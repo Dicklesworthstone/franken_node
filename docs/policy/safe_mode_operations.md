@@ -1,5 +1,13 @@
 # Safe-Mode Operations Governance Policy
 
+The live CLI persists **unsigned JSON** via `serde_json::to_vec_pretty`
+at `.franken-node/safe-mode/state.json` (or `--state-dir`; not
+Ed25519-signed). `safe-mode exit` `--trust-state-consistent`,
+`--no-unresolved-incidents`, and `--evidence-ledger-intact` are
+**operator attestations**, not independently verified checks. HTTP
+`/api/v1/control/safe-mode/*` routes exist in-library; the default
+binary does not start a live control-plane daemon.
+
 ## Purpose
 
 This policy governs the lifecycle of safe-mode operation in franken_node:
@@ -99,34 +107,33 @@ surfaces for the same lifecycle:
   `POST /api/v1/control/safe-mode/exit`.
 
 Both surfaces use `SafeModeController` rather than a parallel state model. The
-CLI persists controller state under `.franken-node/safe-mode/state.json` by
-default, or under the directory passed with `--state-dir`. Exit requests fail
-closed unless the operator identity, `--confirm`, trust-state consistency,
-incident resolution, and evidence-ledger checks are all present.
+CLI persists unsigned JSON controller state under
+`.franken-node/safe-mode/state.json` by default, or under the directory passed
+with `--state-dir`. Exit requests fail closed unless `--operator-id`,
+`--confirm`, and the three operator attestation flags are present; the CLI
+does not independently re-verify trust state, incidents, or the evidence ledger.
 
 ## Recovery Procedures
 
 ### Pre-Exit Checklist
 
-Before exiting safe mode, the following conditions MUST be verified:
+The live CLI requires these as **operator attestation flags**. It does
+not independently re-verify them:
 
-1. **Trust state consistency**: Trust re-verification passes with zero
-   inconsistencies.
-2. **No unresolved incidents**: All incidents flagged during safe-mode
-   operation are resolved or explicitly acknowledged.
-3. **Evidence ledger intact**: The evidence ledger is complete and hash
-   chain is valid.
-4. **Operator confirmation**: The operator explicitly confirms the transition
-   with `franken-node safe-mode exit --confirm ...` or the matching control-plane
-   exit request.
+1. **Trust state consistency**: `--trust-state-consistent`
+2. **No unresolved incidents**: `--no-unresolved-incidents`
+3. **Evidence ledger intact**: `--evidence-ledger-intact`
+4. **Operator confirmation**: `--confirm` plus `--operator-id`
 
 ### Exit Procedure
 
 1. Operator requests exit through `franken-node safe-mode exit` or
    `POST /api/v1/control/safe-mode/exit`.
-2. System runs pre-exit verification checklist.
-3. If all checks pass, system prompts for confirmation.
-4. Operator confirms.
+2. CLI requires `--confirm` plus operator attestation flags
+   (`--trust-state-consistent`, `--no-unresolved-incidents`,
+   `--evidence-ledger-intact`); it does not independently re-run those checks.
+3. If the flags are present and the controller accepts the exit, persist updates.
+4. Operator confirmation is the `--confirm` flag, not an interactive prompt.
 5. System restores suspended capabilities in deterministic order.
 6. System logs exit event with operator identity and timestamp.
 7. System emits SMO-005 and SMO-007 events for deactivation and exit clearance.

@@ -2049,7 +2049,7 @@ mod tests {
     }
 
     #[test]
-    fn scenario_data_source_round_trips_via_signed_report_json() {
+    fn scenario_data_source_round_trips_via_provenance_hash_report_json() {
         // The discriminator must survive the canonical-JSON round trip the
         // verifier consumes, with the stable kebab-case wire form.
         assert_eq!(ScenarioDataSource::FixtureInputs.as_str(), "fixture-inputs");
@@ -3174,7 +3174,7 @@ mod tests {
         crate::security::constant_time::ct_eq_bytes(left.as_bytes(), right.as_bytes())
     }
 
-    fn signed_report_fixture() -> BenchmarkReport {
+    fn provenance_hash_report_fixture() -> BenchmarkReport {
         let mut report = BenchmarkReport {
             suite_version: SUITE_VERSION.to_string(),
             scoring_formula_version: SCORING_FORMULA_VERSION.to_string(),
@@ -3434,7 +3434,7 @@ mod tests {
 
     #[test]
     fn test_to_canonical_json_rejects_non_finite_confidence_upper() {
-        let mut report = signed_report_fixture();
+        let mut report = provenance_hash_report_fixture();
         report.scenarios[0].confidence_interval.upper = f64::INFINITY;
         report.provenance_hash = report.compute_provenance_hash();
 
@@ -3448,7 +3448,7 @@ mod tests {
 
     #[test]
     fn test_to_canonical_json_rejects_non_finite_variance() {
-        let mut report = signed_report_fixture();
+        let mut report = provenance_hash_report_fixture();
         report.scenarios[0].variance_pct = f64::NAN;
         report.provenance_hash = report.compute_provenance_hash();
 
@@ -3461,10 +3461,10 @@ mod tests {
     }
 
     #[test]
-    fn test_signed_report_hash_matches_canonical_content() {
-        let report = signed_report_fixture();
+    fn test_provenance_hash_report_hash_matches_canonical_content() {
+        let report = provenance_hash_report_fixture();
         let recomputed = report.compute_provenance_hash();
-        let json = to_canonical_json(&report).expect("signed report should serialize");
+        let json = to_canonical_json(&report).expect("provenance_hash report should serialize");
 
         assert!(hash_matches(&report.provenance_hash, &recomputed));
         assert!(json.contains("\"provenance_hash\""));
@@ -3472,8 +3472,8 @@ mod tests {
     }
 
     #[test]
-    fn test_signed_report_integrity_detects_raw_value_tamper() {
-        let report = signed_report_fixture();
+    fn test_provenance_hash_report_integrity_detects_raw_value_tamper() {
+        let report = provenance_hash_report_fixture();
         let mut tampered = report.clone();
         tampered.scenarios[0].raw_value = tampered.scenarios[0].raw_value + 1.0;
 
@@ -3483,8 +3483,8 @@ mod tests {
     }
 
     #[test]
-    fn test_signed_report_integrity_detects_runtime_version_tamper() {
-        let report = signed_report_fixture();
+    fn test_provenance_hash_report_integrity_detects_runtime_version_tamper() {
+        let report = provenance_hash_report_fixture();
         let mut tampered = report.clone();
         tampered.runtime_versions.node = Some("23.0.0".to_string());
 
@@ -3494,8 +3494,8 @@ mod tests {
     }
 
     #[test]
-    fn test_signed_report_hash_field_is_not_self_referential() {
-        let report = signed_report_fixture();
+    fn test_provenance_hash_report_hash_field_is_not_self_referential() {
+        let report = provenance_hash_report_fixture();
         let mut resigned = report.clone();
         resigned.provenance_hash =
             "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string();

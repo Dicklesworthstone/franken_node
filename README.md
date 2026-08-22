@@ -61,9 +61,9 @@ Under `franken-node`:
   fail closed because the local frontier is older than the
   `balanced`-profile policy.
 - If the malicious behavior had already executed, `incident bundle` +
-  `incident replay` give you a byte-exact reproduction of the window,
-  and `incident counterfactual --policy strict` tells you in seconds
-  whether a tighter profile would have caught it.
+  `incident replay` integrity-verify the recorded bundle (not live
+  re-execution), and `incident counterfactual --policy strict` scores
+  an alternative policy against that recorded evidence.
 
 Every gate above is a runtime default, not an external scanner. Every
 decision is a signed receipt linked into the evidence ledger.
@@ -114,10 +114,12 @@ replay part of the runtime contract, so JS/TS velocity comes with:
   signed bundle that any operator can replay byte-for-byte and run policy
   counterfactuals against
 - **Migration autopilot**: audit → rewrite → validate → rollout, with
-  rollback artifacts and lockstep validation against Bun and the franken
-  runtime by default; real Node.js can be added when available
-- **Fleet control plane**: quarantine, release, and reconciliation with
-  signed decision receipts and convergence telemetry
+  unsigned JSON rollback plans (not Ed25519-signed). `migrate validate`
+  is static+smoke; behavioral comparison is a separate `verify lockstep`
+  (Bun+franken dyad by default; real Node.js can be added when available)
+- **Fleet quarantine log**: local file-transport quarantine, release, and
+  reconcile with signed decision receipts. Not a live multi-node control
+  plane (`live_control_plane=false`)
 - **Verifier SDK**: independent third parties can validate receipts,
   bundles, and the honesty manifest without trusting the producing
   runtime. `bench run` reports are SHA256 `provenance_hash` documents,
@@ -131,14 +133,14 @@ replay part of the runtime contract, so JS/TS velocity comes with:
 | Revocation freshness gates | Risky and dangerous actions fail closed when trust state is stale |
 | Deterministic incident replay | Signed bundles with timeline, evidence, policy decisions; replay re-derives the recorded decision sequence and verifies it against the bundle's signed hash, fail-closed on mismatch |
 | Counterfactual simulator | Re-evaluate the recorded incident decision trace under a different policy mode and inspect the diff |
-| Migration autopilot | Audit, rewrite, validate, and rollout transforms with rollback bundles |
+| Migration autopilot | Audit, rewrite, validate, and rollout. `--emit-rollback` is unsigned JSON (not Ed25519-signed); `migrate validate` is static+smoke, not `verify lockstep` |
 | Compatibility oracle | Lockstep vs Node (spec) plus Bun as a second reference; matching only Bun stays fail |
-| Fleet quarantine plane | Quarantine, reconcile, release across zones; signed decision receipts |
+| Fleet quarantine log | Local file-transport quarantine, reconcile, release; signed decision receipts (`live_control_plane=false`) |
 | Signed extension registry | Ed25519-signed artifacts, provenance enforcement, assurance levels |
 | Remote capability tokens | Scope-bound, single-use-optional Ed25519 capability tokens with audience binding |
 | Verifier SDK | Independent verification of receipts, bundles, and the honesty manifest (not Ed25519-signed `bench run` reports) |
-| Operator doctor | Workspace-pressure analyzer, close-condition receipts, evidence-readiness reports |
-| Proof pipeline | VEF (Verifiable Execution Fingerprint) receipts, proof workers, queue telemetry |
+| Operator doctor | Workspace-pressure analyzer, close-condition receipts, evidence-readiness from `--input` snapshots (not a live broker) |
+| Proof pipeline | VEF receipts; `proofs queue status` and `proofs workers restart` inspect snapshots / emit restart-request artifacts (not a live broker) |
 | Safe-mode lifecycle | Operator-driven enter/exit with reason codes, persisted JSON state (not Ed25519-signed), and pre-exit operator attestations |
 | No unsafe code | `#![forbid(unsafe_code)]` in both `lib.rs` and `main.rs` |
 
@@ -248,7 +250,7 @@ this repository is the **product layer** on top of that substrate.
 | Counterfactual policy simulation | **Built-in** | N/A | N/A | N/A |
 | Compatibility divergence receipts | **Built-in** | N/A | N/A | N/A |
 | Migration autopilot pipeline | **Built-in** | External scripts | External scripts | External scripts |
-| Fleet quarantine control plane | **Built-in** | External platform | External platform | External platform |
+| Fleet quarantine log (file transport) | **Built-in local** | External platform | External platform | External platform |
 | Signed extension registry | **Built-in** | npm (signature optional) | bunx (no enforcement) | deno.land (URL trust only) |
 | Threshold-signature verification | **Built-in** | Not native | Not native | Not native |
 | Verifier SDK for public claims | **Built-in** | N/A | N/A | N/A |
@@ -384,7 +386,7 @@ franken-node verify release ./release-dir --key-dir ./trusted-public-keys
 6. **Inspect trust and fleet state:**
    ```bash
    franken-node trust list --risk high
-   franken-node fleet status --json
+   franken-node fleet status --json   # local file-transport log, not a live heartbeat
    franken-node incident list --severity high
    ```
 7. **Diagnose environment health:**
@@ -400,8 +402,8 @@ franken-node verify release ./release-dir --key-dir ./trusted-public-keys
 | Scenario | Why franken-node fits |
 |---|---|
 | **Regulated SaaS deploying third-party extensions** | Trust cards + revocation freshness gates + signed registry give a continuous audit trail of which artifacts ran at which version with what attestations. The verifier SDK lets external auditors validate claims without trusting the operator. |
-| **Multi-region operator with quarantine SLA** | Fleet quarantine state machine emits signed decision receipts and tracks convergence per zone. `franken-node fleet reconcile` exposes whether a partitioned node has caught up. |
-| **Migration from legacy Node to a hardened runtime** | `migrate audit` → `migrate rewrite --apply --emit-rollback` → `verify lockstep` is an end-to-end pipeline with rollback artifacts at every stage. The lockstep oracle catches behavioral regressions before they reach production. |
+| **Multi-region operator with quarantine SLA** | Local file-transport fleet quarantine log emits signed decision receipts. `franken-node fleet reconcile` waits on file-transport convergence; it is not a live multi-node heartbeat. |
+| **Migration from legacy Node to a hardened runtime** | `migrate audit` → `migrate rewrite --apply --emit-rollback` → `verify lockstep` is an end-to-end pipeline. `--emit-rollback` writes unsigned JSON (not Ed25519-signed); `migrate validate` is static+smoke, not lockstep. `verify lockstep` is the behavioral oracle. |
 | **Post-incident counterfactual analysis** | `incident bundle --verify` exports a signed, deterministic snapshot of the incident window. `incident counterfactual --policy strict` answers "would tighter policy have blocked this?" with a reproducible diff. |
 | **Public claim verification** | `frankenengine-verifier-sdk` runs outside the producing runtime. Third parties verify receipts, capsules, and counterfactuals without trusting franken-node's own logs. |
 | **Operator triage under disk / build pressure** | `doctor workspace-pressure` analyzes disk, memory, RCH queue depth, and build-fleet state, routes through balanced/conservative/permissive policy, and emits recommended actions. |
@@ -447,7 +449,9 @@ franken-node migrate rewrite ./app --apply --emit-rollback rollback.json
 franken-node verify lockstep ./app --runtimes bun,franken-node --emit-fixtures
 ```
 
-The rollback bundle is a signed, reversible diff. `verify lockstep` defaults
+`--emit-rollback` writes an unsigned JSON `MigrationRollbackPlan`
+(original/rewritten file contents; not Ed25519-signed). Restore from that
+plan and/or `.migrate-backup/` snapshots. `verify lockstep` defaults
 to the Bun+franken dyad and records divergence receipts; that dyad is not
 the L1 spec. Matching only Bun stays fail. On hosts with real Node.js, pass
 `--runtimes node,bun,franken-node` — Node is then the spec. Material
@@ -461,10 +465,10 @@ franken-node doctor --verbose --json
 franken-node ops validation-readiness --input broker-snapshot.json --json
 ```
 
-The validation broker integrates RCH worker health, evidence freshness,
-proof-cache state, and target-dir hygiene. If any precondition is stale,
-the recovery runbook tells the operator exactly which gates need to be
-re-run.
+`ops validation-readiness` and `verify recovery-runbook` inspect
+`--input` / `--readiness-input` snapshots (`live_broker=false`); they
+do not start a live broker. If any recorded precondition is stale, the
+recovery runbook names which gates need to be re-run.
 
 ### Day 7 — Production rollout
 
@@ -512,9 +516,10 @@ franken-node fleet release --incident INC-2026-0042 --json
 ```
 
 `fleet release` lifts quarantine with a signed receipt and waits for
-convergence across all nodes in scope. `franken-node fleet reconcile`
-confirms convergence; `franken-node fleet status --verbose` shows
-per-node application of the release.
+file-transport log convergence (`live_control_plane=false`). `franken-node
+fleet reconcile` confirms that local log catch-up; `franken-node fleet
+status --verbose` shows persisted application of the release, not a live
+multi-node heartbeat.
 
 ### Quarterly — Public claim verification
 
@@ -524,9 +529,11 @@ franken-node verify release ./release-dir --key-dir ./auditor-trust-roots
 franken-node bench run --scenario secure-extension-heavy --output bench.json
 ```
 
-Auditors use `frankenengine-verifier-sdk` to validate the benchmark
-report's signature chain, recompute receipts, and verify capsule integrity
-without trusting the runtime that produced them.
+Auditors use `frankenengine-verifier-sdk` to recompute receipts and verify
+capsule integrity without trusting the runtime that produced them. A
+`bench run` report is a SHA256 `provenance_hash` document, not an
+Ed25519-signed SDK attestation; the SDK does not independently attest
+benchmark claims.
 
 ---
 
@@ -556,8 +563,8 @@ profile**, not the packaging profile:
 
 | Profile | When to use | Behavior |
 |---|---|---|
-| `strict` | High-assurance environments, regulated workloads, post-incident lockdowns | Maximum trust-card freshness requirements, revocation gates on all risky actions, all divergence emits receipts, lockstep validation required before rollout |
-| `balanced` | Default for most teams | Reasonable freshness windows, revocation gates on risky and dangerous classes, lockstep validation recommended |
+| `strict` | High-assurance environments, regulated workloads, post-incident lockdowns | Maximum trust-card freshness requirements, revocation gates on all risky actions, all divergence emits receipts, `migration.require_lockstep_validation=true` (doctor WARN when false; `migrate validate` still does not run `verify lockstep`) |
+| `balanced` | Default for most teams | Reasonable freshness windows, revocation gates on risky and dangerous classes, lockstep recommended as a separate `verify lockstep` stage |
 | `legacy-risky` | Constrained migration windows on legacy codebases | Permits insecure compatibility behaviors when explicitly enabled by policy. Not a long-term mode. |
 
 No profile—including `legacy-risky`—grants `process_spawn`. That capability is
@@ -701,15 +708,15 @@ every leaf command available in the current build.
 |---|---|
 | `franken-node init` | Bootstrap config, policy profile, and `.franken-node/state/` workspace metadata. Flags: `--profile`, `--config`, `--out-dir`, `--overwrite`, `--backup-existing`, `--scan`, `--state-dir`, `--no-state`, `--json` (`franken-node/init-cli/v1`; failures `franken-node/init-error-cli/v1`). |
 | `franken-node run <app_path>` | Run app under policy-governed runtime controls. The app path is handler-required so `--json` failures emit `franken-node/run-error-cli/v1` instead of a human clap error. Flags: `--policy`, `--config`, `--runtime` (auto\|node\|bun\|franken-engine), `--engine-bin`, `--compat-preflight`, `--json` (early failures `franken-node/run-error-cli/v1`; blocked preflight prints JSON then exits 1). External Node/Bun selections fail closed; use `verify lockstep` for comparison. |
-| `franken-node doctor` | Diagnose environment and policy setup. Flags: `--config`, `--profile`, `--policy-activation-input`, `--verbose`, `--json` (early failures `franken-node/doctor-error-cli/v1`), `--structured-logs-jsonl`. |
+| `franken-node doctor` | Local diagnostics: config/profile, close-condition, evidence snapshot, workspace pressure, bwrap. `--policy-activation-input` is a snapshot JSON file (not a live guardrail probe). Flags: `--config`, `--profile`, `--policy-activation-input`, `--verbose`, `--json` (early failures `franken-node/doctor-error-cli/v1`), `--structured-logs-jsonl`. |
 
 ### Migration
 
 | Command | Purpose |
 |---|---|
 | `franken-node migrate audit <path>` | Inventory migration risk. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--format` (json\|text\|sarif), `--json` (alias for `--format json`), `--out`. |
-| `franken-node migrate rewrite <path>` | Apply migration transforms. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--apply`, `--emit-rollback`, `--json`. |
-| `franken-node migrate validate <path>` | Validate transformed project with conformance checks. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--format` (json\|text), `--json`, `--static-only`. |
+| `franken-node migrate rewrite <path>` | Apply migration transforms. `--emit-rollback` writes an unsigned JSON `MigrationRollbackPlan` (not Ed25519-signed) plus `.migrate-backup/` snapshots. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--apply`, `--emit-rollback`, `--json`. |
+| `franken-node migrate validate <path>` | Rerun static migration audit checks and, unless `--static-only`, a transformed-runtime smoke test. Does **not** run `verify lockstep`. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--format` (json\|text), `--json`, `--static-only`. |
 | `franken-node migrate-report <path>` | Export one-command migration assessment. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--format` (json\|html), `--json` (alias for `--format json`), `--output`. |
 
 ### Verification
@@ -723,7 +730,7 @@ every leaf command available in the current build.
 | `franken-node verify lockstep <path>` | Compare runtimes in lockstep. Default `--runtimes bun,franken-node`. Use `--runtimes node,bun,franken-node` only when `node` is real Node.js; Node is then the spec and matching only Bun stays fail. The project path is handler-required so `--json` failures emit `franken-node/verify-lockstep-error-cli/v1` instead of a human clap error. `--emit-fixtures` writes divergence fixtures. Flags: `--json` (stderr banner off; early failures `franken-node/verify-lockstep-error-cli/v1`). |
 | `franken-node verify release <path>` | Verify release artifact signatures. The release path and `--key-dir` are handler-required so `--json` failures emit `franken-node/verify-release-error-cli/v1` instead of a human clap error. **Fails closed without `--key-dir`.** Flags: `--json` (`franken-node/verify-release-cli/v1`; early failures `franken-node/verify-release-error-cli/v1`). |
 | `franken-node verify transparency-log <path>` | Verify transparency-log hash chain. The log path is handler-required so `--json` failures emit `franken-node/verify-transparency-log-error-cli/v1` instead of a human clap error. Empty logs fail closed. Without `--public-key`, signatures are `unproven` (non-zero exit), not PASS. Flags: `--json` (`franken-node/verify-transparency-log-cli/v1`; early failures `franken-node/verify-transparency-log-error-cli/v1`). |
-| `franken-node verify recovery-runbook` | Generate recovery runbook from `--readiness-input`. Flags: `--json` (early failures `franken-node/verify-recovery-runbook-error-cli/v1`). |
+| `franken-node verify recovery-runbook` | Generate a recovery runbook from a `--readiness-input` snapshot (not a live broker). Flags: `--json` (early failures `franken-node/verify-recovery-runbook-error-cli/v1`). |
 
 ### Trust and supply chain
 
@@ -733,10 +740,10 @@ every leaf command available in the current build.
 | `franken-node trust list` | List extensions; filter by `--risk`, `--revoked`. `--json` emits the card list as JSON. |
 | `franken-node trust scan [path]` | Populate baseline trust cards from package.json. Flags: `--deep`, `--audit`, `--json`. |
 | `franken-node trust sync` | Refresh trust-card cache and npm vulnerability state from OSV; `--force` to ignore caches. `--json` emits `franken-node/trust-sync-cli/v1`. |
-| `franken-node trust revoke <id>` | Revoke artifact or publisher trust. The extension id is handler-required so `--json` failures emit `franken-node/trust-error-cli/v1` instead of a human clap error. Optional `--receipt-signing-key`, `--receipt-out`. `--json` emits the revoked trust card; failures `franken-node/trust-error-cli/v1`. |
-| `franken-node trust quarantine` | Quarantine a suspicious artifact fleet-wide. `--artifact` is handler-required so `--json` failures emit `franken-node/trust-error-cli/v1` instead of a human clap error. `--json` emits `franken-node/trust-quarantine-cli/v1`. |
-| `franken-node trust release` | Lift a sentinel quarantine for one run target. `--app`, `--operator-id`, and `--reason` are handler-required so `--json` failures emit `franken-node/trust-release-error/v1` instead of a human clap error. `--json` emits `franken-node/trust-release-cli/v1`. |
-| `franken-node trust-card show <id>` | Show full trust card. The extension id is handler-required so `--json` failures emit `franken-node/trust-card-error-cli/v1` instead of a human clap error. Flags: `--json`. |
+| `franken-node trust revoke <id>` | Revoke an artifact or publisher in the **local** trust-card registry (not a live fleet). The extension id is handler-required so `--json` failures emit `franken-node/trust-error-cli/v1` instead of a human clap error. Optional `--receipt-signing-key`, `--receipt-out`. `--json` emits the revoked trust card; failures `franken-node/trust-error-cli/v1`. |
+| `franken-node trust quarantine` | Quarantine a suspicious artifact in the **local** trust-card registry and file-transport fleet log (`live_control_plane=false`). Not a live multi-node broadcast. `--artifact` is handler-required so `--json` failures emit `franken-node/trust-error-cli/v1` instead of a human clap error. `--json` emits `franken-node/trust-quarantine-cli/v1`. |
+| `franken-node trust release` | Lift a local sentinel run-subject quarantine record for one `--app` (durable JSON; not a live Runtime Sentinel daemon). `--app`, `--operator-id`, and `--reason` are handler-required so `--json` failures emit `franken-node/trust-release-error/v1` instead of a human clap error. `--json` emits `franken-node/trust-release-cli/v1`. |
+| `franken-node trust-card show <id>` | Show a card from the **local** trust-card registry JSON (not a live HTTP API). The extension id is handler-required so `--json` failures emit `franken-node/trust-card-error-cli/v1` instead of a human clap error. Flags: `--json`. |
 | `franken-node trust-card export <id> --json` | Export trust card as canonical JSON. The extension id is handler-required so `--json` failures emit `franken-node/trust-card-error-cli/v1` instead of a human clap error. |
 | `franken-node trust-card list` | List with filters: `--publisher`, `--query`, `--page`, `--per-page`. Flags: `--json`. |
 | `franken-node trust-card compare <left> <right>` | Compare two trust postures. Left and right ids are handler-required so `--json` failures emit `franken-node/trust-card-error-cli/v1` instead of a human clap error. Flags: `--json`. |
@@ -746,12 +753,12 @@ every leaf command available in the current build.
 
 | Command | Purpose |
 |---|---|
-| `franken-node remotecap issue` | Issue signed Ed25519 capability token. `--scope` and `--endpoint` are handler-required so `--json` failures emit `franken-node/remotecap-error-cli/v1` instead of a human clap error. Optional: `--ttl`, `--issuer`, `--operator-approved`, `--single-use`. Flags: `--json` (`franken-node/remotecap-issue-cli/v1`). |
+| `franken-node remotecap issue` | Issue a local Ed25519 capability token. Does **not** perform the scoped network operation. `--scope` and `--endpoint` are handler-required so `--json` failures emit `franken-node/remotecap-error-cli/v1` instead of a human clap error. Optional: `--ttl`, `--issuer`, `--operator-approved`, `--single-use`. Flags: `--json` (`franken-node/remotecap-issue-cli/v1`). |
 | `franken-node remotecap verify` | Verify a capability token without using it. `--token-file`, `--operation`, and `--endpoint` are handler-required so `--json` failures emit `franken-node/remotecap-error-cli/v1` instead of a human clap error. Flags: `--json` (`franken-node/remotecap-verify-cli/v1`). |
 | `franken-node remotecap use` | Authorize a scoped network operation against a token (dry-run). Does not perform the HTTP request. `--token-file`, `--operation`, and `--endpoint` are handler-required so `--json` failures emit `franken-node/remotecap-error-cli/v1` instead of a human clap error. Flags: `--json` (`franken-node/remotecap-use-cli/v1`). |
 | `franken-node remotecap revoke` | Revoke a capability token. Required: `--token-file`. Flags: `--json` (`franken-node/remotecap-revoke-cli/v1`). |
 
-### Fleet control plane
+### Fleet quarantine log (file transport)
 
 | Command | Purpose |
 |---|---|
@@ -766,7 +773,7 @@ every leaf command available in the current build.
 | Command | Purpose |
 |---|---|
 | `franken-node incident bundle` | Export deterministic incident bundle. `--id` is handler-required so `--json` failures emit `franken-node/incident-error-cli/v1` instead of a human clap error. Reads evidence from `--evidence-path` or `<project-root>/.franken-node/state/incidents/<slug>/evidence.v1.json`. `--verify` checks the bundle after writing. Optional receipt-signing controls. Flags: `--json`. |
-| `franken-node incident replay` | Replay incident timeline locally. `--bundle` is handler-required so `--json` failures emit `franken-node/incident-error-cli/v1` instead of a human clap error. **Also fails closed without `--trusted-public-key` or `--key-dir`.** Flags: `--json`. |
+| `franken-node incident replay` | Integrity-verified replay of a recorded incident bundle (not live re-execution). `--bundle` is handler-required so `--json` failures emit `franken-node/incident-error-cli/v1` instead of a human clap error. **Also fails closed without `--trusted-public-key` or `--key-dir`.** Flags: `--json`. |
 | `franken-node incident counterfactual` | Simulate alternative policy actions. Same trust-anchor requirement as `replay`. `--bundle` and `--policy` are handler-required so `--json` failures emit `franken-node/incident-error-cli/v1` instead of a human clap error. Optional: `--promote`, `--promotion-signing-key`, `--operator-id`. `--model production` fails closed (engine-split kernel not in this build). Flags: `--json`. |
 | `franken-node incident list` | List recorded incidents. Filter: `--severity`. Flags: `--json` (failures `franken-node/incident-error-cli/v1`). |
 
@@ -784,8 +791,8 @@ every leaf command available in the current build.
 | `franken-node runtime lane status` | Emit the *local default* lane policy and an empty telemetry snapshot (not a running node). Flags: `--json` (failures `franken-node/runtime-error-cli/v1`). |
 | `franken-node runtime lane assign <task_class>` | Assign one task class through a fresh default lane scheduler; the assignment is not persisted to a live node. Flags: `--json` (failures `franken-node/runtime-error-cli/v1`). |
 | `franken-node runtime epoch` | Compare two caller-supplied epoch integers. Does not inspect a live `ControlEpoch`. `--local-epoch` is handler-required so `--json` failures emit `franken-node/runtime-error-cli/v1` instead of a human clap error. Flags: `--peer-epoch`, `--json`. |
-| `franken-node safe-mode enter` | Enter safe mode and persist operator state. `--reason`, `--operator-id`, and `--trust-state-hash` are handler-required so `--json` failures emit `franken-node/safe-mode-cli/v1` instead of a human clap error. Reasons: `explicit-flag`, `environment-variable`, `config-field`, `trust-corruption`, `crash-loop`, `epoch-mismatch`. Flags: `--json`. |
-| `franken-node safe-mode status` | Inspect persisted safe-mode state. Flags: `--json` (`franken-node/safe-mode-cli/v1`). |
+| `franken-node safe-mode enter` | Enter safe mode and persist unsigned JSON operator state (not Ed25519-signed). `--reason`, `--operator-id`, and `--trust-state-hash` are handler-required so `--json` failures emit `franken-node/safe-mode-cli/v1` instead of a human clap error. Reasons: `explicit-flag`, `environment-variable`, `config-field`, `trust-corruption`, `crash-loop`, `epoch-mismatch`. Flags: `--json`. |
+| `franken-node safe-mode status` | Inspect persisted unsigned JSON safe-mode state. Flags: `--json` (`franken-node/safe-mode-cli/v1`). |
 | `franken-node safe-mode exit` | Exit safe mode after explicit operator confirmation. `--operator-id` is handler-required so `--json` failures emit `franken-node/safe-mode-cli/v1` instead of a human clap error. Required: `--confirm`. `--trust-state-consistent`, `--no-unresolved-incidents`, and `--evidence-ledger-intact` are **operator attestations**, not independently verified checks. Flags: `--json`. |
 | `franken-node proofs queue status` | Inspect proof queue, proof status, and worker readiness from `--input`/`--receipt` snapshots (`live_queue=false`, `queue_source=validation_readiness_snapshot`). Not a live broker. Flags: `--json`. |
 | `franken-node proofs workers restart` | Validate and emit a restart-*request* artifact. Does **not** restart a process unless `--execute` is set and `FRANKEN_NODE_PROOF_WORKER_RESTART_EXECUTOR` is bound. `--operator-id`, `--operator-role`, and `--reason` are handler-required so `--json` failures emit `franken-node/proofs-error-cli/v1` instead of a human clap error. Required: `--confirm`. Flags: `--json`. |
@@ -797,26 +804,27 @@ every leaf command available in the current build.
 | `franken-node ops health-check` | Process health from compile-time git SHA, evidence-ledger flush mtime, and persisted session files under `.franken-node/state/sessions` (not a live SessionManager). Flags: `--json` (`franken-node/ops-health-check-cli/v1`; `session_count_source=persisted_session_files`). |
 | `franken-node ops resource-governor` | Advise whether validation should run / defer / deduplicate. Default observation is a live procfs sample; `--process-snapshot` is a fixture. Human output names `source=`. Flags: `--json`. |
 | `franken-node ops validation-readiness` | Report validation evidence freshness from `--input`/`--receipt` snapshots, or an empty default snapshot when omitted. Human and `--json` name `input_source` and `live_broker=false`. Not a live broker. |
-| `franken-node ops validation-closeout` | Render closeout summary from a receipt. `--bead-id` and `--receipt` are handler-required so `--json` failures emit `franken-node/ops-error-cli/v1` instead of a human clap error. Flags: `--json`. |
+| `franken-node ops validation-closeout` | Render closeout summary from a `--receipt` snapshot (not a live broker). `--bead-id` and `--receipt` are handler-required so `--json` failures emit `franken-node/ops-error-cli/v1` instead of a human clap error. Flags: `--json`. |
 | `franken-node ops config-audit` | Audit active config across profiles. Flags: `--json` (`franken-node/ops-config-audit-cli/v1`). |
 | `franken-node ops metrics` | Emit operator metrics (Prometheus by default). Flags: `--json` (`franken-node/ops-metrics-cli/v1`). |
 | `franken-node ops compat-corpus-run` | Run the committed compatibility corpus through bun + native franken-engine lockstep and write the digest-bound results artifact. `--corpus-root` and `--out` are handler-required so `--json` failures emit `franken-node/ops-error-cli/v1` instead of a human clap error. Flags: `--json` (`franken-node/ops-compat-corpus-run-cli/v1`), `--require-node-reference`. |
-| `franken-node doctor workspace-pressure` | Analyze workspace pressure: disk, memory, builds, RCH; routes through balanced/conservative/permissive policy. Flags: `--json` (failures `franken-node/doctor-error-cli/v1`). |
+| `franken-node ops proof-carrying-evidence` | Produce a 3-effect host-IO evidence chain from a real native-engine run. This is an **additional L1 conjunct**, not a substitute for corpus ≥95%. L1 GREEN still requires the compatibility corpus floor. Flags: `--json`, `--out`, `--merge-corpus`, `--merge-l1-verdict`. |
+| `franken-node doctor workspace-pressure` | Probe local disk, memory, RCH slots, and build counts; apply balanced/conservative/permissive pressure policy. Default human report is stdout. `--human-output <path>` writes that report to a file (not a boolean flag). Flags: `--json`, `--output`, `--human-output`, `--conservative`, `--permissive` (failures `franken-node/doctor-error-cli/v1`). |
 | `franken-node doctor close-condition` | Emit dual-oracle close-condition receipt. Human output names declared L1 `pass_rate`, `node_canonical_observation_passes`, `node_canonical_unscored_fail_ids`, and `child_process_native_eval_aborts` (those remain fail; not recategorized as pass). Flags: `--json` (failures `franken-node/doctor-error-cli/v1`). |
-| `franken-node doctor evidence-readiness` | Report evidence readiness from a broker snapshot. `--input` is handler-required so `--json` failures emit `franken-node/doctor-error-cli/v1` instead of a human clap error. Flags: `--json`. |
+| `franken-node doctor evidence-readiness` | Report evidence readiness from an `--input` snapshot (not a live broker). `--input` is handler-required so `--json` failures emit `franken-node/doctor-error-cli/v1` instead of a human clap error. Flags: `--json`. |
 
 ### Registry, bench, debug
 
 | Command | Purpose |
 |---|---|
-| `franken-node registry publish <package>` | Publish signed extension artifact. The package path and `--version` are handler-required so `--json` failures emit `franken-node/registry-publish-error/v1` instead of a human clap error. **Required: `--version` and `--signing-key`** (raw Ed25519 32-byte key; hex, base64, or supported JSON wrapper). Optional: `--max-active-artifacts`. `--json` emits `franken-node/registry-publish-cli/v1`. |
-| `franken-node registry search <query>` | Query extension registry. The query is handler-required so `--json` failures emit `franken-node/registry-error-cli/v1` instead of a human clap error. Filter: `--min-assurance`. `--json` emits `franken-node/registry-search-cli/v1`. |
+| `franken-node registry publish <package>` | Admit a signed artifact into the **local on-disk** registry (not npm or a live control-plane publish). The package path and `--version` are handler-required so `--json` failures emit `franken-node/registry-publish-error/v1` instead of a human clap error. **Required: `--version` and `--signing-key`** (raw Ed25519 32-byte key; hex, base64, or supported JSON wrapper). Optional: `--max-active-artifacts`. `--json` emits `franken-node/registry-publish-cli/v1`. |
+| `franken-node registry search <query>` | Query locally stored registry artifacts with trust filters (not a live npm/control-plane service). The query is handler-required so `--json` failures emit `franken-node/registry-error-cli/v1` instead of a human clap error. Filter: `--min-assurance`. `--json` emits `franken-node/registry-search-cli/v1`. |
 | `franken-node registry verify <id>` | Verify a locally stored registry artifact. The extension id is handler-required so `--json` failures emit `franken-node/registry-error-cli/v1` instead of a human clap error. `--json` emits `franken-node/registry-verify-cli/v1`. |
 | `franken-node registry gc` | Archive older registry artifacts. Optional: `--keep`. `--json` emits `franken-node/registry-gc-cli/v1`. |
 | `franken-node bench run` | Run benchmark suite and emit a SHA256 `provenance_hash` report (not Ed25519-signed). Flags: `--scenario`, `--fixture-mode`, `--output`, `--json`. The report is always JSON on stdout; `--json` suppresses the human summary on stderr. |
 | `franken-node debug explain` | Walk a signed decision-receipt through verification steps. `--receipt` is handler-required so `--json` failures emit `franken-node/debug-error-cli/v1` instead of a human clap error. `--json` emits machine-readable per-step results (`franken-node/debug-explain-cli/v1`). |
 | `franken-node debug evidence` | Inspect verifier evidence artifacts. `--artifact` is handler-required so `--json` failures emit `franken-node/debug-error-cli/v1` instead of a human clap error. `--kind` accepts `auto`, `node-replay-capsule`, `provenance-attestation`, `vef-evidence-capsule`. `--json` emits machine-readable diagnostics. |
-| `franken-node debug trace` | Trace policy evaluation steps. `--policy` and `--input` are handler-required so `--json` failures emit `franken-node/debug-error-cli/v1` instead of a human clap error. `--json` emits machine-readable trace (`franken-node/debug-trace-cli/v1`). |
+| `franken-node debug trace` | Trace a policy-activation fixture through `doctor_policy_activation` (not live guest execution). `--policy` and `--input` are handler-required so `--json` failures emit `franken-node/debug-error-cli/v1` instead of a human clap error. `--json` emits machine-readable trace (`franken-node/debug-trace-cli/v1`). |
 
 > [!NOTE]
 > Commands that declare `--json` emit machine-readable output. That flag
@@ -860,7 +868,7 @@ default_receipt_ttl_secs = 3600
 [migration]
 # Enable automatic rewrite suggestions
 autofix = true
-# Require lockstep validation before rollout stage transition
+# Doctor WARN when false. `migrate validate` does not invoke `verify lockstep`.
 require_lockstep_validation = true
 
 [trust]
@@ -1030,7 +1038,7 @@ cargo build --release -p frankenengine-node --no-default-features --features eng
 
 ```mermaid
 flowchart TB
-    fn["<b>franken_node</b><br/>compatibility, migration, trust UX, ops<br/>verifier SDK, fleet &amp; incident plane"]
+    fn["<b>franken_node</b><br/>compatibility, migration, trust UX, ops<br/>verifier SDK, file-transport fleet log,<br/>recorded incident bundles"]
     asu["<b>asupersync</b><br/>opt-in transport feature<br/>default is file JSONL"]
     ftui["<b>frankentui</b><br/>Buffer echo of<br/>preformatted doctor/fleet lines"]
     fapi["<b>fastapi_rust</b><br/>dev-dep in-process catalog<br/>does not bind a socket"]
@@ -1147,7 +1155,7 @@ conformance tests under `tests/` and `crates/franken-node/tests/`.
 | **Deterministic incident replay** | `replay::time_travel_engine`, `tools::replay_bundle` | `WorkflowTrace` capture, environment snapshot, schema versioning, `ReplayVerdict`, divergence detection, fsync-backed durable serialization |
 | **Counterfactual simulator** | `replay::time_travel_engine` + `sdk/verifier` | Re-execute the same trace under an alternative `--policy`; emit diff of decisions, blocked actions, and evidence |
 | **Compatibility lockstep oracle** | `runtime::lockstep_harness`, `api::compat_gate` | `verify lockstep` defaults to Bun+franken dyad; corpus L1 treats Node as spec (matching only Bun stays fail; `child_process` aborts remain fail) |
-| **Migration autopilot** | `migration::*`, BPET migration gate | Audit → rewrite → validate → rollout; deterministic audit logs; rollback bundles |
+| **Migration autopilot** | `migration::*`, BPET migration gate | Audit → rewrite → validate → rollout; unsigned JSON `MigrationRollbackPlan` (not Ed25519-signed); `migrate validate` is static+smoke, not `verify lockstep` |
 | **Signed extension registry** | `registry::*`, `extensions::artifact_contract` | Ed25519-signed artifacts, schema enforcement, assurance levels, GC, search |
 | **Threshold signature verification** | `security::threshold_sig` | k-of-n quorum, cached configurations, domain-separated and constant-time verification |
 | **MMR proofs** | `control_plane::mmr_proofs` | Merkle-Mountain-Range inclusion/prefix proofs, raw-hash internals, rebuild/sync from marker streams |
@@ -1565,11 +1573,11 @@ trace; nothing about the bundle itself changes.
 
 ## Epoch Transition Barrier
 
-When the control plane advances the global epoch (for a policy change,
-a key rotation, a schema bump, or a fleet-wide release), every node
-must drain its in-flight work, acknowledge the new epoch, and then
-unblock together. This is the **epoch transition barrier**
-(`control_plane::epoch_transition_barrier`).
+The **epoch transition barrier** primitive
+(`control_plane::epoch_transition_barrier`) drains in-flight work when
+a policy change, key rotation, schema bump, or fleet release advances.
+The default CLI fleet path does not drive this as a live multi-node
+plane (`live_control_plane=false`).
 
 The barrier moves through ordered `BarrierPhase` states; each participant
 acknowledges the phase with a `DrainAck`. The barrier carries:
@@ -1855,13 +1863,14 @@ bootstrap layout is:
 | `.franken-node/state/registry/archive/` | Archived artifacts retained after `registry gc` |
 | `.franken-node/state/migrations/` | Migration audit, rewrite, and validate outputs |
 | `.franken-node/state/trust-card-registry.v1.json` | Canonical trust-card registry file |
+| `.franken-node/safe-mode/state.json` | Unsigned JSON safe-mode controller persist (not Ed25519-signed); override with `--state-dir` |
 | `.franken-node/keys/` | Signing key material; excluded from version control by the generated `.gitignore` |
 
 Additional subtrees are materialized lazily by individual subsystems
-(safe-mode persistence, proof pipeline state, evidence ledger,
-validation broker receipts, cleanup audit) as those subsystems are
-exercised; the bootstrap above is the minimum layout that `franken-node
-init` creates up-front.
+(`.franken-node/safe-mode/state.json` unsigned JSON, proof pipeline
+snapshots, evidence ledger, validation-broker receipt files, cleanup
+audit) as those subsystems are exercised; the bootstrap above is the
+minimum layout that `franken-node init` creates up-front.
 
 Native-runtime evidence authority is deliberately outside this project tree,
 because the project directory is also the guest filesystem sandbox root.
@@ -1906,7 +1915,7 @@ convention. The most common:
 | `FRANKEN_NODE_FLEET_NODE_ID` | `fleet.node_id` | Default `fleet agent` node ID |
 | `FRANKEN_NODE_FLEET_POLL_INTERVAL_SECONDS` | (none) | Default `fleet agent` poll interval |
 | `FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS` | `fleet.convergence_timeout_seconds` | Fleet release / reconcile timeout |
-| `FRANKEN_NODE_DOCTOR_POLICY_ACTIVATION_INPUT` | `doctor --policy-activation-input` | Fallback path to policy-activation input JSON; the CLI flag takes precedence |
+| `FRANKEN_NODE_DOCTOR_POLICY_ACTIVATION_INPUT` | `doctor --policy-activation-input` | Fallback path to policy-activation snapshot JSON (not a live probe); the CLI flag takes precedence |
 | `FRANKEN_NODE_REGISTRY_REQUIRE_SIGNATURES` | `registry.require_signatures` | Fail-closed if unset |
 | `FRANKEN_NODE_REGISTRY_REQUIRE_PROVENANCE` | `registry.require_provenance` | Fail-closed if unset |
 | `FRANKEN_NODE_REGISTRY_MINIMUM_ASSURANCE_LEVEL` | `registry.minimum_assurance_level` | 1-5 |
@@ -1914,7 +1923,7 @@ convention. The most common:
 | `FRANKEN_NODE_OBSERVABILITY_NAMESPACE` | `observability.namespace` | Metrics namespace |
 | `FRANKEN_NODE_OBSERVABILITY_EMIT_STRUCTURED_AUDIT_EVENTS` | `observability.emit_structured_audit_events` | `true`/`false` |
 | `FRANKEN_NODE_MIGRATION_AUTOFIX` | `migration.autofix` | Autofix toggle |
-| `FRANKEN_NODE_MIGRATION_REQUIRE_LOCKSTEP_VALIDATION` | `migration.require_lockstep_validation` | Block rollout without lockstep |
+| `FRANKEN_NODE_MIGRATION_REQUIRE_LOCKSTEP_VALIDATION` | `migration.require_lockstep_validation` | Doctor WARN when false; `migrate validate` still does not run `verify lockstep` |
 | `FRANKEN_NODE_SECURITY_MAX_MERGE_DECISIONS` | (security cap) | Bounded decision history |
 | `FRANKEN_NODE_BENCHMARK_MIN_THROUGHPUT_OPS` / `..._MAX_LATENCY_MS` / `..._MIN_AGGREGATE_SCORE` | bench thresholds | Bench gate parameters |
 | `RUST_LOG` | (none) | `tracing-subscriber` filter expression for diagnostic logging |
@@ -2233,7 +2242,8 @@ franken-node doctor --verbose --json | jq '.status, .resources.free_disk_human, 
 For workspace-pressure specifically:
 
 ```bash
-franken-node doctor workspace-pressure --human-output
+franken-node doctor workspace-pressure
+franken-node doctor workspace-pressure --human-output pressure.txt
 franken-node doctor workspace-pressure --json --conservative > pressure.json
 ```
 
@@ -2245,11 +2255,12 @@ franken-node doctor workspace-pressure --json --conservative > pressure.json
 - `franken-node doctor close-condition --json [--receipt-signing-key …]`
   emits a dual-oracle close-condition receipt.
 - `franken-node doctor evidence-readiness --input broker-snapshot.json --json`
-  reports whether the validation broker's evidence is fresh enough to
-  close out the work.
+  reports evidence freshness from that `--input` snapshot (not a live
+  broker).
 - `franken-node doctor --policy-activation-input <fixture>` exercises
-  the policy activation contract against a checked-in fixture, useful
-  for catching drift between the policy code and the spec.
+  the policy activation contract against a checked-in snapshot JSON
+  (not a live guardrail probe), useful for catching drift between the
+  policy code and the spec.
 - `franken-node doctor process-spawn-readiness --json` securely resolves (or
   accepts `--bubblewrap-path` for) a root-owned, non-setuid, non-writable
   Bubblewrap binary and runs a bounded functional user/PID/cgroup/IPC/UTS
@@ -2265,12 +2276,13 @@ needs.
 
 ## Validation Broker Architecture
 
-The validation broker (`ops::validation_broker`, `ops::validation_planner`,
+Library modules (`ops::validation_broker`, `ops::validation_planner`,
 `ops::validation_proof_cache`, `ops::validation_proof_coalescer`,
-`ops::validation_proof_debt_ledger`) orchestrates the evidence pipeline
-between RCH workers, the proof cache, and operator close-out flows.
-It is the machinery that turns "I think we validated this" into a signed
-receipt the verifier SDK can later replay.
+`ops::validation_proof_debt_ledger`) model the evidence pipeline between
+RCH workers, the proof cache, and operator close-out flows. The default
+CLI does **not** start a live broker daemon: `ops validation-readiness`,
+`ops validation-closeout`, and `proofs queue status` inspect `--input` /
+`--receipt` snapshot files (`live_broker=false`).
 
 ### Components
 
@@ -2305,15 +2317,15 @@ operator ──► validation-planner ──► proof lanes (RCH workers + local
 
 | Command | What it does |
 |---|---|
-| `franken-node ops validation-readiness --input broker-snapshot.json --json` | Reports per-lane freshness vs. policy. `--json` emits the schema-versioned readiness report. |
-| `franken-node ops validation-closeout --bead-id <id> --receipt <r> --json` | Renders the closeout summary for a tracked work item. `--json` emits the schema-versioned closeout report. |
+| `franken-node ops validation-readiness --input broker-snapshot.json --json` | Reports per-lane freshness vs. policy from an `--input` snapshot (`live_broker=false`). `--json` emits the schema-versioned readiness report. |
+| `franken-node ops validation-closeout --bead-id <id> --receipt <r> --json` | Renders the closeout summary from a `--receipt` snapshot (not a live broker). `--json` emits the schema-versioned closeout report. |
 | `franken-node ops resource-governor --process-snapshot <p> --requested-proof-class <c> --json` | Advises whether the proof lane should run, defer, or dedupe. `--json` emits the schema-versioned governor decision. |
-| `franken-node verify recovery-runbook --readiness-input <input> --json` | Generates a runbook for the operator to unstick a blocked lane. `--json` emits the schema-versioned runbook report. |
+| `franken-node verify recovery-runbook --readiness-input <input> --json` | Generates a runbook from that readiness snapshot (not a live broker). `--json` emits the schema-versioned runbook report. |
 
-Receipts emitted by the broker carry the canonical input hash, the
-proof-class lane that produced them, the worker identity, the policy
-profile in force, and an issuance timestamp; the verifier SDK can
-recompute and re-validate them.
+Snapshot receipts carry the canonical input hash, the proof-class lane
+that produced them, the worker identity, the policy profile in force,
+and an issuance timestamp. Inspecting those files is not proof that a
+live broker is running.
 
 ---
 
@@ -2401,7 +2413,9 @@ Common integrations:
 
 - name: franken-node lockstep dyad
   run: |
-    # Matching only Bun stays fail. Corpus L1 needs real Node as spec.
+    # Default dyad is not the L1 spec. Matching only Bun stays fail.
+    # On runners with real Node.js, use --runtimes node,bun,franken-node
+    # (Node is then the spec).
     franken-node verify lockstep . --runtimes bun,franken-node \
         --emit-fixtures
 
@@ -2419,10 +2433,13 @@ straightforward.
 
 In a Kubernetes-style deployment, run `franken-node fleet agent --zone
 <zone> --poll-interval-secs 30` as a long-lived sidecar or daemonset.
-The agent polls the control plane for fleet actions and applies them
-locally with bounded retries. Liveness can be tied to `franken-node ops
-health-check --json`; readiness can be tied to `franken-node
-ops validation-readiness --json`.
+The agent polls the **local file-transport** action log (not a live
+control plane) and applies records with bounded retries. Liveness can be
+tied to `franken-node ops health-check --json` (compiled git SHA plus
+local ledger/receipt files, not per-surface daemon liveness). Readiness
+can be tied to `franken-node ops validation-readiness --input
+<snapshot> --json`; omitting `--input` uses an empty default snapshot
+(`live_broker=false`), not a live broker.
 
 ### Monitoring stack
 
@@ -2476,10 +2493,10 @@ implementation CI gate.
 | Policy semantics and trust primitives at the VM level | Migration and operator experience (audit, rewrite, validate, rollout) |
 | Typed runtime-evidence authority and verification-identity contracts | Persistent product-root custody, per-session authority provisioning, signed identity capture, and worker-response reconciliation |
 | Bayesian sentinel inference and containment actions | Extension ecosystem and trust distribution (registry, trust cards, reputation) |
-| Native Rust execution (no V8/QuickJS bindings) | Packaging, rollout, and enterprise control planes |
+| Native Rust execution (no V8/QuickJS bindings) | Packaging, rollout, and file-transport fleet log |
 | | Product-layer policy controls and verification surfaces |
 | | L1 Product Oracle (Node is the compatibility spec; matching only Bun stays fail; `child_process` native-eval aborts remain fail) |
-| | Fleet operations (quarantine, incident replay, convergence) |
+| | Fleet file-transport quarantine log (not a live multi-node plane) |
 
 The split keeps the verifier SDK auditable: a third party can verify
 product-layer claims (trust, migration, replay, fleet) without having to
@@ -2759,15 +2776,19 @@ Stage details:
    Scanning and most IDEs.
 2. **Rewrite** (`migrate rewrite <path> --apply --emit-rollback <p>`)
    applies the planned transforms. Without `--apply` the command is a
-   dry-run. `--emit-rollback` writes a signed reverse-diff so the
-   transformation can be unwound deterministically.
-3. **Validate** (`migrate validate <path>`) runs the post-rewrite
-   project against the lockstep oracle and the conformance harnesses
-   relevant to the migration class. Failure here blocks the rollout
-   stage by default (`migration.require_lockstep_validation = true`).
-4. **Rollout** is operated by the fleet control plane:
+   dry-run. `--emit-rollback` writes an unsigned JSON
+   `MigrationRollbackPlan` (not Ed25519-signed) plus `.migrate-backup/`
+   snapshots so the transformation can be unwound from file contents.
+3. **Validate** (`migrate validate <path>`) reruns static migration
+   audit checks and, unless `--static-only`, a transformed-runtime
+   smoke test (franken-node, node, or bun). It does not run
+   `verify lockstep`. Doctor WARNs when
+   `migration.require_lockstep_validation` is false; that flag does
+   not make `migrate validate` invoke lockstep.
+4. **Rollout** uses the local file-transport fleet log
+   (`live_control_plane=false`):
    `franken-node fleet release --incident <migration-id>` emits the
-   signed release receipt and waits for convergence.
+   signed release receipt and waits for file-log convergence.
 
 `franken-node migrate-report` produces a single-document operator
 assessment that summarizes the audit and (if run) the validation result
@@ -2785,6 +2806,7 @@ into the corresponding section above.
 | Adopt | `franken-node init --profile balanced --scan` |
 | Audit a project | `franken-node migrate audit . --format sarif --out audit.sarif` |
 | Compare Bun+franken dyad (not L1 Node spec) | `franken-node verify lockstep . --runtimes bun,franken-node` |
+| Compare with real Node as spec | `franken-node verify lockstep . --runtimes node,bun,franken-node` (only when `node` is real Node.js; matching only Bun stays fail) |
 | Seed trust cards | `franken-node trust scan . --deep --audit` |
 | Refresh trust | `franken-node trust sync --force` |
 | Run in strict mode | `franken-node run ./app --policy strict` |
@@ -2794,10 +2816,10 @@ into the corresponding section above.
 | Lift quarantine | `franken-node fleet release --incident INC-… --json` |
 | Reconcile fleet | `franken-node fleet reconcile --json` |
 | Snapshot incident | `franken-node incident bundle --id INC-… --verify` |
-| Replay incident | `franken-node incident replay --bundle …fnbundle --trusted-public-key …pub` |
+| Replay recorded incident (not live re-execution) | `franken-node incident replay --bundle …fnbundle --trusted-public-key …pub` |
 | Run a counterfactual | `franken-node incident counterfactual --bundle … --trusted-public-key … --policy strict` |
 | Diagnose environment | `franken-node doctor --verbose --json` |
-| Workspace pressure | `franken-node doctor workspace-pressure --human-output` |
+| Workspace pressure | `franken-node doctor workspace-pressure` (human stdout; `--human-output <path>` writes a file) |
 | Publish an extension | `franken-node registry publish ./dist --version 1.2.3 --signing-key …` |
 | Verify a release | `franken-node verify release ./release-dir --key-dir ./trusted-keys` |
 | Issue capability | `franken-node remotecap issue --scope … --endpoint … --ttl 300` |
@@ -2975,11 +2997,13 @@ paths and trust anchors where indicated.
 franken-node verify lockstep ./my-app \
     --runtimes bun,franken-node \
     --emit-fixtures
+# When node is real Node.js, Node is the spec:
+# franken-node verify lockstep ./my-app --runtimes node,bun,franken-node --emit-fixtures
 
 # Reproduce a benchmark report
 franken-node bench run --scenario secure-extension-heavy --output bench.json
-# The SHA256 provenance_hash report can be replayed through the verifier SDK; see
-# tests/conformance/verifier_sdk_capsule_replay.rs for the contract.
+# Recompute the SHA256 provenance_hash over the report body (tamper-evident
+# content hash, not an Ed25519-signed SDK attestation).
 
 # Reproduce an incident bundle and replay verdict
 franken-node incident bundle --id INC-2026-0007 \
@@ -3160,7 +3184,7 @@ fn audit(path: &std::path::Path) -> anyhow::Result<()> {
 | `incident replay nondeterministic` | Missing, corrupted, or stale evidence/bundle components | Re-export with `franken-node incident bundle --id <ID> --verify` or ensure `<root>/.franken-node/state/incidents/<slug>/evidence.v1.json` exists. |
 | `registry publish refused: missing version` / `missing signing-key` | Fail-closed publish path | Pass `--version <semver>` and `--signing-key <path>` (raw Ed25519 32-byte key; hex, base64, or supported JSON wrapper). |
 | `safe-mode entry refused: missing trust-state-hash` | Fail-closed safe-mode entry path | Supply `--reason`, `--operator-id`, and `--trust-state-hash` together. |
-| `workspace pressure: defer` from `doctor workspace-pressure` | Disk / memory / build pressure crossed the active policy threshold | Run `franken-node doctor workspace-pressure --human-output` for the recommended action set; consider `--conservative` to keep validation gating tight, or `--permissive` only for known-clean machines. |
+| `workspace pressure: defer` from `doctor workspace-pressure` | Disk / memory / build pressure crossed the active policy threshold | Run `franken-node doctor workspace-pressure` (human stdout) for the recommended action set; `--human-output <path>` writes that report to a file. Consider `--conservative` to keep validation gating tight, or `--permissive` only for known-clean machines. |
 
 `franken-node doctor --verbose --json` is the single best diagnostic; it
 exercises policy activation, evidence readiness, and environment health in
@@ -3184,9 +3208,9 @@ one pass.
   but can surprise teams whose registries are not yet provenance-clean.
 - **Migration rewrites target high-value patterns first.** Niche framework
   macros may still need manual edits; the audit will tell you.
-- **Fleet-wide controls depend on healthy control-plane connectivity** and
-  correct clock discipline. A partitioned node will not converge until
-  reconciled.
+- **Fleet CLI is file-transport by default** (`live_control_plane=false`)
+  and needs correct clock discipline. A partitioned node will not converge
+  until `fleet reconcile`.
 - **Single-node mode** stores fleet state locally; multi-node coordination
   requires the asupersync transport or a configured external transport.
 - **Counterfactual simulations** depend on the completeness of the
@@ -3229,16 +3253,17 @@ divergence receipts before any production rollout.
 
 ### Does franken-node require a full rewrite of existing projects?
 
-No. The migration autopilot audits and transforms incrementally, validates
-each rollout step against the lockstep oracle, and emits rollback bundles
-so any stage can be reversed.
+No. The migration autopilot audits and transforms incrementally, emits
+unsigned JSON rollback plans (`--emit-rollback`, not Ed25519-signed), and
+runs static+smoke `migrate validate`. Behavioral comparison is a separate
+`verify lockstep` stage.
 
 ### Can I run franken-node without a centralized fleet control plane?
 
-Yes. Single-node mode stores fleet state locally under `.franken-node/state/`
-and uses file-backed fleet transport. Multi-node coordination activates
-when an asupersync transport or other control-plane transport is
-configured.
+Yes. Default fleet state is local file-transport JSONL under
+`.franken-node/state/` (`live_control_plane=false`). Multi-node
+coordination requires enabling `asupersync-transport` or another
+configured transport; the default binary does not bind asupersync.
 
 ### What does deterministic replay include?
 
@@ -3251,9 +3276,9 @@ so the bundle can be reproduced exactly under the same runtime version.
 
 It combines Ed25519-signed artifacts, provenance checks, revocation
 freshness gates, trust cards (with camouflage and fragility signals), and
-fleet-wide quarantine controls as **runtime defaults** rather than
-external scanners. Risky and dangerous actions consult fresh trust state
-before they execute.
+local file-transport quarantine (`live_control_plane=false`) as **runtime
+defaults** rather than external scanners. Risky and dangerous actions
+consult fresh trust state before they execute.
 
 ### Do I have to use strict mode?
 
@@ -3313,15 +3338,15 @@ silently redirected to `http://127.0.0.1:8080`.
 `franken-node safe-mode enter --reason <reason> --operator-id <id>
 --trust-state-hash <hash>` (or an automatic entry from
 `crash-loop`, `trust-corruption`, or `epoch-mismatch`) suspends new
-capability issuance, refuses to issue new decisions, and persists the
-entry receipt under `.franken-node/state/`. The runtime continues to
-emit telemetry and accept inspection commands. Exiting requires
+capability issuance, refuses to issue new decisions, and persists
+unsigned JSON operator state under `.franken-node/safe-mode/state.json`
+(not Ed25519-signed). The runtime continues to emit telemetry and accept
+inspection commands. Exiting requires
 `franken-node safe-mode exit --confirm --operator-id <id>` plus the
 operator attestations (`--trust-state-consistent`,
 `--no-unresolved-incidents`, `--evidence-ledger-intact`), which are not
-independently verified by the CLI. The entry/exit
-pair forms a signed pair of receipts so the time spent in safe mode is
-auditable after the fact.
+independently verified by the CLI. The persisted entry/exit
+records are auditable JSON, not a signed receipt pair.
 
 ### How do I scale up to many fleet nodes?
 

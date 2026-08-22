@@ -2,6 +2,12 @@
 
 **Section:** 10.8 | **Bead:** bd-tg2
 
+The default CLI fleet path is a **local file-transport JSONL log**
+(`live_control_plane=false`). `franken-node fleet status` / `reconcile` /
+`release` / `agent` inspect or append that log; they are not a live
+multi-node heartbeat. The policy below is the in-library quarantine
+state machine and target operational contract.
+
 ## Purpose
 
 Defines the operational policy for fleet-wide quarantine and revocation of nodes, tenants, or zones. These operations are used during security incidents, trust violations, or compliance breaches that require coordinated isolation of affected fleet segments.

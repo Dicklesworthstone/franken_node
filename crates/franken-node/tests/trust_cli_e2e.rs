@@ -1804,12 +1804,12 @@ fn trust_quarantine_propagates_through_fleet_transport_pipeline() {
     let quarantine_stdout = String::from_utf8_lossy(&quarantine_output.stdout);
     let incident_id = quarantine_stdout
         .lines()
-        .find_map(|line| line.strip_prefix("fleet propagation incident="))
+        .find_map(|line| line.strip_prefix("file-transport incident="))
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| {
             panic!(
-                "trust quarantine did not emit a fleet incident id\nstdout:\n{}",
+                "trust quarantine did not emit a file-transport incident id\nstdout:\n{}",
                 quarantine_stdout
             )
         })

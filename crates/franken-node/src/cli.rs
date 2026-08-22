@@ -121,7 +121,7 @@ pub enum Command {
     #[command(subcommand)]
     Runtime(RuntimeCommand),
 
-    /// Safe-mode operator lifecycle control.
+    /// Safe-mode operator lifecycle; persist is unsigned JSON (not Ed25519-signed).
     #[command(subcommand, name = "safe-mode")]
     SafeMode(SafeModeCommand),
 
@@ -129,7 +129,7 @@ pub enum Command {
     #[command(subcommand)]
     Proofs(ProofsCommand),
 
-    /// Migration audit, rewrite, and validation workflows.
+    /// Migration audit, rewrite, and validation (rollback JSON is unsigned; validate is not lockstep).
     #[command(subcommand)]
     Migrate(MigrateCommand),
 
@@ -137,27 +137,27 @@ pub enum Command {
     #[command(name = "migrate-report")]
     MigrateReport(MigrateReportArgs),
 
-    /// Compatibility verification across runtimes.
+    /// Local verification family (Node is the lockstep spec when included; matching only Bun stays fail).
     #[command(subcommand)]
     Verify(VerifyCommand),
 
-    /// Extension trust management.
+    /// Local trust-card registry, OSV scan, and file-transport quarantine log.
     #[command(subcommand)]
     Trust(TrustCommand),
 
-    /// Remote capability token issuance and inspection.
+    /// Ed25519 capability tokens; `use` is dry-run (does not send HTTP).
     #[command(subcommand, name = "remotecap")]
     Remotecap(RemoteCapCommand),
 
-    /// Trust-card API/CLI parity surfaces.
+    /// Local trust-card registry inspect (show/export/list/compare/diff; not a live HTTP API).
     #[command(subcommand, name = "trust-card")]
     TrustCard(TrustCardCommand),
 
-    /// Fleet control plane operations.
+    /// Local file-transport fleet/quarantine log (not a live control plane).
     #[command(subcommand)]
     Fleet(FleetCommand),
 
-    /// Incident replay and forensics.
+    /// Recorded incident bundles: export, integrity-verified replay, counterfactual (not live re-execution).
     #[command(subcommand)]
     Incident(IncidentCommand),
 
@@ -165,23 +165,23 @@ pub enum Command {
     #[command(subcommand)]
     Ltv(LtvCommand),
 
-    /// Runtime operations and health inspection.
+    /// Local ops snapshots: health files, config audit, metrics, corpus run (not a live daemon).
     #[command(subcommand)]
     Ops(OpsCommand),
 
-    /// Extension registry operations.
+    /// Local on-disk signed-artifact registry (not a live npm/control-plane service).
     #[command(subcommand)]
     Registry(RegistryCommand),
 
-    /// Benchmark suite execution.
+    /// Benchmark suite; report is SHA256 `provenance_hash` (not Ed25519-signed).
     #[command(subcommand)]
     Bench(BenchCommand),
 
-    /// Debug policy evaluation and trace execution steps.
+    /// Local artifact debug: receipt explain, evidence inspect, fixture policy-activation trace.
     #[command(subcommand)]
     Debug(DebugCommand),
 
-    /// Diagnose environment and policy setup.
+    /// Local diagnostics: config/profile, close-condition, evidence snapshot, workspace pressure, bwrap.
     Doctor(DoctorArgs),
 }
 
@@ -413,10 +413,10 @@ pub struct RuntimeEpochArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum SafeModeCommand {
-    /// Enter safe mode and persist operator state.
+    /// Enter safe mode and persist unsigned JSON operator state (not Ed25519-signed).
     Enter(SafeModeEnterArgs),
 
-    /// Inspect persisted safe-mode state.
+    /// Inspect persisted unsigned JSON safe-mode state.
     Status(SafeModeStatusArgs),
 
     /// Exit safe mode after explicit operator confirmation and pre-exit checks.
@@ -467,7 +467,7 @@ pub struct SafeModeEnterArgs {
     #[arg(long)]
     pub timestamp: Option<String>,
 
-    /// Directory containing the persisted safe-mode state file.
+    /// Directory for unsigned JSON `state.json` (default `.franken-node/safe-mode`; not Ed25519-signed).
     #[arg(long, value_parser = parse_safe_content_pathbuf)]
     pub state_dir: Option<PathBuf>,
 
@@ -482,7 +482,7 @@ pub struct SafeModeStatusArgs {
     #[arg(long)]
     pub timestamp: Option<String>,
 
-    /// Directory containing the persisted safe-mode state file.
+    /// Directory for unsigned JSON `state.json` (default `.franken-node/safe-mode`; not Ed25519-signed).
     #[arg(long, value_parser = parse_safe_content_pathbuf)]
     pub state_dir: Option<PathBuf>,
 
@@ -519,7 +519,7 @@ pub struct SafeModeExitArgs {
     #[arg(long)]
     pub timestamp: Option<String>,
 
-    /// Directory containing the persisted safe-mode state file.
+    /// Directory for unsigned JSON `state.json` (default `.franken-node/safe-mode`; not Ed25519-signed).
     #[arg(long, value_parser = parse_safe_content_pathbuf)]
     pub state_dir: Option<PathBuf>,
 
@@ -557,11 +557,11 @@ pub struct ProofQueueStatusArgs {
     #[arg(long, default_value = "proofs-queue-status")]
     pub trace_id: String,
 
-    /// JSON snapshot of validation broker, proof, worker, and resource readiness inputs.
+    /// JSON snapshot of validation broker, proof, worker, and resource readiness inputs (not a live broker).
     #[arg(long, value_parser = parse_safe_content_pathbuf)]
     pub input: Option<PathBuf>,
 
-    /// Validation broker receipt JSON path. Repeat to include multiple receipts.
+    /// Validation receipt JSON snapshot path (not a live broker). Repeat to include multiple receipts.
     #[arg(long = "receipt", value_parser = parse_safe_content_pathbuf)]
     pub receipts: Vec<PathBuf>,
 }
@@ -584,11 +584,11 @@ pub struct ProofWorkersRestartArgs {
     #[arg(long, default_value = "proofs-workers-restart")]
     pub trace_id: String,
 
-    /// JSON snapshot of validation broker, proof, worker, and resource readiness inputs.
+    /// JSON snapshot of validation broker, proof, worker, and resource readiness inputs (not a live broker).
     #[arg(long, value_parser = parse_safe_content_pathbuf)]
     pub input: Option<PathBuf>,
 
-    /// Validation broker receipt JSON path. Repeat to include multiple receipts.
+    /// Validation receipt JSON snapshot path (not a live broker). Repeat to include multiple receipts.
     #[arg(long = "receipt", value_parser = parse_safe_content_pathbuf)]
     pub receipts: Vec<PathBuf>,
 
@@ -635,10 +635,10 @@ pub enum MigrateCommand {
     /// Inventory migration risk and emit findings.
     Audit(MigrateAuditArgs),
 
-    /// Apply migration transforms with rollback artifacts.
+    /// Apply migration transforms and optionally emit an unsigned JSON rollback plan.
     Rewrite(MigrateRewriteArgs),
 
-    /// Validate transformed project with conformance checks.
+    /// Static audit checks plus optional runtime smoke (not `verify lockstep`).
     Validate(MigrateValidateArgs),
 }
 
@@ -777,7 +777,7 @@ pub struct MigrateRewriteArgs {
     #[arg(long)]
     pub apply: bool,
 
-    /// Path to emit rollback plan.
+    /// Path to emit an unsigned JSON `MigrationRollbackPlan` (not Ed25519-signed).
     #[arg(long, value_parser = parse_safe_content_pathbuf)]
     pub emit_rollback: Option<PathBuf>,
 
@@ -867,7 +867,7 @@ pub enum VerifyCommand {
     #[command(name = "transparency-log")]
     TransparencyLog(VerifyTransparencyLogArgs),
 
-    /// Generate recovery runbook for RCH validation failures.
+    /// Generate a recovery runbook from a `--readiness-input` snapshot (not a live broker).
     #[command(name = "recovery-runbook")]
     RecoveryRunbook(VerifyRecoveryRunbookArgs),
 }
@@ -1018,7 +1018,7 @@ pub struct VerifyTransparencyLogArgs {
 
 #[derive(Debug, Parser)]
 pub struct VerifyRecoveryRunbookArgs {
-    /// Path to validation readiness input JSON file.
+    /// Path to a validation-readiness snapshot JSON file (not a live broker).
     ///
     /// Accepts either the positional form (`verify recovery-runbook PATH`)
     /// or the long-flag form (`verify recovery-runbook --readiness-input PATH`)
@@ -1026,7 +1026,7 @@ pub struct VerifyRecoveryRunbookArgs {
     #[arg(value_parser = parse_safe_content_pathbuf, value_name = "READINESS_INPUT")]
     pub readiness_input_positional: Option<PathBuf>,
 
-    /// Path to validation readiness input JSON file (long-flag alias).
+    /// Path to a validation-readiness snapshot JSON file (long-flag alias).
     #[arg(
         long = "readiness-input",
         value_parser = parse_safe_content_pathbuf,
@@ -1074,16 +1074,16 @@ pub enum TrustCommand {
     /// Populate baseline trust cards from package.json dependencies.
     Scan(TrustScanArgs),
 
-    /// Revoke artifact or publisher trust.
+    /// Revoke an artifact or publisher in the local trust-card registry (not a live fleet).
     Revoke(TrustRevokeArgs),
 
-    /// Quarantine a suspicious artifact fleet-wide.
+    /// Quarantine an artifact in the local trust-card registry and file-transport log (not a live fleet).
     Quarantine(TrustQuarantineArgs),
 
-    /// Release a Runtime Sentinel run-subject quarantine after remediation.
+    /// Lift a local sentinel run-subject quarantine record for `--app` (not a live Runtime Sentinel daemon).
     Release(TrustReleaseArgs),
 
-    /// Sync trust state from upstream sources.
+    /// Refresh trust-card cache and OSV vulnerability state (cached unless `--force`).
     Sync(TrustSyncArgs),
 }
 
@@ -1225,7 +1225,7 @@ pub struct TrustSyncArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum RemoteCapCommand {
-    /// Issue a signed capability token for network-bound operations.
+    /// Issue a local Ed25519 capability token (does not perform the scoped network operation).
     Issue(RemoteCapIssueArgs),
     /// Verify a capability token without consuming single-use tokens.
     Verify(RemoteCapVerifyArgs),
@@ -1587,10 +1587,10 @@ pub enum OpsCommand {
     /// Advise whether cargo/RCH validation should run, defer, dedupe, or fall back to source-only work.
     #[command(name = "resource-governor")]
     ResourceGovernor(OpsResourceGovernorArgs),
-    /// Report whether validation broker evidence is fresh and trustworthy.
+    /// Report validation evidence freshness from --input/--receipt snapshots (not a live broker).
     #[command(name = "validation-readiness")]
     ValidationReadiness(OpsValidationReadinessArgs),
-    /// Render a closeout-ready summary from one validation broker receipt.
+    /// Render a closeout summary from one `--receipt` snapshot (not a live broker).
     #[command(name = "validation-closeout")]
     ValidationCloseout(OpsValidationCloseoutArgs),
     /// Audit the active config and compare operational impact across profiles.
@@ -1692,7 +1692,7 @@ pub struct OpsValidationReadinessArgs {
     )]
     pub input_positional: Option<PathBuf>,
 
-    /// Validation broker receipt JSON path. Repeat to include multiple receipts.
+    /// Validation receipt JSON snapshot path (not a live broker). Repeat to include multiple receipts.
     #[arg(long = "receipt", value_parser = parse_safe_content_pathbuf)]
     pub receipts: Vec<PathBuf>,
 }
@@ -1723,7 +1723,7 @@ pub struct OpsValidationCloseoutArgs {
     #[arg(long, default_value = "")]
     pub bead_id: String,
 
-    /// Validation broker receipt JSON path.
+    /// Validation receipt JSON snapshot path (not a live broker).
     /// Required by the handler (not clap) so `--json` failures emit
     /// `franken-node/ops-error-cli/v1` instead of a human clap error.
     #[arg(long, default_value = "", value_parser = parse_safe_content_pathbuf)]
@@ -1788,8 +1788,10 @@ pub struct OpsProofCarryingEvidenceArgs {
 
     /// Also run a REAL dual-runtime lockstep-oracle pass (bun reference leg
     /// vs native franken_engine leg) and merge both evidence blocks into
-    /// this L1 product verdict artifact (bd-ry7d1). Fails closed on any
-    /// divergence rather than writing a weaker verdict.
+    /// this L1 product verdict artifact (bd-ry7d1). This is an additional
+    /// L1 conjunct, not a corpus substitute; L1 GREEN still requires the
+    /// compatibility corpus floor. Fails closed on any divergence rather
+    /// than writing a weaker verdict.
     #[arg(long = "merge-l1-verdict", value_parser = parse_safe_content_pathbuf)]
     pub merge_l1_verdict: Option<PathBuf>,
 }
@@ -1854,7 +1856,7 @@ pub enum IncidentCommand {
     /// Export deterministic incident bundle.
     Bundle(IncidentBundleArgs),
 
-    /// Replay incident timeline locally.
+    /// Integrity-verified replay of the recorded incident bundle (not live re-execution).
     Replay(IncidentReplayArgs),
 
     /// Simulate alternative policy actions.
@@ -2126,10 +2128,10 @@ pub struct LtvVerifyAsOfArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum RegistryCommand {
-    /// Publish signed extension artifact.
+    /// Admit a signed artifact into the local on-disk registry (not npm/control-plane publish).
     Publish(RegistryPublishArgs),
 
-    /// Query extension registry with trust filters.
+    /// Query locally stored registry artifacts with trust filters.
     Search(RegistrySearchArgs),
 
     /// Verify a locally stored registry artifact's hash and signature.
@@ -2259,7 +2261,7 @@ pub enum DebugCommand {
     /// Inspect verifier-facing evidence artifacts through the shared evidence
     /// verification spine and emit per-check diagnostics.
     Evidence(DebugEvidenceArgs),
-    /// Trace policy evaluation steps for debugging policy logic.
+    /// Trace a policy-activation fixture through doctor_policy_activation (not live guest execution).
     Trace(DebugTraceArgs),
 }
 
@@ -2326,11 +2328,11 @@ pub enum DoctorCommand {
     #[command(name = "close-condition")]
     CloseCondition(DoctorCloseConditionArgs),
 
-    /// Report whether generated evidence is ready for operator trust.
+    /// Report evidence readiness from an `--input` snapshot (not a live broker).
     #[command(name = "evidence-readiness")]
     EvidenceReadiness(DoctorEvidenceReadinessArgs),
 
-    /// Analyze workspace pressure and resource usage.
+    /// Probe local disk, memory, RCH slots, and build counts; apply pressure policy.
     #[command(name = "workspace-pressure")]
     WorkspacePressure(DoctorWorkspacePressureArgs),
 
@@ -2363,7 +2365,7 @@ pub struct DoctorCloseConditionArgs {
 
 #[derive(Debug, Parser)]
 pub struct DoctorEvidenceReadinessArgs {
-    /// Evidence-readiness snapshot JSON exported by operator tooling.
+    /// Evidence-readiness snapshot JSON (not a live broker).
     /// Required by the handler (not clap) so `--json` failures emit
     /// `franken-node/doctor-error-cli/v1` instead of a human clap error.
     #[arg(long, default_value = "", value_parser = parse_safe_content_pathbuf)]
@@ -2419,7 +2421,7 @@ pub struct DoctorArgs {
     #[arg(long)]
     pub profile: Option<String>,
 
-    /// Path to policy activation input JSON for live guardrail diagnostics.
+    /// Path to policy-activation snapshot JSON (not a live guardrail probe).
     /// Falls back to `FRANKEN_NODE_DOCTOR_POLICY_ACTIVATION_INPUT` when the
     /// flag is omitted; the CLI flag takes precedence (bd-lmbt0).
     #[arg(long, env = "FRANKEN_NODE_DOCTOR_POLICY_ACTIVATION_INPUT")]

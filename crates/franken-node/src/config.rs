@@ -3200,7 +3200,7 @@ impl std::str::FromStr for CompatibilityMode {
 pub struct MigrationConfig {
     /// Enable automatic rewrite suggestions.
     pub autofix: bool,
-    /// Require lockstep validation before rollout stage transition.
+    /// Doctor WARN when false. `migrate validate` does not invoke `verify lockstep`.
     pub require_lockstep_validation: bool,
     /// Optional verification threshold for migration validation.
     /// When `None`, consumers use the default (0.95).

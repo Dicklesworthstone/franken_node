@@ -30868,7 +30868,7 @@ fn main() -> Result<()> {
                 };
                 emit_json_or_human(&report, args.json, || {
                     format!(
-                        "quarantine applied: artifact={} affected_cards={}\nfleet propagation incident={}\n{}",
+                        "quarantine applied: artifact={} affected_cards={}\nfile-transport incident={}\ntransport=file live_control_plane=false\n{}",
                         report.artifact,
                         report.affected_cards,
                         report.fleet_incident_id,
