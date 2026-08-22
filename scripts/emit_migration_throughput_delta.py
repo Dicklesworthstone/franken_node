@@ -314,12 +314,26 @@ def resolve_js_runtime() -> tuple[str, str]:
     if not runtime:
         print("error: node or bun required for the baseline reference scripts", file=sys.stderr)
         raise SystemExit(2)
-    try:
-        version = subprocess.run(
-            [runtime, "--version"], capture_output=True, text=True, timeout=30
-        ).stdout.strip()
-    except Exception:
-        version = "unknown"
+
+    def probe_version(binary: str) -> str:
+        try:
+            return subprocess.run(
+                [binary, "--version"], capture_output=True, text=True, timeout=30
+            ).stdout.strip()
+        except Exception:
+            return ""
+
+    version = probe_version(runtime)
+    runtime_name = Path(runtime).name
+    if not version and runtime_name == "node":
+        # A `node` shim without --version (e.g. bun's node-compat wrapper):
+        # disclose the compat layer rather than an opaque "unknown".
+        sibling_bun = Path(runtime).with_name("bun")
+        bun_version = probe_version(str(sibling_bun)) if sibling_bun.is_file() else probe_version(
+            "bun"
+        )
+        if bun_version:
+            return runtime, f"node-shim(bun {bun_version})"
     return runtime, version or "unknown"
 
 

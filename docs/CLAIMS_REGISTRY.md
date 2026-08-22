@@ -53,17 +53,28 @@ Each claim entry uses this structure:
 - **Source**: docs/PRODUCT_CHARTER.md §5 (table row 2)
 - **Claim**: franken-node delivers ≥3× migration throughput / confidence vs.
   baseline patterns, measured as time-to-production + confidence score delta.
-- **Evidence artifact**: `artifacts/migration/throughput_delta.json` (target
-  path; not yet emitted)
-- **Verification command**: TBD — needs a published comparison-corpus runner
-- **Last verified**: 2026-05-20T00:00:00Z (registry backfill)
-- **Status**: pending
-- **Notes**: `artifacts/13/migration_velocity_report.json` is a constructed
-  Feb 2026 10-archetype cohort (`cohort-express-001`, overall 3.15×) and is
-  **not** a live measurement. `scripts/check_migration_velocity_gate.py` now
-  fails that constructed ID set (bd-reality-20260820-w0fc6.2). Tracked by
-  that bead; `bd-3agp` remains historically closed and must not be cited as
-  verified 3×.
+- **Evidence artifact**:
+  `artifacts/migration/throughput_delta.json` +
+  `artifacts/migration/throughput_delta_evidence.json` (live, Ed25519-signed,
+  census-recomputable)
+- **Verification command**:
+  `python3 scripts/check_migration_velocity_gate.py --json`; SDK recompute:
+  `cargo test -p frankenengine-verifier-sdk --test migration_throughput_recompute`
+- **Last verified**: 2026-08-22 (live measurement of record)
+- **Status**: pending (measured 2.30x, CI95 [1.90x, 3.30x] — below 3.0x)
+- **Notes**: The constructed Feb 2026 report
+  (`artifacts/13/migration_velocity_report.json`, fictional
+  `cohort-*-001` archetypes, 3.15x) is **not** evidence and the gate rejects
+  its ID set (bd-reality-20260820-w0fc6.2). The live gate measures real
+  `franken-node migrate audit/rewrite/validate` runs against a frozen cohort
+  of checked-in apps plus pinned upstream code, wall-clock vs the checked-in
+  manual-baseline codemods (`scripts/migration_baseline/`). Measurement of
+  record (target-release binary, 5 fixtures x 5 runs): pooled median ratio
+  **2.30x**, bootstrap CI95 [1.90x, 3.30x]; per-fixture: hardened 3.48x,
+  risky 3.55x, corpus-commander 2.18x, rewrite-shell-commonjs 1.82x,
+  holdout-worker-service 1.95x. The claim stays **pending** until a
+  re-measurement meets 3.0x; `bd-3agp` remains historically closed and must
+  not be cited as verified 3x.
 
 ### CLAIM-003: ≥10× reduction in successful host compromise vs. baseline
 

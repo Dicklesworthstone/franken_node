@@ -24,8 +24,9 @@
 //! 3. the pooled medians, overall velocity ratio, and bootstrap CI are the
 //!    faithful deterministic functions of the whole census (same splitmix64
 //!    stream, same floor-mean median rule, same basis-point rounding); and
-//! 4. the corpus digest commits to exactly the census presented, and the
-//!    ratio meets the signed threshold.
+//! 4. the corpus digest commits to exactly the census presented. The signed
+//!    threshold is reported (`threshold_met`) as caller policy, not an
+//!    integrity failure.
 //!
 //! The signed payload carries integers only (milliseconds, basis points);
 //! floats fail verification.
@@ -68,7 +69,8 @@ const MIGTP_EVIDENCE_DOMAIN: &[u8] =
 /// Domain separator for the corpus digest over all fixtures.
 const MIGTP_CORPUS_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:migration-throughput-corpus:v1:";
 /// Seed preimage for the deterministic harness signing key.
-const MIGTP_SEED_PREIMAGE: &[u8] = b"frankenengine-verifier-sdk:migration-throughput-harness-key:v1";
+const MIGTP_SEED_PREIMAGE: &[u8] =
+    b"frankenengine-verifier-sdk:migration-throughput-harness-key:v1";
 
 const SHA256_PREFIX: &str = "sha256:";
 
@@ -200,6 +202,12 @@ pub struct VerifiedThroughputDelta {
     pub schema_version: String,
     /// The verified velocity ratio, basis points.
     pub velocity_ratio_bp: u64,
+    /// The signed threshold the ratio is judged against, basis points.
+    pub required_velocity_ratio_bp: u64,
+    /// Whether the verified ratio meets the signed threshold. Threshold
+    /// enforcement is caller policy (the CI gate fails below 3x); a
+    /// cryptographically sound below-threshold delta still verifies.
+    pub threshold_met: bool,
     /// Verified bootstrap CI95.
     pub bootstrap_ci95: BootstrapCi95,
     /// Number of census fixtures verified.
@@ -257,8 +265,6 @@ pub enum MigrationThroughputError {
     DeltaRecomputeMismatch { detail: String },
     /// The corpus digest does not commit to the presented census.
     CorpusDigestMismatch,
-    /// The signed threshold is not met by the recomputed ratio.
-    ThresholdNotMet { ratio_bp: u64, required_bp: u64 },
 }
 
 impl fmt::Display for MigrationThroughputError {
@@ -266,10 +272,16 @@ impl fmt::Display for MigrationThroughputError {
         match self {
             Self::Json(detail) => write!(formatter, "json error: {detail}"),
             Self::UnsupportedDeltaSchema { expected, actual } => {
-                write!(formatter, "unsupported delta schema: expected {expected}, got {actual}")
+                write!(
+                    formatter,
+                    "unsupported delta schema: expected {expected}, got {actual}"
+                )
             }
             Self::UnsupportedCensusSchema { expected, actual } => {
-                write!(formatter, "unsupported census schema: expected {expected}, got {actual}")
+                write!(
+                    formatter,
+                    "unsupported census schema: expected {expected}, got {actual}"
+                )
             }
             Self::FloatingPointValue { path } => {
                 write!(formatter, "float value where integer required: {path}")
@@ -282,7 +294,10 @@ impl fmt::Display for MigrationThroughputError {
                 write!(formatter, "delta fixture id sets do not match the census")
             }
             Self::HoldoutContractViolated { actual } => {
-                write!(formatter, "holdout contract requires exactly one holdout, got {actual}")
+                write!(
+                    formatter,
+                    "holdout contract requires exactly one holdout, got {actual}"
+                )
             }
             Self::SignatureAlgorithmUnsupported { actual } => {
                 write!(formatter, "unsupported signature algorithm: {actual}")
@@ -291,15 +306,15 @@ impl fmt::Display for MigrationThroughputError {
             Self::SignatureMalformed => write!(formatter, "malformed signer key or signature"),
             Self::SignatureInvalid => write!(formatter, "signature invalid"),
             Self::CensusRecomputeMismatch { fixture_id, detail } => {
-                write!(formatter, "census recompute mismatch for {fixture_id}: {detail}")
+                write!(
+                    formatter,
+                    "census recompute mismatch for {fixture_id}: {detail}"
+                )
             }
             Self::DeltaRecomputeMismatch { detail } => {
                 write!(formatter, "delta recompute mismatch: {detail}")
             }
             Self::CorpusDigestMismatch => write!(formatter, "corpus digest mismatch"),
-            Self::ThresholdNotMet { ratio_bp, required_bp } => {
-                write!(formatter, "velocity ratio {ratio_bp}bp below required {required_bp}bp")
-            }
         }
     }
 }
@@ -429,7 +444,8 @@ pub fn bootstrap_ci_bp(pairs: &[(u64, u64)], resamples: u64, seed: u64) -> Optio
 
 fn canonical_json_value_bytes(value: Value) -> MigrationThroughputResult<Vec<u8>> {
     let canonical = canonicalize_value(value);
-    serde_json::to_vec(&canonical).map_err(|source| MigrationThroughputError::Json(source.to_string()))
+    serde_json::to_vec(&canonical)
+        .map_err(|source| MigrationThroughputError::Json(source.to_string()))
 }
 
 fn canonicalize_value(value: Value) -> Value {
@@ -450,9 +466,11 @@ fn canonicalize_value(value: Value) -> Value {
 
 fn reject_float_values(value: &Value, path: &str) -> MigrationThroughputResult<()> {
     match value {
-        Value::Number(number) if number.is_f64() => Err(MigrationThroughputError::FloatingPointValue {
-            path: path.to_string(),
-        }),
+        Value::Number(number) if number.is_f64() => {
+            Err(MigrationThroughputError::FloatingPointValue {
+                path: path.to_string(),
+            })
+        }
         Value::Array(items) => {
             for (index, item) in items.iter().enumerate() {
                 reject_float_values(item, &format!("{path}[{index}]"))?;
@@ -483,9 +501,8 @@ fn update_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
 }
 
 fn migtp_signature_message(canonical_unsigned: &[u8]) -> Vec<u8> {
-    let mut message = Vec::with_capacity(
-        MIGTP_SIGNATURE_DOMAIN.len() + 8 + canonical_unsigned.len(),
-    );
+    let mut message =
+        Vec::with_capacity(MIGTP_SIGNATURE_DOMAIN.len() + 8 + canonical_unsigned.len());
     message.extend_from_slice(MIGTP_SIGNATURE_DOMAIN);
     let len = u64::try_from(canonical_unsigned.len()).unwrap_or(u64::MAX);
     message.extend_from_slice(&len.to_le_bytes());
@@ -537,9 +554,10 @@ fn constant_time_eq_bytes(left: &[u8], right: &[u8]) -> bool {
 ///
 /// Returns a [`MigrationThroughputError`] if either document is malformed,
 /// the signature does not verify against the trust anchor, any census
-/// entry's declared aggregates disagree with its recorded runs, the pooled
-/// aggregates or bootstrap CI disagree with the census, the corpus digest
-/// does not commit to the census, or the ratio misses the signed threshold.
+/// entry's declared aggregates disagree with its recorded runs, or the pooled
+/// aggregates or bootstrap CI disagree with the census. A below-threshold
+/// ratio verifies and is reported through `VerifiedThroughputDelta::
+/// threshold_met`; enforcing the 3x policy is the CI gate's job.
 pub fn verify_throughput_delta(
     delta_bytes: &[u8],
     evidence_bytes: &[u8],
@@ -602,15 +620,11 @@ pub fn verify_throughput_delta(
         .map_err(|_| MigrationThroughputError::SignatureInvalid)?;
 
     // --- Index the census, rejecting duplicates ---------------------------- //
-    let census_entries: Vec<FixtureCensusEntry> = serde_json::from_value(
-        evidence_value
-            .get("fixtures")
-            .cloned()
-            .ok_or_else(|| {
-                MigrationThroughputError::Json("census.fixtures missing".to_string())
-            })?,
-    )
-    .map_err(|source| MigrationThroughputError::Json(source.to_string()))?;
+    let census_entries: Vec<FixtureCensusEntry> =
+        serde_json::from_value(evidence_value.get("fixtures").cloned().ok_or_else(|| {
+            MigrationThroughputError::Json("census.fixtures missing".to_string())
+        })?)
+        .map_err(|source| MigrationThroughputError::Json(source.to_string()))?;
     if census_entries.is_empty() {
         return Err(MigrationThroughputError::EmptyCensus);
     }
@@ -629,12 +643,19 @@ pub fn verify_throughput_delta(
     }
 
     // --- Holdout + fixture-set contracts ----------------------------------- //
-    let holdout_count = census_entries.iter().filter(|e| e.role == "holdout").count();
+    let holdout_count = census_entries
+        .iter()
+        .filter(|e| e.role == "holdout")
+        .count();
     if holdout_count != 1 {
-        return Err(MigrationThroughputError::HoldoutContractViolated { actual: holdout_count });
+        return Err(MigrationThroughputError::HoldoutContractViolated {
+            actual: holdout_count,
+        });
     }
-    let mut census_ids: Vec<String> =
-        census_entries.iter().map(|e| e.fixture_id.clone()).collect();
+    let mut census_ids: Vec<String> = census_entries
+        .iter()
+        .map(|e| e.fixture_id.clone())
+        .collect();
     census_ids.sort();
     let mut declared_ids = delta.fixture_ids_cohort.clone();
     declared_ids.extend(delta.fixture_ids_holdout.iter().cloned());
@@ -647,7 +668,11 @@ pub fn verify_throughput_delta(
     let mut pooled_pairs: Vec<(u64, u64)> = Vec::new();
     let mut corpus_pairs: BTreeMap<String, String> = BTreeMap::new();
     for entry in &census_entries {
-        let runs: Vec<(u64, u64)> = entry.runs.iter().map(|r| (r.tool_ms, r.baseline_ms)).collect();
+        let runs: Vec<(u64, u64)> = entry
+            .runs
+            .iter()
+            .map(|r| (r.tool_ms, r.baseline_ms))
+            .collect();
         if runs.is_empty() {
             return Err(MigrationThroughputError::CensusRecomputeMismatch {
                 fixture_id: entry.fixture_id.clone(),
@@ -673,35 +698,44 @@ pub fn verify_throughput_delta(
                 detail: format!(
                     "declared (tool={},baseline={},ratio={}) vs recomputed \
                      (tool={tool_median},baseline={baseline_median},ratio={entry_ratio})",
-                    entry.tool_median_ms,
-                    entry.baseline_median_ms,
-                    entry.ratio_bp
+                    entry.tool_median_ms, entry.baseline_median_ms, entry.ratio_bp
                 ),
             });
         }
         pooled_pairs.extend(runs);
-        corpus_pairs.insert(entry.fixture_id.clone(), census_digest_for(
-            census_index.get(&entry.fixture_id).copied().ok_or_else(|| {
-                MigrationThroughputError::CensusRecomputeMismatch {
-                    fixture_id: entry.fixture_id.clone(),
-                    detail: "raw census value missing".to_string(),
-                }
-            })?,
-        )?);
+        corpus_pairs.insert(
+            entry.fixture_id.clone(),
+            census_digest_for(
+                census_index
+                    .get(&entry.fixture_id)
+                    .copied()
+                    .ok_or_else(|| MigrationThroughputError::CensusRecomputeMismatch {
+                        fixture_id: entry.fixture_id.clone(),
+                        detail: "raw census value missing".to_string(),
+                    })?,
+            )?,
+        );
     }
 
     // --- Recompute pooled aggregates + bootstrap --------------------------- //
     let pooled_tool_values: Vec<u64> = pooled_pairs.iter().map(|(tool, _)| *tool).collect();
-    let pooled_baseline_values: Vec<u64> = pooled_pairs.iter().map(|(_, baseline)| *baseline).collect();
+    let pooled_baseline_values: Vec<u64> =
+        pooled_pairs.iter().map(|(_, baseline)| *baseline).collect();
     let pooled_tool = median_u64(&pooled_tool_values);
     let pooled_baseline = median_u64(&pooled_baseline_values);
     let recomputed_ratio = ratio_bp(pooled_baseline, pooled_tool).ok_or_else(|| {
-        MigrationThroughputError::DeltaRecomputeMismatch { detail: "zero pooled tool median".to_string() }
+        MigrationThroughputError::DeltaRecomputeMismatch {
+            detail: "zero pooled tool median".to_string(),
+        }
     })?;
-    let recomputed_ci = bootstrap_ci_bp(&pooled_pairs, delta.bootstrap_ci95.resamples, delta.bootstrap_ci95.seed)
-        .ok_or_else(|| MigrationThroughputError::DeltaRecomputeMismatch {
-            detail: "bootstrap produced no resamples".to_string(),
-        })?;
+    let recomputed_ci = bootstrap_ci_bp(
+        &pooled_pairs,
+        delta.bootstrap_ci95.resamples,
+        delta.bootstrap_ci95.seed,
+    )
+    .ok_or_else(|| MigrationThroughputError::DeltaRecomputeMismatch {
+        detail: "bootstrap produced no resamples".to_string(),
+    })?;
 
     if pooled_tool != delta.median_tool_ms || pooled_baseline != delta.median_baseline_ms {
         return Err(MigrationThroughputError::DeltaRecomputeMismatch {
@@ -736,32 +770,29 @@ pub fn verify_throughput_delta(
 
     // --- Corpus digest ------------------------------------------------------ //
     let recomputed_corpus = corpus_digest_for(&corpus_pairs);
-    if !constant_time_eq_bytes(
-        recomputed_corpus.as_bytes(),
-        delta.corpus_digest.as_bytes(),
-    ) {
+    if !constant_time_eq_bytes(recomputed_corpus.as_bytes(), delta.corpus_digest.as_bytes()) {
         return Err(MigrationThroughputError::CorpusDigestMismatch);
     }
 
-    // --- Threshold ---------------------------------------------------------- //
-    if delta.velocity_ratio_bp < delta.required_velocity_ratio_bp {
-        return Err(MigrationThroughputError::ThresholdNotMet {
-            ratio_bp: delta.velocity_ratio_bp,
-            required_bp: delta.required_velocity_ratio_bp,
-        });
+    // --- Threshold (caller policy, not an integrity failure) ---------------- //
+    let threshold_met = delta.velocity_ratio_bp >= delta.required_velocity_ratio_bp;
+    let mut event_codes = vec![
+        FN_VSDK_MIGTP_RECOMPUTE_START.to_string(),
+        FN_VSDK_MIGTP_CENSUS_RECOMPUTED.to_string(),
+    ];
+    if threshold_met {
+        event_codes.push(FN_VSDK_MIGTP_DELTA_PASS.to_string());
     }
 
     Ok(VerifiedThroughputDelta {
         schema_version: delta.schema_version,
         velocity_ratio_bp: delta.velocity_ratio_bp,
+        required_velocity_ratio_bp: delta.required_velocity_ratio_bp,
+        threshold_met,
         bootstrap_ci95: delta.bootstrap_ci95,
         fixture_count: census_entries.len(),
         holdout_ratio_bp: delta.holdout_ratio_bp,
         signer_key_id: delta.signature.signer_key_id,
-        event_codes: vec![
-            FN_VSDK_MIGTP_RECOMPUTE_START.to_string(),
-            FN_VSDK_MIGTP_CENSUS_RECOMPUTED.to_string(),
-            FN_VSDK_MIGTP_DELTA_PASS.to_string(),
-        ],
+        event_codes,
     })
 }

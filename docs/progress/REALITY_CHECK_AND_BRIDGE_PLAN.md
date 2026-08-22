@@ -100,7 +100,7 @@ Status key: `WORKING` / `PARTIAL` / `STUB` / `UNPROVEN` / `NOT_STARTED` / `REGRE
 | V13 | SSRF/egress policy as runtime default | README Network Egress | Important | WORKING on native `run` | `bd-y4t2i` crypto/egress residuals | Load-bearing `ssrf_gated_host_io` on engine host I/O. |
 | V14 | Child-process spawn impossible-by-default + Bubblewrap | README Runtime Profiles | Important | PARTIAL | `bd-91tpy`, `bd-at11s` | Real signed opt-in. Linux-only. PATH binary process-spawn-readiness exists. |
 | V15 | No `unsafe` | README L141 | Core | WORKING | honesty manifest | `#![forbid(unsafe_code)]`; honesty `unsafe_blocks=0`. |
-| V16 | ≥3× migration velocity vs baseline | Charter §5, CLAIM-002 | Core | UNPROVEN | **NO open bead** (`bd-3agp` closed) | `artifacts/13/migration_velocity_report.json` is a 2026-02-21 constructed cohort (`overall_velocity_ratio: 3.15`). |
+| V16 | ≥3× migration velocity vs baseline | Charter §5, CLAIM-002 | Core | MEASURED 2.30×, PENDING | `bd-reality-20260820-w0fc6.2` (live gate landed) | Live signed gate (`artifacts/migration/throughput_delta.json`, target-release, 2026-08-22): pooled median 2.30x, CI95 [1.90x, 3.30x] — below 3x. Constructed `bd-3agp` cohort rejected by the gate. |
 | V17 | ≥10× compromise reduction | Charter §5, CLAIM-003 | Core | UNPROVEN | `bd-3cpa` open | Report exists; gate bead still open. Not production-campaign evidence. |
 | V18 | ≥2 independent replications | Charter / `bd-whxp` | Important | NOT_STARTED | `bd-whxp` open | Still ready-work. |
 | V19 | Friction-minimized install → first safe production | Charter §5, `bd-34d5` | Core | PARTIAL | `bd-34d5` open | Installer exists. Homebrew unpublished (README honest). Shipped binary 709 commits stale. Live `run` failed without engine/fallback. |
