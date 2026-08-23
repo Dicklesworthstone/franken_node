@@ -1128,8 +1128,9 @@ fn fleet_reconcile_handles_realistic_partial_reconcile_across_multi_node_fleet()
     );
     assert!(
         output.status.success(),
-        "fleet reconcile --json failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        "fleet reconcile --json failed: stderr={} stdout={}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
     );
 
     let payload: serde_json::Value =
