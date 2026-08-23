@@ -111,10 +111,21 @@ fn spawn_cli_in_dir_with_fleet_state(
         .unwrap_or_else(|err| fail_command("failed spawning", args, err))
 }
 
-fn seed_transport(fleet_state_dir: &std::path::Path) -> FileFleetTransport {
-    let mut transport = FileFleetTransport::new(fleet_state_dir);
-    transport.initialize().expect("initialize fleet transport");
+fn seed_durable_transport(
+    fleet_state_dir: &std::path::Path,
+) -> frankenengine_node::control_plane::fleet_transport_durable::DurableFleetTransport {
+    let mut transport = frankenengine_node::control_plane::fleet_transport_durable::DurableFleetTransport::new(fleet_state_dir)
+        .expect("open durable fleet transport");
     transport
+        .initialize()
+        .expect("initialize durable fleet transport");
+    transport
+}
+
+fn seed_transport(
+    fleet_state_dir: &std::path::Path,
+) -> frankenengine_node::control_plane::fleet_transport_durable::DurableFleetTransport {
+    seed_durable_transport(fleet_state_dir)
 }
 
 fn write_test_signing_key(
@@ -203,7 +214,7 @@ fn write_fail_closed_cli_config_for_fixture_trust_cards(root: &std::path::Path) 
 }
 
 fn seed_fleet_quarantine(
-    transport: &mut FileFleetTransport,
+    transport: &mut frankenengine_node::control_plane::fleet_transport_durable::DurableFleetTransport,
     zone_id: &str,
     incident_id: &str,
     quarantine_version: u64,
@@ -226,7 +237,7 @@ fn seed_fleet_quarantine(
 
 /// Seed realistic multi-node fleet with 5+ nodes across geographic zones
 fn seed_realistic_multi_zone_fleet(
-    transport: &mut FileFleetTransport,
+    transport: &mut frankenengine_node::control_plane::fleet_transport_durable::DurableFleetTransport,
     base_time: chrono::DateTime<Utc>,
 ) {
     let _zones = [
@@ -308,7 +319,7 @@ fn seed_realistic_multi_zone_fleet(
 
 /// Seed realistic security quarantine scenarios with actual vulnerability reasons
 fn seed_realistic_security_quarantine(
-    transport: &mut FileFleetTransport,
+    transport: &mut frankenengine_node::control_plane::fleet_transport_durable::DurableFleetTransport,
     incident_id: &str,
     quarantine_version: u64,
     base_time: chrono::DateTime<Utc>,
@@ -373,7 +384,7 @@ fn seed_realistic_security_quarantine(
 
 /// Seed partial reconcile scenario with mixed node states
 fn seed_partial_reconcile_scenario(
-    transport: &mut FileFleetTransport,
+    transport: &mut frankenengine_node::control_plane::fleet_transport_durable::DurableFleetTransport,
     base_time: chrono::DateTime<Utc>,
 ) {
     // Some nodes reconciled to v4, others still on v2/v3
@@ -430,7 +441,7 @@ fn seed_partial_reconcile_scenario(
 
 /// Seed partial release scenario where only some incidents are released
 fn seed_partial_release_scenario(
-    transport: &mut FileFleetTransport,
+    transport: &mut frankenengine_node::control_plane::fleet_transport_durable::DurableFleetTransport,
     base_time: chrono::DateTime<Utc>,
 ) {
     // Multiple overlapping incidents - some resolved, others still active
@@ -3498,7 +3509,7 @@ impl TestLogger {
         );
     }
 
-    pub fn transport_snapshot(&self, transport: &FileFleetTransport, label: &str) {
+    pub fn transport_snapshot(&self, transport: &frankenengine_node::control_plane::fleet_transport_durable::DurableFleetTransport, label: &str) {
         let actions = transport.list_actions().unwrap_or_default();
         let node_statuses = transport.list_node_statuses().unwrap_or_default();
 
