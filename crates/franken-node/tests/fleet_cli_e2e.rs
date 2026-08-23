@@ -1214,8 +1214,8 @@ fn fleet_reconcile_waits_for_delayed_node_convergence_receipt() {
     let updater_state_dir = fleet_state_dir.clone();
     let updater = std::thread::spawn(move || {
         let deadline = test_clock_now() + Duration::from_secs(5);
-        let mut delayed_transport = seed_durable_transport(&updater_state_dir);
         loop {
+            let mut delayed_transport = seed_durable_transport(&updater_state_dir);
             let actions = delayed_transport.list_actions().expect("list actions");
             if actions.iter().any(|record| {
                 record
@@ -2067,8 +2067,8 @@ fn fleet_agent_processes_later_actions_with_lower_lexicographic_ids() {
     let publisher_state_dir = fleet_state_dir.clone();
     let publisher = std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(5);
-        let mut transport = seed_durable_transport(&publisher_state_dir);
         loop {
+            let mut transport = seed_durable_transport(&publisher_state_dir);
             let nodes = transport.list_node_statuses().expect("list node statuses");
             if nodes
                 .iter()
@@ -2195,8 +2195,8 @@ fn fleet_agent_handles_sigterm_gracefully() {
         &fleet_state_dir,
     );
     let readiness_deadline = Instant::now() + Duration::from_secs(5);
-    let mut readiness_transport = seed_durable_transport(&fleet_state_dir);
     let agent_status = loop {
+        let mut readiness_transport = seed_durable_transport(&fleet_state_dir);
         if let Some(status) = readiness_transport
             .list_node_statuses()
             .expect("list readiness node statuses")
