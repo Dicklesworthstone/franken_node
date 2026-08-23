@@ -5338,14 +5338,12 @@ fn replay_trusted_key_ids(
 }
 
 fn missing_trust_registry_message(path: &Path, policy_mode: Profile) -> String {
-    ActionableError::new(
-        format!(
-            "authoritative trust registry missing at {}; bootstrap trust state before running",
-            path.display()
-        ),
-        format!("franken-node init --profile {policy_mode} --scan"),
+    // Single-line by contract: this text flows into signed decision-receipt
+    // fields, which reject control characters (newlines included).
+    format!(
+        "authoritative trust registry missing at {}; bootstrap trust state before running (run `franken-node init --profile {policy_mode} --scan`)",
+        path.display()
     )
-    .to_string()
 }
 
 fn run_preflight_block_error(report: &RunPreFlightReport) -> ActionableError {
@@ -18354,7 +18352,14 @@ fn evaluate_run_trust_preflight(
             let authoritative_registry = project_root.join(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH);
             registry_path = Some(authoritative_registry.clone());
 
-            if !authoritative_registry.is_file() {
+            // The durable frankensqlite store is the authority; either surface
+            // counts as initialized.
+            let registry_store_exists =
+                supply_chain::trust_card_registry_store::durable_store_path(
+                    &authoritative_registry,
+                )
+                .is_file();
+            if !authoritative_registry.is_file() && !registry_store_exists {
                 PreFlightVerdict::Skipped {
                     reason: missing_trust_registry_message(&authoritative_registry, policy_mode),
                 }

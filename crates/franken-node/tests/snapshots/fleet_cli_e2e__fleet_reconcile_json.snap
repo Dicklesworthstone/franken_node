@@ -3,6 +3,10 @@ source: crates/franken-node/tests/fleet_cli_e2e.rs
 expression: "canonicalize_fleet_reconcile_snapshot(payload, &fleet_state_dir)"
 ---
 {
+  "schema_version": "franken-node/fleet-action-cli/v1",
+  "transport": "file",
+  "live_control_plane": false,
+  "activated_source": "file_transport_not_live",
   "action": {
     "operation_id": "[operation-id]",
     "action_type": "reconcile",
