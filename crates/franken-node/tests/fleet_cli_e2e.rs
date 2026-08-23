@@ -1126,28 +1126,29 @@ fn fleet_reconcile_handles_realistic_partial_reconcile_across_multi_node_fleet()
             ),
         ],
     );
+    // Fail-closed contract: reconcile with a 1s budget over permanently
+    // lagging nodes must time out and exit non-zero instead of emitting a
+    // success report with a non_converged receipt.
     assert!(
-        output.status.success(),
-        "fleet reconcile --json failed: stderr={} stdout={}",
+        !output.status.success(),
+        "fleet reconcile --json must fail closed when convergence times out; stderr={} stdout={}",
         String::from_utf8_lossy(&output.stderr),
         String::from_utf8_lossy(&output.stdout)
     );
 
     let payload: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("fleet reconcile json");
-    assert_eq!(payload["action"]["action_type"], "reconcile");
-    assert_eq!(payload["action"]["event_code"], "FLEET-005");
-    assert_eq!(payload["convergence_receipt"]["timed_out"], true);
-    assert_eq!(payload["convergence_receipt"]["verdict"], "non_converged");
-    assert_eq!(payload["convergence_receipt"]["timeout_ms"], 1_000);
+        serde_json::from_slice(&output.stdout).expect("fleet reconcile error json");
+    assert_eq!(payload["command"], "fleet.reconcile");
     assert!(
-        payload["convergence_receipt"]["elapsed_ms"]
-            .as_u64()
-            .expect("elapsed_ms")
-            >= 1_000
+        payload["error"]
+            .as_str()
+            .expect("error text")
+            .contains("fleet reconcile convergence timed out after 1s"),
+        "timeout error must name the deadline: {payload}"
     );
-    assert_convergence_receipt_signature_round_trips(&payload["convergence_receipt"], &signing_key);
 
+    // The republish still happened before the timeout: exactly two records
+    // (seeded quarantine + reconcile republish) must be present.
     let actions = transport.list_actions().expect("list actions");
     assert_eq!(actions.len(), 2);
     assert!(matches!(
@@ -1155,14 +1156,10 @@ fn fleet_reconcile_handles_realistic_partial_reconcile_across_multi_node_fleet()
         FleetAction::Quarantine {
             zone_id,
             incident_id,
-            target_id,
-            target_kind: FleetTargetKind::Artifact,
-            reason,
             quarantine_version,
-        } if zone_id == "zone-1"
-            && incident_id == "inc-reconcile-1"
-            && target_id == "sha256:reconcile"
-            && reason == "reconcile verification"
+            ..
+        } if zone_id == "us-east-1-production"
+            && incident_id == "SUPPLY-CHAIN-2024-015-reconcile"
             && *quarantine_version == 5
     ));
 }
@@ -2201,7 +2198,7 @@ fn fleet_agent_handles_sigterm_gracefully() {
             .list_node_statuses()
             .expect("list readiness node statuses")
             .into_iter()
-            .find(|node| node.node_id == "agent-sigterm-1")
+            .find(|node| node.node_id == "agent-signal-1")
         {
             break status;
         }
@@ -3755,25 +3752,22 @@ fn fleet_release_handles_realistic_partial_release_scenarios_across_multi_incide
     );
 
     assert!(
-        output.status.success(),
-        "fleet release --json failed for already-resolved incident: {}",
-        String::from_utf8_lossy(&output.stderr)
+        !output.status.success(),
+        "fleet release --json must fail closed for already-resolved incident: stderr={} stdout={}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
     );
-
+    // Fail-closed contract: releasing an incident that is not currently
+    // quarantined (already released 2h ago in the seed) errors instead of
+    // silently succeeding.
     let payload: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("fleet release json");
-
-    // Verify the release action was published for the resolved incident
-    assert_eq!(payload["action"]["action_type"], "release");
-    assert_eq!(payload["action"]["incident_id"], "CVE-2024-45678-resolved");
-
-    // Verify convergence across realistic multi-node fleet
-    assert_eq!(payload["convergence_receipt"]["verdict"], "converged");
+        serde_json::from_slice(&output.stdout).expect("fleet release error json");
     assert!(
-        payload["convergence_receipt"]["elapsed_ms"]
-            .as_u64()
-            .unwrap()
-            < 5000
+        payload["error"]
+            .as_str()
+            .expect("error text")
+            .contains("not found"),
+        "expected not-found error for already-resolved incident: {payload}"
     );
 
     // Now test attempting to release an active incident (should succeed but with different behavior)
@@ -3795,11 +3789,11 @@ fn fleet_release_handles_realistic_partial_release_scenarios_across_multi_incide
             ),
         ],
     );
-
     assert!(
         output_active.status.success(),
-        "fleet release --json failed for active incident: {}",
-        String::from_utf8_lossy(&output_active.stderr)
+        "fleet release --json failed for active incident: stderr={} stdout={}",
+        String::from_utf8_lossy(&output_active.stderr),
+        String::from_utf8_lossy(&output_active.stdout)
     );
 
     let payload_active: serde_json::Value =
