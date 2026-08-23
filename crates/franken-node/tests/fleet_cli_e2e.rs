@@ -3212,12 +3212,11 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
         "fleet reconcile must fail closed when convergence times out; stdout={}",
         String::from_utf8_lossy(&timeout_output.stdout)
     );
-    let timeout_err = String::from_utf8_lossy(&timeout_output.stderr);
+    let timeout_stdout = String::from_utf8_lossy(&timeout_output.stdout);
     assert!(
-        timeout_err.contains("timed out"),
-        "timeout stderr must name the deadline: {timeout_err}"
+        timeout_stdout.contains("convergence timed out after 1s"),
+        "timeout stdout must name the deadline: {timeout_stdout}"
     );
-    let _timeout_signing_key = timeout_signing_key;
 
     let agent_state = tempdir().expect("agent tempdir");
     write_fail_closed_cli_config(agent_state.path());

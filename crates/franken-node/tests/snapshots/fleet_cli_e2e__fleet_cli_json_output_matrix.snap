@@ -4,6 +4,10 @@ expression: matrix
 ---
 {
   "status_zone": {
+    "schema_version": "franken-node/fleet-status-cli/v1",
+    "transport": "file",
+    "live_control_plane": false,
+    "activated_source": "file_transport_not_live",
     "status": {
       "zone_id": "zone-golden-status",
       "active_quarantines": 1,
@@ -86,6 +90,10 @@ expression: matrix
     }
   },
   "status_all": {
+    "schema_version": "franken-node/fleet-status-cli/v1",
+    "transport": "file",
+    "live_control_plane": false,
+    "activated_source": "file_transport_not_live",
     "status": {
       "zone_id": "all",
       "active_quarantines": 1,
@@ -168,6 +176,10 @@ expression: matrix
     }
   },
   "reconcile": {
+    "schema_version": "franken-node/fleet-action-cli/v1",
+    "transport": "file",
+    "live_control_plane": false,
+    "activated_source": "file_transport_not_live",
     "action": {
       "operation_id": "[operation-id]",
       "action_type": "reconcile",
@@ -244,6 +256,10 @@ expression: matrix
     }
   },
   "release": {
+    "schema_version": "franken-node/fleet-action-cli/v1",
+    "transport": "file",
+    "live_control_plane": false,
+    "activated_source": "file_transport_not_live",
     "action": {
       "operation_id": "[operation-id]",
       "action_type": "release",
@@ -362,6 +378,9 @@ expression: matrix
   },
   "agent_once": [
     {
+      "schema_version": "franken-node/fleet-agent-cli/v1",
+      "transport": "file",
+      "live_control_plane": false,
       "cycle": 1,
       "node_id": "agent-golden-once",
       "zone_id": "zone-golden-agent",
@@ -544,6 +563,8 @@ expression: matrix
     }
   },
   "remotecap_verify": {
+    "schema_version": "franken-node/remotecap-verify-cli/v1",
+    "command": "remotecap.verify",
     "valid": true,
     "authorized": true,
     "token_id": "[token-id]",
