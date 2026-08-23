@@ -1442,11 +1442,7 @@ fn fleet_agent_processes_quarantine_actions_and_updates_heartbeat() {
     let project = tempdir().expect("tempdir");
     let fleet_state_dir = project.path().join("fleet-state");
     let mut transport = seed_transport(&fleet_state_dir);
-    std::fs::write(
-        project.path().join("franken_node.toml"),
-        "profile = \"balanced\"\n",
-    )
-    .expect("write config");
+    write_fail_closed_cli_config_for_fixture_trust_cards(project.path());
     std::fs::create_dir_all(project.path().join(".franken-node/state")).expect("state dir");
     write_fixture_registry_to(project.path());
     let now = Utc::now();
@@ -1544,11 +1540,7 @@ fn fleet_agent_applies_quarantine_actions_to_local_registry() {
     let project = tempdir().expect("tempdir");
     let fleet_state_dir = project.path().join("fleet-state");
     let mut transport = seed_transport(&fleet_state_dir);
-    std::fs::write(
-        project.path().join("franken_node.toml"),
-        "profile = \"balanced\"\n",
-    )
-    .expect("write config");
+    write_fail_closed_cli_config_for_fixture_trust_cards(project.path());
     std::fs::create_dir_all(project.path().join(".franken-node/state")).expect("state dir");
     write_fixture_registry_to(project.path());
 
@@ -1613,11 +1605,7 @@ fn fleet_agent_release_actions_clear_local_quarantine_state() {
     let project = tempdir().expect("tempdir");
     let fleet_state_dir = project.path().join("fleet-state");
     let mut transport = seed_transport(&fleet_state_dir);
-    std::fs::write(
-        project.path().join("franken_node.toml"),
-        "profile = \"balanced\"\n",
-    )
-    .expect("write config");
+    write_fail_closed_cli_config_for_fixture_trust_cards(project.path());
     std::fs::create_dir_all(project.path().join(".franken-node/state")).expect("state dir");
     write_fixture_registry_to(project.path());
 
@@ -1728,11 +1716,7 @@ fn fleet_agent_release_actions_clear_global_quarantine_state() {
     let project = tempdir().expect("tempdir");
     let fleet_state_dir = project.path().join("fleet-state");
     let mut transport = seed_transport(&fleet_state_dir);
-    std::fs::write(
-        project.path().join("franken_node.toml"),
-        "profile = \"balanced\"\n",
-    )
-    .expect("write config");
+    write_fail_closed_cli_config_for_fixture_trust_cards(project.path());
     std::fs::create_dir_all(project.path().join(".franken-node/state")).expect("state dir");
     write_fixture_registry_to(project.path());
 
@@ -1843,11 +1827,7 @@ fn fleet_agent_release_preserves_quarantine_when_another_incident_is_still_activ
     let project = tempdir().expect("tempdir");
     let fleet_state_dir = project.path().join("fleet-state");
     let mut transport = seed_transport(&fleet_state_dir);
-    std::fs::write(
-        project.path().join("franken_node.toml"),
-        "profile = \"balanced\"\n",
-    )
-    .expect("write config");
+    write_fail_closed_cli_config_for_fixture_trust_cards(project.path());
     std::fs::create_dir_all(project.path().join(".franken-node/state")).expect("state dir");
     write_fixture_registry_to(project.path());
 
@@ -1941,11 +1921,7 @@ fn fleet_agent_release_actions_clear_local_quarantine_state_across_poll_cycles()
     let project = tempdir().expect("tempdir");
     let fleet_state_dir = project.path().join("fleet-state");
     let mut transport = seed_transport(&fleet_state_dir);
-    std::fs::write(
-        project.path().join("franken_node.toml"),
-        "profile = \"balanced\"\n",
-    )
-    .expect("write config");
+    write_fail_closed_cli_config_for_fixture_trust_cards(project.path());
     std::fs::create_dir_all(project.path().join(".franken-node/state")).expect("state dir");
     write_fixture_registry_to(project.path());
 
@@ -2159,7 +2135,7 @@ fn fleet_agent_uses_config_defaults_for_node_id_and_poll_interval() {
     seed_transport(&fleet_state_dir);
     std::fs::write(
         project.path().join("franken_node.toml"),
-        "profile = \"balanced\"\n\n[fleet]\nnode_id = \"config-node-1\"\npoll_interval_seconds = 9\n",
+        "profile = \"balanced\"\n\n[trust]\nregistry_signing_key = \"ZnJhbmtlbi1ub2RlLXRydXN0LWNhcmQtcmVnaXN0cnkta2V5LXYx\"\n\n[security]\nauthorized_api_keys = [\"test-api-key\"]\n\n[fleet]\nnode_id = \"config-node-1\"\npoll_interval_seconds = 9\n",
     )
     .expect("write config");
 
@@ -2196,11 +2172,7 @@ fn fleet_agent_handles_sigterm_gracefully() {
     let project = tempdir().expect("tempdir");
     let fleet_state_dir = project.path().join("fleet-state");
     seed_transport(&fleet_state_dir);
-    std::fs::write(
-        project.path().join("franken_node.toml"),
-        "profile = \"balanced\"\n",
-    )
-    .expect("write config");
+    write_fail_closed_cli_config_for_fixture_trust_cards(project.path());
 
     let mut child = spawn_cli_in_dir_with_fleet_state(
         project.path(),
