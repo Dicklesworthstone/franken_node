@@ -114,7 +114,10 @@ fn spawn_cli_in_dir_with_fleet_state(
 fn seed_durable_transport(
     fleet_state_dir: &std::path::Path,
 ) -> frankenengine_node::control_plane::fleet_transport_durable::DurableFleetTransport {
-    let mut transport = frankenengine_node::control_plane::fleet_transport_durable::DurableFleetTransport::new(fleet_state_dir)
+    let mut transport =
+        frankenengine_node::control_plane::fleet_transport_durable::DurableFleetTransport::new(
+            fleet_state_dir,
+        )
         .expect("open durable fleet transport");
     transport
         .initialize()
@@ -3509,7 +3512,11 @@ impl TestLogger {
         );
     }
 
-    pub fn transport_snapshot(&self, transport: &frankenengine_node::control_plane::fleet_transport_durable::DurableFleetTransport, label: &str) {
+    pub fn transport_snapshot(
+        &self,
+        transport: &frankenengine_node::control_plane::fleet_transport_durable::DurableFleetTransport,
+        label: &str,
+    ) {
         let actions = transport.list_actions().unwrap_or_default();
         let node_statuses = transport.list_node_statuses().unwrap_or_default();
 
