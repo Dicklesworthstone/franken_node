@@ -17,6 +17,7 @@ pub mod revocation_integration;
 pub mod revocation_registry;
 pub mod transparency_verifier;
 pub mod trust_card;
+pub mod trust_card_registry_store;
 
 #[cfg(all(test, feature = "engine"))]
 mod tests {

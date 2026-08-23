@@ -601,6 +601,70 @@ impl Config {
         Ok((resolved, synthesis))
     }
 
+    /// Validate only the `[fleet]` settings consumed by file-transport CLI
+    /// surfaces (`fleet status` / `reconcile` / `release` / `agent`).
+    ///
+    /// These commands never load the trust-card registry or its HMAC key, so
+    /// the global fail-closed boundaries (`trust.registry_signing_key`,
+    /// `security.authorized_api_keys`) must not gate them; see
+    /// [`Config::resolve_for_fleet`].
+    pub fn validate_fleet(&self) -> Result<(), ConfigError> {
+        if self.fleet.convergence_timeout_seconds == 0 {
+            return Err(ConfigError::ValidationFailed(
+                "fleet.convergence_timeout_seconds must be > 0".to_string(),
+            ));
+        }
+        if let Some(state_dir) = &self.fleet.state_dir
+            && state_dir.as_os_str().is_empty()
+        {
+            return Err(ConfigError::ValidationFailed(
+                "fleet.state_dir must be non-empty when configured".to_string(),
+            ));
+        }
+        if let Some(node_id) = &self.fleet.node_id {
+            crate::control_plane::fleet_transport::validate_node_id(node_id).map_err(|err| {
+                ConfigError::ValidationFailed(format!("fleet.node_id is invalid: {err}"))
+            })?;
+        }
+        if let Some(poll_interval_seconds) = self.fleet.poll_interval_seconds
+            && poll_interval_seconds == 0
+        {
+            return Err(ConfigError::ValidationFailed(
+                "fleet.poll_interval_seconds must be > 0".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Resolve configuration for file-transport fleet CLI surfaces.
+    ///
+    /// Fleet transport commands consume only `[fleet]` settings; they never
+    /// touch the trust-card registry or its HMAC key. Running full
+    /// [`Config::validate`] there aborts every `fleet` command in a workspace
+    /// that has not yet run `franken-node init`, with a misleading
+    /// `trust.registry_signing_key must be configured` error for an unrelated
+    /// boundary (bd-ph79w). This resolver applies only [`Config::validate_fleet`]
+    /// and leaves the global fail-closed boundaries to the surfaces that
+    /// actually consume them.
+    pub fn resolve_for_fleet(
+        explicit_path: Option<&Path>,
+        cli_overrides: CliOverrides,
+    ) -> Result<ResolvedConfig, ConfigError> {
+        Self::resolve_for_fleet_env(explicit_path, cli_overrides, &|key| std::env::var(key).ok())
+    }
+
+    /// Environment-injectable variant of [`Config::resolve_for_fleet`].
+    pub fn resolve_for_fleet_env(
+        explicit_path: Option<&Path>,
+        cli_overrides: CliOverrides,
+        env_lookup: &impl Fn(&str) -> Option<String>,
+    ) -> Result<ResolvedConfig, ConfigError> {
+        let resolved =
+            Self::resolve_without_validation_with_env(explicit_path, cli_overrides, env_lookup)?;
+        resolved.config.validate_fleet()?;
+        Ok(resolved)
+    }
+
     /// Synthesize fresh fail-closed security defaults for first-run bootstrap.
     ///
     /// - If `trust.registry_signing_key` is absent, generate a fresh 32-byte
@@ -1988,30 +2052,7 @@ impl Config {
                 "registry.builder_identity must be non-empty when configured".to_string(),
             ));
         }
-        if self.fleet.convergence_timeout_seconds == 0 {
-            return Err(ConfigError::ValidationFailed(
-                "fleet.convergence_timeout_seconds must be > 0".to_string(),
-            ));
-        }
-        if let Some(state_dir) = &self.fleet.state_dir
-            && state_dir.as_os_str().is_empty()
-        {
-            return Err(ConfigError::ValidationFailed(
-                "fleet.state_dir must be non-empty when configured".to_string(),
-            ));
-        }
-        if let Some(node_id) = &self.fleet.node_id {
-            crate::control_plane::fleet_transport::validate_node_id(node_id).map_err(|err| {
-                ConfigError::ValidationFailed(format!("fleet.node_id is invalid: {err}"))
-            })?;
-        }
-        if let Some(poll_interval_seconds) = self.fleet.poll_interval_seconds
-            && poll_interval_seconds == 0
-        {
-            return Err(ConfigError::ValidationFailed(
-                "fleet.poll_interval_seconds must be > 0".to_string(),
-            ));
-        }
+        self.validate_fleet()?;
         if self.replay.bundle_version.trim().is_empty() {
             return Err(ConfigError::ValidationFailed(
                 "replay.bundle_version must be non-empty".to_string(),

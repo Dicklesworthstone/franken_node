@@ -57,6 +57,8 @@ mod cli;
 mod observability {
     #[path = "evidence_ledger.rs"]
     pub mod evidence_ledger;
+    #[path = "evidence_ledger_durable.rs"]
+    pub mod evidence_ledger_durable;
 }
 #[allow(dead_code)]
 mod security {
@@ -6063,13 +6065,13 @@ fn handle_safe_mode_exit_command(args: SafeModeExitArgs) -> Result<()> {
         Err(err) => {
             let message = err.to_string();
             persist_safe_mode_controller(&state_path, &controller)?;
-            return emit_safe_mode_error(
+            emit_safe_mode_error(
                 "safe-mode.exit",
                 &state_path,
                 args.json,
                 &message,
                 "Pass --confirm only after trust-state, incident, and evidence-ledger pre-exit checks are true",
-            );
+            )
         }
     }
 }
@@ -7835,9 +7837,14 @@ fn bootstrap_state_directory(
     // is guaranteed to be present here (synthesized by the bootstrap-aware
     // config resolver when absent).
     let registry_path = dot_dir.join("state/trust-card-registry.v1.json");
-    if registry_path.is_file() {
+    // The durable frankensqlite store is the authority; the legacy JSON pair
+    // is only a one-time import source, so either surface means "already
+    // bootstrapped".
+    let registry_store_path =
+        supply_chain::trust_card_registry_store::durable_store_path(&registry_path);
+    if registry_path.is_file() || registry_store_path.is_file() {
         actions.push(InitFileAction {
-            path: registry_path.display().to_string(),
+            path: registry_store_path.display().to_string(),
             action: InitFileActionKind::SkippedExisting,
             backup_path: None,
         });
@@ -7850,7 +7857,7 @@ fn bootstrap_state_directory(
             .persist_authoritative_state(&registry_path)
             .map_err(|err| anyhow::anyhow!("failed writing empty trust-card registry: {err}"))?;
         actions.push(InitFileAction {
-            path: registry_path.display().to_string(),
+            path: registry_store_path.display().to_string(),
             action: InitFileActionKind::Created,
             backup_path: None,
         });
@@ -8337,7 +8344,12 @@ fn latest_evidence_ledger_flush_timestamp(project_root: &Path) -> Result<Option<
     for candidate in OPS_HEALTH_LEDGER_FILE_CANDIDATES {
         update_newest_modified_from_path(&mut newest, &state_dir.join(candidate))?;
     }
-
+    // The durable frankensqlite evidence store is the authoritative sink; its
+    // database file counts as a flush surface alongside the legacy spill files.
+    update_newest_modified_from_path(
+        &mut newest,
+        observability::evidence_ledger_durable::durable_store_path(&state_dir).as_path(),
+    )?;
     merge_newest_modified(
         &mut newest,
         newest_matching_file_mtime(&project_root.join(INCIDENT_EVIDENCE_RELATIVE_DIR), |path| {
@@ -9493,6 +9505,14 @@ fn parse_rfc3339_timestamp_to_unix_seconds(raw: &str) -> Result<u64> {
 }
 
 fn count_evidence_ledger_spill_entries(state_dir: &Path) -> Result<u64> {
+    // The durable frankensqlite store is the authoritative sink; when it
+    // exists its row count replaces the legacy spill-file tally (mirroring
+    // the fleet transport's durable-first metrics readers).
+    if let Some(count) = observability::evidence_ledger_durable::count_durable_entries(state_dir)
+        .map_err(|err| anyhow::anyhow!("counting durable evidence entries: {err}"))?
+    {
+        return Ok(count);
+    }
     let mut total = 0_u64;
     for candidate in OPS_HEALTH_LEDGER_FILE_CANDIDATES {
         total = total.saturating_add(count_newline_delimited_records(&state_dir.join(candidate))?);
@@ -14400,9 +14420,10 @@ mod trust_command_tests {
                 .any(|item| item.extension_id == "npm:left-pad")
         );
         assert!(
-            tmp.path()
-                .join(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH)
-                .is_file()
+            supply_chain::trust_card_registry_store::durable_store_path(
+                &tmp.path().join(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH)
+            )
+            .is_file()
         );
     }
 
@@ -16886,10 +16907,13 @@ fn trust_card_cli_registry(now_secs: u64) -> Result<TrustCardCliRegistryState> {
     // the cwd as the project root: this is where the operator expects the
     // registry to be, and matches `trust scan`'s behavior on the same path.
     let path = cwd.join(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH);
-    if !path.is_file() {
+    // The durable frankensqlite store is the authority; the legacy JSON pair
+    // is only a one-time import source. Either surface counts as initialized.
+    let registry_store_path = supply_chain::trust_card_registry_store::durable_store_path(&path);
+    if !path.is_file() && !registry_store_path.is_file() {
         anyhow::bail!(
             "authoritative trust-card registry not initialized at {}; bootstrap or import trust state before using trust commands (run `franken-node init --out-dir .` here, or invoke trust commands from the project root that owns the registry)",
-            path.display()
+            registry_store_path.display()
         );
     }
     let cache_ttl = trust_registry_cache_ttl(&config.trust);
@@ -17307,7 +17331,8 @@ fn trust_scan_registry_state(
 ) -> Result<TrustCardCliRegistryState> {
     ensure_state_dir(project_root)?;
     let path = project_root.join(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH);
-    let registry = if path.is_file() {
+    let registry_store_path = supply_chain::trust_card_registry_store::durable_store_path(&path);
+    let registry = if path.is_file() || registry_store_path.is_file() {
         TrustCardRegistry::load_authoritative_state_from_config(
             &path,
             trust_config,
@@ -18352,21 +18377,20 @@ fn evaluate_run_trust_preflight(
                         };
                         if let Some(age) =
                             snapshot_age_secs_for_path(&authoritative_registry, now_secs)
-                        {
-                            if let Err(err) = evaluate_default_freshness(
+                            && let Err(err) = evaluate_default_freshness(
                                 "run-preflight",
                                 policy_tier,
                                 age,
                                 "trace-run-trust-preflight",
                                 now_secs.to_string(),
-                            ) {
-                                violations.push(TrustViolation {
-                                    dependency_name: None,
-                                    extension_id: None,
-                                    kind: TrustViolationKind::RevocationStale,
-                                    detail: format!("revocation freshness gate denied run: {err}"),
-                                });
-                            }
+                            )
+                        {
+                            violations.push(TrustViolation {
+                                dependency_name: None,
+                                extension_id: None,
+                                kind: TrustViolationKind::RevocationStale,
+                                detail: format!("revocation freshness gate denied run: {err}"),
+                            });
                         }
 
                         for dependency in dependencies {
@@ -22659,7 +22683,10 @@ fn resolve_fleet_state_dir(
 fn open_fleet_transport(
     project_root: &Path,
 ) -> Result<(u64, PathBuf, fleet_transport_durable::DurableFleetTransport)> {
-    let resolved = config::Config::resolve(None, config::CliOverrides::default())
+    // bd-ph79w: fleet transport consumes only `[fleet]` settings; full config
+    // validation would abort every fleet command in workspaces that have not
+    // run `init` with an unrelated trust.registry_signing_key error.
+    let resolved = config::Config::resolve_for_fleet(None, config::CliOverrides::default())
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     let state_dir = resolve_fleet_state_dir(project_root, &resolved)?;
     // bd-reality-20260820-w0fc6.3: the authoritative store is now the
@@ -23315,8 +23342,9 @@ fn append_trust_quarantine_action(
     affected_cards: usize,
 ) -> Result<String> {
     let loaded = load_fleet_state(project_root)?;
-    let mut transport = fleet_transport_durable::DurableFleetTransport::new(loaded.state_dir.clone())
-        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    let mut transport =
+        fleet_transport_durable::DurableFleetTransport::new(loaded.state_dir.clone())
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     transport
         .initialize()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
@@ -23492,7 +23520,9 @@ struct ResolvedFleetAgentArgs {
 fn resolve_fleet_agent_args(args: &FleetAgentArgs) -> Result<ResolvedFleetAgentArgs> {
     use control_plane::fleet_transport::{validate_node_id, validate_zone_id};
 
-    let resolved = config::Config::resolve(None, config::CliOverrides::default())
+    // bd-ph79w: same scoped `[fleet]`-only resolution as open_fleet_transport;
+    // node/zone validity is enforced locally below.
+    let resolved = config::Config::resolve_for_fleet(None, config::CliOverrides::default())
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     let node_id = args
         .node_id
@@ -30141,12 +30171,11 @@ fn main() -> Result<()> {
                 bootstrap_synthesis,
             );
 
-            if structured_logs_jsonl {
-                if let Err(err) =
+            if structured_logs_jsonl
+                && let Err(err) =
                     render_init_structured_logs_jsonl(&report).map(|logs| eprint!("{logs}"))
-                {
-                    return init_fail(json, err);
-                }
+            {
+                return init_fail(json, err);
             }
 
             if json {
@@ -31666,15 +31695,23 @@ mod state_bootstrap_tests {
         bootstrap_state_directory(root, "strict", &test_trust_config(config::Profile::Strict))
             .expect("bootstrap");
 
-        let registry_path = root.join(".franken-node/state/trust-card-registry.v1.json");
+        let registry_store_path = root.join(".franken-node/state/trust-card-registry.v1.db");
         assert!(
-            registry_path.is_file(),
-            "trust-card registry should exist: {}",
-            registry_path.display()
+            registry_store_path.is_file(),
+            "durable trust-card registry store should exist: {}",
+            registry_store_path.display()
         );
 
-        let raw = std::fs::read_to_string(&registry_path).expect("read registry");
-        let snapshot: serde_json::Value = serde_json::from_str(&raw).expect("parse registry JSON");
+        let store = supply_chain::trust_card_registry_store::TrustCardRegistryStore::open(
+            &root.join(".franken-node/state/trust-card-registry.v1.json"),
+        )
+        .expect("open durable registry store");
+        let (snapshot_raw, high_water_raw) = store
+            .load_state()
+            .expect("load durable rows")
+            .expect("bootstrapped registry should hold a snapshot row");
+        let snapshot: serde_json::Value =
+            serde_json::from_str(&snapshot_raw).expect("parse registry JSON");
         assert_eq!(
             snapshot["schema_version"],
             "franken-node/trust-card-registry-state/v1"
@@ -31683,6 +31720,10 @@ mod state_bootstrap_tests {
             .as_object()
             .expect("cards_by_extension should be an object");
         assert!(cards.is_empty(), "registry should start empty");
+        assert!(
+            high_water_raw.is_some(),
+            "bootstrap must record the signed high-water marker"
+        );
     }
 
     #[test]

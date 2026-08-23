@@ -941,6 +941,12 @@ path = "tests/frankensqlite_persistence_integration.rs"
 [[test]]
 name = "fleet_transport_durable_e2e"
 path = "tests/fleet_transport_durable_e2e.rs"
+
+# bd-reality-20260820-w0fc6.3: trust-card registry authority switch and the
+# evidence-ledger durable sink follow the same wired-target rationale.
+[[test]]
+name = "durable_storage_authority_e2e"
+path = "tests/durable_storage_authority_e2e.rs"
 # bd-rjc2m.37: restore the SQLModel typed-schema migration contract
 [[test]]
 name = "sqlmodel_rust_schema_integration"

@@ -20,17 +20,19 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
+pub(crate) use crate::storage::frankensqlite_adapter::check_authorization;
+pub use crate::storage::frankensqlite_adapter::{
+    AdapterError, AdapterEvent, AdapterSummary, CallerContext, MAX_STORE_ENTRIES,
+    MAX_STORE_KEY_BYTES, MAX_STORE_VALUE_BYTES, PersistenceClass, ReadResult, WriteResult,
+};
+use crate::storage::frankensqlite_adapter::{DurabilityTier, event_codes, sanitize_log_key};
 use fsqlite::compat::TransactionExt;
 use fsqlite::{Connection, SqliteValue};
-pub use crate::storage::frankensqlite_adapter::{
-    check_authorization, AdapterError, AdapterEvent, AdapterSummary, CallerContext,
-    PersistenceClass, ReadResult, WriteResult, MAX_STORE_ENTRIES, MAX_STORE_KEY_BYTES,
-    MAX_STORE_VALUE_BYTES,
-};
-use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
-use crate::storage::frankensqlite_adapter::{event_codes, sanitize_log_key, DurabilityTier};
+use sha2::{Digest, Sha256};
 
 const DURABLE_ADAPTER_SCHEMA_VERSION: i64 = 1;
 const AUDIT_JOURNAL_TABLE: &str = "adapter_audit_journal";
@@ -44,12 +46,12 @@ pub struct DurableFrankensqliteAdapter {
     db_path: PathBuf,
     connection: Mutex<Option<Connection>>,
     events: Mutex<Vec<AdapterEvent>>,
-    write_count: usize,
-    write_failures: usize,
-    reads_total: usize,
-    replay_count: usize,
-    replay_mismatches: usize,
-    writes_by_tier: std::collections::BTreeMap<DurabilityTier, usize>,
+    write_count: AtomicUsize,
+    write_failures: AtomicUsize,
+    reads_total: AtomicUsize,
+    replay_count: AtomicUsize,
+    replay_mismatches: AtomicUsize,
+    writes_by_tier: Mutex<std::collections::BTreeMap<DurabilityTier, usize>>,
 }
 
 impl DurableFrankensqliteAdapter {
@@ -63,10 +65,9 @@ impl DurableFrankensqliteAdapter {
         let db_path = db_path.into();
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).map_err(|err| {
-                AdapterError::ConfigValidationFailed(format!(
-                    "create adapter state dir {}: {err}",
-                    parent.display()
-                ))
+                AdapterError::ConfigValidationFailed {
+                    reason: format!("create adapter state dir {}: {err}", parent.display()),
+                }
             })?;
         }
         let connection = Self::open_tier1(&db_path)?;
@@ -74,12 +75,12 @@ impl DurableFrankensqliteAdapter {
             db_path,
             connection: Mutex::new(Some(connection)),
             events: Mutex::new(Vec::new()),
-            write_count: 0,
-            write_failures: 0,
-            reads_total: 0,
-            replay_count: 0,
-            replay_mismatches: 0,
-            writes_by_tier: std::collections::BTreeMap::new(),
+            write_count: AtomicUsize::new(0),
+            write_failures: AtomicUsize::new(0),
+            reads_total: AtomicUsize::new(0),
+            replay_count: AtomicUsize::new(0),
+            replay_mismatches: AtomicUsize::new(0),
+            writes_by_tier: Mutex::new(std::collections::BTreeMap::new()),
         };
         adapter.ensure_schema()?;
         Ok(adapter)
@@ -94,8 +95,8 @@ impl DurableFrankensqliteAdapter {
     /// Same as [`Self::new`].
     pub fn open_default() -> Result<Self, AdapterError> {
         let path = std::env::current_dir()
-            .map_err(|err| {
-                AdapterError::ConfigValidationFailed(format!("resolve cwd: {err}"))
+            .map_err(|err| AdapterError::ConfigValidationFailed {
+                reason: format!("resolve cwd: {err}"),
             })?
             .join(".franken-node/state/frankensqlite/telemetry.db");
         Self::new(path)
@@ -109,16 +110,20 @@ impl DurableFrankensqliteAdapter {
 
     fn open_tier1(db_path: &Path) -> Result<Connection, AdapterError> {
         let connection = Connection::open(db_path.to_string_lossy().as_ref()).map_err(|err| {
-            AdapterError::ConfigValidationFailed(format!("open {}: {err}", db_path.display()))
+            AdapterError::ConfigValidationFailed {
+                reason: format!("open {}: {err}", db_path.display()),
+            }
         })?;
         for pragma in [
             "PRAGMA journal_mode=WAL;",
             "PRAGMA synchronous=FULL;",
             "PRAGMA busy_timeout=5000;",
         ] {
-            connection.query(pragma).map_err(|err| {
-                AdapterError::ConfigValidationFailed(format!("pragma {pragma}: {err}"))
-            })?;
+            connection
+                .query(pragma)
+                .map_err(|err| AdapterError::ConfigValidationFailed {
+                    reason: format!("pragma {pragma}: {err}"),
+                })?;
         }
         Ok(connection)
     }
@@ -134,13 +139,10 @@ impl DurableFrankensqliteAdapter {
                 key: String::new(),
                 reason: "adapter db mutex poisoned".to_string(),
             })?;
-        let connection =
-            guard
-                .as_ref()
-                .ok_or_else(|| AdapterError::WriteFailure {
-                    key: String::new(),
-                    reason: "adapter db connection closed".to_string(),
-                })?;
+        let connection = guard.as_ref().ok_or_else(|| AdapterError::WriteFailure {
+            key: String::new(),
+            reason: "adapter db connection closed".to_string(),
+        })?;
         operation(connection)
     }
 
@@ -214,7 +216,8 @@ impl DurableFrankensqliteAdapter {
         };
         if events.len() >= MAX_AUDIT_LOG_ENTRIES {
             // Bounded ring: drop the oldest to keep memory bounded like the model.
-            let _ = events.drain(..events.len() - MAX_AUDIT_LOG_ENTRIES + 1);
+            let excess = events.len().saturating_sub(MAX_AUDIT_LOG_ENTRIES) + 1;
+            let _ = events.drain(..excess);
         }
         events.push(AdapterEvent {
             code: code.to_string(),
@@ -230,7 +233,7 @@ impl DurableFrankensqliteAdapter {
         reason: impl Into<String>,
     ) -> AdapterError {
         let reason = reason.into();
-        self.write_failures = self.write_failures.saturating_add(1);
+        self.write_failures.fetch_add(1, Ordering::Relaxed);
         self.emit_event(
             event_codes::FRANKENSQLITE_WRITE_FAIL,
             class.label(),
@@ -246,7 +249,11 @@ impl DurableFrankensqliteAdapter {
 /// The write/read backend surface shared by the in-memory conformance model
 /// and the durable implementation, so telemetry can hold either behind one
 /// type.
-pub trait AdapterWriteBackend: Send {
+///
+/// Deliberately NOT `Send`: the durable backend owns an fsqlite
+/// [`fsqlite::Connection`], which is not `Send` on the published 0.1.19
+/// line. Cross-thread users own the backend inside their worker thread.
+pub trait AdapterWriteBackend {
     /// Authorize + durably persist one entry.
     ///
     /// # Errors
@@ -273,6 +280,30 @@ pub trait AdapterWriteBackend: Send {
     ) -> Result<ReadResult, AdapterError>;
 }
 
+/// The in-memory conformance model satisfies the same backend surface, so
+/// telemetry and other `Send` contexts can hold the model while single-thread
+/// owners (CLI, per-worker threads) use the durable backend directly.
+impl AdapterWriteBackend for crate::storage::frankensqlite_adapter::FrankensqliteAdapter {
+    fn write(
+        &mut self,
+        caller: &CallerContext,
+        class: PersistenceClass,
+        key: &str,
+        value: &[u8],
+    ) -> Result<WriteResult, AdapterError> {
+        self.write(caller, class, key, value)
+    }
+
+    fn read(
+        &mut self,
+        caller: &CallerContext,
+        class: PersistenceClass,
+        key: &str,
+    ) -> Result<ReadResult, AdapterError> {
+        self.read(caller, class, key)
+    }
+}
+
 impl AdapterWriteBackend for DurableFrankensqliteAdapter {
     fn write(
         &mut self,
@@ -290,7 +321,10 @@ impl AdapterWriteBackend for DurableFrankensqliteAdapter {
             return Err(self.record_failure(
                 class,
                 key,
-                format!("key length {} bytes exceeds maximum {MAX_STORE_KEY_BYTES}", key.len()),
+                format!(
+                    "key length {} bytes exceeds maximum {MAX_STORE_KEY_BYTES}",
+                    key.len()
+                ),
             ));
         }
         if value.len() > MAX_STORE_VALUE_BYTES {
@@ -309,12 +343,11 @@ impl AdapterWriteBackend for DurableFrankensqliteAdapter {
         self.with_connection(|connection| {
             // Append-only audit semantics: duplicate AuditLog keys are a
             // contract violation, checked transactionally.
-            let mut tx =
-                connection.transaction().map_err(|err| {
-                    AdapterError::WriteFailure {
-                        key: key.to_string(),
-                        reason: format!("begin transaction: {err}"),
-                    }
+            let mut tx = connection
+                .transaction()
+                .map_err(|err| AdapterError::WriteFailure {
+                    key: key.to_string(),
+                    reason: format!("begin transaction: {err}"),
                 })?;
 
             if matches!(class, PersistenceClass::AuditLog) {
@@ -326,11 +359,9 @@ impl AdapterWriteBackend for DurableFrankensqliteAdapter {
                             SqliteValue::Text(key.to_string().into()),
                         ],
                     )
-                    .map_err(|err| {
-                        AdapterError::WriteFailure {
-                            key: key.to_string(),
-                            reason: format!("duplicate probe failed: {err}"),
-                        }
+                    .map_err(|err| AdapterError::WriteFailure {
+                        key: key.to_string(),
+                        reason: format!("duplicate probe failed: {err}"),
                     })?;
                 if !existing.is_empty() {
                     return Err(self.record_failure(
@@ -344,11 +375,9 @@ impl AdapterWriteBackend for DurableFrankensqliteAdapter {
             // Capacity: count rows for NEW keys before inserting.
             let count_rows = tx
                 .query("SELECT COUNT(*) FROM adapter_store;")
-                .map_err(|err| {
-                    AdapterError::WriteFailure {
-                        key: key.to_string(),
-                        reason: format!("capacity probe failed: {err}"),
-                    }
+                .map_err(|err| AdapterError::WriteFailure {
+                    key: key.to_string(),
+                    reason: format!("capacity probe failed: {err}"),
                 })?;
             let current_count = match count_rows.first().and_then(|row| row.values().first()) {
                 Some(SqliteValue::Integer(count)) => usize::try_from(*count).unwrap_or(usize::MAX),
@@ -375,11 +404,9 @@ impl AdapterWriteBackend for DurableFrankensqliteAdapter {
                     SqliteValue::Text(now_rfc3339().into()),
                 ],
             )
-            .map_err(|err| {
-                AdapterError::WriteFailure {
-                    key: key.to_string(),
-                    reason: format!("insert failed: {err}"),
-                }
+            .map_err(|err| AdapterError::WriteFailure {
+                key: key.to_string(),
+                reason: format!("insert failed: {err}"),
             })?;
 
             if matches!(class, PersistenceClass::AuditLog) {
@@ -397,32 +424,37 @@ impl AdapterWriteBackend for DurableFrankensqliteAdapter {
                         SqliteValue::Text(now_rfc3339().into()),
                     ],
                 )
-                .map_err(|err| {
-                    AdapterError::WriteFailure {
-                        key: key.to_string(),
-                        reason: format!("journal insert failed: {err}"),
-                    }
+                .map_err(|err| AdapterError::WriteFailure {
+                    key: key.to_string(),
+                    reason: format!("journal insert failed: {err}"),
                 })?;
             }
 
             // The commit is the durability boundary under WAL/FULL.
-            tx.commit().map_err(|err| {
-                AdapterError::WriteFailure {
-                    key: key.to_string(),
-                    reason: format!("commit failed: {err}"),
-                }
+            tx.commit().map_err(|err| AdapterError::WriteFailure {
+                key: key.to_string(),
+                reason: format!("commit failed: {err}"),
             })?;
             Ok(())
         })?;
 
         let latency = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
-        self.write_count = self.write_count.saturating_add(1);
-        let tier_writes = self.writes_by_tier.entry(tier).or_insert(0);
-        *tier_writes = tier_writes.saturating_add(1);
+        self.write_count.fetch_add(1, Ordering::Relaxed);
+        {
+            let mut tier_writes = self
+                .writes_by_tier
+                .lock()
+                .expect("adapter tier write counters lock");
+            let updated = tier_writes.entry(tier).or_insert(0);
+            *updated = updated.saturating_add(1);
+        }
         self.emit_event(
             event_codes::FRANKENSQLITE_WRITE_SUCCESS,
             &class_label,
-            format!("key={}, tier={tier}, latency_us={latency}", sanitize_log_key(key)),
+            format!(
+                "key={}, tier={tier}, latency_us={latency}",
+                sanitize_log_key(key)
+            ),
         );
 
         Ok(WriteResult {
@@ -441,7 +473,7 @@ impl AdapterWriteBackend for DurableFrankensqliteAdapter {
         key: &str,
     ) -> Result<ReadResult, AdapterError> {
         check_authorization(caller, "read", class).map_err(AdapterError::AuthorizationFailed)?;
-        self.reads_total = self.reads_total.saturating_add(1);
+        self.reads_total.fetch_add(1, Ordering::Relaxed);
         let class_column = class.label().to_string();
         let tier = class.tier();
         let found_row = self.with_connection(|connection| {
@@ -453,11 +485,9 @@ impl AdapterWriteBackend for DurableFrankensqliteAdapter {
                         SqliteValue::Text(key.to_string().into()),
                     ],
                 )
-                .map_err(|err| {
-                    AdapterError::ReadFailure {
-                        key: key.to_string(),
-                        reason: format!("query failed: {err}"),
-                    }
+                .map_err(|err| AdapterError::ReadFailure {
+                    key: key.to_string(),
+                    reason: format!("query failed: {err}"),
                 })?;
             Ok(rows
                 .first()
@@ -484,12 +514,11 @@ impl DurableFrankensqliteAdapter {
     ///
     /// Returns `(key, ok)` pairs; any digest mismatch marks the gate
     /// fail-closed exactly like the in-memory model.
-    ///
     /// # Errors
     ///
     /// Returns [`AdapterError::WriteFailure`] when the journal is unreadable.
     pub fn replay(&mut self) -> Result<Vec<(String, bool)>, AdapterError> {
-        self.replay_count = self.replay_count.saturating_add(1);
+        self.replay_count.fetch_add(1, Ordering::Relaxed);
         let pairs = self.with_connection(|connection| {
             let rows = connection
                 .query(&format!(
@@ -499,11 +528,9 @@ impl DurableFrankensqliteAdapter {
                        ON s.class = j.class AND s.key = j.key
                      ORDER BY j.seq ASC;"
                 ))
-                .map_err(|err| {
-                    AdapterError::WriteFailure {
-                        key: String::new(),
-                        reason: format!("replay query failed: {err}"),
-                    }
+                .map_err(|err| AdapterError::WriteFailure {
+                    key: String::new(),
+                    reason: format!("replay query failed: {err}"),
                 })?;
             let mut results = Vec::with_capacity(rows.len());
             for row in &rows {
@@ -526,7 +553,8 @@ impl DurableFrankensqliteAdapter {
             Ok(results)
         })?;
         let mismatches = pairs.iter().filter(|(_, ok)| !ok).count();
-        self.replay_mismatches = self.replay_mismatches.saturating_add(mismatches);
+        self.replay_mismatches
+            .fetch_add(mismatches, Ordering::Relaxed);
         if mismatches > 0 {
             self.emit_event(
                 event_codes::FRANKENSQLITE_REPLAY_MISMATCH,
@@ -592,7 +620,7 @@ impl DurableFrankensqliteAdapter {
                 .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'adapter_schema_versions';")
                 .map_err(|err| {
                     AdapterError::SchemaMigrationFailed {
-                        version: -1,
+                        version: 0,
                         reason: format!("table probe failed: {err}"),
                     }
                 })?;
@@ -603,7 +631,7 @@ impl DurableFrankensqliteAdapter {
                 .query("SELECT COALESCE(MAX(version), 0) FROM adapter_schema_versions;")
                 .map_err(|err| {
                     AdapterError::SchemaMigrationFailed {
-                        version: -1,
+                        version: 0,
                         reason: format!("version query failed: {err}"),
                     }
                 })?;
@@ -622,19 +650,21 @@ impl DurableFrankensqliteAdapter {
     /// out-of-range versions.
     pub fn migrate(&mut self, version: i64, description: &str) -> Result<(), AdapterError> {
         let current = self.schema_version()?;
+        let version_u32 = u32::try_from(version).unwrap_or(u32::MAX);
         if version <= current {
             return Err(AdapterError::SchemaMigrationFailed {
-                version,
+                version: version_u32,
                 reason: format!("migration must be monotonic; current version is {current}"),
             });
         }
         self.with_connection(|connection| {
-            let mut tx = connection
-                .transaction()
-                .map_err(|err| AdapterError::SchemaMigrationFailed {
-                    version,
-                    reason: format!("begin transaction: {err}"),
-                })?;
+            let mut tx =
+                connection
+                    .transaction()
+                    .map_err(|err| AdapterError::SchemaMigrationFailed {
+                        version: version_u32,
+                        reason: format!("begin transaction: {err}"),
+                    })?;
             tx.execute_with_params(
                 "INSERT INTO adapter_schema_versions(version, applied_at, description)
                  VALUES (?1, ?2, ?3);",
@@ -645,13 +675,14 @@ impl DurableFrankensqliteAdapter {
                 ],
             )
             .map_err(|err| AdapterError::SchemaMigrationFailed {
-                version,
+                version: version_u32,
                 reason: format!("insert failed: {err}"),
             })?;
-            tx.commit().map_err(|err| AdapterError::SchemaMigrationFailed {
-                version,
-                reason: format!("commit failed: {err}"),
-            })
+            tx.commit()
+                .map_err(|err| AdapterError::SchemaMigrationFailed {
+                    version: version_u32,
+                    reason: format!("commit failed: {err}"),
+                })
         })
     }
 
@@ -660,15 +691,17 @@ impl DurableFrankensqliteAdapter {
     pub fn summary(&self) -> AdapterSummary {
         let writes_by_tier: std::collections::BTreeMap<String, usize> = self
             .writes_by_tier
+            .lock()
+            .expect("adapter tier write counters lock")
             .iter()
             .map(|(tier, count)| (tier.label().to_string(), *count))
             .collect();
         AdapterSummary {
-            total_writes: self.write_count,
-            total_reads: self.reads_total,
-            write_failures: self.write_failures,
-            replay_count: self.replay_count,
-            replay_mismatches: self.replay_mismatches,
+            total_writes: self.write_count.load(Ordering::Relaxed),
+            total_reads: self.reads_total.load(Ordering::Relaxed),
+            write_failures: self.write_failures.load(Ordering::Relaxed),
+            replay_count: self.replay_count.load(Ordering::Relaxed),
+            replay_mismatches: self.replay_mismatches.load(Ordering::Relaxed),
             audit_log_truncated: false,
             writes_by_tier,
             schema_version: u32::try_from(self.schema_version().unwrap_or(0)).unwrap_or(u32::MAX),

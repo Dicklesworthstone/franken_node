@@ -2666,13 +2666,13 @@ pub fn build_corpus_results_document_with_references(
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        if outcome.status == "pass" {
-            if let Err(reason) = passing_lockstep_observations_are_consistent(&fingerprints) {
-                bail!(
-                    "corpus outcome `{}` cannot pass with divergent runtime observations: {reason}",
-                    outcome.test_id
-                );
-            }
+        if outcome.status == "pass"
+            && let Err(reason) = passing_lockstep_observations_are_consistent(&fingerprints)
+        {
+            bail!(
+                "corpus outcome `{}` cannot pass with divergent runtime observations: {reason}",
+                outcome.test_id
+            );
         } else if !has_incomplete_observation
             && passing_lockstep_observations_are_consistent(&fingerprints).is_ok()
         {

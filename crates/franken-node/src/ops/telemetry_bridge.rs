@@ -1,6 +1,8 @@
 use crate::config::timeouts;
 use crate::push_bounded;
 use crate::storage::durable_adapter::AdapterWriteBackend;
+#[cfg(any(test, feature = "test-support"))]
+use crate::storage::frankensqlite_adapter::FrankensqliteAdapter;
 use crate::storage::frankensqlite_adapter::{CallerContext, PersistenceClass};
 use anyhow::Result;
 use chrono::Utc;
@@ -719,10 +721,7 @@ pub struct TelemetryBridge {
 }
 
 impl TelemetryBridge {
-    pub fn new(
-        socket_path: &str,
-        adapter: Arc<Mutex<dyn AdapterWriteBackend + Send>>,
-    ) -> Self {
+    pub fn new(socket_path: &str, adapter: Arc<Mutex<dyn AdapterWriteBackend + Send>>) -> Self {
         Self {
             socket_path: socket_path.to_string(),
             adapter_slot: Mutex::new(Some(adapter)),
@@ -1295,7 +1294,7 @@ impl TelemetryBridge {
 
     fn run_persistence_loop(
         receiver: Receiver<PersistEnvelope>,
-        adapter: Arc<Mutex<FrankensqliteAdapter>>,
+        adapter: Arc<Mutex<dyn AdapterWriteBackend + Send>>,
         state: Arc<Mutex<TelemetryBridgeState>>,
         abort_flag: Arc<AtomicBool>,
     ) {
@@ -1330,7 +1329,7 @@ impl TelemetryBridge {
             });
 
             let write_outcomes = match adapter.lock() {
-                Ok(mut db) => Self::write_persistence_batch(&mut db, batch),
+                Ok(mut db) => Self::write_persistence_batch(&mut *db, batch),
                 Err(_) => {
                     Self::record_persistence_lock_failure(&state, batch);
                     continue;
@@ -1367,7 +1366,7 @@ impl TelemetryBridge {
     }
 
     fn write_persistence_batch(
-        db: &mut FrankensqliteAdapter,
+        db: &mut (dyn AdapterWriteBackend + Send),
         batch: Vec<PersistEnvelope>,
     ) -> Vec<PersistWriteOutcome> {
         let mut outcomes = Vec::with_capacity(batch.len());

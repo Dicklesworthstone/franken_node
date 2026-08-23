@@ -1862,7 +1862,7 @@ bootstrap layout is:
 | `.franken-node/state/registry/artifacts/` | Active signed extension artifacts |
 | `.franken-node/state/registry/archive/` | Archived artifacts retained after `registry gc` |
 | `.franken-node/state/migrations/` | Migration audit, rewrite, and validate outputs |
-| `.franken-node/state/trust-card-registry.v1.json` | Canonical trust-card registry file |
+| `.franken-node/state/trust-card-registry.v1.db` | Durable trust-card registry store (WAL frankensqlite; the legacy `.v1.json` pair is a one-time import source only) |
 | `.franken-node/safe-mode/state.json` | Unsigned JSON safe-mode controller persist (not Ed25519-signed); override with `--state-dir` |
 | `.franken-node/keys/` | Signing key material; excluded from version control by the generated `.gitignore` |
 

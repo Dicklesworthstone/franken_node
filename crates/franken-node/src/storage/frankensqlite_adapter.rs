@@ -1,9 +1,16 @@
 //! bd-2tua: frankensqlite adapter conformance model for franken_node persistence.
 //!
-//! This module is an in-memory model of the planned frankensqlite adapter
-//! contract. It exercises the adapter API, tier mapping, authorization,
-//! schema-version, replay, and crash-recovery semantics, but it is not the live
-//! frankensqlite-backed durable store yet.
+//! This module is the in-memory conformance model of the adapter contract. The
+//! live durable implementations now exist:
+//! - [`crate::storage::durable_adapter::DurableFrankensqliteAdapter`] — the
+//!   file-backed adapter sharing this module's authorization matrix, bounds,
+//!   and append-only audit semantics over a WAL-durable store;
+//! - [`crate::control_plane::fleet_transport_durable::DurableFleetTransport`]
+//!   — the fleet action log and node statuses;
+//! - [`crate::supply_chain::trust_card_registry_store`] — the trust-card
+//!   registry snapshot and high-water chain;
+//! - [`crate::observability::evidence_ledger_durable`] — the evidence-ledger
+//!   durable sink.
 //!
 //! Modelled target durability tiers:
 //! - **Tier 1** (target WAL, crash-safe): fencing tokens, lease state, rollout state, audit logs

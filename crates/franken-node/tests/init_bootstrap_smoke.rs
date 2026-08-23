@@ -130,16 +130,12 @@ fn init_succeeds_on_empty_directory_and_synthesizes_security_defaults() {
         "written config must carry the synthesized authorized_api_keys"
     );
 
-    // The state subtree must exist with the trust-card registry primed.
+    // The state subtree must exist with the trust-card registry primed in its
+    // durable frankensqlite store (the legacy JSON pair is no longer written).
     assert!(
-        root.join(".franken-node/state/trust-card-registry.v1.json")
+        root.join(".franken-node/state/trust-card-registry.v1.db")
             .is_file(),
-        "init must create an empty trust-card registry under state/"
-    );
-    assert!(
-        root.join(".franken-node/state/trust-card-registry.v1.json.high-water.json")
-            .is_file(),
-        "init must create a matching high-water file"
+        "init must create the durable trust-card registry store under state/"
     );
     assert!(
         root.join(".franken-node/.gitignore").is_file(),

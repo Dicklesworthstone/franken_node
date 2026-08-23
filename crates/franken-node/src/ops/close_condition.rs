@@ -369,10 +369,10 @@ pub fn compute_compatibility_corpus_runtime_observations_digest(
                 elapsed_ms,
             });
         }
-        if status == "pass" {
-            if let Err(reason) = passing_lockstep_observations_are_consistent(&fingerprints) {
-                bail!("runtime observation row `{test_id}` {reason}");
-            }
+        if status == "pass"
+            && let Err(reason) = passing_lockstep_observations_are_consistent(&fingerprints)
+        {
+            bail!("runtime observation row `{test_id}` {reason}");
         }
     }
     observations.sort();

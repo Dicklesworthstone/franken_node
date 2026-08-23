@@ -10,12 +10,7 @@ mod fuzz_smoke_tests;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{File, OpenOptions, TryLockError},
-    io::Write,
     path::{Path, PathBuf},
-    sync::{Mutex, MutexGuard, OnceLock},
-    thread,
-    time::Duration,
 };
 
 use base64::Engine as _;
@@ -23,9 +18,12 @@ use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tempfile::NamedTempFile;
 
 use super::certification::{DerivationMetadata, VerifiedEvidenceRef};
+use super::trust_card_registry_store::{
+    SLOT_HIGH_WATER, SLOT_SNAPSHOT, TrustCardRegistryStore, durable_store_path, read_slot,
+    upsert_slot,
+};
 use crate::connector::canonical_serializer::canonical_bytes;
 use crate::push_bounded;
 use crate::security::constant_time;
@@ -630,7 +628,6 @@ fn sanitize_error_for_source_context(
 }
 const TRUST_CARD_REGISTRY_HIGH_WATER_SCHEMA: &str =
     "franken-node/trust-card-registry-high-water/v1";
-const SNAPSHOT_LOCK_RETRY_BACKOFF_MILLIS: [u64; 3] = [100, 200, 400];
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -1276,71 +1273,89 @@ impl TrustCardRegistry {
         loaded_at_secs: u64,
         source_context: SnapshotSourceContext,
     ) -> Result<Self, TrustCardError> {
+        Self::load_authoritative_state_with_key(
+            path,
+            DEFAULT_REGISTRY_KEY,
+            cache_ttl_secs,
+            loaded_at_secs,
+            source_context,
+        )
+    }
+
+    /// Load authoritative trust-card state using an explicit registry key.
+    ///
+    /// Resolution order:
+    /// 1. the durable frankensqlite store (`<path-with-db-extension>`) when
+    ///    present — the authoritative surface;
+    /// 2. a one-time import of the legacy JSON pair (`path` plus its
+    ///    `.high-water.json` sidecar), which seeds the store; the files are
+    ///    then only a rollback source (deleting the database re-imports).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrustCardError`] when neither surface holds a readable
+    /// snapshot or validation fails. Error details are sanitized for
+    /// untrusted sources.
+    fn load_authoritative_state_with_key(
+        path: &Path,
+        registry_key: &[u8],
+        cache_ttl_secs: u64,
+        loaded_at_secs: u64,
+        source_context: SnapshotSourceContext,
+    ) -> Result<Self, TrustCardError> {
+        let db_path = durable_store_path(path);
+        if db_path.is_file() {
+            let store = TrustCardRegistryStore::open(path)?;
+            return load_registry_from_durable_store(
+                &store,
+                path,
+                registry_key,
+                cache_ttl_secs,
+                loaded_at_secs,
+                source_context,
+            );
+        }
+        if !path.is_file() {
+            return Err(TrustCardError::SnapshotRead {
+                path: path.to_path_buf(),
+                detail: format!(
+                    "neither durable store {} nor legacy snapshot {} exists",
+                    db_path.display(),
+                    path.display()
+                ),
+            });
+        }
+
+        // Legacy import: validate exactly as before, then seed the durable
+        // store so every later operation is DB-backed.
         let raw = std::fs::read_to_string(path).map_err(|err| TrustCardError::SnapshotRead {
             path: path.to_path_buf(),
             detail: err.to_string(),
         })?;
-
-        // Contextual validation strategy based on source trust level
-        let snapshot =
-            match source_context {
-                SnapshotSourceContext::TrustedFile => {
-                    // Lazy validation: parse first, then basic checks
-                    let snapshot = serde_json::from_str::<TrustCardRegistrySnapshot>(&raw)
-                        .map_err(|err| TrustCardError::SnapshotParse {
-                            path: path.to_path_buf(),
-                            detail: err.to_string(),
-                        })?;
-                    validate_basic_bounds(&snapshot)?;
-                    snapshot
-                }
-                SnapshotSourceContext::UntrustedNetwork => {
-                    // Eager validation: verify signature first, comprehensive checks
-                    verify_signature_before_parsing(&raw, DEFAULT_REGISTRY_KEY)
-                        .map_err(sanitize_error_for_untrusted)?;
-
-                    let snapshot = serde_json::from_str::<TrustCardRegistrySnapshot>(&raw)
-                        .map_err(|err| {
-                            sanitize_error_for_untrusted(TrustCardError::SnapshotParse {
-                                path: path.to_path_buf(),
-                                detail: err.to_string(),
-                            })
-                        })?;
-
-                    validate_comprehensive(&snapshot, DEFAULT_REGISTRY_KEY)
-                        .map_err(sanitize_error_for_untrusted)?;
-                    snapshot
-                }
-            };
-
-        let high_water = read_snapshot_high_water(path, DEFAULT_REGISTRY_KEY)
+        let snapshot = validated_snapshot_from_raw(&raw, path, registry_key, source_context)?;
+        let high_water = read_legacy_high_water(path, registry_key)
             .map_err(|err| sanitize_error_for_source_context(source_context, err))?;
         validate_snapshot_high_water(path, &snapshot, high_water.as_ref())
             .map_err(|err| sanitize_error_for_source_context(source_context, err))?;
-        let trusted_snapshot = snapshot.clone();
-        let mut registry = Self::from_snapshot(snapshot, DEFAULT_REGISTRY_KEY, loaded_at_secs)
+        let mut registry = Self::from_snapshot(snapshot.clone(), registry_key, loaded_at_secs)
             .map_err(|err| sanitize_error_for_source_context(source_context, err))?;
         registry.cache_ttl_secs = cache_ttl_secs.max(1);
-        persist_snapshot_high_water_if_newer(
-            path,
-            &trusted_snapshot,
-            high_water.as_ref(),
-            DEFAULT_REGISTRY_KEY,
-        )
-        .map_err(|err| sanitize_error_for_source_context(source_context, err))?;
+        let store = TrustCardRegistryStore::open(path)?;
+        import_validated_state(&store, &snapshot, registry_key)?;
         Ok(registry)
     }
 
     /// Load authoritative trust-card state from disk using configuration for signing key.
     ///
     /// # Parameters
-    /// - `path`: snapshot file to read and validate.
+    /// - `path`: snapshot location whose durable store (or legacy JSON pair)
+    ///   holds the registry state.
     /// - `config`: trust configuration containing signing key and cache TTL settings.
     /// - `loaded_at_secs`: timestamp assigned to cache entries restored from disk.
     /// - `source_context`: validation strategy based on source trust level.
     ///
     /// # Returns
-    /// A validated `TrustCardRegistry` reconstructed from the on-disk snapshot.
+    /// A validated `TrustCardRegistry` reconstructed from the durable store.
     pub fn load_authoritative_state_from_config(
         path: &Path,
         config: &crate::config::TrustConfig,
@@ -1350,80 +1365,48 @@ impl TrustCardRegistry {
         let cache_ttl_secs = config.card_cache_ttl_secs.unwrap_or(DEFAULT_CACHE_TTL_SECS);
         let registry_key = get_registry_key(config)?;
 
-        let raw = std::fs::read_to_string(path).map_err(|err| TrustCardError::SnapshotRead {
-            path: path.to_path_buf(),
-            detail: err.to_string(),
-        })?;
-
-        // Contextual validation strategy based on source trust level
-        let snapshot =
-            match source_context {
-                SnapshotSourceContext::TrustedFile => {
-                    // Lazy validation: parse first, then basic checks
-                    let snapshot = serde_json::from_str::<TrustCardRegistrySnapshot>(&raw)
-                        .map_err(|err| TrustCardError::SnapshotParse {
-                            path: path.to_path_buf(),
-                            detail: err.to_string(),
-                        })?;
-                    validate_basic_bounds(&snapshot)?;
-                    snapshot
-                }
-                SnapshotSourceContext::UntrustedNetwork => {
-                    // Eager validation: verify signature first, comprehensive checks
-                    verify_signature_before_parsing(&raw, &registry_key)
-                        .map_err(sanitize_error_for_untrusted)?;
-
-                    let snapshot = serde_json::from_str::<TrustCardRegistrySnapshot>(&raw)
-                        .map_err(|err| {
-                            sanitize_error_for_untrusted(TrustCardError::SnapshotParse {
-                                path: path.to_path_buf(),
-                                detail: err.to_string(),
-                            })
-                        })?;
-
-                    validate_comprehensive(&snapshot, &registry_key)
-                        .map_err(sanitize_error_for_untrusted)?;
-                    snapshot
-                }
-            };
-
-        let high_water = read_snapshot_high_water(path, &registry_key)
-            .map_err(|err| sanitize_error_for_source_context(source_context, err))?;
-        validate_snapshot_high_water(path, &snapshot, high_water.as_ref())
-            .map_err(|err| sanitize_error_for_source_context(source_context, err))?;
-        let trusted_snapshot = snapshot.clone();
-        let mut registry = Self::from_snapshot(snapshot, &registry_key, loaded_at_secs)
-            .map_err(|err| sanitize_error_for_source_context(source_context, err))?;
-        registry.cache_ttl_secs = cache_ttl_secs.max(1);
-
-        persist_snapshot_high_water_if_newer(
+        Self::load_authoritative_state_with_key(
             path,
-            &trusted_snapshot,
-            high_water.as_ref(),
             &registry_key,
+            cache_ttl_secs,
+            loaded_at_secs,
+            source_context,
         )
-        .map_err(|err| sanitize_error_for_source_context(source_context, err))?;
-        Ok(registry)
     }
 
-    /// Persist the registry's authoritative snapshot and signed high-water marker atomically.
+    /// Persist the registry's authoritative snapshot and signed high-water
+    /// marker as one committed transaction in the durable store.
     ///
     /// # Parameters
-    /// - `path`: destination snapshot path for the canonical registry state.
+    /// - `path`: logical snapshot location naming the durable store sibling
+    ///   (`<path-with-db-extension>`).
     ///
     /// # Returns
-    /// `Ok(())` after both the snapshot and high-water marker are durably written.
+    /// `Ok(())` once the transaction commits; the commit is the WAL-durable
+    /// boundary under `synchronous=FULL`.
     ///
     /// # Errors
-    /// Returns `TrustCardError` if snapshot materialization, lock acquisition,
-    /// canonical encoding, fsync, or atomic persistence fails.
+    /// Returns `TrustCardError` if snapshot materialization, high-water chain
+    /// validation, canonical encoding, or the transaction fails.
     pub fn persist_authoritative_state(&self, path: &Path) -> Result<(), TrustCardError> {
         let mut snapshot = self.snapshot()?;
-        let high_water_path = authoritative_snapshot_high_water_path(path);
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        with_authoritative_snapshot_persist_lock(path, || {
-            let high_water = read_snapshot_high_water(path, &self.registry_key)?;
-            if let Some(current) = high_water.as_ref()
+        let store = TrustCardRegistryStore::open(path)?;
+        store.with_immediate_transaction(|connection, tx| {
+            let current_high_water = match read_slot(connection, SLOT_HIGH_WATER)? {
+                Some(raw) => {
+                    let high_water = serde_json::from_str::<TrustCardRegistrySnapshotHighWater>(
+                        &raw,
+                    )
+                    .map_err(|err| TrustCardError::SnapshotParse {
+                        path: store.db_path().to_path_buf(),
+                        detail: format!("stored high-water marker: {err}"),
+                    })?;
+                    verify_snapshot_high_water(&high_water, &self.registry_key)?;
+                    Some(high_water)
+                }
+                None => None,
+            };
+            if let Some(current) = current_high_water.as_ref()
                 && snapshot.snapshot_epoch > current.snapshot_epoch
                 && !snapshot
                     .previous_snapshot_hash
@@ -1433,56 +1416,12 @@ impl TrustCardRegistry {
                 snapshot.previous_snapshot_hash = Some(current.snapshot_hash.clone());
                 sign_snapshot_in_place(&mut snapshot, &self.registry_key)?;
             }
-            validate_snapshot_high_water(path, &snapshot, high_water.as_ref())?;
+            validate_snapshot_high_water(path, &snapshot, current_high_water.as_ref())?;
             let encoded = to_canonical_json(&snapshot)?;
             let next_high_water = signed_snapshot_high_water(&snapshot, &self.registry_key)?;
             let high_water_encoded = to_canonical_json(&next_high_water)?;
-            let mut temp =
-                NamedTempFile::new_in(parent).map_err(|err| TrustCardError::SnapshotWrite {
-                    path: path.to_path_buf(),
-                    detail: err.to_string(),
-                })?;
-            temp.write_all(encoded.as_bytes())
-                .map_err(|err| TrustCardError::SnapshotWrite {
-                    path: path.to_path_buf(),
-                    detail: err.to_string(),
-                })?;
-            temp.as_file()
-                .sync_all()
-                .map_err(|err| TrustCardError::SnapshotWrite {
-                    path: path.to_path_buf(),
-                    detail: err.to_string(),
-                })?;
-            temp.persist(path)
-                .map_err(|err| TrustCardError::SnapshotWrite {
-                    path: path.to_path_buf(),
-                    detail: err.error.to_string(),
-                })?;
-            let mut high_water_temp =
-                NamedTempFile::new_in(parent).map_err(|err| TrustCardError::SnapshotWrite {
-                    path: high_water_path.clone(),
-                    detail: err.to_string(),
-                })?;
-            high_water_temp
-                .write_all(high_water_encoded.as_bytes())
-                .map_err(|err| TrustCardError::SnapshotWrite {
-                    path: high_water_path.clone(),
-                    detail: err.to_string(),
-                })?;
-            high_water_temp
-                .as_file()
-                .sync_all()
-                .map_err(|err| TrustCardError::SnapshotWrite {
-                    path: high_water_path.clone(),
-                    detail: err.to_string(),
-                })?;
-            high_water_temp.persist(&high_water_path).map_err(|err| {
-                TrustCardError::SnapshotWrite {
-                    path: high_water_path.clone(),
-                    detail: err.error.to_string(),
-                }
-            })?;
-            sync_parent_directory(parent, path)?;
+            upsert_slot(tx, SLOT_SNAPSHOT, &encoded)?;
+            upsert_slot(tx, SLOT_HIGH_WATER, &high_water_encoded)?;
             Ok(())
         })
     }
@@ -2405,154 +2344,6 @@ impl TrustCardRegistry {
     }
 }
 
-/// Process-local trust-card authoritative snapshot persistence lock.
-///
-/// Canonical lifecycle: `with_authoritative_snapshot_persist_lock` creates or
-/// opens the lock file, acquires the cross-process flock first, then acquires
-/// this mutex before reading high-water state and writing the snapshot plus
-/// high-water temp files. The explicit flock unlock runs after the write closure
-/// and before the mutex guard drops at function return. Callers must not hold
-/// another module's persist lock when entering this path. If this mutex is left
-/// held or poisoned, same-process snapshot writes fail before mutating snapshot
-/// files; if the flock cannot be released, closing the lock file still drops the
-/// OS lock when the function unwinds.
-fn authoritative_snapshot_persist_process_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-fn lock_authoritative_snapshot_persist_process(
-    path: &Path,
-) -> Result<MutexGuard<'static, ()>, TrustCardError> {
-    authoritative_snapshot_persist_process_lock()
-        .lock()
-        .map_err(|_| TrustCardError::SnapshotWrite {
-            path: path.to_path_buf(),
-            detail: "trust-card snapshot persist lock poisoned".to_string(),
-        })
-}
-
-fn authoritative_snapshot_lock_path(path: &Path) -> PathBuf {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("trust-card-registry-state");
-    parent.join(format!("{file_name}.lock"))
-}
-
-fn authoritative_snapshot_high_water_path(path: &Path) -> PathBuf {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("trust-card-registry-state");
-    parent.join(format!("{file_name}.high-water.json"))
-}
-
-fn sync_parent_directory(parent: &Path, path: &Path) -> Result<(), TrustCardError> {
-    let dir = File::open(parent).map_err(|err| TrustCardError::SnapshotWrite {
-        path: path.to_path_buf(),
-        detail: format!(
-            "failed opening parent directory {} for sync: {err}",
-            parent.display()
-        ),
-    })?;
-    dir.sync_all().map_err(|err| TrustCardError::SnapshotWrite {
-        path: path.to_path_buf(),
-        detail: format!(
-            "failed syncing parent directory {}: {err}",
-            parent.display()
-        ),
-    })
-}
-
-fn lock_authoritative_snapshot_file(
-    file: &File,
-    lock_path: &Path,
-    snapshot_path: &Path,
-) -> Result<(), TrustCardError> {
-    match file.try_lock() {
-        Ok(()) => return Ok(()),
-        Err(TryLockError::WouldBlock) => {}
-        Err(TryLockError::Error(err)) => {
-            return Err(TrustCardError::SnapshotWrite {
-                path: snapshot_path.to_path_buf(),
-                detail: format!("failed acquiring flock for {}: {err}", lock_path.display()),
-            });
-        }
-    }
-
-    for delay_millis in SNAPSHOT_LOCK_RETRY_BACKOFF_MILLIS {
-        thread::sleep(Duration::from_millis(delay_millis));
-        match file.try_lock() {
-            Ok(()) => return Ok(()),
-            Err(TryLockError::WouldBlock) => {}
-            Err(TryLockError::Error(err)) => {
-                return Err(TrustCardError::SnapshotWrite {
-                    path: snapshot_path.to_path_buf(),
-                    detail: format!("failed acquiring flock for {}: {err}", lock_path.display()),
-                });
-            }
-        }
-    }
-
-    Err(TrustCardError::SnapshotWrite {
-        path: snapshot_path.to_path_buf(),
-        detail: format!(
-            "timed out acquiring flock for {} after retries at 100ms/200ms/400ms",
-            lock_path.display()
-        ),
-    })
-}
-
-fn unlock_authoritative_snapshot_file(
-    file: &File,
-    lock_path: &Path,
-    snapshot_path: &Path,
-) -> Result<(), TrustCardError> {
-    file.unlock().map_err(|err| TrustCardError::SnapshotWrite {
-        path: snapshot_path.to_path_buf(),
-        detail: format!("failed releasing flock for {}: {err}", lock_path.display()),
-    })
-}
-
-fn with_authoritative_snapshot_persist_lock<T>(
-    path: &Path,
-    write_snapshot: impl FnOnce() -> Result<T, TrustCardError>,
-) -> Result<T, TrustCardError> {
-    // Canonical lock order: file flock first, process mutex second.
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent).map_err(|err| TrustCardError::SnapshotWrite {
-        path: path.to_path_buf(),
-        detail: err.to_string(),
-    })?;
-    let lock_path = authoritative_snapshot_lock_path(path);
-    let lock_file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)
-        .map_err(|err| TrustCardError::SnapshotWrite {
-            path: path.to_path_buf(),
-            detail: format!("failed opening flock file {}: {err}", lock_path.display()),
-        })?;
-    // Step 1: Acquire file flock FIRST (cross-process synchronization)
-    lock_authoritative_snapshot_file(&lock_file, &lock_path, path)?;
-
-    // Step 2: Acquire process Mutex SECOND (in-process synchronization)
-    let _process_guard = lock_authoritative_snapshot_persist_process(path)?;
-
-    let write_result = write_snapshot();
-    let unlock_result = unlock_authoritative_snapshot_file(&lock_file, &lock_path, path);
-    match (write_result, unlock_result) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(err), _) => Err(err),
-        (Ok(_), Err(err)) => Err(err),
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CacheSyncState {
     Fresh,
@@ -3215,11 +3006,22 @@ fn verify_snapshot_high_water(
     Ok(())
 }
 
-fn read_snapshot_high_water(
+/// Sibling sidecar path of the legacy high-water marker file.
+fn legacy_high_water_path(snapshot_path: &Path) -> PathBuf {
+    let parent = snapshot_path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = snapshot_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("trust-card-registry-state");
+    parent.join(format!("{file_name}.high-water.json"))
+}
+
+/// Read and verify the legacy high-water sidecar during one-time import.
+fn read_legacy_high_water(
     snapshot_path: &Path,
     registry_key: &[u8],
 ) -> Result<Option<TrustCardRegistrySnapshotHighWater>, TrustCardError> {
-    let high_water_path = authoritative_snapshot_high_water_path(snapshot_path);
+    let high_water_path = legacy_high_water_path(snapshot_path);
     if !high_water_path.exists() {
         return Ok(None);
     }
@@ -3228,15 +3030,61 @@ fn read_snapshot_high_water(
             path: high_water_path.clone(),
             detail: err.to_string(),
         })?;
+    validated_high_water_from_raw(&raw, registry_key).map(Some)
+}
+
+/// Parse and verify a canonical high-water marker string.
+fn validated_high_water_from_raw(
+    raw: &str,
+    registry_key: &[u8],
+) -> Result<TrustCardRegistrySnapshotHighWater, TrustCardError> {
     let high_water =
-        serde_json::from_str::<TrustCardRegistrySnapshotHighWater>(&raw).map_err(|err| {
+        serde_json::from_str::<TrustCardRegistrySnapshotHighWater>(raw).map_err(|err| {
             TrustCardError::SnapshotParse {
-                path: high_water_path.clone(),
+                path: PathBuf::from("trust-card-registry-high-water"),
                 detail: err.to_string(),
             }
         })?;
     verify_snapshot_high_water(&high_water, registry_key)?;
-    Ok(Some(high_water))
+    Ok(high_water)
+}
+
+/// Validate raw snapshot JSON per the source-context strategy.
+fn validated_snapshot_from_raw(
+    raw: &str,
+    path_label: &Path,
+    registry_key: &[u8],
+    source_context: SnapshotSourceContext,
+) -> Result<TrustCardRegistrySnapshot, TrustCardError> {
+    match source_context {
+        SnapshotSourceContext::TrustedFile => {
+            // Lazy validation: parse first, then basic checks
+            let snapshot =
+                serde_json::from_str::<TrustCardRegistrySnapshot>(raw).map_err(|err| {
+                    TrustCardError::SnapshotParse {
+                        path: path_label.to_path_buf(),
+                        detail: err.to_string(),
+                    }
+                })?;
+            validate_basic_bounds(&snapshot)?;
+            Ok(snapshot)
+        }
+        SnapshotSourceContext::UntrustedNetwork => {
+            // Eager validation: verify signature first, comprehensive checks
+            verify_signature_before_parsing(raw, registry_key)
+                .map_err(sanitize_error_for_untrusted)?;
+            let snapshot =
+                serde_json::from_str::<TrustCardRegistrySnapshot>(raw).map_err(|err| {
+                    sanitize_error_for_untrusted(TrustCardError::SnapshotParse {
+                        path: path_label.to_path_buf(),
+                        detail: err.to_string(),
+                    })
+                })?;
+            validate_comprehensive(&snapshot, registry_key)
+                .map_err(sanitize_error_for_untrusted)?;
+            Ok(snapshot)
+        }
+    }
 }
 
 fn validate_snapshot_high_water(
@@ -3284,48 +3132,50 @@ fn validate_snapshot_high_water(
     Ok(())
 }
 
-fn write_snapshot_high_water(
-    snapshot_path: &Path,
-    high_water: &TrustCardRegistrySnapshotHighWater,
-) -> Result<(), TrustCardError> {
-    let high_water_path = authoritative_snapshot_high_water_path(snapshot_path);
-    let parent = high_water_path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent).map_err(|err| TrustCardError::SnapshotWrite {
-        path: high_water_path.clone(),
-        detail: err.to_string(),
-    })?;
-    let encoded = to_canonical_json(high_water)?;
-    let mut temp = NamedTempFile::new_in(parent).map_err(|err| TrustCardError::SnapshotWrite {
-        path: high_water_path.clone(),
-        detail: err.to_string(),
-    })?;
-    temp.write_all(encoded.as_bytes())
-        .map_err(|err| TrustCardError::SnapshotWrite {
-            path: high_water_path.clone(),
-            detail: err.to_string(),
-        })?;
-    temp.as_file()
-        .sync_all()
-        .map_err(|err| TrustCardError::SnapshotWrite {
-            path: high_water_path.clone(),
-            detail: err.to_string(),
-        })?;
-    temp.persist(&high_water_path)
-        .map_err(|err| TrustCardError::SnapshotWrite {
-            path: high_water_path.clone(),
-            detail: err.error.to_string(),
-        })?;
-    sync_parent_directory(parent, &high_water_path)?;
-    Ok(())
+/// Rebuild a registry from the durable store's validated rows.
+fn load_registry_from_durable_store(
+    store: &TrustCardRegistryStore,
+    path: &Path,
+    registry_key: &[u8],
+    cache_ttl_secs: u64,
+    loaded_at_secs: u64,
+    source_context: SnapshotSourceContext,
+) -> Result<TrustCardRegistry, TrustCardError> {
+    let Some((raw, high_water_raw)) = store.load_state()? else {
+        return Err(TrustCardError::SnapshotRead {
+            path: store.db_path().to_path_buf(),
+            detail: "durable trust-card registry store has no snapshot row".to_string(),
+        });
+    };
+    let snapshot = validated_snapshot_from_raw(&raw, path, registry_key, source_context)?;
+    let high_water = match high_water_raw.as_deref() {
+        Some(encoded) => Some(validated_high_water_from_raw(encoded, registry_key)?),
+        None => None,
+    };
+    validate_snapshot_high_water(path, &snapshot, high_water.as_ref())
+        .map_err(|err| sanitize_error_for_source_context(source_context, err))?;
+    let trusted_snapshot = snapshot.clone();
+    let mut registry = TrustCardRegistry::from_snapshot(snapshot, registry_key, loaded_at_secs)
+        .map_err(|err| sanitize_error_for_source_context(source_context, err))?;
+    registry.cache_ttl_secs = cache_ttl_secs.max(1);
+    persist_high_water_if_newer_in_store(
+        store,
+        &trusted_snapshot,
+        high_water.as_ref(),
+        registry_key,
+    )
+    .map_err(|err| sanitize_error_for_source_context(source_context, err))?;
+    Ok(registry)
 }
 
-fn persist_snapshot_high_water_if_newer(
-    path: &Path,
+/// Advance the durable high-water row when the snapshot moves it forward.
+fn persist_high_water_if_newer_in_store(
+    store: &TrustCardRegistryStore,
     snapshot: &TrustCardRegistrySnapshot,
-    high_water: Option<&TrustCardRegistrySnapshotHighWater>,
+    current: Option<&TrustCardRegistrySnapshotHighWater>,
     registry_key: &[u8],
 ) -> Result<(), TrustCardError> {
-    let should_write = match high_water {
+    let should_write = match current {
         None => true,
         Some(current) => {
             snapshot.snapshot_epoch > current.snapshot_epoch
@@ -3337,7 +3187,20 @@ fn persist_snapshot_high_water_if_newer(
         return Ok(());
     }
     let next = signed_snapshot_high_water(snapshot, registry_key)?;
-    write_snapshot_high_water(path, &next)
+    let encoded = to_canonical_json(&next)?;
+    store.with_immediate_transaction(|_connection, tx| upsert_slot(tx, SLOT_HIGH_WATER, &encoded))
+}
+
+/// Seed the durable store with an already-validated legacy state.
+fn import_validated_state(
+    store: &TrustCardRegistryStore,
+    snapshot: &TrustCardRegistrySnapshot,
+    registry_key: &[u8],
+) -> Result<(), TrustCardError> {
+    let encoded = to_canonical_json(snapshot)?;
+    let high_water = signed_snapshot_high_water(snapshot, registry_key)?;
+    let high_water_encoded = to_canonical_json(&high_water)?;
+    store.import_legacy_state(&encoded, Some(&high_water_encoded))
 }
 
 fn sorted_capabilities(mut capabilities: Vec<CapabilityDeclaration>) -> Vec<CapabilityDeclaration> {
@@ -4890,55 +4753,33 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_authoritative_snapshot_write_fails_closed_when_flock_is_held() {
-        let registry = fixture_registry(1_000).expect("fixture registry");
+    fn concurrent_authoritative_persist_writers_serialize_through_the_store() {
+        let first = fixture_registry(1_000).expect("fixture registry");
+        let second = fixture_registry(1_000).expect("fixture registry");
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir
             .path()
             .join(".franken-node/state/trust-card-registry.v1.json");
-        let parent = path.parent().expect("snapshot path should have parent");
-        std::fs::create_dir_all(parent).expect("create parent");
-        let lock_path = authoritative_snapshot_lock_path(&path);
-        let lock_file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)
-            .expect("open lock");
-        lock_file.try_lock().expect("hold competing writer lock");
 
-        let err = registry
+        // SQLite locking plus the busy timeout serialize the two writers;
+        // neither fails closed and the store ends in a readable state.
+        first
             .persist_authoritative_state(&path)
-            .expect_err("held flock must prevent concurrent snapshot publication");
+            .expect("first writer commits");
+        second
+            .persist_authoritative_state(&path)
+            .expect("second writer serializes behind the first");
 
-        lock_file.unlock().expect("release lock");
-        assert!(matches!(
-            err,
-            TrustCardError::SnapshotWrite { detail, .. }
-                if detail.contains("timed out acquiring flock")
-        ));
+        let store = TrustCardRegistryStore::open(&path).expect("reopen store");
+        let (snapshot_raw, high_water_raw) = store
+            .load_state()
+            .expect("load durable rows")
+            .expect("rows");
+        assert!(snapshot_raw.contains(TRUST_CARD_REGISTRY_SNAPSHOT_SCHEMA));
         assert!(
-            !path.exists(),
-            "snapshot must not be published while another writer holds the flock"
+            high_water_raw.is_some(),
+            "high-water row must accompany snapshot"
         );
-    }
-
-    #[test]
-    fn parent_directory_sync_fails_closed_when_parent_cannot_be_opened() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let missing_parent = dir.path().join("missing-parent");
-        let snapshot_path = missing_parent.join("trust-card-registry.v1.json");
-
-        let err = sync_parent_directory(&missing_parent, &snapshot_path)
-            .expect_err("missing parent directory must fail closed");
-
-        assert!(matches!(
-            err,
-            TrustCardError::SnapshotWrite { path, detail }
-                if path.eq(&snapshot_path)
-                    && detail.contains("failed opening parent directory")
-        ));
     }
 
     #[test]
@@ -5012,11 +4853,13 @@ mod tests {
         registry
             .persist_authoritative_state(&path)
             .expect("persist revoked high-water state");
-        std::fs::write(
-            &path,
-            to_canonical_json(&older_snapshot).expect("older json"),
-        )
-        .expect("install older snapshot");
+        // The rollback attack now tampers the durable snapshot row directly;
+        // the stored signed high-water row must still reject the older epoch.
+        let store = TrustCardRegistryStore::open(&path).expect("open durable store");
+        let older_json = to_canonical_json(&older_snapshot).expect("encode older snapshot");
+        store
+            .import_legacy_state(&older_json, None)
+            .expect("install older snapshot row");
 
         let err = TrustCardRegistry::load_authoritative_state(
             &path,
@@ -6725,13 +6568,21 @@ mod tests {
             .persist_authoritative_state(&path)
             .expect("persist");
 
-        // Tamper with the signature in the file
-        let original_json = std::fs::read_to_string(&path).expect("read");
-        let mut snapshot: TrustCardRegistrySnapshot =
-            serde_json::from_str(&original_json).expect("parse");
-        snapshot.registry_signature = "tampered_signature".to_string();
-        let tampered_json = serde_json::to_string_pretty(&snapshot).expect("serialize");
-        std::fs::write(&path, tampered_json).expect("write tampered");
+        // Tamper the signature on the durable snapshot row in place; the
+        // stored high-water row stays intact so the failure must come from
+        // later signature validation, not pre-parsing.
+        let store = TrustCardRegistryStore::open(&path).expect("open durable store");
+        let (snapshot_raw, high_water_raw) = store
+            .load_state()
+            .expect("load durable rows")
+            .expect("rows exist after persist");
+        let mut stored: TrustCardRegistrySnapshot =
+            serde_json::from_str(&snapshot_raw).expect("parse stored snapshot");
+        stored.registry_signature = "tampered_signature".to_string();
+        let tampered_json = serde_json::to_string_pretty(&stored).expect("serialize");
+        store
+            .import_legacy_state(&tampered_json, high_water_raw.as_deref())
+            .expect("install tampered snapshot row");
 
         // Trusted context should allow parsing but fail later during signature verification
         // This tests that lazy validation parses first, validates later
@@ -6922,7 +6773,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_load_writes_high_water_with_configured_key() {
+    fn configured_load_seeds_and_verifies_durable_high_water() {
         let mut config = crate::config::Config::for_profile(crate::config::Profile::Balanced).trust;
         config.registry_signing_key =
             Some(base64::engine::general_purpose::STANDARD.encode([7_u8; 32]));

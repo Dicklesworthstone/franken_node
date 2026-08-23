@@ -1,5 +1,6 @@
 pub mod durability_violation;
 pub mod evidence_ledger;
+pub mod evidence_ledger_durable;
 pub mod metrics;
 pub mod system_metrics_exporter;
 pub mod validation_proof_economics;

@@ -18,6 +18,7 @@ use frankenengine_node::supply_chain::trust_card::{
     SnapshotSourceContext, TrustCardListFilter, TrustCardMutation, TrustCardRegistry,
     fixture_registry,
 };
+use frankenengine_node::supply_chain::trust_card_registry_store::TrustCardRegistryStore;
 use serde_json::Value;
 
 // DE-MOCKED: Removed FRANKEN_ENGINE_BIN="" and FRANKEN_NODE_ENGINE_BINARY_PATH="" environment
@@ -2682,12 +2683,18 @@ fn init_scan_populates_trust_registry() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let registry_path = workspace
-        .path()
-        .join(".franken-node/state/trust-card-registry.v1.json");
-    let registry = fs::read_to_string(&registry_path).expect("read trust registry");
-    assert!(registry.contains("npm:react"));
-    assert!(registry.contains("19.2.4"));
+    let store = TrustCardRegistryStore::open(
+        &workspace
+            .path()
+            .join(".franken-node/state/trust-card-registry.v1.json"),
+    )
+    .expect("open durable trust registry store");
+    let (snapshot_raw, _high_water_raw) = store
+        .load_state()
+        .expect("load durable trust registry rows")
+        .expect("init --scan must seed the registry snapshot row");
+    assert!(snapshot_raw.contains("npm:react"));
+    assert!(snapshot_raw.contains("19.2.4"));
 }
 
 #[cfg(unix)]
@@ -2723,7 +2730,7 @@ fn full_init_to_run_pipeline_empty_registry_warns_on_untracked_dependency_json()
     assert2::assert!(
         workspace
             .path()
-            .join(".franken-node/state/trust-card-registry.v1.json")
+            .join(".franken-node/state/trust-card-registry.v1.db")
             .is_file()
     );
 
