@@ -1213,11 +1213,8 @@ fn fleet_reconcile_waits_for_delayed_node_convergence_receipt() {
     let updater_state_dir = fleet_state_dir.clone();
     let updater = std::thread::spawn(move || {
         let deadline = test_clock_now() + Duration::from_secs(5);
+        let mut delayed_transport = seed_durable_transport(&updater_state_dir);
         loop {
-            let mut delayed_transport = FileFleetTransport::new(&updater_state_dir);
-            delayed_transport
-                .initialize()
-                .expect("initialize delayed updater transport");
             let actions = delayed_transport.list_actions().expect("list actions");
             if actions.iter().any(|record| {
                 record
@@ -1985,10 +1982,7 @@ fn fleet_agent_release_actions_clear_local_quarantine_state_across_poll_cycles()
             std::thread::sleep(Duration::from_millis(50));
         }
 
-        let mut release_transport = FileFleetTransport::new(&release_fleet_state_dir);
-        release_transport
-            .initialize()
-            .expect("initialize release transport");
+        let mut release_transport = seed_durable_transport(&release_fleet_state_dir);
         release_transport
             .publish_action(&FleetActionRecord {
                 action_id: "fleet-op-release-cross-cycle".to_string(),
@@ -2072,11 +2066,8 @@ fn fleet_agent_processes_later_actions_with_lower_lexicographic_ids() {
     let publisher_state_dir = fleet_state_dir.clone();
     let publisher = std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(5);
+        let mut transport = seed_durable_transport(&publisher_state_dir);
         loop {
-            let mut transport = FileFleetTransport::new(&publisher_state_dir);
-            transport
-                .initialize()
-                .expect("initialize ordering transport");
             let nodes = transport.list_node_statuses().expect("list node statuses");
             if nodes
                 .iter()
@@ -2203,16 +2194,13 @@ fn fleet_agent_handles_sigterm_gracefully() {
         &fleet_state_dir,
     );
     let readiness_deadline = Instant::now() + Duration::from_secs(5);
+    let mut readiness_transport = seed_durable_transport(&fleet_state_dir);
     let agent_status = loop {
-        let mut readiness_transport = FileFleetTransport::new(&fleet_state_dir);
-        readiness_transport
-            .initialize()
-            .expect("initialize readiness transport");
         if let Some(status) = readiness_transport
             .list_node_statuses()
             .expect("list readiness node statuses")
             .into_iter()
-            .find(|status| status.node_id == "agent-signal-1" && status.zone_id == "zone-signal")
+            .find(|node| node.node_id == "agent-sigterm-1")
         {
             break status;
         }
