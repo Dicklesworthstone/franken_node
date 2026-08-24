@@ -449,3 +449,55 @@ Existing beads are **not** duplicated. New beads exist only for NO_BEAD / false-
 ## What this reality check is not
 
 It is not a claim that the last 4,269 closed beads were wasted. The product layer is dense, fail-closed, and unusually serious about receipts. It *is* a claim that **bead percentage is not vision percentage**, that **May 21 GREEN backfills are not close conditions**, and that **a 2.5% corpus with a GREEN L1 file is the central honesty failure**.
+
+---
+
+## Refresh 2026-08-23 (second full reality check — delta pass)
+
+**Method:** same measuring stick (README + charter + CLAIMS_REGISTRY), fresh live probes only; no re-litigation of closed work without evidence. HEAD `v0.1.0-799-g457580b58` (branch `main`). Beads: 15 open / 10 in_progress / 5 blocked / 4,302 closed. Honesty manifest recomputed this session: **9 ok, 0 drifted** (`scripts/check_claims_manifest.py --check-honesty`; integration census 3,756→live 4,009; inline census 21,621→live 21,868; fuzz targets 146/146; validators 437→438; `unsafe_blocks=0`; Ed25519 harness-key signature ok). Velocity (bv): 22 closed last 7d, avg 1.27 days to close.
+
+### What moved since the 2026-08-20 check (verified this session)
+
+| Aug-20 gap | State today | Evidence |
+|---|---|---|
+| G3 dual-oracle contradiction (V20) | **CLOSED** (`w0fc6.1`). L1 is now bound to the measured corpus and honestly RED | `artifacts/oracle/l1_product_verdict.json` verdict=RED; `artifacts/compat/corpus_pass.json` verdict=RED, `observed_pct=86.43`, timestamp 2026-08-20T17:40Z |
+| G4 constructed 3.15× cohort (V16) | **CLOSED as a live signed gate** (`w0fc6.2`). KPI itself still **unmet** | `artifacts/migration/throughput_delta.json`: pooled median 2.30×, bootstrap CI95 [1.90×, 3.30×], holdout 1.90×; CLAIM-002 pending (measured below 3.0×) |
+| G6 frankensqlite in-memory model (V22) | **CLOSED** (`w0fc6.3`). Tier-1 WAL store live (trust-card registry authority switch + evidence-ledger durability) | close_reason cites `trust_card_registry_store.rs`, `trust_card.rs:1271-1427`; README State Layout now lists `trust-card-registry.v1.db` |
+| G7 CLI honesty (V26) | **CLOSED** (`w0fc6.5`) | `verify compatibility` no longer auto-PASSes profile names; e2e regression anchors named in close_reason |
+| G8 dual revocation models (V2) | **CLOSED** (`w0fc6.6`) | product SafetyTier canonical for run/remotecap; control-plane EpochFreshnessTier separated |
+| G2 `run` cannot execute JS (V1) | **CLOSED at fixture level** (`w0fc6.7`) | `default_run_executes_fixture_js_through_embedded_engine_without_degraded_fallback`; host-effect runtime-of-record remains TNR (`bd-f5b04`) |
+| IBD adoption false-close (V28) | **CLOSED as honest-pending KPI** (`w0fc6.8`) | `artifacts/adoption/ibd_production_use.json`: production_operator_count=0, verdict pending |
+| Release staleness (V25) | Documented honestly (`w0fc6.4`); **not fixed** — Latest is still v0.1.0, now **799 commits** behind HEAD (was 709 on Aug-20) | `git describe` → `v0.1.0-799-g457580b58`; PATH binary still Jun-8 v0.1.0 |
+
+Strict WORKING count moves **3/28 → ~7/28**: V3, V11, V15 (unchanged) + V20 (mechanism honest, verdict RED until corpus ≥95%), V22 (fsqlite store live), V26 (CLI honesty restored), V1 (fixture-level run proven from source; full host-effect TNR still open).
+
+### Current corpus residual mix (76 failures; 484/560 = 86.43%; need 532/560 for 95%)
+
+child_process 30 · crypto 13 · stream 12 · fs 6 · tls 5 · zlib 3 · net 3 · events 2 · cluster 2
+(`artifacts/13/compatibility_corpus_results.json.failing_tests_tracking`).
+
+Family bead coverage: child_process `bd-at11s`, crypto `bd-y4t2i`, stream `bd-m8vaa.1`, tls `bd-387cw`, net `bd-sul35` (37/40; incl. node-vs-bun reference disagreement 0005/0024 where franken matches node), cluster `bd-zyp0c`. **fs / zlib / events had zero dedicated beads anywhere (product or engine)** → created this session (see bead table below). zlib engine breadth exists as franken_engine `bd-znj5l` (Brotli) but no product-side residual tracking; events::0022 (arrow lexical-`this`) falls only under the broad franken_engine BRIDGE-14.11 umbrella.
+
+### New regressions / risks found this session
+
+1. **`bd-c6qum` (open, P1): 18 `fleet_cli_e2e` failures at HEAD** after the durable-transport switch (tests seed via `FileFleetTransport` while CLI now uses `DurableFleetTransport`). Active fix in flight by another agent (layers 2b–2d landed Aug 22–23; snapshot files modified in working tree).
+2. **P0 inline-test hole persists:** `[lib] test=false` keeps ~21.9k inline tests out of default `cargo test` (`bd-rjc2m.21`, P0 in_progress). The dedicated lane now compiles but has runtime behavior-drift failures (`bd-o776s`).
+3. Verification-scaffolding API-drift epic `bd-rjc2m` (~68 targets) with `.38`/`.39` G2G restore items in_progress and children `.7` (conformance cluster), `.17` (cargo-deny license) blocked.
+4. RCH/farm health drags on validation: `bd-gc0ze` (stale fastapi-http dependency sync blocks validation), `bd-famte`/`bd-pnmnu` (clippy/fmt blockers).
+
+### Beads created by this refresh (Phase 3a)
+
+| ID | Gap | Vision |
+|---|---|---|
+| `bd-reality-20260823-fs-residual-yxlxu` | fs corpus residuals 6 (0021/0022/0023/0044/0045 engine crashes; 0030 output mismatch) | V6 |
+| `bd-reality-20260823-zlib-residual-l6ev2` | zlib corpus residuals 3 (0004/0009/0016 engine crashes; cross-ref engine `bd-znj5l`) | V6 |
+| `bd-reality-20260823-events-residual-uopqy` | events corpus residuals 2 (0017 engine crash; 0022 arrow lexical-`this` output mismatch) | V6 |
+
+All three block `bd-28sz` (the ≥95% gate). No other NO_BEAD vision gaps found this pass: every other open gap maps to an existing bead (see tables above).
+
+### Refinement notes (plan-space pass over this refresh)
+
+* Do **not** reopen closed `w0fc6.*` items without new evidence; their close_reasons carry file:line + commit citations that checked out against the tree today.
+* The release-freshness decision stands as documented-honesty (`README.md:286-294` warns Latest lags main). If the owner wants a real channel fix, cut v0.2.0 after `bd-c6qum` clears and corpus ≥95% — do not cut earlier just to shrink the number.
+* `net::0005`/`net::0024` are reference-leg disagreement (franken matches Node); resolution is spec adjudication inside `bd-sul35`, not engine work.
+* Keep the orchestrator cadence (4 min) and do not recategorize `child_process` native-eval aborts as pass — both reaffirmed by the Aug-21 follow-up and unchanged today.
