@@ -6694,7 +6694,12 @@ fn handle_doctor_close_condition(
         &close_condition_signing_material,
         args.release_run_url.as_deref(),
     )
-    .context("failed generating close-condition receipt")?;
+    .map_err(|err| {
+        ActionableError::new(
+            format!("failed generating close-condition receipt: {err:#}"),
+            "run from a franken_node checkout whose working directory contains artifacts/oracle/l1_product_verdict.json and the corpus results referenced by docs/DUAL_ORACLE_CLOSE_CONDITION.md",
+        )
+    })?;
     let receipt_key_id = crate::supply_chain::artifact_signing::KeyId::from_verifying_key(
         &signing_material.signing_key.verifying_key(),
     )

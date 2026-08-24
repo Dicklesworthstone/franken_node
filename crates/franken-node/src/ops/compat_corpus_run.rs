@@ -2673,7 +2673,8 @@ pub fn build_corpus_results_document_with_references(
                 "corpus outcome `{}` cannot pass with divergent runtime observations: {reason}",
                 outcome.test_id
             );
-        } else if !has_incomplete_observation
+        } else if outcome.status == "fail"
+            && !has_incomplete_observation
             && passing_lockstep_observations_are_consistent(&fingerprints).is_ok()
         {
             bail!(
@@ -4100,6 +4101,30 @@ mod lockstep_pass_policy_tests {
                 .unwrap_or(usize::MAX),
             0
         );
+    }
+
+    #[test]
+    fn writer_accepts_unanimous_triad_pass_row() {
+        // Regression: a fully-agreeing exit-0 triad row (bun == node == franken)
+        // used to trip the fail-only "cannot fail when franken matches the node
+        // reference" bail because the else-if lacked a status guard. Real corpus
+        // runs die on their first unanimous case (tc::buffer::0001).
+        let mut observations = BTreeMap::new();
+        observations.insert("bun".to_string(), observation('a', 1));
+        observations.insert("node".to_string(), observation('a', 2));
+        observations.insert("franken-engine-native".to_string(), observation('a', 3));
+        let document = build_corpus_results_document_with_references(
+            None,
+            &[outcome("pass", observations)],
+            "compat-corpus-test",
+            "1.3.14-test",
+            Some("v22.14.0"),
+            "2026-08-21T00:00:00Z",
+            "corpus",
+        )
+        .expect("unanimous exit-0 triad pass must serialize");
+        assert_eq!(document["totals"]["passed_test_cases"], 1);
+        assert_eq!(document["totals"]["failed_test_cases"], 0);
     }
 
     #[test]

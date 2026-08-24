@@ -1572,13 +1572,12 @@ dependencies = [
 
 [[package]]
 name = "fastapi-core"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "asupersync 0.4.9",
- "fastapi-openapi 0.4.3",
- "fastapi-router 0.4.3",
- "fastapi-types 0.4.3",
- "futures-executor",
+ "fastapi-openapi 0.4.4",
+ "fastapi-router 0.4.4",
+ "fastapi-types 0.4.4",
  "getrandom 0.4.3",
  "parking_lot",
  "serde",
@@ -1587,15 +1586,15 @@ dependencies = [
 
 [[package]]
 name = "fastapi-http"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "asupersync 0.4.9",
- "fastapi-core 0.4.3",
+ "fastapi-core 0.4.4",
 ]
 
 [[package]]
 name = "fastapi-macros"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1618,10 +1617,10 @@ dependencies = [
 
 [[package]]
 name = "fastapi-openapi"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
- "fastapi-router 0.4.3",
- "fastapi-types 0.4.3",
+ "fastapi-router 0.4.4",
+ "fastapi-types 0.4.4",
  "serde",
  "serde_json",
 ]
@@ -1638,21 +1637,21 @@ dependencies = [
 
 [[package]]
 name = "fastapi-router"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
- "fastapi-types 0.4.3",
+ "fastapi-types 0.4.4",
  "serde_json",
 ]
 
 [[package]]
 name = "fastapi-rust"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
- "fastapi-core 0.4.3",
+ "fastapi-core 0.4.4",
  "fastapi-http",
  "fastapi-macros",
- "fastapi-openapi 0.4.3",
- "fastapi-router 0.4.3",
+ "fastapi-openapi 0.4.4",
+ "fastapi-router 0.4.4",
  "serde",
  "serde_json",
 ]
@@ -1665,7 +1664,7 @@ checksum = "a614846493b09d528f0764a8c8d83d58ff6c26b5db707b62edbe630a353660dd"
 
 [[package]]
 name = "fastapi-types"
-version = "0.4.3"
+version = "0.4.4"
 
 [[package]]
 name = "fastrand"
@@ -2066,9 +2065,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "sqlmodel 0.4.0",
- "sqlmodel-core 0.4.0",
- "sqlmodel-schema 0.4.0",
+ "sqlmodel 0.4.1",
+ "sqlmodel-core 0.4.1",
+ "sqlmodel-schema 0.4.1",
  "subtle",
  "syn 2.0.117",
  "tempfile",
@@ -4683,17 +4682,17 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "asupersync 0.4.9",
  "serde",
  "serde_json",
- "sqlmodel-core 0.4.0",
- "sqlmodel-macros 0.4.0",
- "sqlmodel-pool 0.4.0",
- "sqlmodel-query 0.4.0",
- "sqlmodel-schema 0.4.0",
- "sqlmodel-session 0.4.0",
+ "sqlmodel-core 0.4.1",
+ "sqlmodel-macros 0.4.1",
+ "sqlmodel-pool 0.4.1",
+ "sqlmodel-query 0.4.1",
+ "sqlmodel-schema 0.4.1",
+ "sqlmodel-session 0.4.1",
 ]
 
 [[package]]
@@ -4711,7 +4710,7 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "asupersync 0.4.9",
  "regex",
@@ -4750,7 +4749,7 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel-macros"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4771,10 +4770,10 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel-pool"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "asupersync 0.4.9",
- "sqlmodel-core 0.4.0",
+ "sqlmodel-core 0.4.1",
  "tracing",
 ]
 
@@ -4792,11 +4791,11 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel-query"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "asupersync 0.4.9",
  "serde",
- "sqlmodel-core 0.4.0",
+ "sqlmodel-core 0.4.1",
  "tracing",
 ]
 
@@ -4815,12 +4814,12 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel-schema"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "asupersync 0.4.9",
  "serde",
- "sqlmodel-core 0.4.0",
- "sqlmodel-macros 0.4.0",
+ "sqlmodel-core 0.4.1",
+ "sqlmodel-macros 0.4.1",
  "tracing",
 ]
 
@@ -4840,13 +4839,13 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel-session"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "asupersync 0.4.9",
  "serde",
  "serde_json",
- "sqlmodel-core 0.4.0",
- "sqlmodel-query 0.4.0",
+ "sqlmodel-core 0.4.1",
+ "sqlmodel-query 0.4.1",
  "tracing",
 ]
 
