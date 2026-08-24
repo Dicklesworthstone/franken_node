@@ -36,6 +36,35 @@ const FLEET_DB_FILE: &str = "fleet-state.db";
 const FLEET_DB_SCHEMA_VERSION: &str = "franken-node/fleet-durable-store/v1";
 const META_INITIALIZED_KEY: &str = "initialized";
 const META_JSONL_IMPORT_KEY: &str = "legacy_jsonl_imported";
+/// bd-ymbjw: fsqlite surfaces WAL write-write races as immediate
+/// "database is busy (snapshot conflict …)" errors. Unlike a plain lock wait,
+/// a snapshot conflict is not resolved by `busy_timeout` — the failing
+/// transaction must be rolled back and retried from scratch. Fleet stores are
+/// accessed concurrently by design (a polling `fleet agent` alongside
+/// operator commands), so the transport absorbs these transients itself
+/// instead of leaking them into CLI error envelopes.
+const SNAPSHOT_CONFLICT_RETRY_ATTEMPTS: u32 = 6;
+const SNAPSHOT_CONFLICT_BACKOFF_BASE_MILLIS: u64 = 20;
+
+fn is_transient_snapshot_conflict(err: &FleetTransportError) -> bool {
+    match err {
+        FleetTransportError::IoError { detail }
+        | FleetTransportError::LockContention { detail } => {
+            let detail = detail.to_ascii_lowercase();
+            detail.contains("snapshot conflict")
+                || detail.contains("database is busy")
+                || detail.contains("database is locked")
+        }
+        _ => false,
+    }
+}
+
+fn snapshot_conflict_backoff(attempt: u32) -> Duration {
+    // Deterministic exponential backoff: 20ms * 2^attempt, capped.
+    let shift = attempt.min(5);
+    Duration::from_millis(SNAPSHOT_CONFLICT_BACKOFF_BASE_MILLIS.saturating_mul(1 << shift))
+}
+
 const BUSY_TIMEOUT_MILLIS: u64 = 5_000;
 
 fn text(value: &SqliteValue, column: &str) -> Result<String, FleetTransportError> {
@@ -113,16 +142,33 @@ impl DurableFleetTransport {
 
     fn with_connection<T>(
         &self,
-        operation: impl FnOnce(&Connection) -> Result<T, FleetTransportError>,
+        operation: impl Fn(&Connection) -> Result<T, FleetTransportError>,
     ) -> Result<T, FleetTransportError> {
-        let guard = self
-            .connection
-            .lock()
-            .map_err(|_| FleetTransportError::io("fleet db mutex poisoned".to_string()))?;
-        let connection = guard
-            .as_ref()
-            .ok_or_else(|| FleetTransportError::io("fleet db connection closed".to_string()))?;
-        operation(connection)
+        // bd-ymbjw: snapshot conflicts abort the failing statement without
+        // persisting anything (single autocommit statement per operation in
+        // this transport), so re-running the closure from scratch is safe.
+        let mut attempt = 0_u32;
+        loop {
+            let guard = self
+                .connection
+                .lock()
+                .map_err(|_| FleetTransportError::io("fleet db mutex poisoned".to_string()))?;
+            let connection = guard
+                .as_ref()
+                .ok_or_else(|| FleetTransportError::io("fleet db connection closed".to_string()))?;
+            match operation(connection) {
+                Ok(value) => return Ok(value),
+                Err(err)
+                    if is_transient_snapshot_conflict(&err)
+                        && attempt + 1 < SNAPSHOT_CONFLICT_RETRY_ATTEMPTS =>
+                {
+                    drop(guard);
+                    std::thread::sleep(snapshot_conflict_backoff(attempt));
+                    attempt += 1;
+                }
+                Err(err) => return Err(err),
+            }
+        }
     }
 
     fn ensure_initialized(&self) -> Result<(), FleetTransportError> {

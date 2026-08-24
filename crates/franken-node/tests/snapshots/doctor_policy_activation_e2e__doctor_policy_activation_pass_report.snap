@@ -3,6 +3,7 @@ source: crates/franken-node/tests/doctor_policy_activation_e2e.rs
 expression: canonicalize_doctor_snapshot(report)
 ---
 {
+  "schema_version": "franken-node/doctor-cli/v1",
   "command": "doctor",
   "trace_id": "doctor-policy-e2e-snapshot",
   "generated_at_utc": "[generated-at]",

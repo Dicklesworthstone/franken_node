@@ -5,6 +5,6 @@ error: unexpected argument '--limit' found
 
   tip: to pass '--limit' as a value, use '-- --limit'
 
-Usage: franken-node registry search [OPTIONS] <QUERY>
+Usage: franken-node registry search [OPTIONS] [QUERY]
 
 For more information, try '--help'.

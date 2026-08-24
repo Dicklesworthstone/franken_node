@@ -2703,6 +2703,13 @@ profile = "balanced"
 
 [trust]
 quarantine_on_high_risk = false
+# bd-ymbjw: full `Config::resolve` is fail-closed and demands the registry
+# signing key (and authorized API keys) even for `ops config-audit`; the
+# auditor runs against a complete configuration like any other command.
+registry_signing_key = "x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c="
+
+[security]
+authorized_api_keys = ["test-api-key"]
 
 [fleet]
 convergence_timeout_seconds = 180
@@ -3387,14 +3394,28 @@ fn fleet_invalid_profile_env_exits_with_config_error_code() {
     );
 
     assert_eq!(output.status.code(), Some(1));
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    // bd-ymbjw: `--json` failures use the documented JSON-error contract —
+    // the schema-versioned envelope goes to stdout and stderr stays free of
+    // human clap/error text (same convention as
+    // `verify_release_json_fails_closed_when_release_path_missing`).
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("fleet status --json error envelope");
+    assert_eq!(payload["schema_version"], "franken-node/fleet-error-cli/v1");
+    assert_eq!(payload["command"], "fleet.status");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
     assert!(
-        stderr.contains("FRANKEN_NODE_PROFILE=`experimental`"),
-        "invalid profile error should name env value, got: {stderr}"
+        error.contains("FRANKEN_NODE_PROFILE=`experimental`"),
+        "invalid profile error should name env value, got: {error}"
     );
     assert!(
-        stderr.contains("expected strict, balanced, or legacy-risky"),
-        "invalid profile error should include valid profile set, got: {stderr}"
+        error.contains("expected strict, balanced, or legacy-risky"),
+        "invalid profile error should include valid profile set, got: {error}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.trim().is_empty(),
+        "--json failure must not append a human error line on stderr: {stderr}"
     );
 }
 
@@ -3730,8 +3751,57 @@ fn fleet_release_handles_realistic_partial_release_scenarios_across_multi_incide
 
     // Seed realistic multi-zone fleet to test release propagation
     seed_realistic_multi_zone_fleet(&mut transport, now);
-
-    // Test releasing one resolved incident while others remain active
+    // bd-ymbjw: release convergence requires the zone nodes to check in AFTER
+    // the release action is published (fleet_release_convergence_state counts
+    // only nodes with last_seen >= emitted_at). Simulate the fleet agent on
+    // the two healthy us-east-1-production nodes applying the action, exactly
+    // like fleet_reconcile_waits_for_delayed_node_convergence_receipt does.
+    // The agent keeps ONE connection and treats transient fsqlite contention
+    // (busy / snapshot conflict) as retryable until its deadline, mirroring
+    // how a real fleet agent absorbs concurrent operator traffic.
+    let updater_state_dir = fleet_state_dir.clone();
+    let updater = std::thread::spawn(move || {
+        // fsqlite connections are !Send; the agent owns its transport inside
+        // the thread, mirroring a real per-process fleet agent.
+        let mut agent_transport = seed_durable_transport(&updater_state_dir);
+        let deadline = test_clock_now() + Duration::from_secs(4);
+        loop {
+            let applied = agent_transport.list_actions().map(|records| {
+                records.iter().any(|record| {
+                    record.action_id.starts_with("fleet-op-release-")
+                        && matches!(
+                            &record.action,
+                            FleetAction::Release { incident_id, zone_id, .. }
+                                if incident_id == "MALWARE-2024-0234-active"
+                                    && zone_id == "us-east-1-production"
+                        )
+                })
+            });
+            match applied {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(err) if test_clock_now() < deadline => {
+                    let _ = err;
+                }
+                Err(err) => panic!("agent list actions kept failing: {err}"),
+            }
+            if test_clock_now() >= deadline {
+                panic!("fleet release never published the active incident release");
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        for node_id in ["web-prod-us-east-1a", "web-prod-us-east-1b"] {
+            agent_transport
+                .upsert_node_status(&NodeStatus {
+                    zone_id: "us-east-1-production".to_string(),
+                    node_id: node_id.to_string(),
+                    last_seen: Utc::now(),
+                    quarantine_version: 6,
+                    health: NodeHealth::Healthy,
+                })
+                .expect("agent node check-in");
+        }
+    });
     let output = run_cli_in_dir_with_fleet_state_and_env(
         &repo_root(),
         &[
@@ -3800,10 +3870,15 @@ fn fleet_release_handles_realistic_partial_release_scenarios_across_multi_incide
         serde_json::from_slice(&output_active.stdout).expect("fleet release active json");
 
     assert_eq!(payload_active["action"]["action_type"], "release");
+    // bd-ymbjw: FleetCliActionReport.action carries no incident_id field; the
+    // released incident is identified in the signed receipt's decision payload.
     assert_eq!(
-        payload_active["action"]["incident_id"],
+        payload_active["action"]["receipt"]["decision_payload"]["incident_id"],
         "MALWARE-2024-0234-active"
     );
+    updater
+        .join()
+        .expect("release convergence updater should finish");
 
     // Verify transport state shows realistic partial release scenario
     let actions = transport.list_actions().expect("list actions");
@@ -3849,7 +3924,6 @@ fn fleet_reconcile_with_complete_transport_verification() {
     log.transport_snapshot(&transport, "initial_empty_state");
     let initial_actions = transport.list_actions().expect("list initial actions");
     let initial_nodes = transport.list_node_statuses().expect("list initial nodes");
-
     log.assertion(
         "initial_action_count",
         &json!(0),
@@ -3885,90 +3959,47 @@ fn fleet_reconcile_with_complete_transport_verification() {
         .expect("upsert stale node");
 
     log.transport_snapshot(&transport, "after_setup_quarantine_and_stale_node");
-    let post_setup_actions = transport.list_actions().expect("list post-setup actions");
-    let post_setup_nodes = transport
-        .list_node_statuses()
-        .expect("list post-setup nodes");
 
-    // Verify setup state with detailed transport state checks
-    log.assertion(
-        "post_setup_action_count",
-        &json!(1),
-        &json!(post_setup_actions.len()),
-    );
-    log.assertion(
-        "post_setup_node_count",
-        &json!(1),
-        &json!(post_setup_nodes.len()),
-    );
-    log.assertion(
-        "setup_action_type",
-        &json!("quarantine"),
-        &json!(match &post_setup_actions[0].action {
-            FleetAction::Quarantine { .. } => "quarantine",
-            _ => "other",
-        }),
-    );
-
-    log.phase("act");
-    let start_reconcile = test_clock_now();
+    // PHASE: bd-ymbjw fail-closed contract — with the only zone node stale and
+    // nothing applying the action, reconcile must NOT report success. It must
+    // republish the active quarantine for the stale node and then time out
+    // with a structured JSON error envelope (README: reconcile "times out
+    // fail-closed", same as `fleet release`).
+    log.phase("act_fail_closed");
     let output = run_cli_in_dir_with_fleet_state_and_env(
         &repo_root(),
         &["fleet", "reconcile", "--json"],
         &fleet_state_dir,
-        &[(
-            "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
-            signing_key_path.as_str(),
-        )],
+        &[
+            ("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", "2"),
+            (
+                "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
+                signing_key_path.as_str(),
+            ),
+        ],
     );
-    let reconcile_duration = start_reconcile.elapsed().as_millis() as u64;
-
-    eprintln!(
-        "{}",
-        serde_json::to_string(&json!({
-            "ts": chrono::Utc::now().to_rfc3339(),
-            "suite": "fleet-cli-e2e",
-            "test": "reconcile_with_transport_verification",
-            "event": "reconcile_execution_complete",
-            "data": {
-                "exit_code": output.status.code(),
-                "duration_ms": reconcile_duration,
-                "stdout_size": output.stdout.len(),
-                "stderr_size": output.stderr.len()
-            }
-        }))
-        .unwrap()
-    );
-
-    log.phase("assert");
-
-    // Assert CLI success
     assert!(
-        output.status.success(),
-        "fleet reconcile failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        !output.status.success(),
+        "fleet reconcile must fail closed while the only zone node is stale"
+    );
+    let error_payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("fleet reconcile error json");
+    assert_eq!(
+        error_payload["schema_version"],
+        "franken-node/fleet-error-cli/v1"
+    );
+    assert_eq!(error_payload["command"], "fleet.reconcile");
+    assert_eq!(error_payload["ok"], false);
+    let error_text = error_payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error_text.contains("convergence timed out"),
+        "timeout error must name the convergence timeout: {error_payload}"
     );
 
-    // Parse and validate JSON response
-    let payload: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("fleet reconcile json");
-
-    log.assertion(
-        "reconcile_action_type",
-        &json!("reconcile"),
-        &payload["action"]["action_type"],
-    );
-    log.assertion(
-        "reconcile_event_code",
-        &json!("FLEET-005"),
-        &payload["action"]["event_code"],
-    );
-
+    log.phase("assert_republish");
     // CRITICAL: Transport state verification BETWEEN phases
-    log.transport_snapshot(&transport, "after_reconcile_execution");
-    let post_reconcile_actions = transport
-        .list_actions()
-        .expect("list post-reconcile actions");
+    log.transport_snapshot(&transport, "after_fail_closed_reconcile");
+    let post_reconcile_actions = transport.list_actions().expect("list post-reconcile actions");
     let post_reconcile_nodes = transport
         .list_node_statuses()
         .expect("list post-reconcile nodes");
@@ -3980,7 +4011,7 @@ fn fleet_reconcile_with_complete_transport_verification() {
     assert_eq!(
         post_reconcile_actions.len(),
         2,
-        "reconcile should republish the active quarantine for stale nodes"
+        "reconcile should republish the active quarantine for stale nodes before failing closed"
     );
     log.assertion(
         "post_reconcile_node_count",
@@ -4054,11 +4085,89 @@ fn fleet_reconcile_with_complete_transport_verification() {
         )),
     }
 
+    // PHASE: recovery — an agent applies the republished action and checks in;
+    // a second reconcile now converges and emits the signed receipt.
+    log.phase("act_recovery");
+    let recover_state_dir = fleet_state_dir.clone();
+    let recovery = std::thread::spawn(move || {
+        // The republished action already exists from the fail-closed pass;
+        // give the second reconcile a moment to start its wait loop, then
+        // simulate the node applying it and checking in.
+        std::thread::sleep(Duration::from_millis(300));
+        let mut agent_transport = seed_durable_transport(&recover_state_dir);
+        agent_transport
+            .upsert_node_status(&NodeStatus {
+                zone_id: "zone-reconcile-verify".to_string(),
+                node_id: "node-stale-verify".to_string(),
+                last_seen: Utc::now(),
+                quarantine_version: 9,
+                health: NodeHealth::Healthy,
+            })
+            .expect("agent applies republished quarantine");
+    });
+    let start_reconcile = test_clock_now();
+    let recovered_output = run_cli_in_dir_with_fleet_state_and_env(
+        &repo_root(),
+        &["fleet", "reconcile", "--json"],
+        &fleet_state_dir,
+        &[
+            ("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", "5"),
+            (
+                "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
+                signing_key_path.as_str(),
+            ),
+        ],
+    );
+    let reconcile_duration = start_reconcile.elapsed().as_millis() as u64;
+    eprintln!(
+        "{}",
+        serde_json::to_string(&json!({
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "suite": "fleet-cli-e2e",
+            "test": "reconcile_with_transport_verification",
+            "event": "recovery_reconcile_complete",
+            "data": {
+                "exit_code": recovered_output.status.code(),
+                "duration_ms": reconcile_duration,
+                "stdout_size": recovered_output.stdout.len(),
+                "stderr_size": recovered_output.stderr.len()
+            }
+        }))
+        .unwrap()
+    );
+    recovery.join().expect("recovery agent should finish");
+    assert!(
+        recovered_output.status.success(),
+        "fleet reconcile after node recovery failed: {} {}",
+        String::from_utf8_lossy(&recovered_output.stderr),
+        String::from_utf8_lossy(&recovered_output.stdout)
+    );
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&recovered_output.stdout).expect("fleet reconcile json");
+    log.assertion(
+        "reconcile_action_type",
+        &json!("reconcile"),
+        &payload["action"]["action_type"],
+    );
+    log.assertion(
+        "reconcile_event_code",
+        &json!("FLEET-005"),
+        &payload["action"]["event_code"],
+    );
+    assert_eq!(payload["action"]["action_type"], "reconcile");
+    assert_eq!(payload["action"]["event_code"], "FLEET-005");
+    assert_eq!(payload["convergence_receipt"]["timed_out"], false);
+    assert_eq!(payload["convergence_receipt"]["verdict"], "converged");
+    assert_eq!(
+        payload["convergence_receipt"]["convergence"]["phase"],
+        "Converged"
+    );
+
     // Verify signature round-trip
     assert_convergence_receipt_signature_round_trips(&payload["convergence_receipt"], &signing_key);
 
     log.phase("teardown");
     log.transport_snapshot(&transport, "final_state_after_reconcile");
-
     log.test_end("pass");
 }

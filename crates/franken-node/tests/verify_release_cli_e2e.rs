@@ -2014,9 +2014,17 @@ fn release_manifest_inserted_invalid_line_fails_closed() {
         !output.status.success(),
         "expected inserted manifest line to fail closed"
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("manifest"));
-    assert!(stderr.contains("not canonical"));
+    // bd-ymbjw: `--json` failures emit the schema-versioned envelope on
+    // stdout with stderr left clean; the manifest diagnostics live there.
+    let error_payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("verify release --json error envelope");
+    assert_eq!(
+        error_payload["schema_version"],
+        "franken-node/verify-release-error-cli/v1"
+    );
+    let error_text = error_payload["error"].as_str().unwrap_or_default();
+    assert!(error_text.contains("manifest"));
+    assert!(error_text.contains("not canonical"));
 }
 
 #[test]

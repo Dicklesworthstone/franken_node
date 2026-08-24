@@ -3,6 +3,8 @@ source: crates/franken-node/tests/verify_release_cli_e2e.rs
 expression: "canonicalize_verify_release_snapshot(payload, &release_dir, &key_dir)"
 ---
 {
+  "schema_version": "franken-node/verify-release-cli/v1",
+  "command": "verify.release",
   "release_path": "[release]",
   "manifest_signature_ok": true,
   "results": [

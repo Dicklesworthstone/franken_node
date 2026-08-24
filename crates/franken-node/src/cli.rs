@@ -92,6 +92,16 @@ fn parse_safe_binary_pathbuf(s: &str) -> Result<PathBuf, String> {
         .map_err(|e| format!("Invalid binary path: {}", e))
 }
 
+/// Parser for handler-required path operands: accepts any string, including
+/// the empty default, so the handler owns the missing-operand error and
+/// `--json` failures emit the command's error schema instead of a clap
+/// "a value is required" usage error. Unlike `parse_safe_content_pathbuf`,
+/// this deliberately imposes no absolute-path or traversal policy: operand
+/// validation belongs to each command's handler.
+fn parse_handler_required_pathbuf(s: &str) -> Result<PathBuf, String> {
+    Ok(PathBuf::from(s))
+}
+
 /// franken-node: trust-native JavaScript/TypeScript runtime platform.
 ///
 /// Pairs Node/Bun migration speed with deterministic security controls
@@ -770,7 +780,7 @@ pub struct MigrateRewriteArgs {
     /// Path to the project to rewrite.
     /// Required by the handler (not clap) so `--json` failures emit
     /// `franken-node/migrate-error-cli/v1` instead of a human clap error.
-    #[arg(default_value = "")]
+    #[arg(default_value = "", value_parser = parse_handler_required_pathbuf)]
     pub project_path: PathBuf,
 
     /// Apply rewrites (without this flag, dry-run mode).
@@ -791,7 +801,7 @@ pub struct MigrateValidateArgs {
     /// Path to the project to validate.
     /// Required by the handler (not clap) so `--json` failures emit
     /// `franken-node/migrate-error-cli/v1` instead of a human clap error.
-    #[arg(default_value = "")]
+    #[arg(default_value = "", value_parser = parse_handler_required_pathbuf)]
     pub project_path: PathBuf,
 
     /// Output format: json or text.
@@ -816,7 +826,7 @@ pub struct MigrateReportArgs {
     /// Path to the project to assess.
     /// Required by the handler (not clap) so `--json` failures emit
     /// `franken-node/migrate-error-cli/v1` instead of a human clap error.
-    #[arg(default_value = "")]
+    #[arg(default_value = "", value_parser = parse_handler_required_pathbuf)]
     pub project_path: PathBuf,
 
     /// Output format: json or html.
@@ -877,7 +887,7 @@ pub struct VerifyLockstepArgs {
     /// Path to the project to verify.
     /// Required by the handler (not clap) so `--json` failures emit
     /// `franken-node/verify-lockstep-error-cli/v1` instead of a human clap error.
-    #[arg(default_value = "")]
+    #[arg(default_value = "", value_parser = parse_handler_required_pathbuf)]
     pub project_path: PathBuf,
 
     /// Comma-separated list of runtimes to compare.
@@ -905,13 +915,13 @@ pub struct VerifyReleaseArgs {
     /// Path to the release directory containing artifacts, .sig files, and SHA256SUMS manifest.
     /// Required by the handler (not clap) so `--json` failures emit
     /// `franken-node/verify-release-error-cli/v1` instead of a human clap error.
-    #[arg(default_value = "")]
+    #[arg(default_value = "", value_parser = parse_handler_required_pathbuf)]
     pub release_path: PathBuf,
 
     /// Directory containing trusted public keys (current and rotated). Required: no built-in trust roots are accepted.
     /// Required by the handler (not clap) so `--json` failures emit
     /// `franken-node/verify-release-error-cli/v1` instead of a human clap error.
-    #[arg(long, default_value = "")]
+    #[arg(long, default_value = "", value_parser = parse_handler_required_pathbuf)]
     pub key_dir: PathBuf,
 
     /// Emit schema-versioned JSON (`franken-node/verify-release-cli/v1`)
@@ -981,7 +991,7 @@ pub struct VerifyCorpusArgs {
     /// Path to the corpus manifest to verify.
     /// Required by the handler (not clap) so `--json` failures emit
     /// `verifier-cli-contract-v1` instead of a human clap error.
-    #[arg(default_value = "")]
+    #[arg(default_value = "", value_parser = parse_handler_required_pathbuf)]
     pub corpus_path: PathBuf,
 
     /// Validation kind: auto, corpus-manifest, or compatibility-report.
@@ -1092,7 +1102,7 @@ pub struct TrustReleaseArgs {
     /// Path to the previously quarantined run target (entry file).
     /// Required by the handler (not clap) so `--json` failures emit
     /// `franken-node/trust-release-error/v1` instead of a human clap error.
-    #[arg(long, default_value = "")]
+    #[arg(long, default_value = "", value_parser = parse_handler_required_pathbuf)]
     pub app: PathBuf,
 
     /// Operator identity recorded on the release.
@@ -1282,7 +1292,7 @@ pub struct RemoteCapUseArgs {
     /// Path to a JSON capability token or full `remotecap issue --json` response.
     /// Required by the handler (not clap) so `--json` failures emit
     /// `franken-node/remotecap-error-cli/v1` instead of a human clap error.
-    #[arg(long, default_value = "")]
+    #[arg(long, default_value = "", value_parser = parse_handler_required_pathbuf)]
     pub token_file: PathBuf,
 
     /// Operation being authorized.
@@ -1311,7 +1321,7 @@ pub struct RemoteCapVerifyArgs {
     /// Path to a JSON capability token or full `remotecap issue --json` response.
     /// Required by the handler (not clap) so `--json` failures emit
     /// `franken-node/remotecap-error-cli/v1` instead of a human clap error.
-    #[arg(long, default_value = "")]
+    #[arg(long, default_value = "", value_parser = parse_handler_required_pathbuf)]
     pub token_file: PathBuf,
 
     /// Operation being verified.
@@ -1340,7 +1350,7 @@ pub struct RemoteCapRevokeArgs {
     /// Path to a JSON capability token or full `remotecap issue --json` response.
     /// Required by the handler (not clap) so `--json` failures emit
     /// `franken-node/remotecap-error-cli/v1` instead of a human clap error.
-    #[arg(long, default_value = "")]
+    #[arg(long, default_value = "", value_parser = parse_handler_required_pathbuf)]
     pub token_file: PathBuf,
 
     /// Trace correlation ID for audit logs.
@@ -1905,7 +1915,7 @@ pub struct IncidentReplayArgs {
     /// Path to incident bundle file.
     /// Required by the handler (not clap) so `--json` failures emit
     /// `franken-node/incident-error-cli/v1` instead of a human clap error.
-    #[arg(long, default_value = "")]
+    #[arg(long, default_value = "", value_parser = parse_handler_required_pathbuf)]
     pub bundle: PathBuf,
 
     /// Trusted Ed25519 public key file for replay bundle signature verification.
@@ -1941,7 +1951,7 @@ pub struct IncidentCounterfactualArgs {
     /// Path to incident bundle file.
     /// Required by the handler (not clap) so `--json` failures emit
     /// `franken-node/incident-error-cli/v1` instead of a human clap error.
-    #[arg(long, default_value = "")]
+    #[arg(long, default_value = "", value_parser = parse_handler_required_pathbuf)]
     pub bundle: PathBuf,
 
     /// Trusted Ed25519 public key file for replay bundle signature verification.
@@ -2016,7 +2026,7 @@ pub struct LtvAttestArgs {
     /// Path to the incident bundle whose long-term anteriority is attested.
     /// Required by the handler (not clap) so `--json` failures emit
     /// `franken-node/ltv-error-cli/v1` instead of a human clap error.
-    #[arg(long, default_value = "")]
+    #[arg(long, default_value = "", value_parser = parse_handler_required_pathbuf)]
     pub bundle: PathBuf,
 
     /// Trusted Ed25519 public key file for bundle signature verification.
@@ -2059,7 +2069,7 @@ pub struct LtvAttestArgs {
     /// Output path for the produced evidence JSON.
     /// Required by the handler (not clap) so `--json` failures emit
     /// `franken-node/ltv-error-cli/v1` instead of a human clap error.
-    #[arg(long, default_value = "")]
+    #[arg(long, default_value = "", value_parser = parse_handler_required_pathbuf)]
     pub out: PathBuf,
 
     /// Emit the attestation summary as JSON on stdout
@@ -2083,7 +2093,7 @@ pub struct LtvVerifyAsOfArgs {
     /// Path to the evidence JSON produced by `ltv attest`.
     /// Required by the handler (not clap) so `--json` failures emit
     /// `franken-node/ltv-error-cli/v1` instead of a human clap error.
-    #[arg(long, default_value = "")]
+    #[arg(long, default_value = "", value_parser = parse_handler_required_pathbuf)]
     pub evidence: PathBuf,
 
     /// Path to the operator's witness trust anchor JSON.
@@ -2097,7 +2107,7 @@ pub struct LtvVerifyAsOfArgs {
     /// release` and `incident replay` have no built-in trust roots.
     /// Required by the handler (not clap) so `--json` failures emit
     /// `franken-node/ltv-error-cli/v1` instead of a human clap error.
-    #[arg(long, default_value = "")]
+    #[arg(long, default_value = "", value_parser = parse_handler_required_pathbuf)]
     pub witness_anchor: PathBuf,
 
     /// Override the evidence's verification target time (unix seconds).
@@ -2149,7 +2159,7 @@ pub struct RegistryPublishArgs {
     /// Path to extension package to publish.
     /// Required by the handler (not clap) so `--json` failures emit
     /// `franken-node/registry-publish-error/v1` instead of a human clap error.
-    #[arg(default_value = "")]
+    #[arg(default_value = "", value_parser = parse_handler_required_pathbuf)]
     pub package_path: PathBuf,
 
     /// Authoritative extension version for this package.

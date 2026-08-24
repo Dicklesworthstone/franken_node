@@ -39,7 +39,9 @@ expression: matrix
             "exists": true
           }
         ],
-        "health": "not_declared"
+        "health": "not_declared",
+        "target_kind": "franken_node_crate_src",
+        "guest_js": false
       }
     },
     "stderr": ""
@@ -66,7 +68,9 @@ expression: matrix
       "details": {
         "module_id": "definitely_not_a_real_module",
         "exists": false,
-        "search_root": "[repo]/crates/franken-node/src"
+        "search_root": "[repo]/crates/franken-node/src",
+        "target_kind": "franken_node_crate_src",
+        "guest_js": false
       }
     },
     "stderr": ""
@@ -91,7 +95,11 @@ expression: matrix
       "verdict": "ERROR",
       "status": "error",
       "exit_code": 2,
-      "reason": "unsupported --compat-version=1; supported versions: 3 or 2"
+      "reason": "unsupported --compat-version=1; supported versions: 3 or 2",
+      "details": {
+        "target_kind": "franken_node_crate_src",
+        "guest_js": false
+      }
     },
     "stderr": ""
   },
@@ -145,7 +153,9 @@ expression: matrix
             "severity": "error",
             "remediation_hint": "run migration audit/rewrite/validate and persist the migration evidence record before treating this result as PASS"
           }
-        ]
+        ],
+        "live_rewrite": false,
+        "source": "local_evidence_record"
       }
     },
     "stderr": ""
@@ -195,7 +205,9 @@ expression: matrix
             "severity": "error",
             "remediation_hint": "verify a known migration lane or create an authoritative migration evidence record for this id"
           }
-        ]
+        ],
+        "live_rewrite": false,
+        "source": "local_evidence_record"
       }
     },
     "stderr": ""
@@ -208,21 +220,25 @@ expression: matrix
       "strict",
       "--json"
     ],
-    "exit_code": 0,
-    "success": true,
+    "exit_code": 1,
+    "success": false,
     "stdout_json": {
       "command": "verify compatibility",
       "contract_version": "3.0.0",
       "schema_version": "verifier-cli-contract-v1",
       "compat_version": null,
-      "verdict": "PASS",
-      "status": "pass",
-      "exit_code": 0,
-      "reason": "compatibility target `strict` resolved to profile `strict`",
+      "verdict": "FAIL",
+      "status": "fail",
+      "exit_code": 1,
+      "reason": "compatibility target `strict` is runtime profile `strict`, not a compatibility claim; use `franken-node verify lockstep` or a runtime name (node, bun, franken-node)",
       "details": {
         "target": "strict",
         "target_kind": "profile",
-        "profile": "strict"
+        "profile": "strict",
+        "compatible": false,
+        "known_issues": [
+          "runtime profiles are not compatibility claims; they do not auto-PASS"
+        ]
       }
     },
     "stderr": ""
@@ -274,6 +290,8 @@ expression: matrix
     "exit_code": 1,
     "success": false,
     "stdout_json": {
+      "schema_version": "franken-node/verify-release-cli/v1",
+      "command": "verify.release",
       "release_path": "[release]",
       "manifest_signature_ok": true,
       "results": [
@@ -293,6 +311,6 @@ expression: matrix
       "overall_pass": false,
       "unlisted_artifact_count": 1
     },
-    "stderr": "Error: release verification failed"
+    "stderr": ""
   }
 ]

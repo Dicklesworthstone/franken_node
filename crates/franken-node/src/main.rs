@@ -8919,7 +8919,7 @@ fn ops_config_audit_report(args: &OpsConfigAuditArgs) -> Result<OpsConfigAuditRe
             profile: profile_override,
         },
     )
-    .context("failed resolving configuration for ops config-audit")?;
+    .map_err(|err| anyhow::anyhow!("failed resolving configuration for ops config-audit: {err:#}"))?;
     let active_state = build_ops_config_audit_state(&resolved.config);
     let dependency_impact =
         build_ops_config_dependency_impact(args.config.as_deref(), &resolved, &active_state)?;
@@ -29907,6 +29907,13 @@ fn clap_error_should_emit_json(err: &clap::Error) -> bool {
         ErrorKind::DisplayHelp
             | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
             | ErrorKind::DisplayVersion
+            // bd-ymbjw: an unknown/removed subcommand has no handler and no
+            // command-specific error schema. It must keep clap's native
+            // usage-error contract (human stderr, exit code 2) even when
+            // `--json` appears elsewhere on the command line, so removed or
+            // mistyped subcommands fail at CLI parsing instead of being
+            // converted into a fabricated command error envelope.
+            | ErrorKind::InvalidSubcommand
     ) {
         return false;
     }
