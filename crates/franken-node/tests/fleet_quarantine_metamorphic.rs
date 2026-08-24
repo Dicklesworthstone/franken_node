@@ -92,6 +92,54 @@ fn activated_fleet_manager() -> (FleetControlManager, TempDir) {
     (manager, temp_dir)
 }
 
+// bd-rjc2m.7: release is fail-closed behind a k-of-n quorum of signed
+// positive validations (RollbackUnverified otherwise). Provision the policy
+// and validators the same way fleet_quarantine_e2e_full does.
+fn configure_release_validation_policy(
+    mgr: &mut FleetControlManager,
+    quorum: usize,
+) -> Vec<ed25519_dalek::SigningKey> {
+    let validators = vec![
+        ed25519_dalek::SigningKey::from_bytes(&[91_u8; 32]),
+        ed25519_dalek::SigningKey::from_bytes(&[92_u8; 32]),
+        ed25519_dalek::SigningKey::from_bytes(&[93_u8; 32]),
+    ];
+    let verifying_keys = validators
+        .iter()
+        .map(ed25519_dalek::SigningKey::verifying_key)
+        .collect::<Vec<_>>();
+    mgr.configure_release_validation(
+        ReleaseValidationPolicy::from_validator_keys(&verifying_keys).with_quorum(quorum),
+    );
+    validators
+}
+
+fn submit_resolved_validation(
+    mgr: &mut FleetControlManager,
+    validator: &ed25519_dalek::SigningKey,
+    incident_id: &str,
+    extension_id: &str,
+    zone_id: &str,
+) {
+    let control_epoch = incident_id
+        .strip_prefix("inc-fleet-op-")
+        .and_then(|raw| raw.split_once('-'))
+        .and_then(|(epoch, _)| u64::from_str_radix(epoch, 16).ok())
+        .unwrap_or(0);
+    let validation = sign_positive_validation(
+        validator,
+        incident_id,
+        extension_id,
+        "quarantine",
+        zone_id,
+        control_epoch,
+        true,
+        &chrono::Utc::now().to_rfc3339(),
+    );
+    mgr.submit_release_validation(validation)
+        .expect("positive release validation should be accepted");
+}
+
 /// Generate test scope with controlled randomness
 fn generate_test_scope(rng: &mut rand::rngs::StdRng, zone_suffix: u32) -> QuarantineScope {
     QuarantineScope {
@@ -125,6 +173,7 @@ mod mr_fleet_quarantine_inversion {
         };
         let extension_id = "ext-metamorphic-baseline";
         let identity = admin_identity();
+        let validators = configure_release_validation_policy(&mut mgr, 1);
 
         // Capture initial state
         let initial_state = FleetState::capture_from_manager(&mgr);
@@ -150,6 +199,15 @@ mod mr_fleet_quarantine_inversion {
 
         // Extract incident ID from quarantine result
         let incident_id = format!("inc-{}", quarantine_result.operation_id);
+
+        // bd-rjc2m.7: satisfy the fail-closed release-validation quorum.
+        submit_resolved_validation(
+            &mut mgr,
+            &validators[0],
+            &incident_id,
+            extension_id,
+            &scope.zone_id,
+        );
 
         // Apply release decision (inverse operation)
         let _release_result = mgr
@@ -210,8 +268,20 @@ mod mr_fleet_quarantine_inversion {
                 Err(_) => continue, // Skip invalid inputs (empty zone ID, etc.)
             };
 
-            // Apply release decision (inverse)
+            // bd-rjc2m.7: satisfy the fail-closed release-validation quorum
+            // before the inverse operation; without it every release would be
+            // refused and the property would hold vacuously.
+            let validators = configure_release_validation_policy(&mut mgr, 1);
             let incident_id = format!("inc-{}", quarantine_result.operation_id);
+            submit_resolved_validation(
+                &mut mgr,
+                &validators[0],
+                &incident_id,
+                &extension_id,
+                &scope.zone_id,
+            );
+
+            // Apply release decision (inverse)
             if mgr
                 .release(&incident_id, &identity, &test_trace("release-prop"))
                 .is_err()
@@ -255,6 +325,7 @@ mod mr_fleet_quarantine_inversion {
             reason: "multi-cycle test".to_string(),
         };
         let identity = admin_identity();
+        let validators = configure_release_validation_policy(&mut mgr, 1);
 
         let initial_state = FleetState::capture_from_manager(&mgr);
 
@@ -274,6 +345,16 @@ mod mr_fleet_quarantine_inversion {
 
             // Release
             let incident_id = format!("inc-{}", quarantine_result.operation_id);
+            // bd-rjc2m.7: satisfy the fail-closed release-validation quorum;
+            // rotate validators so each cycle's incident gets a distinct
+            // fresh attestation.
+            submit_resolved_validation(
+                &mut mgr,
+                &validators[(cycle - 1) as usize % validators.len()],
+                &incident_id,
+                &extension_id,
+                &scope.zone_id,
+            );
             mgr.release(
                 &incident_id,
                 &identity,

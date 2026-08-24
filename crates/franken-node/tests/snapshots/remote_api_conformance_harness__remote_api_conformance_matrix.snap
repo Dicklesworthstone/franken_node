@@ -1,0 +1,118 @@
+---
+source: crates/franken-node/tests/remote_api_conformance_harness.rs
+expression: all_results
+---
+[
+  {
+    "test_name": "contract_conformance_api_contract_v2.0.0_api_contract_v2.0.0",
+    "client_version": "api-contract-v2.0.0",
+    "server_version": "api-contract-v2.0.0",
+    "endpoint_compatibility": 1.0,
+    "auth_method_compatibility": 1.0,
+    "error_format_compatibility": 1.0,
+    "feature_compatibility": 1.0,
+    "overall_score": 1.0,
+    "compatibility_issues": []
+  },
+  {
+    "test_name": "contract_conformance_api_contract_v2.0.0_api_contract_v2.1.0",
+    "client_version": "api-contract-v2.0.0",
+    "server_version": "api-contract-v2.1.0",
+    "endpoint_compatibility": 1.0,
+    "auth_method_compatibility": 0.5,
+    "error_format_compatibility": 1.0,
+    "feature_compatibility": 1.0,
+    "overall_score": 0.875,
+    "compatibility_issues": []
+  },
+  {
+    "test_name": "contract_conformance_api_contract_v2.0.0_api_contract_v2.2.0",
+    "client_version": "api-contract-v2.0.0",
+    "server_version": "api-contract-v2.2.0",
+    "endpoint_compatibility": 1.0,
+    "auth_method_compatibility": 0.3333333333333333,
+    "error_format_compatibility": 0.5,
+    "feature_compatibility": 1.0,
+    "overall_score": 0.7083333333333333,
+    "compatibility_issues": [
+      "Authentication method mismatch",
+      "Error format incompatibility"
+    ]
+  },
+  {
+    "test_name": "contract_conformance_api_contract_v2.1.0_api_contract_v2.0.0",
+    "client_version": "api-contract-v2.1.0",
+    "server_version": "api-contract-v2.0.0",
+    "endpoint_compatibility": 0.0,
+    "auth_method_compatibility": 0.5,
+    "error_format_compatibility": 1.0,
+    "feature_compatibility": 0.3333333333333333,
+    "overall_score": 0.4583333333333333,
+    "compatibility_issues": [
+      "Endpoint compatibility below threshold",
+      "Feature set mismatch"
+    ]
+  },
+  {
+    "test_name": "contract_conformance_api_contract_v2.1.0_api_contract_v2.1.0",
+    "client_version": "api-contract-v2.1.0",
+    "server_version": "api-contract-v2.1.0",
+    "endpoint_compatibility": 1.0,
+    "auth_method_compatibility": 1.0,
+    "error_format_compatibility": 1.0,
+    "feature_compatibility": 1.0,
+    "overall_score": 1.0,
+    "compatibility_issues": []
+  },
+  {
+    "test_name": "contract_conformance_api_contract_v2.1.0_api_contract_v2.2.0",
+    "client_version": "api-contract-v2.1.0",
+    "server_version": "api-contract-v2.2.0",
+    "endpoint_compatibility": 1.0,
+    "auth_method_compatibility": 0.6666666666666666,
+    "error_format_compatibility": 0.8,
+    "feature_compatibility": 1.0,
+    "overall_score": 0.8666666666666667,
+    "compatibility_issues": []
+  },
+  {
+    "test_name": "contract_conformance_api_contract_v2.2.0_api_contract_v2.0.0",
+    "client_version": "api-contract-v2.2.0",
+    "server_version": "api-contract-v2.0.0",
+    "endpoint_compatibility": 0.0,
+    "auth_method_compatibility": 0.3333333333333333,
+    "error_format_compatibility": 0.5,
+    "feature_compatibility": 0.25,
+    "overall_score": 0.2708333333333333,
+    "compatibility_issues": [
+      "Endpoint compatibility below threshold",
+      "Authentication method mismatch",
+      "Error format incompatibility",
+      "Feature set mismatch"
+    ]
+  },
+  {
+    "test_name": "contract_conformance_api_contract_v2.2.0_api_contract_v2.1.0",
+    "client_version": "api-contract-v2.2.0",
+    "server_version": "api-contract-v2.1.0",
+    "endpoint_compatibility": 0.75,
+    "auth_method_compatibility": 0.6666666666666666,
+    "error_format_compatibility": 0.8,
+    "feature_compatibility": 0.75,
+    "overall_score": 0.7416666666666667,
+    "compatibility_issues": [
+      "Endpoint compatibility below threshold"
+    ]
+  },
+  {
+    "test_name": "contract_conformance_api_contract_v2.2.0_api_contract_v2.2.0",
+    "client_version": "api-contract-v2.2.0",
+    "server_version": "api-contract-v2.2.0",
+    "endpoint_compatibility": 1.0,
+    "auth_method_compatibility": 1.0,
+    "error_format_compatibility": 1.0,
+    "feature_compatibility": 1.0,
+    "overall_score": 1.0,
+    "compatibility_issues": []
+  }
+]

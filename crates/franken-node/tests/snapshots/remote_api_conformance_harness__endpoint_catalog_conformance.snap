@@ -1,0 +1,704 @@
+---
+source: crates/franken-node/tests/remote_api_conformance_harness.rs
+expression: catalog_analysis
+---
+{
+  "contract_endpoints": 3,
+  "contract_spec": {
+    "authentication_methods": [
+      "basic_session",
+      "hmac_session"
+    ],
+    "endpoints": {
+      "create_session": {
+        "auth_required": false,
+        "deprecated_in_version": null,
+        "introduced_in_version": "api-contract-v2.1.0",
+        "method": "POST",
+        "path": "/api/v2/session/create",
+        "rate_limit": {
+          "burst_capacity": 10,
+          "requests_per_minute": 60
+        },
+        "request_schema": {
+          "content_type": "application/json",
+          "field_types": {
+            "auth_method": "string",
+            "hmac_transcript": "string",
+            "session_id": "string",
+            "trace_id": "string"
+          },
+          "optional_fields": [
+            "hmac_transcript"
+          ],
+          "required_fields": [
+            "auth_method",
+            "session_id",
+            "trace_id"
+          ]
+        },
+        "response_schema": {
+          "error_content_type": "application/json",
+          "status_codes": [
+            200,
+            400,
+            409,
+            429,
+            500
+          ],
+          "success_content_type": "application/json",
+          "success_fields": [
+            "expires_at",
+            "sequence_number",
+            "session_token",
+            "trace_id"
+          ]
+        }
+      },
+      "issue_capability": {
+        "auth_required": true,
+        "deprecated_in_version": null,
+        "introduced_in_version": "api-contract-v2.1.0",
+        "method": "POST",
+        "path": "/api/v2/remote/capability/issue",
+        "rate_limit": {
+          "burst_capacity": 20,
+          "requests_per_minute": 120
+        },
+        "request_schema": {
+          "content_type": "application/json",
+          "field_types": {
+            "expires_at": "integer",
+            "issuer": "string",
+            "scope": "object",
+            "single_use": "boolean",
+            "token_id": "string",
+            "trace_id": "string"
+          },
+          "optional_fields": [
+            "expires_at",
+            "single_use"
+          ],
+          "required_fields": [
+            "issuer",
+            "scope",
+            "token_id",
+            "trace_id"
+          ]
+        },
+        "response_schema": {
+          "error_content_type": "application/json",
+          "status_codes": [
+            200,
+            400,
+            401,
+            403,
+            429,
+            500
+          ],
+          "success_content_type": "application/json",
+          "success_fields": [
+            "capability_token",
+            "issued_at",
+            "signature",
+            "trace_id"
+          ]
+        }
+      },
+      "verify_capability": {
+        "auth_required": true,
+        "deprecated_in_version": null,
+        "introduced_in_version": "api-contract-v2.1.0",
+        "method": "POST",
+        "path": "/api/v2/remote/capability/verify",
+        "rate_limit": {
+          "burst_capacity": 100,
+          "requests_per_minute": 600
+        },
+        "request_schema": {
+          "content_type": "application/json",
+          "field_types": {
+            "capability_token": "string",
+            "endpoint": "string",
+            "operation": "string",
+            "trace_id": "string"
+          },
+          "optional_fields": [],
+          "required_fields": [
+            "capability_token",
+            "endpoint",
+            "operation",
+            "trace_id"
+          ]
+        },
+        "response_schema": {
+          "error_content_type": "application/json",
+          "status_codes": [
+            200,
+            400,
+            401,
+            403,
+            429,
+            500
+          ],
+          "success_content_type": "application/json",
+          "success_fields": [
+            "audit_event",
+            "authorized",
+            "trace_id"
+          ]
+        }
+      }
+    },
+    "error_format": {
+      "details_field": "error_details",
+      "error_code_field": "error",
+      "message_field": "message",
+      "timestamp_field": "timestamp",
+      "trace_id_field": "trace_id",
+      "version": "error-schema-v1.0.0"
+    },
+    "remote_cap_features": [
+      "audit_trails",
+      "basic_issuing",
+      "scope_validation"
+    ],
+    "version": "api-contract-v2.1.0"
+  },
+  "endpoint_catalog": [
+    {
+      "auth_method": "ApiKey",
+      "conformance_status": "pass",
+      "group": "operator",
+      "lifecycle": "stable",
+      "method": "GET",
+      "path": "/v1/operator/status",
+      "policy_hook": "operator.status.read",
+      "status_codes": [
+        200,
+        400,
+        401,
+        403,
+        404,
+        429,
+        500,
+        503
+      ],
+      "trace_propagation": true
+    },
+    {
+      "auth_method": "None",
+      "conformance_status": "pass",
+      "group": "operator",
+      "lifecycle": "stable",
+      "method": "GET",
+      "path": "/v1/operator/health",
+      "policy_hook": "operator.health.read",
+      "status_codes": [
+        200,
+        400,
+        401,
+        403,
+        404,
+        429,
+        500,
+        503
+      ],
+      "trace_propagation": true
+    },
+    {
+      "auth_method": "ApiKey",
+      "conformance_status": "pass",
+      "group": "operator",
+      "lifecycle": "stable",
+      "method": "GET",
+      "path": "/v1/operator/config",
+      "policy_hook": "operator.config.read",
+      "status_codes": [
+        200,
+        400,
+        401,
+        403,
+        404,
+        429,
+        500,
+        503
+      ],
+      "trace_propagation": true
+    },
+    {
+      "auth_method": "ApiKey",
+      "conformance_status": "pass",
+      "group": "operator",
+      "lifecycle": "stable",
+      "method": "GET",
+      "path": "/v1/operator/rollout",
+      "policy_hook": "operator.rollout.read",
+      "status_codes": [
+        200,
+        400,
+        401,
+        403,
+        404,
+        429,
+        500,
+        503
+      ],
+      "trace_propagation": true
+    },
+    {
+      "auth_method": "BearerToken",
+      "conformance_status": "pass",
+      "group": "operator",
+      "lifecycle": "stable",
+      "method": "GET",
+      "path": "/api/v1/proofs/queue/status",
+      "policy_hook": "proof_pipeline.queue.status",
+      "status_codes": [
+        200,
+        400,
+        401,
+        403,
+        404,
+        429,
+        500,
+        503
+      ],
+      "trace_propagation": true
+    },
+    {
+      "auth_method": "BearerToken",
+      "conformance_status": "pass",
+      "group": "operator",
+      "lifecycle": "stable",
+      "method": "POST",
+      "path": "/api/v1/proofs/workers/restart",
+      "policy_hook": "proof_pipeline.workers.restart",
+      "status_codes": [
+        200,
+        201,
+        400,
+        401,
+        403,
+        409,
+        429,
+        500,
+        503
+      ],
+      "trace_propagation": true
+    },
+    {
+      "auth_method": "BearerToken",
+      "conformance_status": "pass",
+      "group": "operator",
+      "lifecycle": "stable",
+      "method": "POST",
+      "path": "/api/v1/control/safe-mode/enter",
+      "policy_hook": "safe_mode.enter",
+      "status_codes": [
+        200,
+        201,
+        400,
+        401,
+        403,
+        409,
+        429,
+        500,
+        503
+      ],
+      "trace_propagation": true
+    },
+    {
+      "auth_method": "BearerToken",
+      "conformance_status": "pass",
+      "group": "operator",
+      "lifecycle": "stable",
+      "method": "GET",
+      "path": "/api/v1/control/safe-mode/status",
+      "policy_hook": "safe_mode.status",
+      "status_codes": [
+        200,
+        400,
+        401,
+        403,
+        404,
+        429,
+        500,
+        503
+      ],
+      "trace_propagation": true
+    },
+    {
+      "auth_method": "BearerToken",
+      "conformance_status": "pass",
+      "group": "operator",
+      "lifecycle": "stable",
+      "method": "POST",
+      "path": "/api/v1/control/safe-mode/exit",
+      "policy_hook": "safe_mode.exit",
+      "status_codes": [
+        200,
+        201,
+        400,
+        401,
+        403,
+        409,
+        429,
+        500,
+        503
+      ],
+      "trace_propagation": true
+    },
+    {
+      "auth_method": "BearerToken",
+      "conformance_status": "pass",
+      "group": "verifier",
+      "lifecycle": "stable",
+      "method": "POST",
+      "path": "/v1/verifier/conformance",
+      "policy_hook": "verifier.conformance.trigger",
+      "status_codes": [
+        200,
+        201,
+        400,
+        401,
+        403,
+        409,
+        429,
+        500,
+        503
+      ],
+      "trace_propagation": true
+    },
+    {
+      "auth_method": "BearerToken",
+      "conformance_status": "pass",
+      "group": "verifier",
+      "lifecycle": "stable",
+      "method": "GET",
+      "path": "/v1/verifier/evidence/{check_id}",
+      "policy_hook": "verifier.evidence.read",
+      "status_codes": [
+        200,
+        400,
+        401,
+        403,
+        404,
+        429,
+        500,
+        503
+      ],
+      "trace_propagation": true
+    },
+    {
+      "auth_method": "BearerToken",
+      "conformance_status": "pass",
+      "group": "verifier",
+      "lifecycle": "stable",
+      "method": "GET",
+      "path": "/v1/verifier/audit-log",
+      "policy_hook": "verifier.audit.read",
+      "status_codes": [
+        200,
+        400,
+        401,
+        403,
+        404,
+        429,
+        500,
+        503
+      ],
+      "trace_propagation": true
+    },
+    {
+      "auth_method": "BearerToken",
+      "conformance_status": "pass",
+      "group": "verifier",
+      "lifecycle": "stable",
+      "method": "GET",
+      "path": "/api/v1/atc/verifier/metrics/{metric_id}",
+      "policy_hook": "atc.verifier.metrics.read",
+      "status_codes": [
+        200,
+        400,
+        401,
+        403,
+        404,
+        429,
+        500,
+        503
+      ],
+      "trace_propagation": true
+    },
+    {
+      "auth_method": "BearerToken",
+      "conformance_status": "pass",
+      "group": "verifier",
+      "lifecycle": "stable",
+      "method": "POST",
+      "path": "/api/v1/atc/verifier/computations/{computation_id}/verify",
+      "policy_hook": "atc.verifier.computations.verify",
+      "status_codes": [
+        200,
+        201,
+        400,
+        401,
+        403,
+        409,
+        429,
+        500,
+        503
+      ],
+      "trace_propagation": true
+    },
+    {
+      "auth_method": "BearerToken",
+      "conformance_status": "pass",
+      "group": "verifier",
+      "lifecycle": "stable",
+      "method": "GET",
+      "path": "/api/v1/atc/verifier/computations/{computation_id}/proof-chain",
+      "policy_hook": "atc.verifier.proof_chain.read",
+      "status_codes": [
+        200,
+        400,
+        401,
+        403,
+        404,
+        429,
+        500,
+        503
+      ],
+      "trace_propagation": true
+    },
+    {
+      "auth_method": "BearerToken",
+      "conformance_status": "pass",
+      "group": "verifier",
+      "lifecycle": "stable",
+      "method": "GET",
+      "path": "/api/v1/atc/verifier/reports/{computation_id}",
+      "policy_hook": "atc.verifier.reports.read",
+      "status_codes": [
+        200,
+        400,
+        401,
+        403,
+        404,
+        429,
+        500,
+        503
+      ],
+      "trace_propagation": true
+    },
+    {
+      "auth_method": "BearerToken",
+      "conformance_status": "pass",
+      "group": "fleet_control",
+      "lifecycle": "stable",
+      "method": "GET",
+      "path": "/v1/fleet/leases",
+      "policy_hook": "fleet.leases.read",
+      "status_codes": [
+        200,
+        400,
+        401,
+        403,
+        404,
+        429,
+        500,
+        503
+      ],
+      "trace_propagation": true
+    },
+    {
+      "auth_method": "BearerToken",
+      "conformance_status": "pass",
+      "group": "fleet_control",
+      "lifecycle": "stable",
+      "method": "POST",
+      "path": "/v1/fleet/leases",
+      "policy_hook": "fleet.leases.acquire",
+      "status_codes": [
+        200,
+        201,
+        400,
+        401,
+        403,
+        409,
+        429,
+        500,
+        503
+      ],
+      "trace_propagation": true
+    },
+    {
+      "auth_method": "BearerToken",
+      "conformance_status": "pass",
+      "group": "fleet_control",
+      "lifecycle": "stable",
+      "method": "DELETE",
+      "path": "/v1/fleet/leases/{lease_id}",
+      "policy_hook": "fleet.leases.release",
+      "status_codes": [
+        200,
+        204,
+        400,
+        401,
+        403,
+        404,
+        429,
+        500,
+        503
+      ],
+      "trace_propagation": true
+    },
+    {
+      "auth_method": "MtlsClientCert",
+      "conformance_status": "pass",
+      "group": "fleet_control",
+      "lifecycle": "stable",
+      "method": "POST",
+      "path": "/v1/fleet/fence",
+      "policy_hook": "fleet.fence.execute",
+      "status_codes": [
+        200,
+        201,
+        400,
+        401,
+        403,
+        409,
+        429,
+        500,
+        503
+      ],
+      "trace_propagation": true
+    },
+    {
+      "auth_method": "MtlsClientCert",
+      "conformance_status": "pass",
+      "group": "fleet_control",
+      "lifecycle": "experimental",
+      "method": "POST",
+      "path": "/v1/fleet/coordinate",
+      "policy_hook": "fleet.coordinate.execute",
+      "status_codes": [
+        200,
+        201,
+        400,
+        401,
+        403,
+        409,
+        429,
+        500,
+        503
+      ],
+      "trace_propagation": true
+    },
+    {
+      "auth_method": "MtlsClientCert",
+      "conformance_status": "pass",
+      "group": "fleet_control",
+      "lifecycle": "stable",
+      "method": "POST",
+      "path": "/v1/fleet/quarantine",
+      "policy_hook": "fleet.quarantine.execute",
+      "status_codes": [
+        200,
+        201,
+        400,
+        401,
+        403,
+        409,
+        429,
+        500,
+        503
+      ],
+      "trace_propagation": true
+    },
+    {
+      "auth_method": "MtlsClientCert",
+      "conformance_status": "pass",
+      "group": "fleet_control",
+      "lifecycle": "stable",
+      "method": "POST",
+      "path": "/v1/fleet/revoke",
+      "policy_hook": "fleet.revoke.execute",
+      "status_codes": [
+        200,
+        201,
+        400,
+        401,
+        403,
+        409,
+        429,
+        500,
+        503
+      ],
+      "trace_propagation": true
+    },
+    {
+      "auth_method": "MtlsClientCert",
+      "conformance_status": "pass",
+      "group": "fleet_control",
+      "lifecycle": "stable",
+      "method": "POST",
+      "path": "/v1/fleet/release",
+      "policy_hook": "fleet.release.execute",
+      "status_codes": [
+        200,
+        201,
+        400,
+        401,
+        403,
+        409,
+        429,
+        500,
+        503
+      ],
+      "trace_propagation": true
+    },
+    {
+      "auth_method": "BearerToken",
+      "conformance_status": "pass",
+      "group": "fleet_control",
+      "lifecycle": "stable",
+      "method": "GET",
+      "path": "/v1/fleet/status",
+      "policy_hook": "fleet.status.read",
+      "status_codes": [
+        200,
+        400,
+        401,
+        403,
+        404,
+        429,
+        500,
+        503
+      ],
+      "trace_propagation": true
+    },
+    {
+      "auth_method": "MtlsClientCert",
+      "conformance_status": "pass",
+      "group": "fleet_control",
+      "lifecycle": "stable",
+      "method": "POST",
+      "path": "/v1/fleet/reconcile",
+      "policy_hook": "fleet.reconcile.execute",
+      "status_codes": [
+        200,
+        201,
+        400,
+        401,
+        403,
+        409,
+        429,
+        500,
+        503
+      ],
+      "trace_propagation": true
+    }
+  ],
+  "total_endpoints": 26
+}

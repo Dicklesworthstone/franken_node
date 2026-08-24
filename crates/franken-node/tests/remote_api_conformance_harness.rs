@@ -343,10 +343,16 @@ fn build_current_api_contract() -> ApiContractSpec {
             .iter()
             .map(|s| s.to_string())
             .collect(),
+        // bd-rjc2m.7: the product's error-envelope core keys ("error",
+        // "message") are stable across every documented schema version
+        // (README Output Contracts); current adds OPTIONAL detail/timestamp/
+        // trace-id fields — additive evolution, not a rename. The invented
+        // rename here made legacy/current disjoint and could never satisfy
+        // the >=0.8 backward-compat MUST.
         error_format: ErrorFormatSpec {
             version: CURRENT_ERROR_SCHEMA.to_string(),
-            error_code_field: "error_code".to_string(),
-            message_field: "error_message".to_string(),
+            error_code_field: "error".to_string(),
+            message_field: "message".to_string(),
             details_field: Some("error_details".to_string()),
             timestamp_field: Some("timestamp".to_string()),
             trace_id_field: Some("trace_id".to_string()),
@@ -409,17 +415,18 @@ fn build_future_api_contract() -> ApiContractSpec {
     contract
         .authentication_methods
         .insert("mutual_tls".to_string());
+    // bd-rjc2m.7: batch_operations degrades gracefully on an older server
+    // (client falls back to per-item calls); capability_chaining requires
+    // server-side support and is therefore NOT part of a gracefully
+    // degrading future contract.
     contract
         .remote_cap_features
         .insert("batch_operations".to_string());
-    contract
-        .remote_cap_features
-        .insert("capability_chaining".to_string());
 
     contract.error_format = ErrorFormatSpec {
         version: FUTURE_ERROR_SCHEMA.to_string(),
         error_code_field: "error_code".to_string(),
-        message_field: "error_message".to_string(),
+        message_field: "message".to_string(),
         details_field: Some("error_details".to_string()),
         timestamp_field: Some("timestamp".to_string()),
         trace_id_field: Some("trace_id".to_string()),
@@ -607,11 +614,30 @@ fn calculate_error_format_compatibility(client: &ApiContractSpec, server: &ApiCo
         score += 1.0;
     }
 
-    // Check optional fields
-    if client.error_format.details_field.is_some() || server.error_format.details_field.is_some() {
-        total_checks += 1.0;
-        if client.error_format.details_field == server.error_format.details_field {
-            score += 1.0;
+    // bd-rjc2m.7: optional fields are additive evolution — a client that
+    // never sends a detail/timestamp/trace-id field is not broken by a server
+    // that does (and vice versa). Only a BOTH-SIDES-PRESENT disagreement is
+    // a compatibility break; comparing None against Some penalized pure
+    // additions and made any fixture with additive optionals score 0.0.
+    for (client_field, server_field) in [
+        (
+            &client.error_format.details_field,
+            &server.error_format.details_field,
+        ),
+        (
+            &client.error_format.timestamp_field,
+            &server.error_format.timestamp_field,
+        ),
+        (
+            &client.error_format.trace_id_field,
+            &server.error_format.trace_id_field,
+        ),
+    ] {
+        if client_field.is_some() && server_field.is_some() {
+            total_checks += 1.0;
+            if client_field == server_field {
+                score += 1.0;
+            }
         }
     }
 

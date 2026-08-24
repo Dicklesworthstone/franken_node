@@ -1,0 +1,44 @@
+---
+source: crates/franken-node/tests/remote_api_conformance_harness.rs
+expression: error_results
+---
+[
+  {
+    "error_format": {
+      "error": "INVALID_REQUEST",
+      "message": "The request is invalid"
+    },
+    "error_version": "error-schema-v0.9.0",
+    "scenario": "legacy_error"
+  },
+  {
+    "error_format": {
+      "error_code": "INVALID_REQUEST",
+      "error_details": {
+        "field": "token_id",
+        "issue": "missing_required_field"
+      },
+      "error_message": "The request is invalid",
+      "timestamp": "2026-04-20T12:00:00Z",
+      "trace_id": "trace-error-001"
+    },
+    "error_version": "error-schema-v1.0.0",
+    "scenario": "current_error"
+  },
+  {
+    "error_format": {
+      "correlation_id": "corr-12345",
+      "error_code": "INVALID_REQUEST",
+      "error_details": {
+        "field": "token_id",
+        "issue": "missing_required_field",
+        "suggestion": "Include a valid token_id field"
+      },
+      "error_message": "The request is invalid",
+      "timestamp": "2026-04-20T12:00:00Z",
+      "trace_id": "trace-error-001"
+    },
+    "error_version": "error-schema-v1.1.0",
+    "scenario": "future_error"
+  }
+]

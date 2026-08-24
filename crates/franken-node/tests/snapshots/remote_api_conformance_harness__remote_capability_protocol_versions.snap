@@ -1,0 +1,57 @@
+---
+source: crates/franken-node/tests/remote_api_conformance_harness.rs
+expression: protocol_results
+---
+[
+  {
+    "capability_issued": true,
+    "features": [
+      "basic_issuing"
+    ],
+    "protocol_version": "remote-cap-v0.9.0",
+    "scope": {
+      "endpoint_prefixes": [
+        "https://conformance-test.example.com/"
+      ],
+      "operations": [
+        "network_egress"
+      ]
+    },
+    "version_name": "legacy"
+  },
+  {
+    "capability_issued": true,
+    "features": [
+      "basic_issuing",
+      "scope_validation"
+    ],
+    "protocol_version": "remote-cap-v1.0.0",
+    "scope": {
+      "endpoint_prefixes": [
+        "https://conformance-test.example.com/"
+      ],
+      "operations": [
+        "network_egress"
+      ]
+    },
+    "version_name": "current"
+  },
+  {
+    "capability_issued": true,
+    "features": [
+      "basic_issuing",
+      "scope_validation",
+      "batch_operations"
+    ],
+    "protocol_version": "remote-cap-v1.1.0",
+    "scope": {
+      "endpoint_prefixes": [
+        "https://conformance-test.example.com/"
+      ],
+      "operations": [
+        "network_egress"
+      ]
+    },
+    "version_name": "future"
+  }
+]

@@ -1,0 +1,41 @@
+---
+source: crates/franken-node/tests/remote_api_conformance_harness.rs
+expression: session_results
+---
+[
+  {
+    "auth_method": "basic_session",
+    "max_sessions": 16,
+    "scenario": "legacy_basic",
+    "session_timeout_ms": 3600000,
+    "session_version": 1,
+    "supported_features": [
+      "basic_auth"
+    ]
+  },
+  {
+    "auth_method": "hmac_session",
+    "max_sessions": 16,
+    "scenario": "current_hmac",
+    "session_timeout_ms": 3600000,
+    "session_version": 2,
+    "supported_features": [
+      "basic_auth",
+      "hmac_auth",
+      "replay_protection"
+    ]
+  },
+  {
+    "auth_method": "mutual_tls",
+    "max_sessions": 16,
+    "scenario": "future_mtls",
+    "session_timeout_ms": 3600000,
+    "session_version": 3,
+    "supported_features": [
+      "basic_auth",
+      "hmac_auth",
+      "replay_protection",
+      "mutual_tls"
+    ]
+  }
+]
