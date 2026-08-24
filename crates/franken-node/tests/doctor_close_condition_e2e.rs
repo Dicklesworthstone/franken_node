@@ -2026,3 +2026,53 @@ fn doctor_json_fails_closed_on_invalid_profile() {
         "--json must not append a second human Error line after the JSON report: {stderr}"
     );
 }
+
+#[test]
+fn doctor_close_condition_failure_names_missing_input_and_fix_command_bd_9zrqh() {
+    // bd-9zrqh: in a workspace with no oracle artifacts the command must fail
+    // closed while surfacing the underlying cause (which input artifact is
+    // missing) plus the actionable fix_command, instead of one opaque
+    // "failed generating close-condition receipt" line.
+    let root = TempDir::new().expect("fixture root");
+    let signing_key_path = root.path().join(".franken-node/keys/receipt-signing.key");
+    fs::write(&signing_key_path, hex::encode([7u8; 32])).expect("signing key seed");
+
+    let output = Command::cargo_bin("franken-node")
+        .expect("franken-node binary")
+        .current_dir(root.path())
+        .args([
+            "doctor",
+            "close-condition",
+            "--json",
+            "--receipt-signing-key",
+            signing_key_path.display().to_string().as_str(),
+        ])
+        .output()
+        .expect("doctor close-condition should run");
+
+    assert!(
+        !output.status.success(),
+        "missing oracle inputs must fail closed: stdout={}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let report: Value =
+        serde_json::from_slice(&output.stdout).expect("error report must be JSON");
+    assert_eq!(report["ok"], false);
+    let error = report["error"].as_str().expect("error string");
+    assert!(
+        error.contains("failed generating close-condition receipt"),
+        "outer context must survive: {error}"
+    );
+    assert!(
+        error.contains("failed evaluating release-policy linkage"),
+        "cause chain must name the failing oracle dimension: {error}"
+    );
+    assert!(
+        error.contains("No such file or directory"),
+        "cause chain must include the underlying OS error: {error}"
+    );
+    assert!(
+        error.contains("fix_command=") && error.contains("artifacts/oracle/l1_product_verdict.json"),
+        "actionable guidance must point at the required input layout: {error}"
+    );
+}
