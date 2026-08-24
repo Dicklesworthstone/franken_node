@@ -790,7 +790,10 @@ fn doctor_close_condition_prints_verdict_without_signing_key() {
         "unexpected stdout: {stdout}"
     );
     assert!(
-        !root.path().join("artifacts/oracle/close_condition_receipt.json").exists(),
+        !root
+            .path()
+            .join("artifacts/oracle/close_condition_receipt.json")
+            .exists(),
         "verdict-only diagnostics must not write a receipt artifact"
     );
 }
@@ -2055,8 +2058,7 @@ fn doctor_close_condition_failure_names_missing_input_and_fix_command_bd_9zrqh()
         "missing oracle inputs must fail closed: stdout={}",
         String::from_utf8_lossy(&output.stdout)
     );
-    let report: Value =
-        serde_json::from_slice(&output.stdout).expect("error report must be JSON");
+    let report: Value = serde_json::from_slice(&output.stdout).expect("error report must be JSON");
     assert_eq!(report["ok"], false);
     let error = report["error"].as_str().expect("error string");
     assert!(
@@ -2072,7 +2074,8 @@ fn doctor_close_condition_failure_names_missing_input_and_fix_command_bd_9zrqh()
         "cause chain must include the underlying OS error: {error}"
     );
     assert!(
-        error.contains("fix_command=") && error.contains("artifacts/oracle/l1_product_verdict.json"),
+        error.contains("fix_command=")
+            && error.contains("artifacts/oracle/l1_product_verdict.json"),
         "actionable guidance must point at the required input layout: {error}"
     );
 }
