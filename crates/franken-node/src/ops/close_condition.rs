@@ -700,11 +700,16 @@ pub struct CloseConditionReceipt {
     pub tamper_evidence: TamperEvidence,
 }
 
-pub fn generate_close_condition_receipt(
+/// Evaluate the dual-oracle close condition WITHOUT producing a signature.
+///
+/// This is the verdict-only diagnostic path (`doctor close-condition` with no
+/// signing key configured): the operator gets the composite oracle color and
+/// every dimension finding without provisioning Ed25519 material. Receipt
+/// export remains the only path that requires signing.
+pub fn evaluate_close_condition_core(
     root: &Path,
-    signing_material: &CloseConditionSigningMaterial<'_>,
     release_run_url: Option<&str>,
-) -> Result<CloseConditionReceipt> {
+) -> Result<CloseConditionReceiptCore> {
     let l1_product_oracle = evaluate_l1_product_oracle(root);
     let l2_engine_boundary_oracle = evaluate_l2_engine_boundary_oracle(root)?;
     let release_policy_linkage = evaluate_release_policy_linkage(root, release_run_url)
@@ -727,7 +732,7 @@ pub fn generate_close_condition_receipt(
         OracleColor::Red
     };
 
-    let core = CloseConditionReceiptCore {
+    Ok(CloseConditionReceiptCore {
         schema_version: "oracle-close-condition-receipt/v1".to_string(),
         receipt_path: CLOSE_CONDITION_RECEIPT_PATH.to_string(),
         generated_at_utc: generated_at_utc(),
@@ -737,8 +742,15 @@ pub fn generate_close_condition_receipt(
         release_policy_linkage,
         composite_verdict,
         failing_dimensions,
-    };
+    })
+}
 
+pub fn generate_close_condition_receipt(
+    root: &Path,
+    signing_material: &CloseConditionSigningMaterial<'_>,
+    release_run_url: Option<&str>,
+) -> Result<CloseConditionReceipt> {
+    let core = evaluate_close_condition_core(root, release_run_url)?;
     let canonical = canonical_json_value(&serde_json::to_value(&core)?);
     let signed_preimage = close_condition_receipt_signed_preimage(&canonical);
     let payload_sha256 = hex::encode(Sha256::digest(&signed_preimage));

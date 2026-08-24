@@ -763,6 +763,38 @@ fn doctor_close_condition_requires_trusted_signing_key() {
     );
 }
 
+/// bd-9zrqh: the dual-oracle VERDICT is a diagnostic and must not require
+/// Ed25519 material. Without a signing key and without `--json` (no receipt
+/// export requested), close-condition prints the verdict-only report,
+/// succeeds, and writes no receipt artifact.
+#[test]
+fn doctor_close_condition_prints_verdict_without_signing_key() {
+    let root = fixture_root();
+    let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let output = command
+        .current_dir(root.path())
+        .env_remove("FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH")
+        .args(["doctor", "close-condition"])
+        .output()
+        .expect("doctor close-condition should run");
+
+    assert!(
+        output.status.success(),
+        "verdict-only diagnostics must not require a signing key: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("verdict-only diagnostics"),
+        "unexpected stdout: {stdout}"
+    );
+    assert!(
+        !root.path().join("artifacts/oracle/close_condition_receipt.json").exists(),
+        "verdict-only diagnostics must not write a receipt artifact"
+    );
+}
+
 #[test]
 fn doctor_close_condition_fails_closed_when_release_policy_ci_output_is_missing() {
     let root = fixture_root_with_ci_gate(false);

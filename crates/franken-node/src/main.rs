@@ -6682,8 +6682,53 @@ fn handle_doctor_close_condition(
 ) -> Result<()> {
     let root = std::env::current_dir()
         .context("failed resolving current working directory for close-condition receipt")?;
-    let signing_material = load_receipt_signing_material(args.receipt_signing_key.as_deref())?
-        .ok_or_else(missing_receipt_signing_key_error)?;
+    let signing_material = load_receipt_signing_material(args.receipt_signing_key.as_deref())?;
+    let Some(signing_material) = signing_material else {
+        // bd-9zrqh: no signing key configured. `--json` means receipt export
+        // (the documented contract), which genuinely requires Ed25519
+        // material, so that request fails with the actionable key guidance.
+        // Plain human diagnostics only need the dual-oracle verdict, so they
+        // run unsigned and never write a receipt.
+        if args.json || parent_json {
+            return Err(missing_receipt_signing_key_error().into());
+        }
+        let core = ops::close_condition::evaluate_close_condition_core(
+            &root,
+            args.release_run_url.as_deref(),
+        )
+        .map_err(|err| {
+            ActionableError::new(
+                format!("failed evaluating close-condition verdict: {err:#}"),
+                "run from a franken_node checkout whose working directory contains artifacts/oracle/l1_product_verdict.json and the corpus results referenced by docs/DUAL_ORACLE_CLOSE_CONDITION.md",
+            )
+        })?;
+        println!(
+            "doctor close-condition: verdict={:?} (verdict-only diagnostics; no signing key configured, no receipt written)",
+            core.composite_verdict
+        );
+        let l1 = &core.l1_product_oracle;
+        println!(
+            "  L1 pass_rate={:.2}% passed={}/{} (declared per-test status; child_process deny is not recategorized as pass)",
+            l1.pass_rate_pct, l1.passed_test_cases, l1.total_test_cases
+        );
+        if let Some(node_canonical) = l1.node_canonical_observation_passes {
+            println!(
+                "  node_canonical_observation_passes={node_canonical} (franken matching Node, both exit 0; does not change declared pass_rate)"
+            );
+        }
+        if !l1.node_canonical_unscored_fail_ids.is_empty() {
+            println!(
+                "  node_canonical_unscored_fail_ids={} (declared fail; franken matches Node; child_process abort is not listed)",
+                l1.node_canonical_unscored_fail_ids.join(",")
+            );
+        }
+        if let Some(aborts) = l1.child_process_native_eval_aborts {
+            println!(
+                "  child_process_native_eval_aborts={aborts} (remain fail; not recategorized as pass)"
+            );
+        }
+        return Ok(());
+    };
     let close_condition_signing_material = ops::close_condition::CloseConditionSigningMaterial {
         signing_key: &signing_material.signing_key,
         key_source: signing_material.source,
