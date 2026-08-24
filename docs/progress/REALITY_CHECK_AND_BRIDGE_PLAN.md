@@ -501,3 +501,17 @@ All three block `bd-28sz` (the ≥95% gate). No other NO_BEAD vision gaps found 
 * The release-freshness decision stands as documented-honesty (`README.md:286-294` warns Latest lags main). If the owner wants a real channel fix, cut v0.2.0 after `bd-c6qum` clears and corpus ≥95% — do not cut earlier just to shrink the number.
 * `net::0005`/`net::0024` are reference-leg disagreement (franken matches Node); resolution is spec adjudication inside `bd-sul35`, not engine work.
 * Keep the orchestrator cadence (4 min) and do not recategorize `child_process` native-eval aborts as pass — both reaffirmed by the Aug-21 follow-up and unchanged today.
+
+### Live binary probes (2026-08-23/24, fresh release build)
+
+Build: `cargo build --release -p frankenengine-node` → `/data/tmp/cargo-target/release/franken-node` (`CARGO_TARGET_DIR` is set workspace-wide; there is no in-repo `target/`). Binary `--version` → `franken-node 0.1.0`.
+
+| Probe | Result |
+|---|---|
+| `init --profile balanced --json --out-dir .` | exit 0; state dirs + keys bootstrapped |
+| `run ./hello.js --policy balanced` (auto) | **exit 1, fails closed**: resolves external `node`, refuses it ("cannot enforce franken-node's capability contract"). Correct refusal — but auto does **not** discover a sibling-built engine |
+| same + `FRANKEN_NODE_ENGINE_BINARY_PATH=<target>/frankenctl` | **exit 0**, stdout `hello-from-engine`, run receipt written (`runtime=franken_engine exit_code=0 violations=0`) |
+| `run … --runtime franken-engine` without engine bin configured | fail-closed: "requested runtime was not found; fix --engine-bin / FRANKEN_NODE_ENGINE_BINARY_PATH / [engine].binary_path" |
+| `doctor close-condition --json` | **bug filed** `bd-9zrqh`: unconditional signing-key demand; its own fix_command then fails with "failed generating close-condition receipt" and empty stderr |
+
+Interpretation: `w0fc6.7`'s closure is accurate for its tested scope (harness provisions the engine authority); the clean-room operator path still requires an explicit engine-binary handoff that README's "First safe workload (current source)" does not mention. That gap belongs to open `bd-34d5` (install → first safe production), not a reopen.
