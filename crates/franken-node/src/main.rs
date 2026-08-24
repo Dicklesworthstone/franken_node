@@ -19204,15 +19204,21 @@ fn handle_incident_bundle_command(args: &cli::IncidentBundleArgs) -> Result<()> 
             Ok(path) => path,
             Err(err) => return incident_fail("incident.bundle", args.json, err),
         };
-    let evidence = match read_incident_evidence_package(&evidence_path, Some(&args.id))
-        .with_context(|| {
-            format!(
-                "failed reading authoritative incident evidence {}",
-                evidence_path.display()
-            )
-        }) {
+    // bd-rjc2m: surface the full cause chain — the bare context line hid
+    // which fail-closed validation refused the package (schema, id mismatch,
+    // empty events/refs, provenance escape, …).
+    let evidence = match read_incident_evidence_package(&evidence_path, Some(&args.id)) {
         Ok(evidence) => evidence,
-        Err(err) => return incident_fail("incident.bundle", args.json, err),
+        Err(err) => {
+            return incident_fail(
+                "incident.bundle",
+                args.json,
+                format!(
+                    "failed reading authoritative incident evidence {}: {err:#}",
+                    evidence_path.display()
+                ),
+            )
+        }
     };
     let mut bundle = match generate_replay_bundle_from_evidence(&evidence).with_context(|| {
         format!(
@@ -19332,10 +19338,22 @@ fn incident_replay_cli_summary(
     bundle_path: &Path,
     trusted_key_ids: &[String],
 ) -> Result<IncidentReplayCliSummary> {
+    // bd-rjc2m: carry the full cause chain (e.g. "bundle integrity mismatch")
+    // so fail-closed replays name the refusal instead of a bare context line.
     let bundle = read_bundle_from_path_with_trusted_keys(bundle_path, trusted_key_ids)
-        .with_context(|| format!("failed reading replay bundle {}", bundle_path.display()))?;
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "failed reading replay bundle {}: {err:#}",
+                bundle_path.display()
+            )
+        })?;
     let outcome = replay_bundle_with_trusted_keys(&bundle, trusted_key_ids)
-        .with_context(|| format!("failed replaying bundle {}", bundle_path.display()))?;
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "failed replaying bundle {}: {err:#}",
+                bundle_path.display()
+            )
+        })?;
 
     Ok(IncidentReplayCliSummary {
         incident_id: outcome.incident_id,

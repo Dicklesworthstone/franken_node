@@ -21,6 +21,11 @@ fn setup_test_workspace() -> TempDir {
 fn remotecap_cmd() -> Command {
     let mut cmd = Command::new(BINARY_UNDER_TEST);
     cmd.arg("remotecap");
+    // bd-rjc2m: issuance requires an explicit operator signing key
+    // (FRANKEN_NODE_REMOTECAP_KEY, fail-closed); supply the suite's fixture
+    // key for every invocation, matching the inline env used by the tests
+    // that already pass.
+    cmd.env("FRANKEN_NODE_REMOTECAP_KEY", "remotecap-cli-e2e-key");
     cmd
 }
 
@@ -895,9 +900,10 @@ fn remotecap_help_shows_usage() {
     let result = cmd.assert().success();
     let output = result.get_output();
     let stdout = std::str::from_utf8(&output.stdout).expect("Invalid UTF-8");
-
+    // bd-rjc2m: about text was rewritten by the honesty relabel
+    // (d30ba8122) to describe actual local behavior.
     assert!(
-        stdout.contains("Remote capability token issuance"),
+        stdout.contains("Ed25519 capability tokens"),
         "Expected help description"
     );
     assert!(

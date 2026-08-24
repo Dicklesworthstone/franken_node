@@ -1,5 +1,5 @@
 error: unexpected argument 'INC-CF-001.fnbundle' found
 
-Usage: franken-node incident replay [OPTIONS] --bundle <BUNDLE>
+Usage: franken-node incident replay [OPTIONS]
 
 For more information, try '--help'.

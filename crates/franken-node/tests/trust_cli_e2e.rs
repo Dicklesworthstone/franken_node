@@ -11,8 +11,9 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use frankenengine_node::config::{Config, Profile};
 use frankenengine_node::control_plane::fleet_transport::{
-    FileFleetTransport, FleetAction, FleetTargetKind, FleetTransport, NodeHealth, NodeStatus,
+    FleetAction, FleetTargetKind, FleetTransport, NodeHealth, NodeStatus,
 };
+use frankenengine_node::control_plane::fleet_transport_durable::DurableFleetTransport;
 use frankenengine_node::security::remote_cap::{CapabilityProvider, RemoteOperation, RemoteScope};
 use frankenengine_node::supply_chain::trust_card::{
     SnapshotSourceContext, TrustCardListFilter, TrustCardMutation, TrustCardRegistry,
@@ -851,8 +852,12 @@ fn assert_trust_card_cli_json_golden(file_name: &str, value: &Value) {
     assert_trust_card_cli_golden(file_name, &actual);
 }
 
-fn shared_fleet_transport(shared_state_dir: &Path) -> FileFleetTransport {
-    let mut transport = FileFleetTransport::new(shared_state_dir);
+// bd-rjc2m: the CLI fleet path is the durable frankensqlite store since the
+// durable-transport switch; the shared-state helper must read the same store
+// or quarantine actions never appear to reach it.
+fn shared_fleet_transport(shared_state_dir: &Path) -> DurableFleetTransport {
+    let mut transport = DurableFleetTransport::new(shared_state_dir.to_path_buf())
+        .expect("open durable fleet transport");
     transport.initialize().expect("initialize fleet transport");
     transport
 }
@@ -2604,6 +2609,10 @@ fn trust_scan_uses_project_configured_registry_signing_key() {
     let workspace = scannable_trust_workspace();
     let mut custom_config = Config::for_profile(Profile::Balanced);
     custom_config.trust.registry_signing_key = Some(BASE64_STANDARD.encode([0xA5_u8; 32]));
+    // bd-rjc2m: Config::resolve is fail-closed on security.authorized_api_keys
+    // too; the generated TOML must carry both boundaries.
+    custom_config.security.authorized_api_keys =
+        ["test-api-key".to_string()].into_iter().collect();
     fs::write(
         workspace.path().join("franken_node.toml"),
         custom_config.to_toml().expect("serialize config"),
