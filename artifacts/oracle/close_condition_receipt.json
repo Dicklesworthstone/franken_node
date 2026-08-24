@@ -1,22 +1,25 @@
 {
   "schema_version": "oracle-close-condition-receipt/v1",
   "receipt_path": "artifacts/oracle/close_condition_receipt.json",
-  "generated_at_utc": "2026-07-12T03:00:10.299537012+00:00",
+  "generated_at_utc": "2026-08-24T13:13:13.887824987+00:00",
   "L1_product_oracle": {
     "verdict": "RED",
     "source_path": "artifacts/13/compatibility_corpus_results.json",
     "corpus_version": "compat-corpus-v2-7b86e9d21758c6d06b8ae0cbc4d79c1b",
     "corpus_provenance": "lockstep-oracle-run",
     "total_test_cases": 560,
-    "passed_test_cases": 484,
-    "failed_test_cases": 76,
+    "passed_test_cases": 382,
+    "failed_test_cases": 178,
     "errored_test_cases": 0,
     "skipped_test_cases": 0,
-    "pass_rate_pct": 86.43,
+    "pass_rate_pct": 68.21,
     "required_pass_rate_pct": 95.0,
     "blocking_findings": [
-      "compatibility corpus pass rate 86.43% is below required 95.00%"
-    ]
+      "compatibility corpus pass rate 68.21% is below required 95.00%",
+      "public corpus_pass observed_pct 86.43 does not match L1 corpus pass rate 68.21"
+    ],
+    "node_canonical_observation_passes": 382,
+    "child_process_native_eval_aborts": 30
   },
   "L2_engine_boundary_oracle": {
     "verdict": "GREEN",
@@ -62,7 +65,7 @@
         "id": "SPLIT-NO-INTERNALS",
         "status": "GREEN",
         "details": {
-          "files_scanned": 791,
+          "files_scanned": 799,
           "violations": []
         }
       },
@@ -110,16 +113,16 @@
     "algorithm": "SHA-256",
     "canonicalization": "lexicographically-sorted-json-keys/no-whitespace",
     "hash_scope": "close_condition_receipt_v1_len_prefixed_core",
-    "sha256": "sha256:aea886b48ba80936d74aa455b76ee007fc565d543a8252ebca828651748a27be",
+    "sha256": "sha256:fc3bd430248ac9605d6303b208161acb2d45e4a7d501f14a4f8381e002881efc",
     "signature": {
       "algorithm": "ed25519",
-      "public_key_hex": "6ee62ae3642137517d14f3437e3bb94c7dedb661aad53de8d5cfc46d406a1ce0",
-      "key_id": "40c56529b7788c31",
-      "key_source": "cli",
+      "public_key_hex": "97196fa9a84d1ec773b6ffdbe2e5c03c70365b5f206fc416808b00f28bf61350",
+      "key_id": "a7d9577340a3410d",
+      "key_source": "default",
       "signing_identity": "oracle-close-condition",
       "trust_scope": "oracle_close_condition",
-      "signed_payload_sha256": "aea886b48ba80936d74aa455b76ee007fc565d543a8252ebca828651748a27be",
-      "signature_hex": "2aff3edefd125d2efa290f272465af387fb766c1d9c9678429a2f09ba6f55423ac73a93365179722b4e1efcaf34eae09338874990e59ed68321fb3af5ce8dc01"
+      "signed_payload_sha256": "fc3bd430248ac9605d6303b208161acb2d45e4a7d501f14a4f8381e002881efc",
+      "signature_hex": "c950b8b7fdd721aa99034c6b0feb1cf1eabf93bdf3bd5ada35e1776c0d52c0f5a44597a244d972cd729d5196e4b9ee48d01f5c54e6f83a865ead30ef96fbf903"
     }
   }
 }
