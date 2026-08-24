@@ -3,6 +3,10 @@ source: crates/franken-node/tests/fleet_cli_e2e.rs
 expression: "&matrix[\"status_all\"]"
 ---
 {
+  "schema_version": "franken-node/fleet-status-cli/v1",
+  "transport": "file",
+  "live_control_plane": false,
+  "activated_source": "file_transport_not_live",
   "status": {
     "zone_id": "all",
     "active_quarantines": 1,

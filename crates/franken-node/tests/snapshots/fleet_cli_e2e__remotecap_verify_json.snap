@@ -3,6 +3,8 @@ source: crates/franken-node/tests/fleet_cli_e2e.rs
 expression: "&matrix[\"remotecap_verify\"]"
 ---
 {
+  "schema_version": "franken-node/remotecap-verify-cli/v1",
+  "command": "remotecap.verify",
   "valid": true,
   "authorized": true,
   "token_id": "[token-id]",
