@@ -1770,11 +1770,17 @@ fn trust_quarantine_propagates_through_fleet_transport_pipeline() {
     let env = [("FRANKEN_NODE_FLEET_STATE_DIR", fleet_state_env)];
     let mut transport = shared_fleet_transport(&shared_fleet_dir);
     let quarantine_target = "npm:@acme/auth-guard";
+    // bd-rjc2m: keep the fixture registry signing key — Config::resolve is
+    // fail-closed on trust.registry_signing_key, and this overwrite replaced
+    // the seeded workspace config without it.
     fs::write(
         workspace.path().join("franken_node.toml"),
-        "profile = \"balanced\"\n\n[security]\ndecision_receipt_signing_key_path = \"keys/receipt-signing.key\"\n",
+        format!(
+            "profile = \"balanced\"\n\n[trust]\nregistry_signing_key = \"{}\"\n\n[security]\nauthorized_api_keys = [\"test-api-key\"]\ndecision_receipt_signing_key_path = \"keys/receipt-signing.key\"\n",
+            BASE64_STANDARD.encode(FIXTURE_REGISTRY_KEY)
+        ),
     )
-    .expect("configure fleet signing key");
+    .expect("configure fleet + registry signing keys");
     write_receipt_signing_key(&workspace.path().join("keys/receipt-signing.key"));
 
     for node_id in ["node-a", "node-b", "node-c"] {
@@ -1954,7 +1960,10 @@ fn trust_quarantine_propagates_through_fleet_transport_pipeline() {
 #[test]
 fn trust_revoke_receipt_export_fails_before_mutation_when_key_missing() {
     let workspace = seeded_fixture_trust_workspace();
-    let receipt_out = workspace.path().join("artifacts/revoke-receipts.json");
+    // bd-rjc2m: receipt exports reject absolute paths (validate_safe_path);
+    // the helper runs the CLI with cwd = workspace, so pass relative paths.
+    let receipt_out_rel = "artifacts/revoke-receipts.json";
+    let receipt_out = workspace.path().join(receipt_out_rel);
     let output = run_cli_in_workspace(
         workspace.path(),
         &[
@@ -1962,7 +1971,7 @@ fn trust_revoke_receipt_export_fails_before_mutation_when_key_missing() {
             "revoke",
             "npm:@acme/auth-guard",
             "--receipt-out",
-            receipt_out.to_str().expect("utf8 receipt path"),
+            receipt_out_rel,
         ],
     );
     assert!(
@@ -1993,8 +2002,12 @@ fn trust_revoke_receipt_export_succeeds_with_cli_signing_key() {
     let workspace = seeded_fixture_trust_workspace();
     let key_path = workspace.path().join("keys/receipt-signing.key");
     write_receipt_signing_key(&key_path);
-    let receipt_out = workspace.path().join("artifacts/revoke-receipts.json");
-    let receipt_summary_out = workspace.path().join("artifacts/revoke-receipts.md");
+    // bd-rjc2m: validate_safe_path rejects absolute export paths; the helper
+    // runs the CLI with cwd = workspace, so pass relative paths.
+    let receipt_out_rel = "artifacts/revoke-receipts.json";
+    let receipt_summary_out_rel = "artifacts/revoke-receipts.md";
+    let receipt_out = workspace.path().join(receipt_out_rel);
+    let receipt_summary_out = workspace.path().join(receipt_summary_out_rel);
 
     let output = run_cli_in_workspace(
         workspace.path(),
@@ -2005,9 +2018,9 @@ fn trust_revoke_receipt_export_succeeds_with_cli_signing_key() {
             "--receipt-signing-key",
             key_path.to_str().expect("utf8 key path"),
             "--receipt-out",
-            receipt_out.to_str().expect("utf8 receipt path"),
+            receipt_out_rel,
             "--receipt-summary-out",
-            receipt_summary_out.to_str().expect("utf8 summary path"),
+            receipt_summary_out_rel,
         ],
     );
     assert!(
@@ -2035,7 +2048,10 @@ fn trust_revoke_receipt_export_succeeds_with_cli_signing_key() {
 #[test]
 fn trust_quarantine_receipt_export_fails_before_mutation_when_key_missing() {
     let workspace = seeded_fixture_trust_workspace();
-    let receipt_out = workspace.path().join("artifacts/quarantine-receipts.json");
+    // bd-rjc2m: validate_safe_path rejects absolute export paths; pass a
+    // workspace-relative path (the helper runs the CLI with cwd = workspace).
+    let receipt_out_rel = "artifacts/quarantine-receipts.json";
+    let receipt_out = workspace.path().join(receipt_out_rel);
     let output = run_cli_in_workspace(
         workspace.path(),
         &[
@@ -2044,7 +2060,7 @@ fn trust_quarantine_receipt_export_fails_before_mutation_when_key_missing() {
             "--artifact",
             "sha256:deadbeef",
             "--receipt-out",
-            receipt_out.to_str().expect("utf8 receipt path"),
+            receipt_out_rel,
         ],
     );
     assert!(
@@ -2097,7 +2113,10 @@ fn trust_quarantine_receipt_export_uses_env_signing_key() {
     let workspace = seeded_fixture_trust_workspace();
     let key_path = workspace.path().join("keys/receipt-signing.key");
     write_receipt_signing_key(&key_path);
-    let receipt_out = workspace.path().join("artifacts/quarantine-receipts.json");
+    // bd-rjc2m: validate_safe_path rejects absolute export paths; pass a
+    // workspace-relative path (the helper runs the CLI with cwd = workspace).
+    let receipt_out_rel = "artifacts/quarantine-receipts.json";
+    let receipt_out = workspace.path().join(receipt_out_rel);
 
     let output = run_cli_in_workspace_with_env(
         workspace.path(),
@@ -2107,7 +2126,7 @@ fn trust_quarantine_receipt_export_uses_env_signing_key() {
             "--artifact",
             "sha256:deadbeef",
             "--receipt-out",
-            receipt_out.to_str().expect("utf8 receipt path"),
+            receipt_out_rel,
         ],
         &[(
             "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
@@ -2135,12 +2154,20 @@ fn trust_quarantine_receipt_export_uses_config_signing_key() {
     let workspace = seeded_fixture_trust_workspace();
     fs::write(
         workspace.path().join("franken_node.toml"),
-        "profile = \"balanced\"\n\n[security]\ndecision_receipt_signing_key_path = \"keys/receipt-signing.key\"\n",
+        // bd-rjc2m: keep the fixture registry signing key (fail-closed
+        // trust.registry_signing_key) alongside the receipt-signing config.
+        format!(
+            "profile = \"balanced\"\n\n[trust]\nregistry_signing_key = \"{}\"\n\n[security]\nauthorized_api_keys = [\"test-api-key\"]\ndecision_receipt_signing_key_path = \"keys/receipt-signing.key\"\n",
+            BASE64_STANDARD.encode(FIXTURE_REGISTRY_KEY)
+        ),
     )
     .expect("rewrite config");
     let key_path = workspace.path().join("keys/receipt-signing.key");
     write_receipt_signing_key(&key_path);
-    let receipt_out = workspace.path().join("artifacts/quarantine-receipts.json");
+    // bd-rjc2m: validate_safe_path rejects absolute export paths; pass a
+    // workspace-relative path (the helper runs the CLI with cwd = workspace).
+    let receipt_out_rel = "artifacts/quarantine-receipts.json";
+    let receipt_out = workspace.path().join(receipt_out_rel);
 
     let output = run_cli_in_workspace(
         workspace.path(),
@@ -2150,7 +2177,7 @@ fn trust_quarantine_receipt_export_uses_config_signing_key() {
             "--artifact",
             "sha256:deadbeef",
             "--receipt-out",
-            receipt_out.to_str().expect("utf8 receipt path"),
+            receipt_out_rel,
         ],
     );
     assert!(

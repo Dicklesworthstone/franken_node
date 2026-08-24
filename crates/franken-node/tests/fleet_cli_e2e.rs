@@ -1209,42 +1209,53 @@ fn fleet_reconcile_waits_for_delayed_node_convergence_receipt() {
         .expect("write delayed stale node");
 
     let updater_state_dir = fleet_state_dir.clone();
+    // bd-c6qum: the agent keeps ONE connection for its whole life and treats
+    // transient fsqlite contention as retryable, mirroring a real per-process
+    // fleet agent; under parallel test load the previous 25ms open-per-poll
+    // loop both generated conflicts and missed the CLI's convergence window.
     let updater = std::thread::spawn(move || {
-        let deadline = test_clock_now() + Duration::from_secs(5);
+        // fsqlite connections are !Send; own the transport inside the thread.
+        let mut delayed_agent = seed_durable_transport(&updater_state_dir);
+        let deadline = test_clock_now() + Duration::from_secs(8);
         loop {
-            let mut delayed_transport = seed_durable_transport(&updater_state_dir);
-            let actions = delayed_transport.list_actions().expect("list actions");
-            if actions.iter().any(|record| {
-                record
-                    .action_id
-                    .starts_with("fleet-op-reconcile-republish-")
-                    && matches!(
-                        &record.action,
-                        FleetAction::Quarantine {
-                            incident_id,
-                            zone_id,
-                            ..
-                        } if incident_id == "inc-delayed-reconcile" && zone_id == "zone-delayed"
-                    )
-            }) {
-                std::thread::sleep(delay);
-                delayed_transport
-                    .upsert_node_status(&NodeStatus {
-                        zone_id: "zone-delayed".to_string(),
-                        node_id: "node-delayed".to_string(),
-                        last_seen: Utc::now(),
-                        quarantine_version: 9,
-                        health: NodeHealth::Healthy,
-                    })
-                    .expect("write delayed node convergence");
-                return;
+            match delayed_agent.list_actions() {
+                Ok(actions) => {
+                    if actions.iter().any(|record| {
+                        record
+                            .action_id
+                            .starts_with("fleet-op-reconcile-republish-")
+                            && matches!(
+                                &record.action,
+                                FleetAction::Quarantine {
+                                    incident_id,
+                                    zone_id,
+                                    ..
+                                } if incident_id == "inc-delayed-reconcile"
+                                    && zone_id == "zone-delayed"
+                            )
+                    }) {
+                        std::thread::sleep(delay);
+                        delayed_agent
+                            .upsert_node_status(&NodeStatus {
+                                zone_id: "zone-delayed".to_string(),
+                                node_id: "node-delayed".to_string(),
+                                last_seen: Utc::now(),
+                                quarantine_version: 9,
+                                health: NodeHealth::Healthy,
+                            })
+                            .expect("write delayed node convergence");
+                        return;
+                    }
+                }
+                Err(_) if test_clock_now() < deadline => {}
+                Err(err) => panic!("agent list actions kept failing: {err}"),
             }
 
             assert!(
                 test_clock_now() < deadline,
                 "fleet reconcile never republished delayed quarantine"
             );
-            std::thread::sleep(Duration::from_millis(25));
+            std::thread::sleep(Duration::from_millis(50));
         }
     });
 
@@ -1253,7 +1264,7 @@ fn fleet_reconcile_waits_for_delayed_node_convergence_receipt() {
         &["fleet", "reconcile", "--json"],
         &fleet_state_dir,
         &[
-            ("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", "3"),
+            ("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", "6"),
             (
                 "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
                 signing_key_path.as_str(),
