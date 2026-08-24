@@ -3136,6 +3136,14 @@ fn fallback_runtime_policy_error(
 }
 
 /// Returns the list of candidate paths to search for the franken-engine binary.
+///
+/// Candidates are build-adjacent and machine-neutral: the engine executable that
+/// the sibling `franken_engine` workspace produces (`frankenctl`, plus the
+/// legacy `franken-engine` name) is looked up next to the running product
+/// binary, so a split checkout built into one shared target directory resolves
+/// without configuration. Nothing here trusts an ambient PATH entry by name:
+/// bare command names fall through to the OS resolver only as a last resort,
+/// preserving the fail-closed posture for profile-governed `run`.
 fn default_engine_binary_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
@@ -3144,6 +3152,8 @@ fn default_engine_binary_candidates() -> Vec<PathBuf> {
     {
         candidates.push(exe_dir.join("franken-engine"));
         candidates.push(exe_dir.join("franken-engine.exe"));
+        candidates.push(exe_dir.join("frankenctl"));
+        candidates.push(exe_dir.join("frankenctl.exe"));
     }
 
     candidates.push(PathBuf::from("franken-engine"));
@@ -10390,6 +10400,21 @@ mod tests {
                     | "/dp/franken_engine/target/release/franken-engine"
             )
         }));
+    }
+
+    #[test]
+    fn default_candidates_include_exe_adjacent_frankenctl() {
+        // The sibling franken_engine workspace names its produced executable
+        // `frankenctl`. When both products build into one shared target dir it
+        // sits beside the franken-node binary, so resolution must consider it
+        // (build-adjacent, machine-neutral — same contract as `franken-engine`).
+        let candidates = default_engine_binary_candidates();
+        let exe_dir = std::env::current_exe()
+            .expect("current exe")
+            .parent()
+            .expect("exe parent")
+            .to_path_buf();
+        assert!(candidates.contains(&exe_dir.join("frankenctl")));
     }
 
     #[test]
