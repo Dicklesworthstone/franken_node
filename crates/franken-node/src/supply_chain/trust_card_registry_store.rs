@@ -345,7 +345,9 @@ mod tests {
                     .first()
                     .and_then(|row| row.values().first().cloned())
                     .map(|value| match value {
-                        SqliteValue::Text(text) => text,
+                        // bd-o776s: SqliteValue::Text carries SmallText; both
+                        // arms must produce the String the caller asserts on.
+                        SqliteValue::Text(text) => text.to_string(),
                         other => format!("{other:?}"),
                     })
                     .unwrap_or_default())

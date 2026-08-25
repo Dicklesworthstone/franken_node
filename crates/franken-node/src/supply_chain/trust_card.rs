@@ -3269,6 +3269,10 @@ mod tests {
     use crate::security::trajectory_gaming::{CamouflageHint, CamouflageKind};
     use base64::Engine as _;
     use std::collections::BTreeMap;
+    // bd-o776s: persistence-round-trip tests construct real temp files; the
+    // inline lane needs these in scope exactly like the integration suites.
+    use tempfile::{NamedTempFile, TempDir};
+    use std::io::Write as _;
 
     type TestResult = Result<(), String>;
 
