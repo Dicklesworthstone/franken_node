@@ -4010,7 +4010,9 @@ fn fleet_reconcile_with_complete_transport_verification() {
     log.phase("assert_republish");
     // CRITICAL: Transport state verification BETWEEN phases
     log.transport_snapshot(&transport, "after_fail_closed_reconcile");
-    let post_reconcile_actions = transport.list_actions().expect("list post-reconcile actions");
+    let post_reconcile_actions = transport
+        .list_actions()
+        .expect("list post-reconcile actions");
     let post_reconcile_nodes = transport
         .list_node_statuses()
         .expect("list post-reconcile nodes");

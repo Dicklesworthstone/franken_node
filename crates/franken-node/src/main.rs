@@ -8919,7 +8919,9 @@ fn ops_config_audit_report(args: &OpsConfigAuditArgs) -> Result<OpsConfigAuditRe
             profile: profile_override,
         },
     )
-    .map_err(|err| anyhow::anyhow!("failed resolving configuration for ops config-audit: {err:#}"))?;
+    .map_err(|err| {
+        anyhow::anyhow!("failed resolving configuration for ops config-audit: {err:#}")
+    })?;
     let active_state = build_ops_config_audit_state(&resolved.config);
     let dependency_impact =
         build_ops_config_dependency_impact(args.config.as_deref(), &resolved, &active_state)?;
@@ -19217,7 +19219,7 @@ fn handle_incident_bundle_command(args: &cli::IncidentBundleArgs) -> Result<()> 
                     "failed reading authoritative incident evidence {}: {err:#}",
                     evidence_path.display()
                 ),
-            )
+            );
         }
     };
     let mut bundle = match generate_replay_bundle_from_evidence(&evidence).with_context(|| {
@@ -19340,20 +19342,16 @@ fn incident_replay_cli_summary(
 ) -> Result<IncidentReplayCliSummary> {
     // bd-rjc2m: carry the full cause chain (e.g. "bundle integrity mismatch")
     // so fail-closed replays name the refusal instead of a bare context line.
-    let bundle = read_bundle_from_path_with_trusted_keys(bundle_path, trusted_key_ids)
-        .map_err(|err| {
+    let bundle =
+        read_bundle_from_path_with_trusted_keys(bundle_path, trusted_key_ids).map_err(|err| {
             anyhow::anyhow!(
                 "failed reading replay bundle {}: {err:#}",
                 bundle_path.display()
             )
         })?;
-    let outcome = replay_bundle_with_trusted_keys(&bundle, trusted_key_ids)
-        .map_err(|err| {
-            anyhow::anyhow!(
-                "failed replaying bundle {}: {err:#}",
-                bundle_path.display()
-            )
-        })?;
+    let outcome = replay_bundle_with_trusted_keys(&bundle, trusted_key_ids).map_err(|err| {
+        anyhow::anyhow!("failed replaying bundle {}: {err:#}", bundle_path.display())
+    })?;
 
     Ok(IncidentReplayCliSummary {
         incident_id: outcome.incident_id,

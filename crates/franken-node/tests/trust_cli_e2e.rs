@@ -2611,8 +2611,7 @@ fn trust_scan_uses_project_configured_registry_signing_key() {
     custom_config.trust.registry_signing_key = Some(BASE64_STANDARD.encode([0xA5_u8; 32]));
     // bd-rjc2m: Config::resolve is fail-closed on security.authorized_api_keys
     // too; the generated TOML must carry both boundaries.
-    custom_config.security.authorized_api_keys =
-        ["test-api-key".to_string()].into_iter().collect();
+    custom_config.security.authorized_api_keys = ["test-api-key".to_string()].into_iter().collect();
     fs::write(
         workspace.path().join("franken_node.toml"),
         custom_config.to_toml().expect("serialize config"),
