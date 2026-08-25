@@ -337,7 +337,14 @@ impl DurableEvidenceSink {
             let entry_json = std::str::from_utf8(payload)
                 .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?
                 .trim_end_matches('\r');
-            self.ledger.append_json(entry_json)?;
+            // bd-o776s: carry the offending payload in the error so a failed
+            // commit is diagnosable from the panic/assert site alone.
+            self.ledger.append_json(entry_json).map_err(|err| {
+                io::Error::new(
+                    err.kind(),
+                    format!("evidence sink rejected entry {entry_json:?}: {err}"),
+                )
+            })?;
             self.committed_entries += 1;
         }
         Ok(())
@@ -346,8 +353,14 @@ impl DurableEvidenceSink {
 
 impl Write for DurableEvidenceSink {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        eprintln!(
+            "DBG sink.write len={} newline_in_buf={}",
+            buf.len(),
+            buf.contains(&b'\n')
+        );
         self.buffer.extend_from_slice(buf);
         self.commit_complete_lines()?;
+        eprintln!("DBG after commit: buffered={} committed={}", self.buffer.len(), self.committed_entries);
         Ok(buf.len())
     }
 
@@ -415,7 +428,17 @@ mod tests {
         sink.write_all(b"\n").expect("entry 2 newline");
         assert_eq!(sink.committed_entries(), 2);
 
-        let ledger = DurableEvidenceLedger::open(&state_dir).expect("reopen");
+        eprintln!(
+            "DBG sink_db={:?} sink_ledger_count={:?}",
+            sink.ledger().db_path(),
+            sink.ledger().count()
+        );
+        let ledger = DurableEvidenceLedger::open_default(&state_dir).expect("reopen");
+        eprintln!(
+            "DBG reopen_db={:?} reopen_count={}",
+            ledger.db_path(),
+            ledger.count().unwrap_or(u64::MAX)
+        );
         assert_eq!(ledger.count().expect("count"), 2);
         assert!(ledger.latest_recorded_at().expect("latest").is_some());
     }
@@ -429,7 +452,7 @@ mod tests {
         sink.write_all(br#"{"ok":true}"#).expect("valid entry");
         sink.write_all(b"\n").expect("newline");
         assert_eq!(sink.committed_entries(), 1);
-        let ledger = DurableEvidenceLedger::open(&state_dir).expect("reopen");
+        let ledger = DurableEvidenceLedger::open_default(&state_dir).expect("reopen");
         assert_eq!(ledger.count().expect("count"), 1);
     }
 
@@ -441,7 +464,7 @@ mod tests {
             sink.write_all(br#"{"decision_id":"DEC-003"}"#)
                 .expect("write without newline");
         }
-        let ledger = DurableEvidenceLedger::open(&state_dir).expect("reopen");
+        let ledger = DurableEvidenceLedger::open_default(&state_dir).expect("reopen");
         assert_eq!(ledger.count().expect("count"), 0);
     }
 
@@ -474,8 +497,9 @@ mod tests {
             None,
             "missing database must signal legacy fallback"
         );
-
-        let mut sink = DurableEvidenceSink::open_default(&state_dir).expect("open sink");
+        // bd-rjc2m.7: the sink nests under <project>/.franken-node/state, so
+        // drive it with a project root and count from the resulting state dir.
+        let mut sink = DurableEvidenceSink::open_default(dir.path()).expect("open sink");
         sink.write_all(br#"{"decision_id":"DEC-004"}"#)
             .expect("json");
         sink.write_all(b"\n").expect("newline");

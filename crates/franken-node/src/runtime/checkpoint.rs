@@ -11,7 +11,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::runtime::bounded_mask::{CancellationState, CapabilityContext, MaskError, bounded_mask};
+use crate::runtime::bounded_mask::{
+    CancellationState, CapabilityContext, MaskError, bounded_mask, bounded_mask_with_policy,
+};
 use crate::security::constant_time;
 
 use crate::capacity_defaults::aliases::MAX_EVENTS;
@@ -580,10 +582,23 @@ impl<B: CheckpointBackend> CheckpointContract for CheckpointWriter<B> {
             previous_checkpoint_hash: previous_checkpoint_hash.clone(),
         };
 
-        let inserted = bounded_mask(cx, cancellation, "checkpoint_write", |_cx, _cancel| {
-            self.backend.save(record.clone())
-        })??;
-
+        // bd-o776s: checkpoint_write serializes and SHA-256 hashes the full
+        // state plus arbitrarily large IDs; the 1ms default mask budget is
+        // smaller than that legitimate work even on an idle machine (the
+        // 1MB-ID conformance case measures ~1.3ms under zero load). Keep the
+        // bound real but sized to the operation.
+        let policy = crate::runtime::bounded_mask::MaskPolicy::new(
+            std::time::Duration::from_millis(250),
+            "checkpoint-write",
+        );
+        let inserted = bounded_mask_with_policy(
+            Some(cx),
+            cancellation,
+            "checkpoint_write",
+            &policy,
+            |_cx, _cancel| self.backend.save(record.clone()),
+        )?;
+        let inserted = inserted.into_inner()?;
         let save_event_name = if inserted {
             CHECKPOINT_SAVE
         } else {

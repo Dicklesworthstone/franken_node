@@ -227,16 +227,27 @@ fn structure_aware_snapshot_fuzz_corpus_fails_closed_for_untrusted_loads() {
 
         if should_load {
             assert!(result.is_ok(), "{label} should load, got {result:?}");
+            // bd-rjc2m.7: the signed high-water marker moved from the
+            // `.high-water.json` sidecar into the durable frankensqlite store
+            // (w0fc6.3 authority switch), so a successful load persists the
+            // store rather than the legacy sidecar.
             assert!(
-                trust_card_high_water_path(&path).exists(),
-                "{label} should persist a signed high-water marker after successful load"
+                frankenengine_node::supply_chain::trust_card_registry_store::durable_store_path(
+                    &path
+                )
+                .exists(),
+                "{label} should persist a signed high-water marker in the durable store after successful load"
             );
             continue;
         }
 
         let err = result.unwrap_err();
         assert!(
-            !trust_card_high_water_path(&path).exists(),
+            !trust_card_high_water_path(&path).exists()
+                && !frankenengine_node::supply_chain::trust_card_registry_store::durable_store_path(
+                    &path
+                )
+                .exists(),
             "{label} must not persist high-water state after failed untrusted validation"
         );
         match err {
