@@ -75,13 +75,10 @@ fn legacy_compatibility_pipeline_round_trips_signed_receipts() {
         .unwrap();
     assert!(engine.verify_transition_signature(&transition));
 
+    // bd-rjc2m.39: current API takes (scope, severity); the shim/package and
+    // rationale live in the GateCheckRequest upstream.
     let divergence = engine
-        .issue_divergence_receipt(
-            "tenant-legacy",
-            "shim-edge",
-            "integration divergence coverage",
-            "minor",
-        )
-        .expect("legacy divergence receipt issuance should succeed");
+        .issue_divergence_receipt("tenant-legacy", "minor")
+        .expect("legacy divergence receipt issuance should succeed for scope tenant-legacy");
     assert!(engine.verify_receipt_signature(&divergence));
 }

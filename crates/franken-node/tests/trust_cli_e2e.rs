@@ -702,6 +702,25 @@ console.log(JSON.stringify({{
     .expect("write runtime probe script");
 }
 
+/// Probe for embedded franken-engine dispatch: pure literals only. Governed
+/// runs grant no ambient authority (`require`, `process.env`,
+/// `process.release` all fail lowering under balanced/strict), so the guest
+/// proves execution by echoing the fixture marker and the expected runtime
+/// identity (bd-etgyw).
+fn write_engine_probe_script(workspace: &Path, entrypoint: &str, marker: &str) {
+    fs::write(
+        workspace.join(entrypoint),
+        format!(
+            r#"console.log(JSON.stringify({{
+  marker: "{marker}",
+  runtime: "franken-engine"
+}}));
+"#
+        ),
+    )
+    .expect("write engine probe script");
+}
+
 fn parse_captured_runtime_probe(run_payload: &Value, context: &str) -> Value {
     let stdout = run_payload["dispatch"]["captured_output"]["stdout"]
         .as_str()
@@ -2738,7 +2757,7 @@ fn full_init_to_run_pipeline_empty_registry_warns_on_untracked_dependency_json()
     let started = Instant::now();
     let workspace = tempfile::tempdir().expect("tempdir");
     write_run_package_manifest(workspace.path(), &[("left-pad", "^1.3.0")]);
-    write_runtime_probe_script(workspace.path(), "index.js", "empty-registry");
+    write_engine_probe_script(workspace.path(), "index.js", "empty-registry");
 
     log_pipeline_step(
         1,
@@ -2774,22 +2793,23 @@ fn full_init_to_run_pipeline_empty_registry_warns_on_untracked_dependency_json()
         "run_with_empty_registry",
         "run succeeds and surfaces an untracked dependency warning in JSON",
     );
-    let runtime_path = runtime_path_env(&["node"]);
+    let engine_bin = resolve_binary_path();
+    let engine_bin_arg = engine_bin.display().to_string();
     let run_args = [
         "run",
         "--policy",
         "balanced",
         "--runtime",
-        "node",
+        "franken-engine",
+        "--engine-bin",
+        engine_bin_arg.as_str(),
         "--json",
-        ".",
+        "index.js",
     ];
-    // DE-MOCKED: Use real engine binary detection with real runtime PATH
-    let run_output = run_cli_in_workspace_with_structured_logs_and_env(
-        workspace.path(),
-        &run_args,
-        &[("PATH", runtime_path.as_str())],
-    );
+    // bd-etgyw: profile-governed runs must not launch ambient node (charter:
+    // compatibility is a wedge, never a wrapped runtime), so the pipeline
+    // exercises the embedded franken-engine dispatch instead.
+    let run_output = run_cli_in_workspace_with_structured_logs(workspace.path(), &run_args);
     ensure_command_success(
         "run with empty registry",
         workspace.path(),
@@ -2820,13 +2840,11 @@ fn full_init_to_run_pipeline_empty_registry_warns_on_untracked_dependency_json()
 
     assert2::assert!(preflight_payload["verdict"]["status"] == "passed");
     assert2::assert!(run_payload["success"].as_bool() == Some(true));
-    assert2::assert!(run_payload["dispatch"]["runtime"] == "node");
+    assert2::assert!(run_payload["dispatch"]["runtime"] == "franken_engine");
     let runtime_probe =
         parse_captured_runtime_probe(&run_payload, "empty registry captured output");
     assert2::assert!(runtime_probe["marker"] == "empty-registry");
-    assert2::assert!(runtime_probe["runtime"] == "node");
-    assert2::assert!(runtime_probe["release"] == "node");
-    assert2::assert!(runtime_probe["policy"] == "balanced");
+    assert2::assert!(runtime_probe["runtime"] == "franken-engine");
     assert2::assert!(warnings.len() == 1);
     assert2::assert!(results.len() == 1);
     assert2::assert!(results[0]["status"] == "untracked");
@@ -2851,7 +2869,7 @@ fn full_init_to_run_pipeline_with_trust_data_reports_trusted_extensions_json() {
         &[("@types/node", "^24.9.2")],
     );
     write_pipeline_lockfile(workspace.path());
-    write_runtime_probe_script(workspace.path(), "index.js", "trusted-registry");
+    write_engine_probe_script(workspace.path(), "index.js", "trusted-registry");
 
     log_pipeline_step(
         1,
@@ -2876,22 +2894,22 @@ fn full_init_to_run_pipeline_with_trust_data_reports_trusted_extensions_json() {
         "run_with_scanned_registry",
         "run succeeds and reports trusted per-extension JSON results",
     );
-    let runtime_path = runtime_path_env(&["node"]);
+    let engine_bin = resolve_binary_path();
+    let engine_bin_arg = engine_bin.display().to_string();
     let run_args = [
         "run",
         "--policy",
         "balanced",
         "--runtime",
-        "node",
+        "franken-engine",
+        "--engine-bin",
+        engine_bin_arg.as_str(),
         "--json",
-        ".",
+        "index.js",
     ];
-    // DE-MOCKED: Use real engine binary detection with real runtime PATH
-    let run_output = run_cli_in_workspace_with_env(
-        workspace.path(),
-        &run_args,
-        &[("PATH", runtime_path.as_str())],
-    );
+    // bd-etgyw: embedded franken-engine dispatch — see the empty-registry
+    // pipeline test for the ambient-node rationale.
+    let run_output = run_cli_in_workspace_with_structured_logs(workspace.path(), &run_args);
     ensure_command_success(
         "run with populated trust registry",
         workspace.path(),
@@ -2924,9 +2942,7 @@ fn full_init_to_run_pipeline_with_trust_data_reports_trusted_extensions_json() {
     let runtime_probe =
         parse_captured_runtime_probe(&run_payload, "trusted registry captured output");
     assert2::assert!(runtime_probe["marker"] == "trusted-registry");
-    assert2::assert!(runtime_probe["runtime"] == "node");
-    assert2::assert!(runtime_probe["release"] == "node");
-    assert2::assert!(runtime_probe["policy"] == "balanced");
+    assert2::assert!(runtime_probe["runtime"] == "franken-engine");
     assert2::assert!(results.len() == 3);
     assert2::assert!(results.iter().all(|result| result["status"] == "trusted"));
     assert2::assert!(
