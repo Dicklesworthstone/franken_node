@@ -4054,9 +4054,24 @@ impl EngineDispatcher {
             .and_then(|p| p.parent())
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
+        // bd-o776s: persistence moved to the durable frankensqlite sibling
+        // (trust_card_registry.db) in the w0fc6.3 authority switch; keying the
+        // existence/mtime checks on the legacy .json made this entire
+        // execution-time revalidation silently SKIP for durably persisted
+        // registries — the exact revoked-since-preflight window bd-zqz0q
+        // closes. The loader already prefers the durable store and falls back
+        // to legacy JSON, so only the gate conditions need store awareness.
         let authoritative_registry = project_root.join(".state").join("trust_card_registry.json");
+        let durable_authoritative =
+            frankenengine_node::supply_chain::trust_card_registry_store::durable_store_path(
+                &authoritative_registry,
+            );
+        let has_authoritative_state =
+            durable_authoritative.is_file() || authoritative_registry.is_file();
 
-        if let Some(age) = snapshot_age_secs_for_path(&authoritative_registry, now_secs) {
+        if let Some(age) = snapshot_age_secs_for_path(&durable_authoritative, now_secs)
+            .or_else(|| snapshot_age_secs_for_path(&authoritative_registry, now_secs))
+        {
             let tier = SafetyTier::for_policy_mode(policy_mode);
             if let Err(err) = evaluate_default_freshness(
                 "dispatch-run",
@@ -4073,7 +4088,7 @@ impl EngineDispatcher {
             }
         }
 
-        if authoritative_registry.is_file() && !trusted_extension_ids.is_empty() {
+        if has_authoritative_state && !trusted_extension_ids.is_empty() {
             let mut registry = TrustCardRegistry::load_authoritative_state_from_config(
                 &authoritative_registry,
                 &config.trust,
@@ -9060,7 +9075,12 @@ mod tests {
         // so the app must live two levels below the project root that holds `.state`.
         let project_root = tmp.path();
         let app_path = project_root.join("workspace").join("test-app");
-        fs::create_dir_all(&app_path).expect("create app dir");
+        fs::create_dir_all(app_path.parent().expect("app parent dir"))
+            .expect("create app dir");
+        // bd-o776s: the app must be a directly executable FILE — dispatch_run
+        // resolves directory inputs to an entrypoint (and fails before the
+        // trust revalidation this test targets) when handed a bare directory.
+        write_fake_executable(&app_path);
 
         // Create project structure for trust registry
         let trust_dir = project_root.join(".state");
@@ -9073,7 +9093,13 @@ mod tests {
         let registry_path = trust_dir.join("trust_card_registry.json");
         let mut config = Config::default();
         config.synthesize_init_security_defaults();
-        let now_secs = 1_700_000_000;
+        // bd-o776s: use wall-clock time. With the historical fixed epoch
+        // (Nov 2023) the freshly written registry's mtime made
+        // snapshot_age_secs_for_path report ~900 days, so the revocation
+        // FRESHNESS gate denied execution before the TOCTOU branch could be
+        // exercised — result2 was an error, but never the revocation error
+        // this test asserts on.
+        let now_secs = chrono::Utc::now().timestamp().max(0) as u64;
 
         // Seed the initial (trusted, non-revoked) trust card. Prod's `update` only
         // mutates an EXISTING card (fail-closed NotFound for unknown extensions), so
@@ -9200,18 +9226,24 @@ mod tests {
         // Should fail with revocation error
         assert!(result2.is_err());
         let error_msg = result2.unwrap_err().to_string();
-        assert!(error_msg.contains("revoked since preflight"));
-        assert!(error_msg.contains("TOCTOU test revocation"));
-        assert!(error_msg.contains("prevents TOCTOU attacks"));
+        assert!(
+            error_msg.contains("revoked since preflight"),
+            "expected the execution-time TOCTOU revocation rejection, got: {error_msg}"
+        );
+        assert!(
+            error_msg.contains("TOCTOU test revocation"),
+            "rejection must carry the revocation reason, got: {error_msg}"
+        );
+        assert!(error_msg.contains("prevents TOCTOU attacks"), "got: {error_msg}");
     }
     use super::*;
     use crate::ops::telemetry_bridge::{BridgeLifecycleState, event_codes, reason_codes};
-    use std::collections::BTreeSet;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::ExitStatusExt;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
+    use std::collections::BTreeSet;
 
     fn write_fake_executable(path: &Path) {
         std::fs::write(path, "#!/bin/sh\n").expect("write fake executable");
