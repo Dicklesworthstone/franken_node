@@ -11,9 +11,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::runtime::bounded_mask::{
-    CancellationState, CapabilityContext, MaskError, bounded_mask, bounded_mask_with_policy,
-};
+use crate::runtime::bounded_mask::{CapabilityContext, MaskError, bounded_mask_with_policy};
 use crate::security::constant_time;
 
 use crate::capacity_defaults::aliases::MAX_EVENTS;

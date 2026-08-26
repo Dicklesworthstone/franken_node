@@ -76,11 +76,7 @@ fn is_valid_witness_structure(witness: &WitnessRef) -> bool {
     }
 
     // Reject all-zero integrity hashes (likely garbage/uninitialized)
-    if crate::security::constant_time::ct_eq_bytes(&witness.integrity_hash, &[0u8; 32]) {
-        return false;
-    }
-
-    true
+    !crate::security::constant_time::ct_eq_bytes(&witness.integrity_hash, &[0u8; 32])
 }
 
 /// Stable event codes for structured logging.
