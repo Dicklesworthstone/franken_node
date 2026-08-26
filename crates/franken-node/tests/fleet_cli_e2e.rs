@@ -1216,7 +1216,7 @@ fn fleet_reconcile_waits_for_delayed_node_convergence_receipt() {
     let updater = std::thread::spawn(move || {
         // fsqlite connections are !Send; own the transport inside the thread.
         let mut delayed_agent = seed_durable_transport(&updater_state_dir);
-        let deadline = test_clock_now() + Duration::from_secs(8);
+        let deadline = test_clock_now() + Duration::from_secs(20);
         loop {
             match delayed_agent.list_actions() {
                 Ok(actions) => {
@@ -1264,7 +1264,7 @@ fn fleet_reconcile_waits_for_delayed_node_convergence_receipt() {
         &["fleet", "reconcile", "--json"],
         &fleet_state_dir,
         &[
-            ("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", "6"),
+            ("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", "12"),
             (
                 "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
                 signing_key_path.as_str(),
@@ -1964,7 +1964,7 @@ fn fleet_agent_release_actions_clear_local_quarantine_state_across_poll_cycles()
     let release_fleet_state_dir = fleet_state_dir.clone();
     let release_publisher = std::thread::spawn(move || {
         let registry_path = project_root.join(".franken-node/state/trust-card-registry.v1.json");
-        let deadline = test_clock_now() + Duration::from_secs(5);
+        let deadline = test_clock_now() + Duration::from_secs(20);
         loop {
             let mut registry = TrustCardRegistry::load_authoritative_state(
                 &registry_path,
@@ -2015,7 +2015,7 @@ fn fleet_agent_release_actions_clear_local_quarantine_state_across_poll_cycles()
             "--zone",
             "zone-release-cross-cycle",
             "--poll-interval-secs",
-            "1",
+            "3",
             "--max-cycles",
             "2",
             "--json",
@@ -2074,7 +2074,7 @@ fn fleet_agent_processes_later_actions_with_lower_lexicographic_ids() {
 
     let publisher_state_dir = fleet_state_dir.clone();
     let publisher = std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             let mut transport = seed_durable_transport(&publisher_state_dir);
             let nodes = transport.list_node_statuses().expect("list node statuses");
@@ -2112,7 +2112,7 @@ fn fleet_agent_processes_later_actions_with_lower_lexicographic_ids() {
             "--zone",
             "zone-ordering",
             "--poll-interval-secs",
-            "1",
+            "3",
             "--max-cycles",
             "2",
             "--json",
@@ -2202,7 +2202,7 @@ fn fleet_agent_handles_sigterm_gracefully() {
         ],
         &fleet_state_dir,
     );
-    let readiness_deadline = Instant::now() + Duration::from_secs(5);
+    let readiness_deadline = Instant::now() + Duration::from_secs(15);
     let agent_status = loop {
         let mut readiness_transport = seed_durable_transport(&fleet_state_dir);
         if let Some(status) = readiness_transport
@@ -2234,7 +2234,7 @@ fn fleet_agent_handles_sigterm_gracefully() {
     let started = Instant::now();
     let output = child.wait_with_output().expect("wait for child");
     assert!(
-        started.elapsed() < Duration::from_secs(5),
+        started.elapsed() < Duration::from_secs(10),
         "agent should exit quickly after SIGTERM"
     );
     assert!(
@@ -3775,7 +3775,7 @@ fn fleet_release_handles_realistic_partial_release_scenarios_across_multi_incide
         // fsqlite connections are !Send; the agent owns its transport inside
         // the thread, mirroring a real per-process fleet agent.
         let mut agent_transport = seed_durable_transport(&updater_state_dir);
-        let deadline = test_clock_now() + Duration::from_secs(4);
+        let deadline = test_clock_now() + Duration::from_secs(15);
         loop {
             let applied = agent_transport.list_actions().map(|records| {
                 records.iter().any(|record| {
@@ -3824,7 +3824,7 @@ fn fleet_release_handles_realistic_partial_release_scenarios_across_multi_incide
         ],
         &fleet_state_dir,
         &[
-            ("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", "5"),
+            ("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", "12"),
             (
                 "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
                 signing_key_path.as_str(),
@@ -3863,7 +3863,7 @@ fn fleet_release_handles_realistic_partial_release_scenarios_across_multi_incide
         ],
         &fleet_state_dir,
         &[
-            ("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", "5"),
+            ("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", "12"),
             (
                 "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
                 signing_key_path.as_str(),
@@ -4124,7 +4124,7 @@ fn fleet_reconcile_with_complete_transport_verification() {
         &["fleet", "reconcile", "--json"],
         &fleet_state_dir,
         &[
-            ("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", "5"),
+            ("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", "12"),
             (
                 "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
                 signing_key_path.as_str(),

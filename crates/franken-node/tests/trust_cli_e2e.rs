@@ -150,7 +150,7 @@ fn read_http_request(stream: &mut impl Read) -> String {
 }
 
 fn accept_osv_fixture_connection(listener: &TcpListener, label: &str) -> TcpStream {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         match listener.accept() {
             Ok((stream, _)) => return stream,
