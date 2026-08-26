@@ -2032,13 +2032,10 @@ mod additional_negative_path_tests {
         assert_eq!(test_hash.0.len(), 32, "Test hash should be 32 bytes");
 
         // Verify the helper's fixed fixture pattern.
-        for i in 0..32 {
-            let expected_byte = 0x2a;
-            assert_eq!(
-                test_hash.0[i], expected_byte,
-                "Test hash should preserve the fixed fixture pattern"
-            );
-        }
+        assert!(
+            test_hash.0.iter().all(|byte| *byte == 0x2a),
+            "Test hash should preserve the fixed fixture pattern"
+        );
     }
 
     #[test]
