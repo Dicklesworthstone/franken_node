@@ -1213,6 +1213,7 @@ fn fleet_reconcile_waits_for_delayed_node_convergence_receipt() {
     // transient fsqlite contention as retryable, mirroring a real per-process
     // fleet agent; under parallel test load the previous 25ms open-per-poll
     // loop both generated conflicts and missed the CLI's convergence window.
+    let updater_started_at = std::time::Instant::now();
     let updater = std::thread::spawn(move || {
         // fsqlite connections are !Send; own the transport inside the thread.
         let mut delayed_agent = seed_durable_transport(&updater_state_dir);
@@ -1274,6 +1275,17 @@ fn fleet_reconcile_waits_for_delayed_node_convergence_receipt() {
     updater
         .join()
         .expect("delayed convergence updater should finish");
+    // bd-upjim: the receipt's elapsed_ms measures only the CLI's post-startup
+    // wait loop, so on a fast host the simulated agent's whole 350ms delay can
+    // elapse before the loop starts and elapsed_ms < delay is CORRECT
+    // behavior. Assert the delay on the updater's own timeline instead: it
+    // sleeps `delay` after seeing the republish, so its wall time must be at
+    // least that long regardless of CLI speed.
+    let updater_elapsed = updater_started_at.elapsed();
+    assert!(
+        updater_elapsed >= delay,
+        "delayed agent must spend >= {delay:?} before writing convergence; took {updater_elapsed:?}"
+    );
     assert!(
         output.status.success(),
         "fleet reconcile --json failed: {}",
@@ -1293,8 +1305,8 @@ fn fleet_reconcile_waits_for_delayed_node_convergence_receipt() {
     assert!(
         payload["convergence_receipt"]["elapsed_ms"]
             .as_u64()
-            .expect("elapsed_ms")
-            >= u64::try_from(delay.as_millis()).expect("delay fits u64")
+            .is_some(),
+        "convergence receipt must carry an elapsed_ms: {payload}"
     );
     assert_convergence_receipt_signature_round_trips(&payload["convergence_receipt"], &signing_key);
 }
@@ -2051,7 +2063,9 @@ fn fleet_agent_release_actions_clear_local_quarantine_state_across_poll_cycles()
         .expect("trust card");
     assert!(
         !card.active_quarantine,
-        "release from a later poll cycle should clear quarantine"
+        "release from a later poll cycle should clear quarantine; agent stdout:\n{}\nagent stderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
