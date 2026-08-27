@@ -2030,3 +2030,16 @@ name = "charter_substrates_e2e"
 path = "tests/charter_substrates_e2e.rs"
 required-features = ["control-plane"]
 
+# compromise_reduction_baseline_bench (bd-3cpa): real 20-vector Node/Bun adversarial
+# benchmark campaign asserting >=10x compromise reduction under franken-node strict.
+[[test]]
+name = "compromise_reduction_baseline_bench"
+path = "tests/compromise_reduction_baseline_bench.rs"
+
+# adversarial_compromise_reduction_tampering (bd-3cpa): cryptographic tamper-detection
+# for compromise reduction campaign reports and telemetry entries.
+[[test]]
+name = "adversarial_compromise_reduction_tampering"
+path = "tests/adversarial_compromise_reduction_tampering.rs"
+
+
