@@ -149,6 +149,7 @@ impl Config {
                     poll_interval_seconds: None,
                     convergence_timeout_seconds: timeouts::FLEET_STRICT_CONVERGENCE_TIMEOUT_SECS,
                     barrier_timeout_ms: None,
+                    allow_degraded_file_transport: false,
                 },
                 observability: ObservabilityConfig {
                     namespace: "franken_node".to_string(),
@@ -222,6 +223,7 @@ impl Config {
                     poll_interval_seconds: None,
                     convergence_timeout_seconds: timeouts::FLEET_BALANCED_CONVERGENCE_TIMEOUT_SECS,
                     barrier_timeout_ms: None,
+                    allow_degraded_file_transport: false,
                 },
                 observability: ObservabilityConfig {
                     namespace: "franken_node".to_string(),
@@ -295,6 +297,7 @@ impl Config {
                     poll_interval_seconds: None,
                     convergence_timeout_seconds: timeouts::FLEET_LEGACY_CONVERGENCE_TIMEOUT_SECS,
                     barrier_timeout_ms: None,
+                    allow_degraded_file_transport: true,
                 },
                 observability: ObservabilityConfig {
                     namespace: "franken_node".to_string(),
@@ -3371,6 +3374,9 @@ pub struct FleetConfig {
     /// When `None`, consumers use `timeouts::FLEET_BARRIER_TIMEOUT_MS`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub barrier_timeout_ms: Option<u64>,
+    /// Allow degraded file-transport mode when asupersync-transport is not available.
+    #[serde(default)]
+    pub allow_degraded_file_transport: bool,
 }
 
 // -- Observability --

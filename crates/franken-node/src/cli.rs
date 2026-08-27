@@ -1549,6 +1549,10 @@ pub struct FleetReleaseArgs {
 
 #[derive(Debug, Parser)]
 pub struct FleetReconcileArgs {
+    /// Allow degraded file-transport mode when asupersync-transport is not compiled in.
+    #[arg(long, default_value_t = false)]
+    pub fallback_file_transport: bool,
+
     /// Emit JSON instead of human-readable output.
     /// Includes `transport=file` and `live_control_plane=false`.
     #[arg(long)]
@@ -1580,6 +1584,10 @@ pub struct FleetAgentArgs {
     /// Run a single poll cycle and exit after processing all currently pending actions.
     #[arg(long)]
     pub once: bool,
+
+    /// Allow degraded file-transport mode when asupersync-transport is not compiled in.
+    #[arg(long, default_value_t = false)]
+    pub fallback_file_transport: bool,
 
     /// Emit JSON instead of human-readable output.
     /// Includes `transport=file` and `live_control_plane=false`; this is

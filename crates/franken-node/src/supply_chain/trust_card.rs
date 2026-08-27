@@ -3271,8 +3271,8 @@ mod tests {
     use std::collections::BTreeMap;
     // bd-o776s: persistence-round-trip tests construct real temp files; the
     // inline lane needs these in scope exactly like the integration suites.
-    use tempfile::{NamedTempFile, TempDir};
     use std::io::Write as _;
+    use tempfile::{NamedTempFile, TempDir};
 
     type TestResult = Result<(), String>;
 

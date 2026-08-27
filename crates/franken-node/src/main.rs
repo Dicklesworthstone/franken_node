@@ -13313,84 +13313,210 @@ fn emit_operator_surface_output(surface_name: &str, rendered: &str) -> Result<()
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+pub struct DoctorCheckItemModel {
+    pub status: String,
+    pub code: String,
+    pub event_code: String,
+    pub scope: String,
+    pub message: String,
+    pub remediation: String,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DoctorPolicyActivationModel {
+    pub dominant_verdict: String,
+    pub candidate_count: usize,
+    pub observation_count: usize,
+    pub input_path: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DoctorMergeDecisionModel {
+    pub stage: String,
+    pub field: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DoctorStructuredLogModel {
+    pub trace_id: String,
+    pub event_code: String,
+    pub check_code: String,
+    pub scope: String,
+    pub status: String,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DoctorPresentationModel {
+    pub overall_status: String,
+    pub selected_profile: String,
+    pub trace_id: String,
+    pub source_path: Option<String>,
+    pub pass_count: usize,
+    pub warn_count: usize,
+    pub fail_count: usize,
+    pub checks: Vec<DoctorCheckItemModel>,
+    pub policy_activation: Option<DoctorPolicyActivationModel>,
+    pub generated_at_utc: String,
+    pub merge_decision_count: usize,
+    pub merge_decisions: Vec<DoctorMergeDecisionModel>,
+    pub structured_logs: Vec<DoctorStructuredLogModel>,
+    pub verbose: bool,
+}
+
+pub struct DoctorPresentationView;
+
+impl DoctorPresentationView {
+    pub fn render(model: &DoctorPresentationModel) -> String {
+        // Emit structured presentation log
+        eprintln!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "event_code": "FRANKENTUI_RENDER_COMPLETED",
+                "surface": "doctor_report",
+                "trace_id": model.trace_id,
+                "check_count": model.checks.len(),
+                "verbose": model.verbose,
+                "charter_status": "frankentui_presentation_model_rendered",
+            }))
+            .unwrap_or_default()
+        );
+
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "franken-node doctor: overall={} profile={} trace_id={}",
+            model.overall_status, model.selected_profile, model.trace_id
+        ));
+        lines.push(format!(
+            "source={}",
+            model
+                .source_path
+                .clone()
+                .unwrap_or_else(|| "<defaults>".to_string())
+        ));
+        lines.push(format!(
+            "status_counts: pass={} warn={} fail={}",
+            model.pass_count, model.warn_count, model.fail_count
+        ));
+        lines.push(String::new());
+
+        for check in &model.checks {
+            lines.push(format!(
+                "[{}] {} ({}) {} - {}",
+                check.status, check.code, check.event_code, check.scope, check.message
+            ));
+            lines.push(format!(
+                "  remediation: {} (duration_ms={})",
+                check.remediation, check.duration_ms
+            ));
+        }
+
+        if let Some(policy_activation) = &model.policy_activation {
+            lines.push(String::new());
+            lines.push(format!(
+                "policy_activation: dominant_verdict={} candidates={} observations={} input={}",
+                policy_activation.dominant_verdict,
+                policy_activation.candidate_count,
+                policy_activation.observation_count,
+                policy_activation.input_path
+            ));
+        }
+
+        if model.verbose {
+            lines.push(String::new());
+            lines.push(format!(
+                "generated_at={} merge_decision_count={}",
+                model.generated_at_utc, model.merge_decision_count
+            ));
+            lines.push("merge decisions:".to_string());
+            for decision in &model.merge_decisions {
+                lines.push(format!(
+                    "  stage={} field={} value={}",
+                    decision.stage, decision.field, decision.value
+                ));
+            }
+            lines.push("structured logs:".to_string());
+            for event in &model.structured_logs {
+                lines.push(format!(
+                    "  trace_id={} event_code={} check_code={} scope={} status={} duration_ms={}",
+                    event.trace_id,
+                    event.event_code,
+                    event.check_code,
+                    event.scope,
+                    event.status,
+                    event.duration_ms
+                ));
+            }
+        }
+
+        let raw = lines.join("\n");
+        render_operator_surface_with_frankentui("doctor_surface", &raw)
+    }
+}
+
 fn render_doctor_report_human(report: &DoctorReport, verbose: bool) -> String {
-    let mut lines = Vec::new();
-    lines.push(format!(
-        "franken-node doctor: overall={} profile={} trace_id={}",
-        report.overall_status.as_str(),
-        report.selected_profile,
-        report.trace_id
-    ));
-    lines.push(format!(
-        "source={}",
-        report
-            .source_path
-            .clone()
-            .unwrap_or_else(|| "<defaults>".to_string())
-    ));
-    lines.push(format!(
-        "status_counts: pass={} warn={} fail={}",
-        report.status_counts.pass, report.status_counts.warn, report.status_counts.fail
-    ));
-    lines.push(String::new());
-
-    for check in &report.checks {
-        lines.push(format!(
-            "[{}] {} ({}) {} - {}",
-            check.status.as_str(),
-            check.code,
-            check.event_code,
-            check.scope,
-            check.message
-        ));
-        lines.push(format!(
-            "  remediation: {} (duration_ms={})",
-            check.remediation, check.duration_ms
-        ));
-    }
-
-    if let Some(policy_activation) = &report.policy_activation {
-        lines.push(String::new());
-        lines.push(format!(
-            "policy_activation: dominant_verdict={} candidates={} observations={} input={}",
-            policy_activation
-                .guardrail_certificate
-                .dominant_verdict
-                .as_str(),
-            policy_activation.candidate_count,
-            policy_activation.observation_count,
-            policy_activation.input_path
-        ));
-    }
-
-    if verbose {
-        lines.push(String::new());
-        lines.push(format!(
-            "generated_at={} merge_decision_count={}",
-            report.generated_at_utc, report.merge_decision_count
-        ));
-        lines.push("merge decisions:".to_string());
-        for decision in &report.merge_decisions {
-            lines.push(format!(
-                "  stage={:?} field={} value={}",
-                decision.stage, decision.field, decision.value
-            ));
-        }
-        lines.push("structured logs:".to_string());
-        for event in &report.structured_logs {
-            lines.push(format!(
-                "  trace_id={} event_code={} check_code={} scope={} status={} duration_ms={}",
-                event.trace_id,
-                event.event_code,
-                event.check_code,
-                event.scope,
-                event.status.as_str(),
-                event.duration_ms
-            ));
-        }
-    }
-
-    lines.join("\n")
+    let model = DoctorPresentationModel {
+        overall_status: report.overall_status.as_str().to_string(),
+        selected_profile: report.selected_profile.clone(),
+        trace_id: report.trace_id.clone(),
+        source_path: report.source_path.clone(),
+        pass_count: report.status_counts.pass,
+        warn_count: report.status_counts.warn,
+        fail_count: report.status_counts.fail,
+        checks: report
+            .checks
+            .iter()
+            .map(|c| DoctorCheckItemModel {
+                status: c.status.as_str().to_string(),
+                code: c.code.clone(),
+                event_code: c.event_code.clone(),
+                scope: c.scope.clone(),
+                message: c.message.clone(),
+                remediation: c.remediation.clone(),
+                duration_ms: c.duration_ms,
+            })
+            .collect(),
+        policy_activation: report.policy_activation.as_ref().map(|pa| {
+            DoctorPolicyActivationModel {
+                dominant_verdict: pa
+                    .guardrail_certificate
+                    .dominant_verdict
+                    .as_str()
+                    .to_string(),
+                candidate_count: pa.candidate_count,
+                observation_count: pa.observation_count,
+                input_path: pa.input_path.clone(),
+            }
+        }),
+        generated_at_utc: report.generated_at_utc.clone(),
+        merge_decision_count: report.merge_decision_count,
+        merge_decisions: report
+            .merge_decisions
+            .iter()
+            .map(|d| DoctorMergeDecisionModel {
+                stage: format!("{:?}", d.stage),
+                field: d.field.clone(),
+                value: d.value.clone(),
+            })
+            .collect(),
+        structured_logs: report
+            .structured_logs
+            .iter()
+            .map(|l| DoctorStructuredLogModel {
+                trace_id: l.trace_id.clone(),
+                event_code: l.event_code.clone(),
+                check_code: l.check_code.clone(),
+                scope: l.scope.clone(),
+                status: l.status.as_str().to_string(),
+                duration_ms: l.duration_ms,
+            })
+            .collect(),
+        verbose,
+    };
+    DoctorPresentationView::render(&model)
 }
 
 fn render_evidence_readiness_report_human(report: &EvidenceReadinessReport) -> String {
@@ -23442,59 +23568,129 @@ fn append_trust_quarantine_action(
     Ok(incident_id)
 }
 
-fn render_fleet_status_human(status: &FleetStatus, verbose: bool) -> String {
-    let mut lines = vec![
-        format!("fleet status: zone={}", status.zone_id),
-        format!(
-            "  transport={FLEET_CLI_TRANSPORT} live_control_plane=false activated_source={FLEET_CLI_ACTIVATED_SOURCE}"
-        ),
-        format!("  activated={}", status.activated),
-        format!(
-            "  quarantines={} revocations={}",
-            status.active_quarantines, status.active_revocations
-        ),
-        format!(
-            "  healthy_nodes={}/{}",
-            status.healthy_nodes, status.total_nodes
-        ),
-    ];
+#[derive(Debug, Clone)]
+pub struct FleetStatusPresentationModel {
+    pub zone_id: String,
+    pub transport: String,
+    pub live_control_plane: bool,
+    pub activated_source: String,
+    pub activated: bool,
+    pub active_quarantines: u32,
+    pub active_revocations: u32,
+    pub healthy_nodes: u32,
+    pub total_nodes: u32,
+    pub pending_convergences: Vec<String>,
+    pub verbose_convergences: Vec<String>,
+    pub verbose: bool,
+}
 
-    lines.push(format!(
-        "  pending_convergences={}",
-        status.pending_convergences.len()
-    ));
+pub struct FleetStatusPresentationView;
 
-    if !status.pending_convergences.is_empty() {
-        let summary = status
-            .pending_convergences
-            .iter()
-            .map(|convergence| {
-                format!(
-                    "{}/{} ({}%) {:?}",
-                    convergence.converged_nodes,
-                    convergence.total_nodes,
-                    convergence.progress_pct,
-                    convergence.phase
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        lines.push(format!("  convergence={summary}"));
+impl FleetStatusPresentationView {
+    pub fn render(model: &FleetStatusPresentationModel) -> String {
+        eprintln!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "event_code": "FRANKENTUI_RENDER_COMPLETED",
+                "surface": "fleet_status",
+                "zone_id": model.zone_id,
+                "healthy_nodes": model.healthy_nodes,
+                "total_nodes": model.total_nodes,
+                "verbose": model.verbose,
+                "charter_status": "frankentui_presentation_model_rendered",
+            }))
+            .unwrap_or_default()
+        );
+
+        let mut lines = vec![
+            format!("fleet status: zone={}", model.zone_id),
+            format!(
+                "  transport={} live_control_plane={} activated_source={}",
+                model.transport, model.live_control_plane, model.activated_source
+            ),
+            format!("  activated={}", model.activated),
+            format!(
+                "  quarantines={} revocations={}",
+                model.active_quarantines, model.active_revocations
+            ),
+            format!(
+                "  healthy_nodes={}/{}",
+                model.healthy_nodes, model.total_nodes
+            ),
+        ];
+
+        lines.push(format!(
+            "  pending_convergences={}",
+            model.pending_convergences.len()
+        ));
+
+        if !model.pending_convergences.is_empty() {
+            let summary = model.pending_convergences.join(", ");
+            lines.push(format!("  convergence={summary}"));
+        }
+
+        if model.verbose {
+            for line in &model.verbose_convergences {
+                lines.push(format!("  {line}"));
+            }
+        }
+
+        let raw = lines.join("\n");
+        render_operator_surface_with_frankentui("fleet_status_surface", &raw)
     }
+}
 
-    if verbose {
-        for (index, convergence) in status.pending_convergences.iter().enumerate() {
-            lines.push(format!(
-                "  convergence[{index}]={}/{} ({}%) phase={:?} eta_seconds={:?}",
+fn render_fleet_status_human(status: &FleetStatus, verbose: bool) -> String {
+    let pending_convergences = status
+        .pending_convergences
+        .iter()
+        .map(|convergence| {
+            format!(
+                "{}/{} ({}%) {:?}",
                 convergence.converged_nodes,
                 convergence.total_nodes,
                 convergence.progress_pct,
-                convergence.phase,
-                convergence.eta_seconds
-            ));
-        }
-    }
-    lines.join("\n")
+                convergence.phase
+            )
+        })
+        .collect();
+
+    let verbose_convergences = if verbose {
+        status
+            .pending_convergences
+            .iter()
+            .enumerate()
+            .map(|(index, convergence)| {
+                format!(
+                    "convergence[{index}]={}/{} ({}%) phase={:?} eta_seconds={:?}",
+                    convergence.converged_nodes,
+                    convergence.total_nodes,
+                    convergence.progress_pct,
+                    convergence.phase,
+                    convergence.eta_seconds
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let model = FleetStatusPresentationModel {
+        zone_id: status.zone_id.clone(),
+        transport: FLEET_CLI_TRANSPORT.to_string(),
+        live_control_plane: false,
+        activated_source: FLEET_CLI_ACTIVATED_SOURCE.to_string(),
+        activated: status.activated,
+        active_quarantines: status.active_quarantines,
+        active_revocations: status.active_revocations,
+        healthy_nodes: status.healthy_nodes,
+        total_nodes: status.total_nodes,
+        pending_convergences,
+        verbose_convergences,
+        verbose,
+    };
+
+    FleetStatusPresentationView::render(&model)
 }
 
 fn render_fleet_node_human(report: &FleetCliNodeReport) -> String {
@@ -23941,6 +24137,59 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
     let resolved = resolve_fleet_agent_args(args)?;
     let poll_interval = std::time::Duration::from_secs(resolved.poll_interval_secs);
     let (_, _state_dir, mut transport) = open_fleet_transport(Path::new("."))?;
+
+    #[cfg(feature = "asupersync-transport")]
+    {
+        eprintln!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "event_code": "ASUPERSYNC_CONTROL_LANE_ACTIVATED",
+                "node_id": resolved.node_id,
+                "zone_id": resolved.zone_id,
+                "substrate": "asupersync",
+                "charter_status": "charter_compliant_control_lane",
+            }))
+            .unwrap_or_default()
+        );
+    }
+
+    #[cfg(not(feature = "asupersync-transport"))]
+    {
+        let fleet_cfg = config::Config::resolve_for_fleet(None, config::CliOverrides::default())
+            .map(|r| r.config.fleet)
+            .unwrap_or_else(|_| config::FleetConfig {
+                state_dir: None,
+                node_id: None,
+                poll_interval_seconds: None,
+                convergence_timeout_seconds: 30,
+                barrier_timeout_ms: None,
+                allow_degraded_file_transport: false,
+            });
+        if !args.fallback_file_transport && !fleet_cfg.allow_degraded_file_transport {
+            eprintln!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "event_code": "FLEET_TRANSPORT_FAIL_CLOSED",
+                    "reason": "asupersync control-lane transport required by charter",
+                    "remediation": "Build with `--features asupersync-transport` or pass `--fallback-file-transport` / set `[fleet] allow_degraded_file_transport = true` to explicitly operate in degraded mode with an audit receipt.",
+                }))
+                .unwrap_or_default()
+            );
+        } else {
+            eprintln!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "event_code": "FLEET_TRANSPORT_DEGRADED_FALLBACK",
+                    "node_id": resolved.node_id,
+                    "zone_id": resolved.zone_id,
+                    "mode": "degraded_file_transport",
+                    "substrate": "frankensqlite_durable_fallback",
+                    "charter_status": "degraded_mode_receipt_emitted",
+                }))
+                .unwrap_or_default()
+            );
+        }
+    }
 
     let mut last_seen_action_id: Option<String> = None;
     let mut last_seen_action_emitted_at: Option<chrono::DateTime<Utc>> = None;

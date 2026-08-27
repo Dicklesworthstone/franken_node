@@ -360,7 +360,11 @@ impl Write for DurableEvidenceSink {
         );
         self.buffer.extend_from_slice(buf);
         self.commit_complete_lines()?;
-        eprintln!("DBG after commit: buffered={} committed={}", self.buffer.len(), self.committed_entries);
+        eprintln!(
+            "DBG after commit: buffered={} committed={}",
+            self.buffer.len(),
+            self.committed_entries
+        );
         Ok(buf.len())
     }
 

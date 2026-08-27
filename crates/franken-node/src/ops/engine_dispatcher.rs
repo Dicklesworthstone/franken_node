@@ -9075,8 +9075,7 @@ mod tests {
         // so the app must live two levels below the project root that holds `.state`.
         let project_root = tmp.path();
         let app_path = project_root.join("workspace").join("test-app");
-        fs::create_dir_all(app_path.parent().expect("app parent dir"))
-            .expect("create app dir");
+        fs::create_dir_all(app_path.parent().expect("app parent dir")).expect("create app dir");
         // bd-o776s: the app must be a directly executable FILE — dispatch_run
         // resolves directory inputs to an entrypoint (and fails before the
         // trust revalidation this test targets) when handed a bare directory.
@@ -9234,16 +9233,19 @@ mod tests {
             error_msg.contains("TOCTOU test revocation"),
             "rejection must carry the revocation reason, got: {error_msg}"
         );
-        assert!(error_msg.contains("prevents TOCTOU attacks"), "got: {error_msg}");
+        assert!(
+            error_msg.contains("prevents TOCTOU attacks"),
+            "got: {error_msg}"
+        );
     }
     use super::*;
     use crate::ops::telemetry_bridge::{BridgeLifecycleState, event_codes, reason_codes};
+    use std::collections::BTreeSet;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::ExitStatusExt;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
-    use std::collections::BTreeSet;
 
     fn write_fake_executable(path: &Path) {
         std::fs::write(path, "#!/bin/sh\n").expect("write fake executable");

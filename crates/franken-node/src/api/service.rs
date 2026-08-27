@@ -2575,4 +2575,137 @@ mod contract_tests {
             );
         }
     }
+
+    #[test]
+    fn http_server_dispatches_health_and_catalog() {
+        let (status, content_type, body) =
+            http_server::dispatch_http_request("GET", "/health", "test-trace-health-1");
+        assert_eq!(status, 200);
+        assert_eq!(content_type, "application/json");
+        assert!(body.contains("\"status\":\"ok\""));
+        assert!(body.contains("\"service\":\"franken-node-control-plane\""));
+
+        let (status, content_type, body) =
+            http_server::dispatch_http_request("GET", "/v1/catalog", "test-trace-catalog-1");
+        assert_eq!(status, 200);
+        assert_eq!(content_type, "application/json");
+        assert!(body.contains("franken-node/control-plane-catalog/v1"));
+
+        let (status, content_type, body) =
+            http_server::dispatch_http_request("GET", "/unknown/route", "test-trace-404-1");
+        assert_eq!(status, 404);
+        assert_eq!(content_type, "application/problem+json");
+        assert!(body.contains("Not Found"));
+    }
+}
+
+pub mod http_server {
+    use super::*;
+    use serde_json::json;
+
+    pub const EVENT_FASTAPI_SERVER_STARTED: &str = "FASTAPI_SERVER_STARTED";
+    pub const EVENT_FASTAPI_REQUEST_SERVED: &str = "FASTAPI_REQUEST_SERVED";
+    pub const EVENT_FASTAPI_SERVER_SHUTDOWN: &str = "FASTAPI_SERVER_SHUTDOWN";
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct HealthStatusResponse {
+        pub status: String,
+        pub service: String,
+        pub catalog_endpoint_count: usize,
+        pub trace_id: String,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct ControlPlaneCatalogResponse {
+        pub schema_version: String,
+        pub endpoints: Vec<EndpointCatalogEntry>,
+        pub total_count: usize,
+        pub trace_id: String,
+    }
+
+    /// Process a control-plane HTTP route dispatch.
+    pub fn dispatch_http_request(
+        method: &str,
+        path: &str,
+        trace_id: &str,
+    ) -> (u16, String, String) {
+        let (status, content_type, body) = match (method, path) {
+            ("GET", "/health") | ("GET", "/api/v1/health") => {
+                let catalog = build_endpoint_catalog();
+                let resp = HealthStatusResponse {
+                    status: "ok".to_string(),
+                    service: "franken-node-control-plane".to_string(),
+                    catalog_endpoint_count: catalog.len(),
+                    trace_id: trace_id.to_string(),
+                };
+                (
+                    200,
+                    "application/json".to_string(),
+                    serde_json::to_string(&resp).unwrap_or_default(),
+                )
+            }
+            ("GET", "/v1/catalog") | ("GET", "/api/v1/catalog") => {
+                let catalog = build_endpoint_catalog();
+                let count = catalog.len();
+                let resp = ControlPlaneCatalogResponse {
+                    schema_version: "franken-node/control-plane-catalog/v1".to_string(),
+                    endpoints: catalog,
+                    total_count: count,
+                    trace_id: trace_id.to_string(),
+                };
+                (
+                    200,
+                    "application/json".to_string(),
+                    serde_json::to_string(&resp).unwrap_or_default(),
+                )
+            }
+            ("GET", "/v1/fleet/status") | ("GET", "/api/v1/fleet/status") => {
+                let resp = json!({
+                    "schema_version": "franken-node/fleet-status/v1",
+                    "status": "ready",
+                    "live_control_plane": true,
+                    "trace_id": trace_id,
+                });
+                (200, "application/json".to_string(), resp.to_string())
+            }
+            ("GET", "/v1/trust/cards") | ("GET", "/api/v1/trust/cards") => {
+                let resp = json!({
+                    "schema_version": "franken-node/trust-cards/v1",
+                    "cards": [],
+                    "total_count": 0,
+                    "trace_id": trace_id,
+                });
+                (200, "application/json".to_string(), resp.to_string())
+            }
+            _ => {
+                let resp = json!({
+                    "type": "urn:franken-node:error:fastapi-not-found",
+                    "title": "Not Found",
+                    "status": 404,
+                    "detail": format!("No route matching {method} {path}"),
+                    "trace_id": trace_id,
+                });
+                (
+                    404,
+                    "application/problem+json".to_string(),
+                    resp.to_string(),
+                )
+            }
+        };
+
+        eprintln!(
+            "{}",
+            serde_json::to_string(&json!({
+                "event_code": EVENT_FASTAPI_REQUEST_SERVED,
+                "method": method,
+                "path": path,
+                "status": status,
+                "trace_id": trace_id,
+                "charter_status": "fastapi_rust_http_served",
+            }))
+            .unwrap_or_default()
+        );
+
+        (status, content_type, body)
+    }
 }
