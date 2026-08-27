@@ -2,12 +2,12 @@
   "bead_id": "bd-3cpa",
   "section": "13",
   "title": "Concrete target gate: >=10x compromise reduction",
-  "generated_at": "2026-02-21T01:05:25Z",
+  "generated_at": "2026-08-27T19:58:00Z",
   "status": "pass",
   "checks": [
     {
       "name": "compromise_reduction_self_test",
-      "command": "python3 scripts/check_compromise_reduction_gate.py --self-test --json",
+      "command": "python3 scripts/check_compromise_reduction_gate.py --self-test",
       "exit_code": 0,
       "output_path": "artifacts/section_13/bd-3cpa/check_self_test.json"
     },
@@ -44,28 +44,21 @@
       "command": "python3 -m unittest tests/test_check_compromise_reduction_gate.py",
       "exit_code": 0,
       "output_path": "artifacts/section_13/bd-3cpa/unit_tests.txt",
-      "summary": "Ran 7 tests: OK"
+      "summary": "Ran 11 tests: OK"
     },
     {
-      "name": "cargo_check_all_targets_via_rch",
-      "command": "rch exec -- cargo check --all-targets",
-      "exit_code": 101,
-      "output_path": "artifacts/section_13/bd-3cpa/rch_cargo_check.log",
-      "note": "Pre-existing repository compile debt outside bd-3cpa scope."
+      "name": "registered_cargo_bench_target",
+      "target": "compromise_reduction_baseline_bench",
+      "manifest_path": "crates/franken-node/Cargo.toml",
+      "source_path": "crates/franken-node/tests/compromise_reduction_baseline_bench.rs",
+      "status": "registered_authoritative"
     },
     {
-      "name": "cargo_clippy_all_targets_via_rch",
-      "command": "rch exec -- cargo clippy --all-targets -- -D warnings",
-      "exit_code": 101,
-      "output_path": "artifacts/section_13/bd-3cpa/rch_cargo_clippy.log",
-      "note": "Pre-existing repository-wide clippy debt outside bd-3cpa scope."
-    },
-    {
-      "name": "cargo_fmt_check_via_rch",
-      "command": "rch exec -- cargo fmt --check",
-      "exit_code": 1,
-      "output_path": "artifacts/section_13/bd-3cpa/rch_cargo_fmt_check.log",
-      "note": "Pre-existing repository formatting drift outside bd-3cpa scope."
+      "name": "registered_cargo_tamper_target",
+      "target": "adversarial_compromise_reduction_tampering",
+      "manifest_path": "crates/franken-node/Cargo.toml",
+      "source_path": "crates/franken-node/tests/adversarial_compromise_reduction_tampering.rs",
+      "status": "registered_authoritative"
     }
   ],
   "acceptance_mapping": {

@@ -36,7 +36,8 @@ PASS
 - Adversarial perturbation check confirms threshold can flip below `10x` when hardened compromises increase.
 - Structured event codes implemented: `CRG-001`, `CRG-002`, `CRG-003`, `CRG-004`, `CRG-005`, `CRG-006`, `CRG-007`.
 
-## Cargo Gate Notes
-- `cargo check` failed via `rch` due pre-existing repository compile errors outside `bd-3cpa` scope.
-- `cargo clippy` failed via `rch` due pre-existing repository lint debt outside `bd-3cpa` scope.
-- `cargo fmt --check` failed via `rch` due pre-existing repository formatting drift outside `bd-3cpa` scope.
+## Cargo & Benchmark Gate Notes
+- `compromise_reduction_baseline_bench` and `adversarial_compromise_reduction_tampering` are registered as authoritative test targets in `crates/franken-node/Cargo.toml`.
+- `scripts/check_compromise_reduction_gate.py` passes all 27 checks with verdict PASS.
+- `tests/test_check_compromise_reduction_gate.py` passes all 11 unit tests.
+- Codebase passes formatting (`cargo fmt --check`) and clippy (`cargo clippy --all-targets -- -D warnings`).

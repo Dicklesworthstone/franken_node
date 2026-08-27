@@ -125,27 +125,41 @@ def _make_report(
 
 
 class TestCompromiseReductionGate(TestCase):
-    def test_run_checks_fails_repo_artifacts_when_attempts_unequal(self) -> None:
+    def test_run_checks_passes_repo_artifacts(self) -> None:
         result = mod.run_checks()
         self.assertEqual(result["bead_id"], "bd-3cpa")
-        self.assertEqual(result["verdict"], "FAIL")
+        self.assertEqual(result["verdict"], "PASS")
         self.assertTrue(
             any(
-                check["check"] == "equal attempts (baseline vs franken)" and not check["pass"]
+                check["check"] == "equal attempts (baseline vs franken)" and check["pass"]
                 for check in result["checks"]
             ),
             result["checks"],
         )
         event_codes = [event["event_code"] for event in result["events"]]
-        self.assertIn("CRG-003", event_codes)
-        self.assertNotIn("CRG-002", event_codes)
-        self.assertFalse(
+        self.assertIn("CRG-002", event_codes)
+        self.assertNotIn("CRG-003", event_codes)
+
+    def test_unequal_attempts_fails(self) -> None:
+        with TemporaryDirectory(prefix="bd-3cpa-test-") as tmp:
+            root = Path(tmp)
+            spec_path = root / "spec.md"
+            report_path = root / "report.json"
+            report = _make_report()
+            report["benchmark_proof"]["baseline_attempts"] = 19
+            report["benchmark_proof"]["franken_attempts"] = 20
+
+            spec_path.write_text(_base_spec_text(), encoding="utf-8")
+            report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+            result = mod.run_checks(spec_path=spec_path, report_path=report_path)
+
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(
             any(
-                event["event_code"] == "CRG-002"
-                or "gate passed" in str(event.get("message", "")).lower()
-                for event in result["events"]
-            ),
-            result["events"],
+                check["check"] == "equal attempts (baseline vs franken)" and not check["pass"]
+                for check in result["checks"]
+            )
         )
 
     def test_attack_vector_count_below_twenty_fails(self) -> None:
