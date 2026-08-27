@@ -2,7 +2,7 @@
   "schema_version": "2.0.0",
   "artifact_id": "compromise_reduction_v2",
   "status": "measured",
-  "generated_at_utc": "2026-08-27T19:53:38.217085786+00:00",
+  "generated_at_utc": "2026-08-27T20:18:32.312162011+00:00",
   "pass_criterion": {
     "criterion": ">=10x",
     "passed": true
@@ -654,7 +654,7 @@
     "algorithm": "ed25519-fixture-v1",
     "key_id": "adversarial-extension-baseline-bench-v2",
     "public_key": "22fc297792f0b6ffc0bfcfdb7edb0c0aa14e025a365ec0e342e86e3829cb74b6",
-    "payload_sha256": "sha256:de888cc02358627dbad9c605de24b8355b51c78587e2897beaeccab3637110d9",
-    "value": "ed25519:9de5f681d4ee3623376f571fe76251152e42847ccae35edaf8fdcb69cec01516972ab93e7a9b656e2904cc7a69d2803e0f454a64727af5ddb41002fbb8432e00"
+    "payload_sha256": "sha256:51277d2719810520ca754c264f23a997d69f4b6a85a0fd0837b7c0cb3097da60",
+    "value": "ed25519:71fd89d17549d03af25f5a7aa41a3560c17d69717fec6e44ceb30640d1a51a2b3d052f0bfb955cccc727c3862b51153ca44aa6f427de865a763739da7fb45c05"
   }
 }
