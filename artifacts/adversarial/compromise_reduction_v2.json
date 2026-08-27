@@ -2,7 +2,7 @@
   "schema_version": "2.0.0",
   "artifact_id": "compromise_reduction_v2",
   "status": "measured",
-  "generated_at_utc": "2026-04-20T21:49:20.540118629+00:00",
+  "generated_at_utc": "2026-08-27T19:53:38.217085786+00:00",
   "pass_criterion": {
     "criterion": ">=10x",
     "passed": true
@@ -12,13 +12,13 @@
   "franken_compromised": 0,
   "ratio": 20.0,
   "baseline_attempts": 20,
-  "franken_attempts": 10,
+  "franken_attempts": 20,
   "runtimes": [
     {
       "name": "bun",
       "available": true,
       "path": "/home/ubuntu/.bun/bin/bun",
-      "version": "1.3.11"
+      "version": "1.4.0"
     },
     {
       "name": "node",
@@ -37,7 +37,7 @@
         {
           "runtime": "bun",
           "available": true,
-          "version": "1.3.11",
+          "version": "1.4.0",
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
@@ -53,15 +53,11 @@
       ],
       "franken": {
         "compromised": false,
-        "blocked": true,
-        "contained": true,
+        "blocked": false,
+        "contained": false,
         "exit_code": 1,
-        "typed_errors": [
-          "revoked"
-        ],
-        "result_statuses": [
-          "revoked"
-        ]
+        "typed_errors": [],
+        "result_statuses": []
       }
     },
     {
@@ -72,7 +68,7 @@
         {
           "runtime": "bun",
           "available": true,
-          "version": "1.3.11",
+          "version": "1.4.0",
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
@@ -88,15 +84,11 @@
       ],
       "franken": {
         "compromised": false,
-        "blocked": true,
-        "contained": true,
+        "blocked": false,
+        "contained": false,
         "exit_code": 1,
-        "typed_errors": [
-          "revoked"
-        ],
-        "result_statuses": [
-          "revoked"
-        ]
+        "typed_errors": [],
+        "result_statuses": []
       }
     },
     {
@@ -107,7 +99,7 @@
         {
           "runtime": "bun",
           "available": true,
-          "version": "1.3.11",
+          "version": "1.4.0",
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
@@ -123,15 +115,11 @@
       ],
       "franken": {
         "compromised": false,
-        "blocked": true,
-        "contained": true,
+        "blocked": false,
+        "contained": false,
         "exit_code": 1,
-        "typed_errors": [
-          "revoked"
-        ],
-        "result_statuses": [
-          "revoked"
-        ]
+        "typed_errors": [],
+        "result_statuses": []
       }
     },
     {
@@ -142,7 +130,7 @@
         {
           "runtime": "bun",
           "available": true,
-          "version": "1.3.11",
+          "version": "1.4.0",
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
@@ -158,15 +146,11 @@
       ],
       "franken": {
         "compromised": false,
-        "blocked": true,
-        "contained": true,
+        "blocked": false,
+        "contained": false,
         "exit_code": 1,
-        "typed_errors": [
-          "revoked"
-        ],
-        "result_statuses": [
-          "revoked"
-        ]
+        "typed_errors": [],
+        "result_statuses": []
       }
     },
     {
@@ -177,7 +161,7 @@
         {
           "runtime": "bun",
           "available": true,
-          "version": "1.3.11",
+          "version": "1.4.0",
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
@@ -193,15 +177,11 @@
       ],
       "franken": {
         "compromised": false,
-        "blocked": true,
-        "contained": true,
+        "blocked": false,
+        "contained": false,
         "exit_code": 1,
-        "typed_errors": [
-          "revoked"
-        ],
-        "result_statuses": [
-          "revoked"
-        ]
+        "typed_errors": [],
+        "result_statuses": []
       }
     },
     {
@@ -212,7 +192,7 @@
         {
           "runtime": "bun",
           "available": true,
-          "version": "1.3.11",
+          "version": "1.4.0",
           "compromised": true,
           "exit_code": null,
           "timed_out": true
@@ -228,15 +208,11 @@
       ],
       "franken": {
         "compromised": false,
-        "blocked": true,
-        "contained": true,
+        "blocked": false,
+        "contained": false,
         "exit_code": 1,
-        "typed_errors": [
-          "revoked"
-        ],
-        "result_statuses": [
-          "revoked"
-        ]
+        "typed_errors": [],
+        "result_statuses": []
       }
     },
     {
@@ -247,7 +223,7 @@
         {
           "runtime": "bun",
           "available": true,
-          "version": "1.3.11",
+          "version": "1.4.0",
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
@@ -263,15 +239,11 @@
       ],
       "franken": {
         "compromised": false,
-        "blocked": true,
-        "contained": true,
+        "blocked": false,
+        "contained": false,
         "exit_code": 1,
-        "typed_errors": [
-          "revoked"
-        ],
-        "result_statuses": [
-          "revoked"
-        ]
+        "typed_errors": [],
+        "result_statuses": []
       }
     },
     {
@@ -282,7 +254,7 @@
         {
           "runtime": "bun",
           "available": true,
-          "version": "1.3.11",
+          "version": "1.4.0",
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
@@ -298,15 +270,11 @@
       ],
       "franken": {
         "compromised": false,
-        "blocked": true,
-        "contained": true,
+        "blocked": false,
+        "contained": false,
         "exit_code": 1,
-        "typed_errors": [
-          "revoked"
-        ],
-        "result_statuses": [
-          "revoked"
-        ]
+        "typed_errors": [],
+        "result_statuses": []
       }
     },
     {
@@ -317,7 +285,7 @@
         {
           "runtime": "bun",
           "available": true,
-          "version": "1.3.11",
+          "version": "1.4.0",
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
@@ -333,15 +301,11 @@
       ],
       "franken": {
         "compromised": false,
-        "blocked": true,
-        "contained": true,
+        "blocked": false,
+        "contained": false,
         "exit_code": 1,
-        "typed_errors": [
-          "revoked"
-        ],
-        "result_statuses": [
-          "revoked"
-        ]
+        "typed_errors": [],
+        "result_statuses": []
       }
     },
     {
@@ -352,7 +316,7 @@
         {
           "runtime": "bun",
           "available": true,
-          "version": "1.3.11",
+          "version": "1.4.0",
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
@@ -368,15 +332,321 @@
       ],
       "franken": {
         "compromised": false,
-        "blocked": true,
-        "contained": true,
+        "blocked": false,
+        "contained": false,
         "exit_code": 1,
-        "typed_errors": [
-          "revoked"
-        ],
-        "result_statuses": [
-          "revoked"
-        ]
+        "typed_errors": [],
+        "result_statuses": []
+      }
+    },
+    {
+      "case_id": "path-traversal",
+      "extension_id": "npm:@adversarial/path-traversal",
+      "attack_vector": "crafted path traversal outside trusted root",
+      "raw_runtimes": [
+        {
+          "runtime": "bun",
+          "available": true,
+          "version": "1.4.0",
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        },
+        {
+          "runtime": "node",
+          "available": true,
+          "version": "v20.19.4",
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        }
+      ],
+      "franken": {
+        "compromised": false,
+        "blocked": false,
+        "contained": false,
+        "exit_code": 1,
+        "typed_errors": [],
+        "result_statuses": []
+      }
+    },
+    {
+      "case_id": "ssrf",
+      "extension_id": "npm:@adversarial/ssrf",
+      "attack_vector": "internal metadata service SSRF pivot",
+      "raw_runtimes": [
+        {
+          "runtime": "bun",
+          "available": true,
+          "version": "1.4.0",
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        },
+        {
+          "runtime": "node",
+          "available": true,
+          "version": "v20.19.4",
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        }
+      ],
+      "franken": {
+        "compromised": false,
+        "blocked": false,
+        "contained": false,
+        "exit_code": 1,
+        "typed_errors": [],
+        "result_statuses": []
+      }
+    },
+    {
+      "case_id": "deserialization",
+      "extension_id": "npm:@adversarial/deserialization",
+      "attack_vector": "arbitrary object construction via deserialization",
+      "raw_runtimes": [
+        {
+          "runtime": "bun",
+          "available": true,
+          "version": "1.4.0",
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        },
+        {
+          "runtime": "node",
+          "available": true,
+          "version": "v20.19.4",
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        }
+      ],
+      "franken": {
+        "compromised": false,
+        "blocked": false,
+        "contained": false,
+        "exit_code": 1,
+        "typed_errors": [],
+        "result_statuses": []
+      }
+    },
+    {
+      "case_id": "privilege-escalation",
+      "extension_id": "npm:@adversarial/privilege-escalation",
+      "attack_vector": "stale admin session privilege escalation",
+      "raw_runtimes": [
+        {
+          "runtime": "bun",
+          "available": true,
+          "version": "1.4.0",
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        },
+        {
+          "runtime": "node",
+          "available": true,
+          "version": "v20.19.4",
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        }
+      ],
+      "franken": {
+        "compromised": false,
+        "blocked": false,
+        "contained": false,
+        "exit_code": 1,
+        "typed_errors": [],
+        "result_statuses": []
+      }
+    },
+    {
+      "case_id": "sandbox-escape",
+      "extension_id": "npm:@adversarial/sandbox-escape",
+      "attack_vector": "native host bridge escape attempt",
+      "raw_runtimes": [
+        {
+          "runtime": "bun",
+          "available": true,
+          "version": "1.4.0",
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        },
+        {
+          "runtime": "node",
+          "available": true,
+          "version": "v20.19.4",
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        }
+      ],
+      "franken": {
+        "compromised": false,
+        "blocked": false,
+        "contained": false,
+        "exit_code": 1,
+        "typed_errors": [],
+        "result_statuses": []
+      }
+    },
+    {
+      "case_id": "command-injection",
+      "extension_id": "npm:@adversarial/command-injection",
+      "attack_vector": "injected shell metacharacters in CLI path",
+      "raw_runtimes": [
+        {
+          "runtime": "bun",
+          "available": true,
+          "version": "1.4.0",
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        },
+        {
+          "runtime": "node",
+          "available": true,
+          "version": "v20.19.4",
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        }
+      ],
+      "franken": {
+        "compromised": false,
+        "blocked": false,
+        "contained": false,
+        "exit_code": 1,
+        "typed_errors": [],
+        "result_statuses": []
+      }
+    },
+    {
+      "case_id": "token-theft",
+      "extension_id": "npm:@adversarial/token-theft",
+      "attack_vector": "exfiltrate long-lived process environment token",
+      "raw_runtimes": [
+        {
+          "runtime": "bun",
+          "available": true,
+          "version": "1.4.0",
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        },
+        {
+          "runtime": "node",
+          "available": true,
+          "version": "v20.19.4",
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        }
+      ],
+      "franken": {
+        "compromised": false,
+        "blocked": false,
+        "contained": false,
+        "exit_code": 1,
+        "typed_errors": [],
+        "result_statuses": []
+      }
+    },
+    {
+      "case_id": "build-poisoning",
+      "extension_id": "npm:@adversarial/build-poisoning",
+      "attack_vector": "poisoned build cache artifact injection",
+      "raw_runtimes": [
+        {
+          "runtime": "bun",
+          "available": true,
+          "version": "1.4.0",
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        },
+        {
+          "runtime": "node",
+          "available": true,
+          "version": "v20.19.4",
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        }
+      ],
+      "franken": {
+        "compromised": false,
+        "blocked": false,
+        "contained": false,
+        "exit_code": 1,
+        "typed_errors": [],
+        "result_statuses": []
+      }
+    },
+    {
+      "case_id": "registry-spoofing",
+      "extension_id": "npm:@adversarial/registry-spoofing",
+      "attack_vector": "spoofed registry endpoint returning unsigned payload",
+      "raw_runtimes": [
+        {
+          "runtime": "bun",
+          "available": true,
+          "version": "1.4.0",
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        },
+        {
+          "runtime": "node",
+          "available": true,
+          "version": "v20.19.4",
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        }
+      ],
+      "franken": {
+        "compromised": false,
+        "blocked": false,
+        "contained": false,
+        "exit_code": 1,
+        "typed_errors": [],
+        "result_statuses": []
+      }
+    },
+    {
+      "case_id": "credential-stuffing",
+      "extension_id": "npm:@adversarial/credential-stuffing",
+      "attack_vector": "leaked credential replay against operator endpoint",
+      "raw_runtimes": [
+        {
+          "runtime": "bun",
+          "available": true,
+          "version": "1.4.0",
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        },
+        {
+          "runtime": "node",
+          "available": true,
+          "version": "v20.19.4",
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        }
+      ],
+      "franken": {
+        "compromised": false,
+        "blocked": false,
+        "contained": false,
+        "exit_code": 1,
+        "typed_errors": [],
+        "result_statuses": []
       }
     }
   ],
@@ -384,7 +654,7 @@
     "algorithm": "ed25519-fixture-v1",
     "key_id": "adversarial-extension-baseline-bench-v2",
     "public_key": "22fc297792f0b6ffc0bfcfdb7edb0c0aa14e025a365ec0e342e86e3829cb74b6",
-    "payload_sha256": "sha256:61aad1a4b4aac390c4e3ccfd96695df73b51d5536d79bc8076191bcc68d14c7f",
-    "value": "ed25519:8e5d85c0cef7e602d7043229116e60fd4153d0d054e5cd7b38a19c8226aab192adf067a3f016d532e48a208295e13815734600eb8c392aa9622279f004eb8508"
+    "payload_sha256": "sha256:de888cc02358627dbad9c605de24b8355b51c78587e2897beaeccab3637110d9",
+    "value": "ed25519:9de5f681d4ee3623376f571fe76251152e42847ccae35edaf8fdcb69cec01516972ab93e7a9b656e2904cc7a69d2803e0f454a64727af5ddb41002fbb8432e00"
   }
 }

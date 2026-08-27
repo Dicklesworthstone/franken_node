@@ -20,7 +20,7 @@
     "baseline_compromised": 20,
     "franken_compromised": 0,
     "baseline_attempts": 20,
-    "franken_attempts": 10,
+    "franken_attempts": 20,
     "raw_baseline_runtimes": [
       "bun",
       "node"

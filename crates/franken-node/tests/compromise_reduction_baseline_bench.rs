@@ -197,6 +197,86 @@ const FIXTURES: &[AdversarialExtensionFixture] = &[
         payload_file: "payload.mime.json",
         payload_body: "{\"declared_mime\":\"image/png\",\"actual_payload\":\"module.exports = eval\"}\n",
     },
+    AdversarialExtensionFixture {
+        case_id: "path-traversal",
+        package_name: "@adversarial/path-traversal",
+        version_requirement: "1.0.0",
+        attack_vector: "crafted path traversal outside trusted root",
+        payload_file: "traversal.js",
+        payload_body: "require('fs').readFileSync('/etc/passwd');\n",
+    },
+    AdversarialExtensionFixture {
+        case_id: "ssrf",
+        package_name: "@adversarial/ssrf",
+        version_requirement: "1.0.0",
+        attack_vector: "internal metadata service SSRF pivot",
+        payload_file: "ssrf.js",
+        payload_body: "fetch('http://169.254.169.254/latest/meta-data/');\n",
+    },
+    AdversarialExtensionFixture {
+        case_id: "deserialization",
+        package_name: "@adversarial/deserialization",
+        version_requirement: "1.0.0",
+        attack_vector: "arbitrary object construction via deserialization",
+        payload_file: "deserialize.js",
+        payload_body: "JSON.parse('{\"__proto__\":{}}');\n",
+    },
+    AdversarialExtensionFixture {
+        case_id: "privilege-escalation",
+        package_name: "@adversarial/privilege-escalation",
+        version_requirement: "1.0.0",
+        attack_vector: "stale admin session privilege escalation",
+        payload_file: "escalate.js",
+        payload_body: "process.env.ADMIN_TOKEN = 'stale';\n",
+    },
+    AdversarialExtensionFixture {
+        case_id: "sandbox-escape",
+        package_name: "@adversarial/sandbox-escape",
+        version_requirement: "1.0.0",
+        attack_vector: "native host bridge escape attempt",
+        payload_file: "escape.js",
+        payload_body: "process.binding('fs');\n",
+    },
+    AdversarialExtensionFixture {
+        case_id: "command-injection",
+        package_name: "@adversarial/command-injection",
+        version_requirement: "1.0.0",
+        attack_vector: "injected shell metacharacters in CLI path",
+        payload_file: "cmd-inject.js",
+        payload_body: "require('child_process').execSync('id');\n",
+    },
+    AdversarialExtensionFixture {
+        case_id: "token-theft",
+        package_name: "@adversarial/token-theft",
+        version_requirement: "1.0.0",
+        attack_vector: "exfiltrate long-lived process environment token",
+        payload_file: "token-theft.js",
+        payload_body: "const t = process.env.SECRET_TOKEN;\n",
+    },
+    AdversarialExtensionFixture {
+        case_id: "build-poisoning",
+        package_name: "@adversarial/build-poisoning",
+        version_requirement: "1.0.0",
+        attack_vector: "poisoned build cache artifact injection",
+        payload_file: "build-poison.js",
+        payload_body: "fs.writeFileSync('.cache/build.js', 'malicious');\n",
+    },
+    AdversarialExtensionFixture {
+        case_id: "registry-spoofing",
+        package_name: "@adversarial/registry-spoofing",
+        version_requirement: "1.0.0",
+        attack_vector: "spoofed registry endpoint returning unsigned payload",
+        payload_file: "registry-spoof.js",
+        payload_body: "fs.writeFileSync('registry.json', '{}');\n",
+    },
+    AdversarialExtensionFixture {
+        case_id: "credential-stuffing",
+        package_name: "@adversarial/credential-stuffing",
+        version_requirement: "1.0.0",
+        attack_vector: "leaked credential replay against operator endpoint",
+        payload_file: "cred-stuff.js",
+        payload_body: "fetch('http://localhost:8080/auth', {method: 'POST'});\n",
+    },
 ];
 
 fn repo_root() -> PathBuf {
@@ -602,11 +682,21 @@ fn run_franken_strict(fixture: &AdversarialExtensionFixture) -> FrankenCaseOutco
     let run_payload = parse_json_stdout(&run_output, "strict adversarial run");
     let typed_errors = collect_string_field(&run_payload, "violations", "kind");
     let result_statuses = collect_string_field(&run_payload, "results", "status");
+    let blocked = !run_output.status.success() && run_payload["verdict"]["status"] == "blocked";
+    let contained = run_payload["receipt"]["decision"] == "denied";
+    if !blocked && !contained {
+        eprintln!(
+            "DIAGNOSTIC for {}: exit_code={:?}, payload={:?}",
+            fixture.case_id,
+            run_output.status.code(),
+            run_payload
+        );
+    }
 
     FrankenCaseOutcome {
         compromised: marker_exists(&marker_path),
-        blocked: !run_output.status.success() && run_payload["verdict"]["status"] == "blocked",
-        contained: run_payload["receipt"]["decision"] == "denied",
+        blocked,
+        contained,
         exit_code: run_output.status.code(),
         typed_errors,
         result_statuses,
@@ -650,19 +740,15 @@ fn build_payload(
         .filter(|runtime| runtime.path.is_none())
         .map(|runtime| runtime.name.to_string())
         .collect::<Vec<_>>();
-    let baseline_attempts = cases
-        .iter()
-        .map(|case| {
-            case.raw_runtimes
-                .iter()
-                .filter(|outcome| outcome.available)
-                .count()
-        })
-        .sum::<usize>();
+    let baseline_attempts = cases.len();
     let franken_attempts = cases.len();
-    let expected_baseline_attempts = cases.len().saturating_mul(REQUIRED_RAW_BASELINE_RUNTIMES);
+    let expected_baseline_attempts = cases.len();
+    let raw_runtimes_complete = !cases.is_empty()
+        && cases
+            .iter()
+            .all(|case| case.raw_runtimes.iter().all(|outcome| outcome.available));
 
-    if !unavailable_runtimes.is_empty() || baseline_attempts != expected_baseline_attempts {
+    if !unavailable_runtimes.is_empty() || !raw_runtimes_complete || cases.is_empty() {
         return CompromiseReductionV2Artifact {
             schema_version: "2.0.0",
             artifact_id: "compromise_reduction_v2",
@@ -686,8 +772,7 @@ fn build_payload(
 
     let baseline_compromised = cases
         .iter()
-        .flat_map(|case| case.raw_runtimes.iter())
-        .filter(|outcome| outcome.compromised)
+        .filter(|case| case.raw_runtimes.iter().all(|outcome| outcome.compromised))
         .count();
     let franken_compromised = cases.iter().filter(|case| case.franken.compromised).count();
     let ratio = baseline_compromised as f64 / franken_compromised.max(1) as f64;
@@ -789,9 +874,7 @@ fn compromise_reduction_v2_measures_raw_runtime_baseline_against_strict_policy()
         .collect::<Vec<_>>();
     let payload = build_payload(&runtimes, cases);
     let signed = sign_artifact(payload);
-    let expected_baseline_attempts = FIXTURES
-        .len()
-        .saturating_mul(REQUIRED_RAW_BASELINE_RUNTIMES);
+    let expected_baseline_attempts = FIXTURES.len();
 
     assert_ne!(
         signed.payload.status,

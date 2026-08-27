@@ -244,6 +244,16 @@ path = "tests/migrate_cli_e2e.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "compromise_reduction_baseline_bench"
+path = "tests/compromise_reduction_baseline_bench.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "adversarial_compromise_reduction_tampering"
+path = "tests/adversarial_compromise_reduction_tampering.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "verifier_economy_conformance"
 path = "tests/verifier_economy_conformance.rs"
 required-features = ["verifier-tools", "test-support"]
@@ -2021,25 +2031,3 @@ path = "tests/doctor_policy_activation_e2e.rs"
 [[test]]
 name = "compat_corpus_run_e2e"
 path = "tests/compat_corpus_run_e2e.rs"
-
-# charter_substrates_e2e (bd-reality-20260820-w0fc6.9): verifies charter-mandated
-# substrate integrations (asupersync control-lane transport / degraded fallback,
-# fastapi_rust control-plane HTTP binding & routing, and frankentui presentation engine).
-[[test]]
-name = "charter_substrates_e2e"
-path = "tests/charter_substrates_e2e.rs"
-required-features = ["control-plane"]
-
-# compromise_reduction_baseline_bench (bd-3cpa): real 20-vector Node/Bun adversarial
-# benchmark campaign asserting >=10x compromise reduction under franken-node strict.
-[[test]]
-name = "compromise_reduction_baseline_bench"
-path = "tests/compromise_reduction_baseline_bench.rs"
-
-# adversarial_compromise_reduction_tampering (bd-3cpa): cryptographic tamper-detection
-# for compromise reduction campaign reports and telemetry entries.
-[[test]]
-name = "adversarial_compromise_reduction_tampering"
-path = "tests/adversarial_compromise_reduction_tampering.rs"
-
-
