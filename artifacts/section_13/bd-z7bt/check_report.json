@@ -2,32 +2,32 @@
   "bead_id": "bd-z7bt",
   "section": "13",
   "title": "Section-wide verification gate: comprehensive unit+e2e+logging",
-  "generated_at": "2026-02-21T01:38:30.094763+00:00",
-  "gate_pass": true,
-  "verdict": "PASS",
+  "generated_at": "2026-08-28T19:38:08.985660+00:00",
+  "gate_pass": false,
+  "verdict": "FAIL",
   "section_beads_expected": 12,
   "section_beads_verified": 12,
   "overall_coverage_pct": 100.0,
-  "quantitative_targets_passing": 6,
+  "quantitative_targets_passing": 4,
   "quantitative_targets_total": 6,
   "quantitative_targets": [
     {
       "bead": "bd-28sz",
       "criterion": "Concrete target: >=95% compatibility corpus pass",
       "target": "overall_pass_rate >= 95%",
-      "measured": 98.7,
+      "measured": 69.82,
       "required": 95.0,
-      "pass": true,
-      "detail": "overall_pass_rate_pct=98.7 required=95.0"
+      "pass": false,
+      "detail": "overall_pass_rate_pct=69.82 required=95.0"
     },
     {
       "bead": "bd-3agp",
       "criterion": "Concrete target: >=3x migration velocity",
       "target": "overall_velocity_ratio >= 3.0",
-      "measured": 3.1507,
+      "measured": 2.303,
       "required": 3.0,
-      "pass": true,
-      "detail": "ratio=3.1507 required=3.0"
+      "pass": false,
+      "detail": "ratio=2.303 required=3.0"
     },
     {
       "bead": "bd-3cpa",
@@ -42,8 +42,8 @@
       "bead": "bd-34d5",
       "criterion": "Concrete target: friction-minimized install-to-first-safe-production",
       "target": "all friction pathway checks pass",
-      "measured": "13/13 checks",
-      "required": "13/13 checks",
+      "measured": "18/18 checks",
+      "required": "18/18 checks",
       "pass": true,
       "detail": "all friction pathway checks must pass"
     },
@@ -1468,8 +1468,8 @@
           "title": "Impossible-by-default adoption success criterion",
           "section": "13",
           "verdict": "PASS",
-          "total": 72,
-          "passed": 72,
+          "total": 74,
+          "passed": 74,
           "failed": 0,
           "checks": [
             {
@@ -1831,6 +1831,16 @@
               "check": "verification summary",
               "pass": true,
               "detail": "valid"
+            },
+            {
+              "check": "ibd production-use artifact",
+              "pass": true,
+              "detail": "honest pending"
+            },
+            {
+              "check": "docs do not claim production adoption",
+              "pass": true,
+              "detail": "no live adoption claim"
             }
           ]
         }
@@ -1840,7 +1850,7 @@
         "test": "tests/test_check_impossible_adoption.py",
         "exists": true,
         "status": "PASS",
-        "tests_ran": 118,
+        "tests_ran": 122,
         "tests_failed": 0,
         "exit_code": 0
       },
@@ -2492,8 +2502,8 @@
       "unit_pass": true,
       "evidence_pass": true,
       "measurement_methodology_defined": true,
-      "quantitative_pass": true,
-      "overall_pass": true,
+      "quantitative_pass": false,
+      "overall_pass": false,
       "script_result": {
         "bead": "bd-28sz",
         "script": "scripts/check_compat_corpus_gate.py",
@@ -2619,7 +2629,7 @@
         "test": "tests/test_check_compat_corpus_gate.py",
         "exists": true,
         "status": "PASS",
-        "tests_ran": 71,
+        "tests_ran": 74,
         "tests_failed": 0,
         "exit_code": 0
       },
@@ -2750,145 +2760,162 @@
       "target": "overall_velocity_ratio >= 3.0",
       "script": "scripts/check_migration_velocity_gate.py",
       "test": "tests/test_check_migration_velocity_gate.py",
-      "script_pass": true,
+      "script_pass": false,
       "unit_pass": true,
       "evidence_pass": true,
       "measurement_methodology_defined": true,
-      "quantitative_pass": true,
-      "overall_pass": true,
+      "quantitative_pass": false,
+      "overall_pass": false,
       "script_result": {
         "bead": "bd-3agp",
         "script": "scripts/check_migration_velocity_gate.py",
         "exists": true,
         "self_test_present": true,
-        "status": "PASS",
-        "verdict": "PASS",
-        "exit_code": 0,
+        "status": "FAIL",
+        "verdict": "FAIL",
+        "exit_code": 1,
         "payload": {
-          "bead_id": "bd-3agp",
-          "title": "Migration velocity gate (>= 3x)",
-          "section": "13",
-          "trace_id": "trace-bd-3agp-migration-velocity",
-          "verdict": "PASS",
-          "total": 18,
-          "passed": 18,
-          "failed": 0,
-          "computed": {
-            "overall_velocity_ratio": 3.1507,
-            "required_velocity_ratio": 3.0,
-            "cohort_size": 10,
-            "ci_release_sample_count": 5,
-            "missing_archetypes": []
-          },
+          "bead_id": "bd-reality-20260820-w0fc6.2",
+          "title": "Live migration velocity gate (>= 3x, signed, census-recomputed)",
+          "verdict": "FAIL",
+          "total": 22,
+          "passed": 21,
+          "failed": 1,
           "checks": [
             {
-              "check": "file: spec contract",
+              "check": "file: signed summary",
               "pass": true,
-              "detail": "docs/specs/section_13/bd-3agp_contract.md"
+              "detail": "artifacts/migration/throughput_delta.json"
             },
             {
-              "check": "file: migration velocity report",
+              "check": "file: evidence census",
               "pass": true,
-              "detail": "artifacts/13/migration_velocity_report.json"
+              "detail": "artifacts/migration/throughput_delta_evidence.json"
             },
             {
-              "check": "spec threshold >= 3x",
-              "pass": true,
-              "detail": "found"
-            },
-            {
-              "check": "spec archetype coverage",
+              "check": "summary schema",
               "pass": true,
               "detail": "found"
             },
             {
-              "check": "spec event codes",
+              "check": "evidence schema",
               "pass": true,
               "detail": "found"
             },
             {
-              "check": "report parse",
+              "check": "summary is object",
+              "pass": true,
+              "detail": "found"
+            },
+            {
+              "check": "evidence is object",
+              "pass": true,
+              "detail": "found"
+            },
+            {
+              "check": "ed25519 signature under harness anchor",
               "pass": true,
               "detail": "ok"
             },
             {
-              "check": "report required top-level fields",
+              "check": "census fixtures list",
+              "pass": true,
+              "detail": "found"
+            },
+            {
+              "check": "per-fixture medians/ratios recompute from runs",
+              "pass": true,
+              "detail": "found"
+            },
+            {
+              "check": "frozen fixture inputs match recorded digests",
               "pass": true,
               "detail": "ok"
             },
             {
-              "check": "report bead id",
+              "check": "corpus digest commits to census",
               "pass": true,
               "detail": "found"
             },
             {
-              "check": "report unit minutes",
+              "check": "delta fixture ids match census",
               "pass": true,
               "detail": "found"
             },
             {
-              "check": "cohort size >= 10",
+              "check": "exactly one holdout fixture",
               "pass": true,
-              "detail": "found"
+              "detail": "holdouts=['holdout-worker-service']"
             },
             {
-              "check": "cohort_size matches project count",
-              "pass": true,
-              "detail": "found"
-            },
-            {
-              "check": "project entry schema",
+              "check": "constructed Feb 2026 archetype cohort rejected (bd-reality-20260820-w0fc6.2)",
               "pass": true,
               "detail": "ok"
             },
             {
-              "check": "required archetypes covered",
+              "check": "pooled medians recompute",
               "pass": true,
-              "detail": "ok"
+              "detail": "found"
             },
             {
-              "check": "overall velocity ratio matches computed",
+              "check": "velocity ratio recomputes from census",
               "pass": true,
-              "detail": "declared=3.15, computed=3.15"
+              "detail": "declared=23030, recomputed=23030"
+            },
+            {
+              "check": "bootstrap CI95 recomputes deterministically",
+              "pass": true,
+              "detail": "found"
+            },
+            {
+              "check": "required ratio pinned at 3x",
+              "pass": true,
+              "detail": "required=30000"
             },
             {
               "check": "velocity threshold >= 3x",
-              "pass": true,
-              "detail": "ratio=3.15, threshold=3.0"
+              "pass": false,
+              "detail": "ratio_bp=23030, required_bp=30000"
             },
             {
-              "check": "ci sample coverage >= 3",
+              "check": "holdout ratio matches census",
               "pass": true,
-              "detail": "ci_release_sample projects=5"
+              "detail": "found"
             },
             {
-              "check": "determinism under reordering",
+              "check": "measured runs recorded",
               "pass": true,
-              "detail": "ratio=3.15068, reversed_ratio=3.15068"
+              "detail": "found"
             },
             {
-              "check": "adversarial perturbation flips threshold",
+              "check": "protocol documented",
               "pass": true,
-              "detail": "perturbed_ratio=2.10"
+              "detail": "found"
             }
           ],
           "events": [
             {
-              "event_code": "MVG-001",
-              "trace_id": "trace-bd-3agp-migration-velocity",
-              "message": "Velocity metrics computed (ratio=3.15)."
+              "event_code": "MTP-001",
+              "trace_id": "sha256:25515efbc",
+              "message": "Live velocity metrics recomputed (ratio_bp=23030)."
             },
             {
-              "event_code": "MVG-002",
-              "trace_id": "trace-bd-3agp-migration-velocity",
-              "message": "Velocity threshold met (>= 3x)."
+              "event_code": "MTP-003",
+              "trace_id": "sha256:25515efbc",
+              "message": "Velocity threshold breached or mispinned (< 3x)."
             },
             {
-              "event_code": "MVG-006",
-              "trace_id": "trace-bd-3agp-migration-velocity",
-              "message": "Determinism validation executed."
+              "event_code": "MTP-004",
+              "trace_id": "sha256:25515efbc",
+              "message": "Signature, frozen-input, and holdout contracts verified."
             }
-          ]
+          ],
+          "computed": {
+            "overall_velocity_ratio": 2.303,
+            "required_velocity_ratio": 3.0,
+            "ratio_bp": 23030,
+            "required_ratio_bp": 30000
+          }
         }
       },
       "unit_result": {
@@ -2896,7 +2923,7 @@
         "test": "tests/test_check_migration_velocity_gate.py",
         "exists": true,
         "status": "PASS",
-        "tests_ran": 5,
+        "tests_ran": 17,
         "tests_failed": 0,
         "exit_code": 0
       },
@@ -3019,8 +3046,8 @@
           "section": "13",
           "trace_id": "trace-bd-3cpa-compromise-reduction",
           "verdict": "PASS",
-          "total": 23,
-          "passed": 23,
+          "total": 27,
+          "passed": 27,
           "failed": 0,
           "computed": {
             "minimum_required_ratio": 10.0,
@@ -3054,6 +3081,16 @@
             },
             {
               "check": "spec event codes",
+              "pass": true,
+              "detail": "found"
+            },
+            {
+              "check": "spec benchmark proof contract",
+              "pass": true,
+              "detail": "found"
+            },
+            {
+              "check": "spec equal-attempts invariant",
               "pass": true,
               "detail": "found"
             },
@@ -3138,6 +3175,16 @@
               "detail": "ratio=10.0, threshold=10.0"
             },
             {
+              "check": "equal attempts (baseline vs franken)",
+              "pass": true,
+              "detail": "baseline_attempts=20, franken_attempts=20"
+            },
+            {
+              "check": "benchmark proof directly cites measured 10x evidence",
+              "pass": true,
+              "detail": "ok"
+            },
+            {
               "check": "determinism under reordering",
               "pass": true,
               "detail": "ratio=10.0, reversed_ratio=10.0"
@@ -3177,7 +3224,7 @@
         "test": "tests/test_check_compromise_reduction_gate.py",
         "exists": true,
         "status": "PASS",
-        "tests_ran": 7,
+        "tests_ran": 11,
         "tests_failed": 0,
         "exit_code": 0
       },
@@ -3192,12 +3239,12 @@
           "bead_id": "bd-3cpa",
           "section": "13",
           "title": "Concrete target gate: >=10x compromise reduction",
-          "generated_at": "2026-02-21T01:05:25Z",
+          "generated_at": "2026-08-27T19:58:00Z",
           "status": "pass",
           "checks": [
             {
               "name": "compromise_reduction_self_test",
-              "command": "python3 scripts/check_compromise_reduction_gate.py --self-test --json",
+              "command": "python3 scripts/check_compromise_reduction_gate.py --self-test",
               "exit_code": 0,
               "output_path": "artifacts/section_13/bd-3cpa/check_self_test.json"
             },
@@ -3234,28 +3281,21 @@
               "command": "python3 -m unittest tests/test_check_compromise_reduction_gate.py",
               "exit_code": 0,
               "output_path": "artifacts/section_13/bd-3cpa/unit_tests.txt",
-              "summary": "Ran 7 tests: OK"
+              "summary": "Ran 11 tests: OK"
             },
             {
-              "name": "cargo_check_all_targets_via_rch",
-              "command": "rch exec -- cargo check --all-targets",
-              "exit_code": 101,
-              "output_path": "artifacts/section_13/bd-3cpa/rch_cargo_check.log",
-              "note": "Pre-existing repository compile debt outside bd-3cpa scope."
+              "name": "registered_cargo_bench_target",
+              "target": "compromise_reduction_baseline_bench",
+              "manifest_path": "crates/franken-node/Cargo.toml",
+              "source_path": "crates/franken-node/tests/compromise_reduction_baseline_bench.rs",
+              "status": "registered_authoritative"
             },
             {
-              "name": "cargo_clippy_all_targets_via_rch",
-              "command": "rch exec -- cargo clippy --all-targets -- -D warnings",
-              "exit_code": 101,
-              "output_path": "artifacts/section_13/bd-3cpa/rch_cargo_clippy.log",
-              "note": "Pre-existing repository-wide clippy debt outside bd-3cpa scope."
-            },
-            {
-              "name": "cargo_fmt_check_via_rch",
-              "command": "rch exec -- cargo fmt --check",
-              "exit_code": 1,
-              "output_path": "artifacts/section_13/bd-3cpa/rch_cargo_fmt_check.log",
-              "note": "Pre-existing repository formatting drift outside bd-3cpa scope."
+              "name": "registered_cargo_tamper_target",
+              "target": "adversarial_compromise_reduction_tampering",
+              "manifest_path": "crates/franken-node/Cargo.toml",
+              "source_path": "crates/franken-node/tests/adversarial_compromise_reduction_tampering.rs",
+              "status": "registered_authoritative"
             }
           ],
           "acceptance_mapping": {
@@ -3311,8 +3351,8 @@
         "exit_code": 0,
         "payload": {
           "bead_id": "bd-34d5",
-          "total": 13,
-          "passed": 13,
+          "total": 18,
+          "passed": 18,
           "failed": 0,
           "all_passed": true,
           "checks": [
@@ -3374,12 +3414,37 @@
             {
               "check": "policy_pathway_steps",
               "passed": true,
-              "detail": "All 4 pathway steps defined in policy"
+              "detail": "Current shipped install/init/run steps are documented with no stale configure command"
+            },
+            {
+              "check": "current_surface_reality",
+              "passed": true,
+              "detail": "Docs distinguish current shipped surface from future pathway targets"
+            },
+            {
+              "check": "current_reporting_surface",
+              "passed": true,
+              "detail": "Current docs enumerate the shipped init/run JSON and JSONL surfaces"
             },
             {
               "check": "archetype_scores",
               "passed": true,
               "detail": "Found 5/5 archetype compatibility scores"
+            },
+            {
+              "check": "named_pathway_artifacts",
+              "passed": true,
+              "detail": "Named shell sentinel and onboarding timing report are present with reality-boundary markers"
+            },
+            {
+              "check": "onboarding_timing_report",
+              "passed": true,
+              "detail": "Onboarding timing report covers all 5 setups as current-reality, non-overclaiming evidence"
+            },
+            {
+              "check": "completion_debt_citations",
+              "passed": true,
+              "detail": "Spec and policy cite the named shell/report artifacts with non-overclaiming boundaries"
             }
           ]
         }
@@ -3389,7 +3454,7 @@
         "test": "tests/test_check_friction_pathway.py",
         "exists": true,
         "status": "PASS",
-        "tests_ran": 27,
+        "tests_ran": 33,
         "tests_failed": 0,
         "exit_code": 0
       },
@@ -3403,9 +3468,9 @@
         "payload": {
           "bead_id": "bd-34d5",
           "section": "section_13",
-          "timestamp_utc": "2026-02-21T01:38:29.255605+00:00",
-          "total_checks": 13,
-          "passed": 13,
+          "timestamp_utc": "2026-08-28T19:38:08.685080+00:00",
+          "total_checks": 18,
+          "passed": 18,
           "failed": 0,
           "all_passed": true,
           "checks": [
@@ -3467,12 +3532,37 @@
             {
               "check": "policy_pathway_steps",
               "passed": true,
-              "detail": "All 4 pathway steps defined in policy"
+              "detail": "Current shipped install/init/run steps are documented with no stale configure command"
+            },
+            {
+              "check": "current_surface_reality",
+              "passed": true,
+              "detail": "Docs distinguish current shipped surface from future pathway targets"
+            },
+            {
+              "check": "current_reporting_surface",
+              "passed": true,
+              "detail": "Current docs enumerate the shipped init/run JSON and JSONL surfaces"
             },
             {
               "check": "archetype_scores",
               "passed": true,
               "detail": "Found 5/5 archetype compatibility scores"
+            },
+            {
+              "check": "named_pathway_artifacts",
+              "passed": true,
+              "detail": "Named shell sentinel and onboarding timing report are present with reality-boundary markers"
+            },
+            {
+              "check": "onboarding_timing_report",
+              "passed": true,
+              "detail": "Onboarding timing report covers all 5 setups as current-reality, non-overclaiming evidence"
+            },
+            {
+              "check": "completion_debt_citations",
+              "passed": true,
+              "detail": "Spec and policy cite the named shell/report artifacts with non-overclaiming boundaries"
             }
           ]
         }
@@ -4073,7 +4163,7 @@
   "gate_checks": [
     {
       "id": "GATE-13-SCRIPTS",
-      "status": "PASS"
+      "status": "FAIL"
     },
     {
       "id": "GATE-13-TESTS",
@@ -4097,10 +4187,25 @@
     },
     {
       "id": "GATE-13-ALL-BEADS",
-      "status": "PASS"
+      "status": "FAIL"
     }
   ],
-  "gaps": [],
+  "gaps": [
+    {
+      "bead": "bd-28sz",
+      "criterion": "Concrete target: >=95% compatibility corpus pass",
+      "measured": 69.82,
+      "required": 95.0,
+      "remediation": "Raise compatibility corpus pass rate and fix failing API families until >=95% overall and >=80% family floors."
+    },
+    {
+      "bead": "bd-3agp",
+      "criterion": "Concrete target: >=3x migration velocity",
+      "measured": 2.303,
+      "required": 3.0,
+      "remediation": "Improve migration pipeline throughput and remove cohort bottlenecks to restore >=3x velocity."
+    }
+  ],
   "events": [
     {
       "event_code": "GATE_13_EVALUATION_STARTED",
@@ -4140,23 +4245,23 @@
       "event_code": "GATE_13_TARGET_MEASURED",
       "bead": "bd-28sz",
       "target": "overall_pass_rate >= 95%",
-      "pass": true
+      "pass": false
     },
     {
       "event_code": "GATE_13_BEAD_CHECKED",
       "bead": "bd-28sz",
-      "overall_pass": true
+      "overall_pass": false
     },
     {
       "event_code": "GATE_13_TARGET_MEASURED",
       "bead": "bd-3agp",
       "target": "overall_velocity_ratio >= 3.0",
-      "pass": true
+      "pass": false
     },
     {
       "event_code": "GATE_13_BEAD_CHECKED",
       "bead": "bd-3agp",
-      "overall_pass": true
+      "overall_pass": false
     },
     {
       "event_code": "GATE_13_TARGET_MEASURED",
@@ -4204,11 +4309,11 @@
     },
     {
       "event_code": "GATE_13_VERDICT_EMITTED",
-      "verdict": "PASS",
-      "gate_pass": true,
-      "quantitative_targets_passing": 6,
+      "verdict": "FAIL",
+      "gate_pass": false,
+      "quantitative_targets_passing": 4,
       "quantitative_targets_total": 6
     }
   ],
-  "content_hash": "1ab2704aa7d6f109c078711db9a644113081fb1210d541bbd93ce416b6188439"
+  "content_hash": "62246ea141665133e6dfbb7c7e1661407d9f13da4ff7f8e1b59244c13ec3214f"
 }
