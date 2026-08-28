@@ -2949,7 +2949,7 @@ See [`docs/DUAL_ORACLE_CLOSE_CONDITION.md`](docs/DUAL_ORACLE_CLOSE_CONDITION.md)
 
 Receipts emitted by the close-condition oracle are signed and chained into
 the evidence ledger so a later audit can verify exactly which inputs
-produced the verdict. Live L1 is currently RED (corpus 86.43%, 484/560);
+produced the verdict. Live L1 is currently RED (corpus 69.82%, 391/560, per `artifacts/13/compatibility_corpus_results.json`);
 do not read a GREEN L1 from backfill artifacts.
 
 ---
@@ -3244,8 +3244,8 @@ one pass.
 
 ### Is this a drop-in replacement for Node or Bun?
 
-No. The measured compatibility corpus is the L1 spec (currently 86.43%,
-484/560) and `child_process` native-eval aborts remain fail, not pass.
+No. The measured compatibility corpus is the L1 spec (currently 69.82%,
+391/560 per `artifacts/13/compatibility_corpus_results.json`) and `child_process` native-eval aborts remain fail, not pass.
 `verify lockstep` defaults to a Bun+franken dyad for hosts without real
 Node.js; that dyad is not the spec. When `--runtimes` includes `node` as
 real Node.js, Node is the spec and matching only Bun stays fail. Inspect
