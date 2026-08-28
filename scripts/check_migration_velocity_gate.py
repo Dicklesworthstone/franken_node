@@ -413,7 +413,13 @@ def run_checks(summary_path: Path = SUMMARY, evidence_path: Path = EVIDENCE) -> 
     else:
         _event("MTP-004", trace, "Signature/frozen-input/holdout contract violation detected.")
 
-    return _verdict("PASS" if all(c["pass"] for c in CHECKS) else "FAIL", "", "")
+    computed = {
+        "overall_velocity_ratio": recomputed_ratio / 10_000.0,
+        "required_velocity_ratio": required / 10_000.0,
+        "ratio_bp": recomputed_ratio,
+        "required_ratio_bp": required,
+    }
+    return _verdict("PASS" if all(c["pass"] for c in CHECKS) else "FAIL", "", "", computed=computed)
 
 
 def _check_frozen_inputs(fixtures: list) -> tuple[bool, str]:
@@ -431,12 +437,17 @@ def _check_frozen_inputs(fixtures: list) -> tuple[bool, str]:
     return (not mismatches, "ok" if not mismatches else "; ".join(mismatches[:5]))
 
 
-def _verdict(verdict: str, event_code: str, message: str) -> dict:
+def _verdict(
+    verdict: str,
+    event_code: str,
+    message: str,
+    computed: dict | None = None,
+) -> dict:
     if event_code:
         _event(event_code, "gate", message)
     total = len(CHECKS)
     passed = sum(1 for check in CHECKS if check["pass"])
-    return {
+    result = {
         "bead_id": "bd-reality-20260820-w0fc6.2",
         "title": "Live migration velocity gate (>= 3x, signed, census-recomputed)",
         "verdict": verdict,
@@ -446,6 +457,9 @@ def _verdict(verdict: str, event_code: str, message: str) -> dict:
         "checks": CHECKS,
         "events": EVENTS,
     }
+    if computed is not None:
+        result["computed"] = computed
+    return result
 
 
 def _rel(path: Path) -> str:

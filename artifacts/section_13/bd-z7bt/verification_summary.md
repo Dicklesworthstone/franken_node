@@ -1,7 +1,9 @@
 # bd-z7bt Verification Summary
 
 ## Result
-PASS (bead scope) with pre-existing workspace baseline cargo failures
+- Gate implementation: PASS (script + self-test + unit tests all green)
+- Quantitative verdict: FAIL (4/6 concrete targets; gate threshold is >=4/6, so the gate still passes its own threshold; two real gaps: bd-28sz corpus regression and bd-3agp live-gate re-scoping)
+- Cargo: clean (local nightly)
 
 ## Delivered
 - `scripts/check_section_13_gate.py`
@@ -41,6 +43,5 @@ PASS (bead scope) with pre-existing workspace baseline cargo failures
   - `GATE-13-ALL-BEADS`
 
 ## Cargo Gate Notes
-- `cargo check` failed via `rch` due pre-existing compile debt (`E0423` in `crates/franken-node/src/supply_chain/manifest.rs`).
-- `cargo clippy` failed via `rch` due pre-existing workspace lint/compile debt.
-- `cargo fmt --check` failed via `rch` due pre-existing formatting drift.
+- `cargo check` (local nightly, `RCH_SHIM_LOCAL_IDE=1`) passes cleanly on this branch; the older E0423 in `crates/franken-node/src/supply_chain/manifest.rs` is no longer present (resolved by the substrate-merge commits). RCH workers still flag the gate as `fail_baseline` because they lack a toolchain component.
+- `cargo clippy` and `cargo fmt --check` similarly pass locally on this branch.

@@ -134,6 +134,35 @@ class GateCliTests(unittest.TestCase):
         payload = json.loads(completed.stdout)
         assert payload["ok"] is True
 
+    def test_run_emits_computed_block_with_canonical_keys(self) -> None:
+        # bd-3agp / section-13 gate reads `computed.overall_velocity_ratio` and
+        # `computed.required_velocity_ratio` from the live output; if those keys
+        # are missing the section-13 quantitative slot goes `null` even when
+        # the underlying check is wired. The live gate MUST publish the
+        # canonical block at the top level of its verdict.
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPT), "--json"],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        # Non-zero is fine (current cohort is below threshold); we only
+        # care that the JSON contract is honored.
+        assert completed.returncode in (0, 1), completed.stderr
+        payload = json.loads(completed.stdout)
+        computed = payload.get("computed")
+        assert isinstance(computed, dict), f"missing computed block: {payload.keys()}"
+        for key in ("overall_velocity_ratio", "required_velocity_ratio",
+                    "ratio_bp", "required_ratio_bp"):
+            assert key in computed, f"missing {key} in computed: {computed}"
+        # The bp<->float mapping must be consistent.
+        assert abs(computed["overall_velocity_ratio"] * 10_000.0
+                   - computed["ratio_bp"]) < 0.5
+        assert abs(computed["required_velocity_ratio"] * 10_000.0
+                   - computed["required_ratio_bp"]) < 0.5
+        # Required must be the 3x floor.
+        assert computed["required_ratio_bp"] == 30_000
+
 
 if __name__ == "__main__":
     unittest.main()
