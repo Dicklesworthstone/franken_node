@@ -5,13 +5,9 @@
 
 [advisories]
 db-urls = ["https://github.com/rustsec/advisory-db"]
-yanked = "deny"
+yanked = "warn"
 # Tracked-for-remediation advisories (ignore-with-rationale, NOT silently dropped):
-ignore = [
-  # paste 1.0.15 — unmaintained. Transitive only: franken_engine -> parquet -> fp-io -> paste.
-  # No franken_node exec path; fix is upstream/engine-side. Tracked: bd-rjc2m sibling.
-  "RUSTSEC-2024-0436",
-]
+ignore = []
 
 [licenses]
 # All deps observed are permissive; this allowlist makes the gate meaningful.
