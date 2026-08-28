@@ -20,7 +20,6 @@ const ARTIFACT_RELATIVE_PATH: &str = "artifacts/adversarial/compromise_reduction
 const TRUST_CARD_REGISTRY_RELATIVE_PATH: &str = ".franken-node/state/trust-card-registry.v1.json";
 const FIXTURE_SIGNING_KEY_BYTES: [u8; 32] = [0x43; 32];
 const RUNTIME_TIMEOUT: Duration = Duration::from_secs(2);
-const REQUIRED_RAW_BASELINE_RUNTIMES: usize = 2;
 
 #[derive(Clone, Copy)]
 struct AdversarialExtensionFixture {
@@ -500,6 +499,15 @@ fn write_fixture_workspace(workspace: &Path, fixture: &AdversarialExtensionFixtu
         serde_json::to_string_pretty(&manifest).expect("serialize root package manifest"),
     )
     .expect("write root package manifest");
+    let config_body = concat!(
+        "profile = \"strict\"\n\n",
+        "[trust]\n",
+        "registry_signing_key = \"ZnJhbmtlbi1ub2RlLXRydXN0LWNhcmQtcmVnaXN0cnkta2V5LXYx\"\n\n",
+        "[security]\n",
+        "authorized_api_keys = [\"fnode-fixture-adversarial-bench\"]\n"
+    );
+    fs::write(workspace.join("franken_node.toml"), config_body)
+        .expect("write franken_node.toml config");
     fs::write(workspace.join("index.js"), entrypoint_payload(fixture))
         .expect("write executable adversarial entrypoint");
     fs::write(workspace.join("host-secret.txt"), "host-secret-token\n")
@@ -684,14 +692,6 @@ fn run_franken_strict(fixture: &AdversarialExtensionFixture) -> FrankenCaseOutco
     let result_statuses = collect_string_field(&run_payload, "results", "status");
     let blocked = !run_output.status.success() && run_payload["verdict"]["status"] == "blocked";
     let contained = run_payload["receipt"]["decision"] == "denied";
-    if !blocked && !contained {
-        eprintln!(
-            "DIAGNOSTIC for {}: exit_code={:?}, payload={:?}",
-            fixture.case_id,
-            run_output.status.code(),
-            run_payload
-        );
-    }
 
     FrankenCaseOutcome {
         compromised: marker_exists(&marker_path),
