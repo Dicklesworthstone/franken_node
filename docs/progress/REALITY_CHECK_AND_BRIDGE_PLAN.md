@@ -515,3 +515,58 @@ Build: `cargo build --release -p frankenengine-node` → `/data/tmp/cargo-target
 | `doctor close-condition --json` | **bug filed** `bd-9zrqh`: unconditional signing-key demand; its own fix_command then fails with "failed generating close-condition receipt" and empty stderr |
 
 Interpretation: `w0fc6.7`'s closure is accurate for its tested scope (harness provisions the engine authority); the clean-room operator path still requires an explicit engine-binary handoff that README's "First safe workload (current source)" does not mention. That gap belongs to open `bd-34d5` (install → first safe production), not a reopen.
+
+## Refresh 2026-08-29 (third full reality check — delta pass)
+
+**Method:** same measuring stick (README + AGENTS.md + PRODUCT_CHARTER + CLAIMS_REGISTRY + the Aug-20/23 sections of this file), fresh live probes only; no re-litigation of closed work without new evidence. HEAD `v0.1.0-860-g77a8d48cc` (2026-08-28). Beads: 4,342 issues — 14 open / 11 in_progress / 4 blocked (~99.3% closed). Honesty manifest recomputed this session: **9 ok, 0 drifted** (integration census 3,756→live 4,014; inline 21,621→21,871; fuzz 146/146; validators 437→438; `unsafe_blocks=0`; Ed25519 harness-key signature ok). Release drift grew again: Latest `v0.1.0` is now **860 commits** behind HEAD (709 at Aug-20, 799 at Aug-23).
+
+### Headline: the compatibility corpus REGRESSED 86.43% → 69.82%
+
+`artifacts/13/compatibility_corpus_results.json`, regenerated 2026-08-24 (f50be1135) and 2026-08-26 (10ae1ddcd), now measures **391/560 = 69.82%** (bands: core 74.41%, high-value 62.40%, edge 82.14% — all below their 99/95/90 floors). The Aug-20/23 measurements recorded 484/560 = 86.43% with a 76-failure mix containing **no IFC failure class at all**. The current artifact has 169 failures; **97 of them share one new signature**: the franken-engine leg refuses at the lowering stage with `unauthorized flow detected at op N: TopSecret -> Internal` (information-flow-control / taint enforcement). Class census: engine_crash 120 (97 = IFC refusals), native_eval_abort 30 (child_process, unchanged), output_mismatch 18, reference_disagree 1. IFC refusals span ≥12 families (buffer 14, url 8, querystring 7, os ~5, cluster ~5, crypto ~12, events ~13, fs ~13, stream ~8, http ~3, timers 1, tls ~1, zlib ~5). Same-corpus-hash anchor: v0.1.0 scores 68.21% — the regression puts main ~1.6 points above the May baseline, erasing ~6 weeks of measured compatibility progress. Suspected cause: default-on IFC enforcement landed engine-side between the two measurement windows. This is the charter's central collision (security hardening vs the ≥95% floor); per the Aug-21 reaffirmation these failures must NOT be recategorized — benign flows must declassify correctly, malicious flows must still refuse.
+
+**Beads created this pass (all three block `bd-28sz`):**
+
+| ID | Gap | Vision |
+|---|---|---|
+| `bd-kx70h` (P0, bug) | IFC lowering-refusal regression: 97 corpus cases; triage incl. measurement-protocol hygiene; engine-first fix per split contract + CI class tripwire | V6 |
+| `bd-bwa93` (P2, task) | Failure-ownership sweep: os/http non-IFC residuals (4 known) + durable "every corpus failure has an owner" invariant | V6 |
+| `bd-klpse` (P2, bug) | `artifacts/compat/corpus_pass.json` (86.43 @ Aug-20) + CLAIMS_REGISTRY CLAIM-001 stale vs 69.82 measured; `check_compatibility_corpus_pass_gate.py` never reads `corpus_pass.json` — zero drift detection | V6/V20 |
+
+### What else moved since 2026-08-23 (verified this session)
+
+| Aug-23 item | State today | Evidence |
+|---|---|---|
+| fleet_cli_e2e 18 failures (`bd-c6qum`) | CLOSED; close-reason quality high | 50/50 green at HEAD d9c0973b4, serial + -j4, verified 10+ runs |
+| doctor close-condition keyless bug (`bd-9zrqh`) | CLOSED | 22fbc4f7b; `close_condition.rs:709-746` + `main.rs:6685-6731`; regression test named |
+| 10× compromise gate (`bd-3cpa`) | CLOSED as gate implementation; CLAIM-003 correctly still pending | c3dddc6f1: bench targets registered, gate 27/27 PASS; v2 artifact uses raw bun/node baselines (20 attempts each) with `fail_closed_baseline_unavailable=true`; registry retains "do not treat 20.0× as verified" — gate-vs-claim separation coherent, no reopen |
+| Inline-test hole (`bd-rjc2m.21`, P0) | Still open; dedicated lane now compiles but has runtime behavior-drift failures (`bd-o776s`) | V27 remains PARTIAL: ~21.9k inline tests still not effectively executed anywhere |
+| Migration 3× (`bd-v0lgc`) | Still open | live gate measured 2.30× (CI95 [1.90×, 3.30×]) vs ≥3.0× charter floor |
+| CLI honesty (`w0fc6.5`) | **Re-verified HOLDS** by a fresh static audit this session | zero `todo!`/`unimplemented!`/`TODO` in src; `verify compatibility` profile targets fail closed (`main.rs:28186-28203`); proofs restart paper-labeled with `ERR_PROOF_RESTART_NO_EXECUTOR` (`ops/proof_pipeline.rs:486-497`, `main.rs:8775-8782`); counterfactual `--model production` bails (`main.rs:20008-20015`); `trust sync` performs a real OSV POST with offline warnings; all six spot-checked primitives 1,289–6,977 lines, REAL |
+| Release channel (`w0fc6.4`, documented honesty) | Drift worsened 799 → 860 commits; correctly still blocked on corpus ≥95% per the Aug-23 decision | `git describe` |
+
+### Vision checklist deltas (Aug-20 numbering)
+
+- **V6 (compat ≥95%): REGRESSED** — 86.43% → 69.82%. Honest RED everywhere: `l1_product_verdict.json` RED, close-condition receipt `failing_dimensions=[L1_product_oracle]`, `corpus_pass.json` RED-but-stale (bd-klpse).
+- V1 (`run` executes JS): fixture-level proof stands (`w0fc6.7`); this session re-ran the named e2e via rch — result recorded below. Clean-room operator path still owned by `bd-34d5`.
+- V20 (dual-oracle truth): mechanism still honest; summary-artifact staleness is the one new crack (bd-klpse).
+- V27 (effective coverage): unchanged PARTIAL; the P0 remains the single largest coverage hole in the repo.
+- Strict WORKING count: **~7/28, unchanged** (V3, V11, V15, V20-mechanism, V22, V26, V1-fixture-level). The corpus regression blocks any further climb until the IFC class is resolved.
+
+### Run-proof re-verification (2026-08-29 session)
+
+**Live operator probe PASS (new positive delta vs 2026-08-23).** Using the shared debug binary built 2026-08-29 03:28 (`/data/tmp/cargo-target/debug/franken-node`, newer than HEAD 77a8d48cc) in a clean `/tmp` workspace with the standard sibling `franken_engine` checkout:
+
+1. `franken-node init --profile balanced --json --out-dir .` → `franken-node/init-cli/v1`, exit 0.
+2. `franken-node run ./hello.js --policy balanced` (auto runtime) → **exit 0, stdout `hello-from-engine`, `runtime=franken_engine exit_code=0 violations=0 auto_quarantined=0`**, signed run receipt written under `.franken-node/state/execution-receipts/2026-08-29/…`. **No `FRANKEN_NODE_ENGINE_BINARY_PATH` and no degraded-fallback env were needed** — auto mode discovered the sibling engine, which FAILED on the identical probe 2026-08-23. The clean-room gap that `bd-34d5` tracks has narrowed to release-channel freshness (debug/source builds auto-discover; the shipped v0.1.0 installer artifact still cannot).
+3. `doctor close-condition` keyless in that workspace → no signing-key demand (bd-9zrqh fix live); fails with a precise missing-artifact path (`artifacts/section/10.N/gate_verdict/bd-1neb_section_gate.json`) plus a fix_command naming the checkout requirement.
+4. `verify compatibility balanced` → **fail closed**, `status=fail exit_code=1`, contract_version 3.0.0, message: profile is not a compatibility claim (w0fc6.5 behavior confirmed live).
+
+The named regression e2e (`default_run_executes_fixture_js_through_embedded_engine_without_degraded_fallback`) was also re-launched this session via `rch`; it was still executing on the shared build fleet at commit time (cold workspace test compile ~47 min across the fleet). Its outcome should be appended here by the next writer; the live probe above plus the standing `w0fc6.7` proof carry the fixture-level V1 evidence for this refresh.
+
+### Refinement notes (Phase 5 pass, this session)
+
+- `bd-kx70h` amended after review: triage must first confirm the Aug-20 run's measurement protocol (policy_mode, reference runtime, corpus hash) before attributing the drop to engine code; only the code-delta component is engine work. Same-corpus-hash v0.1.0 anchor suggests protocol comparability, but verify from the Aug-20 run record.
+- Generalization candidate noted, deliberately not bead-ed yet: the IFC tripwire (bd-kx70h task 3) could become a generic failure-class-census tripwire (any class-census shift beyond a registered floor fails CI). Decide when the IFC tripwire lands.
+- Known-and-accepted (again): `docs/TODO_ULTRA_DETAILED.md` sections 1–5 are stale (QuickJS-evaluator TODOs contradict the no-bindings rule; ROADMAP "Phase 0 In Progress" is wrong). Flagged Aug-20; still not worth a bead against the P0 — a 10-minute truth pass is warranted once the corpus is green.
+- Cross-repo bead references: `failing_tests_tracking.investigation_bead_id` `bd-8qvy6` lives in the franken_engine bead store, not this one — intentional, but triagers must look there.
+- Beads-store transient corruption during this session's concurrent creation: auto-export hit `database disk image is malformed` plus a JSONL write-lock timeout; the first bd-kx70h write was lost and re-created. Store now verifies clean: 4,342/4,342 coverage, dirty 0 (pre-repair snapshot in `.beads/recovery_20260829_realitycheck/`).
