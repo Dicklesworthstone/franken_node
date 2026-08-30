@@ -356,8 +356,9 @@ def compute_runtime_observations_digest(data: dict) -> str:
         hash_field("elapsed_ms", elapsed_ms.to_bytes(8, "big"))
     return f"sha256:{hasher.hexdigest()}"
 
-CONTRACT = ROOT / "docs" / "specs" / "section_13" / "bd-28sz_contract.md"
 SUMMARY = ROOT / "artifacts" / "compat" / "corpus_pass.json"
+CONTRACT = ROOT / "docs" / "specs" / "section_13" / "bd-28sz_contract.md"
+IFC_REFUSAL_MARKER = "unauthorized flow detected"
 REPORT = ROOT / "artifacts" / "13" / "compatibility_corpus_results.json"
 DEFAULT_MIN_CASES = 500
 
@@ -558,6 +559,37 @@ def check_summary(report_path: Path, data: dict | None, results_generated_at: "s
             "pass": True,
             "detail": f"observed_pct matches {report_path}",
         })
+    return checks
+
+
+
+def count_ifc_refusals(data: dict) -> int:
+    """bd-kx70h tripwire input: failing cases whose reason carries the
+    engine IFC lowering-refusal signature."""
+    return sum(
+        1
+        for row in data.get("failing_tests_tracking", [])
+        if IFC_REFUSAL_MARKER in str(row.get("reason", ""))
+    )
+
+
+def check_ifc_regression(
+    data: dict | None,
+    max_allowed: int = 0,
+) -> list[dict]:
+    """bd-kx70h task 3 tripwire: any corpus regeneration whose IFC-refusal
+    census exceeds the registered floor fails the gate, so a security
+    landing that mass-fails compatibility surfaces at gate time instead of
+    days later in an artifact refresh."""
+    checks: list[dict] = []
+    if data is None:
+        return checks
+    count = count_ifc_refusals(data)
+    checks.append({
+        "check": f"ifc: refusal census <= {max_allowed}",
+        "pass": count <= max_allowed,
+        "detail": f"ifc_refusals={count} marker={IFC_REFUSAL_MARKER!r}",
+    })
     return checks
 
 
@@ -871,6 +903,7 @@ def run_checks(
         if isinstance(corpus_block, dict):
             generated_at = corpus_block.get("generated_at_utc")
     checks.extend(check_summary(report_path, data, generated_at))
+    checks.extend(check_ifc_regression(data))
 
     passing = sum(1 for c in checks if c["pass"])
     failing = sum(1 for c in checks if not c["pass"])
@@ -955,6 +988,19 @@ def self_test() -> tuple[bool, list[dict]]:
     checks.append({
         "check": "self: summary GREEN below floor blocked",
         "pass": "SUMMARY_GREEN_BELOW_FLOOR" in green_findings,
+    })
+    # bd-kx70h: IFC-refusal census tripwire counts only marked reasons.
+    tripwire_sample = {
+        "failing_tests_tracking": [
+            {"test_id": "tc::a::0001", "reason": "lowering: unauthorized flow detected at op 3"},
+            {"test_id": "tc::b::0002", "reason": "output mismatch vs bun reference"},
+        ]
+    }
+    checks.append({
+        "check": "self: IFC refusal census counts marked reasons only",
+        "pass": count_ifc_refusals(tripwire_sample) == 1
+        and len(check_ifc_regression(tripwire_sample, max_allowed=0)) == 1
+        and check_ifc_regression(tripwire_sample, max_allowed=1)[0]["pass"],
     })
     return all(c["pass"] for c in checks), checks
 
