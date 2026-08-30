@@ -1146,6 +1146,18 @@ impl Config {
                     MAX_MERGE_DECISIONS,
                 );
             }
+            if let Some(value) = section.allow_degraded_file_transport {
+                self.fleet.allow_degraded_file_transport = value;
+                push_bounded(
+                    decisions,
+                    MergeDecision::new(
+                        stage.clone(),
+                        "fleet.allow_degraded_file_transport",
+                        value,
+                    ),
+                    MAX_MERGE_DECISIONS,
+                );
+            }
         }
 
         if let Some(section) = &overrides.observability {
@@ -2971,6 +2983,7 @@ struct FleetOverrides {
     pub poll_interval_seconds: Option<u64>,
     pub convergence_timeout_seconds: Option<u64>,
     pub barrier_timeout_ms: Option<u64>,
+    pub allow_degraded_file_transport: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
