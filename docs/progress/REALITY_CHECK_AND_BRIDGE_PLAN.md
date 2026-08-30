@@ -561,7 +561,7 @@ Interpretation: `w0fc6.7`'s closure is accurate for its tested scope (harness pr
 3. `doctor close-condition` keyless in that workspace → no signing-key demand (bd-9zrqh fix live); fails with a precise missing-artifact path (`artifacts/section/10.N/gate_verdict/bd-1neb_section_gate.json`) plus a fix_command naming the checkout requirement.
 4. `verify compatibility balanced` → **fail closed**, `status=fail exit_code=1`, contract_version 3.0.0, message: profile is not a compatibility claim (w0fc6.5 behavior confirmed live).
 
-The named regression e2e (`default_run_executes_fixture_js_through_embedded_engine_without_degraded_fallback`) was also re-launched this session via `rch`; it was still executing on the shared build fleet at commit time (cold workspace test compile ~47 min across the fleet). Its outcome should be appended here by the next writer; the live probe above plus the standing `w0fc6.7` proof carry the fixture-level V1 evidence for this refresh.
+The named regression e2e (`default_run_executes_fixture_js_through_embedded_engine_without_degraded_fallback`) was re-launched this session via `rch` and produced **no verdict**: the remote build was SIGKILLed (`exit=137`, rch "likely resource exhaustion") on worker hz4 after a 60-minute cold compile, with no higher-capacity worker available — an infrastructure failure, not a product regression. V1 fixture-level evidence for this refresh therefore rests on the live probe above (newer-than-HEAD binary, full operator path, auto-discovered engine) plus the standing `w0fc6.7` proof; the named test should be re-run once a warm target or a larger worker is available.
 
 ### Refinement notes (Phase 5 pass, this session)
 
