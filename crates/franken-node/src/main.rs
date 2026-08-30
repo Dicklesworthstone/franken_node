@@ -8490,13 +8490,17 @@ fn emit_ops_error_json(command: &str, message: &str) -> Result<()> {
     Ok(())
 }
 
-fn ops_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Result<()> {
+fn ops_fail(command: &str, json: bool, error: anyhow::Error) -> Result<()> {
     let message = error.to_string();
     if json {
         emit_ops_error_json(command, &message)?;
         fail_closed_after_json();
     }
-    anyhow::bail!("{message}")
+    // bd-kx70h: preserve the full cause chain for human diagnostics — the
+    // flattened message hid the root cause of multi-step provisioning
+    // failures (corpus child-process authority triage). The JSON surface
+    // keeps its stable message-only shape.
+    Err(error)
 }
 
 fn emit_proofs_error_json(command: &str, message: &str) -> Result<()> {
