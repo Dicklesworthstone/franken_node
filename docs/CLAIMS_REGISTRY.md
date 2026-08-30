@@ -41,11 +41,20 @@ Each claim entry uses this structure:
   `artifacts/13/compatibility_corpus_results.json`)
 - **Verification command**:
   `python3 scripts/check_compatibility_corpus_pass_gate.py --json`
-- **Last verified**: 2026-08-20T17:40:36Z
-- **Status**: pending (measured RED: observed_pct=86.43, required=95.0; 484/560)
-- **Notes**: Live lockstep-oracle-run triad as of 2026-08-20. The L1
+- **Last verified**: 2026-08-30T01:35:01Z (bd-klpse sync; measured artifact
+  regenerated 2026-08-26T07:27:33Z, commit 10ae1ddcd)
+- **Status**: pending (measured RED: observed_pct=69.82, required=95.0; 391/560;
+  97 failures are engine IFC lowering refusals, bd-kx70h)
+- **Notes**: Live lockstep-oracle-run triad as of 2026-08-26. The L1
   close-condition gate fails closed if this file is GREEN or pending while
   the corpus is below 95% (bd-reality-20260820-w0fc6.1). Tracked by `bd-28sz`.
+  REPRODUCTION CAVEAT (2026-08-30, bd-kx70h triage): re-running
+  `ops compat-corpus-run --require-node-reference` (node v22.2.0, bun 1.4.0,
+  same corpus hash) on the current tree measured 60.36% (338/560) — the
+  committed 69.82% did NOT reproduce on this host. The artifact does not pin
+  host, engine build, node/bun versions, or fixture-tree revision, so
+  cross-host reproduction is currently unverifiable; treat headline deltas
+  as within-measurement-uncertainty until provenance is pinned (bd-kx70h).
 
 ### CLAIM-002: ≥3× migration throughput vs. baseline
 

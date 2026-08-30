@@ -2,12 +2,12 @@
   "$schema": "../../docs/specs/section_13/bd-28sz_contract.md",
   "gate": "compat_corpus_pass_gate",
   "verdict": "RED",
-  "timestamp": "2026-08-20T17:40:36.705661771+00:00",
+  "timestamp": "2026-08-30T01:35:01.918957163Z",
   "owner_track": "10.2",
   "metric": {
     "name": "targeted_compatibility_corpus_pass_rate",
     "target_pct": 95.0,
-    "observed_pct": 86.43,
+    "observed_pct": 69.82,
     "passed": false,
     "details_ref": "artifacts/13/compatibility_corpus_results.json"
   },
@@ -18,12 +18,13 @@
     "compat_corpus_gate_self_test": "scripts/check_compat_corpus_gate.py --self-test",
     "corpus_results": "artifacts/13/compatibility_corpus_results.json",
     "total_test_cases": 560,
-    "passed_test_cases": 484,
-    "failed_test_cases": 76
+    "passed_test_cases": 391,
+    "failed_test_cases": 169
   },
   "notes": [
-    "Measured 2026-08-20 from artifacts/13/compatibility_corpus_results.json (lockstep-oracle-run triad).",
-    "observed_pct 86.43 is below required 95.00; verdict is RED until bd-28sz closes.",
+    "Synced 2026-08-30 (bd-klpse) to the measured results artifact regenerated 2026-08-26T07:27:33Z (lockstep-oracle-run, commit 10ae1ddcd): observed_pct 69.82 (391/560).",
+    "The previous summary block (observed_pct 86.43, timestamp 2026-08-20) was stale relative to its details_ref; the pass gate now fails closed on any summary/results divergence (SUMMARY_* findings).",
+    "observed_pct 69.82 is below required 95.00; verdict is RED until bd-28sz closes. 97 of the 169 failures are engine IFC lowering refusals tracked by bd-kx70h.",
     "This file is bound to the L1 close-condition gate (bd-reality-20260820-w0fc6.1). Declaring GREEN here while the corpus is below the floor is fail-closed."
   ]
 }

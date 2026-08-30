@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -356,6 +357,7 @@ def compute_runtime_observations_digest(data: dict) -> str:
     return f"sha256:{hasher.hexdigest()}"
 
 CONTRACT = ROOT / "docs" / "specs" / "section_13" / "bd-28sz_contract.md"
+SUMMARY = ROOT / "artifacts" / "compat" / "corpus_pass.json"
 REPORT = ROOT / "artifacts" / "13" / "compatibility_corpus_results.json"
 DEFAULT_MIN_CASES = 500
 
@@ -446,6 +448,117 @@ def load_report(report_path: Path = REPORT) -> tuple[dict | None, list[dict]]:
 
     checks.append({"check": "report: valid json", "pass": True, "detail": "valid"})
     return data, checks
+
+
+def _parse_rfc3339(value: str) -> "datetime | None":
+    """Parse an RFC 3339 timestamp; returns None when absent or malformed."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def evaluate_summary_consistency(
+    summary: dict,
+    observed_rate: float,
+    threshold_met: bool,
+    results_generated_at: "str | None",
+) -> list[dict]:
+    """bd-klpse: the public charter-metric summary must agree with the
+    measured results artifact it references. Returns named findings; an
+    empty list means the summary is fresh and consistent."""
+    findings: list[dict] = []
+    metric = summary.get("metric") if isinstance(summary.get("metric"), dict) else {}
+    reported_pct = metric.get("observed_pct")
+    if not isinstance(reported_pct, (int, float)) or isinstance(reported_pct, bool):
+        findings.append({
+            "finding": "SUMMARY_OBSERVED_PCT_MISSING",
+            "detail": "metric.observed_pct is absent or non-numeric",
+        })
+    elif abs(float(reported_pct) - observed_rate) >= 0.01:
+        findings.append({
+            "finding": "SUMMARY_OBSERVED_PCT_MISMATCH",
+            "detail": f"summary={reported_pct} results={observed_rate}",
+        })
+
+    summary_ts = _parse_rfc3339(str(summary.get("timestamp", "")))
+    results_ts = _parse_rfc3339(results_generated_at or "")
+    if summary_ts is None:
+        findings.append({
+            "finding": "SUMMARY_TIMESTAMP_UNPARSEABLE",
+            "detail": f"summary.timestamp={summary.get('timestamp')!r}",
+        })
+    elif results_ts is not None and summary_ts < results_ts:
+        findings.append({
+            "finding": "SUMMARY_STALE_VS_RESULTS",
+            "detail": (
+                f"summary.timestamp={summary.get('timestamp')} precedes "
+                f"results generated_at_utc={results_generated_at}"
+            ),
+        })
+
+    verdict = str(summary.get("verdict", "")).upper()
+    if verdict == "GREEN" and not threshold_met:
+        findings.append({
+            "finding": "SUMMARY_GREEN_BELOW_FLOOR",
+            "detail": "summary verdict GREEN while measured results miss the gate",
+        })
+    elif verdict not in {"GREEN", "RED", "YELLOW"}:
+        findings.append({
+            "finding": "SUMMARY_VERDICT_INCONSISTENT",
+            "detail": f"summary verdict={summary.get('verdict')!r} is not GREEN/RED/YELLOW",
+        })
+    return findings
+
+
+def check_summary(report_path: Path, data: dict | None, results_generated_at: "str | None") -> list[dict]:
+    """Filesystem-facing wrapper: load SUMMARY and evaluate it against the
+    recomputed rate from `data`. Emits nothing when the report itself is
+    unloadable — the report checks already fail for that case."""
+    checks: list[dict] = []
+    if data is None:
+        return checks
+    if not SUMMARY.exists():
+        checks.append({
+            "check": "summary: charter metric artifact exists",
+            "pass": False,
+            "detail": f"MISSING: {SUMMARY}",
+        })
+        return checks
+    try:
+        summary = json.loads(SUMMARY.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        checks.append({
+            "check": "summary: valid json",
+            "pass": False,
+            "detail": f"unparseable: {SUMMARY}",
+        })
+        return checks
+    checks.append({"check": "summary: valid json", "pass": True, "detail": str(SUMMARY)})
+
+    per_tests = data.get("per_test_results", [])
+    observed_rate = pass_rate(
+        sum(1 for r in per_tests if r.get("status") == "pass"), len(per_tests)
+    )
+    gate = evaluate_gate(data)
+    findings = evaluate_summary_consistency(
+        summary, observed_rate, gate["threshold_met"], results_generated_at
+    )
+    for finding in findings:
+        checks.append({
+            "check": "summary: consistent with measured results",
+            "pass": False,
+            "detail": f"{finding['finding']}: {finding['detail']}",
+        })
+    if not findings:
+        checks.append({
+            "check": "summary: consistent with measured results",
+            "pass": True,
+            "detail": f"observed_pct matches {report_path}",
+        })
+    return checks
 
 
 def pass_rate(passed: int, total: int) -> float:
@@ -752,6 +865,12 @@ def run_checks(
     data, load_checks = load_report(report_path)
     checks.extend(load_checks)
     checks.extend(check_report(data, minimum_cases))
+    generated_at = None
+    if isinstance(data, dict):
+        corpus_block = data.get("corpus")
+        if isinstance(corpus_block, dict):
+            generated_at = corpus_block.get("generated_at_utc")
+    checks.extend(check_summary(report_path, data, generated_at))
 
     passing = sum(1 for c in checks if c["pass"])
     failing = sum(1 for c in checks if not c["pass"])
@@ -806,6 +925,36 @@ def self_test() -> tuple[bool, list[dict]]:
         and hmac.compare_digest(
             compute_result_digest(list(reversed(digest_vector))), expected_digest
         ),
+    })
+    # bd-klpse: summary-consistency vectors. Fresh consistent summary -> no
+    # findings; stale or divergent summary -> named findings, and a GREEN
+    # verdict under the floor is always a finding.
+    fresh = {
+        "verdict": "RED",
+        "timestamp": "2026-08-29T00:00:00Z",
+        "metric": {"observed_pct": 69.82},
+    }
+    ok_fresh = evaluate_summary_consistency(fresh, 69.82, False, "2026-08-28T00:00:00Z") == []
+    checks.append({
+        "check": "self: summary fresh consistent yields no findings",
+        "pass": ok_fresh,
+    })
+    stale = dict(fresh, timestamp="2026-08-20T00:00:00Z", metric={"observed_pct": 86.43})
+    stale_findings = {
+        f["finding"] for f in evaluate_summary_consistency(stale, 69.82, False, "2026-08-26T00:00:00Z")
+    }
+    checks.append({
+        "check": "self: summary stale + pct mismatch detected",
+        "pass": {"SUMMARY_STALE_VS_RESULTS", "SUMMARY_OBSERVED_PCT_MISMATCH"} <= stale_findings,
+        "detail": f"findings={sorted(stale_findings)}",
+    })
+    green_below = dict(fresh, verdict="GREEN")
+    green_findings = {
+        f["finding"] for f in evaluate_summary_consistency(green_below, 69.82, False, "2026-08-28T00:00:00Z")
+    }
+    checks.append({
+        "check": "self: summary GREEN below floor blocked",
+        "pass": "SUMMARY_GREEN_BELOW_FLOOR" in green_findings,
     })
     return all(c["pass"] for c in checks), checks
 
