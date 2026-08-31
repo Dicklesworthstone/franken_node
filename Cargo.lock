@@ -2165,9 +2165,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "sqlmodel 0.4.1",
- "sqlmodel-core 0.4.1",
- "sqlmodel-schema 0.4.1",
+ "sqlmodel 0.4.2",
+ "sqlmodel-core 0.4.2",
+ "sqlmodel-schema 0.4.2",
  "subtle",
  "syn 2.0.117",
  "tempfile",
@@ -4839,17 +4839,17 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "asupersync 0.4.9",
  "serde",
  "serde_json",
- "sqlmodel-core 0.4.1",
- "sqlmodel-macros 0.4.1",
- "sqlmodel-pool 0.4.1",
- "sqlmodel-query 0.4.1",
- "sqlmodel-schema 0.4.1",
- "sqlmodel-session 0.4.1",
+ "sqlmodel-core 0.4.2",
+ "sqlmodel-macros 0.4.2",
+ "sqlmodel-pool 0.4.2",
+ "sqlmodel-query 0.4.2",
+ "sqlmodel-schema 0.4.2",
+ "sqlmodel-session 0.4.2",
 ]
 
 [[package]]
@@ -4867,7 +4867,7 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel-core"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "asupersync 0.4.9",
  "regex",
@@ -4906,7 +4906,7 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel-macros"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4927,10 +4927,10 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel-pool"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "asupersync 0.4.9",
- "sqlmodel-core 0.4.1",
+ "sqlmodel-core 0.4.2",
  "tracing",
 ]
 
@@ -4948,11 +4948,11 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel-query"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "asupersync 0.4.9",
  "serde",
- "sqlmodel-core 0.4.1",
+ "sqlmodel-core 0.4.2",
  "tracing",
 ]
 
@@ -4971,12 +4971,12 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel-schema"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "asupersync 0.4.9",
  "serde",
- "sqlmodel-core 0.4.1",
- "sqlmodel-macros 0.4.1",
+ "sqlmodel-core 0.4.2",
+ "sqlmodel-macros 0.4.2",
  "tracing",
 ]
 
@@ -4996,13 +4996,13 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel-session"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "asupersync 0.4.9",
  "serde",
  "serde_json",
- "sqlmodel-core 0.4.1",
- "sqlmodel-query 0.4.1",
+ "sqlmodel-core 0.4.2",
+ "sqlmodel-query 0.4.2",
  "tracing",
 ]
 
