@@ -1150,11 +1150,7 @@ impl Config {
                 self.fleet.allow_degraded_file_transport = value;
                 push_bounded(
                     decisions,
-                    MergeDecision::new(
-                        stage.clone(),
-                        "fleet.allow_degraded_file_transport",
-                        value,
-                    ),
+                    MergeDecision::new(stage.clone(), "fleet.allow_degraded_file_transport", value),
                     MAX_MERGE_DECISIONS,
                 );
             }
