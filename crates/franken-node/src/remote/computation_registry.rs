@@ -29,7 +29,7 @@ const MAX_SANITIZED_DISPLAY_LENGTH: usize = 256;
 /// - Format string injection: Escapes % characters to prevent format specifier interpretation
 /// - Length bounds: Truncates oversized input to prevent log flooding
 /// - PII/secret leakage: Redacts potential secret patterns (base64, hex tokens)
-/// Largest byte index at or below `max_byte` that lies on a UTF-8 character boundary of `s`.
+///   Largest byte index at or below `max_byte` that lies on a UTF-8 character boundary of `s`.
 ///
 /// `str::floor_char_boundary` is still unstable, so this is the stable equivalent: it never
 /// panics and never splits a multibyte character (bd-oonyu). A raw byte slice `&s[..n]` panics

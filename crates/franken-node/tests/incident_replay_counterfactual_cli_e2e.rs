@@ -156,12 +156,19 @@ fn incident_replay_missing_bundle_fails() {
 
     let result = cmd.assert().failure();
     let output = result.get_output();
-    let stderr = std::str::from_utf8(&output.stderr).expect("Invalid UTF-8");
+    let payload: Value = serde_json::from_slice(&output.stdout)
+        .expect("incident replay --json failure must emit JSON on stdout");
 
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/incident-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "incident.replay");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().expect("error string");
     assert!(
-        stderr.contains("bundle") || stderr.contains("not found"),
-        "Expected error about missing bundle: {}",
-        stderr
+        error.contains("bundle") || error.contains("not found"),
+        "Expected error about missing bundle: {error}"
     );
 }
 
@@ -185,18 +192,25 @@ fn incident_replay_malformed_bundle_fails() {
 
     let result = cmd.assert().failure();
     let output = result.get_output();
-    let stderr = std::str::from_utf8(&output.stderr).expect("Invalid UTF-8");
+    let payload: Value = serde_json::from_slice(&output.stdout)
+        .expect("incident replay --json failure must emit JSON on stdout");
 
     // Prod fails closed reading the bundle with `failed reading replay bundle
     // <path>` caused by a `json serialization error: ...` (the deserializer
     // rejects the non-`ReplayBundle` JSON). Assert on that real wording.
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/incident-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "incident.replay");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().expect("error string");
     assert!(
-        stderr.contains("bundle")
-            || stderr.contains("json")
-            || stderr.contains("parse")
-            || stderr.contains("invalid"),
-        "Expected error about malformed bundle: {}",
-        stderr
+        error.contains("bundle")
+            || error.contains("json")
+            || error.contains("parse")
+            || error.contains("invalid"),
+        "Expected error about malformed bundle: {error}"
     );
 }
 
@@ -282,12 +296,19 @@ fn incident_counterfactual_invalid_policy_fails() {
 
     let result = cmd.assert().failure();
     let output = result.get_output();
-    let stderr = std::str::from_utf8(&output.stderr).expect("Invalid UTF-8");
+    let payload: Value = serde_json::from_slice(&output.stdout)
+        .expect("incident counterfactual --json failure must emit JSON on stdout");
 
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/incident-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "incident.counterfactual");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().expect("error string");
     assert!(
-        stderr.contains("policy") || stderr.contains("invalid"),
-        "Expected error about invalid policy: {}",
-        stderr
+        error.contains("policy") || error.contains("invalid"),
+        "Expected error about invalid policy: {error}"
     );
 }
 
@@ -455,7 +476,9 @@ fn incident_help_shows_subcommands() {
     let stdout = std::str::from_utf8(&output.stdout).expect("Invalid UTF-8");
 
     assert!(
-        stdout.contains("Incident replay and forensics"),
+        stdout.contains(
+            "Recorded incident bundles: export, integrity-verified replay, counterfactual"
+        ),
         "Expected help description"
     );
     assert!(stdout.contains("bundle"), "Expected bundle subcommand");

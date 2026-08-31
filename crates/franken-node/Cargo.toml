@@ -1907,7 +1907,7 @@ required-features = ["extended-surfaces"]
 [[test]]
 name = "incident_replay_counterfactual_cli_e2e"
 path = "tests/incident_replay_counterfactual_cli_e2e.rs"
-required-features = ["extended-surfaces"]
+required-features = ["extended-surfaces", "test-support"]
 
 # golden_artifacts_comprehensive (bd-h4kkw/bd-ossc4): the golden/ submodules now
 # compile, but the top-level file is still blocked by its #[path]-included
