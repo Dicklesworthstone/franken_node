@@ -102,6 +102,47 @@ consistency between this CSV and the migration plan.
 | MIG-004 | Exception expired; surface must be migrated |
 | MIG-005 | Burn-down milestone reached |
 
+## Native Context Ownership for Asupersync 0.5 (`bd-3fbgm`)
+
+The optional `asupersync-transport` dependency is pinned to registry version
+`=0.5.0`. Its default features are unchanged. The transport's existing
+`checkpoint` and tracing operations use a context retained from its caller;
+the transport does not create a runtime or enable `test-internals`.
+
+Use `AsupersyncFleetTransport::with_cx(cx, node_id, network)` when the runtime
+owner supplies the request context explicitly. For example, that owner can
+obtain a context with `Runtime::request_cx_with_budget`. Pass an existing
+request's context when its cancellation and budget must govern the transport.
+The transport stores the supplied context unchanged and its clones share that
+context's cancellation state.
+
+`AsupersyncFleetTransport::for_request(node_id, network)` retains its name and
+arguments but now returns `Result<Self, FleetTransportError>`. It captures
+`Cx::current()` and returns `NotInitialized` when no request is installed.
+Callers must handle that refusal; a missing owner no longer creates unrelated
+authority. The old `for_testing` constructor is replaced by `with_cx` in tests,
+using a caller-owned runtime. These are changes to the unpublished internal
+Rust API described in the README stability table; CLI and wire contracts are
+unchanged.
+
+Both published Asupersync 0.3.10 and 0.5.0 already restrict `Cx::for_request`
+and `Cx::for_testing` to `test-internals`. This repair removes an existing
+dependency on those test-only factories; it is not evidence that 0.5 newly
+removed them. The transport-only normal dependency graph does not enable
+`test-internals`. The default engine's existing `fastapi-core/testing` edge
+does enable it transitively, which remains a separate dependency-policy issue
+and must not be used to justify production calls to test-only factories.
+
+The existing `AsupersyncFleetNetwork` is shared in-memory state. Its tests
+exercise actual transport state mutation, native context cancellation, and
+obligation accounting; they do not establish socket transport, durable fleet
+delivery, or multi-process convergence. The migration tests additionally
+check missing-owner and exhausted-budget refusal, capture under a restricted
+context, cancellation after the ambient context has been restored, and unchanged actions, nodes,
+and events after refused operations. Native execution and required remote
+compiler/lint gates remain pending under `bd-3fbgm`; static graph resolution
+does not satisfy those gates.
+
 ## Selective Runtime Seam Contract (`bd-1now.4.1`)
 
 This appendix records the design contract for the telemetry ingestion seam
