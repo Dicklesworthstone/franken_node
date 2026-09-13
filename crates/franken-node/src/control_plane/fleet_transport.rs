@@ -834,22 +834,35 @@ pub struct AsupersyncFleetTransport {
 
 #[cfg(feature = "asupersync-transport")]
 impl AsupersyncFleetTransport {
+    /// Retains the caller's context, including its budget, cancellation state,
+    /// and runtime capability mask. The caller owns the runtime lifetime.
     #[must_use]
-    pub fn for_request(node_id: impl Into<String>, network: AsupersyncFleetNetwork) -> Self {
+    pub fn with_cx(
+        cx: asupersync::Cx,
+        node_id: impl Into<String>,
+        network: AsupersyncFleetNetwork,
+    ) -> Self {
         Self {
-            cx: asupersync::Cx::for_request(),
+            cx,
             node_id: node_id.into(),
             network,
         }
     }
 
-    #[must_use]
-    pub fn for_testing(node_id: impl Into<String>, network: AsupersyncFleetNetwork) -> Self {
-        Self {
-            cx: asupersync::Cx::for_testing(),
-            node_id: node_id.into(),
-            network,
-        }
+    /// Uses the currently installed request context without creating authority.
+    ///
+    /// Outside a runtime request, use [`Self::with_cx`] with a context supplied
+    /// by the runtime owner. A missing context is an explicit refusal.
+    pub fn for_request(
+        node_id: impl Into<String>,
+        network: AsupersyncFleetNetwork,
+    ) -> Result<Self, FleetTransportError> {
+        let cx = asupersync::Cx::current().ok_or_else(|| {
+            FleetTransportError::not_initialized(
+                "asupersync request context is not installed; use AsupersyncFleetTransport::with_cx",
+            )
+        })?;
+        Ok(Self::with_cx(cx, node_id, network))
     }
 
     #[must_use]

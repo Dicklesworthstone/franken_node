@@ -1322,10 +1322,25 @@ fn fleet_reconcile_receipt_default_timeout_overrun_is_non_converged() {
 #[cfg(feature = "asupersync-transport")]
 #[test]
 fn asupersync_fleet_transport_converges_simulated_two_node_mode() {
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("runtime");
     let network = AsupersyncFleetNetwork::new();
-    let mut coordinator = AsupersyncFleetTransport::for_testing("coordinator", network.clone());
-    let mut node_a = AsupersyncFleetTransport::for_testing("node-a", network.clone());
-    let mut node_b = AsupersyncFleetTransport::for_testing("node-b", network.clone());
+    let mut coordinator = AsupersyncFleetTransport::with_cx(
+        runtime.request_cx_with_budget(asupersync::Budget::INFINITE),
+        "coordinator",
+        network.clone(),
+    );
+    let mut node_a = AsupersyncFleetTransport::with_cx(
+        runtime.request_cx_with_budget(asupersync::Budget::INFINITE),
+        "node-a",
+        network.clone(),
+    );
+    let mut node_b = AsupersyncFleetTransport::with_cx(
+        runtime.request_cx_with_budget(asupersync::Budget::INFINITE),
+        "node-b",
+        network.clone(),
+    );
 
     coordinator.initialize().expect("initialize coordinator");
     node_a.initialize().expect("initialize node-a");

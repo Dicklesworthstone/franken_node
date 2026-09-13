@@ -1,12 +1,12 @@
 use asupersync::obligation::ledger::{LedgerStats, ObligationLedger};
 use asupersync::record::{ObligationAbortReason, ObligationKind};
 use asupersync::runtime::RuntimeBuilder;
-use asupersync::{CancelKind, Cx, Time};
+use asupersync::{Budget, CancelKind, Cx, Time};
 use chrono::{DateTime, Utc};
 use frankenengine_node::config::RuntimeConfig;
 use frankenengine_node::control_plane::fleet_transport::{
     AsupersyncFleetNetwork, AsupersyncFleetTransport, FleetAction, FleetActionRecord,
-    FleetTargetKind, FleetTransport, NodeHealth, NodeStatus,
+    FleetTargetKind, FleetTransport, FleetTransportError, NodeHealth, NodeStatus,
 };
 use frankenengine_node::runtime::bounded_mask::CapabilityContext;
 use frankenengine_node::runtime::lane_router::{
@@ -129,7 +129,7 @@ fn asupersync_cx_first_control_lane_commits_obligations() {
         .expect("current-thread Asupersync runtime should build");
 
     let report = runtime.block_on(async {
-        let cx = Cx::for_request();
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
         let mut scheduler = LaneScheduler::new(default_policy())
             .expect("default lane scheduler policy should be valid");
         let mut ledger = ObligationLedger::new();
@@ -170,7 +170,7 @@ fn asupersync_cancelled_control_lane_aborts_without_obligation_leak() {
         .expect("current-thread Asupersync runtime should build");
 
     let report = runtime.block_on(async {
-        let cx = Cx::for_request();
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
         let mut scheduler = LaneScheduler::new(default_policy())
             .expect("default lane scheduler policy should be valid");
         let mut ledger = ObligationLedger::new();
@@ -244,9 +244,18 @@ fn lane_router_rejects_multi_scope_priority_downgrade() {
 
 #[test]
 fn asupersync_fleet_transport_read_snapshots_record_events_independently() {
+    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
     let network = AsupersyncFleetNetwork::new();
-    let mut writer = AsupersyncFleetTransport::for_testing("writer", network.clone());
-    let reader = AsupersyncFleetTransport::for_testing("reader", network.clone());
+    let mut writer = AsupersyncFleetTransport::with_cx(
+        runtime.request_cx_with_budget(Budget::INFINITE),
+        "writer",
+        network.clone(),
+    );
+    let reader = AsupersyncFleetTransport::with_cx(
+        runtime.request_cx_with_budget(Budget::INFINITE),
+        "reader",
+        network.clone(),
+    );
 
     writer.initialize().expect("initialize writer");
     writer
@@ -306,4 +315,161 @@ fn asupersync_fleet_transport_read_snapshots_record_events_independently() {
             "missing asupersync control event {expected}; got {operations:?}"
         );
     }
+}
+
+#[test]
+fn asupersync_fleet_transport_requires_a_caller_context() {
+    assert!(Cx::current().is_none());
+    let network = AsupersyncFleetNetwork::new();
+    let error = AsupersyncFleetTransport::for_request("missing-owner", network.clone())
+        .expect_err("a transport must not manufacture a request context");
+    assert_eq!(
+        error,
+        FleetTransportError::NotInitialized {
+            detail:
+                "asupersync request context is not installed; use AsupersyncFleetTransport::with_cx"
+                    .to_string(),
+        }
+    );
+    assert!(network.control_events().expect("events").is_empty());
+    assert!(Cx::current().is_none());
+}
+
+#[test]
+fn asupersync_fleet_transport_retains_the_callers_exhausted_budget() {
+    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+    let network = AsupersyncFleetNetwork::new();
+    let request = runtime.request_cx_with_budget(Budget::INFINITE.with_poll_quota(0));
+    let mut transport =
+        AsupersyncFleetTransport::with_cx(request.clone(), "no-budget", network.clone());
+
+    let result = transport.initialize();
+    let cancellation = request.checkpoint().expect_err("poll budget is exhausted");
+    assert_eq!(
+        request.cancel_reason().expect("budget cancellation").kind,
+        CancelKind::PollQuota
+    );
+    assert_eq!(
+        result,
+        Err(FleetTransportError::StaleState {
+            detail: format!(
+                "asupersync control-lane checkpoint failed during initialize: {cancellation}"
+            ),
+        })
+    );
+    assert!(network.control_events().expect("events").is_empty());
+
+    let observer = AsupersyncFleetTransport::with_cx(
+        runtime.request_cx_with_budget(Budget::INFINITE),
+        "observer",
+        network,
+    );
+    assert_eq!(
+        observer.read_shared_state(),
+        Err(FleetTransportError::NotInitialized {
+            detail: "call initialize() before using the asupersync fleet transport".to_string(),
+        })
+    );
+}
+
+#[test]
+fn asupersync_fleet_transport_retains_restricted_request_cancellation() {
+    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+    let network = AsupersyncFleetNetwork::new();
+    let observer = AsupersyncFleetTransport::with_cx(
+        runtime.request_cx_with_budget(Budget::INFINITE),
+        "observer",
+        network.clone(),
+    );
+
+    runtime.block_on(async {
+        let parent = Cx::current().expect("runtime context");
+        let parent_capabilities = parent.capabilities();
+        let request = runtime.request_cx_with_budget(Budget::INFINITE);
+        let (mut transport, request_capabilities) = {
+            let _restriction = request
+                .restrict::<asupersync::cx::cap::None>()
+                .set_current_restricted();
+            let restricted = Cx::current().expect("restricted request context");
+            let capabilities = restricted.capabilities();
+            assert_eq!(
+                [
+                    capabilities.spawn,
+                    capabilities.time,
+                    capabilities.entropy,
+                    capabilities.io,
+                    capabilities.remote,
+                ],
+                [false; 5]
+            );
+            let transport = AsupersyncFleetTransport::for_request("restricted", network.clone())
+                .expect("an installed restricted request is a valid transport owner");
+            assert_eq!(
+                Cx::current().expect("request remains installed").capabilities(),
+                capabilities
+            );
+            (transport, capabilities)
+        };
+        assert_eq!(
+            Cx::current().expect("parent restored").capabilities(),
+            parent_capabilities
+        );
+        assert!(!request_capabilities.spawn);
+
+        let action = FleetActionRecord {
+            action_id: "cancelled-owner-action".to_string(),
+            emitted_at: DateTime::parse_from_rfc3339("2026-09-12T00:00:00Z")
+                .expect("timestamp")
+                .with_timezone(&Utc),
+            action: FleetAction::Quarantine {
+                zone_id: "zone-cancel".to_string(),
+                incident_id: "incident-cancel".to_string(),
+                target_id: "sha256:cancel".to_string(),
+                target_kind: FleetTargetKind::Artifact,
+                reason: "request cancellation propagation".to_string(),
+                quarantine_version: 1,
+            },
+        };
+        let mut node = NodeStatus {
+            zone_id: "zone-cancel".to_string(),
+            node_id: "node-cancel".to_string(),
+            last_seen: action.emitted_at,
+            quarantine_version: 1,
+            health: NodeHealth::Healthy,
+        };
+        transport.initialize().expect("initialize");
+        transport.publish_action(&action).expect("publish before cancellation");
+        transport.upsert_node_status(&node).expect("upsert before cancellation");
+        let before = observer.read_shared_state().expect("initial shared state");
+        let events_before = network.control_events().expect("initial events");
+        assert_eq!(before.actions, vec![action.clone()]);
+        assert_eq!(before.nodes, vec![node.clone()]);
+
+        request.cancel_with(CancelKind::User, Some("transport owner cancelled"));
+        let cancellation = request.checkpoint().expect_err("owner is cancelled");
+        assert!(cancellation.is_cancelled());
+        node.quarantine_version = 2;
+        for (operation, result) in [
+            ("initialize", transport.initialize()),
+            ("publish_action", transport.publish_action(&action)),
+            ("upsert_node_status", transport.upsert_node_status(&node)),
+            ("list_actions", transport.list_actions().map(|_| ())),
+            ("list_node_statuses", transport.list_node_statuses().map(|_| ())),
+            ("read_shared_state", transport.read_shared_state().map(|_| ())),
+        ] {
+            assert_eq!(
+                result,
+                Err(FleetTransportError::StaleState {
+                    detail: format!(
+                        "asupersync control-lane checkpoint failed during {operation}: {cancellation}"
+                    ),
+                }),
+                "{operation} must honor the retained request cancellation"
+            );
+        }
+        assert_eq!(network.control_events().expect("events"), events_before);
+        assert_eq!(observer.read_shared_state().expect("unchanged shared state"), before);
+        assert!(parent.checkpoint().is_ok(), "independent parent remains live");
+        assert_eq!(parent.capabilities(), parent_capabilities);
+    });
 }
