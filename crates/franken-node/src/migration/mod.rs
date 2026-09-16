@@ -10,14 +10,23 @@ use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{self, Read, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Command, Output};
+#[cfg(not(target_os = "linux"))]
+use std::process::{Child, Stdio};
+#[cfg(not(target_os = "linux"))]
 use std::sync::mpsc::{self, Receiver};
+#[cfg(not(target_os = "linux"))]
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_os = "linux"))]
+use std::time::Instant;
 use tree_sitter::{Language, Node, Parser as JsParser};
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 use std::os::unix::process::CommandExt;
+
+#[cfg(target_os = "linux")]
+mod smoke_supervisor;
 
 /// Maximum allowed file size for migration operations to prevent DoS via parser bombs.
 /// External package.json, source files, etc. could be maliciously crafted as large files.
@@ -70,6 +79,7 @@ const MIGRATION_RUNTIME_SMOKE_STDOUT_FIELD: &[u8] = b"stdout";
 const MIGRATION_RUNTIME_SMOKE_STDERR_FIELD: &[u8] = b"stderr";
 const MIGRATION_RUNTIME_PIPE_DRAIN_TIMEOUT: Duration =
     frankenengine_node::config::timeouts::MIGRATION_RUNTIME_PIPE_DRAIN_TIMEOUT;
+#[cfg(not(target_os = "linux"))]
 const MIGRATION_RUNTIME_PROCESS_KILL_GRACE: Duration =
     frankenengine_node::config::timeouts::MIGRATION_RUNTIME_PROCESS_KILL_GRACE;
 
@@ -527,6 +537,7 @@ struct MigrationRuntimeSmokeTarget {
     display: String,
 }
 
+#[cfg(not(target_os = "linux"))]
 struct RuntimeSmokePipeReader {
     label: &'static str,
     receiver: Receiver<io::Result<Vec<u8>>>,
@@ -1443,6 +1454,16 @@ mod native_migration_smoke_command_tests {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn run_command_with_timeout(command: &mut Command, timeout: Duration) -> anyhow::Result<Output> {
+    smoke_supervisor::run_command_with_timeout(
+        command,
+        timeout,
+        MIGRATION_RUNTIME_PIPE_DRAIN_TIMEOUT,
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
 fn run_command_with_timeout(command: &mut Command, timeout: Duration) -> anyhow::Result<Output> {
     command
         .stdin(Stdio::null())
@@ -1517,6 +1538,7 @@ fn run_command_with_timeout(command: &mut Command, timeout: Duration) -> anyhow:
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn spawn_pipe_reader(
     reader: impl Read + Send + 'static,
     label: &'static str,
@@ -1530,8 +1552,10 @@ fn spawn_pipe_reader(
 
 // Keep runtime-controlled output bounded independently for stdout and stderr.
 // Overflow is an error, never a truncated stream that could produce a PASS.
+#[cfg(not(target_os = "linux"))]
 const MIGRATION_SMOKE_MAX_STREAM_BYTES: u64 = 16 * 1024 * 1024;
 
+#[cfg(not(target_os = "linux"))]
 fn read_to_end(reader: impl Read) -> io::Result<Vec<u8>> {
     let mut output = Vec::new();
     reader
@@ -1546,7 +1570,7 @@ fn read_to_end(reader: impl Read) -> io::Result<Vec<u8>> {
     Ok(output)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "linux")))]
 mod migration_smoke_output_tests {
     use super::*;
 
@@ -1608,6 +1632,7 @@ mod migration_smoke_output_tests {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn collect_runtime_smoke_output(
     stdout_reader: RuntimeSmokePipeReader,
     stderr_reader: RuntimeSmokePipeReader,
@@ -1618,6 +1643,7 @@ fn collect_runtime_smoke_output(
     Ok((stdout, stderr))
 }
 
+#[cfg(not(target_os = "linux"))]
 fn collect_pipe_reader(
     reader: RuntimeSmokePipeReader,
     timeout: Duration,
@@ -1640,6 +1666,7 @@ fn collect_pipe_reader(
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn terminate_runtime_smoke_process_tree(child: &mut Child) -> Result<(), anyhow::Error> {
     #[cfg(unix)]
     terminate_runtime_smoke_process_group(child.id())?;
@@ -1653,7 +1680,7 @@ fn terminate_runtime_smoke_process_tree(child: &mut Child) -> Result<(), anyhow:
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn terminate_runtime_smoke_process_group(pid: u32) -> Result<(), std::io::Error> {
     signal_runtime_smoke_process_group(pid, "-TERM")?;
     thread::sleep(MIGRATION_RUNTIME_PROCESS_KILL_GRACE);
@@ -1661,7 +1688,7 @@ fn terminate_runtime_smoke_process_group(pid: u32) -> Result<(), std::io::Error>
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn signal_runtime_smoke_process_group(pid: u32, signal: &str) -> Result<(), std::io::Error> {
     let process_group = format!("-{pid}");
     let status = Command::new("kill")
@@ -6652,7 +6679,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "linux")))]
     fn signal_runtime_smoke_process_group_fails_with_invalid_pid() {
         // Test that signal_runtime_smoke_process_group returns error for invalid process group.
         // FIXME(bd-o776s): pid 0 lowers to `kill -- -0`, which targets the CALLER's process
@@ -6675,7 +6702,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "linux")))]
     fn terminate_runtime_smoke_process_group_propagates_signal_errors() {
         // Test that terminate_runtime_smoke_process_group propagates signal errors.
         // FIXME(bd-o776s): pid 0 lowers to `kill -- -0`, which targets the CALLER's process
@@ -6697,6 +6724,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "linux"))]
     fn terminate_runtime_smoke_process_tree_error_propagation_pattern() {
         // Test that the error propagation follows the expected pattern
         // We can't easily mock Child::kill()/wait() failures, but we can test the error structure

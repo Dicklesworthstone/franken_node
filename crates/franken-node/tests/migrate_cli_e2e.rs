@@ -28,6 +28,12 @@ mod golden;
 #[path = "migrate_rewrite_goldens.rs"]
 mod migrate_rewrite_goldens;
 
+// Compile the actual Linux process mechanism in the normal registered test
+// target, independently of the library's opt-in inline-test configuration.
+#[cfg(target_os = "linux")]
+#[path = "../src/migration/smoke_supervisor.rs"]
+mod native_smoke_supervisor;
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()

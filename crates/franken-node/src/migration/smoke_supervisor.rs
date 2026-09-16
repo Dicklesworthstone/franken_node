@@ -23,7 +23,10 @@ const POLL_INTERVAL: Duration = Duration::from_millis(5);
 const REAP_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn checked_group(raw: u32) -> io::Result<Pid> {
-    let pid = i32::try_from(raw).ok().filter(|raw| *raw > 1).and_then(Pid::from_raw);
+    let pid = i32::try_from(raw)
+        .ok()
+        .filter(|raw| *raw > 1)
+        .and_then(Pid::from_raw);
     match pid {
         Some(pid) if pid != getpgrp() => Ok(pid),
         _ => Err(io::Error::new(
@@ -42,9 +45,14 @@ struct OwnedSmokeChild {
 
 impl OwnedSmokeChild {
     fn spawn(command: &mut Command) -> Result<Self> {
-        command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         command.process_group(0);
-        let mut child = command.spawn().context("failed launching runtime smoke command")?;
+        let mut child = command
+            .spawn()
+            .context("failed launching runtime smoke command")?;
         let group = match checked_group(child.id()) {
             Ok(group) => group,
             Err(error) => {
@@ -55,7 +63,11 @@ impl OwnedSmokeChild {
                 return Err(error).context("invalid spawned runtime smoke group");
             }
         };
-        Ok(Self { child, group, active: true })
+        Ok(Self {
+            child,
+            group,
+            active: true,
+        })
     }
 
     fn exited_without_reaping(&mut self) -> io::Result<bool> {
@@ -70,7 +82,9 @@ impl OwnedSmokeChild {
                 // Without the unreaped leader, numerical group signalling can
                 // hit a recycled PID. Fail, and disarm that unsafe cleanup.
                 self.active = false;
-                Err(io::Error::other("runtime smoke child was reaped outside its owner"))
+                Err(io::Error::other(
+                    "runtime smoke child was reaped outside its owner",
+                ))
             }
             Err(error) => Err(error.into()),
         }
@@ -78,7 +92,9 @@ impl OwnedSmokeChild {
 
     fn finish(&mut self) -> io::Result<ExitStatus> {
         if !self.active {
-            return Err(io::Error::other("runtime smoke child ownership already ended"));
+            return Err(io::Error::other(
+                "runtime smoke child ownership already ended",
+            ));
         }
         // Signal the group BEFORE reaping the pinned leader. Attempt the direct
         // kill and reap even when signalling the group fails. ESRCH is benign:
@@ -91,12 +107,16 @@ impl OwnedSmokeChild {
         if let Err(error) = group_result
             && error != Errno::SRCH
         {
-            return Err(io::Error::other(format!("runtime smoke group cleanup failed: {error}")));
+            return Err(io::Error::other(format!(
+                "runtime smoke group cleanup failed: {error}"
+            )));
         }
         if let Err(error) = kill_result
             && error.raw_os_error() != Some(Errno::SRCH.raw_os_error())
         {
-            return Err(io::Error::other(format!("runtime smoke child cleanup failed: {error}")));
+            return Err(io::Error::other(format!(
+                "runtime smoke child cleanup failed: {error}"
+            )));
         }
         Ok(status)
     }
@@ -120,7 +140,10 @@ fn reap_bounded(child: &mut Child) -> io::Result<ExitStatus> {
             Err(error) => return Err(error),
         }
         if started.elapsed() >= REAP_TIMEOUT {
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "runtime smoke child could not be reaped within cleanup budget"));
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "runtime smoke child could not be reaped within cleanup budget",
+            ));
         }
         thread::sleep(POLL_INTERVAL);
     }
@@ -141,7 +164,12 @@ struct PipeCapture<R> {
 
 impl<R: Read> PipeCapture<R> {
     fn new(pipe: R, label: &'static str) -> Self {
-        Self { pipe, bytes: Vec::new(), eof: false, label }
+        Self {
+            pipe,
+            bytes: Vec::new(),
+            eof: false,
+            label,
+        }
     }
 
     /// Read at most one chunk so a stdout flood cannot starve stderr, child
@@ -155,13 +183,26 @@ impl<R: Read> PipeCapture<R> {
         let remaining = limit.saturating_sub(self.bytes.len());
         let request = buffer.len().min(remaining.saturating_add(1));
         match self.pipe.read(&mut buffer[..request]) {
-            Ok(0) => { self.eof = true; Ok(true) }
+            Ok(0) => {
+                self.eof = true;
+                Ok(true)
+            }
             Ok(count) if count > remaining => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("runtime smoke {} output exceeds {limit} bytes", self.label),
             )),
-            Ok(count) => { self.bytes.extend_from_slice(&buffer[..count]); Ok(true) }
-            Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted) => Ok(false),
+            Ok(count) => {
+                self.bytes.extend_from_slice(&buffer[..count]);
+                Ok(true)
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
+                Ok(false)
+            }
             Err(error) => Err(error),
         }
     }
@@ -177,15 +218,30 @@ pub(super) fn run_command_with_timeout(
     run_bounded(command, timeout, pipe_drain_timeout, MAX_STREAM_BYTES)
 }
 
-fn run_bounded(command: &mut Command, timeout: Duration, drain_timeout: Duration, limit: usize) -> Result<Output> {
+fn run_bounded(
+    command: &mut Command,
+    timeout: Duration,
+    drain_timeout: Duration,
+    limit: usize,
+) -> Result<Output> {
     if timeout.is_zero() || drain_timeout.is_zero() || limit == 0 || limit > MAX_STREAM_BYTES {
         bail!("runtime smoke requires positive bounded time and output limits");
     }
-    let deadline = Instant::now().checked_add(timeout).context("runtime smoke deadline overflow")?;
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .context("runtime smoke deadline overflow")?;
     let mut owned = OwnedSmokeChild::spawn(command)?;
     let result = (|| -> Result<(Vec<u8>, Vec<u8>)> {
-        let stdout = owned.child.stdout.take().context("runtime smoke stdout pipe unavailable")?;
-        let stderr = owned.child.stderr.take().context("runtime smoke stderr pipe unavailable")?;
+        let stdout = owned
+            .child
+            .stdout
+            .take()
+            .context("runtime smoke stdout pipe unavailable")?;
+        let stderr = owned
+            .child
+            .stderr
+            .take()
+            .context("runtime smoke stderr pipe unavailable")?;
         nonblocking(&stdout).context("configure runtime smoke stdout")?;
         nonblocking(&stderr).context("configure runtime smoke stderr")?;
         let mut stdout = PipeCapture::new(stdout, "stdout");
@@ -194,21 +250,33 @@ fn run_bounded(command: &mut Command, timeout: Duration, drain_timeout: Duration
         loop {
             let now = Instant::now();
             if now >= deadline {
-                bail!("runtime smoke command timed out after {}ms", timeout.as_millis());
+                bail!(
+                    "runtime smoke command timed out after {}ms",
+                    timeout.as_millis()
+                );
             }
-            let out_progress = stdout.pump(limit).context("failed reading runtime smoke stdout")?;
-            let err_progress = stderr.pump(limit).context("failed reading runtime smoke stderr")?;
+            let out_progress = stdout
+                .pump(limit)
+                .context("failed reading runtime smoke stdout")?;
+            let err_progress = stderr
+                .pump(limit)
+                .context("failed reading runtime smoke stderr")?;
             if owned.exited_without_reaping()? {
                 if stdout.eof && stderr.eof {
                     return Ok((stdout.bytes, stderr.bytes));
                 }
                 let exited = *exited_at.get_or_insert(now);
                 if now.duration_since(exited) >= drain_timeout {
-                    bail!("runtime smoke command exited but output pipes remained open beyond {}ms", drain_timeout.as_millis());
+                    bail!(
+                        "runtime smoke command exited but output pipes remained open beyond {}ms",
+                        drain_timeout.as_millis()
+                    );
                 }
             }
             if !out_progress && !err_progress {
-                thread::sleep(POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())));
+                thread::sleep(
+                    POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
+                );
             }
         }
     })();
@@ -216,10 +284,16 @@ fn run_bounded(command: &mut Command, timeout: Duration, drain_timeout: Duration
     // still holds a write end. No blocked reader thread survives this function.
     let cleanup = owned.finish();
     match (result, cleanup) {
-        (Ok((stdout, stderr)), Ok(status)) => Ok(Output { status, stdout, stderr }),
+        (Ok((stdout, stderr)), Ok(status)) => Ok(Output {
+            status,
+            stdout,
+            stderr,
+        }),
         (Err(error), Ok(_)) => Err(error),
         (Ok(_), Err(error)) => Err(error).context("runtime smoke cleanup failed"),
-        (Err(error), Err(cleanup)) => Err(error.context(format!("runtime smoke cleanup also failed: {cleanup}"))),
+        (Err(error), Err(cleanup)) => {
+            Err(error.context(format!("runtime smoke cleanup also failed: {cleanup}")))
+        }
     }
 }
 
@@ -236,7 +310,11 @@ mod tests {
     }
 
     fn run(source: &str) -> Result<Output> {
-        run_command_with_timeout(&mut shell(source), Duration::from_secs(3), Duration::from_millis(100))
+        run_command_with_timeout(
+            &mut shell(source),
+            Duration::from_secs(3),
+            Duration::from_millis(100),
+        )
     }
 
     #[test]
@@ -249,25 +327,37 @@ mod tests {
 
     #[test]
     fn binary_streams_and_trailing_newlines_remain_distinct() {
-        let output = run("printf 'a\\000b\\377\\n\\n'; printf 'error\\n' >&2").expect("binary output");
+        let output =
+            run("printf 'a\\000b\\377\\n\\n'; printf 'error\\n' >&2").expect("binary output");
         assert_eq!(output.stdout, [b'a', 0, b'b', 255, b'\n', b'\n']);
         assert_eq!(output.stderr, b"error\n");
     }
 
     #[test]
     fn nonzero_exit_is_not_replaced_by_cleanup_status() {
-        assert_eq!(run("exit 7").expect("nonzero process").status.code(), Some(7));
+        assert_eq!(
+            run("exit 7").expect("nonzero process").status.code(),
+            Some(7)
+        );
     }
 
     #[test]
     fn signal_exit_is_not_replaced_by_cleanup_status() {
-        assert_eq!(run("kill -TERM $$").expect("signal exit").status.signal(), Some(Signal::TERM.as_raw()));
+        assert_eq!(
+            run("kill -TERM $$").expect("signal exit").status.signal(),
+            Some(Signal::TERM.as_raw())
+        );
     }
 
     #[test]
     fn both_streams_allow_the_exact_limit() {
-        let output = run_bounded(&mut shell("printf 1234; printf 5678 >&2"), Duration::from_secs(3), Duration::from_secs(1), 4)
-            .expect("exact output caps");
+        let output = run_bounded(
+            &mut shell("printf 1234; printf 5678 >&2"),
+            Duration::from_secs(3),
+            Duration::from_secs(1),
+            4,
+        )
+        .expect("exact output caps");
         assert_eq!(output.stdout, b"1234");
         assert_eq!(output.stderr, b"5678");
     }
@@ -275,8 +365,13 @@ mod tests {
     #[test]
     fn overflow_on_either_stream_is_not_truncated_success() {
         for (source, label) in [("printf 12345", "stdout"), ("printf 12345 >&2", "stderr")] {
-            let error = run_bounded(&mut shell(source), Duration::from_secs(3), Duration::from_secs(1), 4)
-                .expect_err("overflow");
+            let error = run_bounded(
+                &mut shell(source),
+                Duration::from_secs(3),
+                Duration::from_secs(1),
+                4,
+            )
+            .expect_err("overflow");
             let message = format!("{error:#}");
             assert!(message.contains(label), "{message}");
             assert!(message.contains("exceeds 4 bytes"), "{message}");
@@ -286,8 +381,13 @@ mod tests {
     #[test]
     fn flood_is_stopped_before_the_runtime_deadline() {
         let started = Instant::now();
-        let error = run_bounded(&mut shell("while :; do printf abcdefgh; done"), Duration::from_secs(30), Duration::from_secs(1), 64)
-            .expect_err("flood must terminate");
+        let error = run_bounded(
+            &mut shell("while :; do printf abcdefgh; done"),
+            Duration::from_secs(30),
+            Duration::from_secs(1),
+            64,
+        )
+        .expect_err("flood must terminate");
         assert!(format!("{error:#}").contains("exceeds 64 bytes"));
         assert!(started.elapsed() < Duration::from_secs(3));
     }
@@ -295,8 +395,13 @@ mod tests {
     #[test]
     fn closed_pipes_do_not_hide_a_running_child() {
         let started = Instant::now();
-        let error = run_bounded(&mut shell("exec 1>&- 2>&-; exec /bin/sleep 60"), Duration::from_millis(150), Duration::from_secs(1), 64)
-            .expect_err("running child");
+        let error = run_bounded(
+            &mut shell("exec 1>&- 2>&-; exec /bin/sleep 60"),
+            Duration::from_millis(150),
+            Duration::from_secs(1),
+            64,
+        )
+        .expect_err("running child");
         assert!(error.to_string().contains("timed out"));
         assert!(started.elapsed() < Duration::from_secs(3));
     }
@@ -311,16 +416,29 @@ mod tests {
 
     #[test]
     fn ignored_sigterm_does_not_prevent_cleanup() {
-        let error = run_bounded(&mut shell("trap '' TERM; exec /bin/sleep 60"), Duration::from_millis(150), Duration::from_secs(1), 64)
-            .expect_err("deadline");
+        let error = run_bounded(
+            &mut shell("trap '' TERM; exec /bin/sleep 60"),
+            Duration::from_millis(150),
+            Duration::from_secs(1),
+            64,
+        )
+        .expect_err("deadline");
         assert!(error.to_string().contains("timed out"));
         assert!(!format!("{error:#}").contains("cleanup also failed"));
     }
 
     #[test]
     fn reserved_and_caller_group_ids_are_rejected_without_signalling() {
-        for raw in [0, 1, u32::MAX, u32::try_from(getpgrp().as_raw_pid()).expect("positive group")] {
-            assert_eq!(checked_group(raw).expect_err("unsafe group").kind(), io::ErrorKind::InvalidInput);
+        for raw in [
+            0,
+            1,
+            u32::MAX,
+            u32::try_from(getpgrp().as_raw_pid()).expect("positive group"),
+        ] {
+            assert_eq!(
+                checked_group(raw).expect_err("unsafe group").kind(),
+                io::ErrorKind::InvalidInput
+            );
         }
     }
 
@@ -342,21 +460,40 @@ mod tests {
         let owned = OwnedSmokeChild::spawn(&mut shell("exec /bin/sleep 60")).expect("child");
         let pid = owned.group;
         drop(owned);
-        assert!(matches!(waitid(WaitId::Pid(pid), WaitIdOptions::EXITED | WaitIdOptions::NOHANG), Err(Errno::CHILD)));
+        assert!(matches!(
+            waitid(
+                WaitId::Pid(pid),
+                WaitIdOptions::EXITED | WaitIdOptions::NOHANG
+            ),
+            Err(Errno::CHILD)
+        ));
     }
 
     #[test]
     fn success_still_stops_background_group_members() {
-        let output = run("/bin/sleep 60 >/dev/null 2>&1 & printf '%s' \"$!\"; exit 0").expect("background child");
+        let output = run("/bin/sleep 60 >/dev/null 2>&1 & printf '%s' \"$!\"; exit 0")
+            .expect("background child");
         assert!(output.status.success());
-        let pid: u32 = std::str::from_utf8(&output.stdout).expect("pid output").parse().expect("pid");
+        let pid: u32 = std::str::from_utf8(&output.stdout)
+            .expect("pid output")
+            .parse()
+            .expect("pid");
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => break,
-                Ok(stat) if stat.rsplit_once(") ").is_some_and(|(_, rest)| rest.starts_with('Z') || rest.starts_with('X')) => break,
+                Ok(stat)
+                    if stat.rsplit_once(") ").is_some_and(|(_, rest)| {
+                        rest.starts_with('Z') || rest.starts_with('X')
+                    }) =>
+                {
+                    break;
+                }
                 _ => {
-                    assert!(Instant::now() < deadline, "background group member still running");
+                    assert!(
+                        Instant::now() < deadline,
+                        "background group member still running"
+                    );
                     thread::sleep(POLL_INTERVAL);
                 }
             }
