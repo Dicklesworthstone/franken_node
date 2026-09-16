@@ -1,0 +1,68 @@
+name: Native rewrite transactions
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/franken-node/src/migration/rewrite_transaction.rs'
+      - 'crates/franken-node/src/migration/mod.rs'
+      - '.github/workflows/native-rewrite-transaction.yml'
+  pull_request:
+    paths:
+      - 'crates/franken-node/src/migration/rewrite_transaction.rs'
+      - 'crates/franken-node/src/migration/mod.rs'
+      - '.github/workflows/native-rewrite-transaction.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  transaction:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Compile and test the production transaction module
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal --component clippy --component rustfmt
+          mkdir -p evidence "$RUNNER_TEMP/rewrite-transaction-check"
+          git rev-parse HEAD > evidence/revision.txt
+          git ls-tree HEAD crates/franken-node/src/migration/rewrite_transaction.rs > evidence/source-blobs.txt
+          rustc +stable --version > evidence/rust-version.txt
+          cat > "$RUNNER_TEMP/rewrite-transaction-check/Cargo.toml" <<EOF
+          [package]
+          name = "franken-rewrite-transaction-check"
+          version = "0.0.0"
+          edition = "2024"
+          [workspace]
+          [lib]
+          path = "$GITHUB_WORKSPACE/crates/franken-node/src/migration/rewrite_transaction.rs"
+          [dependencies]
+          anyhow = "1.0"
+          serde = { version = "1.0", features = ["derive"] }
+          serde_json = "1.0"
+          sha2 = "0.11"
+          hex = "0.4"
+          rustix = { version = "1.1", features = ["fs"] }
+          [dev-dependencies]
+          tempfile = "3"
+          EOF
+          rustfmt +stable --edition 2024 --emit stdout crates/franken-node/src/migration/rewrite_transaction.rs > evidence/rewrite_transaction.formatted.rs
+          cargo +stable test --manifest-path "$RUNNER_TEMP/rewrite-transaction-check/Cargo.toml" -- --nocapture 2>&1 | tee evidence/transaction-tests.log
+          cargo +stable clippy --manifest-path "$RUNNER_TEMP/rewrite-transaction-check/Cargo.toml" --all-targets -- -D warnings 2>&1 | tee evidence/transaction-clippy.log
+          cp "$RUNNER_TEMP/rewrite-transaction-check/Cargo.lock" evidence/Cargo.lock
+      - name: Preserve actual execution evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-rewrite-transaction-evidence
+          path: |
+            evidence/
+            crates/franken-node/src/migration/rewrite_transaction.rs
+          retention-days: 7
+          if-no-files-found: error
