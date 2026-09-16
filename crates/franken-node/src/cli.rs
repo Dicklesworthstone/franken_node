@@ -787,6 +787,11 @@ pub struct MigrateRewriteArgs {
     #[arg(long)]
     pub apply: bool,
 
+    /// Test the captured candidate on Node and native Franken before applying.
+    /// Requires complete process/filesystem agreement; JSON uses checked-rewrite/v1.
+    #[arg(long, requires = "apply", conflicts_with = "emit_rollback")]
+    pub verify: bool,
+
     /// Path to emit an unsigned JSON `MigrationRollbackPlan` (not Ed25519-signed).
     #[arg(long, value_parser = parse_safe_content_pathbuf)]
     pub emit_rollback: Option<PathBuf>,
@@ -794,6 +799,50 @@ pub struct MigrateRewriteArgs {
     /// Emit structured JSON output.
     #[arg(long)]
     pub json: bool,
+}
+
+#[cfg(test)]
+mod checked_rewrite_cli_tests {
+    use super::*;
+
+    #[test]
+    fn checked_rewrite_parses_explicit_apply_and_verification() {
+        let cli = Cli::try_parse_from(["franken-node", "migrate", "rewrite", "project", "--apply", "--verify", "--json"]).unwrap();
+        let Command::Migrate(MigrateCommand::Rewrite(args)) = cli.command else { panic!("wrong command"); };
+        assert!(args.apply && args.verify && args.json);
+        assert!(args.emit_rollback.is_none());
+    }
+
+    #[test]
+    fn checked_rewrite_cannot_execute_under_dry_run_semantics() {
+        let error = Cli::try_parse_from(["franken-node", "migrate", "rewrite", "project", "--verify"]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn checked_rewrite_does_not_mix_a_second_rollback_artifact_with_its_report() {
+        let error = Cli::try_parse_from(["franken-node", "migrate", "rewrite", "project", "--apply", "--verify", "--emit-rollback", "rollback.json"]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn checked_rewrite_keeps_missing_project_in_the_json_handler_contract() {
+        let cli = Cli::try_parse_from(["franken-node", "migrate", "rewrite", "--apply", "--verify", "--json"]).unwrap();
+        let Command::Migrate(MigrateCommand::Rewrite(args)) = cli.command else { panic!("wrong command"); };
+        assert!(args.project_path.as_os_str().is_empty());
+        assert!(args.verify && args.json);
+    }
+
+    #[test]
+    fn ordinary_rewrite_does_not_implicitly_execute_tests() {
+        for flags in [vec![], vec!["--apply"]] {
+            let mut arguments = vec!["franken-node", "migrate", "rewrite", "project"];
+            arguments.extend(flags);
+            let cli = Cli::try_parse_from(arguments).unwrap();
+            let Command::Migrate(MigrateCommand::Rewrite(args)) = cli.command else { panic!("wrong command"); };
+            assert!(!args.verify);
+        }
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -4740,8 +4789,6 @@ mod tests {
     /// Test JSON and serialization integrity in CLI structures
     #[test]
     fn negative_cli_serialization_integrity_validation() {
-        use serde_json;
-
         let serialization_test_result = std::panic::catch_unwind(|| {
             // Test CLI argument parsing and potential serialization
             let test_cases = vec![

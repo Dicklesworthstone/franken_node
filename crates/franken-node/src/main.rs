@@ -30855,6 +30855,30 @@ fn main() -> Result<()> {
                         "`migrate rewrite` requires a project path",
                     );
                 }
+                if args.verify {
+                    #[cfg(target_os = "linux")]
+                    {
+                        let executable = match std::env::current_exe() {
+                            Ok(path) => path,
+                            Err(err) => return migrate_fail("migrate.rewrite", args.json, err),
+                        };
+                        let report = migration::verified_rewrite::run(&args.project_path, &executable);
+                        if let Err(err) = emit_json_or_human(&report, args.json, || {
+                            migration::verified_rewrite::render(&report)
+                        }) {
+                            return migrate_fail("migrate.rewrite", args.json, err);
+                        }
+                        if !report.is_success() {
+                            // The full checked report has already been emitted;
+                            // keep both JSON and human failures to one payload.
+                            let code = if report.status == migration::verified_rewrite::CheckedRewriteStatus::Error { 2 } else { 1 };
+                            fail_closed_after_json_with_code(code);
+                        }
+                        return Ok(());
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    return migrate_fail("migrate.rewrite", args.json, "--verify currently requires Linux");
+                }
                 let report = match migration::run_rewrite(&args.project_path, args.apply)
                     .with_context(|| {
                         format!(

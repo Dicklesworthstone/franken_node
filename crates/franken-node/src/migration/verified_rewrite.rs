@@ -202,6 +202,24 @@ mod tests {
     }
 
     #[test]
+    fn identical_console_output_with_different_file_effects_cannot_be_applied() {
+        let root = project();
+        let original = source(root.path());
+        fs::write(root.path().join("case.test.mjs"),
+            "import fs from 'node:fs';\nconst text = fs.readFileSync('helper.mjs','utf8');\nfs.writeFileSync('artifact',text.includes('node:path')?'changed':'original');\n").unwrap();
+        let report = node_pair(root.path());
+        assert_eq!(report.status, CheckedRewriteStatus::Rejected, "{report:#?}");
+        let row = &report.validation.as_ref().unwrap().cases[0];
+        assert_eq!(row.reference.as_ref().unwrap().exit_code, Some(0));
+        assert_eq!(row.native.as_ref().unwrap().exit_code, Some(0));
+        assert_eq!(row.reference.as_ref().unwrap().stdout, row.native.as_ref().unwrap().stdout);
+        assert_eq!(row.divergences, ["filesystem:workspace_delta_mismatch"]);
+        assert_eq!(source(root.path()), original);
+        assert_eq!(report.rewrite.as_ref().unwrap().rewrites_applied, 0);
+        assert!(!root.path().join("artifact").exists());
+    }
+
+    #[test]
     fn unresolved_manual_review_blocks_runtime_execution() {
         let root = project();
         fs::write(root.path().join("manual.cjs"), "const name = 'path';\nconst value = require(name);\n").unwrap();
