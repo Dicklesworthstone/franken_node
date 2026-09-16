@@ -39,10 +39,10 @@ jobs:
           rustc +stable --version > evidence/rust-version.txt
           node --version > evidence/node-version.txt
           git rev-parse HEAD > evidence/franken_node.revision
-          git ls-tree HEAD crates/franken-node/src/migration/validation_suite.rs crates/franken-node/src/migration/smoke_supervisor.rs tools/migration-validator/Cargo.toml tools/migration-validator/main.rs > evidence/source-blobs.txt
+          git ls-tree HEAD crates/franken-node/src/migration/validation_suite.rs crates/franken-node/src/migration/workspace_effects.rs crates/franken-node/src/migration/paired_validation_tests.rs crates/franken-node/src/migration/smoke_supervisor.rs tools/migration-validator/Cargo.toml tools/migration-validator/main.rs > evidence/source-blobs.txt
           rustfmt +stable --edition 2024 --emit stdout crates/franken-node/src/migration/validation_suite.rs > evidence/validation_suite.formatted.rs
           rustfmt +stable --edition 2024 --config skip_children=true --emit stdout tools/migration-validator/main.rs > evidence/main.formatted.rs
-          cargo +stable test --manifest-path tools/migration-validator/Cargo.toml -- --nocapture 2>&1 | tee evidence/suite-tests.log
+          cargo +stable test --manifest-path tools/migration-validator/Cargo.toml -- --nocapture --test-threads=2 2>&1 | tee evidence/suite-tests.log
           cargo +stable clippy --manifest-path tools/migration-validator/Cargo.toml --all-targets -- -D warnings 2>&1 | tee evidence/suite-clippy.log
           cargo +stable build --manifest-path tools/migration-validator/Cargo.toml 2>&1 | tee evidence/suite-build.log
       - name: Exercise executable CLI exit and report behavior
@@ -51,16 +51,21 @@ jobs:
           set -euo pipefail
           binary="$GITHUB_WORKSPACE/tools/migration-validator/target/debug/franken-migration-suite"
           project="$RUNNER_TEMP/suite-cli-project"
-          mkdir -p "$project"
-          printf "console.log('reference');\n" > "$project/case.test.js"
+          candidate="$RUNNER_TEMP/suite-cli-candidate"
+          mkdir -p "$project" "$candidate"
+          printf "require('fs').writeFileSync('artifact','original');\n" > "$project/case.test.js"
+          printf "require('fs').writeFileSync('artifact','rewritten');\n" > "$candidate/case.test.js"
+          # /bin/false is a deliberate executable failure, not a Franken stand-in.
           set +e
-          "$binary" "$project" --native-bin /bin/false --execute --out "$GITHUB_WORKSPACE/evidence/measured-failure.json" > evidence/cli-failure.json
+          "$binary" "$project" --migrated-project "$candidate" --compare-filesystem --native-bin /bin/false --execute --out "$GITHUB_WORKSPACE/evidence/measured-failure.json" > evidence/cli-failure.json
           measured_exit=$?
           "$binary" "$project" --native-bin /bin/false > evidence/cli-no-consent.json
           consent_exit=$?
           set -e
           test "$measured_exit" = 1
           test "$consent_exit" = 2
+          test ! -e "$project/artifact"
+          test ! -e "$candidate/artifact"
           python3 - <<'PY'
           import json
           from pathlib import Path
@@ -69,10 +74,16 @@ jobs:
           assert measured['verdict'] == 'FAIL' and measured['failed'] == 1
           assert measured['cases'][0]['reference']['exit_code'] == 0
           assert measured['cases'][0]['native']['exit_code'] == 1
+          assert measured['input_sha256'] != measured['candidate_input_sha256']
+          assert measured['filesystem_comparison'] is True
+          assert measured['filesystem_exclusions'] == ['**/.git', '.franken-node']
+          assert measured['cases'][0]['reference']['workspace_delta']['changed_paths'] == 1
+          assert measured['cases'][0]['native']['workspace_delta']['changed_paths'] == 0
+          assert 'filesystem:workspace_delta_mismatch' in measured['cases'][0]['divergences']
           assert measured['release_certification'] is False
           assert consent['verdict'] == 'ERROR' and '--execute' in consent['error']
           assert Path('evidence/measured-failure.json').stat().st_mode & 0o777 == 0o600
-          print('Actual native suite CLI: measured failure exit 1; no-consent exit 2; private report verified.')
+          print('Paired-input CLI: measured filesystem failure exit 1; no-consent exit 2; unchanged inputs and private report verified.')
           PY
       - name: Preserve exact source and execution evidence
         if: always()
@@ -85,6 +96,8 @@ jobs:
             tools/migration-validator/Cargo.lock
             tools/migration-validator/main.rs
             crates/franken-node/src/migration/validation_suite.rs
+            crates/franken-node/src/migration/workspace_effects.rs
+            crates/franken-node/src/migration/paired_validation_tests.rs
             crates/franken-node/src/migration/smoke_supervisor.rs
           retention-days: 7
           if-no-files-found: error
