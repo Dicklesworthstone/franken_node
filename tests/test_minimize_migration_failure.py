@@ -278,6 +278,96 @@ class TestExecutedMinimization(unittest.TestCase):
         self.assertIn("already exists", json.loads(refused.stdout)["error"])
         self.assertEqual(output.read_bytes(), existing)
 
+    def test_fresh_final_verification_rejects_a_late_environment_change(self):
+        counter = self.root / "counter"
+        counter.write_text("0", encoding="utf-8")
+        setup = (f"const fs=require('fs'), path={json.dumps(str(counter))};\n"
+                 "const count=Number(fs.readFileSync(path,'utf8'))+1;\n"
+                 "fs.writeFileSync(path,String(count));\n")
+        self.sources(setup + "console.log(count>6 ? 'late-drift' : 'original');\n",
+                     setup + "console.log(count>6 ? 'late-drift' : 'rewritten');\n")
+        artifact = self.capture()
+        # Capture uses counts 1..2; two initial suite runs use 3..6.
+        # With no search budget, the first FINAL run reaches 7..8 and drifts.
+        with self.assertRaisesRegex(ValueError, "final reduced capsule"):
+            self.minimize(artifact, max_executions=4)
+
+    def test_offline_export_restores_exact_inputs_without_executing_guest_code(self):
+        marker = self.root / "must-not-run"
+        setup = f"require('fs').writeFileSync({json.dumps(str(marker))},'executed');\n"
+        self.sources(setup + "console.log('original');\n", setup + "console.log('rewritten');\n")
+        artifact = self.capture()
+        marker.rename(self.root / "executed-during-capture")
+        destination = self.root / "repro"
+        manifest = minimizer.export_capsule(artifact, destination)
+        self.assertFalse(marker.exists())
+        self.assertFalse(manifest["executed"])
+        self.assertEqual(destination.stat().st_mode & 0o777, 0o700)
+        self.assertEqual((destination / "reproduction.json").stat().st_mode & 0o777, 0o600)
+        self.assertEqual(manifest["inputs"], artifact["expected"]["inputs"])
+        self.assertEqual((destination / "baseline/app.test.js").read_bytes(),
+                         (self.before / "app.test.js").read_bytes())
+
+    def test_export_refuses_existing_directory_and_symlink(self):
+        self.sources()
+        artifact = self.capture()
+        with self.assertRaises(FileExistsError):
+            minimizer.export_capsule(artifact, self.before)
+        link = self.root / "link"
+        link.symlink_to(self.before)
+        with self.assertRaises(FileExistsError):
+            minimizer.export_capsule(artifact, link)
+        self.assertEqual(sorted(path.name for path in self.before.iterdir()), ["app.test.js"])
+
+    def capture_command(self):
+        return [sys.executable, minimizer.__file__, "--capture", str(self.before),
+                "--migrated-project", str(self.after), "--execute", "--json",
+                "--capture-out", str(self.root / "original.json"),
+                "--out", str(self.root / "reduced.json"), "--export-dir", str(self.root / "repro"),
+                "--baseline-command", json.dumps(self.command), "--migration-command", json.dumps(self.command)]
+
+    def test_one_command_capture_minimize_export_pipeline(self):
+        self.sources()
+        result = subprocess.run(self.capture_command(), capture_output=True, timeout=40, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        summary = json.loads(result.stdout)
+        self.assertEqual(summary["verdict"], "REDUCED")
+        original = replay.load_replay(Path(summary["captured_capsule"]))
+        reduced = replay.load_replay(Path(summary["reduced_capsule"]))
+        self.assertEqual(minimizer.behavior(original["expected"]), minimizer.behavior(reduced["expected"]))
+        self.assertLess(reduced["minimization"]["final_bytes"], reduced["minimization"]["initial_bytes"])
+        exported = json.loads((self.root / "repro/reproduction.json").read_text())
+        self.assertEqual(exported["content_sha256"], reduced["content_sha256"])
+
+    def test_capture_preserves_original_when_reduction_refuses_reference_failure(self):
+        self.sources("process.exit(3);\n", "process.exit(4);\n")
+        result = subprocess.run(self.capture_command(), capture_output=True, timeout=15, check=False)
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        summary = json.loads(result.stdout)
+        original = replay.load_replay(Path(summary["captured_capsule"]))
+        self.assertEqual(original["expected"]["validation_verdict"], "FAIL")
+        self.assertFalse((self.root / "reduced.json").exists())
+        self.assertFalse((self.root / "repro").exists())
+
+    def test_passing_capture_is_reported_without_inventing_a_minimized_failure(self):
+        self.sources("console.log('same');\n", "console.log('same');\n")
+        result = subprocess.run(self.capture_command(), capture_output=True, timeout=15, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        summary = json.loads(result.stdout)
+        self.assertEqual(summary["verdict"], "NO_FAILURE")
+        self.assertEqual(replay.load_replay(self.root / "original.json")["expected"]["validation_verdict"], "PASS")
+        self.assertFalse((self.root / "reduced.json").exists())
+
+    def test_capture_preflights_every_destination_before_execution(self):
+        marker = self.root / "must-not-run"
+        code = f"require('fs').writeFileSync({json.dumps(str(marker))},'executed');\n"
+        self.sources(code, code + "console.log('different');\n")
+        (self.root / "repro").mkdir()
+        result = subprocess.run(self.capture_command(), capture_output=True, timeout=10, check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(marker.exists())
+        self.assertFalse((self.root / "original.json").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
