@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, File, Metadata, Permissions};
+use std::fs::{File, Metadata, Permissions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path};
@@ -136,7 +136,7 @@ fn read_optional(parent: &File, name: &OsStr, limit: usize) -> Result<Option<Con
     ensure!(before.is_file() && before.nlink() == 1, "rewrite input must be a regular, unaliased file");
     ensure!(before.len() <= limit as u64, "rewrite input exceeds byte limit");
     let mut bytes = Vec::new();
-    file.by_ref().take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    Read::take(&mut file, limit as u64 + 1).read_to_end(&mut bytes)?;
     ensure!(bytes.len() <= limit && same_version(&before, &file.metadata()?), "rewrite input changed during read");
     Ok(Some(Contents { bytes, metadata: before }))
 }
@@ -357,6 +357,7 @@ impl RewriteTransaction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::os::unix::fs::symlink;
 
     fn project() -> tempfile::TempDir {
@@ -442,6 +443,27 @@ mod tests {
         }
         drop(RewriteTransaction::open(root.path()).unwrap());
         assert_original(root.path());
+    }
+
+    #[test]
+    fn abruptly_exiting_writer_leaves_a_recoverable_journal() {
+        const CHILD_ROOT: &str = "FRANKEN_REWRITE_TEST_CRASH_ROOT";
+        if let Some(path) = std::env::var_os(CHILD_ROOT) {
+            let transaction = RewriteTransaction::open(Path::new(&path)).unwrap();
+            let journal = transaction.prepare(&edits()).unwrap();
+            transaction.install(&journal, 0).unwrap();
+            std::process::exit(73); // no destructors, no successful-commit marker
+        }
+        let root = project();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::abruptly_exiting_writer_leaves_a_recoverable_journal", "--nocapture"])
+            .env(CHILD_ROOT, root.path()).output().unwrap();
+        assert_eq!(output.status.code(), Some(73), "{}", String::from_utf8_lossy(&output.stdout));
+        assert_eq!(fs::read(root.path().join("a.js")).unwrap(), b"after-a");
+        assert!(pending(root.path()).exists());
+        drop(RewriteTransaction::open(root.path()).unwrap());
+        assert_original(root.path());
+        assert!(!pending(root.path()).exists());
     }
 
     #[test]
