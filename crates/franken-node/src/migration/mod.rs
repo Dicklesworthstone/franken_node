@@ -28,7 +28,7 @@ use tree_sitter::{Language, Node, Parser as JsParser};
 use std::os::unix::process::CommandExt;
 
 #[cfg(target_os = "linux")]
-mod smoke_supervisor;
+pub(crate) mod smoke_supervisor;
 
 #[cfg(target_os = "linux")]
 pub mod validation_suite;

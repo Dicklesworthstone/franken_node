@@ -1,4 +1,4 @@
-//! Linux native-migration process supervision (bd-o776s).
+//! Shared Linux migration and compatibility-corpus process supervision.
 //!
 //! Own the child, its process group and both nonblocking pipes until cleanup.
 //! No pipe-reader thread or PATH-resolved kill command can outlive a check.
@@ -157,42 +157,28 @@ fn nonblocking(pipe: &impl AsFd) -> io::Result<()> {
 
 struct PipeCapture<R> {
     pipe: R,
-    bytes: Vec<u8>,
     eof: bool,
-    label: &'static str,
 }
 
 impl<R: Read> PipeCapture<R> {
-    fn new(pipe: R, label: &'static str) -> Self {
-        Self {
-            pipe,
-            bytes: Vec::new(),
-            eof: false,
-            label,
-        }
+    fn new(pipe: R) -> Self {
+        Self { pipe, eof: false }
     }
 
     /// Read at most one chunk so a stdout flood cannot starve stderr, child
-    /// exit checks or deadlines. Probe one extra byte at the exact cap, but
-    /// never retain it or turn an overflow into a truncated success.
-    fn pump(&mut self, limit: usize) -> io::Result<bool> {
+    /// exit checks or deadlines. The trusted observer owns its retention cap.
+    fn pump(&mut self, receive: &mut impl FnMut(&[u8]) -> io::Result<()>) -> io::Result<bool> {
         if self.eof {
             return Ok(false);
         }
         let mut buffer = [0_u8; 64 * 1024];
-        let remaining = limit.saturating_sub(self.bytes.len());
-        let request = buffer.len().min(remaining.saturating_add(1));
-        match self.pipe.read(&mut buffer[..request]) {
+        match self.pipe.read(&mut buffer) {
             Ok(0) => {
                 self.eof = true;
                 Ok(true)
             }
-            Ok(count) if count > remaining => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("runtime smoke {} output exceeds {limit} bytes", self.label),
-            )),
             Ok(count) => {
-                self.bytes.extend_from_slice(&buffer[..count]);
+                receive(&buffer[..count])?;
                 Ok(true)
             }
             Err(error)
@@ -206,6 +192,47 @@ impl<R: Read> PipeCapture<R> {
             Err(error) => Err(error),
         }
     }
+}
+
+struct BoundedBytes {
+    bytes: Vec<u8>,
+    limit: usize,
+    label: &'static str,
+}
+
+impl BoundedBytes {
+    fn receive(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "runtime smoke {} output exceeds {} bytes",
+                    self.label, self.limit
+                ),
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Stream {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StopReason {
+    Exited,
+    RuntimeTimeout,
+    PipeTimeout,
+}
+
+#[derive(Debug)]
+pub(crate) struct Completion {
+    pub(crate) status: ExitStatus,
+    pub(crate) reason: StopReason,
 }
 
 /// Execute one native smoke leg. The deadline includes pipe draining; cleanup
@@ -227,11 +254,67 @@ fn run_bounded(
     if timeout.is_zero() || drain_timeout.is_zero() || limit == 0 || limit > MAX_STREAM_BYTES {
         bail!("runtime smoke requires positive bounded time and output limits");
     }
+    let mut stdout = BoundedBytes {
+        bytes: Vec::new(),
+        limit,
+        label: "stdout",
+    };
+    let mut stderr = BoundedBytes {
+        bytes: Vec::new(),
+        limit,
+        label: "stderr",
+    };
+    let completion = supervise_with_observer(
+        command,
+        timeout,
+        drain_timeout,
+        |_| Ok(()),
+        |stream, bytes| match stream {
+            Stream::Stdout => stdout.receive(bytes),
+            Stream::Stderr => stderr.receive(bytes),
+        },
+    )?;
+    match completion.reason {
+        StopReason::RuntimeTimeout => bail!(
+            "runtime smoke command timed out after {}ms",
+            timeout.as_millis()
+        ),
+        StopReason::PipeTimeout => bail!(
+            "runtime smoke command exited but output pipes remained open beyond {}ms",
+            drain_timeout.as_millis()
+        ),
+        StopReason::Exited => Ok(Output {
+            status: completion.status,
+            stdout: stdout.bytes,
+            stderr: stderr.bytes,
+        }),
+    }
+}
+
+/// Run with a trusted, bounded in-process stream observer. The observer may
+/// retain a capped prefix while hashing later bytes; it must not block. The
+/// startup hook receives only a PID (not the child/wait ownership), and must
+/// enforce its own bounded handshake. Its elapsed time is included in the
+/// leg's deadline, never followed by a fresh full runtime allowance.
+///
+/// A timeout is a measured incomplete outcome, not successful execution. The
+/// caller must refuse equivalence on either timeout reason. Setup, observer,
+/// hook and cleanup errors remain errors, with cleanup attempted on every exit.
+pub(crate) fn supervise_with_observer(
+    command: &mut Command,
+    timeout: Duration,
+    drain_timeout: Duration,
+    after_spawn: impl FnOnce(u32) -> Result<()>,
+    mut observe: impl FnMut(Stream, &[u8]) -> io::Result<()>,
+) -> Result<Completion> {
+    if timeout.is_zero() || drain_timeout.is_zero() {
+        bail!("runtime smoke requires positive bounded time and output limits");
+    }
     let deadline = Instant::now()
         .checked_add(timeout)
         .context("runtime smoke deadline overflow")?;
     let mut owned = OwnedSmokeChild::spawn(command)?;
-    let result = (|| -> Result<(Vec<u8>, Vec<u8>)> {
+    let result = (|| -> Result<StopReason> {
         let stdout = owned
             .child
             .stdout
@@ -244,33 +327,33 @@ fn run_bounded(
             .context("runtime smoke stderr pipe unavailable")?;
         nonblocking(&stdout).context("configure runtime smoke stdout")?;
         nonblocking(&stderr).context("configure runtime smoke stderr")?;
-        let mut stdout = PipeCapture::new(stdout, "stdout");
-        let mut stderr = PipeCapture::new(stderr, "stderr");
+        let mut stdout = PipeCapture::new(stdout);
+        let mut stderr = PipeCapture::new(stderr);
+        if let Err(error) = after_spawn(owned.child.id()) {
+            // Retain available diagnostics without waiting for inherited pipes.
+            let _ = stdout.pump(&mut |bytes| observe(Stream::Stdout, bytes));
+            let _ = stderr.pump(&mut |bytes| observe(Stream::Stderr, bytes));
+            return Err(error).context("runtime startup hook failed");
+        }
         let mut exited_at = None;
         loop {
             let now = Instant::now();
             if now >= deadline {
-                bail!(
-                    "runtime smoke command timed out after {}ms",
-                    timeout.as_millis()
-                );
+                return Ok(StopReason::RuntimeTimeout);
             }
             let out_progress = stdout
-                .pump(limit)
+                .pump(&mut |bytes| observe(Stream::Stdout, bytes))
                 .context("failed reading runtime smoke stdout")?;
             let err_progress = stderr
-                .pump(limit)
+                .pump(&mut |bytes| observe(Stream::Stderr, bytes))
                 .context("failed reading runtime smoke stderr")?;
             if owned.exited_without_reaping()? {
                 if stdout.eof && stderr.eof {
-                    return Ok((stdout.bytes, stderr.bytes));
+                    return Ok(StopReason::Exited);
                 }
                 let exited = *exited_at.get_or_insert(now);
                 if now.duration_since(exited) >= drain_timeout {
-                    bail!(
-                        "runtime smoke command exited but output pipes remained open beyond {}ms",
-                        drain_timeout.as_millis()
-                    );
+                    return Ok(StopReason::PipeTimeout);
                 }
             }
             if !out_progress && !err_progress {
@@ -284,11 +367,7 @@ fn run_bounded(
     // still holds a write end. No blocked reader thread survives this function.
     let cleanup = owned.finish();
     match (result, cleanup) {
-        (Ok((stdout, stderr)), Ok(status)) => Ok(Output {
-            status,
-            stdout,
-            stderr,
-        }),
+        (Ok(reason), Ok(status)) => Ok(Completion { status, reason }),
         (Err(error), Ok(_)) => Err(error),
         (Ok(_), Err(error)) => Err(error).context("runtime smoke cleanup failed"),
         (Err(error), Err(cleanup)) => {
@@ -510,11 +589,109 @@ mod tests {
 
     #[test]
     fn capture_never_retains_the_overflow_probe_byte() {
-        let mut capture = PipeCapture::new(Cursor::new(b"12345"), "stdout");
-        assert!(capture.pump(4).is_err());
-        assert!(capture.bytes.len() <= 4);
-        let mut empty = PipeCapture::new(io::empty(), "stderr");
-        assert!(empty.pump(4).expect("EOF"));
+        let mut capture = PipeCapture::new(Cursor::new(b"12345"));
+        let mut retained = BoundedBytes {
+            bytes: Vec::new(),
+            limit: 4,
+            label: "stdout",
+        };
+        assert!(capture.pump(&mut |bytes| retained.receive(bytes)).is_err());
+        assert!(retained.bytes.len() <= 4);
+        let mut empty = PipeCapture::new(io::empty());
+        assert!(
+            empty
+                .pump(&mut |bytes| retained.receive(bytes))
+                .expect("EOF")
+        );
         assert!(empty.eof);
+    }
+
+    #[test]
+    fn observer_keeps_timeout_distinct_from_a_successful_leader_exit() {
+        let mut bytes = Vec::new();
+        let result = supervise_with_observer(
+            &mut shell("printf captured; /bin/sleep 60 & exit 0"),
+            Duration::from_secs(3),
+            Duration::from_millis(100),
+            |_| Ok(()),
+            |stream, chunk| {
+                if stream == Stream::Stdout {
+                    bytes.extend_from_slice(chunk);
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(result.reason, StopReason::PipeTimeout);
+        assert_eq!(result.status.code(), Some(0));
+        assert_eq!(bytes, b"captured");
+    }
+
+    #[test]
+    fn startup_time_consumes_the_original_leg_deadline() {
+        let started = Instant::now();
+        let result = supervise_with_observer(
+            &mut shell("exec /bin/sleep 0.4"),
+            Duration::from_millis(150),
+            Duration::from_millis(100),
+            |_| {
+                thread::sleep(Duration::from_millis(300));
+                Ok(())
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(result.reason, StopReason::RuntimeTimeout);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn startup_failure_cleans_up_without_joining_inherited_pipes() {
+        let mut pid = None;
+        let started = Instant::now();
+        let error = supervise_with_observer(
+            &mut shell("/bin/sleep 60 & wait"),
+            Duration::from_secs(3),
+            Duration::from_millis(100),
+            |raw| {
+                pid = Pid::from_raw(i32::try_from(raw).unwrap());
+                bail!("rejected authority");
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("rejected authority"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(matches!(
+            waitid(
+                WaitId::Pid(pid.unwrap()),
+                WaitIdOptions::EXITED | WaitIdOptions::NOHANG
+            ),
+            Err(Errno::CHILD)
+        ));
+    }
+
+    #[test]
+    fn observer_failure_also_terminates_and_reaps_the_leader() {
+        let mut pid = None;
+        let error = supervise_with_observer(
+            &mut shell("while :; do printf output; done"),
+            Duration::from_secs(3),
+            Duration::from_millis(100),
+            |raw| {
+                pid = Pid::from_raw(i32::try_from(raw).unwrap());
+                Ok(())
+            },
+            |_, _| Err(io::Error::other("observer refused bytes")),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("observer refused bytes"));
+        assert!(matches!(
+            waitid(
+                WaitId::Pid(pid.unwrap()),
+                WaitIdOptions::EXITED | WaitIdOptions::NOHANG
+            ),
+            Err(Errno::CHILD)
+        ));
     }
 }

@@ -6,7 +6,7 @@
 //! Process groups do not contain descendants that deliberately escape them.
 
 use crate::migration::smoke_supervisor::{StopReason, Stream, supervise_with_observer};
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Result, bail, ensure};
 use sha2::{Digest, Sha256};
 use std::io;
 use std::process::{Command, ExitStatus, Output};
@@ -42,15 +42,26 @@ struct Accumulator {
 
 impl Accumulator {
     fn new(limit: usize) -> Self {
-        Self { retained: Vec::new(), hash: Sha256::new(), total_bytes: 0, limit }
+        Self {
+            retained: Vec::new(),
+            hash: Sha256::new(),
+            total_bytes: 0,
+            limit,
+        }
     }
 
     fn receive(&mut self, bytes: &[u8]) -> io::Result<()> {
-        let count = u64::try_from(bytes.len()).map_err(|_| io::Error::other("runtime output length exceeds u64"))?;
-        let total = self.total_bytes.checked_add(count).ok_or_else(|| io::Error::other("runtime output byte count overflowed u64"))?;
+        let count = u64::try_from(bytes.len())
+            .map_err(|_| io::Error::other("runtime output length exceeds u64"))?;
+        let total = self
+            .total_bytes
+            .checked_add(count)
+            .ok_or_else(|| io::Error::other("runtime output byte count overflowed u64"))?;
         self.hash.update(bytes);
         self.total_bytes = total;
-        let keep = bytes.len().min(self.limit.saturating_sub(self.retained.len()));
+        let keep = bytes
+            .len()
+            .min(self.limit.saturating_sub(self.retained.len()));
         self.retained.extend_from_slice(&bytes[..keep]);
         Ok(())
     }
@@ -74,20 +85,36 @@ pub(super) fn capture(
     retained_limit: usize,
     after_spawn: impl FnOnce(u32) -> Result<()>,
 ) -> Result<ProcessCapture> {
-    ensure!(retained_limit > 0 && retained_limit <= MAX_RETAINED_BYTES, "invalid corpus output retention limit");
+    ensure!(
+        retained_limit > 0 && retained_limit <= MAX_RETAINED_BYTES,
+        "invalid corpus output retention limit"
+    );
     let started = Instant::now();
     let mut stdout = Accumulator::new(retained_limit);
     let mut stderr = Accumulator::new(retained_limit);
-    let completion = supervise_with_observer(command, timeout, DRAIN_TIMEOUT, after_spawn,
+    let completion = supervise_with_observer(
+        command,
+        timeout,
+        DRAIN_TIMEOUT,
+        after_spawn,
         |stream, bytes| match stream {
             Stream::Stdout => stdout.receive(bytes),
             Stream::Stderr => stderr.receive(bytes),
-        });
+        },
+    );
     let completion = completion.map_err(|error| {
         // Failure diagnostics must not wait for EOF. The supervisor already
         // collected immediately available bytes and terminated the group.
-        let diagnostic = sanitize_excerpt(if stderr.retained.is_empty() { &stdout.retained } else { &stderr.retained });
-        if diagnostic.is_empty() { error } else { error.context(format!("runtime leg diagnostic: {diagnostic}")) }
+        let diagnostic = sanitize_excerpt(if stderr.retained.is_empty() {
+            &stdout.retained
+        } else {
+            &stderr.retained
+        });
+        if diagnostic.is_empty() {
+            error
+        } else {
+            error.context(format!("runtime leg diagnostic: {diagnostic}"))
+        }
     })?;
     Ok(ProcessCapture {
         status: completion.status,
@@ -102,17 +129,34 @@ pub(super) fn capture(
 /// unbounded Command::output. A partial probe can never establish identity.
 pub(super) fn probe(command: &mut Command, timeout: Duration) -> Result<Output> {
     let result = capture(command, timeout, PROBE_RETAINED_BYTES, |_| Ok(()))?;
-    if result.timed_out { bail!("runtime probe timed out or left output pipes open"); }
-    ensure!(!result.stdout.capture_truncated && !result.stderr.capture_truncated,
-        "runtime probe output exceeded the capture budget");
-    Ok(Output { status: result.status, stdout: result.stdout.retained_bytes, stderr: result.stderr.retained_bytes })
+    if result.timed_out {
+        bail!("runtime probe timed out or left output pipes open");
+    }
+    ensure!(
+        !result.stdout.capture_truncated && !result.stderr.capture_truncated,
+        "runtime probe output exceeded the capture budget"
+    );
+    Ok(Output {
+        status: result.status,
+        stdout: result.stdout.retained_bytes,
+        stderr: result.stderr.retained_bytes,
+    })
 }
 
 fn sanitize_excerpt(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
-    let line = text.lines().find(|line| !line.trim().is_empty()).unwrap_or("").trim();
+    let line = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim();
     let line = line.split("fix_command=").next().unwrap_or("");
-    line.chars().filter(|c| !c.is_control()).take(200).collect::<String>().trim().to_owned()
+    line.chars()
+        .filter(|c| !c.is_control())
+        .take(200)
+        .collect::<String>()
+        .trim()
+        .to_owned()
 }
 
 #[cfg(test)]
@@ -136,8 +180,20 @@ mod tests {
         loop {
             match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => return,
-                Ok(stat) if stat.rsplit_once(") ").is_some_and(|(_, rest)| rest.starts_with('Z') || rest.starts_with('X')) => return,
-                _ => { assert!(Instant::now() < deadline, "owned process {pid} still running"); thread::sleep(Duration::from_millis(5)); }
+                Ok(stat)
+                    if stat.rsplit_once(") ").is_some_and(|(_, rest)| {
+                        rest.starts_with('Z') || rest.starts_with('X')
+                    }) =>
+                {
+                    return;
+                }
+                _ => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "owned process {pid} still running"
+                    );
+                    thread::sleep(Duration::from_millis(5));
+                }
             }
         }
     }
@@ -151,7 +207,13 @@ mod tests {
         assert_eq!(result.stderr.retained_bytes, b"err\n");
         assert_eq!(result.stdout.total_bytes, 5);
         assert!(!result.stdout.capture_truncated);
-        assert_eq!(result.stdout.sha256, format!("sha256:{}", hex::encode(Sha256::digest([b'a', 0, b'b', 255, b'\n']))));
+        assert_eq!(
+            result.stdout.sha256,
+            format!(
+                "sha256:{}",
+                hex::encode(Sha256::digest([b'a', 0, b'b', 255, b'\n']))
+            )
+        );
     }
 
     #[test]
@@ -162,7 +224,10 @@ mod tests {
             assert_eq!(stream.retained_bytes, [0; 16]);
             assert_eq!(stream.total_bytes, count as u64);
             assert!(stream.capture_truncated);
-            assert_eq!(stream.sha256, format!("sha256:{}", hex::encode(Sha256::digest(vec![0; count]))));
+            assert_eq!(
+                stream.sha256,
+                format!("sha256:{}", hex::encode(Sha256::digest(vec![0; count])))
+            );
         }
     }
 
@@ -185,8 +250,13 @@ mod tests {
 
     #[test]
     fn timeout_retains_partial_measurements_without_claiming_completion() {
-        let result = capture(&mut shell("printf started; exec /bin/sleep 60"),
-            Duration::from_millis(200), 64, |_| Ok(())).unwrap();
+        let result = capture(
+            &mut shell("printf started; exec /bin/sleep 60"),
+            Duration::from_millis(200),
+            64,
+            |_| Ok(()),
+        )
+        .unwrap();
         assert!(result.timed_out);
         assert_eq!(result.stdout.retained_bytes, b"started");
         assert_eq!(result.stdout.total_bytes, 7);
@@ -195,8 +265,13 @@ mod tests {
 
     #[test]
     fn infinite_output_keeps_memory_bounded_and_cannot_starve_deadline() {
-        let result = capture(&mut shell("while :; do printf abcdefgh; printf err >&2; done"),
-            Duration::from_millis(200), 64, |_| Ok(())).unwrap();
+        let result = capture(
+            &mut shell("while :; do printf abcdefgh; printf err >&2; done"),
+            Duration::from_millis(200),
+            64,
+            |_| Ok(()),
+        )
+        .unwrap();
         assert!(result.timed_out);
         assert_eq!(result.stdout.retained_bytes.len(), 64);
         assert_eq!(result.stderr.retained_bytes.len(), 64);
@@ -210,31 +285,49 @@ mod tests {
         assert!(result.timed_out);
         assert_eq!(result.status.code(), Some(0));
         assert!(result.elapsed_ms < 3000);
-        assert_stopped(std::str::from_utf8(&result.stdout.retained_bytes).unwrap().parse().unwrap());
+        assert_stopped(
+            std::str::from_utf8(&result.stdout.retained_bytes)
+                .unwrap()
+                .parse()
+                .unwrap(),
+        );
     }
 
     #[test]
     fn successful_leader_cannot_leave_silent_group_members_running() {
-        let result = run("/bin/sleep 60 >/dev/null 2>&1 & printf '%s' \"$!\"; exit 0", 64);
+        let result = run(
+            "/bin/sleep 60 >/dev/null 2>&1 & printf '%s' \"$!\"; exit 0",
+            64,
+        );
         assert!(!result.timed_out);
         assert!(result.status.success());
-        assert_stopped(std::str::from_utf8(&result.stdout.retained_bytes).unwrap().parse().unwrap());
+        assert_stopped(
+            std::str::from_utf8(&result.stdout.retained_bytes)
+                .unwrap()
+                .parse()
+                .unwrap(),
+        );
     }
 
     #[test]
     fn authentication_error_keeps_diagnostics_and_never_joins_an_inherited_pipe() {
         let marker = tempfile::tempdir().unwrap();
         let path = marker.path().join("ready");
-        let mut command = shell("printf 'auth-error\\n' >&2; /bin/sleep 60 & printf ready > \"$MARKER\"; wait");
+        let mut command =
+            shell("printf 'auth-error\\n' >&2; /bin/sleep 60 & printf ready > \"$MARKER\"; wait");
         command.env("MARKER", &path);
         let started = Instant::now();
         let mut child = None;
         let error = capture(&mut command, Duration::from_secs(5), 64, |pid| {
             child = Some(pid);
             let deadline = Instant::now() + Duration::from_secs(2);
-            while !path.exists() { ensure!(Instant::now() < deadline, "child did not start"); thread::sleep(Duration::from_millis(5)); }
+            while !path.exists() {
+                ensure!(Instant::now() < deadline, "child did not start");
+                thread::sleep(Duration::from_millis(5));
+            }
             bail!("authority rejected");
-        }).unwrap_err();
+        })
+        .unwrap_err();
         let message = format!("{error:#}");
         assert!(message.contains("authority rejected"), "{message}");
         assert!(message.contains("auth-error"), "{message}");
@@ -251,8 +344,22 @@ mod tests {
 
     #[test]
     fn probes_refuse_hangs_and_oversized_identity_responses() {
-        assert!(probe(&mut shell("printf node; /bin/sleep 60 & exit 0"), Duration::from_millis(200)).is_err());
-        assert!(probe(&mut shell("head -c 20000 /dev/zero"), Duration::from_secs(3)).unwrap_err().to_string().contains("capture budget"));
+        assert!(
+            probe(
+                &mut shell("printf node; /bin/sleep 60 & exit 0"),
+                Duration::from_millis(200)
+            )
+            .is_err()
+        );
+        assert!(
+            probe(
+                &mut shell("head -c 20000 /dev/zero"),
+                Duration::from_secs(3)
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("capture budget")
+        );
         let result = probe(&mut shell("printf v22.1.0"), Duration::from_secs(3)).unwrap();
         assert!(result.status.success());
         assert_eq!(result.stdout, b"v22.1.0");
@@ -261,7 +368,17 @@ mod tests {
     #[test]
     fn invalid_limits_and_counter_overflow_fail_closed() {
         for cap in [0, MAX_RETAINED_BYTES + 1] {
-            assert!(capture(&mut Command::new("/missing/runtime"), Duration::from_secs(1), cap, |_| Ok(())).unwrap_err().to_string().contains("retention limit"));
+            assert!(
+                capture(
+                    &mut Command::new("/missing/runtime"),
+                    Duration::from_secs(1),
+                    cap,
+                    |_| Ok(())
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("retention limit")
+            );
         }
         let mut accumulator = Accumulator::new(4);
         accumulator.total_bytes = u64::MAX;

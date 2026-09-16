@@ -43,6 +43,12 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+#[cfg(all(feature = "engine", target_os = "linux"))]
+#[path = "corpus_process.rs"]
+mod corpus_process;
+#[cfg(feature = "engine")]
+use std::process::Output;
+
 #[cfg(unix)]
 use rustix::fd::OwnedFd;
 #[cfg(unix)]
@@ -1241,7 +1247,7 @@ struct PipeDrainResult {
     capture_truncated: bool,
 }
 
-#[cfg(feature = "engine")]
+#[cfg(all(feature = "engine", any(test, not(target_os = "linux"))))]
 fn drain_capped(
     mut pipe: impl Read + Send + 'static,
 ) -> std::thread::JoinHandle<std::io::Result<PipeDrainResult>> {
@@ -1620,11 +1626,19 @@ fn resolve_reference_executable(runtime: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(runtime))
 }
 
+// Probe startup is supervised too: a hung --version, identity script or
+// init process must not stall the corpus before its first timed case.
+#[cfg(feature = "engine")]
+fn run_probe(command: &mut Command) -> Result<Output> {
+    #[cfg(target_os = "linux")]
+    { corpus_process::probe(command, Duration::from_secs(10)) }
+    #[cfg(not(target_os = "linux"))]
+    { command.output().context("execute runtime probe") }
+}
+
 #[cfg(feature = "engine")]
 fn runtime_version(executable: &Path, runtime: &str) -> Result<String> {
-    let output = Command::new(executable)
-        .arg("--version")
-        .output()
+    let output = run_probe(Command::new(executable).arg("--version"))
         .with_context(|| format!("{runtime} --version failed"))?;
     if !output.status.success() {
         bail!("{runtime} --version exited nonzero; cannot pin the reference runtime version");
@@ -1638,12 +1652,11 @@ fn runtime_version(executable: &Path, runtime: &str) -> Result<String> {
 
 #[cfg(feature = "engine")]
 fn validate_node_identity(executable: &Path) -> Result<()> {
-    let output = Command::new(executable)
+    let output = run_probe(Command::new(executable)
         .args([
             "-e",
             "process.stdout.write(`${process.release?.name}|${typeof Bun}`)",
-        ])
-        .output()
+        ]))
         .context("execute Node.js identity probe")?;
     let identity = String::from_utf8_lossy(&output.stdout);
     if !output.status.success() || identity != "node|undefined" {
@@ -1701,7 +1714,46 @@ fn run_leg_with_process_authority(
     })
 }
 
-#[cfg(feature = "engine")]
+#[cfg(all(feature = "engine", target_os = "linux"))]
+fn run_leg_after_spawn(
+    command: &mut Command,
+    timeout: Duration,
+    after_spawn: impl FnOnce(u32) -> Result<()>,
+) -> Result<LegCapture> {
+    let captured = corpus_process::capture(command, timeout, MAX_LEG_OUTPUT_BYTES,
+        |pid| after_spawn(pid).context("authenticate corpus process-authority child"))?;
+    let timed_out = captured.timed_out;
+    let exit_code = captured.status.code();
+    let convert = |stream: corpus_process::CapturedStream| PipeDrainResult {
+        retained_bytes: stream.retained_bytes,
+        sha256: stream.sha256,
+        total_bytes: stream.total_bytes,
+        capture_truncated: stream.capture_truncated,
+    };
+    let stdout = convert(captured.stdout);
+    let stderr = convert(captured.stderr);
+    Ok(LegCapture {
+        comparison: runtime_comparison(&stdout, &stderr, timed_out, exit_code),
+        observation: RuntimeLegObservation {
+            stdout_digest: stdout.sha256,
+            stderr_digest: stderr.sha256,
+            stdout_bytes: stdout.total_bytes,
+            stderr_bytes: stderr.total_bytes,
+            stdout_truncated: stdout.capture_truncated,
+            stderr_truncated: stderr.capture_truncated,
+            exit_code,
+            termination_kind: if timed_out { "timed_out" } else if exit_code.is_some() {
+                "exited"
+            } else { "signal_or_unknown" }.to_owned(),
+            timed_out,
+            elapsed_ms: captured.elapsed_ms,
+        },
+        stdout_excerpt: sanitize_reason_excerpt(&stdout.retained_bytes),
+        stderr_excerpt: sanitize_reason_excerpt(&stderr.retained_bytes),
+    })
+}
+
+#[cfg(all(feature = "engine", not(target_os = "linux")))]
 fn run_leg_after_spawn(
     command: &mut Command,
     timeout: Duration,
@@ -1848,10 +1900,9 @@ pub fn run_corpus(
     // need the same visible filesystem scaffold so guest `readdir('.')`
     // observations compare runtime semantics rather than different sandboxes.
     let template = tempfile::TempDir::new().context("create workspace template dir")?;
-    let init = Command::new(&current_exe)
+    let init = run_probe(Command::new(&current_exe)
         .args(["init", "--profile", "balanced", "--out-dir", "."])
-        .current_dir(template.path())
-        .output()
+        .current_dir(template.path()))
         .context("bootstrap workspace template via init")?;
     if !init.status.success() {
         bail!(
