@@ -16,402 +16,37 @@ permissions:
 jobs:
   process-supervision:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Apply the reviewed production integration
+      - name: Finish the platform import boundary
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p evidence
-          cat > evidence/integration.patch <<'PATCH'
-          diff --git a/crates/franken-node/src/migration/mod.rs b/crates/franken-node/src/migration/mod.rs
-          --- a/crates/franken-node/src/migration/mod.rs
-          +++ b/crates/franken-node/src/migration/mod.rs
-          @@ -29,3 +29,3 @@
-           #[cfg(target_os = "linux")]
-          -mod smoke_supervisor;
-          +pub(crate) mod smoke_supervisor;
-           
-          diff --git a/crates/franken-node/src/ops/corpus_process.rs b/crates/franken-node/src/ops/corpus_process.rs
-          --- a/crates/franken-node/src/ops/corpus_process.rs
-          +++ b/crates/franken-node/src/ops/corpus_process.rs
-          @@ -8,3 +8,3 @@
-           use crate::migration::smoke_supervisor::{StopReason, Stream, supervise_with_observer};
-          -use anyhow::{Context, Result, bail, ensure};
-          +use anyhow::{Result, bail, ensure};
-           use sha2::{Digest, Sha256};
-          diff --git a/crates/franken-node/src/migration/smoke_supervisor.rs b/crates/franken-node/src/migration/smoke_supervisor.rs
-          --- a/crates/franken-node/src/migration/smoke_supervisor.rs
-          +++ b/crates/franken-node/src/migration/smoke_supervisor.rs
-          @@ -1,4 +1,4 @@
-          -//! Linux native-migration process supervision (bd-o776s).
-          +//! Shared Linux migration and compatibility-corpus process supervision.
-           //!
-           //! Own the child, its process group and both nonblocking pipes until cleanup.
-           //! No pipe-reader thread or PATH-resolved kill command can outlive a check.
-          @@ -155,44 +155,30 @@
-           struct PipeCapture<R> {
-               pipe: R,
-          -    bytes: Vec<u8>,
-               eof: bool,
-          -    label: &'static str,
-           }
-           
-           impl<R: Read> PipeCapture<R> {
-          -    fn new(pipe: R, label: &'static str) -> Self {
-          -        Self {
-          -            pipe,
-          -            bytes: Vec::new(),
-          -            eof: false,
-          -            label,
-          -        }
-          +    fn new(pipe: R) -> Self {
-          +        Self { pipe, eof: false }
-               }
-           
-               /// Read at most one chunk so a stdout flood cannot starve stderr, child
-          -    /// exit checks or deadlines. Probe one extra byte at the exact cap, but
-          -    /// never retain it or turn an overflow into a truncated success.
-          -    fn pump(&mut self, limit: usize) -> io::Result<bool> {
-          +    /// exit checks or deadlines. The trusted observer owns its retention cap.
-          +    fn pump(&mut self, receive: &mut impl FnMut(&[u8]) -> io::Result<()>) -> io::Result<bool> {
-                   if self.eof {
-                       return Ok(false);
-                   }
-                   let mut buffer = [0_u8; 64 * 1024];
-          -        let remaining = limit.saturating_sub(self.bytes.len());
-          -        let request = buffer.len().min(remaining.saturating_add(1));
-          -        match self.pipe.read(&mut buffer[..request]) {
-          +        match self.pipe.read(&mut buffer) {
-                       Ok(0) => {
-                           self.eof = true;
-                           Ok(true)
-                       }
-          -            Ok(count) if count > remaining => Err(io::Error::new(
-          -                io::ErrorKind::InvalidData,
-          -                format!("runtime smoke {} output exceeds {limit} bytes", self.label),
-          -            )),
-                       Ok(count) => {
-          -                self.bytes.extend_from_slice(&buffer[..count]);
-          +                receive(&buffer[..count])?;
-                           Ok(true)
-                       }
-          @@ -211,2 +211,30 @@
-          +struct BoundedBytes {
-          +    bytes: Vec<u8>,
-          +    limit: usize,
-          +    label: &'static str,
-          +}
-          +
-          +impl BoundedBytes {
-          +    fn receive(&mut self, bytes: &[u8]) -> io::Result<()> {
-          +        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
-          +            return Err(io::Error::new(io::ErrorKind::InvalidData,
-          +                format!("runtime smoke {} output exceeds {} bytes", self.label, self.limit)));
-          +        }
-          +        self.bytes.extend_from_slice(bytes);
-          +        Ok(())
-          +    }
-          +}
-          +
-          +#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-          +pub(crate) enum Stream { Stdout, Stderr }
-          +
-          +#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-          +pub(crate) enum StopReason { Exited, RuntimeTimeout, PipeTimeout }
-          +
-          +#[derive(Debug)]
-          +pub(crate) struct Completion {
-          +    pub(crate) status: ExitStatus,
-          +    pub(crate) reason: StopReason,
-          +}
-          +
-           /// Execute one native smoke leg. The deadline includes pipe draining; cleanup
-           /// has a separate bounded reap allowance and also runs on setup/I/O errors.
-          @@ -227,11 +242,42 @@
-               if timeout.is_zero() || drain_timeout.is_zero() || limit == 0 || limit > MAX_STREAM_BYTES {
-                   bail!("runtime smoke requires positive bounded time and output limits");
-               }
-          -    let deadline = Instant::now()
-          -        .checked_add(timeout)
-          -        .context("runtime smoke deadline overflow")?;
-          +    let mut stdout = BoundedBytes { bytes: Vec::new(), limit, label: "stdout" };
-          +    let mut stderr = BoundedBytes { bytes: Vec::new(), limit, label: "stderr" };
-          +    let completion = supervise_with_observer(command, timeout, drain_timeout, |_| Ok(()),
-          +        |stream, bytes| match stream {
-          +            Stream::Stdout => stdout.receive(bytes),
-          +            Stream::Stderr => stderr.receive(bytes),
-          +        })?;
-          +    match completion.reason {
-          +        StopReason::RuntimeTimeout => bail!("runtime smoke command timed out after {}ms", timeout.as_millis()),
-          +        StopReason::PipeTimeout => bail!("runtime smoke command exited but output pipes remained open beyond {}ms", drain_timeout.as_millis()),
-          +        StopReason::Exited => Ok(Output { status: completion.status, stdout: stdout.bytes, stderr: stderr.bytes }),
-          +    }
-          +}
-          +
-          +/// Run with a trusted, bounded in-process stream observer. The observer may
-          +/// retain a capped prefix while hashing later bytes; it must not block. The
-          +/// startup hook receives only a PID (not the child/wait ownership), and must
-          +/// enforce its own bounded handshake. Its elapsed time is included in the
-          +/// leg's deadline, never followed by a fresh full runtime allowance.
-          +///
-          +/// A timeout is a measured incomplete outcome, not successful execution. The
-          +/// caller must refuse equivalence on either timeout reason. Setup, observer,
-          +/// hook and cleanup errors remain errors, with cleanup attempted on every exit.
-          +pub(crate) fn supervise_with_observer(
-          +    command: &mut Command,
-          +    timeout: Duration,
-          +    drain_timeout: Duration,
-          +    after_spawn: impl FnOnce(u32) -> Result<()>,
-          +    mut observe: impl FnMut(Stream, &[u8]) -> io::Result<()>,
-          +) -> Result<Completion> {
-          +    if timeout.is_zero() || drain_timeout.is_zero() {
-          +        bail!("runtime smoke requires positive bounded time and output limits");
-          +    }
-          +    let deadline = Instant::now().checked_add(timeout).context("runtime smoke deadline overflow")?;
-               let mut owned = OwnedSmokeChild::spawn(command)?;
-          -    let result = (|| -> Result<(Vec<u8>, Vec<u8>)> {
-          +    let result = (|| -> Result<StopReason> {
-                   let stdout = owned
-                       .child
-                       .stdout
-          @@ -244,33 +290,34 @@
-                       .context("runtime smoke stderr pipe unavailable")?;
-                   nonblocking(&stdout).context("configure runtime smoke stdout")?;
-                   nonblocking(&stderr).context("configure runtime smoke stderr")?;
-          -        let mut stdout = PipeCapture::new(stdout, "stdout");
-          -        let mut stderr = PipeCapture::new(stderr, "stderr");
-          +        let mut stdout = PipeCapture::new(stdout);
-          +        let mut stderr = PipeCapture::new(stderr);
-          +        if let Err(error) = after_spawn(owned.child.id()) {
-          +            // Retain available diagnostics without waiting for inherited pipes.
-          +            let _ = stdout.pump(&mut |bytes| observe(Stream::Stdout, bytes));
-          +            let _ = stderr.pump(&mut |bytes| observe(Stream::Stderr, bytes));
-          +            return Err(error).context("runtime startup hook failed");
-          +        }
-                   let mut exited_at = None;
-                   loop {
-                       let now = Instant::now();
-                       if now >= deadline {
-          -                bail!(
-          -                    "runtime smoke command timed out after {}ms",
-          -                    timeout.as_millis()
-          -                );
-          +                return Ok(StopReason::RuntimeTimeout);
-                       }
-                       let out_progress = stdout
-          -                .pump(limit)
-          +                .pump(&mut |bytes| observe(Stream::Stdout, bytes))
-                           .context("failed reading runtime smoke stdout")?;
-                       let err_progress = stderr
-          -                .pump(limit)
-          +                .pump(&mut |bytes| observe(Stream::Stderr, bytes))
-                           .context("failed reading runtime smoke stderr")?;
-                       if owned.exited_without_reaping()? {
-                           if stdout.eof && stderr.eof {
-          -                    return Ok((stdout.bytes, stderr.bytes));
-          +                    return Ok(StopReason::Exited);
-                           }
-                           let exited = *exited_at.get_or_insert(now);
-                           if now.duration_since(exited) >= drain_timeout {
-          -                    bail!(
-          -                        "runtime smoke command exited but output pipes remained open beyond {}ms",
-          -                        drain_timeout.as_millis()
-          -                    );
-          +                    return Ok(StopReason::PipeTimeout);
-                           }
-                       }
-          @@ -284,11 +331,7 @@
-               // still holds a write end. No blocked reader thread survives this function.
-               let cleanup = owned.finish();
-               match (result, cleanup) {
-          -        (Ok((stdout, stderr)), Ok(status)) => Ok(Output {
-          -            status,
-          -            stdout,
-          -            stderr,
-          -        }),
-          +        (Ok(reason), Ok(status)) => Ok(Completion { status, reason }),
-                   (Err(error), Ok(_)) => Err(error),
-                   (Ok(_), Err(error)) => Err(error).context("runtime smoke cleanup failed"),
-          @@ -510,11 +553,57 @@
-               #[test]
-               fn capture_never_retains_the_overflow_probe_byte() {
-          -        let mut capture = PipeCapture::new(Cursor::new(b"12345"), "stdout");
-          -        assert!(capture.pump(4).is_err());
-          -        assert!(capture.bytes.len() <= 4);
-          -        let mut empty = PipeCapture::new(io::empty(), "stderr");
-          -        assert!(empty.pump(4).expect("EOF"));
-          +        let mut capture = PipeCapture::new(Cursor::new(b"12345"));
-          +        let mut retained = BoundedBytes { bytes: Vec::new(), limit: 4, label: "stdout" };
-          +        assert!(capture.pump(&mut |bytes| retained.receive(bytes)).is_err());
-          +        assert!(retained.bytes.len() <= 4);
-          +        let mut empty = PipeCapture::new(io::empty());
-          +        assert!(empty.pump(&mut |bytes| retained.receive(bytes)).expect("EOF"));
-                   assert!(empty.eof);
-               }
-          +
-          +    #[test]
-          +    fn observer_keeps_timeout_distinct_from_a_successful_leader_exit() {
-          +        let mut bytes = Vec::new();
-          +        let result = supervise_with_observer(&mut shell("printf captured; /bin/sleep 60 & exit 0"),
-          +            Duration::from_secs(3), Duration::from_millis(100), |_| Ok(()),
-          +            |stream, chunk| { if stream == Stream::Stdout { bytes.extend_from_slice(chunk); } Ok(()) }).unwrap();
-          +        assert_eq!(result.reason, StopReason::PipeTimeout);
-          +        assert_eq!(result.status.code(), Some(0));
-          +        assert_eq!(bytes, b"captured");
-          +    }
-          +
-          +    #[test]
-          +    fn startup_time_consumes_the_original_leg_deadline() {
-          +        let started = Instant::now();
-          +        let result = supervise_with_observer(&mut shell("exec /bin/sleep 0.4"),
-          +            Duration::from_millis(150), Duration::from_millis(100),
-          +            |_| { thread::sleep(Duration::from_millis(300)); Ok(()) }, |_, _| Ok(())).unwrap();
-          +        assert_eq!(result.reason, StopReason::RuntimeTimeout);
-          +        assert!(started.elapsed() < Duration::from_secs(2));
-          +    }
-          +
-          +    #[test]
-          +    fn startup_failure_cleans_up_without_joining_inherited_pipes() {
-          +        let mut pid = None;
-          +        let started = Instant::now();
-          +        let error = supervise_with_observer(&mut shell("/bin/sleep 60 & wait"),
-          +            Duration::from_secs(3), Duration::from_millis(100),
-          +            |raw| { pid = Pid::from_raw(i32::try_from(raw).unwrap()); bail!("rejected authority"); },
-          +            |_, _| Ok(())).unwrap_err();
-          +        assert!(format!("{error:#}").contains("rejected authority"));
-          +        assert!(started.elapsed() < Duration::from_secs(2));
-          +        assert!(matches!(waitid(WaitId::Pid(pid.unwrap()), WaitIdOptions::EXITED | WaitIdOptions::NOHANG), Err(Errno::CHILD)));
-          +    }
-          +
-          +    #[test]
-          +    fn observer_failure_also_terminates_and_reaps_the_leader() {
-          +        let mut pid = None;
-          +        let error = supervise_with_observer(&mut shell("while :; do printf output; done"),
-          +            Duration::from_secs(3), Duration::from_millis(100),
-          +            |raw| { pid = Pid::from_raw(i32::try_from(raw).unwrap()); Ok(()) },
-          +            |_, _| Err(io::Error::other("observer refused bytes"))).unwrap_err();
-          +        assert!(format!("{error:#}").contains("observer refused bytes"));
-          +        assert!(matches!(waitid(WaitId::Pid(pid.unwrap()), WaitIdOptions::EXITED | WaitIdOptions::NOHANG), Err(Errno::CHILD)));
-          +    }
-           }
+          cat > evidence/import.patch <<'PATCH'
           diff --git a/crates/franken-node/src/ops/compat_corpus_run.rs b/crates/franken-node/src/ops/compat_corpus_run.rs
           --- a/crates/franken-node/src/ops/compat_corpus_run.rs
           +++ b/crates/franken-node/src/ops/compat_corpus_run.rs
-          @@ -50,3 +50,9 @@
-           use std::time::{Duration, Instant};
-           
-          +#[cfg(all(feature = "engine", target_os = "linux"))]
-          +#[path = "corpus_process.rs"]
-          +mod corpus_process;
-          +#[cfg(feature = "engine")]
-          +use std::process::Output;
-          +
-           #[cfg(unix)]
-          @@ -1245,4 +1251,4 @@
-          -#[cfg(feature = "engine")]
-          +#[cfg(all(feature = "engine", any(test, not(target_os = "linux"))))]
-           fn drain_capped(
-               mut pipe: impl Read + Send + 'static,
-           ) -> std::thread::JoinHandle<std::io::Result<PipeDrainResult>> {
-          @@ -1622,9 +1628,24 @@
-          +// Probe startup is supervised too: a hung --version, identity script or
-          +// init process must not stall the corpus before its first timed case.
-          +#[cfg(feature = "engine")]
-          +fn run_probe(command: &mut Command) -> Result<Output> {
-          +    #[cfg(target_os = "linux")]
-          +    { corpus_process::probe(command, Duration::from_secs(10)) }
-          +    #[cfg(not(target_os = "linux"))]
-          +    { command.output().context("execute runtime probe") }
-          +}
-          +
-           #[cfg(feature = "engine")]
-           fn runtime_version(executable: &Path, runtime: &str) -> Result<String> {
-          -    let output = Command::new(executable)
-          -        .arg("--version")
-          -        .output()
-          +    let output = run_probe(Command::new(executable).arg("--version"))
-                   .with_context(|| format!("{runtime} --version failed"))?;
-          @@ -1641,10 +1662,8 @@
-           #[cfg(feature = "engine")]
-           fn validate_node_identity(executable: &Path) -> Result<()> {
-          -    let output = Command::new(executable)
-          +    let output = run_probe(Command::new(executable)
-                   .args([
-                       "-e",
-                       "process.stdout.write(`${process.release?.name}|${typeof Bun}`)",
-          -        ])
-          -        .output()
-          +        ]))
-                   .context("execute Node.js identity probe")?;
-          @@ -1701,7 +1720,49 @@
-          -#[cfg(feature = "engine")]
-          +#[cfg(all(feature = "engine", target_os = "linux"))]
-          +fn run_leg_after_spawn(
-          +    command: &mut Command,
-          +    timeout: Duration,
-          +    after_spawn: impl FnOnce(u32) -> Result<()>,
-          +) -> Result<LegCapture> {
-          +    let captured = corpus_process::capture(command, timeout, MAX_LEG_OUTPUT_BYTES,
-          +        |pid| after_spawn(pid).context("authenticate corpus process-authority child"))?;
-          +    let timed_out = captured.timed_out;
-          +    let exit_code = captured.status.code();
-          +    let convert = |stream: corpus_process::CapturedStream| PipeDrainResult {
-          +        retained_bytes: stream.retained_bytes,
-          +        sha256: stream.sha256,
-          +        total_bytes: stream.total_bytes,
-          +        capture_truncated: stream.capture_truncated,
-          +    };
-          +    let stdout = convert(captured.stdout);
-          +    let stderr = convert(captured.stderr);
-          +    Ok(LegCapture {
-          +        comparison: runtime_comparison(&stdout, &stderr, timed_out, exit_code),
-          +        observation: RuntimeLegObservation {
-          +            stdout_digest: stdout.sha256,
-          +            stderr_digest: stderr.sha256,
-          +            stdout_bytes: stdout.total_bytes,
-          +            stderr_bytes: stderr.total_bytes,
-          +            stdout_truncated: stdout.capture_truncated,
-          +            stderr_truncated: stderr.capture_truncated,
-          +            exit_code,
-          +            termination_kind: if timed_out { "timed_out" } else if exit_code.is_some() {
-          +                "exited"
-          +            } else { "signal_or_unknown" }.to_owned(),
-          +            timed_out,
-          +            elapsed_ms: captured.elapsed_ms,
-          +        },
-          +        stdout_excerpt: sanitize_reason_excerpt(&stdout.retained_bytes),
-          +        stderr_excerpt: sanitize_reason_excerpt(&stderr.retained_bytes),
-          +    })
-          +}
-          +
+          @@ -40,5 +40,7 @@
+           use std::path::{Component, Path, PathBuf};
+          -use std::process::{Command, Stdio};
+          +use std::process::Command;
           +#[cfg(all(feature = "engine", not(target_os = "linux")))]
-           fn run_leg_after_spawn(
-               command: &mut Command,
-               timeout: Duration,
-               after_spawn: impl FnOnce(u32) -> Result<()>,
-           ) -> Result<LegCapture> {
-          @@ -1853,6 +1914,5 @@
-          -    let init = Command::new(&current_exe)
-          +    let init = run_probe(Command::new(&current_exe)
-                   .args(["init", "--profile", "balanced", "--out-dir", "."])
-          -        .current_dir(template.path())
-          -        .output()
-          +        .current_dir(template.path()))
-                   .context("bootstrap workspace template via init")?;
+          +use std::process::Stdio;
+           use std::time::{Duration, Instant};
           PATCH
-          git apply --recount --check evidence/integration.patch
-          git apply --recount evidence/integration.patch
+          git apply --recount --check evidence/import.patch
+          git apply --recount evidence/import.patch
           git diff --check
-      - name: Test the exact process owner and corpus capture; preserve migration behavior
+      - name: Test the actual process owner and corpus capture
         shell: bash
         run: |
           set -euo pipefail
           rustup toolchain install stable --profile minimal --component clippy --component rustfmt
           source="$GITHUB_WORKSPACE/crates/franken-node/src"
           harness="$RUNNER_TEMP/corpus-process-check"
-          mkdir -p "$harness"
+          mkdir -p "$harness" evidence
           cat > "$harness/Cargo.toml" <<'TOML'
           [package]
           name = "corpus-process-check"
@@ -440,29 +75,25 @@ jobs:
               mod corpus_process;
           }
           RUST
-          rustfmt +stable --edition 2024 "$source/migration/smoke_supervisor.rs" "$source/ops/corpus_process.rs"
+          rustfmt +stable --edition 2024 --check "$source/migration/smoke_supervisor.rs" "$source/ops/corpus_process.rs"
           rustfmt +stable --edition 2024 --config skip_children=true --emit stdout "$source/ops/compat_corpus_run.rs" > /dev/null
           rustfmt +stable --edition 2024 --config skip_children=true --emit stdout "$source/migration/mod.rs" > /dev/null
           git rev-parse HEAD > evidence/revision.txt
           rustc +stable --version > evidence/rust-version.txt
-          node --version > evidence/node-version.txt
-          git hash-object "$source/migration/smoke_supervisor.rs" "$source/ops/corpus_process.rs" "$source/ops/compat_corpus_run.rs" "$source/migration/mod.rs" > evidence/compiled-source-blobs.txt
+          git hash-object "$source/migration/smoke_supervisor.rs" "$source/ops/corpus_process.rs" "$source/ops/compat_corpus_run.rs" "$source/migration/mod.rs" > evidence/source-blobs.txt
           cargo +stable test --manifest-path "$harness/Cargo.toml" --test process_supervision -- --nocapture --test-threads=2 2>&1 | tee evidence/process-tests.log
           cargo +stable clippy --manifest-path "$harness/Cargo.toml" --test process_supervision -- -D warnings 2>&1 | tee evidence/process-clippy.log
-          cargo +stable test --manifest-path tools/migration-validator/Cargo.toml -- --nocapture --test-threads=2 2>&1 | tee evidence/migration-regression-tests.log
-          cargo +stable clippy --manifest-path tools/migration-validator/Cargo.toml --all-targets -- -D warnings 2>&1 | tee evidence/migration-clippy.log
           cp "$harness/Cargo.lock" evidence/process-Cargo.lock
-      - name: Commit the tested integration directly to main
+      - name: Commit the reviewed import fix directly to main
         shell: bash
         run: |
           set -euo pipefail
           git diff --check
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add crates/franken-node/src/migration/smoke_supervisor.rs crates/franken-node/src/migration/mod.rs crates/franken-node/src/ops/compat_corpus_run.rs crates/franken-node/src/ops/corpus_process.rs
-          git diff --cached --name-only > evidence/committed-paths.txt
-          test "$(wc -l < evidence/committed-paths.txt)" = 4
-          git commit -m 'fix(compat): supervise corpus legs and startup probes with the shared process owner'
+          git add crates/franken-node/src/ops/compat_corpus_run.rs
+          test "$(git diff --cached --name-only)" = 'crates/franken-node/src/ops/compat_corpus_run.rs'
+          git commit -m 'fix(compat): keep thread-fallback Stdio import off Linux production builds'
           git push origin HEAD:main
           git rev-parse HEAD > evidence/published-revision.txt
       - name: Preserve exact source and executed evidence
