@@ -1,205 +1,233 @@
 #!/usr/bin/env python3
-"""
-Migration Confidence Report Generator.
+"""Evidence-gated migration confidence; scores are heuristics, not probabilities."""
 
-Synthesizes scan, risk, validation, and rollout data into a confidence
-assessment with uncertainty bands.
+from __future__ import annotations
 
-Usage:
-    python3 scripts/migration_confidence_report.py --self-test [--json]
-"""
-
+import hashlib
 import json
-import os
+import math
+import re
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from scripts.lib.test_logger import configure_test_logging
+HASH_RE = re.compile(r"[0-9a-f]{64}\Z")
+EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+MAX_TESTS = 1024
 
-ROOT = Path(__file__).resolve().parent.parent
 
-CONFIDENCE_LEVELS = [
-    (100, "high", "Proceed with standard rollout"),
-    (79, "medium", "Proceed with extended monitoring"),
-    (49, "low", "Address risks before proceeding"),
-    (19, "insufficient", "Migration not recommended"),
-]
+def checked_number(value, maximum: float, label: str) -> float:
+    if type(value) not in {int, float} or not math.isfinite(value) or not 0 <= value <= maximum:
+        raise ValueError(f"{label} must be finite and between 0 and {maximum}")
+    return value
 
 
 def compute_confidence(risk_score: float, validation_pass_rate: float,
                        fixture_coverage: float, api_tracked_pct: float) -> dict:
-    """Compute confidence score with uncertainty bands.
-
-    Args:
-        risk_score: 0-100, lower is better (from risk scorer)
-        validation_pass_rate: 0-1, fraction of tests passing
-        fixture_coverage: 0-1, fraction of APIs with fixtures
-        api_tracked_pct: 0-1, fraction of detected APIs in registry
-    """
-    # Base confidence: inverse of risk + validation success
-    risk_component = max(0, (100 - risk_score)) * 0.35
-    validation_component = validation_pass_rate * 100 * 0.35
-    coverage_component = fixture_coverage * 100 * 0.15
-    tracking_component = api_tracked_pct * 100 * 0.15
-
-    raw_score = risk_component + validation_component + coverage_component + tracking_component
-    confidence = round(min(100, max(0, raw_score)), 1)
-
-    # Uncertainty band: wider when data is less complete
+    """Calculate a bounded heuristic. Its interval is NOT a statistical CI."""
+    checked_number(risk_score, 100, "risk_score")
+    for name, value in (("validation_pass_rate", validation_pass_rate),
+                        ("fixture_coverage", fixture_coverage), ("api_tracked_pct", api_tracked_pct)):
+        checked_number(value, 1, name)
+    components = {"risk_component": (100 - risk_score) * 0.35,
+                  "validation_component": validation_pass_rate * 35,
+                  "coverage_component": fixture_coverage * 15,
+                  "tracking_component": api_tracked_pct * 15}
+    score = round(sum(components.values()), 1)
     completeness = (fixture_coverage + api_tracked_pct + validation_pass_rate) / 3
-    uncertainty_width = round((1 - completeness) * 30, 1)  # Max ±30 points
-    lower_bound = round(max(0, confidence - uncertainty_width), 1)
-    upper_bound = round(min(100, confidence + uncertainty_width), 1)
-
-    return {
-        "confidence_score": confidence,
-        "uncertainty_band": {
-            "lower": lower_bound,
-            "upper": upper_bound,
-            "width": uncertainty_width,
-        },
-        "components": {
-            "risk_component": round(risk_component, 1),
-            "validation_component": round(validation_component, 1),
-            "coverage_component": round(coverage_component, 1),
-            "tracking_component": round(tracking_component, 1),
-        },
-    }
+    width = round((1 - completeness) * 30, 1)
+    return {"confidence_score": score, "score_kind": "heuristic_not_probability",
+            "uncertainty_band": {"lower": round(max(0, score - width), 1),
+                                 "upper": round(min(100, score + width), 1), "width": width,
+                                 "kind": "heuristic_not_statistical_interval"},
+            "components": {key: round(value, 1) for key, value in components.items()}}
 
 
 def classify_confidence(score: float) -> dict:
-    """Classify confidence level."""
-    for threshold, level, recommendation in CONFIDENCE_LEVELS:
-        if score >= threshold - 20:  # Adjusted ranges
-            pass
-    # Use explicit bands
+    checked_number(score, 100, "confidence_score")
     if score >= 80:
-        return {"level": "high", "recommendation": "Proceed with standard rollout"}
+        return {"level": "high", "recommendation": "Evaluate a staged rollout against measured evidence"}
     if score >= 50:
-        return {"level": "medium", "recommendation": "Proceed with extended monitoring"}
+        return {"level": "medium", "recommendation": "Require monitored staged evaluation"}
     if score >= 20:
-        return {"level": "low", "recommendation": "Address risks before proceeding"}
+        return {"level": "low", "recommendation": "Address evidence gaps before proceeding"}
     return {"level": "insufficient", "recommendation": "Migration not recommended"}
 
 
-def generate_report(scan_summary: dict = None, risk_report: dict = None,
-                    validation_result: dict = None) -> dict:
-    """Generate complete confidence report."""
-    # Extract metrics (with sensible defaults for missing data)
-    risk_score = risk_report.get("risk_score", 50) if risk_report else 50
-    validation_pass_rate = 0.0
-    if validation_result:
-        summary = validation_result.get("summary", {})
-        total = summary.get("total_tests", 0)
-        passed = summary.get("passed", 0)
-        validation_pass_rate = passed / total if total > 0 else 0
+def validation_evidence(result: dict | None) -> dict:
+    """Reconcile observations, not merely a caller-supplied PASS or pass rate.
 
-    fixture_coverage = 0.5  # Default: assume partial coverage
-    api_tracked_pct = 0.8   # Default: assume most APIs tracked
+    This checks internal consistency, not authenticity. Only the orchestrator's
+    own execution establishes that measurements happened; unsigned imported
+    reports must not be treated as trusted certificates.
+    """
+    invalid = {"valid": False, "all_passed": False, "pass_rate": None,
+               "total_tests": 0, "reason": "no complete measured validation"}
+    try:
+        if (not isinstance(result, dict) or result.get("schema_version") != "migration-validation-v1"
+                or result.get("phase") != "execution" or result.get("comparison_mode") != "exact-bytes"):
+            return invalid
+        summary, rows = result["summary"], result["validation_results"]
+        if not isinstance(summary, dict) or not isinstance(rows, list):
+            return invalid
+        counts = [summary[key] for key in ("total_tests", "passed", "failed", "skipped", "errored")]
+        if any(type(value) is not int or not 0 <= value <= MAX_TESTS for value in counts):
+            return invalid
+        total, passed, failed, skipped, errored = counts
+        if (not total or total != passed + failed + skipped + errored or skipped or errored
+                or len(rows) != total or result.get("errors")):
+            return invalid
+        expected_verdict = "FAIL" if failed else "PASS"
+        if summary.get("verdict") != expected_verdict:
+            return invalid
+        discovery = result["test_discovery"]
+        names = discovery["test_files"]
+        if (not isinstance(names, list) or len(names) != total
+                or type(discovery.get("test_files_found")) is not int
+                or discovery.get("test_files_found") != total
+                or discovery.get("missing_baseline") or discovery.get("missing_migration")
+                or any(not isinstance(name, str) or not name for name in names)
+                or len(set(names)) != total):
+            return invalid
+        filesystem = result.get("filesystem_comparison")
+        if type(filesystem) is not bool:
+            return invalid
+        expected_scope = "test-process-and-workspace-delta" if filesystem else "test-process-stdout-stderr-exit"
+        if result.get("validation_scope") != expected_scope:
+            return invalid
+        inputs = result["inputs"]
+        if (not isinstance(inputs, dict) or set(inputs) != {"baseline_sha256", "migration_sha256"}
+                or any(not isinstance(value, str) or HASH_RE.fullmatch(value) is None for value in inputs.values())):
+            return invalid
+        commands = result["commands"]
+        if not isinstance(commands, dict) or set(commands) != {"baseline", "migration"}:
+            return invalid
+        for command in commands.values():
+            if (not isinstance(command, list) or not 2 <= len(command) <= 256
+                    or any(not isinstance(arg, str) or not arg or "\0" in arg for arg in command)
+                    or command.count("{test}") != 1 or command[0] == "{test}"):
+                return invalid
+        seen, measured_passed = set(), 0
+        for row in rows:
+            name = row["test"]
+            if name not in names or name in seen or row.get("status") not in {"PASS", "FAIL"}:
+                return invalid
+            seen.add(name)
+            successful = True
+            for leg in ("baseline", "migration"):
+                observation = row[leg]
+                exit_code, termination = observation["exit_code"], observation["termination"]
+                if (type(exit_code) is not int or termination not in {"exited", "signal", "timeout", "output_limit"}
+                        or (termination == "signal" and exit_code >= 0)
+                        or (termination == "exited" and exit_code < 0)):
+                    return invalid
+                streams = observation["streams"]
+                if not isinstance(streams, dict) or set(streams) != {"stdout", "stderr"}:
+                    return invalid
+                for stream in streams.values():
+                    digest, count, retained = stream["sha256"], stream["bytes_observed"], stream["retained_bytes"]
+                    if (not isinstance(digest, str) or HASH_RE.fullmatch(digest) is None
+                            or type(count) is not int or count < 0 or type(retained) is not int
+                            or not 0 <= retained <= count or type(stream["complete"]) is not bool
+                            or (count == 0 and digest != EMPTY_SHA256)
+                            or (termination == "exited" and (not stream["complete"] or retained != count))):
+                        return invalid
+                successful &= exit_code == 0 and termination == "exited"
+                if filesystem:
+                    delta = observation["workspace_delta"]
+                    if (not isinstance(delta["sha256"], str) or HASH_RE.fullmatch(delta["sha256"]) is None
+                            or type(delta["changed_paths"]) is not int or delta["changed_paths"] < 0):
+                        return invalid
+            equal = all(row["baseline"]["streams"][channel] == row["migration"]["streams"][channel]
+                        for channel in ("stdout", "stderr"))
+            if filesystem:
+                equal &= all(row["baseline"]["workspace_delta"][key] == row["migration"]["workspace_delta"][key]
+                             for key in ("sha256", "changed_paths"))
+            measured_pass = successful and equal
+            if ((row["status"] == "PASS") != measured_pass
+                    or not isinstance(row.get("divergences"), list)
+                    or (not row["divergences"]) != measured_pass):
+                return invalid
+            measured_passed += int(measured_pass)
+        if measured_passed != passed or len(seen) != total:
+            return invalid
+        return {"valid": True, "all_passed": passed == total, "pass_rate": passed / total,
+                "total_tests": total, "reason": "complete internally consistent execution evidence"}
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return invalid
 
-    if scan_summary:
-        total_apis = scan_summary.get("total_apis_detected", 0)
-        risk_dist = scan_summary.get("risk_distribution", {})
-        low_count = risk_dist.get("low", 0)
-        api_tracked_pct = low_count / total_apis if total_apis > 0 else 0.5
 
-    confidence = compute_confidence(risk_score, validation_pass_rate, fixture_coverage, api_tracked_pct)
+def generate_report(scan_summary: dict | None = None, risk_report: dict | None = None,
+                    validation_result: dict | None = None, *, fixture_coverage: float | None = None,
+                    api_tracked_pct: float | None = None) -> dict:
+    """Missing coverage is unknown, not assumed 50%; risk is not API coverage."""
+    risk_score = risk_report.get("risk_score") if risk_report else None
+    if risk_score is not None:
+        checked_number(risk_score, 100, "risk_score")
+    for name, value in (("fixture_coverage", fixture_coverage), ("api_tracked_pct", api_tracked_pct)):
+        if value is not None:
+            checked_number(value, 1, name)
+    evidence = validation_evidence(validation_result)
+    confidence = compute_confidence(100 if risk_score is None else risk_score,
+                                    evidence["pass_rate"] or 0, fixture_coverage or 0, api_tracked_pct or 0)
     classification = classify_confidence(confidence["confidence_score"])
-
-    # Go/no-go
-    go_decision = classification["level"] in ("high", "medium")
-
-    return {
-        "report_timestamp": datetime.now(timezone.utc).isoformat(),
-        "confidence": confidence,
-        "classification": classification,
-        "go_decision": {
-            "proceed": go_decision,
-            "rationale": classification["recommendation"],
-        },
-        "uncertainty_sources": [
-            {"source": "fixture_coverage", "impact": "medium" if fixture_coverage < 0.8 else "low"},
-            {"source": "validation_completeness", "impact": "high" if validation_pass_rate < 0.5 else "low"},
-            {"source": "api_tracking", "impact": "medium" if api_tracked_pct < 0.8 else "low"},
-        ],
-        "data_inputs": {
-            "risk_score": risk_score,
-            "validation_pass_rate": validation_pass_rate,
-            "fixture_coverage": fixture_coverage,
-            "api_tracked_pct": api_tracked_pct,
-        },
-    }
+    blockers = []
+    if risk_score is None:
+        blockers.append("risk assessment is unavailable")
+    if not evidence["valid"]:
+        blockers.append(evidence["reason"])
+    elif not evidence["all_passed"]:
+        blockers.append("at least one measured migration case failed")
+    if classification["level"] not in {"high", "medium"}:
+        blockers.append("insufficient evidence score")
+    distribution = (scan_summary or {}).get("risk_distribution", {})
+    if any(distribution.get(level, 0) for level in ("critical", "high")):
+        blockers.append("high or critical static findings require review")
+    unknown = [name for name, value in (("risk_score", risk_score),
+                                        ("fixture_coverage", fixture_coverage),
+                                        ("api_tracked_pct", api_tracked_pct),
+                                        ("validation_pass_rate", evidence["pass_rate"])) if value is None]
+    return {"report_timestamp": datetime.now(timezone.utc).isoformat(), "confidence": confidence,
+            "classification": classification,
+            "go_decision": {"proceed": not blockers, "scope": "captured-tests-only; not production authorization",
+                            "rationale": "; ".join(blockers) if blockers else classification["recommendation"],
+                            "blocking_reasons": blockers},
+            "validation_evidence": evidence,
+            "uncertainty_sources": [{"source": name, "impact": "unknown", "assumed": False} for name in unknown],
+            "data_inputs": {"risk_score": risk_score, "validation_pass_rate": evidence["pass_rate"],
+                            "fixture_coverage": fixture_coverage, "api_tracked_pct": api_tracked_pct}}
 
 
 def self_test() -> dict:
-    """Run self-test."""
-    checks = []
-
-    # Test 1: High-confidence scenario
-    conf = compute_confidence(risk_score=5, validation_pass_rate=1.0, fixture_coverage=0.9, api_tracked_pct=0.95)
-    checks.append({"id": "CONF-HIGH", "status": "PASS" if conf["confidence_score"] >= 70 else "FAIL",
-                    "details": {"score": conf["confidence_score"]}})
-
-    # Test 2: Low-confidence scenario
-    conf2 = compute_confidence(risk_score=80, validation_pass_rate=0.2, fixture_coverage=0.3, api_tracked_pct=0.4)
-    checks.append({"id": "CONF-LOW", "status": "PASS" if conf2["confidence_score"] < 50 else "FAIL",
-                    "details": {"score": conf2["confidence_score"]}})
-
-    # Test 3: Score bounded
-    checks.append({"id": "CONF-BOUNDED", "status": "PASS" if 0 <= conf["confidence_score"] <= 100 and 0 <= conf2["confidence_score"] <= 100 else "FAIL"})
-
-    # Test 4: Uncertainty band
-    checks.append({"id": "CONF-UNCERTAINTY", "status": "PASS" if conf["uncertainty_band"]["width"] >= 0 else "FAIL",
-                    "details": {"width": conf["uncertainty_band"]["width"]}})
-
-    # Test 5: Classification
-    cls_high = classify_confidence(85)
-    cls_low = classify_confidence(15)
-    checks.append({"id": "CONF-CLASSIFY", "status": "PASS" if cls_high["level"] == "high" and cls_low["level"] == "insufficient" else "FAIL"})
-
-    # Test 6: Report generation
-    report = generate_report()
-    has_fields = all(k in report for k in ("confidence", "classification", "go_decision"))
-    checks.append({"id": "CONF-REPORT", "status": "PASS" if has_fields else "FAIL"})
-
-    failing = [c for c in checks if c["status"] == "FAIL"]
-    return {
-        "gate": "confidence_report_verification",
-        "section": "10.3",
-        "verdict": "PASS" if not failing else "FAIL",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "checks": checks,
-        "summary": {"total_checks": len(checks), "passing_checks": len(checks) - len(failing), "failing_checks": len(failing)},
-    }
+    high = compute_confidence(5, 1, .9, .95)
+    low = compute_confidence(80, .2, .3, .4)
+    checks = [{"id": "CONF-HIGH", "status": "PASS" if high["confidence_score"] >= 70 else "FAIL"},
+              {"id": "CONF-LOW", "status": "PASS" if low["confidence_score"] < 50 else "FAIL"},
+              {"id": "CONF-BOUNDED", "status": "PASS" if 0 <= high["confidence_score"] <= 100 else "FAIL"},
+              {"id": "CONF-UNCERTAINTY", "status": "PASS" if high["uncertainty_band"]["width"] >= 0 else "FAIL"},
+              {"id": "CONF-CLASSIFY", "status": "PASS" if classify_confidence(85)["level"] == "high" else "FAIL"},
+              {"id": "CONF-REPORT", "status": "PASS" if "go_decision" in generate_report() else "FAIL"},
+              {"id": "CONF-MISSING-EVIDENCE", "status": "PASS" if not generate_report()["go_decision"]["proceed"] else "FAIL"}]
+    failures = sum(check["status"] != "PASS" for check in checks)
+    return {"gate": "confidence_report_verification", "section": "10.3",
+            "verdict": "FAIL" if failures else "PASS", "timestamp": datetime.now(timezone.utc).isoformat(),
+            "checks": checks, "summary": {"total_checks": len(checks), "passing_checks": len(checks) - failures,
+                                           "failing_checks": failures}}
 
 
-def main():
-    logger = configure_test_logging("migration_confidence_report")
-    logger.info("starting migration confidence report")
-    json_output = "--json" in sys.argv
-    is_self_test = "--self-test" in sys.argv
-
-    if is_self_test:
-        result = self_test()
-        if json_output:
-            print(json.dumps(result, indent=2))
-        else:
-            for c in result["checks"]:
-                print(f"  [{'OK' if c['status'] == 'PASS' else 'FAIL'}] {c['id']}")
-            print(f"\nVerdict: {result['verdict']}")
-        sys.exit(0 if result["verdict"] == "PASS" else 1)
-
-    report = generate_report()
-    if json_output:
-        print(json.dumps(report, indent=2))
+def main() -> int:
+    result = self_test() if "--self-test" in sys.argv else generate_report()
+    if "--json" in sys.argv:
+        print(json.dumps(result, indent=2, allow_nan=False))
+    elif "--self-test" in sys.argv:
+        for check in result["checks"]:
+            print(f"[{check['status']}] {check['id']}")
+        print(f"Verdict: {result['verdict']}")
     else:
-        c = report["confidence"]
-        print(f"Confidence: {c['confidence_score']}/100 [{c['uncertainty_band']['lower']}-{c['uncertainty_band']['upper']}]")
-        print(f"Level: {report['classification']['level']}")
-        print(f"Go/No-Go: {'GO' if report['go_decision']['proceed'] else 'NO-GO'}")
+        print(f"Confidence: {result['confidence']['confidence_score']}/100 (heuristic)")
+        print(f"Go/No-Go: {'GO' if result['go_decision']['proceed'] else 'NO-GO'}")
+        print(result["go_decision"]["rationale"])
+    return (0 if result["verdict"] == "PASS" else 1) if "--self-test" in sys.argv else 2
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
