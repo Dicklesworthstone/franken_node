@@ -34,6 +34,9 @@ mod migrate_rewrite_goldens;
 #[path = "../src/migration/smoke_supervisor.rs"]
 mod native_smoke_supervisor;
 
+#[cfg(target_os = "linux")]
+mod native_project_suite_cli;
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
