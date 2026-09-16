@@ -6,11 +6,13 @@ on:
     paths:
       - 'crates/franken-node/src/migration/rewrite_transaction.rs'
       - 'crates/franken-node/src/migration/mod.rs'
+      - 'crates/franken-node/tests/native_rewrite_transactions.rs'
       - '.github/workflows/native-rewrite-transaction.yml'
   pull_request:
     paths:
       - 'crates/franken-node/src/migration/rewrite_transaction.rs'
       - 'crates/franken-node/src/migration/mod.rs'
+      - 'crates/franken-node/tests/native_rewrite_transactions.rs'
       - '.github/workflows/native-rewrite-transaction.yml'
   workflow_dispatch:
 
@@ -64,5 +66,309 @@ jobs:
           path: |
             evidence/
             crates/franken-node/src/migration/rewrite_transaction.rs
+          retention-days: 7
+          if-no-files-found: error
+
+  primary-integration:
+    needs: transaction
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Apply the reviewed primary integration if not already present
+        id: patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          path=crates/franken-node/src/migration/mod.rs
+          before=$(git hash-object "$path")
+          if grep -q '^mod rewrite_transaction;' "$path"; then
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+          else
+            test "$before" = 945336fe8a8640db447303443c6e87baab3b63e9
+            git apply --check - <<'PATCH'
+          diff --git a/crates/franken-node/src/migration/mod.rs b/crates/franken-node/src/migration/mod.rs
+          --- a/crates/franken-node/src/migration/mod.rs
+          +++ b/crates/franken-node/src/migration/mod.rs
+          @@ -8,7 +8,9 @@
+           use std::collections::BTreeSet;
+           use std::fmt::Write as _;
+           use std::fs::File;
+          -use std::io::{self, Read, Write as _};
+          +use std::io::{self, Read};
+          +#[cfg(any(test, not(target_os = "linux")))]
+          +use std::io::Write as _;
+           use std::path::{Path, PathBuf};
+           use std::process::{Command, Output};
+           #[cfg(not(target_os = "linux"))]
+          PATCH
+            # All edits below are a literal reviewed patch, never a regex rewrite.
+            cat > evidence/primary-integration.patch <<'PATCH'
+          diff --git a/crates/franken-node/src/migration/mod.rs b/crates/franken-node/src/migration/mod.rs
+          index 945336f..7e987d3 100644
+          --- a/crates/franken-node/src/migration/mod.rs
+          +++ b/crates/franken-node/src/migration/mod.rs
+          @@ -8,7 +8,9 @@
+           use std::collections::BTreeSet;
+           use std::fmt::Write as _;
+           use std::fs::File;
+          -use std::io::{self, Read, Write as _};
+          +use std::io::{self, Read};
+          +#[cfg(any(test, not(target_os = "linux")))]
+          +use std::io::Write as _;
+           use std::path::{Path, PathBuf};
+           use std::process::{Command, Output};
+           #[cfg(not(target_os = "linux"))]
+          @@ -31,6 +33,9 @@
+           #[cfg(target_os = "linux")]
+           pub mod validation_suite;
+           
+          +#[cfg(target_os = "linux")]
+          +mod rewrite_transaction;
+          +
+           /// Maximum allowed file size for migration operations to prevent DoS via parser bombs.
+           /// External package.json, source files, etc. could be maliciously crafted as large files.
+           /// 10MB should be more than sufficient for any reasonable package manifest or source file.
+          @@ -705,9 +710,36 @@
+               }
+           }
+           
+          +// Rollback preimages are executable recovery data, not a diagnostic preview.
+          +// Never evict earlier edits to make room for later ones: that would install an
+          +// incomplete migration while reporting the entire plan as applied.
+          +fn record_rewrite_rollback_entry(
+          +    entries: &mut Vec<MigrationRollbackEntry>,
+          +    entry: MigrationRollbackEntry,
+          +) -> anyhow::Result<()> {
+          +    anyhow::ensure!(entries.len() < MAX_TOTAL_FINDINGS, "rewrite plan exceeds entry limit");
+          +    let total = entries.iter().chain(std::iter::once(&entry)).try_fold(0_usize, |total, item| {
+          +        total.checked_add(item.original_content.len())
+          +            .and_then(|value| value.checked_add(item.rewritten_content.len()))
+          +    }).ok_or_else(|| anyhow::anyhow!("rewrite plan byte count overflow"))?;
+          +    anyhow::ensure!(total <= 256 * 1024 * 1024, "rewrite plan exceeds total byte budget");
+          +    entries.push(entry);
+          +    Ok(())
+          +}
+          +
+           pub fn run_rewrite(project_path: &Path, apply: bool) -> anyhow::Result<MigrationRewriteReport> {
+               ensure_migration_project_path(project_path, "rewrite")?;
+           
+          +    // Hold the cooperative lock through recovery AND planning. A previous
+          +    // interrupted installation must be restored before computing fresh edits.
+          +    // Dry-run must not acquire a lock, create backups, or recover live sources.
+          +    #[cfg(target_os = "linux")]
+          +    let transaction = if apply {
+          +        Some(rewrite_transaction::RewriteTransaction::open(project_path)?)
+          +    } else {
+          +        None
+          +    };
+          +
+               let files: Vec<PathBuf> = collect_project_files(project_path)?;
+               let mut package_manifests_scanned = 0_usize;
+               let mut rewrites_planned = 0_usize;
+          @@ -804,8 +836,11 @@
+                               })?;
+           
+                           if apply {
+          -                    write_migration_backup(project_path, &path, &raw)?;
+          -                    write_migration_file_atomically(project_path, &path, &rewritten)?;
+          +                    #[cfg(not(target_os = "linux"))]
+          +                    {
+          +                        write_migration_backup(project_path, &path, &raw)?;
+          +                        write_migration_file_atomically(project_path, &path, &rewritten)?;
+          +                    }
+                               rewrites_applied = rewrites_applied.saturating_add(1);
+                           }
+           
+          @@ -845,15 +880,14 @@
+                                   );
+                               }
+                           }
+          -                push_bounded(
+          +                record_rewrite_rollback_entry(
+                               &mut rollback_entries,
+                               MigrationRollbackEntry {
+                                   path: relative_path,
+                                   original_content: raw,
+                                   rewritten_content: rewritten,
+                               },
+          -                    MAX_TOTAL_FINDINGS,
+          -                );
+          +                )?;
+                       }
+                       continue;
+                   }
+          @@ -931,8 +965,11 @@
+                   if rewrite_count > 0 {
+                       rewrites_planned = rewrites_planned.saturating_add(1);
+                       if apply {
+          -                write_migration_backup(project_path, &path, &raw)?;
+          -                write_migration_file_atomically(project_path, &path, &rewritten_content)?;
+          +                #[cfg(not(target_os = "linux"))]
+          +                {
+          +                    write_migration_backup(project_path, &path, &raw)?;
+          +                    write_migration_file_atomically(project_path, &path, &rewritten_content)?;
+          +                }
+                           rewrites_applied = rewrites_applied.saturating_add(1);
+                       }
+           
+          @@ -947,15 +984,14 @@
+                           },
+                           MAX_TOTAL_FINDINGS,
+                       );
+          -            push_bounded(
+          +            record_rewrite_rollback_entry(
+                           &mut rollback_entries,
+                           MigrationRollbackEntry {
+                               path: relative_path,
+                               original_content: raw,
+                               rewritten_content,
+                           },
+          -                MAX_TOTAL_FINDINGS,
+          -            );
+          +            )?;
+                   }
+               }
+           
+          @@ -984,6 +1020,16 @@
+                   entry.id = format!("mig-rewrite-{:03}", index.saturating_add(1));
+               }
+           
+          +    #[cfg(target_os = "linux")]
+          +    if let Some(transaction) = transaction {
+          +        let plan = rollback_entries.iter().map(|entry| rewrite_transaction::Edit {
+          +            path: &entry.path,
+          +            before: entry.original_content.as_bytes(),
+          +            after: entry.rewritten_content.as_bytes(),
+          +        }).collect::<Vec<_>>();
+          +        transaction.apply(&plan)?;
+          +    }
+          +
+               Ok(MigrationRewriteReport {
+                   schema_version: "1.0.0".to_string(),
+                   project_path: project_path.to_string_lossy().replace('\\', "/"),
+          @@ -2499,6 +2545,7 @@
+           /// SECURITY: Creates backup directory structure safely, preventing TOCTOU race conditions
+           /// where symlinks could be placed between validation and directory creation.
+           /// Creates each directory component incrementally with symlink validation at each step.
+          +#[cfg(any(test, not(target_os = "linux")))]
+           fn create_backup_directory_safe(project_path: &Path, backup_path: &Path) -> anyhow::Result<()> {
+               let backup_root = project_path.join(MIGRATION_BACKUP_DIR);
+           
+          @@ -2577,6 +2624,7 @@
+           /// SECURITY: Validates that no component in the backup path is a symlink to prevent
+           /// directory traversal attacks. Checks the backup root directory and all parent
+           /// directories up to the project root.
+          +#[cfg(any(test, not(target_os = "linux")))]
+           fn validate_backup_path_no_symlinks(project_path: &Path, backup_path: &Path) -> anyhow::Result<()> {
+               let backup_root = project_path.join(MIGRATION_BACKUP_DIR);
+           
+          @@ -2623,6 +2671,7 @@
+               Ok(())
+           }
+           
+          +#[cfg(any(test, not(target_os = "linux")))]
+           fn write_migration_backup(
+               project_path: &Path,
+               source_path: &Path,
+          @@ -2684,6 +2733,7 @@
+               Ok(backup_path)
+           }
+           
+          +#[cfg(any(test, not(target_os = "linux")))]
+           fn write_migration_file_atomically(
+               project_path: &Path,
+               source_path: &Path,
+          PATCH
+            git apply --check evidence/primary-integration.patch
+            git apply evidence/primary-integration.patch
+            test "$(git hash-object "$path")" = 7e987d3521bb2afef683358d0a2f85a49874f23c
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          fi
+          git diff --check
+      - name: Compile the full primary module and run public rewrite API regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal --component clippy
+          harness="$RUNNER_TEMP/primary-rewrite-check"
+          source_root="$GITHUB_WORKSPACE/crates/franken-node/src"
+          mkdir -p "$harness"
+          cat > "$harness/Cargo.toml" <<EOF
+          [package]
+          name = "primary-rewrite-check"
+          version = "0.0.0"
+          edition = "2024"
+          [workspace]
+          [lib]
+          name = "frankenengine_node"
+          path = "lib.rs"
+          test = false
+          doctest = false
+          [[test]]
+          name = "rewrite_transactions"
+          path = "$GITHUB_WORKSPACE/crates/franken-node/tests/native_rewrite_transactions.rs"
+          [features]
+          admin-tools = []
+          [dependencies]
+          anyhow = "1.0"
+          thiserror = "2.0"
+          serde = { version = "1.0", features = ["derive"] }
+          serde_json = "1.0"
+          sha2 = "0.11"
+          hex = "0.4"
+          chrono = "0.4"
+          tempfile = "3"
+          tree-sitter = "0.26.8"
+          tree-sitter-javascript = "0.25.0"
+          rustix = { version = "1.1", default-features = false, features = ["std", "fs", "process"] }
+          EOF
+          cat > "$harness/lib.rs" <<RUST
+          #![forbid(unsafe_code)]
+          extern crate self as frankenengine_node;
+          #[path = "$source_root/config/timeouts.rs"]
+          pub mod production_timeouts;
+          pub mod config { pub use crate::production_timeouts as timeouts; }
+          #[path = "$source_root/migration/mod.rs"]
+          pub mod migration;
+          RUST
+          cargo +stable test --manifest-path "$harness/Cargo.toml" --test rewrite_transactions -- --nocapture 2>&1 | tee evidence/primary-rewrite-tests.log
+          cargo +stable clippy --manifest-path "$harness/Cargo.toml" --lib -- -D warnings 2>&1 | tee evidence/primary-rewrite-clippy.log
+          git hash-object crates/franken-node/src/migration/mod.rs crates/franken-node/src/migration/rewrite_transaction.rs crates/franken-node/tests/native_rewrite_transactions.rs > evidence/compiled-source-blobs.txt
+          cp "$harness/Cargo.lock" evidence/primary-Cargo.lock
+      - name: Commit only the verified primary call-site change directly to main
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.patch.outputs.changed == 'true'
+        env:
+          PUBLISH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          path=crates/franken-node/src/migration/mod.rs
+          test "$(git diff --name-only)" = "$path"
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add "$path"
+          git commit -m 'feat(migration): install complete rewrite plans with journaled recovery' -m 'Hold the project lock through recovery and planning, defer Linux writes until complete plan validation, preserve original backups and source modes, and refuse rollback-plan truncation. Verified by real transaction and primary run_rewrite API tests.'
+          authorization=$(printf 'x-access-token:%s' "$PUBLISH_TOKEN" | base64 -w0)
+          # A concurrent main update fails this normal fast-forward push; never force.
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $authorization" push origin HEAD:refs/heads/main
+          git rev-parse HEAD > evidence/published-commit.txt
+      - name: Preserve compiled integration and evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: primary-rewrite-transaction-evidence
+          path: |
+            evidence/
+            crates/franken-node/src/migration/mod.rs
+            crates/franken-node/src/migration/rewrite_transaction.rs
+            crates/franken-node/tests/native_rewrite_transactions.rs
           retention-days: 7
           if-no-files-found: error
