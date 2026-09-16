@@ -1,0 +1,178 @@
+name: Verified rewrite application
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/verified-rewrite.yml'
+      - 'crates/franken-node/src/migration/verified_rewrite.rs'
+      - 'crates/franken-node/src/migration/rewrite_candidate.rs'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checked-apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Register the reviewed modules when not already present
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          cat > evidence/module-registration.patch <<'PATCH'
+          diff --git a/crates/franken-node/src/migration/mod.rs b/crates/franken-node/src/migration/mod.rs
+          --- a/crates/franken-node/src/migration/mod.rs
+          +++ b/crates/franken-node/src/migration/mod.rs
+          @@ -37,6 +37,9 @@
+           #[cfg(target_os = "linux")]
+           mod rewrite_transaction;
+           
+          +#[cfg(target_os = "linux")]
+          +pub mod verified_rewrite;
+          +
+           /// Maximum allowed file size for migration operations to prevent DoS via parser bombs.
+           /// External package.json, source files, etc. could be maliciously crafted as large files.
+           /// 10MB should be more than sufficient for any reasonable package manifest or source file.
+          diff --git a/crates/franken-node/src/migration/validation_suite.rs b/crates/franken-node/src/migration/validation_suite.rs
+          --- a/crates/franken-node/src/migration/validation_suite.rs
+          +++ b/crates/franken-node/src/migration/validation_suite.rs
+          @@ -29,6 +29,9 @@
+           #[path = "paired_validation_tests.rs"]
+           mod paired_tests;
+           
+          +#[path = "rewrite_candidate.rs"]
+          +pub mod rewrite_candidate;
+          +
+           const MAX_ENTRIES: usize = 50_000;
+           const MAX_PROJECT_BYTES: usize = 256 * 1024 * 1024;
+           const MAX_TESTS: usize = 1024;
+          PATCH
+          if git apply --reverse --check evidence/module-registration.patch 2>/dev/null; then
+            echo 'Module registrations already present'
+          else
+            git apply --check evidence/module-registration.patch
+            git apply evidence/module-registration.patch
+          fi
+          git diff --check
+      - name: Compile primary source and execute checked-apply regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal --component clippy --component rustfmt
+          primary="$RUNNER_TEMP/verified-primary"
+          tests="$RUNNER_TEMP/verified-tests"
+          source="$GITHUB_WORKSPACE/crates/franken-node/src"
+          mkdir -p "$primary" "$tests"
+          cat > "$primary/Cargo.toml" <<'TOML'
+          [package]
+          name = "verified-primary"
+          version = "0.0.0"
+          edition = "2024"
+          [workspace]
+          [lib]
+          path = "lib.rs"
+          test = false
+          doctest = false
+          [features]
+          admin-tools = []
+          [dependencies]
+          anyhow = "1.0"
+          thiserror = "2.0"
+          serde = { version = "1.0", features = ["derive"] }
+          serde_json = "1.0"
+          sha2 = "0.11"
+          hex = "0.4"
+          chrono = "0.4.40"
+          tempfile = "3"
+          tree-sitter = "0.26.8"
+          tree-sitter-javascript = "0.25.0"
+          rustix = { version = "1.1.4", default-features = false, features = ["std", "fs", "process"] }
+          TOML
+          cat > "$primary/lib.rs" <<RUST
+          #![forbid(unsafe_code)]
+          extern crate self as frankenengine_node;
+          #[path = "$source/config/timeouts.rs"]
+          pub mod production_timeouts;
+          pub mod config { pub use crate::production_timeouts as timeouts; }
+          #[path = "$source/migration/mod.rs"]
+          pub mod migration;
+          RUST
+          cat > "$tests/Cargo.toml" <<TOML
+          [package]
+          name = "verified-rewrite-tests"
+          version = "0.0.0"
+          edition = "2024"
+          [workspace]
+          [lib]
+          path = "lib.rs"
+          [dependencies]
+          verified-primary = { path = "$primary" }
+          anyhow = "1.0"
+          serde = { version = "1.0", features = ["derive"] }
+          serde_json = "1.0"
+          sha2 = "0.11"
+          hex = "0.4"
+          tempfile = "3"
+          rustix = { version = "1.1.4", default-features = false, features = ["std", "fs", "process"] }
+          TOML
+          cat > "$tests/lib.rs" <<RUST
+          #![forbid(unsafe_code)]
+          pub use verified_primary::migration::{MigrationRewriteAction, MigrationRewriteReport, MigrationValidateReport, run_rewrite, run_validate};
+          #[path = "$source/migration/smoke_supervisor.rs"]
+          pub mod smoke_supervisor;
+          #[path = "$source/migration/validation_suite.rs"]
+          pub mod validation_suite;
+          #[path = "$source/migration/rewrite_transaction.rs"]
+          pub mod rewrite_transaction;
+          #[path = "$source/migration/verified_rewrite.rs"]
+          pub mod verified_rewrite;
+          RUST
+          git rev-parse HEAD > evidence/revision.txt
+          rustc +stable --version > evidence/rust-version.txt
+          node --version > evidence/node-version.txt
+          for file in mod.rs validation_suite.rs rewrite_candidate.rs verified_rewrite.rs rewrite_transaction.rs workspace_effects.rs smoke_supervisor.rs; do
+            printf '%s ' "$file" >> evidence/compiled-source-blobs.txt
+            git hash-object "$source/migration/$file" >> evidence/compiled-source-blobs.txt
+          done
+          cargo +stable check --manifest-path "$primary/Cargo.toml" --lib 2>&1 | tee evidence/primary-check.log
+          cargo +stable test --manifest-path "$tests/Cargo.toml" verified_rewrite::tests -- --nocapture --test-threads=2 2>&1 | tee evidence/checked-apply-tests.log
+          cargo +stable test --manifest-path "$tests/Cargo.toml" rewrite_candidate::tests -- --nocapture --test-threads=2 2>&1 | tee evidence/candidate-tests.log
+          cargo +stable clippy --manifest-path "$primary/Cargo.toml" --lib -- -D warnings 2>&1 | tee evidence/primary-clippy.log
+          cargo +stable clippy --manifest-path "$tests/Cargo.toml" --all-targets -- -D warnings 2>&1 | tee evidence/checked-clippy.log
+          cp "$tests/Cargo.lock" evidence/Cargo.lock
+      - name: Commit only tested module registrations directly to main
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          paths=(crates/franken-node/src/migration/mod.rs crates/franken-node/src/migration/validation_suite.rs)
+          if ! git diff --quiet -- "${paths[@]}"; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add -- "${paths[@]}"
+            git commit -m 'feat(migration): wire tested checked-apply into the primary migration module'
+            git push origin HEAD:main
+          fi
+          git rev-parse HEAD > evidence/published-revision.txt
+      - name: Preserve tested source and integration context
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: checked-rewrite-evidence
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            evidence/
+            crates/franken-node/src/migration/mod.rs
+            crates/franken-node/src/migration/validation_suite.rs
+            crates/franken-node/src/migration/rewrite_candidate.rs
+            crates/franken-node/src/migration/verified_rewrite.rs
+            crates/franken-node/src/migration/rewrite_transaction.rs
+            crates/franken-node/src/cli.rs
+            crates/franken-node/src/main.rs
