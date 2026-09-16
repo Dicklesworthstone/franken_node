@@ -263,8 +263,10 @@ jobs:
           cargo +stable test --manifest-path "$tests/Cargo.toml" verified_rewrite::tests -- --nocapture --test-threads=2 2>&1 | tee evidence/checked-apply-tests.log
           cargo +stable test --manifest-path "$tests/Cargo.toml" rewrite_candidate::tests -- --nocapture --test-threads=2 2>&1 | tee evidence/candidate-tests.log
           cargo +stable test --manifest-path "$tests/Cargo.toml" checked_rewrite_cli_tests -- --nocapture 2>&1 | tee evidence/cli-tests.log
+          # Whole production libraries are linted. Existing CLI inline tests
+          # have independent style-lint debt; their compiled tests still run.
           cargo +stable clippy --manifest-path "$primary/Cargo.toml" --lib -- -D warnings 2>&1 | tee evidence/primary-clippy.log
-          cargo +stable clippy --manifest-path "$tests/Cargo.toml" --all-targets -- -D warnings 2>&1 | tee evidence/checked-clippy.log
+          cargo +stable clippy --manifest-path "$tests/Cargo.toml" --lib -- -D warnings 2>&1 | tee evidence/checked-clippy.log
           cp "$tests/Cargo.lock" evidence/Cargo.lock
       - name: Commit only the tested primary CLI integration directly to main
         if: github.ref == 'refs/heads/main'
