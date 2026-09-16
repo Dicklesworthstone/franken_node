@@ -148,7 +148,7 @@ class TestLiveMigrationValidation(unittest.TestCase):
         self.write_case()
         report = self.validate()
         self.assertEqual(report["summary"], {"total_tests": 1, "passed": 1,
-                                            "failed": 0, "skipped": 0, "verdict": "PASS"})
+                                            "failed": 0, "skipped": 0, "errored": 0, "verdict": "PASS"})
         self.assertEqual(report["phase"], "execution")
         self.assertFalse(report["release_certification"])
         self.assertEqual(report["comparison_mode"], "exact-bytes")
@@ -304,6 +304,9 @@ class TestLiveMigrationValidation(unittest.TestCase):
         report = self.validate(timeout_seconds=10, total_timeout_seconds=0.15)
         self.assertEqual(report["summary"]["verdict"], "ERROR")
         self.assertIn("budget exhausted", report["errors"][0]["message"])
+        self.assertEqual(report["summary"]["errored"], 1)
+        self.assertEqual(report["validation_results"][0]["baseline"]["termination"], "timeout")
+        self.assertEqual(report["validation_results"][0]["status"], "ERROR")
 
     def test_exact_bytes_keep_trailing_newlines_and_invalid_utf8_distinct(self):
         for before, after in [("process.stdout.write('ok\\n');", "process.stdout.write('ok');"),
@@ -364,6 +367,149 @@ class TestLiveMigrationValidation(unittest.TestCase):
                 self.assertEqual(result.returncode, expected, result.stderr)
                 report = json.loads(result.stdout)
                 self.assertEqual(report["summary"]["verdict"], "PASS" if expected == 0 else "FAIL")
+
+    def test_added_migration_tests_are_not_silently_ignored(self):
+        self.write_case()
+        (self.after / "extra.test.js").write_text("process.exit(8);", encoding="utf-8")
+        report = self.validate()
+        self.assertEqual(report["summary"]["verdict"], "ERROR")
+        self.assertEqual(report["test_discovery"]["missing_baseline"], ["extra.test.js"])
+        self.assertEqual(report["validation_results"], [])
+
+    def test_removed_tests_fail_before_any_runtime_starts(self):
+        self.write_case()
+        (self.before / "extra.test.js").write_text("process.exit(8);", encoding="utf-8")
+        report = self.validate()
+        self.assertEqual(report["summary"]["verdict"], "ERROR")
+        self.assertEqual(report["test_discovery"]["missing_migration"], ["extra.test.js"])
+        self.assertEqual(report["validation_results"], [])
+
+    def test_workspaces_do_not_accumulate_across_cases(self):
+        code = ("const fs=require('fs'),p=require('path'); "
+                "console.log(fs.readdirSync(p.dirname(p.dirname(process.cwd())))"
+                ".filter(x=>x.startsWith('case-')).length);")
+        for name in ("a.test.js", "b.test.js", "c.test.js"):
+            self.write_case(code, name=name)
+        report = self.validate()
+        self.assertEqual(report["summary"]["passed"], 3)
+        expected = runner.hashlib.sha256(b"1\n").hexdigest()
+        for row in report["validation_results"]:
+            self.assertEqual(row["baseline"]["streams"]["stdout"]["sha256"], expected)
+            self.assertEqual(row["migration"]["streams"]["stdout"]["sha256"], expected)
+
+    def test_report_export_is_private_and_contains_the_executed_result(self):
+        self.write_case()
+        report = self.validate()
+        destination = self.root / "report.json"
+        destination.write_text("old report", encoding="utf-8")
+        runner.write_report(report, destination)
+        self.assertEqual(json.loads(destination.read_text()), report)
+        self.assertEqual(destination.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(list(self.root.glob(".report.json.*")), [])
+
+    def test_cli_report_export_preserves_failure_exit(self):
+        self.write_case(after="process.exit(1);")
+        destination = self.root / "report.json"
+        command = [sys.executable, str(Path(runner.__file__)), str(self.before),
+                   "--migrated-project", str(self.after), "--json", "--out", str(destination),
+                   "--baseline-command", json.dumps([self.node, "{test}"]),
+                   "--migration-command", json.dumps([self.node, "{test}"])]
+        result = subprocess.run(command, capture_output=True, timeout=10, check=False)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(json.loads(result.stdout), json.loads(destination.read_text()))
+
+    def test_report_write_failure_is_nonzero_without_losing_previous_file(self):
+        destination = self.root / "existing-dir"
+        destination.mkdir()
+        with self.assertRaises(OSError):
+            runner.write_report({"ok": True}, destination)
+        self.assertTrue(destination.is_dir())
+        self.assertEqual(list(self.root.glob(".existing-dir.*")), [])
+
+    def test_cli_no_tests_is_nonzero_json(self):
+        result = subprocess.run([sys.executable, str(Path(runner.__file__)), str(self.before), "--json"],
+                                capture_output=True, timeout=10, check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(json.loads(result.stdout)["summary"]["verdict"], "NO_TESTS")
+
+    def test_cli_missing_runtime_is_nonzero_json(self):
+        self.write_case()
+        result = subprocess.run([sys.executable, str(Path(runner.__file__)), str(self.before), "--json",
+                                 "--migration-command", json.dumps([str(self.root / "absent"), "{test}"])],
+                                capture_output=True, timeout=10, check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(json.loads(result.stdout)["summary"]["verdict"], "ERROR")
+
+    def test_filesystem_comparison_catches_same_output_different_writes(self):
+        self.write_case("require('fs').writeFileSync('result.txt','one');",
+                        "require('fs').writeFileSync('result.txt','two');")
+        self.assertEqual(self.validate()["summary"]["verdict"], "PASS")
+        report = self.validate(compare_filesystem=True)
+        self.assertEqual(report["summary"]["verdict"], "FAIL")
+        self.assertEqual(report["validation_scope"], "test-process-and-workspace-delta")
+        self.assertIn({"channel": "filesystem", "reason": "workspace_delta_mismatch"},
+                      report["validation_results"][0]["divergences"])
+
+    def test_equivalent_writes_pass_despite_different_original_source(self):
+        self.write_case("require('fs').writeFileSync('result.txt',String(6*7));",
+                        "require('fs').writeFileSync('result.txt',String(41+1));")
+        report = self.validate(compare_filesystem=True)
+        self.assertEqual(report["summary"]["verdict"], "PASS")
+        row = report["validation_results"][0]
+        self.assertEqual(row["baseline"]["workspace_delta"], row["migration"]["workspace_delta"])
+        self.assertEqual(row["baseline"]["workspace_delta"]["changed_paths"], 1)
+        observed = row["baseline"]["workspace_delta"]["changes"]["result.txt"]["after"]
+        self.assertEqual(set(observed), {"kind", "mode", "sha256"})
+        self.assertEqual(observed["sha256"], runner.hashlib.sha256(b"42").hexdigest())
+
+    def test_workspace_deletion_and_mode_changes_are_observed(self):
+        for operation in ("unlinkSync('data.txt')", "chmodSync('data.txt',0o600)"):
+            with self.subTest(operation=operation):
+                self.write_case(f"require('fs').{operation};", "// No effect")
+                for root in (self.before, self.after):
+                    (root / "data.txt").write_text("unchanged content", encoding="utf-8")
+                    (root / "data.txt").chmod(0o644)
+                report = self.validate(compare_filesystem=True)
+                self.assertEqual(report["summary"]["verdict"], "FAIL")
+                self.assertEqual(report["validation_results"][0]["baseline"]["workspace_delta"]["changed_paths"], 1)
+                self.assertEqual((self.before / "data.txt").stat().st_mode & 0o777, 0o644)
+
+    def test_workspace_delta_preview_cap_does_not_hide_a_late_difference(self):
+        code = "const fs=require('fs'); for(let i=0;i<25;i++) fs.writeFileSync('result-'+i,'same');"
+        self.write_case(code, code + "fs.writeFileSync('result-9','different');")
+        report = self.validate(compare_filesystem=True)
+        self.assertEqual(report["summary"]["verdict"], "FAIL")
+        delta = report["validation_results"][0]["baseline"]["workspace_delta"]
+        self.assertEqual(delta["changed_paths"], 25)
+        self.assertTrue(delta["details_truncated"])
+        self.assertEqual(len(delta["changes"]), 20)
+        self.assertNotIn("result-9", delta["changes"])
+
+    def test_filesystem_cli_option_is_wired_to_the_verdict(self):
+        self.write_case("require('fs').writeFileSync('data','one');",
+                        "require('fs').writeFileSync('data','two');")
+        command = [sys.executable, str(Path(runner.__file__)), str(self.before),
+                   "--migrated-project", str(self.after), "--json", "--compare-filesystem",
+                   "--baseline-command", json.dumps([self.node, "{test}"]),
+                   "--migration-command", json.dumps([self.node, "{test}"])]
+        result = subprocess.run(command, capture_output=True, timeout=10, check=False)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertTrue(json.loads(result.stdout)["filesystem_comparison"])
+
+    def test_symlink_chain_retargeting_keeps_original_semantics(self):
+        code = ("const fs=require('fs'); fs.unlinkSync('middle'); fs.symlinkSync('second','middle'); "
+                "console.log(fs.readFileSync('alias','utf8'));")
+        self.write_case(code)
+        for root in (self.before, self.after):
+            (root / "first").write_text("first", encoding="utf-8")
+            (root / "second").write_text("second", encoding="utf-8")
+            (root / "middle").symlink_to("first")
+            (root / "alias").symlink_to("middle")
+        report = self.validate(compare_filesystem=True)
+        self.assertEqual(report["summary"]["verdict"], "PASS")
+        row = report["validation_results"][0]
+        self.assertEqual(row["baseline"]["streams"]["stdout"]["sha256"], runner.hashlib.sha256(b"second\n").hexdigest())
+        self.assertEqual(row["baseline"]["workspace_delta"]["changed_paths"], 1)
 
 
 if __name__ == "__main__":
