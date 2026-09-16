@@ -32,6 +32,8 @@ Each suggestion includes:
 - Rollback command (git restore path) with an argv form so operator tooling does
   not need to parse shell text
 
+Those suggestion templates are separate from the native transaction rollback command described below. Native rollback uses recorded source identities and backups, not a Git restore command.
+
 ## Recoverable Native Rewrite Application (Linux)
 
 The primary `run_rewrite` implementation in `crates/franken-node/src/migration/mod.rs` uses `rewrite_transaction.rs` to install an entire planned set of changes rather than writing each file while still discovering the plan.
@@ -107,6 +109,43 @@ This is not an operating-system sandbox. Execute only trusted projects: absolute
 
 The implementation lives in `verified_rewrite.rs` and the production suite's `rewrite_candidate.rs` child module. Regression coverage uses actual planner/static-validation code, the actual capture/observer/supervisor, and the actual transaction writer with explicitly identified Node/Node executions. Those tests establish orchestration and refusal behavior, not native Franken compatibility or general semantic equivalence. Native failure-capsule export, autonomous deployment and release certification remain separate work.
 
+## Native Rollback and Recovery-Only Operation (Linux)
+
+The primary command now restores applied native rewrites from their retained transaction identities. It does not invoke Git, a shell, Node, Bun or guest project code.
+
+```bash
+# List retained transactions without changing project files or recovering work.
+franken-node migrate rollback /path/to/project --json
+
+# Copy an exact transaction_id from history into TRANSACTION_ID, then preview.
+franken-node migrate rollback /path/to/project --transaction "$TRANSACTION_ID" --json
+
+# Restore only that transaction after complete source/backup preflight.
+franken-node migrate rollback /path/to/project --transaction "$TRANSACTION_ID" --apply --json
+```
+
+There is no implicit latest-transaction selection and no force override. Without `--apply`, selecting a transaction remains a preview. Applying requires an explicit ID. History and preview open only existing metadata and acquire the existing cooperative lock; they never create a backup directory, lock file or journal, and they do not perform automatic recovery. A project without native transaction history has an empty history, not a guessed Git-based recovery plan.
+
+### Restoration contract
+
+The selected journal must be valid and bound to its transaction directory. Applied, pending and completed rollback records must agree when multiple records exist. Every original backup is checked against its recorded hash/length, and every source must match either the recorded original or the installed rewrite, including permissions. The whole plan is preflighted before writing restoration intent or changing any source. A conflict in a later file cannot partially restore an earlier file. Missing files, corrupt backups, changed permissions, hard links and symlink redirection are refused rather than overwritten.
+
+Restoration writes the selected journal to the existing `pending.json` location before replacing the first source. It then uses the writer's existing recovery mechanism to restore exact original bytes and modes. Already-original files are left in place. The original `applied.json`, original backups and staged replacements are retained; completion records `rolled-back.json` in the same session. No historical file or unrelated source is deleted.
+
+An interrupted rollback remains recoverable: retry the same transaction with `--apply`, or let the next ordinary rewrite recover the pending work first. A pending initial apply can also be selected explicitly to restore originals **without planning any new rewrite**. A different pending transaction blocks the selected restoration instead of being implicitly recovered. Late errors or new conflicts after preflight may leave a partial restoration; the pending journal and available report details remain for recovery.
+
+Retrying an already completed transaction returns `ALREADY_ROLLED_BACK` without changing or certifying current sources. This is a statement about the retained receipt: it must not undo later user edits or a newer successful migration. History reports `APPLIED`, `APPLY_INTERRUPTED`, `ROLLBACK_PENDING`, or `ROLLED_BACK`; it does not infer chronological latest order from transaction names.
+
+### Rollback reports and bounds
+
+JSON schema is `franken-node/migration-rollback/v1`. Reports include transaction identity, a hash of the validated canonical journal, source/backup hashes, preflight states, conflicts and any pending transaction ID. They omit raw source and backup contents. File states describe preflight observations, not an atomic final-state certificate. Status is `HISTORY`, `READY`, `CONFLICT`, `ROLLED_BACK`, `ALREADY_ROLLED_BACK`, or `ERROR`. Conflict exits 1, input/infrastructure/recovery errors exit 2, and the other outcomes exit 0. Non-Linux rollback is refused.
+
+History is bounded to 1,000 transaction directories, 4,096 directory entries and 16 MiB of cumulative journal reads; a journal is at most 2 MiB. Existing per-file and per-plan rewrite bounds still apply. An exhausted history bound fails explicitly rather than presenting a partial history as complete. An explicitly selected ID does not require scanning all other history.
+
+The implementation is `rewrite_transaction::rollback` in `rewrite_rollback.rs`, reexported as `migration::rollback`. It shares the writer's held-directory/no-follow operations and owner-bound advisory lock. The guard explicitly unlocks when ownership ends so a duplicate descriptor transiently inherited during another thread's process spawn cannot keep a completed operation locked. Tests cover actual descriptor duplication, real process exits at several restoration points, repeated rewrite/restore cycles, original-byte/mode restoration, and preservation of unrelated edits.
+
+Rollback has the same local trust and concurrency limits as the writer: it is not a multi-file atomic filesystem operation, a signed receipt verifier, protection from privileged journal forgery, or an atomic compare-and-swap against arbitrary editors. Power-loss durability is not simulated by process-crash tests. It restores the transaction's source changes, not external services, guest-created files or deployment state.
+
 ## Invariants
 
 1. Every suggestion maps to a compatibility registry entry or "untracked".
@@ -122,6 +161,8 @@ The implementation lives in `verified_rewrite.rs` and the production suite's `re
 8. Rollback entries are never truncated to fit a diagnostic retention cap.
 9. Checked apply installs only the measured replacement plan after a complete
    nonempty process/filesystem PASS and a fresh captured-input identity check.
+10. Native rollback previews are nonmutating; explicit restoration preflights all
+    sources and backups, preserves later user edits, and records resumable intent.
 
 ## References
 
