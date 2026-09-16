@@ -396,3 +396,414 @@ fn default_policy_blocks_real_mechanism_for_loopback() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// Keep these tests in this registered integration target: ordinary cargo test
+// does not execute the product library's inline test modules.
+#[cfg(unix)]
+mod flow_gate_regressions {
+    use super::*;
+    use frankenengine_extension_host::host_io::{FsOperation, HostIoExceptionProvenance};
+    use frankenengine_node::ops::flow_gated_host_io::FlowGatedHostIo;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const NETWORK_PROBE: &str = "test network mechanism reached";
+
+    /// Real sandboxed filesystem with a network-only test double. The distinct
+    /// Io error proves delegation without pretending an external request ran.
+    /// The final test below uses the real network mechanism as well.
+    #[derive(Debug)]
+    struct NetworkProbe {
+        inner: SandboxedHostIo,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl HostIoProvider for NetworkProbe {
+        fn name(&self) -> &str {
+            "flow-test-network-probe"
+        }
+
+        fn filesystem_exception_provenance(&self) -> HostIoExceptionProvenance {
+            self.inner.filesystem_exception_provenance()
+        }
+
+        fn perform(&self, request: &HostIoRequest, granted: &[HostIoCapability]) -> HostIoOutcome {
+            let capability = request.required_capability();
+            if !granted.contains(&capability) {
+                return Err(HostIoError::CapabilityMissing { capability });
+            }
+            match request {
+                HostIoRequest::NetworkSend { .. }
+                | HostIoRequest::NetworkRequest { .. }
+                | HostIoRequest::NetworkRecv { .. } => {
+                    self.calls.fetch_add(1, Ordering::SeqCst);
+                    Err(HostIoError::Io {
+                        detail: NETWORK_PROBE.to_string(),
+                    })
+                }
+                _ => self.inner.perform(request, granted),
+            }
+        }
+    }
+
+    fn probe(root: &Path, calls: &Arc<AtomicUsize>) -> FlowGatedHostIo<NetworkProbe> {
+        FlowGatedHostIo::new(
+            NetworkProbe {
+                inner: SandboxedHostIo::with_root(root).expect("sandboxed filesystem"),
+                calls: Arc::clone(calls),
+            },
+            "flow-integration",
+        )
+    }
+
+    fn sinks(payload: &[u8]) -> [HostIoRequest; 3] {
+        [
+            HostIoRequest::NetworkSend {
+                endpoint: "127.0.0.1:9".into(),
+                payload: payload.to_vec(),
+            },
+            HostIoRequest::NetworkRequest {
+                endpoint: "127.0.0.1:9".into(),
+                payload: payload.to_vec(),
+                max_len: 4096,
+                use_tls: false,
+            },
+            HostIoRequest::NetworkRequest {
+                endpoint: "127.0.0.1:9".into(),
+                payload: payload.to_vec(),
+                max_len: 4096,
+                use_tls: true,
+            },
+        ]
+    }
+
+    fn assert_flow_denied(
+        gate: &impl HostIoProvider,
+        calls: &AtomicUsize,
+        request: &HostIoRequest,
+    ) {
+        let before = calls.load(Ordering::SeqCst);
+        let outcome = gate.perform(request, &[request.required_capability()]);
+        assert!(
+            matches!(&outcome, Err(HostIoError::Denied { reason }) if reason.starts_with("flow_policy:")),
+            "expected flow-policy denial, got {outcome:?}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), before, "denied effect delegated");
+    }
+
+    fn assert_probe_reached(
+        gate: &impl HostIoProvider,
+        calls: &AtomicUsize,
+        request: &HostIoRequest,
+    ) {
+        let before = calls.load(Ordering::SeqCst);
+        let outcome = gate.perform(request, &[request.required_capability()]);
+        assert_eq!(
+            outcome,
+            Err(HostIoError::Io {
+                detail: NETWORK_PROBE.to_string(),
+            })
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), before + 1);
+    }
+
+    fn read_path(gate: &impl HostIoProvider, path: &str, expected: &[u8]) {
+        assert_eq!(
+            gate.perform(
+                &HostIoRequest::FsRead { path: path.into() },
+                &[HostIoCapability::FsRead],
+            ),
+            Ok(HostIoResponse::FsRead {
+                bytes: expected.to_vec(),
+            })
+        );
+    }
+
+    fn meta(operation: FsOperation, path: &str, arguments: Vec<String>) -> HostIoRequest {
+        HostIoRequest::FsMeta {
+            operation,
+            path: path.into(),
+            arguments,
+            data: Vec::new(),
+        }
+    }
+
+    fn open_fd(gate: &impl HostIoProvider, path: &str) -> u64 {
+        let outcome = gate.perform(
+            &meta(FsOperation::Open, path, vec!["flags=r".into()]),
+            &[HostIoCapability::FsWrite],
+        );
+        match outcome {
+            Ok(HostIoResponse::FsMeta {
+                result: FsMetaResult::Unsigned(fd),
+            }) => fd,
+            other => panic!("expected an opened descriptor, got {other:?}"),
+        }
+    }
+
+    fn read_fd(gate: &impl HostIoProvider, fd: u64, ignored_path: &str, expected: &[u8]) {
+        let request = meta(
+            FsOperation::ReadFd,
+            ignored_path,
+            vec![
+                format!("fd={fd}"),
+                format!("length={}", expected.len()),
+                "position=0".into(),
+            ],
+        );
+        assert_eq!(
+            gate.perform(&request, &[HostIoCapability::FsRead]),
+            Ok(HostIoResponse::FsMeta {
+                result: FsMetaResult::Bytes(expected.to_vec()),
+            })
+        );
+    }
+
+    #[test]
+    fn untrackable_sensitive_reads_deny_all_payload_sinks_without_delegation() {
+        for size in [1, 7, 64 * 1024 + 1] {
+            let root = tempfile::tempdir().expect("scratch root");
+            let secret = vec![b'x'; size];
+            std::fs::write(root.path().join(".env"), &secret).expect("secret fixture");
+            let calls = Arc::new(AtomicUsize::new(0));
+            let gate = probe(root.path(), &calls);
+            read_path(&gate, ".env", &secret);
+            for payload in [b"".as_slice(), b"public".as_slice(), secret.as_slice()] {
+                for request in sinks(payload) {
+                    assert_flow_denied(&gate, &calls, &request);
+                }
+            }
+            // Egress refusal must not disable local filesystem work.
+            let write = HostIoRequest::FsWrite {
+                path: "local.txt".into(),
+                data: b"ok".to_vec(),
+            };
+            assert_eq!(
+                gate.perform(&write, &[HostIoCapability::FsWrite]),
+                Ok(HostIoResponse::FsWrite { bytes_written: 2 })
+            );
+            assert_eq!(
+                std::fs::read(root.path().join("local.txt")).expect("local copy"),
+                b"ok"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_sample_boundaries_reject_framed_secrets_but_allow_public_payloads() {
+        for size in [8, 64 * 1024] {
+            let root = tempfile::tempdir().expect("scratch root");
+            let secret = vec![0x91; size];
+            std::fs::write(root.path().join(".env"), &secret).expect("binary secret");
+            let calls = Arc::new(AtomicUsize::new(0));
+            let gate = probe(root.path(), &calls);
+            read_path(&gate, ".env", &secret);
+            let mut framed = b"header:".to_vec();
+            framed.extend_from_slice(&secret);
+            framed.extend_from_slice(b":trailer");
+            for request in sinks(&framed) {
+                assert_flow_denied(&gate, &calls, &request);
+            }
+            for request in sinks(b"public") {
+                assert_probe_reached(&gate, &calls, &request);
+            }
+        }
+    }
+
+    #[test]
+    fn sample_budget_deduplicates_before_capacity_and_never_forgets_overflow() {
+        let root = tempfile::tempdir().expect("scratch root");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = probe(root.path(), &calls);
+        for index in 0..16 {
+            let sample = format!("secret-token-{index:04}");
+            std::fs::write(root.path().join(".env"), &sample).expect("rotate secret");
+            read_path(&gate, ".env", sample.as_bytes());
+        }
+        std::fs::write(root.path().join(".env"), b"secret-token-0000").expect("reread secret");
+        read_path(&gate, ".env", b"secret-token-0000");
+        assert_probe_reached(&gate, &calls, &sinks(b"public")[0]);
+        assert_flow_denied(&gate, &calls, &sinks(b"secret-token-0000")[0]);
+        std::fs::write(root.path().join(".env"), b"seventeenth-secret").expect("overflow secret");
+        read_path(&gate, ".env", b"seventeenth-secret");
+        for request in sinks(b"public").into_iter().chain(sinks(b"")) {
+            assert_flow_denied(&gate, &calls, &request);
+        }
+    }
+
+    #[test]
+    fn empty_failed_and_nonsensitive_reads_do_not_close_egress() {
+        let root = tempfile::tempdir().expect("scratch root");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = probe(root.path(), &calls);
+        std::fs::write(root.path().join(".env"), b"").expect("empty secret");
+        for _ in 0..17 {
+            read_path(&gate, ".env", b"");
+        }
+        std::fs::write(root.path().join("public.txt"), b"x").expect("short public file");
+        read_path(&gate, "public.txt", b"x");
+        std::fs::write(root.path().join(".env"), b"unread-secret").expect("unread secret");
+        assert!(matches!(
+            gate.perform(
+                &HostIoRequest::FsRead { path: ".env".into() },
+                &[],
+            ),
+            Err(HostIoError::CapabilityMissing { .. })
+        ));
+        assert!(
+            gate.perform(
+                &HostIoRequest::FsRead {
+                    path: ".env.missing".into(),
+                },
+                &[HostIoCapability::FsRead],
+            )
+            .is_err()
+        );
+        assert_probe_reached(&gate, &calls, &sinks(b"public")[0]);
+    }
+
+    #[test]
+    fn descriptor_reads_use_open_provenance_not_the_ignored_request_path() {
+        let root = tempfile::tempdir().expect("scratch root");
+        std::fs::write(root.path().join(".env"), b"descriptor-secret").expect("secret fixture");
+        std::fs::write(root.path().join("public.txt"), b"public-file-bytes")
+            .expect("public fixture");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = probe(root.path(), &calls);
+        let secret_fd = open_fd(&gate, ".env");
+        read_fd(&gate, secret_fd, "public.txt", b"");
+        assert_probe_reached(&gate, &calls, &sinks(b"public")[0]);
+        read_fd(&gate, secret_fd, "public.txt", b"descriptor-secret");
+        for request in sinks(b"prefix:descriptor-secret:suffix") {
+            assert_flow_denied(&gate, &calls, &request);
+        }
+        let public_fd = open_fd(&gate, "public.txt");
+        read_fd(&gate, public_fd, ".env", b"public-file-bytes");
+        assert_probe_reached(&gate, &calls, &sinks(b"public-file-bytes")[0]);
+    }
+
+    #[test]
+    fn failed_close_keeps_provenance_and_successful_close_keeps_observed_secrets() {
+        let root = tempfile::tempdir().expect("scratch root");
+        std::fs::write(root.path().join(".env"), b"descriptor-secret").expect("secret fixture");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = probe(root.path(), &calls);
+        let fd = open_fd(&gate, ".env");
+        let close = meta(FsOperation::CloseFd, "", vec![format!("fd={fd}")]);
+        assert!(matches!(
+            gate.perform(&close, &[]),
+            Err(HostIoError::CapabilityMissing { .. })
+        ));
+        read_fd(&gate, fd, "", b"descriptor-secret");
+        assert_flow_denied(&gate, &calls, &sinks(b"descriptor-secret")[0]);
+        assert_eq!(
+            gate.perform(&close, &[HostIoCapability::FsWrite]),
+            Ok(HostIoResponse::FsMeta {
+                result: FsMetaResult::Unit,
+            })
+        );
+        assert_flow_denied(&gate, &calls, &sinks(b"descriptor-secret")[0]);
+    }
+
+    #[test]
+    fn successful_reads_from_preexisting_untracked_descriptors_are_sensitive() {
+        let root = tempfile::tempdir().expect("scratch root");
+        std::fs::write(root.path().join(".env"), b"untracked-secret").expect("secret fixture");
+        let inner = SandboxedHostIo::with_root(root.path()).expect("sandboxed filesystem");
+        let fd = inner.open_fd(".env", "r").expect("open before wrapping");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = FlowGatedHostIo::new(
+            NetworkProbe {
+                inner,
+                calls: Arc::clone(&calls),
+            },
+            "untracked-descriptor",
+        );
+        read_fd(&gate, fd, "public.txt", b"untracked-secret");
+        assert_flow_denied(&gate, &calls, &sinks(b"untracked-secret")[0]);
+    }
+
+    #[test]
+    fn metadata_results_and_exception_provenance_remain_unchanged() {
+        let root = tempfile::tempdir().expect("scratch root");
+        std::fs::write(root.path().join(".env"), b"tiny").expect("unread secret fixture");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = probe(root.path(), &calls);
+        assert_eq!(
+            gate.filesystem_exception_provenance(),
+            HostIoExceptionProvenance::ProviderInternal
+        );
+        assert_eq!(
+            gate.perform(
+                &meta(FsOperation::Exists, ".env", Vec::new()),
+                &[HostIoCapability::FsRead],
+            ),
+            Ok(HostIoResponse::FsMeta {
+                result: FsMetaResult::Bool(true),
+            })
+        );
+        assert_probe_reached(&gate, &calls, &sinks(b"public")[0]);
+    }
+
+    #[test]
+    fn debug_output_redacts_source_bytes_and_inner_provider() {
+        let root = tempfile::tempdir().expect("scratch root");
+        let secret = b"never-print-this-secret";
+        std::fs::write(root.path().join(".env"), secret).expect("secret fixture");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = probe(root.path(), &calls);
+        read_path(&gate, ".env", secret);
+        let debug = format!("{gate:?}");
+        assert!(!debug.contains("never-print-this-secret"));
+        assert!(!debug.contains(&format!("{secret:?}")));
+        assert!(!debug.contains("NetworkProbe"));
+    }
+
+    #[test]
+    fn composed_gates_block_secret_socket_and_send_public_bytes_to_real_listener() {
+        let root = tempfile::tempdir().expect("scratch root");
+        let secret = b"real-loopback-secret";
+        std::fs::write(root.path().join(".env"), secret).expect("secret fixture");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+        listener.set_nonblocking(true).expect("bounded accept");
+        let endpoint = listener
+            .local_addr()
+            .expect("listener address")
+            .to_string();
+        let inner = SandboxedHostIo::with_root(root.path()).expect("real provider");
+        let gate = FlowGatedHostIo::new(
+            SsrfGatedHostIo::with_policy(inner, permissive_template(), "endpoint-allowed"),
+            "real-flow-gate",
+        );
+        read_path(&gate, ".env", secret);
+        let forbidden = HostIoRequest::NetworkSend {
+            endpoint: endpoint.clone(),
+            payload: secret.to_vec(),
+        };
+        assert!(matches!(
+            gate.perform(&forbidden, &[HostIoCapability::NetworkSend]),
+            Err(HostIoError::Denied { .. })
+        ));
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+        let public = b"public data";
+        let permitted = HostIoRequest::NetworkSend {
+            endpoint,
+            payload: public.to_vec(),
+        };
+        assert_eq!(
+            gate.perform(&permitted, &[HostIoCapability::NetworkSend]),
+            Ok(HostIoResponse::NetworkSend {
+                bytes_sent: u64::try_from(public.len()).expect("small payload"),
+            })
+        );
+        let (mut stream, _) = listener.accept().expect("public connection");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("bounded read");
+        let mut received = Vec::new();
+        stream.read_to_end(&mut received).expect("read public bytes");
+        assert_eq!(received.as_slice(), public);
+    }
+}
