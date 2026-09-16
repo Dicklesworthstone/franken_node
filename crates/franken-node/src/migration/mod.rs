@@ -86,16 +86,6 @@ fn push_bounded<T>(vec: &mut Vec<T>, item: T, max_cap: usize) {
     vec.push(item);
 }
 
-#[cfg(feature = "external-commands")]
-fn resolve_runtime_on_path(runtime: &str) -> Option<PathBuf> {
-    which::which(runtime).ok()
-}
-
-#[cfg(not(feature = "external-commands"))]
-fn resolve_runtime_on_path(_runtime: &str) -> Option<PathBuf> {
-    None
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuditOutputFormat {
     Json,
@@ -540,23 +530,6 @@ struct MigrationRuntimeSmokeTarget {
 struct RuntimeSmokePipeReader {
     label: &'static str,
     receiver: Receiver<io::Result<Vec<u8>>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum MigrationRuntimeTarget {
-    FrankenNode(PathBuf),
-    Node(PathBuf),
-    Bun(PathBuf),
-}
-
-impl MigrationRuntimeTarget {
-    const fn label(&self) -> &'static str {
-        match self {
-            Self::FrankenNode(_) => "franken-node",
-            Self::Node(_) => "node",
-            Self::Bun(_) => "bun",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1092,7 +1065,7 @@ fn runtime_smoke_validation_check(project_path: &Path) -> MigrationValidationChe
                 receipt.runtime, receipt.target, receipt.exit_code
             ),
             remediation: Some(
-                "Keep the transformed project executable under franken-node, node, or bun during migration rollout."
+                "Keep the transformed project executable under the native franken-node runtime and its configured policy."
                     .to_string(),
             ),
         },
@@ -1101,7 +1074,7 @@ fn runtime_smoke_validation_check(project_path: &Path) -> MigrationValidationChe
             passed: false,
             message: format!("runtime smoke test failed: {err}"),
             remediation: Some(
-                "Install franken-node/node/bun and ensure the transformed package manifest can execute the canonical smoke fixture."
+                "Resolve the native franken-node execution or policy failure; Node/Bun success is reference evidence, not migration readiness."
                     .to_string(),
             ),
         },
@@ -1112,49 +1085,40 @@ fn execute_migration_runtime_smoke(
     project_path: &Path,
 ) -> anyhow::Result<MigrationRuntimeSmokeReceipt> {
     let smoke_target = select_migration_runtime_smoke_target(project_path)?;
-    let runtimes = resolve_migration_runtime_targets()?;
-    let mut failures = Vec::new();
+    // Validate the implementation the operator invoked, including renamed
+    // binaries. Never try a different implementation after a native failure:
+    // that would turn a policy denial or unsupported feature into a false PASS.
+    let native_executable = std::env::current_exe().map_err(|err| {
+        anyhow::anyhow!("failed locating native migration smoke executable: {err}")
+    })?;
+    execute_migration_runtime_smoke_with_target(&native_executable, &smoke_target)
+}
 
-    for runtime in runtimes {
-        match execute_migration_runtime_smoke_with_target(&runtime, &smoke_target) {
-            Ok(receipt) => return Ok(receipt),
-            Err(err) => failures.push(format!("{}: {err}", runtime.label())),
-        }
-    }
-
-    anyhow::bail!(
-        "no transformed-runtime smoke executor succeeded: {}",
-        failures.join(" | ")
-    )
+fn native_migration_smoke_command(
+    native_executable: &Path,
+    smoke_target: &MigrationRuntimeSmokeTarget,
+) -> Command {
+    let mut command = Command::new(native_executable);
+    command
+        .arg("run")
+        .arg(&smoke_target.entry_path)
+        .arg("--runtime")
+        .arg("franken-engine")
+        .arg("--engine-bin")
+        .arg(native_executable)
+        .arg("--json")
+        // This is an admission check, not an operator-requested degraded run.
+        .env_remove("FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK")
+        // Do not override a project's strict policy with balanced defaults.
+        .current_dir(&smoke_target.working_dir);
+    command
 }
 
 fn execute_migration_runtime_smoke_with_target(
-    runtime: &MigrationRuntimeTarget,
+    native_executable: &Path,
     smoke_target: &MigrationRuntimeSmokeTarget,
 ) -> anyhow::Result<MigrationRuntimeSmokeReceipt> {
-    let mut command = match &runtime {
-        MigrationRuntimeTarget::FrankenNode(path) => {
-            let mut command = Command::new(path);
-            command
-                .arg("run")
-                .arg(&smoke_target.entry_path)
-                .arg("--runtime")
-                .arg("auto")
-                .arg("--policy")
-                .arg("balanced")
-                .arg("--json")
-                .current_dir(&smoke_target.working_dir);
-            command
-        }
-        MigrationRuntimeTarget::Node(path) | MigrationRuntimeTarget::Bun(path) => {
-            let mut command = Command::new(path);
-            command
-                .arg(&smoke_target.entry_path)
-                .current_dir(&smoke_target.working_dir);
-            command
-        }
-    };
-
+    let mut command = native_migration_smoke_command(native_executable, smoke_target);
     let output = run_command_with_timeout(&mut command, MIGRATION_VALIDATE_RUNTIME_TIMEOUT)?;
     let exit_code = output
         .status
@@ -1162,19 +1126,16 @@ fn execute_migration_runtime_smoke_with_target(
         .ok_or_else(|| anyhow::anyhow!("runtime smoke process terminated by signal"))?;
     if !output.status.success() {
         anyhow::bail!(
-            "runtime `{}` exited with code {exit_code}; stderr={}",
-            runtime.label(),
+            "native runtime `franken-node` exited with code {exit_code}; stderr={}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
 
-    if matches!(runtime, MigrationRuntimeTarget::FrankenNode(_)) {
-        verify_franken_node_smoke_receipt_round_trip(&output)?;
-    }
+    verify_franken_node_smoke_receipt_round_trip(&output)?;
 
     let receipt = MigrationRuntimeSmokeReceipt {
         schema_version: "franken-node/migrate-validate-runtime-smoke/v1".to_string(),
-        runtime: runtime.label().to_string(),
+        runtime: "franken-node".to_string(),
         target: smoke_target.display.clone(),
         exit_code,
         stdout_sha256: migration_runtime_smoke_stdout_sha256_hex(&output.stdout),
@@ -1446,35 +1407,40 @@ fn select_smoke_package_manifest(project_path: &Path) -> anyhow::Result<PathBuf>
         })
 }
 
-fn resolve_migration_runtime_targets() -> anyhow::Result<Vec<MigrationRuntimeTarget>> {
-    let mut runtimes = Vec::new();
+#[cfg(test)]
+mod native_migration_smoke_command_tests {
+    use super::*;
 
-    if let Ok(exe_path) = std::env::current_exe()
-        && is_franken_node_binary(&exe_path)
-    {
-        runtimes.push(MigrationRuntimeTarget::FrankenNode(exe_path));
+    #[test]
+    fn command_pins_native_engine_and_preserves_project_policy() {
+        let executable = Path::new("renamed runtime");
+        let target = MigrationRuntimeSmokeTarget {
+            working_dir: PathBuf::from("project with spaces"),
+            entry_path: PathBuf::from("project with spaces/app.js"),
+            display: "fixture".to_string(),
+        };
+        let command = native_migration_smoke_command(executable, &target);
+        let arguments: Vec<_> = command.get_args().collect();
+        let expected: Vec<_> = [
+            "run",
+            "project with spaces/app.js",
+            "--runtime",
+            "franken-engine",
+            "--engine-bin",
+            "renamed runtime",
+            "--json",
+        ]
+        .into_iter()
+        .map(std::ffi::OsStr::new)
+        .collect();
+        assert_eq!(command.get_program(), executable.as_os_str());
+        assert_eq!(arguments, expected);
+        assert_eq!(command.get_current_dir(), Some(target.working_dir.as_path()));
+        assert!(command.get_envs().any(|(key, value)| {
+            key == std::ffi::OsStr::new("FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK")
+                && value.is_none()
+        }));
     }
-
-    if let Some(path) = resolve_runtime_on_path("node") {
-        runtimes.push(MigrationRuntimeTarget::Node(path));
-    }
-    if let Some(path) = resolve_runtime_on_path("bun") {
-        runtimes.push(MigrationRuntimeTarget::Bun(path));
-    }
-
-    if runtimes.is_empty() {
-        anyhow::bail!(
-            "no transformed-runtime executor found: franken-node, node, and bun are unavailable"
-        );
-    }
-
-    Ok(runtimes)
-}
-
-fn is_franken_node_binary(path: &Path) -> bool {
-    path.file_stem()
-        .and_then(std::ffi::OsStr::to_str)
-        .is_some_and(|name| name == "franken-node")
 }
 
 fn run_command_with_timeout(command: &mut Command, timeout: Duration) -> anyhow::Result<Output> {

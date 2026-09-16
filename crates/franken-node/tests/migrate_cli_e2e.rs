@@ -57,6 +57,136 @@ fn franken_node_command() -> Command {
     Command::cargo_bin("franken-node").expect("franken-node binary")
 }
 
+#[cfg(unix)]
+mod native_smoke_admission_regressions {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    struct Fixture {
+        root: TempDir,
+        project: PathBuf,
+        marker: PathBuf,
+        path: String,
+    }
+
+    impl Fixture {
+        fn new(source: &str) -> Self {
+            let root = TempDir::new().expect("native smoke fixture");
+            let project = root.path().join("project");
+            let bin = root.path().join("bin");
+            let marker = root.path().join("reference-was-executed");
+            std::fs::create_dir_all(&project).expect("project directory");
+            std::fs::create_dir_all(&bin).expect("reference directory");
+            std::fs::write(project.join("index.js"), source).expect("entrypoint");
+            std::fs::write(project.join("package-lock.json"), "{}\n").expect("lockfile");
+            std::fs::write(
+                project.join("package.json"),
+                r#"{"name":"native-smoke","version":"1.0.0","main":"index.js","engines":{"node":">=20 <23"}}"#,
+            )
+            .expect("manifest");
+            // Planted negative: reference success must not replace a failed
+            // product. These stubs never pretend to be a native runtime.
+            for name in ["node", "bun"] {
+                let binary = bin.join(name);
+                std::fs::write(
+                    &binary,
+                    "#!/bin/sh\nprintf '%s\\n' \"$0\" >> \"$FN_TEST_REFERENCE_MARKER\"\nexit 0\n",
+                )
+                .expect("reference stub");
+                std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
+                    .expect("executable reference stub");
+            }
+            let path = format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            Self { root, project, marker, path }
+        }
+
+        fn environment(&self) -> [(&'static str, String); 3] {
+            [
+                ("PATH", self.path.clone()),
+                ("FN_TEST_REFERENCE_MARKER", self.marker.to_string_lossy().into_owned()),
+                ("FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK", "1".to_string()),
+            ]
+        }
+    }
+
+    fn assert_native_failure(report: &serde_json::Value) {
+        assert_eq!(report["status"], "fail", "{report}");
+        let checks = report["checks"].as_array().expect("validation checks");
+        for id in ["mig-validate-001", "mig-validate-002", "mig-validate-003", "mig-validate-004"] {
+            let check = checks.iter().find(|check| check["id"] == id).expect("static check");
+            assert_eq!(check["passed"], true, "must reach native execution: {check}");
+        }
+        let smoke = checks.iter().find(|check| check["id"] == "mig-validate-005")
+            .expect("runtime check");
+        assert_eq!(smoke["passed"], false);
+        assert!(smoke["message"].as_str().expect("smoke message").contains("native runtime"));
+    }
+
+    #[test]
+    fn native_failure_cannot_be_replaced_by_successful_references() {
+        let fixture = Fixture::new("const = ;\n");
+        let project = fixture.project.to_string_lossy().into_owned();
+        let output = run_cli_with_wall_timeout(
+            &["migrate", "validate", &project, "--json"],
+            Duration::from_secs(30),
+            &fixture.environment(),
+        );
+        assert!(!output.status.success());
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .expect("native validation JSON");
+        assert_native_failure(&report);
+        assert!(!fixture.marker.exists(), "reference code must never execute");
+    }
+
+    #[test]
+    fn native_report_keeps_rollout_blocked_after_native_failure() {
+        let fixture = Fixture::new("const = ;\n");
+        let project = fixture.project.to_string_lossy().into_owned();
+        let output = run_cli_with_wall_timeout(
+            &["migrate-report", &project, "--format", "json"],
+            Duration::from_secs(30),
+            &fixture.environment(),
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .expect("native migration report JSON");
+        assert_native_failure(&report["validation"]);
+        assert_eq!(report["executive_summary"]["go_no_go"], "no_go");
+        let rollout = report["rollout_plan"]["phases"].as_array().expect("rollout phases")
+            .iter().find(|phase| phase["name"] == "rollout").expect("rollout phase");
+        assert_eq!(rollout["status"], "blocked");
+        assert!(!fixture.marker.exists(), "report must not try reference fallbacks");
+    }
+
+    #[test]
+    #[cfg(feature = "engine")]
+    fn renamed_native_binary_validates_itself_not_a_reference() {
+        let fixture = Fixture::new("console.log('native-smoke-ok');\n");
+        let renamed = fixture.root.path().join("renamed runtime");
+        let original = franken_node_command();
+        std::fs::copy(Path::new(original.get_program()), &renamed).expect("copy native binary");
+        let output = Command::new(&renamed)
+            .current_dir(repo_root())
+            .args(["migrate", "validate"])
+            .arg(&fixture.project)
+            .arg("--json")
+            .envs(fixture.environment())
+            .output()
+            .expect("renamed native validation");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .expect("renamed validation JSON");
+        assert_eq!(report["status"], "pass");
+        let smoke = report["checks"].as_array().expect("checks")
+            .iter().find(|check| check["id"] == "mig-validate-005").expect("native smoke");
+        assert!(smoke["message"].as_str().expect("message").contains("runtime=franken-node"));
+        assert!(!fixture.marker.exists());
+    }
+}
+
 fn fail_test(message: String) -> ! {
     std::panic::panic_any(message)
 }
@@ -1935,14 +2065,15 @@ fn migrate_validate_passes_for_hardened_project() {
     assert!(stdout.contains("status: PASS"));
     assert!(stdout.contains("[mig-validate-005] PASS"));
     assert!(stdout.contains("runtime smoke test passed"));
+    assert!(stdout.contains("runtime=franken-node"));
     assert!(stdout.contains("receipt_round_trip=true"));
 }
 
 #[test]
-fn migrate_validate_timeout_path_does_not_block_on_inherited_pipes() {
+fn migrate_validate_native_failure_never_launches_hanging_reference() {
     #[cfg(not(unix))]
     {
-        eprintln!("skipping inherited-pipe timeout regression: unix shell unavailable");
+        eprintln!("skipping reference nonexecution regression: unix shell unavailable");
         return;
     }
 
@@ -1955,7 +2086,8 @@ fn migrate_validate_timeout_path_does_not_block_on_inherited_pipes() {
         let shim_dir = temp.path().join("bin");
         std::fs::create_dir_all(&shim_dir).expect("shim dir");
         let node_shim = shim_dir.join("node");
-        std::fs::write(&node_shim, "#!/bin/sh\n(sleep 60 >&1 2>&2) &\nsleep 60\n")
+        let marker = temp.path().join("hanging-reference-executed");
+        std::fs::write(&node_shim, "#!/bin/sh\nprintf called > \"$FN_TEST_REFERENCE_MARKER\"\n(sleep 60 >&1 2>&2) &\nsleep 60\n")
             .expect("write node shim");
         let mut permissions = std::fs::metadata(&node_shim)
             .expect("node shim metadata")
@@ -1970,7 +2102,7 @@ fn migrate_validate_timeout_path_does_not_block_on_inherited_pipes() {
         std::fs::create_dir_all(project_path.join("scripts")).expect("project scripts dir");
         std::fs::write(
             project_path.join("scripts/hang.js"),
-            "this is intentionally invalid JavaScript so franken-node falls back to node\n",
+            "const = ; // native parser must reject this without trying another runtime\n",
         )
         .expect("write hanging smoke script");
         std::fs::write(
@@ -1995,19 +2127,23 @@ fn migrate_validate_timeout_path_does_not_block_on_inherited_pipes() {
         let output = run_cli_with_wall_timeout(
             &["migrate", "validate", &project_arg],
             Duration::from_secs(20),
-            &[("PATH", shimmed_path)],
+            &[
+                ("PATH", shimmed_path),
+                ("FN_TEST_REFERENCE_MARKER", marker.to_string_lossy().into_owned()),
+            ],
         );
 
         assert!(
             started.elapsed() < Duration::from_secs(20),
-            "migrate validate should fail fast on smoke timeout"
+            "native refusal must not start a hanging reference"
         );
         assert!(
             !output.status.success(),
-            "validate should fail when runtime smoke times out"
+            "validate must preserve native failure"
         );
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("[mig-validate-005] FAIL"));
-        assert!(stdout.contains("runtime smoke command timed out after"));
+        assert!(stdout.contains("native runtime `franken-node` exited"));
+        assert!(!marker.exists(), "the hanging reference must not be launched");
     }
 }
