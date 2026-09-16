@@ -11,13 +11,14 @@
 //! `fs.read` of a recognized secret-bearing file
 //! ([`crate::security::lineage_tracker::classify_sensitive_source_path`] — the
 //! `.env` family, PEM/key/SSH/PKCS#12/credential files) has its bytes retained
-//! as a secret *sample* (bounded). Before any subsequent network egress
-//! (`NetworkSend` / `NetworkRequest`), the gate checks whether the outbound
-//! bytes CONTAIN a secret sample; if so — and absent a valid declassification
-//! (operator-authorized override, not yet wired) — the egress fails closed
-//! with [`HostIoError::Denied`] and never reaches the wrapped provider. The
-//! engine's host-I/O transcript records the denial, so the signed host-effect
-//! ledger surfaces it as a flow BLOCK exactly as a byte-verbatim exfil would.
+//! as a secret *sample* (bounded). Descriptor reads carry the classification
+//! captured at successful open; unknown descriptors are treated as sensitive.
+//! Before any subsequent network egress (`NetworkSend` / `NetworkRequest`),
+//! the gate checks whether the outbound bytes CONTAIN a secret sample; if so
+//! — and absent a valid declassification (operator-authorized override, not
+//! yet wired) — the egress fails closed with [`HostIoError::Denied`] and never
+//! reaches the wrapped provider. The engine's host-I/O transcript records the
+//! denial, so the signed host-effect ledger surfaces it as a flow BLOCK.
 //!
 //! Containment (not exact-hash) is required because an http egress payload is
 //! the *framed* request (headers + body) — the secret appears as a substring.
@@ -33,12 +34,14 @@
 //! `crates/franken-node/tests/native_engine_compat.rs`.
 
 #[cfg(feature = "engine")]
+use std::collections::BTreeMap;
+#[cfg(feature = "engine")]
 use std::sync::Mutex;
 
 #[cfg(feature = "engine")]
 use frankenengine_extension_host::host_io::{
-    HostIoCapability, HostIoError, HostIoExceptionProvenance, HostIoOutcome, HostIoProvider,
-    HostIoRequest, HostIoResponse,
+    FsMetaResult, FsOperation, HostIoCapability, HostIoError, HostIoExceptionProvenance,
+    HostIoOutcome, HostIoProvider, HostIoRequest, HostIoResponse,
 };
 
 #[cfg(feature = "engine")]
@@ -53,6 +56,10 @@ const MIN_SECRET_SAMPLE_LEN: usize = 8;
 const MAX_SECRET_SAMPLE_LEN: usize = 64 * 1024;
 #[cfg(feature = "engine")]
 const MAX_SECRET_SAMPLES: usize = 16;
+/// Untracked descriptors remain readable, but their bytes are sensitive. Never
+/// evict an active descriptor and accidentally classify an unknown one public.
+#[cfg(feature = "engine")]
+const MAX_TRACKED_DESCRIPTORS: usize = 1_024;
 
 #[cfg(feature = "engine")]
 #[derive(Default)]
@@ -72,6 +79,16 @@ fn slice_contains(haystack: &[u8], needle: &[u8]) -> bool {
             .any(|window| window == needle)
 }
 
+/// Match the host provider's first `fd=` argument semantics, including refusing
+/// an invalid first value rather than silently selecting a later duplicate.
+#[cfg(feature = "engine")]
+fn descriptor_argument(arguments: &[String]) -> Option<u64> {
+    arguments
+        .iter()
+        .find_map(|argument| argument.strip_prefix("fd="))
+        .and_then(|value| value.parse().ok())
+}
+
 /// A [`HostIoProvider`] decorator that fails a network egress closed when its
 /// bytes carry a secret this run read. Wrap it OUTSIDE the SSRF gate so a
 /// secret-carrying egress is refused before endpoint evaluation.
@@ -80,6 +97,10 @@ pub struct FlowGatedHostIo<P: HostIoProvider> {
     inner: P,
     /// Secret-source byte samples observed during this run (bounded).
     secrets: Mutex<SecretSamples>,
+    /// Open guest descriptor -> whether its source is sensitive. Hold this
+    /// lock across descriptor effects AND updates so concurrent close/reopen
+    /// cannot change a read's provenance between the effect and observation.
+    descriptors: Mutex<BTreeMap<u64, bool>>,
     trace_id: String,
 }
 
@@ -102,6 +123,7 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
         Self {
             inner,
             secrets: Mutex::new(SecretSamples::default()),
+            descriptors: Mutex::new(BTreeMap::new()),
             trace_id: trace_id.into(),
         }
     }
@@ -133,11 +155,61 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
         }
     }
 
+    fn perform_descriptor_operation(
+        &self,
+        request: &HostIoRequest,
+        granted: &[HostIoCapability],
+        operation: FsOperation,
+        path: &str,
+        arguments: &[String],
+    ) -> HostIoOutcome {
+        let mut descriptors = self.descriptors.lock().map_err(|_| HostIoError::Denied {
+            reason: format!("flow_policy: descriptor tracking lock poisoned ({})", self.trace_id),
+        })?;
+        let outcome = self.inner.perform(request, granted);
+        let Ok(response) = &outcome else {
+            // A denied open/close must not create or erase provenance.
+            return outcome;
+        };
+        match (operation, response) {
+            (FsOperation::Open, HostIoResponse::FsMeta { result: FsMetaResult::Unsigned(fd) }) => {
+                if descriptors.len() < MAX_TRACKED_DESCRIPTORS || descriptors.contains_key(fd) {
+                    descriptors.insert(*fd, classify_sensitive_source_path(path).is_some());
+                }
+            }
+            (FsOperation::ReadFd, HostIoResponse::FsMeta { result: FsMetaResult::Bytes(bytes) }) => {
+                let known_public = descriptor_argument(arguments)
+                    .and_then(|fd| descriptors.get(&fd))
+                    .is_some_and(|sensitive| !sensitive);
+                if !known_public {
+                    self.record_secret(bytes);
+                }
+            }
+            (FsOperation::CloseFd, HostIoResponse::FsMeta { result: FsMetaResult::Unit }) => {
+                if let Some(fd) = descriptor_argument(arguments) {
+                    descriptors.remove(&fd);
+                }
+                // Previously returned bytes remain sensitive after close.
+            }
+            _ => {
+                return Err(HostIoError::Denied {
+                    reason: format!("flow_policy: invalid descriptor effect response ({})", self.trace_id),
+                });
+            }
+        }
+        outcome
+    }
+
     /// `Ok(())` authorizes the egress; `Err(Denied)` fails it closed when the
     /// outbound bytes contain a retained secret sample. A poisoned lock denies
     /// fail-closed. Check tracking completeness even for empty payloads:
     /// connecting is still a host effect.
     fn gate_outbound(&self, outbound: &[u8]) -> Result<(), HostIoError> {
+        if self.descriptors.is_poisoned() {
+            return Err(HostIoError::Denied {
+                reason: format!("flow_policy: descriptor tracking lock poisoned ({})", self.trace_id),
+            });
+        }
         let carries_secret = match self.secrets.lock() {
             Ok(secrets) if secrets.incomplete => {
                 return Err(HostIoError::Denied {
@@ -204,13 +276,15 @@ impl<P: HostIoProvider> HostIoProvider for FlowGatedHostIo<P> {
                 }
                 outcome
             }
-            // Inbound receive and local filesystem mutations are not external
-            // network sinks: delegate unchanged (the ledger still labels
-            // secret-carrying write-class input for evidence). `FsMeta`
-            // arguments are operation metadata, not bytes read from a file;
-            // even read-class metadata results therefore must not become
-            // secret samples. Its `data` field is used only by write-class
-            // operations such as append and remains a local sink here.
+            HostIoRequest::FsMeta {
+                operation: operation @ (FsOperation::Open | FsOperation::ReadFd | FsOperation::CloseFd),
+                path,
+                arguments,
+                ..
+            } => self.perform_descriptor_operation(request, granted, *operation, path, arguments),
+            // Inbound receive and local mutations are not payload egress. Other
+            // FsMeta operations expose metadata, not file contents: an exists,
+            // stat or readlink result must not become a secret byte sample.
             HostIoRequest::NetworkRecv { .. }
             | HostIoRequest::FsWrite { .. }
             | HostIoRequest::FsMeta { .. }
@@ -318,5 +392,27 @@ mod tests {
         assert!(!debug.contains("secret-must-not-reach-debug"));
         assert!(!debug.contains(&format!("{secret:?}")));
         assert!(!debug.contains("DenyAllHostIo"));
+    }
+
+    #[test]
+    fn descriptor_argument_matches_host_first_value_semantics() {
+        assert_eq!(descriptor_argument(&[]), None);
+        assert_eq!(descriptor_argument(&["path=7".into(), "fd=12".into()]), Some(12));
+        assert_eq!(descriptor_argument(&["fd=12".into(), "fd=7".into()]), Some(12));
+        assert_eq!(descriptor_argument(&["fd=invalid".into(), "fd=7".into()]), None);
+        assert_eq!(descriptor_argument(&["fd=-1".into()]), None);
+        assert_eq!(descriptor_argument(&["fd=18446744073709551616".into()]), None);
+    }
+
+    #[test]
+    fn poisoned_descriptor_tracking_closes_network_egress() {
+        let gate = gate();
+        let result = std::panic::catch_unwind(|| {
+            let _guard = gate.descriptors.lock().expect("descriptor state");
+            panic!("poison descriptor tracking for regression coverage");
+        });
+        assert!(result.is_err());
+        assert_denied(&gate, b"public");
+        assert_denied(&gate, b"");
     }
 }
