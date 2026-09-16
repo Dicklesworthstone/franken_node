@@ -36,6 +36,9 @@ pub mod validation_suite;
 #[cfg(target_os = "linux")]
 mod rewrite_transaction;
 
+#[cfg(target_os = "linux")]
+pub mod verified_rewrite;
+
 /// Maximum allowed file size for migration operations to prevent DoS via parser bombs.
 /// External package.json, source files, etc. could be maliciously crafted as large files.
 /// 10MB should be more than sufficient for any reasonable package manifest or source file.

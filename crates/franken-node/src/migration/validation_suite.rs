@@ -29,6 +29,9 @@ pub use workspace_effects::DeltaSummary;
 #[path = "paired_validation_tests.rs"]
 mod paired_tests;
 
+#[path = "rewrite_candidate.rs"]
+pub mod rewrite_candidate;
+
 const MAX_ENTRIES: usize = 50_000;
 const MAX_PROJECT_BYTES: usize = 256 * 1024 * 1024;
 const MAX_TESTS: usize = 1024;
