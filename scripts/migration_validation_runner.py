@@ -64,10 +64,15 @@ MAX_PROJECT_BYTES = 256 * 1024 * 1024
 MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 
 
+def raise_walk_error(error: OSError) -> None:
+    """An unreadable subtree must never silently shrink the measured input."""
+    raise error
+
+
 def discover_tests(project_dir: Path) -> list[Path]:
     """Discover only project tests, excluding dependency and VCS directories."""
     tests = set()
-    for directory, names, files in os.walk(project_dir, followlinks=False):
+    for directory, names, files in os.walk(project_dir, followlinks=False, onerror=raise_walk_error):
         names[:] = sorted(n for n in names if n not in {"node_modules", ".git"})
         for name in sorted(files):
             path = Path(directory) / name
@@ -127,9 +132,9 @@ def capture_project(project: Path, deadline: float) -> tuple[list[SnapshotEntry]
     entries = []
     total = 0
     digest = hashlib.sha256(b"franken-migration-input-v1\0")
-    for directory, names, files in os.walk(project, followlinks=False):
+    for directory, names, files in os.walk(project, followlinks=False, onerror=raise_walk_error):
         names[:] = sorted(n for n in names if n != ".git")
-        for name in sorted(names + files):
+        for name in sorted(names + [name for name in files if name != ".git"]):
             if time.monotonic() >= deadline:
                 raise TimeoutError("total validation budget exhausted during project capture")
             path = Path(directory) / name
@@ -140,7 +145,16 @@ def capture_project(project: Path, deadline: float) -> tuple[list[SnapshotEntry]
                 target = path.resolve(strict=True)
                 if not target.is_relative_to(project):
                     raise ValueError(f"external workspace symlink refused: {relative}")
-                link = os.path.relpath(target, path.parent)
+                link = os.readlink(path)
+                lexical_target = Path(os.path.abspath(path.parent / link))
+                if (not lexical_target.is_relative_to(project)
+                        or ".git" in lexical_target.relative_to(project).parts
+                        or ".git" in target.relative_to(project).parts):
+                    raise ValueError(f"external or excluded workspace symlink refused: {relative}")
+                # Preserve intermediate links: flattening a->b->c would change
+                # program behavior when a test retargets b.
+                if os.path.isabs(link):
+                    link = os.path.relpath(lexical_target, path.parent)
                 entry = SnapshotEntry(relative, None, mode, link)
             elif stat.S_ISDIR(metadata.st_mode):
                 entry = SnapshotEntry(relative, None, mode)
@@ -196,11 +210,39 @@ def stage_project(entries: list[SnapshotEntry], destination: Path, deadline: flo
             (destination / entry.path).chmod(entry.mode)
 
 
+def workspace_delta(before: list[SnapshotEntry], after: list[SnapshotEntry]) -> dict:
+    """Compare effects on workspace state, not original-vs-rewritten source.
+
+    Captures persistent file/link/mode changes only, not transient writes,
+    external paths or network effects. Raw file bytes never enter the report.
+    """
+    def fingerprint(entry: SnapshotEntry) -> dict:
+        return {"kind": "link" if entry.link is not None else "directory" if entry.data is None else "file",
+                "mode": entry.mode,
+                "sha256": hashlib.sha256(entry.link.encode() if entry.link is not None
+                                         else entry.data or b"").hexdigest()}
+
+    previous = {entry.path: fingerprint(entry) for entry in before}
+    current = {entry.path: fingerprint(entry) for entry in after}
+    return {path: {"change": "created" if path not in previous else "removed" if path not in current else "modified",
+                   "after": current.get(path)}
+            for path in sorted(previous.keys() | current.keys()) if previous.get(path) != current.get(path)}
+
+
+def summarize_delta(delta: dict) -> dict:
+    payload = json.dumps(delta, sort_keys=True, separators=(",", ":")).encode()
+    return {"sha256": hashlib.sha256(b"franken-migration-workspace-delta-v1\0" + payload).hexdigest(),
+            "changed_paths": len(delta), "changes": dict(list(delta.items())[:20]),
+            "details_truncated": len(delta) > 20}
+
+
 def resolve_command(command: tuple[str, ...] | list[str]) -> list[str]:
-    if (not isinstance(command, (list, tuple)) or not command
+    if (not isinstance(command, (list, tuple)) or not command or len(command) > 256
             or any(not isinstance(arg, str) or not arg or "\0" in arg for arg in command)
             or command.count("{test}") != 1 or command[0] == "{test}"):
         raise ValueError("runtime command must be a nonempty argv array with one standalone {test}")
+    if sum(len(arg.encode()) for arg in command) > 65536:
+        raise ValueError("runtime argv exceeds the 65536-byte bound")
     executable = shutil.which(command[0])
     if executable is None:
         raise ValueError(f"runtime executable not found: {command[0]}")
@@ -269,17 +311,20 @@ def validate_project(project_dir: Path, *, migrated_project: Path | None = None,
                      baseline_command=DEFAULT_BASELINE_COMMAND,
                      migration_command=DEFAULT_MIGRATION_COMMAND,
                      timeout_seconds: float = 30.0, total_timeout_seconds: float = 300.0,
-                     max_output_bytes: int = 1_048_576, band: str = "core") -> dict:
+                     max_output_bytes: int = 1_048_576, band: str = "core",
+                     compare_filesystem: bool = False) -> dict:
     """Execute a nonempty test set; FAIL/ERROR/NO_TESTS can never yield PASS."""
     report = {"schema_version": "migration-validation-v1", "project": str(project_dir),
               "migrated_project": str(migrated_project or project_dir),
               "validation_timestamp": datetime.now(timezone.utc).isoformat(),
-              "phase": "execution", "validation_scope": "test-process-stdout-stderr-exit",
+              "phase": "execution",
+              "validation_scope": "test-process-and-workspace-delta" if compare_filesystem else "test-process-stdout-stderr-exit",
               "comparison_mode": "exact-bytes", "release_certification": False,
+              "filesystem_comparison": compare_filesystem, "filesystem_exclusions": [".git"],
               "test_discovery": {"test_files_found": 0, "test_files": []},
               "validation_results": [], "errors": [],
               "summary": {"total_tests": 0, "passed": 0, "failed": 0, "skipped": 0,
-                          "verdict": "ERROR"}}
+                          "errored": 0, "verdict": "ERROR"}}
     summary = report["summary"]
     try:
         if os.name != "posix":
@@ -307,10 +352,19 @@ def validate_project(project_dir: Path, *, migrated_project: Path | None = None,
             root = Path(temporary)
             discovery = root / "discovery"
             stage_project(baseline_entries, discovery, deadline)
-            tests = [path.relative_to(discovery).as_posix() for path in discover_tests(discovery)]
-            report["test_discovery"] = {"test_files_found": len(tests), "test_files": tests}
+            baseline_tests = {path.relative_to(discovery).as_posix() for path in discover_tests(discovery)}
+            migration_discovery = root / "migration-discovery"
+            stage_project(migration_entries, migration_discovery, deadline)
+            migration_tests = {path.relative_to(migration_discovery).as_posix()
+                               for path in discover_tests(migration_discovery)}
+            tests = sorted(baseline_tests | migration_tests)
+            report["test_discovery"] = {"test_files_found": len(tests), "test_files": tests,
+                                        "missing_baseline": sorted(migration_tests - baseline_tests),
+                                        "missing_migration": sorted(baseline_tests - migration_tests)}
             summary.update(total_tests=len(tests), skipped=len(tests))
             report["inputs"] = {"baseline_sha256": baseline_digest, "migration_sha256": migration_digest}
+            if baseline_tests != migration_tests:
+                raise ValueError("project test inventories differ; missing test counterparts are reported in test_discovery")
             if not tests:
                 summary["verdict"] = "NO_TESTS"
                 return report
@@ -323,24 +377,36 @@ def validate_project(project_dir: Path, *, migrated_project: Path | None = None,
             # Freeze a single inherited environment for both legs; do not invent
             # permissive policy, signing keys, or degraded-runtime overrides.
             for index, test in enumerate(tests):
-                row = {"test": test, "band": band, "status": "FAIL", "divergences": []}
+                row = {"test": test, "band": band, "status": "ERROR", "divergences": []}
+                report["validation_results"].append(row)
+                summary["skipped"] -= 1
+                summary["errored"] += 1
                 captures = {}
-                for leg, entries, template in (("baseline", baseline_entries, baseline),
-                                               ("migration", migration_entries, migration)):
-                    workspace = root / f"case-{index}-{leg}"
-                    stage_project(entries, workspace, deadline)
-                    if not (workspace / test).is_file():
-                        raise ValueError(f"{leg} project is missing test {test}")
-                    command = [f"./{test}" if arg == "{test}" else arg for arg in template]
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise TimeoutError("total validation budget exhausted")
-                    captures[leg] = run_command(command, workspace,
-                                                timeout=min(timeout_seconds, remaining),
-                                                max_output_bytes=max_output_bytes,
-                                                environment=environment)
-                    # Output is compared in memory, not serialized into reports.
-                    row[leg] = {k: v for k, v in captures[leg].items() if k not in {"stdout", "stderr"}}
+                deltas = {}
+                # Release each pair before the next test: disk use must not
+                # grow as number_of_tests * project_size.
+                with tempfile.TemporaryDirectory(prefix=f"case-{index}-", dir=root) as case_dir:
+                    for leg, entries, template in (("baseline", baseline_entries, baseline),
+                                                   ("migration", migration_entries, migration)):
+                        workspace = Path(case_dir) / leg
+                        stage_project(entries, workspace, deadline)
+                        if not (workspace / test).is_file():
+                            raise ValueError(f"{leg} project is missing test {test}")
+                        command = [f"./{test}" if arg == "{test}" else arg for arg in template]
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TimeoutError("total validation budget exhausted")
+                        captures[leg] = run_command(command, workspace,
+                                                    timeout=min(timeout_seconds, remaining),
+                                                    max_output_bytes=max_output_bytes,
+                                                    environment=environment)
+                        # Keep completed-leg evidence even if the other leg
+                        # encounters an infrastructure failure or total timeout.
+                        row[leg] = {k: v for k, v in captures[leg].items() if k not in {"stdout", "stderr"}}
+                        if compare_filesystem:
+                            final_entries, _ = capture_project(workspace, deadline)
+                            deltas[leg] = workspace_delta(entries, final_entries)
+                            row[leg]["workspace_delta"] = summarize_delta(deltas[leg])
                 for leg, capture in captures.items():
                     if capture["termination"] != "exited" or capture["exit_code"] != 0:
                         row["divergences"].append({"channel": leg, "reason": capture["termination"],
@@ -348,16 +414,38 @@ def validate_project(project_dir: Path, *, migrated_project: Path | None = None,
                 for channel in ("stdout", "stderr"):
                     if captures["baseline"][channel] != captures["migration"][channel]:
                         row["divergences"].append({"channel": channel, "reason": "byte_mismatch"})
+                if compare_filesystem and deltas["baseline"] != deltas["migration"]:
+                    row["divergences"].append({"channel": "filesystem", "reason": "workspace_delta_mismatch"})
                 row["severity"] = classify_divergence_severity(row["divergences"], band)
                 row["status"] = "FAIL" if row["divergences"] else "PASS"
-                report["validation_results"].append(row)
                 summary["passed" if row["status"] == "PASS" else "failed"] += 1
-                summary["skipped"] -= 1
+                summary["errored"] -= 1
             summary["verdict"] = "FAIL" if summary["failed"] else "PASS"
     except (OSError, ValueError, RuntimeError, TimeoutError, subprocess.SubprocessError) as error:
         report["errors"].append({"type": type(error).__name__, "message": str(error)})
         summary["verdict"] = "ERROR"
     return report
+
+
+def write_report(report: dict, destination: Path) -> None:
+    """Atomically publish a private report; never leave half-written JSON."""
+    payload = (json.dumps(report, indent=2, allow_nan=False) + "\n").encode("utf-8")
+    # The operator explicitly chooses the destination. A failed write leaves
+    # any previous report untouched; the temporary file contains no raw output.
+    with tempfile.NamedTemporaryFile(prefix=f".{destination.name}.", dir=destination.parent,
+                                     delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+    try:
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def check_primary_implementation_cited() -> dict:
@@ -397,6 +485,23 @@ def self_test() -> dict:
         {"id": "VALIDATE-COMPARE-DIFF", "status": "PASS" if compare_outputs("hello\nworld", "hello\nearth")["divergence_count"] == 1 else "FAIL"},
         {"id": "VALIDATE-SEVERITY", "status": "PASS" if classify_divergence_severity([{}], "core") == "critical" else "FAIL"},
     ])
+    # A green self-test must exercise the executor, not just inspect strings.
+    # Python is an explicitly named command here, not a fake Node/Franken binary.
+    with tempfile.TemporaryDirectory(prefix="migration-self-test-") as temporary:
+        project = Path(temporary)
+        before, after = project / "before", project / "after"
+        before.mkdir()
+        after.mkdir()
+        (before / "probe.test.js").write_text("print('reference')\n", encoding="utf-8")
+        (after / "probe.test.js").write_text("print('candidate')\n", encoding="utf-8")
+        execution = validate_project(before, migrated_project=after,
+                                     baseline_command=[sys.executable, "{test}"],
+                                     migration_command=[sys.executable, "{test}"])
+        detected = (execution["summary"]["verdict"] == "FAIL"
+                    and execution["summary"]["failed"] == 1
+                    and execution["validation_results"][0]["baseline"]["exit_code"] == 0
+                    and execution["validation_results"][0]["migration"]["exit_code"] == 0)
+        checks.append({"id": "VALIDATE-LIVE-DIVERGENCE", "status": "PASS" if detected else "FAIL"})
     failing = sum(check["status"] == "FAIL" for check in checks)
     return {"gate": "migration_validation_verification", "section": "10.3",
             "verdict": "FAIL" if failing else "PASS", "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -417,6 +522,9 @@ def main() -> int:
     parser.add_argument("--total-timeout-seconds", type=float, default=300.0)
     parser.add_argument("--max-output-bytes", type=int, default=1_048_576)
     parser.add_argument("--band", choices=("core", "high-value", "edge"), default="core")
+    parser.add_argument("--out", type=Path, help="atomically write the JSON validation report")
+    parser.add_argument("--compare-filesystem", action="store_true",
+                        help="also compare persistent workspace file/link/mode changes; .git excluded")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
@@ -429,8 +537,15 @@ def main() -> int:
         result = validate_project(args.project_dir, migrated_project=args.migrated_project,
                                   baseline_command=args.baseline_command, migration_command=args.migration_command,
                                   timeout_seconds=args.timeout_seconds, total_timeout_seconds=args.total_timeout_seconds,
-                                  max_output_bytes=args.max_output_bytes, band=args.band)
+                                  max_output_bytes=args.max_output_bytes, band=args.band,
+                                  compare_filesystem=args.compare_filesystem)
         verdict = result["summary"]["verdict"]
+    if args.out is not None:
+        try:
+            write_report(result, args.out)
+        except OSError as error:
+            print(f"cannot write validation report: {error}", file=sys.stderr)
+            return 2
     if args.json:
         print(json.dumps(result, indent=2, allow_nan=False))
     else:
