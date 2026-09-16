@@ -41,6 +41,7 @@ jobs:
           set -euo pipefail
           rustup toolchain install stable --profile minimal --component clippy --component rustfmt
           harness="$RUNNER_TEMP/rewrite-transaction-check"
+          source_root="$GITHUB_WORKSPACE/crates/franken-node/src"
           mkdir -p evidence "$harness"
           git rev-parse HEAD > evidence/revision.txt
           git ls-tree HEAD crates/franken-node/src/migration/rewrite_transaction.rs crates/franken-node/src/migration/rewrite_rollback.rs > evidence/source-blobs.txt
@@ -52,7 +53,7 @@ jobs:
           edition = "2024"
           [workspace]
           [lib]
-          path = "$GITHUB_WORKSPACE/crates/franken-node/src/migration/rewrite_transaction.rs"
+          path = "$source_root/migration/rewrite_transaction.rs"
           [[test]]
           name = "nested_transaction"
           path = "nested.rs"
@@ -69,11 +70,11 @@ jobs:
           cat > "$harness/nested.rs" <<EOF
           #![forbid(unsafe_code)]
           pub mod migration {
-              #[path = "$GITHUB_WORKSPACE/crates/franken_node/src/migration/rewrite_transaction.rs"]
+              #[path = "$source_root/migration/rewrite_transaction.rs"]
               pub mod rewrite_transaction;
           }
           EOF
-          rustfmt +stable --edition 2024 --emit stdout crates/franken-node/src/migration/rewrite_transaction.rs > evidence/rewrite_transaction.formatted.rs
+          rustfmt +stable --edition 2024 --emit stdout "$source_root/migration/rewrite_transaction.rs" > evidence/rewrite_transaction.formatted.rs
           cargo +stable test --manifest-path "$harness/Cargo.toml" -- --nocapture 2>&1 | tee evidence/transaction-tests.log
           cargo +stable clippy --manifest-path "$harness/Cargo.toml" --all-targets -- -D warnings 2>&1 | tee evidence/transaction-clippy.log
           cp "$harness/Cargo.lock" evidence/Cargo.lock
