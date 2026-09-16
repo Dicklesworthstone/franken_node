@@ -8,7 +8,9 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs::File;
-use std::io::{self, Read, Write as _};
+use std::io::{self, Read};
+#[cfg(any(test, not(target_os = "linux")))]
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 #[cfg(not(target_os = "linux"))]
@@ -30,6 +32,9 @@ mod smoke_supervisor;
 
 #[cfg(target_os = "linux")]
 pub mod validation_suite;
+
+#[cfg(target_os = "linux")]
+mod rewrite_transaction;
 
 /// Maximum allowed file size for migration operations to prevent DoS via parser bombs.
 /// External package.json, source files, etc. could be maliciously crafted as large files.
@@ -705,8 +710,35 @@ pub fn render_audit_report(
     }
 }
 
+// Rollback preimages are executable recovery data, not a diagnostic preview.
+// Never evict earlier edits to make room for later ones: that would install an
+// incomplete migration while reporting the entire plan as applied.
+fn record_rewrite_rollback_entry(
+    entries: &mut Vec<MigrationRollbackEntry>,
+    entry: MigrationRollbackEntry,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(entries.len() < MAX_TOTAL_FINDINGS, "rewrite plan exceeds entry limit");
+    let total = entries.iter().chain(std::iter::once(&entry)).try_fold(0_usize, |total, item| {
+        total.checked_add(item.original_content.len())
+            .and_then(|value| value.checked_add(item.rewritten_content.len()))
+    }).ok_or_else(|| anyhow::anyhow!("rewrite plan byte count overflow"))?;
+    anyhow::ensure!(total <= 256 * 1024 * 1024, "rewrite plan exceeds total byte budget");
+    entries.push(entry);
+    Ok(())
+}
+
 pub fn run_rewrite(project_path: &Path, apply: bool) -> anyhow::Result<MigrationRewriteReport> {
     ensure_migration_project_path(project_path, "rewrite")?;
+
+    // Hold the cooperative lock through recovery AND planning. A previous
+    // interrupted installation must be restored before computing fresh edits.
+    // Dry-run must not acquire a lock, create backups, or recover live sources.
+    #[cfg(target_os = "linux")]
+    let transaction = if apply {
+        Some(rewrite_transaction::RewriteTransaction::open(project_path)?)
+    } else {
+        None
+    };
 
     let files: Vec<PathBuf> = collect_project_files(project_path)?;
     let mut package_manifests_scanned = 0_usize;
@@ -804,8 +836,11 @@ pub fn run_rewrite(project_path: &Path, apply: bool) -> anyhow::Result<Migration
                     })?;
 
                 if apply {
-                    write_migration_backup(project_path, &path, &raw)?;
-                    write_migration_file_atomically(project_path, &path, &rewritten)?;
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        write_migration_backup(project_path, &path, &raw)?;
+                        write_migration_file_atomically(project_path, &path, &rewritten)?;
+                    }
                     rewrites_applied = rewrites_applied.saturating_add(1);
                 }
 
@@ -845,15 +880,14 @@ pub fn run_rewrite(project_path: &Path, apply: bool) -> anyhow::Result<Migration
                         );
                     }
                 }
-                push_bounded(
+                record_rewrite_rollback_entry(
                     &mut rollback_entries,
                     MigrationRollbackEntry {
                         path: relative_path,
                         original_content: raw,
                         rewritten_content: rewritten,
                     },
-                    MAX_TOTAL_FINDINGS,
-                );
+                )?;
             }
             continue;
         }
@@ -931,8 +965,11 @@ pub fn run_rewrite(project_path: &Path, apply: bool) -> anyhow::Result<Migration
         if rewrite_count > 0 {
             rewrites_planned = rewrites_planned.saturating_add(1);
             if apply {
-                write_migration_backup(project_path, &path, &raw)?;
-                write_migration_file_atomically(project_path, &path, &rewritten_content)?;
+                #[cfg(not(target_os = "linux"))]
+                {
+                    write_migration_backup(project_path, &path, &raw)?;
+                    write_migration_file_atomically(project_path, &path, &rewritten_content)?;
+                }
                 rewrites_applied = rewrites_applied.saturating_add(1);
             }
 
@@ -947,15 +984,14 @@ pub fn run_rewrite(project_path: &Path, apply: bool) -> anyhow::Result<Migration
                 },
                 MAX_TOTAL_FINDINGS,
             );
-            push_bounded(
+            record_rewrite_rollback_entry(
                 &mut rollback_entries,
                 MigrationRollbackEntry {
                     path: relative_path,
                     original_content: raw,
                     rewritten_content,
                 },
-                MAX_TOTAL_FINDINGS,
-            );
+            )?;
         }
     }
 
@@ -982,6 +1018,16 @@ pub fn run_rewrite(project_path: &Path, apply: bool) -> anyhow::Result<Migration
     });
     for (index, entry) in entries.iter_mut().enumerate() {
         entry.id = format!("mig-rewrite-{:03}", index.saturating_add(1));
+    }
+
+    #[cfg(target_os = "linux")]
+    if let Some(transaction) = transaction {
+        let plan = rollback_entries.iter().map(|entry| rewrite_transaction::Edit {
+            path: &entry.path,
+            before: entry.original_content.as_bytes(),
+            after: entry.rewritten_content.as_bytes(),
+        }).collect::<Vec<_>>();
+        transaction.apply(&plan)?;
     }
 
     Ok(MigrationRewriteReport {
@@ -2499,6 +2545,7 @@ fn package_manifest_declares_module_type(project_root: &Path, directory: &Path) 
 /// SECURITY: Creates backup directory structure safely, preventing TOCTOU race conditions
 /// where symlinks could be placed between validation and directory creation.
 /// Creates each directory component incrementally with symlink validation at each step.
+#[cfg(any(test, not(target_os = "linux")))]
 fn create_backup_directory_safe(project_path: &Path, backup_path: &Path) -> anyhow::Result<()> {
     let backup_root = project_path.join(MIGRATION_BACKUP_DIR);
 
@@ -2577,6 +2624,7 @@ fn create_backup_directory_safe(project_path: &Path, backup_path: &Path) -> anyh
 /// SECURITY: Validates that no component in the backup path is a symlink to prevent
 /// directory traversal attacks. Checks the backup root directory and all parent
 /// directories up to the project root.
+#[cfg(any(test, not(target_os = "linux")))]
 fn validate_backup_path_no_symlinks(project_path: &Path, backup_path: &Path) -> anyhow::Result<()> {
     let backup_root = project_path.join(MIGRATION_BACKUP_DIR);
 
@@ -2623,6 +2671,7 @@ fn validate_backup_path_no_symlinks(project_path: &Path, backup_path: &Path) -> 
     Ok(())
 }
 
+#[cfg(any(test, not(target_os = "linux")))]
 fn write_migration_backup(
     project_path: &Path,
     source_path: &Path,
@@ -2684,6 +2733,7 @@ fn write_migration_backup(
     Ok(backup_path)
 }
 
+#[cfg(any(test, not(target_os = "linux")))]
 fn write_migration_file_atomically(
     project_path: &Path,
     source_path: &Path,
