@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   process-supervision:
@@ -19,26 +19,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Finish the platform import boundary
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p evidence
-          cat > evidence/import.patch <<'PATCH'
-          diff --git a/crates/franken-node/src/ops/compat_corpus_run.rs b/crates/franken-node/src/ops/compat_corpus_run.rs
-          --- a/crates/franken-node/src/ops/compat_corpus_run.rs
-          +++ b/crates/franken-node/src/ops/compat_corpus_run.rs
-          @@ -40,5 +40,7 @@
-           use std::path::{Component, Path, PathBuf};
-          -use std::process::{Command, Stdio};
-          +use std::process::Command;
-          +#[cfg(all(feature = "engine", not(target_os = "linux")))]
-          +use std::process::Stdio;
-           use std::time::{Duration, Instant};
-          PATCH
-          git apply --recount --check evidence/import.patch
-          git apply --recount evidence/import.patch
-          git diff --check
+        with:
+          persist-credentials: false
       - name: Test the actual process owner and corpus capture
         shell: bash
         run: |
@@ -80,22 +62,10 @@ jobs:
           rustfmt +stable --edition 2024 --config skip_children=true --emit stdout "$source/migration/mod.rs" > /dev/null
           git rev-parse HEAD > evidence/revision.txt
           rustc +stable --version > evidence/rust-version.txt
-          git hash-object "$source/migration/smoke_supervisor.rs" "$source/ops/corpus_process.rs" "$source/ops/compat_corpus_run.rs" "$source/migration/mod.rs" > evidence/source-blobs.txt
+          git ls-tree HEAD crates/franken-node/src/migration/smoke_supervisor.rs crates/franken-node/src/ops/corpus_process.rs crates/franken-node/src/ops/compat_corpus_run.rs crates/franken-node/src/migration/mod.rs > evidence/source-blobs.txt
           cargo +stable test --manifest-path "$harness/Cargo.toml" --test process_supervision -- --nocapture --test-threads=2 2>&1 | tee evidence/process-tests.log
           cargo +stable clippy --manifest-path "$harness/Cargo.toml" --test process_supervision -- -D warnings 2>&1 | tee evidence/process-clippy.log
           cp "$harness/Cargo.lock" evidence/process-Cargo.lock
-      - name: Commit the reviewed import fix directly to main
-        shell: bash
-        run: |
-          set -euo pipefail
-          git diff --check
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add crates/franken-node/src/ops/compat_corpus_run.rs
-          test "$(git diff --cached --name-only)" = 'crates/franken-node/src/ops/compat_corpus_run.rs'
-          git commit -m 'fix(compat): keep thread-fallback Stdio import off Linux production builds'
-          git push origin HEAD:main
-          git rev-parse HEAD > evidence/published-revision.txt
       - name: Preserve exact source and executed evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -109,3 +79,29 @@ jobs:
             crates/franken-node/src/migration/smoke_supervisor.rs
             crates/franken-node/src/ops/compat_corpus_run.rs
             crates/franken-node/src/ops/corpus_process.rs
+
+  migration-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Preserve the shared owner's existing migration behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal --component clippy
+          mkdir -p evidence
+          git rev-parse HEAD > evidence/revision.txt
+          node --version > evidence/node-version.txt
+          cargo +stable test --manifest-path tools/migration-validator/Cargo.toml -- --nocapture --test-threads=2 2>&1 | tee evidence/migration-regression-tests.log
+          cargo +stable clippy --manifest-path tools/migration-validator/Cargo.toml --all-targets -- -D warnings 2>&1 | tee evidence/migration-clippy.log
+      - name: Preserve migration regression evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: corpus-shared-owner-migration-evidence
+          retention-days: 7
+          if-no-files-found: error
+          path: evidence/
