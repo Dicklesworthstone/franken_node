@@ -20,44 +20,146 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: Register the reviewed modules when not already present
+      - name: Apply the reviewed primary CLI integration when absent
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p evidence
-          cat > evidence/module-registration.patch <<'PATCH'
-          diff --git a/crates/franken-node/src/migration/mod.rs b/crates/franken-node/src/migration/mod.rs
-          --- a/crates/franken-node/src/migration/mod.rs
-          +++ b/crates/franken-node/src/migration/mod.rs
-          @@ -37,6 +37,9 @@
-           #[cfg(target_os = "linux")]
-           mod rewrite_transaction;
+          cat > evidence/primary-cli.patch <<'PATCH'
+          diff --git a/crates/franken-node/src/cli.rs b/crates/franken-node/src/cli.rs
+          --- a/crates/franken-node/src/cli.rs
+          +++ b/crates/franken-node/src/cli.rs
+          @@ -787,6 +787,11 @@
+               #[arg(long)]
+               pub apply: bool,
            
-          +#[cfg(target_os = "linux")]
-          +pub mod verified_rewrite;
+          +    /// Test the captured candidate on Node and native Franken before applying.
+          +    /// Requires complete process/filesystem agreement; JSON uses checked-rewrite/v1.
+          +    #[arg(long, requires = "apply", conflicts_with = "emit_rollback")]
+          +    pub verify: bool,
           +
-           /// Maximum allowed file size for migration operations to prevent DoS via parser bombs.
-           /// External package.json, source files, etc. could be maliciously crafted as large files.
-           /// 10MB should be more than sufficient for any reasonable package manifest or source file.
-          diff --git a/crates/franken-node/src/migration/validation_suite.rs b/crates/franken-node/src/migration/validation_suite.rs
-          --- a/crates/franken-node/src/migration/validation_suite.rs
-          +++ b/crates/franken-node/src/migration/validation_suite.rs
-          @@ -29,6 +29,9 @@
-           #[path = "paired_validation_tests.rs"]
-           mod paired_tests;
+               /// Path to emit an unsigned JSON `MigrationRollbackPlan` (not Ed25519-signed).
+               #[arg(long, value_parser = parse_safe_content_pathbuf)]
+               pub emit_rollback: Option<PathBuf>,
+          @@ -799,6 +804,53 @@
+               pub json: bool,
+           }
            
-          +#[path = "rewrite_candidate.rs"]
-          +pub mod rewrite_candidate;
+          +#[cfg(test)]
+          +mod checked_rewrite_cli_tests {
+          +    use super::*;
           +
-           const MAX_ENTRIES: usize = 50_000;
-           const MAX_PROJECT_BYTES: usize = 256 * 1024 * 1024;
-           const MAX_TESTS: usize = 1024;
+          +    #[test]
+          +    fn checked_rewrite_parses_explicit_apply_and_verification() {
+          +        let cli = Cli::try_parse_from(["franken-node", "migrate", "rewrite", "project", "--apply", "--verify", "--json"]).unwrap();
+          +        let Command::Migrate(MigrateCommand::Rewrite(args)) = cli.command else { panic!("wrong command"); };
+          +        assert!(args.apply && args.verify && args.json);
+          +        assert!(args.emit_rollback.is_none());
+          +    }
+          +
+          +    #[test]
+          +    fn checked_rewrite_cannot_execute_under_dry_run_semantics() {
+          +        let error = Cli::try_parse_from(["franken-node", "migrate", "rewrite", "project", "--verify"]).unwrap_err();
+          +        assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+          +    }
+          +
+          +    #[test]
+          +    fn checked_rewrite_does_not_mix_a_second_rollback_artifact_with_its_report() {
+          +        let error = Cli::try_parse_from(["franken-node", "migrate", "rewrite", "project", "--apply", "--verify", "--emit-rollback", "rollback.json"]).unwrap_err();
+          +        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+          +    }
+          +
+          +    #[test]
+          +    fn checked_rewrite_keeps_missing_project_in_the_json_handler_contract() {
+          +        let cli = Cli::try_parse_from(["franken-node", "migrate", "rewrite", "--apply", "--verify", "--json"]).unwrap();
+          +        let Command::Migrate(MigrateCommand::Rewrite(args)) = cli.command else { panic!("wrong command"); };
+          +        assert!(args.project_path.as_os_str().is_empty());
+          +        assert!(args.verify && args.json);
+          +    }
+          +
+          +    #[test]
+          +    fn ordinary_rewrite_does_not_implicitly_execute_tests() {
+          +        for flags in [vec![], vec!["--apply"]] {
+          +            let mut arguments = vec!["franken-node", "migrate", "rewrite", "project"];
+          +            arguments.extend(flags);
+          +            let cli = Cli::try_parse_from(arguments).unwrap();
+          +            let Command::Migrate(MigrateCommand::Rewrite(args)) = cli.command else { panic!("wrong command"); };
+          +            assert!(!args.verify);
+          +        }
+          +    }
+          +}
+          +
+           #[derive(Debug, Parser)]
+           pub struct MigrateValidateArgs {
+               /// Path to the project to validate.
+          diff --git a/crates/franken-node/src/main.rs b/crates/franken-node/src/main.rs
+          --- a/crates/franken-node/src/main.rs
+          +++ b/crates/franken-node/src/main.rs
+          @@ -30855,6 +30855,32 @@
+                                   "`migrate rewrite` requires a project path",
+                               );
+                           }
+          +                if args.verify {
+          +                    #[cfg(target_os = "linux")]
+          +                    {
+          +                        let executable = match std::env::current_exe() {
+          +                            Ok(path) => path,
+          +                            Err(err) => return migrate_fail("migrate.rewrite", args.json, err),
+          +                        };
+          +                        let report = migration::verified_rewrite::run(&args.project_path, &executable);
+          +                        if let Err(err) = emit_json_or_human(&report, args.json, || {
+          +                            migration::verified_rewrite::render(&report)
+          +                        }) {
+          +                            return migrate_fail("migrate.rewrite", args.json, err);
+          +                        }
+          +                        if !report.is_success() {
+          +                            // The full checked report has already been emitted;
+          +                            // keep both JSON and human failures to one payload.
+          +                            let code = if report.status == migration::verified_rewrite::CheckedRewriteStatus::Error { 2 } else { 1 };
+          +                            fail_closed_after_json_with_code(code);
+          +                        }
+          +                        return Ok(());
+          +                    }
+          +                    #[cfg(not(target_os = "linux"))]
+          +                    return migrate_fail("migrate.rewrite", args.json, "--verify currently requires Linux");
+          +                }
+                           let report = match migration::run_rewrite(&args.project_path, args.apply)
+                               .with_context(|| {
+                                   format!(
+          diff --git a/crates/franken-node/src/migration/verified_rewrite.rs b/crates/franken-node/src/migration/verified_rewrite.rs
+          --- a/crates/franken-node/src/migration/verified_rewrite.rs
+          +++ b/crates/franken-node/src/migration/verified_rewrite.rs
+          @@ -199,6 +199,25 @@
+                   assert!(!root.path().join(".migrate-backup/helper.mjs").exists());
+               }
+           
+          +    #[test]
+          +    fn identical_console_output_with_different_file_effects_cannot_be_applied() {
+          +        let root = project();
+          +        let original = source(root.path());
+          +        fs::write(root.path().join("case.test.mjs"),
+          +            "import fs from 'node:fs';\nconst text = fs.readFileSync('helper.mjs','utf8');\nfs.writeFileSync('artifact',text.includes('node:path')?'changed':'original');\n").unwrap();
+          +        let report = node_pair(root.path());
+          +        assert_eq!(report.status, CheckedRewriteStatus::Rejected, "{report:#?}");
+          +        let row = &report.validation.as_ref().unwrap().cases[0];
+          +        assert_eq!(row.reference.as_ref().unwrap().exit_code, Some(0));
+          +        assert_eq!(row.native.as_ref().unwrap().exit_code, Some(0));
+          +        assert_eq!(row.reference.as_ref().unwrap().stdout, row.native.as_ref().unwrap().stdout);
+          +        assert_eq!(row.divergences, ["filesystem:workspace_delta_mismatch"]);
+          +        assert_eq!(source(root.path()), original);
+          +        assert_eq!(report.rewrite.as_ref().unwrap().rewrites_applied, 0);
+          +        assert!(!root.path().join("artifact").exists());
+          +    }
+          +
+               #[test]
+               fn unresolved_manual_review_blocks_runtime_execution() {
+                   let root = project();
           PATCH
-          if git apply --reverse --check evidence/module-registration.patch 2>/dev/null; then
-            echo 'Module registrations already present'
+          if git apply --recount --reverse --check evidence/primary-cli.patch 2>/dev/null; then
+            echo 'Primary CLI integration already present'
           else
-            git apply --check evidence/module-registration.patch
-            git apply evidence/module-registration.patch
+            git apply --recount --check evidence/primary-cli.patch
+            git apply --recount evidence/primary-cli.patch
           fi
           git diff --check
       - name: Compile primary source and execute checked-apply regression tests
@@ -114,6 +216,7 @@ jobs:
           [dependencies]
           verified-primary = { path = "$primary" }
           anyhow = "1.0"
+          clap = { version = "4", features = ["derive"] }
           serde = { version = "1.0", features = ["derive"] }
           serde_json = "1.0"
           sha2 = "0.11"
@@ -124,6 +227,8 @@ jobs:
           cat > "$tests/lib.rs" <<RUST
           #![forbid(unsafe_code)]
           pub use verified_primary::migration::{MigrationRewriteAction, MigrationRewriteReport, MigrationValidateReport, run_rewrite, run_validate};
+          #[path = "$source/cli.rs"]
+          pub mod cli;
           #[path = "$source/migration/smoke_supervisor.rs"]
           pub mod smoke_supervisor;
           #[path = "$source/migration/validation_suite.rs"]
@@ -140,23 +245,29 @@ jobs:
             printf '%s ' "$file" >> evidence/compiled-source-blobs.txt
             git hash-object "$source/migration/$file" >> evidence/compiled-source-blobs.txt
           done
+          for file in cli.rs main.rs; do
+            printf '%s ' "$file" >> evidence/compiled-source-blobs.txt
+            git hash-object "$source/$file" >> evidence/compiled-source-blobs.txt
+            rustfmt +stable --edition 2024 --config skip_children=true --emit stdout "$source/$file" > /dev/null
+          done
           cargo +stable check --manifest-path "$primary/Cargo.toml" --lib 2>&1 | tee evidence/primary-check.log
           cargo +stable test --manifest-path "$tests/Cargo.toml" verified_rewrite::tests -- --nocapture --test-threads=2 2>&1 | tee evidence/checked-apply-tests.log
           cargo +stable test --manifest-path "$tests/Cargo.toml" rewrite_candidate::tests -- --nocapture --test-threads=2 2>&1 | tee evidence/candidate-tests.log
+          cargo +stable test --manifest-path "$tests/Cargo.toml" checked_rewrite_cli_tests -- --nocapture 2>&1 | tee evidence/cli-tests.log
           cargo +stable clippy --manifest-path "$primary/Cargo.toml" --lib -- -D warnings 2>&1 | tee evidence/primary-clippy.log
           cargo +stable clippy --manifest-path "$tests/Cargo.toml" --all-targets -- -D warnings 2>&1 | tee evidence/checked-clippy.log
           cp "$tests/Cargo.lock" evidence/Cargo.lock
-      - name: Commit only tested module registrations directly to main
+      - name: Commit only the tested primary CLI integration directly to main
         if: github.ref == 'refs/heads/main'
         shell: bash
         run: |
           set -euo pipefail
-          paths=(crates/franken-node/src/migration/mod.rs crates/franken-node/src/migration/validation_suite.rs)
+          paths=(crates/franken-node/src/cli.rs crates/franken-node/src/main.rs crates/franken-node/src/migration/verified_rewrite.rs)
           if ! git diff --quiet -- "${paths[@]}"; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
             git add -- "${paths[@]}"
-            git commit -m 'feat(migration): wire tested checked-apply into the primary migration module'
+            git commit -m 'feat(migration): expose measured candidate approval as rewrite --apply --verify'
             git push origin HEAD:main
           fi
           git rev-parse HEAD > evidence/published-revision.txt
