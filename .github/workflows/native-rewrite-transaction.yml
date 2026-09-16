@@ -69,7 +69,7 @@ jobs:
           cat > "$harness/nested.rs" <<EOF
           #![forbid(unsafe_code)]
           pub mod migration {
-              #[path = "$GITHUB_WORKSPACE/crates/franken-node/src/migration/rewrite_transaction.rs"]
+              #[path = "$GITHUB_WORKSPACE/crates/franken_node/src/migration/rewrite_transaction.rs"]
               pub mod rewrite_transaction;
           }
           EOF
@@ -92,146 +92,10 @@ jobs:
   primary-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: Apply the reviewed primary rollback command when absent
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p evidence
-          cat > evidence/rollback-cli.patch <<'PATCH'
-          diff --git a/crates/franken-node/src/cli.rs b/crates/franken-node/src/cli.rs
-          --- a/crates/franken-node/src/cli.rs
-          +++ b/crates/franken-node/src/cli.rs
-          @@ -648,6 +648,9 @@
-               /// Apply migration transforms and optionally emit an unsigned JSON rollback plan.
-               Rewrite(MigrateRewriteArgs),
-           
-          +    /// Inspect rewrite transactions or restore one by its explicit identity.
-          +    Rollback(MigrateRollbackArgs),
-          +
-               /// Static audit checks plus optional runtime smoke (not `verify lockstep`).
-               Validate(MigrateValidateArgs),
-           }
-          @@ -775,6 +778,78 @@
-               }
-           }
-           
-          +#[derive(Debug, Parser)]
-          +pub struct MigrateRollbackArgs {
-          +    /// Project whose retained native rewrite transactions should be inspected.
-          +    /// The handler owns missing-project errors so --json stays machine-readable.
-          +    #[arg(default_value = "", value_parser = parse_handler_required_pathbuf)]
-          +    pub project_path: PathBuf,
-          +
-          +    /// Exact transaction ID from history. Omit to list transactions; no latest-ID inference.
-          +    #[arg(long)]
-          +    pub transaction: Option<String>,
-          +
-          +    /// Restore this transaction after complete preflight. Without it, preview only.
-          +    #[arg(long, requires = "transaction")]
-          +    pub apply: bool,
-          +
-          +    /// Emit structured JSON with hashes and conflicts, never source contents.
-          +    #[arg(long)]
-          +    pub json: bool,
-          +}
-          +
-          +#[cfg(test)]
-          +mod rollback_cli_tests {
-          +    use super::*;
-          +
-          +    #[test]
-          +    fn rollback_defaults_to_nonmutating_history() {
-          +        let cli = Cli::try_parse_from(["franken-node", "migrate", "rollback", "project", "--json"]).unwrap();
-          +        let Command::Migrate(MigrateCommand::Rollback(args)) = cli.command else { panic!("wrong command"); };
-          +        assert_eq!(args.project_path, PathBuf::from("project"));
-          +        assert!(args.transaction.is_none());
-          +        assert!(!args.apply);
-          +        assert!(args.json);
-          +    }
-          +
-          +    #[test]
-          +    fn selecting_a_transaction_does_not_implicitly_apply() {
-          +        let cli = Cli::try_parse_from(["franken-node", "migrate", "rollback", "project", "--transaction", "txn-123"]).unwrap();
-          +        let Command::Migrate(MigrateCommand::Rollback(args)) = cli.command else { panic!("wrong command"); };
-          +        assert_eq!(args.transaction.as_deref(), Some("txn-123"));
-          +        assert!(!args.apply);
-          +    }
-          +
-          +    #[test]
-          +    fn rollback_apply_requires_an_explicit_transaction() {
-          +        let error = Cli::try_parse_from(["franken-node", "migrate", "rollback", "project", "--apply"]).unwrap_err();
-          +        assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
-          +    }
-          +
-          +    #[test]
-          +    fn explicit_restore_and_json_parse_together() {
-          +        let cli = Cli::try_parse_from(["franken-node", "migrate", "rollback", "project", "--transaction", "txn-123", "--apply", "--json"]).unwrap();
-          +        let Command::Migrate(MigrateCommand::Rollback(args)) = cli.command else { panic!("wrong command"); };
-          +        assert!(args.apply && args.json);
-          +        assert_eq!(args.transaction.as_deref(), Some("txn-123"));
-          +    }
-          +
-          +    #[test]
-          +    fn missing_rollback_project_remains_a_json_handler_error() {
-          +        let cli = Cli::try_parse_from(["franken-node", "migrate", "rollback", "--json"]).unwrap();
-          +        let Command::Migrate(MigrateCommand::Rollback(args)) = cli.command else { panic!("wrong command"); };
-          +        assert!(args.project_path.as_os_str().is_empty());
-          +        assert!(args.json);
-          +    }
-          +
-          +    #[test]
-          +    fn rollback_has_no_implicit_latest_or_force_override() {
-          +        for flag in ["--latest", "--force", "--verify"] {
-          +            assert!(Cli::try_parse_from(["franken-node", "migrate", "rollback", "project", flag]).is_err());
-          +        }
-          +    }
-          +}
-          +
-           #[derive(Debug, Parser)]
-           pub struct MigrateRewriteArgs {
-               /// Path to the project to rewrite.
-          diff --git a/crates/franken-node/src/main.rs b/crates/franken-node/src/main.rs
-          --- a/crates/franken-node/src/main.rs
-          +++ b/crates/franken-node/src/main.rs
-          @@ -30941,6 +30941,26 @@
-                               }
-                           }
-                       }
-          +            MigrateCommand::Rollback(args) => {
-          +                if args.project_path.as_os_str().is_empty() {
-          +                    return migrate_fail("migrate.rollback", args.json, "`migrate rollback` requires a project path");
-          +                }
-          +                #[cfg(target_os = "linux")]
-          +                {
-          +                    let report = migration::rollback::run(&args.project_path, args.transaction.as_deref(), args.apply);
-          +                    if let Err(err) = emit_json_or_human(&report, args.json, || migration::rollback::render(&report)) {
-          +                        return migrate_fail("migrate.rollback", args.json, err);
-          +                    }
-          +                    let code = report.exit_code();
-          +                    if code != 0 {
-          +                        // A single complete report is already printed. Do not
-          +                        // append a second human or JSON error payload.
-          +                        fail_closed_after_json_with_code(i32::from(code));
-          +                    }
-          +                }
-          +                #[cfg(not(target_os = "linux"))]
-          +                return migrate_fail("migrate.rollback", args.json, "native rewrite rollback currently requires Linux");
-          +            }
-                       MigrateCommand::Validate(args) => {
-                           if args.project_path.as_os_str().is_empty() {
-                               return migrate_fail(
-          PATCH
-          if git apply --recount --reverse --check evidence/rollback-cli.patch 2>/dev/null; then
-            echo 'Primary rollback command already present'
-          else
-            git apply --recount --check evidence/rollback-cli.patch
-            git apply --recount evidence/rollback-cli.patch
-          fi
-          git diff --check
+        with:
+          persist-credentials: false
       - name: Compile the primary module and actual parser; run public API regressions
         shell: bash
         run: |
@@ -297,21 +161,6 @@ jobs:
           cargo +stable test --manifest-path "$harness/Cargo.toml" --test rollback_cli rollback_cli_tests -- --nocapture 2>&1 | tee evidence/rollback-cli-tests.log
           cargo +stable clippy --manifest-path "$harness/Cargo.toml" --lib -- -D warnings 2>&1 | tee evidence/primary-rewrite-clippy.log
           cp "$harness/Cargo.lock" evidence/primary-Cargo.lock
-      - name: Commit only the tested primary command directly to main
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! git diff --quiet -- crates/franken-node/src/cli.rs crates/franken-node/src/main.rs; then
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git add -- crates/franken-node/src/cli.rs crates/franken-node/src/main.rs
-            git commit -m 'feat(migration): add native rollback history, preview and explicit restoration commands'
-            git fetch origin main
-            git rebase origin/main
-            git push origin HEAD:main
-          fi
-          git rev-parse HEAD > evidence/published-revision.txt
       - name: Preserve compiled integration and evidence
         if: always()
         uses: actions/upload-artifact@v4
