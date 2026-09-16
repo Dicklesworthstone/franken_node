@@ -18,6 +18,7 @@ import json
 import math
 import os
 import re
+import stat
 import sys
 import tempfile
 import time
@@ -34,6 +35,7 @@ NOTE_SCHEMA = "migration-failure-note-v1"
 MAX_CAPSULE_BYTES = 128 * 1024 * 1024
 MAX_EXPANDED_BYTES = 64 * 1024 * 1024
 MAX_METADATA_BYTES = 8 * 1024 * 1024
+MAX_EXECUTABLE_BYTES = 512 * 1024 * 1024
 HASH_RE = re.compile(r"[0-9a-f]{64}\Z")
 ID_RE = re.compile(r"REPLAY-[a-zA-Z0-9-]{1,80}\Z")
 LEGS = ("baseline", "migration")
@@ -104,8 +106,11 @@ def check_link(path: str, target: str, nodes: dict) -> None:
 
     pending = path.split("/")[:-1] + parts(target)
     resolved = []
-    links = 0
+    links = steps = 0
     while pending:
+        steps += 1
+        if steps > 4096:
+            raise ValueError("capsule symlink resolution budget exceeded")
         part = pending.pop(0)
         if part in {"", "."}:
             continue
@@ -254,6 +259,77 @@ def checked_options(options: dict) -> dict:
     return result
 
 
+def hash_regular_file(path: Path, deadline: float) -> str:
+    """Bounded descriptor hash with before/after mutation detection, not a lock."""
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW), "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_EXECUTABLE_BYTES:
+            raise ValueError("runtime/validator must be a bounded regular file")
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            if time.monotonic() >= deadline:
+                raise ValueError("runtime fingerprinting exhausted total execution budget")
+            chunk = stream.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_EXECUTABLE_BYTES:
+                raise ValueError("runtime byte bound exceeded")
+            digest.update(chunk)
+        after = os.fstat(stream.fileno())
+        fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if total != before.st_size or any(getattr(before, field) != getattr(after, field) for field in fields):
+            raise ValueError("runtime/validator changed during fingerprinting")
+        return digest.hexdigest()
+
+
+def runtime_bindings(baseline_command, migration_command, deadline: float) -> tuple[dict, dict]:
+    """Resolve caller-owned commands; bind direct executables, argv and validators.
+
+    Paths may relocate while bytes stay identical. Dynamic libraries, imported
+    modules outside the snapshot and ambient environment remain outside this
+    binding; it is not a hermetic executable-image or whole-machine claim.
+    """
+    commands = {"baseline": runner.resolve_command(baseline_command),
+                "migration": runner.resolve_command(migration_command)}
+    hashes = {}
+
+    def hashed(path):
+        path = Path(path).resolve(strict=True)
+        if path not in hashes:
+            hashes[path] = hash_regular_file(path, deadline)
+        return hashes[path]
+
+    bindings = {leg: {"executable_sha256": hashed(command[0]), "arguments": command[1:]}
+                for leg, command in commands.items()}
+    bindings["validators"] = {"replay_sha256": hashed(__file__), "runner_sha256": hashed(runner.__file__),
+                              "python_sha256": hashed(sys.executable)}
+    return commands, bindings
+
+
+def check_runtime_binding_schema(bindings) -> None:
+    if not isinstance(bindings, dict) or set(bindings) != {*LEGS, "validators"}:
+        raise ValueError("missing runtime provenance bindings")
+    validators = bindings["validators"]
+    if (not isinstance(validators, dict)
+            or set(validators) != {"replay_sha256", "runner_sha256", "python_sha256"}):
+        raise ValueError("invalid validator provenance bindings")
+    hashes = list(validators.values())
+    for leg in LEGS:
+        binding = bindings[leg]
+        if not isinstance(binding, dict) or set(binding) != {"executable_sha256", "arguments"}:
+            raise ValueError("invalid runtime binding")
+        hashes.append(binding["executable_sha256"])
+        args = binding["arguments"]
+        if (not isinstance(args, list) or not 1 <= len(args) < 256
+                or any(not isinstance(arg, str) or not arg or "\0" in arg for arg in args)
+                or args.count("{test}") != 1 or sum(len(arg.encode()) for arg in args) > 65536):
+            raise ValueError("invalid bound runtime arguments")
+    if any(not isinstance(value, str) or HASH_RE.fullmatch(value) is None for value in hashes):
+        raise ValueError("invalid runtime/validator content digest")
+
+
 def validate_capsule(artifact: dict, expected_sha256: str | None = None) -> dict:
     if not isinstance(artifact, dict) or artifact.get("schema_version") != CAPSULE_SCHEMA:
         raise ValueError("not an executable migration replay capsule")
@@ -271,6 +347,7 @@ def validate_capsule(artifact: dict, expected_sha256: str | None = None) -> dict
             or not hmac.compare_digest(expected_sha256, digest)):
         raise ValueError("capsule does not match the independently pinned hash")
     checked_options(artifact.get("options"))
+    check_runtime_binding_schema(artifact.get("runtime_bindings"))
     expected = artifact.get("expected")
     if (not isinstance(expected, dict) or expected.get("validation_verdict") not in {"PASS", "FAIL"}
             or not isinstance(expected.get("cases"), list)
@@ -281,6 +358,10 @@ def validate_capsule(artifact: dict, expected_sha256: str | None = None) -> dict
             or any(not isinstance(value, str) or HASH_RE.fullmatch(value) is None
                    for value in inputs.values())):
         raise ValueError("capsule is missing its executed input digest bindings")
+    expected_verdict = "FAIL" if any(isinstance(case, dict) and case.get("status") == "FAIL"
+                                     for case in expected["cases"]) else "PASS"
+    if expected["validation_verdict"] != expected_verdict:
+        raise ValueError("expected validation verdict disagrees with case outcomes")
     ids = set()
     for case in expected["cases"]:
         if not isinstance(case, dict):
@@ -302,9 +383,11 @@ def validate_capsule(artifact: dict, expected_sha256: str | None = None) -> dict
 
 
 def execute_snapshots(snapshots: dict, baseline_command, migration_command,
-                      options: dict, expected_inputs: dict | None = None) -> dict:
+                      options: dict, expected_inputs: dict | None = None,
+                      *, deadline: float | None = None) -> dict:
     options = checked_options(options)
-    deadline = time.monotonic() + options["total_timeout_seconds"]
+    if deadline is None:
+        deadline = time.monotonic() + options["total_timeout_seconds"]
     with tempfile.TemporaryDirectory(prefix="migration-replay-") as temporary:
         root = Path(temporary)
         digests = {}
@@ -331,22 +414,30 @@ def capture_migration(project: Path, *, migrated_project: Path | None = None,
     """Capture inputs FIRST, then measure exactly those inputs, never a later tree."""
     options = checked_options(options)
     deadline = time.monotonic() + options["total_timeout_seconds"]
+    commands, bindings = runtime_bindings(baseline_command, migration_command, deadline)
     snapshots = {}
+    captured_roots = {}
     for leg, directory in (("baseline", project), ("migration", migrated_project or project)):
         directory = Path(directory).resolve(strict=True)
         if not directory.is_dir():
             raise ValueError("capture source must be a directory")
-        snapshots[leg], _ = runner.capture_project(directory, deadline)
+        if directory not in captured_roots:
+            captured_roots[directory], _ = runner.capture_project(directory, deadline)
+        snapshots[leg] = captured_roots[directory]
     manifests, blobs = encode_snapshots(snapshots)
     snapshots = decode_snapshots(manifests, blobs)
-    report = execute_snapshots(snapshots, baseline_command, migration_command, options)
+    report = execute_snapshots(snapshots, commands["baseline"], commands["migration"], options, deadline=deadline)
     expected = execution_observation(report)
+    _, after_bindings = runtime_bindings(commands["baseline"], commands["migration"], deadline)
+    if after_bindings != bindings:
+        raise ValueError("runtime or validator changed during capture")
     artifact = seal({
         "schema_version": CAPSULE_SCHEMA,
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "failure_source": "migration_validation_runner",
         "snapshots": manifests, "blobs": blobs, "options": options,
         "recorded_commands": report["commands"],
+        "runtime_bindings": bindings,
         "expected": expected,
         "scope": "exact-input re-execution; not deterministic runtime replay",
         "environment_captured": False, "release_certification": False,
@@ -359,18 +450,36 @@ def capture_migration(project: Path, *, migrated_project: Path | None = None,
 def replay_migration(artifact: dict, *, execute: bool = False,
                      baseline_command=runner.DEFAULT_BASELINE_COMMAND,
                      migration_command=runner.DEFAULT_MIGRATION_COMMAND,
-                     expected_sha256: str | None = None) -> dict:
+                     expected_sha256: str | None = None, verify_fix: bool = False) -> dict:
     """Re-execute, not self-compare. Never execute argv or environment from a capsule."""
     snapshots = validate_capsule(artifact, expected_sha256)
     if not execute:
         raise ValueError("replay requires explicit execute=True / --execute consent")
-    report = execute_snapshots(snapshots, baseline_command, migration_command,
-                               artifact["options"], artifact["expected"].get("inputs"))
+    options = checked_options(artifact["options"])
+    deadline = time.monotonic() + options["total_timeout_seconds"]
+    commands, bindings = runtime_bindings(baseline_command, migration_command, deadline)
+    recorded_bindings = artifact["runtime_bindings"]
+    required = ("baseline", "validators") if verify_fix else (*LEGS, "validators")
+    if any(bindings[component] != recorded_bindings[component] for component in required):
+        raise ValueError("runtime provenance mismatch; ordinary replay requires the recorded executables and arguments")
+    if verify_fix and (artifact["expected"]["validation_verdict"] != "FAIL"
+                      or any(case["baseline"].get("exit_code") != 0
+                             or case["baseline"].get("termination") != "exited"
+                             or not all(stream.get("complete") is True for stream in case["baseline"]["streams"].values())
+                             for case in artifact["expected"]["cases"])):
+        raise ValueError("fix verification requires an original failing migration with successful complete reference runs")
+    report = execute_snapshots(snapshots, commands["baseline"], commands["migration"],
+                               options, artifact["expected"]["inputs"], deadline=deadline)
+    _, after_bindings = runtime_bindings(commands["baseline"], commands["migration"], deadline)
+    if after_bindings != bindings:
+        raise ValueError("runtime or validator changed during replay")
     result = {"schema_version": "migration-replay-result-v1", "replay_id": artifact["replay_id"],
               "content_sha256": artifact["content_sha256"], "verdict": "ERROR",
               "recorded_validation_verdict": artifact["expected"]["validation_verdict"],
               "observed_validation_verdict": report["summary"]["verdict"],
               "execution": report, "mismatched_tests": [],
+              "mode": "fix-verification" if verify_fix else "replay",
+              "runtime_bindings": bindings,
               "environment_reproduced": False, "release_certification": False}
     try:
         observed = execution_observation(report)
@@ -382,7 +491,28 @@ def replay_migration(artifact: dict, *, execute: bool = False,
     result["mismatched_tests"] = [test for test in sorted(expected_cases.keys() | observed_cases.keys())
                                   if expected_cases.get(test) != observed_cases.get(test)]
     result["verdict"] = "REPRODUCED" if observed == artifact["expected"] else "DIVERGED"
+    if verify_fix:
+        result["reference_drift_tests"] = [test for test in sorted(expected_cases.keys() | observed_cases.keys())
+                                           if expected_cases.get(test, {}).get("baseline")
+                                           != observed_cases.get(test, {}).get("baseline")]
+        if result["reference_drift_tests"]:
+            result["verdict"] = "REFERENCE_DRIFT"
+        else:
+            result["verdict"] = "FIX_VERIFIED" if observed["validation_verdict"] == "PASS" else "FIX_NOT_VERIFIED"
     return result
+
+
+def inspect_capsule(artifact: dict, expected_sha256: str | None = None) -> dict:
+    """Offline validation and privacy-bounded summary; no commands are resolved."""
+    snapshots = validate_capsule(artifact, expected_sha256)
+    return {"verdict": "INTEGRITY_VALID", "replay_id": artifact["replay_id"],
+            "content_sha256": artifact["content_sha256"],
+            "independently_pinned": expected_sha256 is not None,
+            "validation_verdict": artifact["expected"]["validation_verdict"],
+            "test_count": len(artifact["expected"]["cases"]),
+            "workspace_entries": {leg: len(entries) for leg, entries in snapshots.items()},
+            "runtime_binding_present": True, "executed": False,
+            "authentication": "external digest pin" if expected_sha256 else "checksum only; not authenticated"}
 
 
 def validate_replay_artifact(artifact: dict) -> list[str]:
@@ -448,7 +578,6 @@ def reject_constant(value):
 def load_replay(path: Path) -> dict:
     flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
     with os.fdopen(os.open(path, flags), "rb") as stream:
-        import stat
         metadata = os.fstat(stream.fileno())
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_CAPSULE_BYTES:
             raise ValueError("capsule must be a bounded regular file")
@@ -496,11 +625,13 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--capture", type=Path, metavar="PROJECT")
     mode.add_argument("--replay", type=Path, metavar="CAPSULE")
+    mode.add_argument("--inspect", type=Path, metavar="CAPSULE", help="verify integrity offline without executing any code")
     mode.add_argument("--self-test", action="store_true")
     parser.add_argument("--migrated-project", type=Path)
     parser.add_argument("--baseline-command", type=json.loads, default=list(runner.DEFAULT_BASELINE_COMMAND))
     parser.add_argument("--migration-command", type=json.loads, default=list(runner.DEFAULT_MIGRATION_COMMAND))
     parser.add_argument("--execute", action="store_true", help="approve executing trusted captured project code")
+    parser.add_argument("--verify-fix", action="store_true", help="allow a new migration runtime; require unchanged reference evidence and all captured cases passing")
     parser.add_argument("--expected-sha256", help="capsule content hash obtained from an independent trusted channel")
     parser.add_argument("--compare-filesystem", action="store_true")
     parser.add_argument("--timeout-seconds", type=float, default=30.0)
@@ -508,13 +639,20 @@ def main() -> int:
     parser.add_argument("--out", type=Path)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
+    if args.verify_fix and not args.replay:
+        parser.error("--verify-fix requires --replay")
     try:
         if args.self_test:
             result = self_test()
             code = 0 if result["verdict"] == "PASS" else 1
+        elif args.inspect:
+            result = inspect_capsule(load_replay(args.inspect), args.expected_sha256)
+            code = 0
         elif args.capture:
             if args.out is None:
                 parser.error("--capture requires --out; capsules contain sensitive project files")
+            if os.path.lexists(args.out):
+                raise ValueError("capture destination already exists; refusing to execute or overwrite it")
             artifact = capture_migration(args.capture, migrated_project=args.migrated_project,
                                          baseline_command=args.baseline_command, migration_command=args.migration_command,
                                          compare_filesystem=args.compare_filesystem, timeout_seconds=args.timeout_seconds,
@@ -529,8 +667,10 @@ def main() -> int:
                 parser.error("--replay requires --execute: captured programs run with your authority")
             artifact = load_replay(args.replay)
             result = replay_migration(artifact, execute=True, baseline_command=args.baseline_command,
-                                      migration_command=args.migration_command, expected_sha256=args.expected_sha256)
-            code = {"REPRODUCED": 0, "DIVERGED": 1, "ERROR": 2}[result["verdict"]]
+                                      migration_command=args.migration_command, expected_sha256=args.expected_sha256,
+                                      verify_fix=args.verify_fix)
+            code = {"REPRODUCED": 0, "FIX_VERIFIED": 0, "DIVERGED": 1, "FIX_NOT_VERIFIED": 1,
+                    "REFERENCE_DRIFT": 2, "ERROR": 2}[result["verdict"]]
             if args.out:
                 if args.out.resolve() == args.replay.resolve():
                     raise ValueError("replay report must not overwrite its input capsule")
