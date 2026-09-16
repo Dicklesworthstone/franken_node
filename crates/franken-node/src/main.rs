@@ -30941,6 +30941,26 @@ fn main() -> Result<()> {
                     }
                 }
             }
+            MigrateCommand::Rollback(args) => {
+                if args.project_path.as_os_str().is_empty() {
+                    return migrate_fail("migrate.rollback", args.json, "`migrate rollback` requires a project path");
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    let report = migration::rollback::run(&args.project_path, args.transaction.as_deref(), args.apply);
+                    if let Err(err) = emit_json_or_human(&report, args.json, || migration::rollback::render(&report)) {
+                        return migrate_fail("migrate.rollback", args.json, err);
+                    }
+                    let code = report.exit_code();
+                    if code != 0 {
+                        // A single complete report is already printed. Do not
+                        // append a second human or JSON error payload.
+                        fail_closed_after_json_with_code(i32::from(code));
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                return migrate_fail("migrate.rollback", args.json, "native rewrite rollback currently requires Linux");
+            }
             MigrateCommand::Validate(args) => {
                 if args.project_path.as_os_str().is_empty() {
                     return migrate_fail(

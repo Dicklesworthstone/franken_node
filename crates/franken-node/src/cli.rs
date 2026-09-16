@@ -648,6 +648,9 @@ pub enum MigrateCommand {
     /// Apply migration transforms and optionally emit an unsigned JSON rollback plan.
     Rewrite(MigrateRewriteArgs),
 
+    /// Inspect rewrite transactions or restore one by its explicit identity.
+    Rollback(MigrateRollbackArgs),
+
     /// Static audit checks plus optional runtime smoke (not `verify lockstep`).
     Validate(MigrateValidateArgs),
 }
@@ -772,6 +775,78 @@ fn validate_migrate_audit_output(format: &str, out: Option<&PathBuf>) -> Result<
             "--format=text requires a text-compatible --out path",
         )),
         _ => Ok(()),
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct MigrateRollbackArgs {
+    /// Project whose retained native rewrite transactions should be inspected.
+    /// The handler owns missing-project errors so --json stays machine-readable.
+    #[arg(default_value = "", value_parser = parse_handler_required_pathbuf)]
+    pub project_path: PathBuf,
+
+    /// Exact transaction ID from history. Omit to list transactions; no latest-ID inference.
+    #[arg(long)]
+    pub transaction: Option<String>,
+
+    /// Restore this transaction after complete preflight. Without it, preview only.
+    #[arg(long, requires = "transaction")]
+    pub apply: bool,
+
+    /// Emit structured JSON with hashes and conflicts, never source contents.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[cfg(test)]
+mod rollback_cli_tests {
+    use super::*;
+
+    #[test]
+    fn rollback_defaults_to_nonmutating_history() {
+        let cli = Cli::try_parse_from(["franken-node", "migrate", "rollback", "project", "--json"]).unwrap();
+        let Command::Migrate(MigrateCommand::Rollback(args)) = cli.command else { panic!("wrong command"); };
+        assert_eq!(args.project_path, PathBuf::from("project"));
+        assert!(args.transaction.is_none());
+        assert!(!args.apply);
+        assert!(args.json);
+    }
+
+    #[test]
+    fn selecting_a_transaction_does_not_implicitly_apply() {
+        let cli = Cli::try_parse_from(["franken-node", "migrate", "rollback", "project", "--transaction", "txn-123"]).unwrap();
+        let Command::Migrate(MigrateCommand::Rollback(args)) = cli.command else { panic!("wrong command"); };
+        assert_eq!(args.transaction.as_deref(), Some("txn-123"));
+        assert!(!args.apply);
+    }
+
+    #[test]
+    fn rollback_apply_requires_an_explicit_transaction() {
+        let error = Cli::try_parse_from(["franken-node", "migrate", "rollback", "project", "--apply"]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn explicit_restore_and_json_parse_together() {
+        let cli = Cli::try_parse_from(["franken-node", "migrate", "rollback", "project", "--transaction", "txn-123", "--apply", "--json"]).unwrap();
+        let Command::Migrate(MigrateCommand::Rollback(args)) = cli.command else { panic!("wrong command"); };
+        assert!(args.apply && args.json);
+        assert_eq!(args.transaction.as_deref(), Some("txn-123"));
+    }
+
+    #[test]
+    fn missing_rollback_project_remains_a_json_handler_error() {
+        let cli = Cli::try_parse_from(["franken-node", "migrate", "rollback", "--json"]).unwrap();
+        let Command::Migrate(MigrateCommand::Rollback(args)) = cli.command else { panic!("wrong command"); };
+        assert!(args.project_path.as_os_str().is_empty());
+        assert!(args.json);
+    }
+
+    #[test]
+    fn rollback_has_no_implicit_latest_or_force_override() {
+        for flag in ["--latest", "--force", "--verify"] {
+            assert!(Cli::try_parse_from(["franken-node", "migrate", "rollback", "project", flag]).is_err());
+        }
     }
 }
 
