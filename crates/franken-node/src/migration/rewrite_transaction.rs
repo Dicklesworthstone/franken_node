@@ -455,8 +455,13 @@ mod tests {
             std::process::exit(73); // no destructors, no successful-commit marker
         }
         let root = project();
+        // The same production tests run both as a standalone library and as
+        // migration::rewrite_transaction inside the product. Strip only the
+        // crate name so the child selects this exact test in either layout.
+        let module = module_path!().split_once("::").map_or(module_path!(), |(_, path)| path);
+        let test_name = format!("{module}::abruptly_exiting_writer_leaves_a_recoverable_journal");
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "tests::abruptly_exiting_writer_leaves_a_recoverable_journal", "--nocapture"])
+            .args(["--exact", test_name.as_str(), "--nocapture"])
             .env(CHILD_ROOT, root.path()).output().unwrap();
         assert_eq!(output.status.code(), Some(73), "{}", String::from_utf8_lossy(&output.stdout));
         assert_eq!(fs::read(root.path().join("a.js")).unwrap(), b"after-a");
