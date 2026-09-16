@@ -37,6 +37,9 @@ pub mod validation_suite;
 mod rewrite_transaction;
 
 #[cfg(target_os = "linux")]
+pub use rewrite_transaction::rollback;
+
+#[cfg(target_os = "linux")]
 pub mod verified_rewrite;
 
 /// Maximum allowed file size for migration operations to prevent DoS via parser bombs.

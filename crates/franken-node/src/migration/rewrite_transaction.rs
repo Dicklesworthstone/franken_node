@@ -25,6 +25,9 @@ use std::path::{Component, Path};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[path = "rewrite_rollback.rs"]
+pub mod rollback;
+
 pub const MAX_EDITS: usize = 1_000;
 pub const MAX_PLAN_BYTES: usize = 256 * 1024 * 1024;
 const MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
@@ -39,7 +42,7 @@ pub struct Edit<'a> {
     pub after: &'a [u8],
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Record {
     path: String,
@@ -50,7 +53,7 @@ struct Record {
     mode: u32,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Journal {
     schema_version: String,
@@ -70,6 +73,16 @@ pub struct RewriteTransaction {
     backups: File,
     store: File,
     _lock: File,
+}
+
+impl Drop for RewriteTransaction {
+    fn drop(&mut self) {
+        // flock belongs to the open file description, not this descriptor.
+        // A concurrently spawned child can transiently inherit a duplicate
+        // before CLOEXEC closes it. Release when the owner ends, rather than
+        // leaving the next operation locked out until that duplicate closes.
+        let _ = flock(&self._lock, FlockOperation::Unlock);
+    }
 }
 
 fn unique_name(prefix: &str) -> String {
@@ -359,6 +372,21 @@ mod tests {
     use super::*;
     use std::fs;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn owner_drop_releases_lock_even_when_a_duplicate_descriptor_remains() {
+        let root = tempfile::tempdir().unwrap();
+        let transaction = RewriteTransaction::open(root.path()).unwrap();
+        // A real dup shares the same kernel lock description as a forked child.
+        let inherited = transaction._lock.try_clone().unwrap();
+        assert!(RewriteTransaction::open(root.path()).is_err());
+        drop(transaction);
+        let next = RewriteTransaction::open(root.path()).unwrap();
+        drop(inherited);
+        assert!(RewriteTransaction::open(root.path()).is_err());
+        drop(next);
+        drop(RewriteTransaction::open(root.path()).unwrap());
+    }
 
     fn project() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
