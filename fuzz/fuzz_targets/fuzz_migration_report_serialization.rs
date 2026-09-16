@@ -171,6 +171,8 @@ fn validate_report(input: &FuzzInput) -> MigrationValidateReport {
             .collect(),
         blocking_findings,
         warning_findings,
+        #[cfg(target_os = "linux")]
+        test_suite: None,
     }
 }
 
