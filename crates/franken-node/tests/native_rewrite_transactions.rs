@@ -173,3 +173,88 @@ fn primary_recovery_conflict_preserves_user_edits_and_refuses_new_work() {
     assert_eq!(fs::read_to_string(root.path().join("z.js")).unwrap(), "const user_edit = true;\n");
     assert!(pending(root.path()).exists());
 }
+
+#[test]
+fn primary_rewrite_then_operator_rollback_restores_the_complete_original_project() {
+    use frankenengine_node::migration::rollback::{self, RollbackStatus, TransactionState};
+    let root = project();
+    let manifest = r#"{"name":"needs-pin","version":"1.0.0"}"#;
+    fs::write(root.path().join("package.json"), manifest).unwrap();
+    fs::write(root.path().join("keep.txt"), "unrelated input").unwrap();
+    let before = run_rewrite(root.path(), false).unwrap();
+    assert_eq!(before.rewrites_planned, 3);
+    let applied = run_rewrite(root.path(), true).unwrap();
+    assert_eq!(applied.rewrites_applied, 3);
+    let history = rollback::run(root.path(), None, false);
+    assert_eq!(history.status, RollbackStatus::History, "{history:#?}");
+    assert_eq!(history.history.len(), 1);
+    let id = &history.history[0].transaction_id;
+    assert_eq!(history.history[0].state, TransactionState::Applied);
+    let preview = rollback::run(root.path(), Some(id), false);
+    assert_eq!(preview.status, RollbackStatus::Ready, "{preview:#?}");
+    assert_eq!(preview.files.len(), 3);
+    assert!(fs::read_to_string(root.path().join("a.js")).unwrap().contains("import fs"));
+    let restored = rollback::run(root.path(), Some(id), true);
+    assert_eq!(restored.status, RollbackStatus::RolledBack, "{restored:#?}");
+    originals(root.path());
+    assert_eq!(fs::read_to_string(root.path().join("package.json")).unwrap(), manifest);
+    assert_eq!(fs::read_to_string(root.path().join("keep.txt")).unwrap(), "unrelated input");
+    assert_eq!(fs::metadata(root.path().join("a.js")).unwrap().permissions().mode() & 0o777, 0o755);
+    assert!(run_rewrite(root.path(), false).unwrap().rewrites_planned == 3);
+    assert!(!pending(root.path()).exists());
+}
+
+#[test]
+fn primary_rollback_refuses_later_user_edits_without_restoring_other_sources() {
+    use frankenengine_node::migration::rollback::{self, RollbackStatus};
+    let root = project();
+    run_rewrite(root.path(), true).unwrap();
+    let history = rollback::run(root.path(), None, false);
+    let id = &history.history[0].transaction_id;
+    let after_a = fs::read(root.path().join("a.js")).unwrap();
+    fs::write(root.path().join("z.js"), "const my_work = 42;\n").unwrap();
+    let report = rollback::run(root.path(), Some(id), true);
+    assert_eq!(report.status, RollbackStatus::Conflict, "{report:#?}");
+    assert_eq!(report.exit_code(), 1);
+    assert_eq!(fs::read(root.path().join("a.js")).unwrap(), after_a);
+    assert_eq!(fs::read_to_string(root.path().join("z.js")).unwrap(), "const my_work = 42;\n");
+    assert!(!pending(root.path()).exists());
+}
+
+#[test]
+fn primary_reapply_after_rollback_is_safe_against_old_transaction_retries() {
+    use frankenengine_node::migration::rollback::{self, RollbackStatus, TransactionState};
+    let root = project();
+    run_rewrite(root.path(), true).unwrap();
+    let id = rollback::run(root.path(), None, false).history[0].transaction_id.clone();
+    assert_eq!(rollback::run(root.path(), Some(&id), true).status, RollbackStatus::RolledBack);
+    assert_eq!(run_rewrite(root.path(), true).unwrap().rewrites_applied, 2);
+    let after_a = fs::read(root.path().join("a.js")).unwrap();
+    let retry = rollback::run(root.path(), Some(&id), true);
+    assert_eq!(retry.status, RollbackStatus::AlreadyRolledBack, "{retry:#?}");
+    assert_eq!(fs::read(root.path().join("a.js")).unwrap(), after_a);
+    let history = rollback::run(root.path(), None, false);
+    assert_eq!(history.history.len(), 2);
+    assert_eq!(history.history.iter().filter(|row| row.state == TransactionState::Applied).count(), 1);
+    assert_eq!(fs::read_to_string(root.path().join(".migrate-backup/a.js")).unwrap(), A);
+}
+
+#[test]
+fn primary_rollback_history_and_preview_do_not_expose_saved_source_contents() {
+    use frankenengine_node::migration::rollback::{self, RollbackReport, RollbackStatus};
+    let root = project();
+    let empty = rollback::run(root.path(), None, false);
+    assert_eq!(empty.status, RollbackStatus::History);
+    assert!(!root.path().join(".migrate-backup").exists());
+    run_rewrite(root.path(), true).unwrap();
+    let history = rollback::run(root.path(), None, false);
+    let id = &history.history[0].transaction_id;
+    let preview = rollback::run(root.path(), Some(id), false);
+    assert_eq!(preview.status, RollbackStatus::Ready);
+    for report in [&history, &preview] {
+        let encoded = serde_json::to_string(report).unwrap();
+        assert!(!encoded.contains("require('fs')"));
+        assert!(!encoded.contains("existsSync"));
+        assert_eq!(serde_json::from_str::<RollbackReport>(&encoded).unwrap(), *report);
+    }
+}
