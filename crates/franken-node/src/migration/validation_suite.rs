@@ -1,10 +1,10 @@
 //! Execution-backed project test validation for the native migration command.
 //!
-//! Both runtimes receive fresh copies of one bounded input capture for EACH
-//! case. Only successful exits and exact stdout/stderr bytes establish a pass.
-//! This is a process-output comparison, not filesystem-effect equivalence,
-//! release certification, deterministic replay, or an OS sandbox. Trusted code
-//! can still access ambient credentials, absolute paths and external services.
+//! Each runtime receives fresh copies of its own bounded input capture for
+//! every case. Successful exits and exact output bytes are required. Optional
+//! filesystem comparison also checks persistent workspace deltas, with explicit
+//! exclusions. This is not release certification, deterministic replay, or an
+//! OS sandbox. Trusted code retains access to ambient/external authority.
 
 use super::smoke_supervisor;
 use anyhow::{Context, Result, bail, ensure};
@@ -20,6 +20,14 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
+
+#[path = "workspace_effects.rs"]
+mod workspace_effects;
+pub use workspace_effects::DeltaSummary;
+
+#[cfg(test)]
+#[path = "paired_validation_tests.rs"]
+mod paired_tests;
 
 const MAX_ENTRIES: usize = 50_000;
 const MAX_PROJECT_BYTES: usize = 256 * 1024 * 1024;
@@ -42,6 +50,8 @@ pub struct RunObservation {
     pub signal: Option<i32>,
     pub stdout: StreamObservation,
     pub stderr: StreamObservation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_delta: Option<DeltaSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +78,9 @@ pub struct SuiteReport {
     pub scope: String,
     pub release_certification: bool,
     pub input_sha256: String,
+    pub candidate_input_sha256: String,
+    pub filesystem_comparison: bool,
+    pub filesystem_exclusions: Vec<String>,
     pub reference_runtime: RuntimeIdentity,
     pub native_runtime: RuntimeIdentity,
     pub total_tests: usize,
@@ -310,17 +323,39 @@ fn node_on_path() -> Result<PathBuf> {
 fn observe(output: &Output) -> RunObservation {
     let stream = |bytes: &[u8]| StreamObservation { bytes: bytes.len(), sha256: hex::encode(Sha256::digest(bytes)) };
     RunObservation { exit_code: output.status.code(), signal: output.status.signal(),
-        stdout: stream(&output.stdout), stderr: stream(&output.stderr) }
+        stdout: stream(&output.stdout), stderr: stream(&output.stderr), workspace_delta: None }
 }
 
+#[cfg(test)]
 fn execute_suite(snapshot: &Snapshot, reference: &Invocation, native: &Invocation,
     deadline: Instant, leg_timeout: Duration) -> Result<SuiteReport> {
-    let tests = snapshot.tests()?;
+    execute_suite_pair(snapshot, snapshot, reference, native, deadline, leg_timeout, false)
+}
+
+fn matched_tests(reference: &Snapshot, candidate: &Snapshot) -> Result<Vec<PathBuf>> {
+    let tests = reference.tests()?;
+    let candidate_tests = candidate.tests()?;
+    ensure!(tests == candidate_tests,
+        "test inventories differ: original has {} cases and candidate has {}; added or removed test counterparts cannot be ignored",
+        tests.len(), candidate_tests.len());
     ensure!(!tests.is_empty(), "empty test suite cannot pass");
+    Ok(tests)
+}
+
+fn execute_suite_pair(reference_snapshot: &Snapshot, candidate_snapshot: &Snapshot,
+    reference: &Invocation, native: &Invocation, deadline: Instant,
+    leg_timeout: Duration, compare_filesystem: bool) -> Result<SuiteReport> {
+    let tests = matched_tests(reference_snapshot, candidate_snapshot)?;
     let mut report = SuiteReport {
         schema_version: "franken-node/native-validation-suite/v1".into(),
-        scope: "captured-test-process-stdout-stderr-exit".into(), release_certification: false,
-        input_sha256: snapshot.digest.clone(), reference_runtime: reference.identity(deadline)?,
+        scope: if compare_filesystem { "captured-test-process-and-workspace-delta" }
+            else { "captured-test-process-stdout-stderr-exit" }.into(),
+        release_certification: false, input_sha256: reference_snapshot.digest.clone(),
+        candidate_input_sha256: candidate_snapshot.digest.clone(), filesystem_comparison: compare_filesystem,
+        filesystem_exclusions: if compare_filesystem {
+            workspace_effects::EXCLUSIONS.iter().map(|path| (*path).to_owned()).collect()
+        } else { Vec::new() },
+        reference_runtime: reference.identity(deadline)?,
         native_runtime: native.identity(deadline)?, total_tests: tests.len(), passed: 0, failed: 0,
         errored: 0, skipped: tests.len(), verdict: "ERROR".into(), cases: Vec::new(), errors: Vec::new(),
     };
@@ -332,22 +367,40 @@ fn execute_suite(snapshot: &Snapshot, reference: &Invocation, native: &Invocatio
         let result = (|| -> Result<()> {
             let case = tempfile::Builder::new().prefix("franken-native-validation-").tempdir()?;
             let mut outputs = Vec::new();
-            for (name, invocation) in [("reference", reference), ("native", native)] {
+            let mut deltas = Vec::new();
+            for (name, snapshot, invocation) in [("reference", reference_snapshot, reference),
+                                                 ("native", candidate_snapshot, native)] {
                 let workspace = case.path().join(name);
                 snapshot.stage(&workspace, deadline)?;
                 ensure!(workspace.join(&test).is_file(), "discovered test is not a file");
+                let before = if compare_filesystem {
+                    Some(workspace_effects::observe(&workspace, deadline)
+                        .with_context(|| format!("{name} initial workspace observation failed"))?)
+                } else { None };
                 budget(deadline)?;
                 let timeout = leg_timeout.min(deadline.saturating_duration_since(Instant::now()));
                 let output = smoke_supervisor::run_command_with_timeout(
                     &mut invocation.command(&test, &workspace, &environment), timeout, DRAIN_TIMEOUT)
                     .with_context(|| format!("{name} execution failed"))?;
-                let observation = observe(&output);
-                if name == "reference" { row.reference = Some(observation); } else { row.native = Some(observation); }
+                let observation = if name == "reference" { &mut row.reference } else { &mut row.native };
+                // Persist process evidence BEFORE filesystem observation so an
+                // unreadable/oversized output cannot erase completed execution.
+                let observation = observation.insert(observe(&output));
                 if !output.status.success() { row.divergences.push(format!("{name}:unsuccessful_exit")); }
+                if let Some(before) = before {
+                    let after = workspace_effects::observe(&workspace, deadline)
+                        .with_context(|| format!("{name} final workspace observation failed"))?;
+                    let delta = workspace_effects::delta(&before, &after);
+                    observation.workspace_delta = Some(workspace_effects::summarize(&delta)?);
+                    deltas.push(delta);
+                }
                 outputs.push(output);
             }
             if outputs[0].stdout != outputs[1].stdout { row.divergences.push("stdout:byte_mismatch".into()); }
             if outputs[0].stderr != outputs[1].stderr { row.divergences.push("stderr:byte_mismatch".into()); }
+            if compare_filesystem && deltas[0] != deltas[1] {
+                row.divergences.push("filesystem:workspace_delta_mismatch".into());
+            }
             Ok(())
         })();
         report.skipped -= 1;
@@ -378,29 +431,50 @@ pub fn run_if_present(project: &Path) -> Result<Option<SuiteReport>> {
     let deadline = Instant::now() + TOTAL_TIMEOUT;
     let snapshot = Snapshot::capture(project, deadline)?;
     if snapshot.tests()?.is_empty() { return Ok(None); }
-    run_captured(project, &snapshot, &std::env::current_exe()?, deadline).map(Some)
+    run_captured((project, project), (&snapshot, &snapshot), &std::env::current_exe()?, deadline, false).map(Some)
 }
 
 /// Execute a nonempty captured project suite using an explicitly selected
 /// native product binary. This also supports independent CLI/library callers
 /// without incorrectly re-executing their own embedding process as a runtime.
 pub fn run_project(project: &Path, native_executable: &Path) -> Result<SuiteReport> {
-    let deadline = Instant::now() + TOTAL_TIMEOUT;
-    let snapshot = Snapshot::capture(project, deadline)?;
-    ensure!(!snapshot.tests()?.is_empty(), "no tests discovered; an empty suite cannot pass");
-    run_captured(project, &snapshot, native_executable, deadline)
+    run_project_comparison(project, None, native_executable, false)
 }
 
-fn run_captured(project: &Path, snapshot: &Snapshot, native_executable: &Path,
-    deadline: Instant) -> Result<SuiteReport> {
+/// Compare original inputs on Node with an optional rewritten candidate on
+/// native Franken. Capture BOTH trees before execution and reject mismatched
+/// test inventories. Only final workspace changes in the reported scope are
+/// compared; unchanged rewritten sources are not mistaken for runtime effects.
+pub fn run_project_comparison(project: &Path, migrated_project: Option<&Path>,
+    native_executable: &Path, compare_filesystem: bool) -> Result<SuiteReport> {
+    let deadline = Instant::now() + TOTAL_TIMEOUT;
+    let reference_root = project.canonicalize()?;
+    let candidate_root = migrated_project.unwrap_or(project).canonicalize()?;
+    ensure!(reference_root == candidate_root || (!reference_root.starts_with(&candidate_root)
+        && !candidate_root.starts_with(&reference_root)), "distinct input projects must not be nested");
+    let reference_snapshot = Snapshot::capture(&reference_root, deadline)?;
+    ensure!(!reference_snapshot.tests()?.is_empty(), "no tests discovered; an empty suite cannot pass");
+    let captured_candidate = if reference_root == candidate_root { None }
+        else { Some(Snapshot::capture(&candidate_root, deadline)?) };
+    let candidate_snapshot = captured_candidate.as_ref().unwrap_or(&reference_snapshot);
+    matched_tests(&reference_snapshot, candidate_snapshot)?;
+    run_captured((&reference_root, &candidate_root), (&reference_snapshot, candidate_snapshot),
+        native_executable, deadline, compare_filesystem)
+}
+
+fn run_captured(projects: (&Path, &Path), snapshots: (&Snapshot, &Snapshot), native_executable: &Path,
+    deadline: Instant, compare_filesystem: bool) -> Result<SuiteReport> {
     let executable = native_executable.canonicalize()?;
     let native = Invocation { executable: executable.clone(), before: vec!["run".into()],
         after: vec!["--runtime".into(), "franken-engine".into(), "--engine-bin".into(),
             executable.into_os_string(), "--console-only".into()] };
     let reference = Invocation { executable: node_on_path()?, before: vec![], after: vec![] };
-    ensure!(!reference.executable.starts_with(project.canonicalize()?), "reference runtime must be outside the measured project");
-    ensure!(!native.executable.starts_with(project.canonicalize()?), "native runtime must be outside the measured project");
-    execute_suite(snapshot, &reference, &native, deadline, LEG_TIMEOUT)
+    for project in [projects.0, projects.1] {
+        let project = project.canonicalize()?;
+        ensure!(!reference.executable.starts_with(&project), "reference runtime must be outside both measured projects");
+        ensure!(!native.executable.starts_with(&project), "native runtime must be outside both measured projects");
+    }
+    execute_suite_pair(snapshots.0, snapshots.1, &reference, &native, deadline, LEG_TIMEOUT, compare_filesystem)
 }
 
 #[cfg(test)]
