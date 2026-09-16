@@ -6,9 +6,9 @@ After rewrite suggestions are applied, operators need a validation runner that e
 
 ## Scope
 
-`scripts/migration_validation_runner.py` now executes the discovered tests rather than emitting design-phase PENDING reports. Its default baseline command is `node {test}`; its default migration command is `franken-node run --console-only {test}`. The native product's ordinary policy/configuration remains in force: the runner does not install dependencies, mint authority, or enable a degraded fallback.
+`scripts/migration_validation_runner.py` executes the discovered tests rather than emitting design-phase PENDING reports. Its default baseline command is `node {test}`; its default migration command is `franken-node run --console-only {test}`. The native product's ordinary policy/configuration remains in force: the runner does not install dependencies, mint authority, or enable a degraded fallback.
 
-This is the standalone runner designated by this contract. It does not change the Rust `franken-node migrate validate` dispatch, replace the L1/L2 release oracle, or certify engine compatibility by itself.
+The Python runner remains independently usable. The native Rust suite described below is also integrated into the primary Linux `franken-node migrate validate` and `migrate-report` paths. Neither route replaces the L1/L2 release oracle or certifies engine compatibility by itself.
 
 ## Operator Usage
 
@@ -62,16 +62,36 @@ The real-process regression suite explicitly uses Node on both legs to test the 
 ## Primary Implementation Surface
 
 - `scripts/migration_validation_runner.py`: discovery, snapshots, dual execution, exact comparison, optional filesystem deltas, report export, and self-test.
+- `crates/franken-node/src/migration/mod.rs`: primary migration validation and report admission, including suite dispatch and native-only smoke execution.
+- `crates/franken-node/src/migration/validation_suite.rs`: shared native suite executor used by the product and standalone operator.
 - `crates/franken-node/src/runtime/lockstep_harness.rs`: the separate product lockstep harness for Node/Bun/franken_node comparisons and divergence fixtures.
-- `tests/test_check_migration_validation.py`: unit and real-process regression coverage.
+- `tests/test_check_migration_validation.py`: Python unit and real-process regression coverage.
+- `crates/franken-node/tests/native_project_suite_cli.rs`: primary product CLI regressions, registered in `migrate_cli_e2e`.
 
 ## Invariants
 
-1. Every test/runtime pair starts from the captured input rather than a previous pair's mutated workspace.
-2. All measured divergences are classified by compatibility band.
-3. No divergence, missing runtime, missing counterpart, no-test run, matching failure, timeout, or output overflow becomes PASS.
+1. Every suite test/runtime pair starts from the captured input rather than a previous pair's mutated workspace.
+2. Python runner divergences are classified by compatibility band; the native suite reports exact divergence channels.
+3. No suite divergence, missing runtime, missing counterpart, no-test suite, matching failure, timeout, or output overflow becomes a suite PASS.
 4. Reports preserve available execution evidence without embedding raw program output or file contents.
 5. Input/output/delta hashes are deterministic for identical captured data; live timestamps and elapsed times remain measurements, not deterministic claims.
+
+## Primary Migration Commands (Linux)
+
+```bash
+franken-node migrate validate /path/to/project --json
+franken-node migrate-report /path/to/project --json
+```
+
+The primary validator retains its four static prerequisites: package manifests, a committed lockfile, no risky install/build scripts, and no high-severity audit findings. Failed prerequisites block all runtime execution. `migrate validate --static-only` runs only those four checks and does not resolve or execute either runtime; a static PASS is not measured runtime equivalence.
+
+When prerequisites pass, Linux validation captures the project and calls the shared native suite. If tests exist, every discovered case is compared on installed Node and the current product executable. The primary command supplies the same captured input to both sides and currently compares exact stdout/stderr and successful exits, not persistent filesystem deltas. Failed/errored/skipped cases or runtime identity errors fail runtime check `mig-validate-005`; they cannot fall back to an entrypoint smoke test. Missing Node, invalid captures, and unsupported input links also fail admission rather than shrinking the measured scope.
+
+A completed suite report is retained under `test_suite` in the validation JSON and under `validation.test_suite` in the one-command report. It includes all available per-case observations, input/runtime identities, aggregate counts, and scoped verdict. The primary report derives its validation decision and rollout state from that result, so suite failure produces `no_go` with blocked rollout. Existing JSON without `test_suite` remains decodable; the field is omitted when no suite report exists.
+
+Only a successfully captured project with no discovered tests takes the existing single-entrypoint smoke path. That smoke executes the invoked native binary, not a Node/Bun fallback, and verifies its receipt round-trip. Entrypoint arguments are rebased to a non-parent-traversing path beneath the selected working directory (`./src/app.js`, for example), because `run` deliberately rejects absolute content paths. A smoke PASS does not claim test-suite equivalence. Non-Linux primary validation retains its existing smoke behavior; the native suite mechanism requires Linux.
+
+These commands retain their existing execution semantics: they execute trusted project code unless `--static-only` is used on `migrate validate`. The standalone operator below separately requires `--execute`. A successfully generated `migrate-report` can exit successfully while its contained admission decision is `no_go`; report generation is not authorization to deploy. Static assessment and rewrite suggestions precede suite capture and are not an atomic assessment/execution snapshot. Full environment capture, signed release certification, and automatic native failure-capsule export remain outside this path.
 
 ## Native Rust Project-Suite Operator (Linux)
 
@@ -125,13 +145,14 @@ Run only trusted projects. Workspaces are not an OS sandbox and the report is no
 
 ### Remaining integration boundary
 
-This native operator does **not** yet replace the existing `franken-node migrate validate` or `migrate-report` dispatch. The optional-suite API is provided for that integration, but those call-site changes are separate. Native failure-capsule export and reduction remain unimplemented; the Python workflows continue to provide those capabilities.
+The primary commands now use this native executor for same-tree, exact-output suite validation on Linux. The standalone operator remains the entrypoint for distinct rewritten-tree input and persistent filesystem comparison; those flags are not exposed by the primary migration CLI yet. Native failure-capsule export and reduction remain unimplemented; the Python workflows continue to provide those capabilities.
 
-The operator's real-process regressions use explicitly identified Node/Node commands for differential orchestration and `/bin/false` for a deliberate CLI failure. Those tests are not native Franken compatibility measurements. Its standard tests include the exact production Linux supervisor, workspace observer and paired-input regressions.
+The operator's real-process regressions use explicitly identified Node/Node commands for differential orchestration and `/bin/false` for a deliberate CLI failure. Those tests are not native Franken compatibility measurements. Its standard tests include the exact production Linux supervisor, workspace observer and paired-input regressions. The separate `native_project_suite_cli` group invokes the actual product binary and contains a required native-success test when built with the engine feature.
 
 ```bash
 cargo test --manifest-path tools/migration-validator/Cargo.toml
 cargo clippy --manifest-path tools/migration-validator/Cargo.toml --all-targets -- -D warnings
+cargo test -p frankenengine-node --features test-support --test migrate_cli_e2e native_project_suite_cli
 ```
 
 ## References
