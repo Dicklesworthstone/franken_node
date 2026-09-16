@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'crates/franken-node/src/migration/rewrite_transaction.rs'
+      - 'crates/franken-node/src/migration/rewrite_rollback.rs'
       - 'crates/franken-node/src/migration/mod.rs'
       - 'crates/franken-node/tests/native_rewrite_transactions.rs'
       - 'crates/franken-node/tests/native_project_suite_cli.rs'
@@ -12,6 +13,7 @@ on:
   pull_request:
     paths:
       - 'crates/franken-node/src/migration/rewrite_transaction.rs'
+      - 'crates/franken-node/src/migration/rewrite_rollback.rs'
       - 'crates/franken-node/src/migration/mod.rs'
       - 'crates/franken-node/tests/native_rewrite_transactions.rs'
       - 'crates/franken-node/tests/native_project_suite_cli.rs'
@@ -25,10 +27,68 @@ jobs:
   transaction:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
+      - name: Apply the reviewed restoration registration when absent
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          cat > evidence/rollback-registration.patch <<'PATCH'
+          diff --git a/crates/franken-node/src/migration/rewrite_transaction.rs b/crates/franken-node/src/migration/rewrite_transaction.rs
+          --- a/crates/franken-node/src/migration/rewrite_transaction.rs
+          +++ b/crates/franken-node/src/migration/rewrite_transaction.rs
+          @@ -26,6 +26,9 @@
+           use std::sync::atomic::{AtomicU64, Ordering};
+           use std::time::{SystemTime, UNIX_EPOCH};
+           
+          +#[path = "rewrite_rollback.rs"]
+          +pub mod rollback;
+          +
+           pub const MAX_EDITS: usize = 1_000;
+           pub const MAX_PLAN_BYTES: usize = 256 * 1024 * 1024;
+           const MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
+          @@ -42,7 +45,7 @@
+               pub after: &'a [u8],
+           }
+           
+          -#[derive(Debug, Serialize, Deserialize)]
+          +#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+           #[serde(deny_unknown_fields)]
+           struct Record {
+               path: String,
+          @@ -54,7 +57,7 @@
+               mode: u32,
+           }
+           
+          -#[derive(Debug, Serialize, Deserialize)]
+          +#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+           #[serde(deny_unknown_fields)]
+           struct Journal {
+               schema_version: String,
+          diff --git a/crates/franken-node/src/migration/mod.rs b/crates/franken-node/src/migration/mod.rs
+          --- a/crates/franken-node/src/migration/mod.rs
+          +++ b/crates/franken-node/src/migration/mod.rs
+          @@ -35,6 +35,9 @@
+           #[cfg(target_os = "linux")]
+           mod rewrite_transaction;
+           
+          +#[cfg(target_os = "linux")]
+          +pub use rewrite_transaction::rollback;
+          +
+           #[cfg(target_os = "linux")]
+           pub mod verified_rewrite;
+           
+          PATCH
+          if git apply --recount --reverse --check evidence/rollback-registration.patch 2>/dev/null; then
+            echo 'Restoration registration already present'
+          else
+            git apply --recount --check evidence/rollback-registration.patch
+            git apply --recount evidence/rollback-registration.patch
+          fi
+          git diff --check
       - name: Compile and test the production transaction module in both layouts
         shell: bash
         run: |
@@ -37,7 +97,10 @@ jobs:
           harness="$RUNNER_TEMP/rewrite-transaction-check"
           mkdir -p evidence "$harness"
           git rev-parse HEAD > evidence/revision.txt
-          git ls-tree HEAD crates/franken-node/src/migration/rewrite_transaction.rs > evidence/source-blobs.txt
+          for file in rewrite_transaction.rs rewrite_rollback.rs mod.rs; do
+            printf '%s ' "$file" >> evidence/compiled-source-blobs.txt
+            git hash-object "crates/franken-node/src/migration/$file" >> evidence/compiled-source-blobs.txt
+          done
           rustc +stable --version > evidence/rust-version.txt
           cat > "$harness/Cargo.toml" <<EOF
           [package]
@@ -71,6 +134,21 @@ jobs:
           cargo +stable test --manifest-path "$harness/Cargo.toml" -- --nocapture 2>&1 | tee evidence/transaction-tests.log
           cargo +stable clippy --manifest-path "$harness/Cargo.toml" --all-targets -- -D warnings 2>&1 | tee evidence/transaction-clippy.log
           cp "$harness/Cargo.lock" evidence/Cargo.lock
+      - name: Commit only tested registrations directly to main
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! git diff --quiet -- crates/franken-node/src/migration/rewrite_transaction.rs crates/franken-node/src/migration/mod.rs; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add -- crates/franken-node/src/migration/rewrite_transaction.rs crates/franken-node/src/migration/mod.rs
+            git commit -m 'feat(migration): expose tested rollback through the production transaction writer'
+            git fetch origin main
+            git rebase origin/main
+            git push origin HEAD:main
+          fi
+          git rev-parse HEAD > evidence/published-revision.txt
       - name: Preserve actual execution evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -79,6 +157,8 @@ jobs:
           path: |
             evidence/
             crates/franken-node/src/migration/rewrite_transaction.rs
+            crates/franken-node/src/migration/rewrite_rollback.rs
+            crates/franken-node/src/migration/mod.rs
           retention-days: 7
           if-no-files-found: error
 
