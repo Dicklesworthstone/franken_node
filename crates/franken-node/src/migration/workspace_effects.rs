@@ -62,6 +62,10 @@ fn excluded(relative: &Path) -> bool {
 /// Stream file hashes under a shared byte/deadline budget. Refuse unsupported
 /// outputs instead of silently omitting them from a passing comparison.
 pub fn observe(root: &Path, deadline: Instant) -> Result<State> {
+    // A trailing separator (including one introduced by join("")) makes
+    // lstat follow a final symlink as a directory. Normalize separators/dot
+    // components lexically, without canonicalizing through a replaced root.
+    let root: PathBuf = root.components().collect();
     let mut state = State::new();
     let mut pending = vec![PathBuf::new()];
     let mut total_bytes = 0_usize;
@@ -73,7 +77,8 @@ pub fn observe(root: &Path, deadline: Instant) -> Result<State> {
             relative.to_str().context("non-UTF-8 workspace output path refused")?
         };
         ensure!(text.len() <= MAX_PATH_BYTES, "workspace output path too long");
-        let path = root.join(&relative);
+        let path = if relative.as_os_str().is_empty() { root.clone() }
+            else { root.join(&relative) };
         let metadata = fs::symlink_metadata(&path)?;
         let (kind, length, sha256) = if metadata.is_symlink() {
             ensure!(!relative.as_os_str().is_empty(), "workspace root was replaced by a symlink");
@@ -242,7 +247,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let alias = root.path().join("alias");
         symlink(root.path(), &alias).unwrap();
-        assert!(observe(&alias, deadline()).unwrap_err().to_string().contains("root"));
+        for path in [&alias, &alias.join(""), &alias.join(".")] {
+            assert!(observe(path, deadline()).unwrap_err().to_string().contains("root"));
+        }
+        // A real root remains observable in all equivalent lexical forms.
+        let expected = observe(root.path(), deadline()).unwrap();
+        assert_eq!(expected, observe(&root.path().join(""), deadline()).unwrap());
+        assert_eq!(expected, observe(&root.path().join("."), deadline()).unwrap());
     }
 
     #[test]
