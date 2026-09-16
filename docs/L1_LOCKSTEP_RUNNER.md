@@ -138,6 +138,54 @@ The runner reads `lockstep_runner_config.json` (or uses defaults):
 - Every machine-readable report or config that disables a runtime must carry an
   `exclusion_reason` so the omission is auditable.
 
+## Native Compatibility-Corpus Process Lifecycle (Linux)
+
+The separate `franken-node ops compat-corpus-run` command uses
+`ops/compat_corpus_run.rs` for the release corpus. Its Linux process path now
+shares the owned, nonblocking supervisor used by native migration validation.
+This is not a change to `verify lockstep`'s separate execution implementation.
+
+Every Bun, optional Node, and native product leg has an owned process group.
+The supervisor drains both pipes in bounded chunks, checks deadlines even
+under continuous output, and stops ordinary group members before reaping the
+leader. Cleanup is attempted after success, timeout, observation/setup errors,
+and failed corpus-authority authentication. There are no detached pipe-reader
+threads in this Linux production corpus path. A direct child exit does not
+imply its output is complete: pipe inheritance beyond the drain allowance is
+a timeout, even if the leader exited zero.
+
+Capture retains at most 1 MiB per stream while hashing and counting every byte
+actually read. Output beyond the retained prefix remains marked truncated and
+cannot pass the existing admission check. Runtime/pipe timeouts remain
+`timed_out` observations, with `termination_kind="timed_out"`; their hashes
+cover observed prefixes, not unobserved output. Setup, authentication and
+cleanup failures remain infrastructure errors: they abort artifact publication
+instead of certifying a partial corpus. Clean completions keep the existing
+comparison encoding, digest prefixes, output counts, and exit/signal semantics.
+
+Version probes, the independent Node identity probe, and workspace-template
+initialization use the same supervisor with a 10-second runtime deadline and
+16 KiB retained output per stream. A timeout or oversized response cannot
+establish identity or successful initialization. The corpus-authority startup
+hook retains its existing bounded authentication protocol and consumes the
+leg's deadline; it does not receive a fresh runtime allowance afterward. The
+same-executable peer checks, signatures, policy limits and fixed production
+trust root are unchanged.
+
+The post-exit pipe allowance is one second; cleanup has a separate two-second
+leader-reap allowance. These are process supervision bounds, not OS resource
+quotas or deterministic execution guarantees. The trusted startup hook enforces
+its own handshake bound. Process creation/system calls can have OS latency,
+and descendants that deliberately escape their process group need separate
+containment. Non-Linux execution retains its prior implementation.
+
+Focused tests execute the actual production supervisor and corpus capture with
+real child processes. They cover inherited pipes, silent background children,
+continuous output, partial timeout measurements, failed startup authentication,
+full hashes past the retention cap, and bounded probes. They do not establish
+Node/Bun/Franken semantic parity, regenerate the corpus, or change release
+thresholds.
+
 ## 7. References
 
 - [COMPATIBILITY_BANDS.md](COMPATIBILITY_BANDS.md) — Band definitions
