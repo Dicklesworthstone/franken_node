@@ -3,39 +3,43 @@ name: Native migration validation
 on:
   push:
     branches: [main]
-    paths: ['.github/workflows/native-migration-validation.yml']
+    paths:
+      - '.github/workflows/native-migration-validation.yml'
+      - 'crates/franken-node/src/migration/**'
+      - 'crates/franken-node/tests/migrate_cli_e2e.rs'
+      - 'crates/franken-node/Cargo.toml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  pull_request:
+    paths:
+      - '.github/workflows/native-migration-validation.yml'
+      - 'crates/franken-node/src/migration/**'
+      - 'crates/franken-node/tests/migrate_cli_e2e.rs'
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: native-migration-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  validate-and-wire-supervisor:
-    if: github.repository == 'Dicklesworthstone/franken_node' && github.ref == 'refs/heads/main'
+  focused-supervisor:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
-          fetch-depth: 1
-      - name: Verify exact reviewed source identities
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD:crates/franken-node/src/migration/mod.rs)" = a04ce1244a85b0bf8d571155e056ae04e7be4378
-          test "$(git rev-parse HEAD:crates/franken-node/tests/migrate_cli_e2e.rs)" = f47460253f36a19961dc15c6626d360c0fec5acd
-          test "$(git rev-parse HEAD:crates/franken-node/src/migration/smoke_supervisor.rs)" = 5590a63796b86d2c15527913e3150dd6d52c606b
-      - name: Compile and test the actual production supervisor
+          persist-credentials: false
+      - name: Test the exact production module independently of the engine graph
         shell: bash
         run: |
           set -euo pipefail
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
           mkdir -p evidence "$RUNNER_TEMP/supervisor-tests"
           source_file="$GITHUB_WORKSPACE/crates/franken-node/src/migration/smoke_supervisor.rs"
-          rustfmt +stable --edition 2024 "$source_file"
+          rustfmt +stable --edition 2024 --check "$source_file"
           cat > "$RUNNER_TEMP/supervisor-tests/Cargo.toml" <<'TOML'
           [package]
           name = "native-smoke-supervisor-tests"
@@ -51,46 +55,82 @@ jobs:
           path = "actual_supervisor.rs"
           TOML
           printf '#![forbid(unsafe_code)]\n#[path = "%s"]\nmod smoke_supervisor;\n' "$source_file" > "$RUNNER_TEMP/supervisor-tests/actual_supervisor.rs"
+          git rev-parse HEAD > evidence/franken_node.revision
+          git ls-tree HEAD crates/franken-node/src/migration/smoke_supervisor.rs > evidence/source-blobs.txt
+          rustc +stable --version > evidence/rust-version.txt
           cargo +stable test --manifest-path "$RUNNER_TEMP/supervisor-tests/Cargo.toml" --test actual_supervisor -- --nocapture 2>&1 | tee evidence/supervisor-tests.log
           cargo +stable clippy --manifest-path "$RUNNER_TEMP/supervisor-tests/Cargo.toml" --tests -- -D warnings 2>&1 | tee evidence/supervisor-clippy.log
-          rustc +stable --version > evidence/rust-version.txt
-      - name: Wire tested mechanism into native admission and commit to main
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          for sha in 4ee3e25b04a3abc4ddb0c490192c84be3c8a887b 03f0b2f8bb94a9d405161e97bda7f9095facd8b0; do
-            patch="$RUNNER_TEMP/$sha.patch"
-            gh api "repos/Dicklesworthstone/franken_node/git/blobs/$sha" --jq .content | base64 --decode > "$patch"
-            test "$(git hash-object "$patch")" = "$sha"
-            git apply --recount --check "$patch"
-            git apply --recount "$patch"
-          done
-          while IFS= read -r path; do
-            case "$path" in
-              crates/franken-node/src/migration/mod.rs|crates/franken-node/src/migration/smoke_supervisor.rs|crates/franken-node/tests/migrate_cli_e2e.rs) ;;
-              *) echo "Unexpected changed path: $path" >&2; exit 1 ;;
-            esac
-            rustfmt +stable --edition 2024 --config skip_children=true --emit stdout "$path" > /dev/null
-          done < <(git diff --name-only)
-          git diff --check
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -- crates/franken-node/src/migration/mod.rs crates/franken-node/src/migration/smoke_supervisor.rs crates/franken-node/tests/migrate_cli_e2e.rs
-          git commit -m 'fix(migration): wire owned Linux supervisor into native admission' -m 'The actual production supervisor passed its 16 real-process/boundary tests and Clippy with warnings denied in a focused Cargo target. Complete modified Rust files parse. This is mechanism validation, not a passing full native application build. Preserve non-Linux behavior unchanged.'
-          git push origin HEAD:main
-          git rev-parse HEAD | tee evidence/published-commit.txt
-          git ls-tree HEAD crates/franken-node/src/migration/mod.rs crates/franken-node/src/migration/smoke_supervisor.rs crates/franken-node/tests/migrate_cli_e2e.rs > evidence/source-blobs.txt
-      - name: Preserve actual source and execution evidence
+      - name: Preserve supervisor evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: native-supervisor-evidence
           path: |
             evidence/
-            crates/franken-node/src/migration/mod.rs
             crates/franken-node/src/migration/smoke_supervisor.rs
-            crates/franken-node/tests/migrate_cli_e2e.rs
+          retention-days: 7
+          if-no-files-found: error
+
+  native-admission:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: franken_node
+          persist-credentials: false
+      - name: Checkout declared sibling development dependencies
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          git -C franken_node rev-parse HEAD > evidence/franken_node.revision
+          for repo in franken_engine frankentui fastapi_rust sqlmodel_rust asupersync frankensqlite; do
+            git clone --depth 1 "https://github.com/Dicklesworthstone/$repo.git" "$repo"
+            git -C "$repo" rev-parse HEAD > "evidence/$repo.revision"
+          done
+          # Supply real checkouts for the declared /dp dev-dependencies.
+          # Never edit dependency manifests or substitute test stubs.
+          sudo mkdir -p /dp
+          for repo in franken_node franken_engine frankentui fastapi_rust sqlmodel_rust asupersync frankensqlite; do
+            sudo ln -s "$GITHUB_WORKSPACE/$repo" "/dp/$repo"
+          done
+      - name: Install Rust required by fsqlite-pager
+        run: |
+          rustup toolchain install nightly --profile minimal --component rustfmt --component clippy
+          rustc +nightly --version | tee evidence/rust-version.txt
+      - name: Parse complete modified Rust files
+        working-directory: franken_node
+        run: |
+          set -euo pipefail
+          for path in crates/franken-node/src/migration/mod.rs crates/franken-node/src/migration/smoke_supervisor.rs crates/franken-node/tests/migrate_cli_e2e.rs; do
+            rustfmt +nightly --edition 2024 --config skip_children=true --emit stdout "$path" > /dev/null
+          done
+      - name: Compile and run native admission regressions
+        working-directory: franken_node
+        run: |
+          set -euo pipefail
+          cargo +nightly test -p frankenengine-node --features test-support --test migrate_cli_e2e native_smoke_admission_regressions -- --nocapture 2>&1 | tee ../evidence/native-admission.log
+          cargo +nightly test -p frankenengine-node --features test-support --test migrate_cli_e2e native_smoke_supervisor -- --nocapture 2>&1 | tee ../evidence/native-supervisor-integration.log
+          cargo +nightly test -p frankenengine-node --features test-support --test migrate_cli_e2e migrate_validate_native_failure_never_launches_hanging_reference -- --nocapture 2>&1 | tee ../evidence/no-reference-fallback.log
+          cargo +nightly test -p frankenengine-node --features test-support --test migrate_cli_e2e migrate_validate_passes_for_hardened_project -- --nocapture 2>&1 | tee ../evidence/native-positive-smoke.log
+      - name: Preserve exact source and execution evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-migration-evidence
+          path: |
+            evidence/
+            franken_node/Cargo.lock
+            franken_node/crates/franken-node/src/migration/mod.rs
+            franken_node/crates/franken-node/src/migration/smoke_supervisor.rs
+            franken_node/crates/franken-node/tests/migrate_cli_e2e.rs
           retention-days: 7
           if-no-files-found: error
