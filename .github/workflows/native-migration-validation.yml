@@ -7,6 +7,7 @@ on:
       - '.github/workflows/native-migration-validation.yml'
       - 'crates/franken-node/src/migration/**'
       - 'crates/franken-node/tests/migrate_cli_e2e.rs'
+      - 'tools/migration-validator/**'
       - 'crates/franken-node/Cargo.toml'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -15,14 +16,11 @@ on:
       - '.github/workflows/native-migration-validation.yml'
       - 'crates/franken-node/src/migration/**'
       - 'crates/franken-node/tests/migrate_cli_e2e.rs'
+      - 'tools/migration-validator/**'
   workflow_dispatch:
 
 permissions:
   contents: read
-
-concurrency:
-  group: native-migration-${{ github.ref }}
-  cancel-in-progress: false
 
 jobs:
   focused-suite:
@@ -32,52 +30,69 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Compile and test the production suite and supervisor
+      - name: Compile and test the actual native suite operator
         shell: bash
         run: |
           set -euo pipefail
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
-          mkdir -p evidence "$RUNNER_TEMP/suite-tests"
-          source_dir="$GITHUB_WORKSPACE/crates/franken-node/src/migration"
-          rustfmt +stable --edition 2024 --emit stdout "$source_dir/validation_suite.rs" > evidence/validation_suite.formatted.rs
-          cat > "$RUNNER_TEMP/suite-tests/Cargo.toml" <<'TOML'
-          [package]
-          name = "native-validation-suite-tests"
-          version = "0.0.0"
-          edition = "2024"
-          autotests = false
-          [workspace]
-          [dependencies]
-          anyhow = "=1.0.104"
-          rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process"] }
-          serde = { version = "1.0", features = ["derive"] }
-          serde_json = "1.0"
-          sha2 = "0.10"
-          tempfile = "3"
-          [[test]]
-          name = "actual_suite"
-          path = "actual_suite.rs"
-          TOML
-          printf '#![forbid(unsafe_code)]\n#[path = "%s/smoke_supervisor.rs"]\nmod smoke_supervisor;\n#[path = "%s/validation_suite.rs"]\nmod validation_suite;\n' "$source_dir" "$source_dir" > "$RUNNER_TEMP/suite-tests/actual_suite.rs"
-          git rev-parse HEAD > evidence/franken_node.revision
-          git ls-tree HEAD crates/franken-node/src/migration > evidence/source-tree.txt
+          mkdir -p evidence
           rustc +stable --version > evidence/rust-version.txt
           node --version > evidence/node-version.txt
-          cargo +stable test --manifest-path "$RUNNER_TEMP/suite-tests/Cargo.toml" --test actual_suite -- --nocapture 2>&1 | tee evidence/suite-tests.log
-          cargo +stable clippy --manifest-path "$RUNNER_TEMP/suite-tests/Cargo.toml" --tests -- -D warnings 2>&1 | tee evidence/suite-clippy.log
-      - name: Preserve exact source and test evidence
+          git rev-parse HEAD > evidence/franken_node.revision
+          git ls-tree HEAD crates/franken-node/src/migration/validation_suite.rs crates/franken-node/src/migration/smoke_supervisor.rs tools/migration-validator/Cargo.toml tools/migration-validator/main.rs > evidence/source-blobs.txt
+          rustfmt +stable --edition 2024 --emit stdout crates/franken-node/src/migration/validation_suite.rs > evidence/validation_suite.formatted.rs
+          rustfmt +stable --edition 2024 --config skip_children=true --emit stdout tools/migration-validator/main.rs > evidence/main.formatted.rs
+          cargo +stable test --manifest-path tools/migration-validator/Cargo.toml -- --nocapture 2>&1 | tee evidence/suite-tests.log
+          cargo +stable clippy --manifest-path tools/migration-validator/Cargo.toml --all-targets -- -D warnings 2>&1 | tee evidence/suite-clippy.log
+          cargo +stable build --manifest-path tools/migration-validator/Cargo.toml 2>&1 | tee evidence/suite-build.log
+      - name: Exercise executable CLI exit and report behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="$GITHUB_WORKSPACE/tools/migration-validator/target/debug/franken-migration-suite"
+          project="$RUNNER_TEMP/suite-cli-project"
+          mkdir -p "$project"
+          printf "console.log('reference');\n" > "$project/case.test.js"
+          set +e
+          "$binary" "$project" --native-bin /bin/false --execute --out "$GITHUB_WORKSPACE/evidence/measured-failure.json" > evidence/cli-failure.json
+          measured_exit=$?
+          "$binary" "$project" --native-bin /bin/false > evidence/cli-no-consent.json
+          consent_exit=$?
+          set -e
+          test "$measured_exit" = 1
+          test "$consent_exit" = 2
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          measured = json.loads(Path('evidence/measured-failure.json').read_text())
+          consent = json.loads(Path('evidence/cli-no-consent.json').read_text())
+          assert measured['verdict'] == 'FAIL' and measured['failed'] == 1
+          assert measured['cases'][0]['reference']['exit_code'] == 0
+          assert measured['cases'][0]['native']['exit_code'] == 1
+          assert measured['release_certification'] is False
+          assert consent['verdict'] == 'ERROR' and '--execute' in consent['error']
+          assert Path('evidence/measured-failure.json').stat().st_mode & 0o777 == 0o600
+          print('Actual native suite CLI: measured failure exit 1; no-consent exit 2; private report verified.')
+          PY
+      - name: Preserve exact source and execution evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: native-validation-suite-evidence
           path: |
             evidence/
+            tools/migration-validator/Cargo.toml
+            tools/migration-validator/Cargo.lock
+            tools/migration-validator/main.rs
             crates/franken-node/src/migration/validation_suite.rs
             crates/franken-node/src/migration/smoke_supervisor.rs
           retention-days: 7
           if-no-files-found: error
 
   native-admission:
+    concurrency:
+      group: native-application-migration-${{ github.ref }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -110,7 +125,7 @@ jobs:
         run: |
           rustup toolchain install nightly --profile minimal --component rustfmt --component clippy
           rustc +nightly --version | tee evidence/rust-version.txt
-      - name: Parse complete modified Rust files
+      - name: Parse complete native application files
         working-directory: franken_node
         run: |
           set -euo pipefail
