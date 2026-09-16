@@ -12,7 +12,9 @@
 //! ([`crate::security::lineage_tracker::classify_sensitive_source_path`] — the
 //! `.env` family, PEM/key/SSH/PKCS#12/credential files) has its bytes retained
 //! as a secret *sample* (bounded). Descriptor reads carry the classification
-//! captured at successful open; unknown descriptors are treated as sensitive.
+//! captured at successful open and any later inherited source classification;
+//! unknown descriptors are treated as sensitive. Copy and rename propagate
+//! sensitivity before the effect, including a copy that writes before failing.
 //! Before any subsequent network effect, the gate checks whether the outbound
 //! payload or destination CONTAINS a secret sample; if so — and absent a valid
 //! declassification (operator-authorized override, not yet wired) — the effect
@@ -27,6 +29,15 @@
 //! makes tracking incomplete for the rest of the run. Local I/O still works,
 //! but network effects fail closed rather than forgetting an exposed secret.
 //!
+//! File provenance uses conservative, case-insensitive basename labels, matching
+//! the existing sensitive-source classifier without assuming a provider's root.
+//! Moving directories or switching between absolute and relative paths cannot
+//! shed a derived label. Unrelated files with the same basename may therefore
+//! be overclassified. Labels persist for the run, including after failed I/O,
+//! unlink, replacement, or overwrite; label-budget exhaustion closes egress.
+//! This is not inode tracking and does not discover pre-existing filesystem
+//! aliases or mutations made outside this provider.
+//!
 //! Scope. This gate prevents secret NETWORK egress only. A local `fs.write`
 //! that copies a secret is labeled by the ledger for evidence but is not an
 //! external sink and is not blocked here. Following a secret through in-guest
@@ -36,7 +47,9 @@
 //! `ssrf_gated_host_io_egress` integration target.
 
 #[cfg(feature = "engine")]
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+#[cfg(feature = "engine")]
+use std::path::Path;
 #[cfg(feature = "engine")]
 use std::sync::Mutex;
 
@@ -62,6 +75,71 @@ const MAX_SECRET_SAMPLES: usize = 16;
 /// evict an active descriptor and accidentally classify an unknown one public.
 #[cfg(feature = "engine")]
 const MAX_TRACKED_DESCRIPTORS: usize = 1_024;
+#[cfg(feature = "engine")]
+const MAX_DERIVED_SOURCE_NAMES: usize = 1_024;
+#[cfg(feature = "engine")]
+const MAX_SOURCE_NAME_BYTES: usize = 4_096;
+
+#[cfg(feature = "engine")]
+struct DescriptorSource {
+    name: Option<String>,
+    sensitive_at_open: bool,
+}
+
+/// No stored label is ever evicted or downgraded. Name-based overclassification
+/// is preferable to claiming an inode identity the provider does not expose.
+#[cfg(feature = "engine")]
+#[derive(Default)]
+struct FileLineage {
+    sensitive_names: BTreeSet<String>,
+    incomplete: bool,
+}
+
+#[cfg(feature = "engine")]
+fn source_name(path: &str) -> Option<String> {
+    let name = Path::new(path).file_name()?.to_str()?;
+    if name.is_empty() || name.len() > MAX_SOURCE_NAME_BYTES || name.contains('\0') {
+        return None;
+    }
+    Some(name.to_ascii_lowercase())
+}
+
+#[cfg(feature = "engine")]
+impl FileLineage {
+    fn is_sensitive(&self, path: &str) -> bool {
+        classify_sensitive_source_path(path).is_some()
+            || source_name(path).is_none_or(|name| {
+                classify_sensitive_source_path(&name).is_some()
+                    || self.sensitive_names.contains(&name)
+            })
+    }
+
+    fn mark_sensitive(&mut self, path: &str) {
+        let Some(name) = source_name(path) else {
+            self.incomplete = true;
+            return;
+        };
+        if self.sensitive_names.contains(&name) {
+            return;
+        }
+        if self.sensitive_names.len() >= MAX_DERIVED_SOURCE_NAMES {
+            self.incomplete = true;
+        } else {
+            self.sensitive_names.insert(name);
+        }
+    }
+
+    fn prepare_transfer(&mut self, operation: FsOperation, source: &str, destination: &str) {
+        if self.is_sensitive(source) {
+            self.mark_sensitive(destination);
+        }
+        // An already-open source descriptor still refers to the renamed file.
+        // Never leave it public when its new name is a protected source name.
+        if operation == FsOperation::Rename && self.is_sensitive(destination) {
+            self.mark_sensitive(source);
+        }
+    }
+}
 
 #[cfg(feature = "engine")]
 #[derive(Default)]
@@ -100,7 +178,11 @@ pub struct FlowGatedHostIo<P: HostIoProvider> {
     /// Open guest descriptor -> whether its source is sensitive. Hold this
     /// lock across descriptor effects AND updates so concurrent close/reopen
     /// cannot change a read's provenance between the effect and observation.
-    descriptors: Mutex<BTreeMap<u64, bool>>,
+    descriptors: Mutex<BTreeMap<u64, DescriptorSource>>,
+    /// Lock order: lineage -> descriptors -> samples. Held through filesystem
+    /// effects/observations and network authorization/delegation, so a copy into
+    /// an open file cannot race a read or a network authorization on this gate.
+    lineage: Mutex<FileLineage>,
     trace_id: String,
 }
 
@@ -124,6 +206,7 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
             inner,
             secrets: Mutex::new(SecretSamples::default()),
             descriptors: Mutex::new(BTreeMap::new()),
+            lineage: Mutex::new(FileLineage::default()),
             trace_id: trace_id.into(),
         }
     }
@@ -162,6 +245,7 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
         operation: FsOperation,
         path: &str,
         arguments: &[String],
+        lineage: &FileLineage,
     ) -> HostIoOutcome {
         let mut descriptors = self.descriptors.lock().map_err(|_| HostIoError::Denied {
             reason: format!(
@@ -182,7 +266,13 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
                 },
             ) => {
                 if descriptors.len() < MAX_TRACKED_DESCRIPTORS || descriptors.contains_key(fd) {
-                    descriptors.insert(*fd, classify_sensitive_source_path(path).is_some());
+                    descriptors.insert(
+                        *fd,
+                        DescriptorSource {
+                            name: source_name(path),
+                            sensitive_at_open: lineage.is_sensitive(path),
+                        },
+                    );
                 }
             }
             (
@@ -193,7 +283,12 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
             ) => {
                 let known_public = descriptor_argument(arguments)
                     .and_then(|fd| descriptors.get(&fd))
-                    .is_some_and(|sensitive| !*sensitive);
+                    .is_some_and(|source| {
+                        !source.sensitive_at_open
+                            && source.name.as_ref().is_some_and(|name| {
+                                !lineage.sensitive_names.contains(name)
+                            })
+                    });
                 if !known_public {
                     self.record_secret(bytes);
                 }
@@ -225,7 +320,15 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
     /// outbound bytes contain a retained secret sample. A poisoned lock denies
     /// fail-closed. Check tracking completeness even for empty payloads:
     /// connecting is still a host effect.
-    fn gate_outbound(&self, outbound: &[u8]) -> Result<(), HostIoError> {
+    fn check_outbound(&self, outbound: &[u8], lineage: &FileLineage) -> Result<(), HostIoError> {
+        if lineage.incomplete {
+            return Err(HostIoError::Denied {
+                reason: format!(
+                    "flow_policy: incomplete file lineage; network egress denied ({})",
+                    self.trace_id
+                ),
+            });
+        }
         if self.descriptors.is_poisoned() {
             return Err(HostIoError::Denied {
                 reason: format!(
@@ -266,6 +369,14 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
         }
         Ok(())
     }
+
+    #[cfg(test)]
+    fn gate_outbound(&self, outbound: &[u8]) -> Result<(), HostIoError> {
+        let lineage = self.lineage.lock().map_err(|_| HostIoError::Denied {
+            reason: "flow_policy: file lineage lock poisoned".to_string(),
+        })?;
+        self.check_outbound(outbound, &lineage)
+    }
 }
 
 #[cfg(feature = "engine")]
@@ -279,6 +390,15 @@ impl<P: HostIoProvider> HostIoProvider for FlowGatedHostIo<P> {
     }
 
     fn perform(&self, request: &HostIoRequest, granted: &[HostIoCapability]) -> HostIoOutcome {
+        // A request lacking authority must not mutate provenance or reach the
+        // underlying mechanism. This check does not grant any extra read I/O.
+        let capability = request.required_capability();
+        if !granted.contains(&capability) {
+            return Err(HostIoError::CapabilityMissing { capability });
+        }
+        let mut lineage = self.lineage.lock().map_err(|_| HostIoError::Denied {
+            reason: format!("flow_policy: file lineage lock poisoned ({})", self.trace_id),
+        })?;
         match request {
             // Check both channels before the effect: a hostname can disclose
             // secret data during DNS resolution even with an empty payload.
@@ -286,21 +406,21 @@ impl<P: HostIoProvider> HostIoProvider for FlowGatedHostIo<P> {
             | HostIoRequest::NetworkRequest {
                 endpoint, payload, ..
             } => {
-                self.gate_outbound(endpoint.as_bytes())?;
-                self.gate_outbound(payload)?;
+                self.check_outbound(endpoint.as_bytes(), &lineage)?;
+                self.check_outbound(payload, &lineage)?;
                 self.inner.perform(request, granted)
             }
             // Receive opens a new outbound socket too. It has no payload, but
             // its endpoint is still a sink and incomplete tracking must deny.
             HostIoRequest::NetworkRecv { endpoint, .. } => {
-                self.gate_outbound(endpoint.as_bytes())?;
+                self.check_outbound(endpoint.as_bytes(), &lineage)?;
                 self.inner.perform(request, granted)
             }
             // A sensitive read registers a secret sample AFTER it succeeds; the
             // read itself is a source, not a sink, and is never blocked.
             HostIoRequest::FsRead { path } => {
                 let outcome = self.inner.perform(request, granted);
-                if classify_sensitive_source_path(path).is_some()
+                if lineage.is_sensitive(path)
                     && let Ok(HostIoResponse::FsRead { bytes }) = &outcome
                 {
                     self.record_secret(bytes);
@@ -312,7 +432,23 @@ impl<P: HostIoProvider> HostIoProvider for FlowGatedHostIo<P> {
                 path,
                 arguments,
                 ..
-            } => self.perform_descriptor_operation(request, granted, *operation, path, arguments),
+            } => self.perform_descriptor_operation(
+                request, granted, *operation, path, arguments, &lineage,
+            ),
+            HostIoRequest::FsMeta {
+                operation: operation @ (FsOperation::CopyFile | FsOperation::Rename),
+                path,
+                arguments,
+                ..
+            } => {
+                // Match the host's FIRST positional destination argument.
+                // Copy may write bytes and then fail (including in chmod), so
+                // waiting for a successful result would leave a laundering path.
+                if let Some(destination) = arguments.first() {
+                    lineage.prepare_transfer(*operation, path, destination);
+                }
+                self.inner.perform(request, granted)
+            }
             // Local mutations are not network sinks. Other FsMeta operations
             // expose metadata, not file contents: an exists, stat or readlink
             // result must not become a secret byte sample.
@@ -511,6 +647,104 @@ mod tests {
         let outcome = gate.perform(&request, &[HostIoCapability::NetworkRecv]);
         assert!(matches!(
             outcome,
+            Err(HostIoError::Denied { reason }) if reason.starts_with("flow_policy:")
+        ));
+    }
+
+    #[test]
+    fn copies_and_renames_propagate_without_a_prior_read() {
+        let mut lineage = FileLineage::default();
+        lineage.prepare_transfer(FsOperation::CopyFile, ".env", "staging/cache");
+        lineage.prepare_transfer(FsOperation::Rename, "staging/cache", "upload/body");
+        assert!(lineage.is_sensitive("/different/provider/root/upload/body"));
+        assert!(lineage.is_sensitive("./upload/body"));
+        assert!(lineage.is_sensitive("staging/cache"));
+        assert!(!lineage.is_sensitive("body-public"));
+    }
+
+    #[test]
+    fn public_transfers_do_not_consume_lineage_budget() {
+        let mut lineage = FileLineage::default();
+        for index in 0..=MAX_DERIVED_SOURCE_NAMES {
+            lineage.prepare_transfer(FsOperation::CopyFile, "public", &format!("copy-{index}"));
+            lineage.prepare_transfer(FsOperation::Rename, "public", &format!("move-{index}"));
+        }
+        assert!(lineage.sensitive_names.is_empty());
+        assert!(!lineage.incomplete);
+    }
+
+    #[test]
+    fn protected_rename_destination_taints_existing_source_identity() {
+        let mut lineage = FileLineage::default();
+        lineage.prepare_transfer(FsOperation::Rename, "public", ".env");
+        assert!(lineage.is_sensitive("public"));
+        // A copy creates a new object, unlike rename; the public source stays public.
+        let mut copied = FileLineage::default();
+        copied.prepare_transfer(FsOperation::CopyFile, "public", ".env");
+        assert!(!copied.is_sensitive("public"));
+    }
+
+    #[test]
+    fn derived_name_exhaustion_closes_egress_and_never_evicts() {
+        let gate = gate();
+        {
+            let mut lineage = gate.lineage.lock().expect("lineage");
+            for index in 0..MAX_DERIVED_SOURCE_NAMES {
+                lineage.mark_sensitive(&format!("file-{index}"));
+            }
+            lineage.mark_sensitive("file-0");
+            assert!(!lineage.incomplete);
+            lineage.mark_sensitive("overflow");
+            assert!(lineage.incomplete);
+            assert_eq!(lineage.sensitive_names.len(), MAX_DERIVED_SOURCE_NAMES);
+            assert!(lineage.is_sensitive("file-0"));
+        }
+        assert_denied(&gate, b"");
+        assert_denied(&gate, b"public payload");
+    }
+
+    #[test]
+    fn untrackable_source_names_never_become_public() {
+        let mut lineage = FileLineage::default();
+        assert!(lineage.is_sensitive(""));
+        assert!(lineage.is_sensitive("../"));
+        assert!(lineage.is_sensitive(".env/."));
+        lineage.mark_sensitive(&"x".repeat(MAX_SOURCE_NAME_BYTES + 1));
+        assert!(lineage.incomplete);
+        assert!(lineage.sensitive_names.is_empty());
+    }
+
+    #[test]
+    fn missing_capability_cannot_poison_source_provenance() {
+        let gate = gate();
+        let request = HostIoRequest::FsMeta {
+            operation: FsOperation::CopyFile,
+            path: ".env".into(),
+            arguments: vec!["otherwise-public".into()],
+            data: Vec::new(),
+        };
+        assert!(matches!(
+            gate.perform(&request, &[]),
+            Err(HostIoError::CapabilityMissing { .. })
+        ));
+        assert!(!gate.lineage.lock().expect("lineage").is_sensitive("otherwise-public"));
+    }
+
+    #[test]
+    fn poisoned_lineage_denies_network_and_is_not_recovered() {
+        let gate = gate();
+        let poisoned = std::panic::catch_unwind(|| {
+            let _guard = gate.lineage.lock().expect("lineage");
+            panic!("poison lineage for regression coverage");
+        });
+        assert!(poisoned.is_err());
+        assert_denied(&gate, b"");
+        let request = HostIoRequest::NetworkRecv {
+            endpoint: "public.example.invalid:443".into(),
+            max_len: 1,
+        };
+        assert!(matches!(
+            gate.perform(&request, &[HostIoCapability::NetworkRecv]),
             Err(HostIoError::Denied { reason }) if reason.starts_with("flow_policy:")
         ));
     }
