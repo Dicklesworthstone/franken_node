@@ -7,6 +7,7 @@ on:
       - '.github/workflows/native-migration-validation.yml'
       - 'crates/franken-node/src/migration/**'
       - 'crates/franken-node/tests/migrate_cli_e2e.rs'
+      - 'crates/franken-node/tests/native_project_suite_cli.rs'
       - 'tools/migration-validator/**'
       - 'crates/franken-node/Cargo.toml'
       - 'Cargo.toml'
@@ -16,6 +17,7 @@ on:
       - '.github/workflows/native-migration-validation.yml'
       - 'crates/franken-node/src/migration/**'
       - 'crates/franken-node/tests/migrate_cli_e2e.rs'
+      - 'crates/franken-node/tests/native_project_suite_cli.rs'
       - 'tools/migration-validator/**'
   workflow_dispatch:
 
@@ -23,6 +25,144 @@ permissions:
   contents: read
 
 jobs:
+  primary-module:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Compile the complete primary module with its real configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          mkdir -p evidence "$RUNNER_TEMP/primary-migration/tests"
+          harness="$RUNNER_TEMP/primary-migration"
+          source_root="$GITHUB_WORKSPACE/crates/franken-node/src"
+          cat > "$harness/Cargo.toml" <<'TOML'
+          [package]
+          name = "primary-migration-check"
+          version = "0.0.0"
+          edition = "2024"
+          [workspace]
+          [lib]
+          path = "lib.rs"
+          test = false
+          doctest = false
+          [features]
+          admin-tools = []
+          [dependencies]
+          anyhow = "1.0"
+          thiserror = "2.0"
+          serde = { version = "1.0", features = ["derive"] }
+          serde_json = "1.0"
+          sha2 = "0.11.0"
+          hex = "0.4.3"
+          chrono = "0.4.40"
+          tempfile = "3"
+          tree-sitter = "0.26.8"
+          tree-sitter-javascript = "0.25.0"
+          rustix = { version = "1.1.4", default-features = false, features = ["std", "fs", "process"] }
+          TOML
+          cat > "$harness/lib.rs" <<RUST
+          #![forbid(unsafe_code)]
+          extern crate self as frankenengine_node;
+          #[path = "$source_root/config/timeouts.rs"]
+          pub mod production_timeouts;
+          pub mod config { pub use crate::production_timeouts as timeouts; }
+          #[path = "$source_root/migration/mod.rs"]
+          pub mod migration;
+          RUST
+          cat > "$harness/tests/primary_dispatch.rs" <<'RUST'
+          use primary_migration_check::migration::{self, MigrationValidateReport};
+          use std::path::Path;
+
+          fn project() -> tempfile::TempDir {
+              let root = tempfile::tempdir().unwrap();
+              std::fs::write(root.path().join("package.json"),
+                  r#"{"name":"fixture","engines":{"node":">=20"}}"#).unwrap();
+              std::fs::write(root.path().join("package-lock.json"), "{}\n").unwrap();
+              std::fs::write(root.path().join("case.test.js"),
+                  "require('fs').writeFileSync('executed','unexpected');\n").unwrap();
+              root
+          }
+
+          fn no_guest_effects(root: &Path) {
+              assert!(!root.join("executed").exists());
+              assert!(!root.join(".franken-node").exists());
+          }
+
+          #[test]
+          fn static_only_preserves_the_four_check_contract_without_execution() {
+              let root = project();
+              let report = migration::run_validate(root.path(), true).unwrap();
+              assert!(report.is_pass());
+              assert_eq!(report.checks.len(), 4);
+              assert!(report.test_suite.is_none());
+              no_guest_effects(root.path());
+          }
+
+          #[test]
+          fn static_prerequisite_failure_does_not_launch_a_runtime() {
+              let root = project();
+              std::fs::write(root.path().join("package.json"),
+                  r#"{"name":"blocked","scripts":{"postinstall":"echo blocked"}}"#).unwrap();
+              let report = migration::run_validate(root.path(), false).unwrap();
+              assert!(!report.is_pass());
+              assert_eq!(report.checks.len(), 5);
+              assert!(!report.checks[4].passed);
+              assert!(report.checks[4].message.contains("static validation checks failed"));
+              assert!(report.test_suite.is_none());
+              no_guest_effects(root.path());
+          }
+
+          #[test]
+          fn primary_validation_and_report_refuse_invalid_suite_capture() {
+              let root = project();
+              let outside = tempfile::NamedTempFile::new().unwrap();
+              std::os::unix::fs::symlink(outside.path(), root.path().join("outside-link")).unwrap();
+              let report = migration::run_one_command_report(root.path()).unwrap();
+              assert!(!report.validation.is_pass());
+              assert!(report.validation.checks[4].message.contains("symlink"));
+              assert!(report.validation.test_suite.is_none());
+              assert_eq!(report.executive_summary.go_no_go, "no_go");
+              let rollout = report.rollout_plan.phases.iter().find(|p| p.name == "rollout").unwrap();
+              assert_eq!(rollout.status, "blocked");
+              no_guest_effects(root.path());
+          }
+
+          #[test]
+          fn reports_without_suite_evidence_still_round_trip() {
+              let root = project();
+              let report = migration::run_validate(root.path(), true).unwrap();
+              let encoded = serde_json::to_value(&report).unwrap();
+              assert!(encoded.get("test_suite").is_none());
+              let decoded: MigrationValidateReport = serde_json::from_value(encoded).unwrap();
+              assert_eq!(decoded, report);
+          }
+          RUST
+          git rev-parse HEAD > evidence/franken_node.revision
+          git ls-tree HEAD crates/franken-node/src/migration/mod.rs crates/franken-node/src/config/timeouts.rs crates/franken-node/tests/native_project_suite_cli.rs > evidence/primary-source-blobs.txt
+          rustc +stable --version > evidence/primary-rust-version.txt
+          rustfmt +stable --edition 2024 --config skip_children=true --emit stdout "$source_root/migration/mod.rs" > /dev/null
+          rustfmt +stable --edition 2024 --config skip_children=true --emit stdout crates/franken-node/tests/native_project_suite_cli.rs > /dev/null
+          cargo +stable check --manifest-path "$harness/Cargo.toml" --lib 2>&1 | tee evidence/primary-module-check.log
+          cargo +stable test --manifest-path "$harness/Cargo.toml" --test primary_dispatch -- --nocapture 2>&1 | tee evidence/primary-dispatch-tests.log
+          cargo +stable clippy --manifest-path "$harness/Cargo.toml" --lib -- -D warnings 2>&1 | tee evidence/primary-module-clippy.log
+      - name: Preserve primary module evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: primary-migration-module-evidence
+          path: |
+            evidence/
+            crates/franken-node/src/migration/mod.rs
+            crates/franken-node/src/config/timeouts.rs
+            crates/franken-node/tests/native_project_suite_cli.rs
+          retention-days: 7
+          if-no-files-found: error
+
   focused-suite:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -142,13 +282,14 @@ jobs:
         working-directory: franken_node
         run: |
           set -euo pipefail
-          for path in crates/franken-node/src/migration/mod.rs crates/franken-node/src/migration/smoke_supervisor.rs crates/franken-node/src/migration/validation_suite.rs crates/franken-node/tests/migrate_cli_e2e.rs; do
+          for path in crates/franken-node/src/migration/mod.rs crates/franken-node/src/migration/smoke_supervisor.rs crates/franken-node/src/migration/validation_suite.rs crates/franken-node/tests/migrate_cli_e2e.rs crates/franken-node/tests/native_project_suite_cli.rs; do
             rustfmt +nightly --edition 2024 --config skip_children=true --emit stdout "$path" > /dev/null
           done
       - name: Compile and run native admission regressions
         working-directory: franken_node
         run: |
           set -euo pipefail
+          cargo +nightly test -p frankenengine-node --features test-support --test migrate_cli_e2e native_project_suite_cli -- --nocapture --test-threads=2 2>&1 | tee ../evidence/primary-suite-cli.log
           cargo +nightly test -p frankenengine-node --features test-support --test migrate_cli_e2e native_smoke_admission_regressions -- --nocapture 2>&1 | tee ../evidence/native-admission.log
           cargo +nightly test -p frankenengine-node --features test-support --test migrate_cli_e2e native_smoke_supervisor -- --nocapture 2>&1 | tee ../evidence/native-supervisor-integration.log
           cargo +nightly test -p frankenengine-node --features test-support --test migrate_cli_e2e migrate_validate_native_failure_never_launches_hanging_reference -- --nocapture 2>&1 | tee ../evidence/no-reference-fallback.log
@@ -165,5 +306,6 @@ jobs:
             franken_node/crates/franken-node/src/migration/smoke_supervisor.rs
             franken_node/crates/franken-node/src/migration/validation_suite.rs
             franken_node/crates/franken-node/tests/migrate_cli_e2e.rs
+            franken_node/crates/franken-node/tests/native_project_suite_cli.rs
           retention-days: 7
           if-no-files-found: error
