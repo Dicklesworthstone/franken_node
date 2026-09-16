@@ -3,6 +3,9 @@
 //! successful native case is required to demonstrate positive admission;
 //! missing policy/engine capabilities must fail that test, never skip it.
 
+#[path = "native_rewrite_transactions.rs"]
+mod rewrite_transactions;
+
 use super::{TempDir, franken_node_command, native_smoke_supervisor, parse_json_stdout, repo_root};
 use std::path::Path;
 use std::process::Output;
