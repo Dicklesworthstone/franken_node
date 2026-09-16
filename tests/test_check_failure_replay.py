@@ -252,7 +252,7 @@ class TestExecutableReplay(unittest.TestCase):
         empty.mkdir()
         with self.assertRaisesRegex(ValueError, "complete nonempty"):
             replay.capture_migration(empty, baseline_command=self.command, migration_command=self.command)
-        with self.assertRaisesRegex(ValueError, "complete nonempty"):
+        with self.assertRaisesRegex(ValueError, "runtime executable not found"):
             replay.capture_migration(self.before, baseline_command=["/absent/node", "{test}"], migration_command=self.command)
 
     def test_duplicate_json_and_nonfinite_values_rejected(self):
@@ -313,6 +313,128 @@ class TestExecutableReplay(unittest.TestCase):
                                 capture_output=True, timeout=10, check=False)
         self.assertEqual(result.returncode, 2)
         self.assertIn(b"requires --execute", result.stderr)
+
+    def test_runtime_argv_drift_is_not_ordinary_replay(self):
+        artifact = self.capture()
+        with self.assertRaisesRegex(ValueError, "runtime provenance mismatch"):
+            replay.replay_migration(artifact, execute=True, baseline_command=self.command,
+                                    migration_command=[self.command[0], "--no-warnings", "{test}"])
+
+    def test_validator_drift_is_not_ordinary_replay(self):
+        artifact = self.capture()
+        artifact["runtime_bindings"]["validators"]["runner_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "runtime provenance mismatch"):
+            self.execute(replay.seal(artifact))
+
+    def test_changed_executable_bytes_are_rejected_before_launch(self):
+        wrapper = self.root / "node-launcher"
+        code = f"#!{sys.executable}\nimport os,sys\nos.execv({self.command[0]!r}, [{self.command[0]!r}, *sys.argv[1:]])\n"
+        wrapper.write_text(code, encoding="utf-8")
+        wrapper.chmod(0o755)
+        command = [str(wrapper), "{test}"]
+        artifact = replay.capture_migration(self.before, migrated_project=self.after,
+                                             baseline_command=command, migration_command=command)
+        marker = self.root / "changed-binary-must-not-run"
+        wrapper.write_text(f"#!{sys.executable}\nopen({str(marker)!r},'w').write('bad')\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "runtime provenance mismatch"):
+            replay.replay_migration(artifact, execute=True, baseline_command=command, migration_command=command)
+        self.assertFalse(marker.exists())
+
+    def test_byte_identical_executable_can_relocate(self):
+        code = f"#!{sys.executable}\nimport os,sys\nos.execv({self.command[0]!r}, [{self.command[0]!r}, *sys.argv[1:]])\n"
+        first, second = self.root / "first-launcher", self.root / "relocated-launcher"
+        for path in (first, second):
+            path.write_text(code, encoding="utf-8")
+            path.chmod(0o755)
+        artifact = replay.capture_migration(self.before, migrated_project=self.after,
+                                             baseline_command=[str(first), "{test}"], migration_command=self.command)
+        result = replay.replay_migration(artifact, execute=True, baseline_command=[str(second), "{test}"],
+                                         migration_command=self.command)
+        self.assertEqual(result["verdict"], "REPRODUCED")
+
+    def capture_argument_failure(self):
+        for directory in (self.before, self.after):
+            (directory / "app.test.js").write_text("console.log(process.argv[2]);", encoding="utf-8")
+        baseline = [self.command[0], "{test}", "expected"]
+        candidate = [self.command[0], "{test}", "wrong"]
+        artifact = replay.capture_migration(self.before, migrated_project=self.after,
+                                             baseline_command=baseline, migration_command=candidate)
+        return artifact, baseline, candidate
+
+    def test_fix_verification_executes_new_candidate_against_unchanged_reference(self):
+        artifact, baseline, _ = self.capture_argument_failure()
+        result = replay.replay_migration(artifact, execute=True, verify_fix=True,
+                                         baseline_command=baseline, migration_command=baseline)
+        self.assertEqual(result["verdict"], "FIX_VERIFIED")
+        self.assertEqual(result["recorded_validation_verdict"], "FAIL")
+        self.assertEqual(result["observed_validation_verdict"], "PASS")
+        self.assertEqual(result["reference_drift_tests"], [])
+        self.assertEqual(result["mode"], "fix-verification")
+        self.assertFalse(result["release_certification"])
+
+    def test_unchanged_failure_does_not_verify_a_fix(self):
+        artifact, baseline, candidate = self.capture_argument_failure()
+        result = replay.replay_migration(artifact, execute=True, verify_fix=True,
+                                         baseline_command=baseline, migration_command=candidate)
+        self.assertEqual(result["verdict"], "FIX_NOT_VERIFIED")
+        self.assertEqual(result["observed_validation_verdict"], "FAIL")
+
+    def test_changing_reference_command_is_forbidden_even_in_fix_mode(self):
+        artifact, _, candidate = self.capture_argument_failure()
+        with self.assertRaisesRegex(ValueError, "runtime provenance mismatch"):
+            replay.replay_migration(artifact, execute=True, verify_fix=True,
+                                    baseline_command=candidate, migration_command=candidate)
+
+    def test_reference_output_drift_blocks_false_fix_when_current_legs_agree(self):
+        key = "FRANKEN_REPLAY_TEST_REFERENCE_DRIFT"
+        old = os.environ.pop(key, None)
+        try:
+            (self.before / "app.test.js").write_text(f"console.log(process.env.{key} || 'expected');", encoding="utf-8")
+            artifact = self.capture()
+            os.environ[key] = "actual"
+            result = self.execute(artifact, verify_fix=True)
+            self.assertEqual(result["observed_validation_verdict"], "PASS")
+            self.assertEqual(result["verdict"], "REFERENCE_DRIFT")
+            self.assertEqual(result["reference_drift_tests"], ["app.test.js"])
+        finally:
+            if old is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old
+
+    def test_failed_reference_cannot_authorize_fix_verification(self):
+        (self.before / "app.test.js").write_text("process.exit(2);", encoding="utf-8")
+        artifact = self.capture()
+        with self.assertRaisesRegex(ValueError, "successful complete reference"):
+            self.execute(artifact, verify_fix=True)
+
+    def test_inspection_is_offline_and_does_not_expose_project_contents(self):
+        (self.before / ".env").write_text("VERY_PRIVATE_SECRET=value", encoding="utf-8")
+        artifact = self.capture()
+        result = replay.inspect_capsule(artifact, artifact["content_sha256"])
+        self.assertEqual(result["verdict"], "INTEGRITY_VALID")
+        self.assertFalse(result["executed"])
+        self.assertTrue(result["independently_pinned"])
+        self.assertNotIn("VERY_PRIVATE_SECRET", json.dumps(result))
+        self.assertNotIn("blobs", result)
+
+    def test_inspect_cli_does_not_require_available_runtime_commands(self):
+        capsule = replay.save_replay(self.capture(), self.root)
+        result = subprocess.run([sys.executable, replay.__file__, "--inspect", str(capsule), "--json",
+                                 "--baseline-command", '["/absent/runtime","{test}"]'],
+                                capture_output=True, timeout=10, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(json.loads(result.stdout)["executed"])
+
+    def test_fix_cli_reports_success_only_for_fixed_captured_cases(self):
+        artifact, baseline, _ = self.capture_argument_failure()
+        capsule = replay.save_replay(artifact, self.root)
+        result = subprocess.run([sys.executable, replay.__file__, "--replay", str(capsule), "--execute",
+                                 "--verify-fix", "--json", "--baseline-command", json.dumps(baseline),
+                                 "--migration-command", json.dumps(baseline)],
+                                capture_output=True, timeout=10, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["verdict"], "FIX_VERIFIED")
 
 
 if __name__ == "__main__":
