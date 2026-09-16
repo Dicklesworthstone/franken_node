@@ -1528,10 +1528,84 @@ fn spawn_pipe_reader(
     RuntimeSmokePipeReader { label, receiver }
 }
 
-fn read_to_end(mut reader: impl Read) -> io::Result<Vec<u8>> {
+// Keep runtime-controlled output bounded independently for stdout and stderr.
+// Overflow is an error, never a truncated stream that could produce a PASS.
+const MIGRATION_SMOKE_MAX_STREAM_BYTES: u64 = 16 * 1024 * 1024;
+
+fn read_to_end(reader: impl Read) -> io::Result<Vec<u8>> {
     let mut output = Vec::new();
-    reader.read_to_end(&mut output)?;
+    reader
+        .take(MIGRATION_SMOKE_MAX_STREAM_BYTES + 1)
+        .read_to_end(&mut output)?;
+    if u64::try_from(output.len()).unwrap_or(u64::MAX) > MIGRATION_SMOKE_MAX_STREAM_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("runtime smoke output exceeds {MIGRATION_SMOKE_MAX_STREAM_BYTES} bytes"),
+        ));
+    }
     Ok(output)
+}
+
+#[cfg(test)]
+mod migration_smoke_output_tests {
+    use super::*;
+
+    #[test]
+    fn empty_output_is_preserved() {
+        assert!(read_to_end(io::empty()).expect("empty stream").is_empty());
+    }
+
+    #[test]
+    fn binary_output_and_trailing_newlines_are_preserved() {
+        let bytes = [0, 0xff, b'a', b'\n', b'\n'];
+        assert_eq!(read_to_end(bytes.as_slice()).expect("binary output"), bytes);
+    }
+
+    #[test]
+    fn exact_output_cap_is_allowed() {
+        let bytes = read_to_end(io::repeat(b'x').take(MIGRATION_SMOKE_MAX_STREAM_BYTES))
+            .expect("exact cap");
+        assert_eq!(u64::try_from(bytes.len()).expect("bounded length"), MIGRATION_SMOKE_MAX_STREAM_BYTES);
+    }
+
+    #[test]
+    fn one_byte_over_output_cap_is_an_error_not_truncated_success() {
+        let reader = io::repeat(b'x').take(MIGRATION_SMOKE_MAX_STREAM_BYTES + 1);
+        let error = read_to_end(reader).expect_err("overflow must fail");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("runtime smoke output exceeds"));
+    }
+
+    #[test]
+    fn both_pipe_collectors_propagate_output_overflow() {
+        for label in ["stdout", "stderr"] {
+            let reader = spawn_pipe_reader(
+                io::repeat(b'x').take(MIGRATION_SMOKE_MAX_STREAM_BYTES + 1),
+                label,
+            );
+            let error = collect_pipe_reader(reader, Duration::from_secs(5))
+                .expect_err("a truncated pipe cannot become evidence");
+            let message = error.to_string();
+            assert!(message.contains(label), "{message}");
+            assert!(message.contains("output exceeds"), "{message}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_supervisor_timeout_remains_bounded_with_inherited_pipes() {
+        // Exercise the supervisor directly. The old CLI regression depended
+        // on falling back to Node after native failure, which is now forbidden.
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "(/bin/sleep 60 >&1 2>&2) & wait"]);
+        let started = Instant::now();
+        let error = run_command_with_timeout(&mut command, Duration::from_millis(200))
+            .expect_err("inherited-pipe subprocess must time out");
+        let message = error.to_string();
+        assert!(message.contains("timed out after"), "{message}");
+        assert!(!message.contains("termination failed"), "{message}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
 }
 
 fn collect_runtime_smoke_output(
