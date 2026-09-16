@@ -92,6 +92,15 @@ jobs:
            #[derive(Debug, Parser)]
            pub struct MigrateValidateArgs {
                /// Path to the project to validate.
+          @@ -4740,8 +4789,6 @@
+               /// Test JSON and serialization integrity in CLI structures
+               #[test]
+               fn negative_cli_serialization_integrity_validation() {
+          -        use serde_json;
+          -
+                   let serialization_test_result = std::panic::catch_unwind(|| {
+                       // Test CLI argument parsing and potential serialization
+                       let test_cases = vec![
           diff --git a/crates/franken-node/src/main.rs b/crates/franken-node/src/main.rs
           --- a/crates/franken-node/src/main.rs
           +++ b/crates/franken-node/src/main.rs
@@ -216,7 +225,7 @@ jobs:
           [dependencies]
           verified-primary = { path = "$primary" }
           anyhow = "1.0"
-          clap = { version = "4", features = ["derive"] }
+          clap = { version = "4.5.32", features = ["derive", "env"] }
           serde = { version = "1.0", features = ["derive"] }
           serde_json = "1.0"
           sha2 = "0.11"
