@@ -25,24 +25,24 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  focused-supervisor:
+  focused-suite:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Test the exact production module independently of the engine graph
+      - name: Compile and test the production suite and supervisor
         shell: bash
         run: |
           set -euo pipefail
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
-          mkdir -p evidence "$RUNNER_TEMP/supervisor-tests"
-          source_file="$GITHUB_WORKSPACE/crates/franken-node/src/migration/smoke_supervisor.rs"
-          rustfmt +stable --edition 2024 --check "$source_file"
-          cat > "$RUNNER_TEMP/supervisor-tests/Cargo.toml" <<'TOML'
+          mkdir -p evidence "$RUNNER_TEMP/suite-tests"
+          source_dir="$GITHUB_WORKSPACE/crates/franken-node/src/migration"
+          rustfmt +stable --edition 2024 --emit stdout "$source_dir/validation_suite.rs" > evidence/validation_suite.formatted.rs
+          cat > "$RUNNER_TEMP/suite-tests/Cargo.toml" <<'TOML'
           [package]
-          name = "native-smoke-supervisor-tests"
+          name = "native-validation-suite-tests"
           version = "0.0.0"
           edition = "2024"
           autotests = false
@@ -50,23 +50,29 @@ jobs:
           [dependencies]
           anyhow = "=1.0.104"
           rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process"] }
+          serde = { version = "1.0", features = ["derive"] }
+          serde_json = "1.0"
+          sha2 = "0.10"
+          tempfile = "3"
           [[test]]
-          name = "actual_supervisor"
-          path = "actual_supervisor.rs"
+          name = "actual_suite"
+          path = "actual_suite.rs"
           TOML
-          printf '#![forbid(unsafe_code)]\n#[path = "%s"]\nmod smoke_supervisor;\n' "$source_file" > "$RUNNER_TEMP/supervisor-tests/actual_supervisor.rs"
+          printf '#![forbid(unsafe_code)]\n#[path = "%s/smoke_supervisor.rs"]\nmod smoke_supervisor;\n#[path = "%s/validation_suite.rs"]\nmod validation_suite;\n' "$source_dir" "$source_dir" > "$RUNNER_TEMP/suite-tests/actual_suite.rs"
           git rev-parse HEAD > evidence/franken_node.revision
-          git ls-tree HEAD crates/franken-node/src/migration/smoke_supervisor.rs > evidence/source-blobs.txt
+          git ls-tree HEAD crates/franken-node/src/migration > evidence/source-tree.txt
           rustc +stable --version > evidence/rust-version.txt
-          cargo +stable test --manifest-path "$RUNNER_TEMP/supervisor-tests/Cargo.toml" --test actual_supervisor -- --nocapture 2>&1 | tee evidence/supervisor-tests.log
-          cargo +stable clippy --manifest-path "$RUNNER_TEMP/supervisor-tests/Cargo.toml" --tests -- -D warnings 2>&1 | tee evidence/supervisor-clippy.log
-      - name: Preserve supervisor evidence
+          node --version > evidence/node-version.txt
+          cargo +stable test --manifest-path "$RUNNER_TEMP/suite-tests/Cargo.toml" --test actual_suite -- --nocapture 2>&1 | tee evidence/suite-tests.log
+          cargo +stable clippy --manifest-path "$RUNNER_TEMP/suite-tests/Cargo.toml" --tests -- -D warnings 2>&1 | tee evidence/suite-clippy.log
+      - name: Preserve exact source and test evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: native-supervisor-evidence
+          name: native-validation-suite-evidence
           path: |
             evidence/
+            crates/franken-node/src/migration/validation_suite.rs
             crates/franken-node/src/migration/smoke_supervisor.rs
           retention-days: 7
           if-no-files-found: error
@@ -96,8 +102,6 @@ jobs:
             git clone --depth 1 "https://github.com/Dicklesworthstone/$repo.git" "$repo"
             git -C "$repo" rev-parse HEAD > "evidence/$repo.revision"
           done
-          # Supply real checkouts for the declared /dp dev-dependencies.
-          # Never edit dependency manifests or substitute test stubs.
           sudo mkdir -p /dp
           for repo in franken_node franken_engine frankentui fastapi_rust sqlmodel_rust asupersync frankensqlite; do
             sudo ln -s "$GITHUB_WORKSPACE/$repo" "/dp/$repo"
@@ -110,7 +114,7 @@ jobs:
         working-directory: franken_node
         run: |
           set -euo pipefail
-          for path in crates/franken-node/src/migration/mod.rs crates/franken-node/src/migration/smoke_supervisor.rs crates/franken-node/tests/migrate_cli_e2e.rs; do
+          for path in crates/franken-node/src/migration/mod.rs crates/franken-node/src/migration/smoke_supervisor.rs crates/franken-node/src/migration/validation_suite.rs crates/franken-node/tests/migrate_cli_e2e.rs; do
             rustfmt +nightly --edition 2024 --config skip_children=true --emit stdout "$path" > /dev/null
           done
       - name: Compile and run native admission regressions
@@ -121,7 +125,7 @@ jobs:
           cargo +nightly test -p frankenengine-node --features test-support --test migrate_cli_e2e native_smoke_supervisor -- --nocapture 2>&1 | tee ../evidence/native-supervisor-integration.log
           cargo +nightly test -p frankenengine-node --features test-support --test migrate_cli_e2e migrate_validate_native_failure_never_launches_hanging_reference -- --nocapture 2>&1 | tee ../evidence/no-reference-fallback.log
           cargo +nightly test -p frankenengine-node --features test-support --test migrate_cli_e2e migrate_validate_passes_for_hardened_project -- --nocapture 2>&1 | tee ../evidence/native-positive-smoke.log
-      - name: Preserve exact source and execution evidence
+      - name: Preserve native application build evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -131,6 +135,7 @@ jobs:
             franken_node/Cargo.lock
             franken_node/crates/franken-node/src/migration/mod.rs
             franken_node/crates/franken-node/src/migration/smoke_supervisor.rs
+            franken_node/crates/franken-node/src/migration/validation_suite.rs
             franken_node/crates/franken-node/tests/migrate_cli_e2e.rs
           retention-days: 7
           if-no-files-found: error
