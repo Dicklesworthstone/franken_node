@@ -224,7 +224,7 @@ impl Snapshot {
                 hash.update(part);
             }
         }
-        Ok(Self { entries, digest: format!("{:x}", hash.finalize()) })
+        Ok(Self { entries, digest: hex::encode(hash.finalize()) })
     }
 
     fn tests(&self) -> Result<Vec<PathBuf>> {
@@ -281,7 +281,7 @@ impl Invocation {
             hash.update(&buffer[..count]);
         }
         ensure!(same_file_version(&before, &file.metadata()?), "runtime binary changed during hashing");
-        Ok(RuntimeIdentity { executable: self.executable.clone(), sha256: format!("{:x}", hash.finalize()),
+        Ok(RuntimeIdentity { executable: self.executable.clone(), sha256: hex::encode(hash.finalize()),
             arguments_before_test: self.before.clone(), arguments_after_test: self.after.clone() })
     }
 
@@ -308,7 +308,7 @@ fn node_on_path() -> Result<PathBuf> {
 }
 
 fn observe(output: &Output) -> RunObservation {
-    let stream = |bytes: &[u8]| StreamObservation { bytes: bytes.len(), sha256: format!("{:x}", Sha256::digest(bytes)) };
+    let stream = |bytes: &[u8]| StreamObservation { bytes: bytes.len(), sha256: hex::encode(Sha256::digest(bytes)) };
     RunObservation { exit_code: output.status.code(), signal: output.status.signal(),
         stdout: stream(&output.stdout), stderr: stream(&output.stderr) }
 }
@@ -371,9 +371,9 @@ fn execute_suite(snapshot: &Snapshot, reference: &Invocation, native: &Invocatio
     Ok(report)
 }
 
-/// Called by native `migrate validate` after static admission. No tests retains
-/// the existing entrypoint smoke behavior; discovered tests may never fall back
-/// to a smoke PASS after a missing reference, capture failure or test failure.
+/// Optional-suite integration entrypoint for the product binary. The current
+/// standalone operator uses `run_project`; native migrate dispatch wiring is
+/// separate. Errors must never be converted to a single-entrypoint smoke PASS.
 pub fn run_if_present(project: &Path) -> Result<Option<SuiteReport>> {
     let deadline = Instant::now() + TOTAL_TIMEOUT;
     let snapshot = Snapshot::capture(project, deadline)?;
@@ -505,7 +505,7 @@ mod tests {
         let report = measured(project.path());
         assert_eq!(report.verdict, "PASS");
         for row in &report.cases {
-            assert_eq!(row.reference.as_ref().unwrap().stdout.sha256, format!("{:x}", Sha256::digest(b"original\n")));
+            assert_eq!(row.reference.as_ref().unwrap().stdout.sha256, hex::encode(Sha256::digest(b"original\n")));
         }
         assert_eq!(fs::read_to_string(project.path().join("value.txt")).unwrap(), "original");
     }
@@ -648,7 +648,7 @@ mod tests {
         write(project.path(), "case.test.js", "const fs=require('fs'); fs.unlinkSync('middle'); fs.symlinkSync('second','middle'); console.log(fs.readFileSync('alias','utf8'));");
         let report = measured(project.path());
         assert_eq!(report.verdict, "PASS");
-        assert_eq!(report.cases[0].native.as_ref().unwrap().stdout.sha256, format!("{:x}", Sha256::digest(b"second\n")));
+        assert_eq!(report.cases[0].native.as_ref().unwrap().stdout.sha256, hex::encode(Sha256::digest(b"second\n")));
         assert_eq!(fs::read_link(project.path().join("middle")).unwrap(), Path::new("first"));
     }
 
