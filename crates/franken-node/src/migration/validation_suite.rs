@@ -115,7 +115,8 @@ fn is_test(path: &Path) -> bool {
     let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
     let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
     let supported = ["js", "mjs", "cjs", "ts", "mts", "cts"].contains(&extension);
-    supported && (name.contains(".test.") || name.contains(".spec.")
+    supported && (name.strip_suffix(extension).is_some_and(|stem|
+        stem.ends_with(".test.") || stem.ends_with(".spec."))
         || path.parent().is_some_and(|parent| parent.components().any(|part|
             matches!(part, Component::Normal(name) if name == "test" || name == "__tests__"))))
 }
@@ -377,13 +378,29 @@ pub fn run_if_present(project: &Path) -> Result<Option<SuiteReport>> {
     let deadline = Instant::now() + TOTAL_TIMEOUT;
     let snapshot = Snapshot::capture(project, deadline)?;
     if snapshot.tests()?.is_empty() { return Ok(None); }
-    let executable = std::env::current_exe()?.canonicalize()?;
+    run_captured(project, &snapshot, &std::env::current_exe()?, deadline).map(Some)
+}
+
+/// Execute a nonempty captured project suite using an explicitly selected
+/// native product binary. This also supports independent CLI/library callers
+/// without incorrectly re-executing their own embedding process as a runtime.
+pub fn run_project(project: &Path, native_executable: &Path) -> Result<SuiteReport> {
+    let deadline = Instant::now() + TOTAL_TIMEOUT;
+    let snapshot = Snapshot::capture(project, deadline)?;
+    ensure!(!snapshot.tests()?.is_empty(), "no tests discovered; an empty suite cannot pass");
+    run_captured(project, &snapshot, native_executable, deadline)
+}
+
+fn run_captured(project: &Path, snapshot: &Snapshot, native_executable: &Path,
+    deadline: Instant) -> Result<SuiteReport> {
+    let executable = native_executable.canonicalize()?;
     let native = Invocation { executable: executable.clone(), before: vec!["run".into()],
         after: vec!["--runtime".into(), "franken-engine".into(), "--engine-bin".into(),
             executable.into_os_string(), "--console-only".into()] };
     let reference = Invocation { executable: node_on_path()?, before: vec![], after: vec![] };
     ensure!(!reference.executable.starts_with(project.canonicalize()?), "reference runtime must be outside the measured project");
-    execute_suite(&snapshot, &reference, &native, deadline, LEG_TIMEOUT).map(Some)
+    ensure!(!native.executable.starts_with(project.canonicalize()?), "native runtime must be outside the measured project");
+    execute_suite(snapshot, &reference, &native, deadline, LEG_TIMEOUT)
 }
 
 #[cfg(test)]
@@ -581,6 +598,7 @@ mod tests {
         let absent = Invocation { executable: project.path().join("absent"), before: vec![], after: vec![] };
         assert!(execute_suite(&snapshot, &absent, &node(true), deadline, Duration::from_secs(1)).is_err());
         assert!(!project.path().join("never").exists());
+        assert!(run_project(project.path(), &absent.executable).is_err());
     }
 
     #[test]
@@ -597,7 +615,7 @@ mod tests {
     fn discovery_is_sorted_and_excludes_state_and_backups() {
         let project = fixture();
         for path in ["z.spec.mjs", "test/plain.js", "a.test.ts", "__tests__/nested/x.cjs",
-            "node_modules/pkg/x.test.js", ".migrate-backup/a.test.js", ".franken-node/x.test.js", "helper.js"] {
+            "node_modules/pkg/x.test.js", ".migrate-backup/a.test.js", ".franken-node/x.test.js", "helper.js", "name.test.helper.js"] {
             write(project.path(), path, "//fixture");
         }
         let snapshot = Snapshot::capture(project.path(), Instant::now() + Duration::from_secs(5)).unwrap();
@@ -660,6 +678,7 @@ mod tests {
     fn capture_identity_binds_file_content_and_permissions() {
         let project = fixture();
         write(project.path(), "case.test.js", "console.log('ok');");
+        fs::set_permissions(project.path().join("case.test.js"), fs::Permissions::from_mode(0o644)).unwrap();
         let capture = || Snapshot::capture(project.path(), Instant::now() + Duration::from_secs(5)).unwrap().digest;
         let original = capture();
         assert_eq!(original, capture());
