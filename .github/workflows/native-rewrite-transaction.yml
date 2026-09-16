@@ -68,6 +68,45 @@ jobs:
            #[serde(deny_unknown_fields)]
            struct Journal {
                schema_version: String,
+          @@ -75,6 +78,16 @@
+               _lock: File,
+           }
+           
+          +impl Drop for RewriteTransaction {
+          +    fn drop(&mut self) {
+          +        // flock belongs to the open file description, not this descriptor.
+          +        // A concurrently spawned child can transiently inherit a duplicate
+          +        // before CLOEXEC closes it. Release when the owner ends, rather than
+          +        // leaving the next operation locked out until that duplicate closes.
+          +        let _ = flock(&self._lock, FlockOperation::Unlock);
+          +    }
+          +}
+          +
+           fn unique_name(prefix: &str) -> String {
+               static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+               let clock = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+          @@ -367,6 +380,22 @@
+               use std::fs;
+               use std::os::unix::fs::symlink;
+           
+          +    #[test]
+          +    fn owner_drop_releases_lock_even_when_a_duplicate_descriptor_remains() {
+          +        let root = tempfile::tempdir().unwrap();
+          +        let transaction = RewriteTransaction::open(root.path()).unwrap();
+          +        // A real dup shares the same kernel lock description as a forked child.
+          +        let inherited = transaction._lock.try_clone().unwrap();
+          +        assert!(RewriteTransaction::open(root.path()).is_err());
+          +        drop(transaction);
+          +        let next = RewriteTransaction::open(root.path()).unwrap();
+          +        drop(inherited);
+          +        assert!(RewriteTransaction::open(root.path()).is_err());
+          +        drop(next);
+          +        drop(RewriteTransaction::open(root.path()).unwrap());
+          +    }
+          +
+               fn project() -> tempfile::TempDir {
+                   let root = tempfile::tempdir().unwrap();
+                   fs::write(root.path().join("a.js"), b"before-a").unwrap();
           diff --git a/crates/franken-node/src/migration/mod.rs b/crates/franken-node/src/migration/mod.rs
           --- a/crates/franken-node/src/migration/mod.rs
           +++ b/crates/franken-node/src/migration/mod.rs
@@ -125,7 +164,7 @@ jobs:
           EOF
           cat > "$harness/nested.rs" <<EOF
           #![forbid(unsafe_code)]
-          mod migration {
+          pub mod migration {
               #[path = "$GITHUB_WORKSPACE/crates/franken-node/src/migration/rewrite_transaction.rs"]
               pub mod rewrite_transaction;
           }
@@ -143,7 +182,7 @@ jobs:
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
             git add -- crates/franken-node/src/migration/rewrite_transaction.rs crates/franken-node/src/migration/mod.rs
-            git commit -m 'feat(migration): expose tested rollback through the production transaction writer'
+            git commit -m 'feat(migration): expose transaction rollback with owner-bound lock release'
             git fetch origin main
             git rebase origin/main
             git push origin HEAD:main
