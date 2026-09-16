@@ -40,7 +40,9 @@ use std::io::Write as _;
 #[cfg(all(feature = "engine", target_os = "linux"))]
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
+#[cfg(all(feature = "engine", not(target_os = "linux")))]
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 #[cfg(all(feature = "engine", target_os = "linux"))]
