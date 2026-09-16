@@ -760,6 +760,54 @@ mod flow_gate_regressions {
     }
 
     #[test]
+    fn destinations_are_checked_before_network_delegation_including_receive() {
+        let root = tempfile::tempdir().expect("scratch root");
+        std::fs::write(root.path().join(".env"), b"secret-host-label")
+            .expect("hostname secret fixture");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = probe(root.path(), &calls);
+        read_path(&gate, ".env", b"secret-host-label");
+        let forbidden_endpoint = "secret-host-label.example.invalid:443";
+        for mut request in sinks(b"") {
+            match &mut request {
+                HostIoRequest::NetworkSend { endpoint, .. }
+                | HostIoRequest::NetworkRequest { endpoint, .. } => {
+                    *endpoint = forbidden_endpoint.into();
+                }
+                other => panic!("unexpected payload sink: {other:?}"),
+            }
+            assert_flow_denied(&gate, &calls, &request);
+        }
+        let forbidden_receive = HostIoRequest::NetworkRecv {
+            endpoint: forbidden_endpoint.into(),
+            max_len: 4096,
+        };
+        assert_flow_denied(&gate, &calls, &forbidden_receive);
+        let public_receive = HostIoRequest::NetworkRecv {
+            endpoint: "public.example.invalid:443".into(),
+            max_len: 4096,
+        };
+        assert_probe_reached(&gate, &calls, &public_receive);
+    }
+
+    #[test]
+    fn incomplete_tracking_cannot_be_bypassed_with_a_receive_only_connection() {
+        let root = tempfile::tempdir().expect("scratch root");
+        std::fs::write(root.path().join(".env"), b"x").expect("untrackable secret");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = probe(root.path(), &calls);
+        read_path(&gate, ".env", b"x");
+        assert_flow_denied(
+            &gate,
+            &calls,
+            &HostIoRequest::NetworkRecv {
+                endpoint: "public.example.invalid:443".into(),
+                max_len: 4096,
+            },
+        );
+    }
+
+    #[test]
     fn composed_gates_block_secret_socket_and_send_public_bytes_to_real_listener() {
         let root = tempfile::tempdir().expect("scratch root");
         let secret = b"real-loopback-secret";
