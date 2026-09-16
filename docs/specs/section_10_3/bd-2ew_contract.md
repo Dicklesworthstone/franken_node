@@ -44,7 +44,7 @@ franken-node migrate rewrite /path/to/project --json
 franken-node migrate rewrite /path/to/project --apply --json
 ```
 
-The command's transformation rules are unchanged. Applying a proposal does not prove JavaScript behavioral equivalence. Use migration validation against the preserved original and rewritten inputs before making deployment decisions; see [bd-2st_contract.md](bd-2st_contract.md).
+The command's transformation rules are unchanged. Ordinary `--apply` does not prove JavaScript behavioral equivalence. Add `--verify` for the checked installation path described below, or use migration validation against preserved original and rewritten inputs before making deployment decisions; see [bd-2st_contract.md](bd-2st_contract.md).
 
 ### Complete-plan preflight and installation
 
@@ -74,7 +74,7 @@ A dry run does not recover an interrupted apply. It remains nonmutating and may 
 
 This is **recoverable multi-file installation**, not a filesystem-wide atomic transaction. Other processes can observe intermediate replacements, and advisory locks do not stop arbitrary editors. The final source check and rename are not an atomic compare-and-swap against an uncooperative writer. Directory handles prevent ordinary symlink redirection but do not make privileged concurrent directory renames safe. Journals are private local recovery records, not signed certificates, and same-privilege journal forgery is outside this mechanism's trust boundary.
 
-Tests cover complete application, late backup conflicts, source-mode preservation, plan overflow, symlink/hardlink refusal, interrupted partial/final installation, corrupt recovery data, unrelated edits, and a real child process that exits without running destructors. Process-crash recovery is exercised; sudden storage-device power loss is not simulated. No full-environment capture, autonomous rollout, semantic transformation proof or runtime-equivalence gate is added by this writer. Non-Linux builds retain the existing per-file write mechanism.
+Tests cover complete application, late backup conflicts, source-mode preservation, plan overflow, symlink/hardlink refusal, interrupted partial/final installation, corrupt recovery data, unrelated edits, and a real child process that exits without running destructors. Process-crash recovery is exercised; sudden storage-device power loss is not simulated. No full-environment capture, autonomous rollout, semantic transformation proof or runtime-equivalence gate is added by this writer itself. Non-Linux builds retain the existing per-file write mechanism.
 
 The public-API regressions live in `crates/franken-node/tests/native_rewrite_transactions.rs`, included by the registered `migrate_cli_e2e` target. They exercise the actual `run_rewrite` implementation rather than a substitute writer:
 
@@ -84,6 +84,28 @@ rch exec -- cargo test -p frankenengine-node --features test-support \
 ```
 
 The read-only `Native rewrite transactions` workflow additionally compiles the exact transaction module in standalone and nested layouts and compiles the complete primary migration module with its production timeout configuration. These focused builds do not substitute for a full product/engine build.
+
+## Checked Application Before Installation (Linux)
+
+```bash
+franken-node migrate rewrite /path/to/project --apply --verify --json
+```
+
+`--verify` opts into execution-backed installation. It requires `--apply` and cannot be combined with `--emit-rollback`; the checked report already contains the planned original/replacement entries, and successful installation preserves the writer's backups and journal. Ordinary dry runs and ordinary `--apply` keep their existing behavior and do not implicitly execute tests.
+
+The checked path holds the cooperative transaction lock from recovery through installation. After recovering any previous pending transaction, it captures the project once. Static validation and the real rewrite planner run on a private copy of that captured input. Static prerequisites must pass and every manual-review item must be resolved before either runtime executes.
+
+The candidate is built only from exact captured file preimages and the planner's complete replacement list. Original inputs run on installed Node; the candidate runs on the invoked native product with the existing native-engine and policy checks. Every discovered test starts from its own fresh workspace. A nonempty, complete passing suite is mandatory, including both successful exits, exact stdout/stderr and persistent filesystem-delta agreement. Matching failures, infrastructure errors, missing observations, missing tests and partial runs never authorize installation. There is no entrypoint-smoke rescue and no reference-success fallback.
+
+After a passing comparison, a new capture of the entire live input must still match the original digest, including unedited dependencies and configuration. Only then does the recoverable transaction writer install the exact measured replacement list. Backup conflicts and stale preimages retain their existing fail-closed behavior. An unchanged proposal still requires successful execution; it does not bypass validation.
+
+Checked JSON uses `franken-node/checked-rewrite/v1`. It retains `static_validation`, `rewrite`, `validation`, and `errors` as they become available. `status` is `APPLIED`, `UNCHANGED`, `REJECTED`, or `ERROR`. The first two return exit 0, measured or prerequisite rejection returns 1, and infrastructure/input/installation errors return 2. Reports on rejection keep `rewrites_applied=0` and retain any completed differential observations. Normal usage errors still use the existing migration error handler. Non-Linux checked apply is refused.
+
+Reports contain the existing rewrite planner's source preimages and replacements; they can disclose private code or embedded credentials. Redirect JSON only to a private destination outside the measured input. Differential observations themselves contain output and file hashes, not raw output streams. `release_certification` is always false.
+
+This is not an operating-system sandbox. Execute only trusted projects: absolute paths, network access and ambient authority remain available subject to the selected runtimes' normal policies. Filesystem comparison excludes `.git` entries and root `.franken-node` state and does not observe transient writes or external effects. The input recheck and installation are not an atomic operation against an uncooperative editor. Recovery of an earlier interrupted transaction may change sources before the new checked proposal is assessed; rejecting a new proposal guarantees that proposal is not installed, not that recovery or arbitrary guest code made no changes.
+
+The implementation lives in `verified_rewrite.rs` and the production suite's `rewrite_candidate.rs` child module. Regression coverage uses actual planner/static-validation code, the actual capture/observer/supervisor, and the actual transaction writer with explicitly identified Node/Node executions. Those tests establish orchestration and refusal behavior, not native Franken compatibility or general semantic equivalence. Native failure-capsule export, autonomous deployment and release certification remain separate work.
 
 ## Invariants
 
@@ -98,6 +120,8 @@ The read-only `Native rewrite transactions` workflow additionally compiles the e
 7. Linux apply preflights the complete plan and writes a recovery journal before
    its first live source replacement. Recovery never overwrites an unrelated edit.
 8. Rollback entries are never truncated to fit a diagnostic retention cap.
+9. Checked apply installs only the measured replacement plan after a complete
+   nonempty process/filesystem PASS and a fresh captured-input identity check.
 
 ## References
 
