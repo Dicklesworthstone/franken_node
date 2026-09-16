@@ -111,6 +111,15 @@ def reduce_lines(lines: list[bytes], interesting) -> list[bytes]:
     return current
 
 
+def validate_limits(max_executions: int, seconds: float, confirmations: int) -> None:
+    if type(confirmations) is not int or not 2 <= confirmations <= 8:
+        raise ValueError("confirmations must be an integer between 2 and 8")
+    if type(max_executions) is not int or not 2 * confirmations <= max_executions <= MAX_EXECUTIONS:
+        raise ValueError("execution budget must cover initial/final confirmations and stay within 4096")
+    if type(seconds) not in {int, float} or not math.isfinite(seconds) or not 0 < seconds <= MAX_SECONDS:
+        raise ValueError("reduction time budget must be finite, positive, and at most 3600 seconds")
+
+
 def minimize_migration(artifact: dict, *, execute: bool = False,
                        baseline_command=runner.DEFAULT_BASELINE_COMMAND,
                        migration_command=runner.DEFAULT_MIGRATION_COMMAND,
@@ -126,12 +135,7 @@ def minimize_migration(artifact: dict, *, execute: bool = False,
     """
     if not execute:
         raise ValueError("minimization requires execute=True / --execute consent")
-    if type(confirmations) is not int or not 2 <= confirmations <= 8:
-        raise ValueError("confirmations must be an integer between 2 and 8")
-    if type(max_executions) is not int or not 2 * confirmations <= max_executions <= MAX_EXECUTIONS:
-        raise ValueError("execution budget must cover initial/final confirmations and stay within 4096")
-    if type(seconds) not in {int, float} or not math.isfinite(seconds) or not 0 < seconds <= MAX_SECONDS:
-        raise ValueError("reduction time budget must be finite, positive, and at most 3600 seconds")
+    validate_limits(max_executions, seconds, confirmations)
     started = time.monotonic()
     deadline = started + seconds
     search_deadline = started + seconds * 0.8
@@ -267,9 +271,50 @@ def minimize_migration(artifact: dict, *, execute: bool = False,
     return minimized
 
 
+def export_capsule(artifact: dict, destination: Path, *, seconds: float = 60) -> dict:
+    """Restore inspectable repro workspaces without executing captured commands.
+
+    Only a new private directory is accepted. On an I/O error a partial export
+    may remain, but no success manifest is written before both input hashes are
+    checked. Source content and dependencies remain sensitive, even minimized.
+    """
+    if type(seconds) not in {int, float} or not math.isfinite(seconds) or not 0 < seconds <= MAX_SECONDS:
+        raise ValueError("invalid export time budget")
+    deadline = time.monotonic() + seconds
+    snapshots = replay.validate_capsule(artifact)
+    destination = Path(destination)
+    destination.mkdir(mode=0o700)
+    digests = {}
+    for leg in replay.LEGS:
+        workspace = destination / leg
+        runner.stage_project(snapshots[leg], workspace, deadline)
+        _, digest = runner.capture_project(workspace, deadline)
+        digests[f"{leg}_sha256"] = digest
+    if digests != artifact["expected"]["inputs"]:
+        raise ValueError("exported workspace input digest mismatch")
+    manifest = {"schema_version": "migration-repro-workspaces-v1",
+                "content_sha256": artifact["content_sha256"], "inputs": digests,
+                "validation_verdict": artifact["expected"]["validation_verdict"],
+                "commands_are_diagnostic_only": True, "executed": False,
+                "recorded_commands": artifact["recorded_commands"],
+                "runtime_bindings": artifact["runtime_bindings"]}
+    descriptor = os.open(destination / "reproduction.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(replay.canonical_bytes(manifest) + b"\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    return manifest
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("capsule", type=Path)
+    parser.add_argument("capsule", type=Path, nargs="?")
+    parser.add_argument("--capture", type=Path, help="capture, persist and reduce a live project failure")
+    parser.add_argument("--migrated-project", type=Path)
+    parser.add_argument("--capture-out", type=Path, help="save original capsule BEFORE reduction; required with --capture")
+    parser.add_argument("--compare-filesystem", action="store_true", help="capture persistent filesystem effects")
+    parser.add_argument("--timeout-seconds", type=float, default=30, help="per-leg timeout for capture")
+    parser.add_argument("--export-dir", type=Path, help="new private directory for inspectable repro workspaces")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--out", type=Path, required=True, help="new private replay capsule; never overwrite")
     parser.add_argument("--source-file", action="append", help="shared JS/TS path; default: failing test files")
@@ -281,24 +326,64 @@ def main() -> int:
     parser.add_argument("--confirmations", type=int, default=2)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
+    if (args.capsule is None) == (args.capture is None):
+        parser.error("provide exactly one capsule path or --capture PROJECT")
+    if args.capture and args.capture_out is None:
+        parser.error("--capture requires --capture-out to retain the original before reduction")
+    if not args.capture and (args.capture_out or args.migrated_project or args.compare_filesystem):
+        parser.error("capture-only options cannot modify an existing capsule")
+    preserved = {}
     try:
         if not args.execute:
             raise ValueError("--execute is required: captured programs run with your authority")
-        if os.path.lexists(args.out):
-            raise ValueError("output already exists; refusing to execute or overwrite")
-        artifact = minimize_migration(replay.load_replay(args.capsule), execute=True,
-                                      baseline_command=args.baseline_command, migration_command=args.migration_command,
-                                      source_files=args.source_file, expected_sha256=args.expected_sha256,
-                                      max_executions=args.max_executions, seconds=args.seconds,
-                                      confirmations=args.confirmations)
-        replay.write_capsule(artifact, args.out)
-        result = {"verdict": "REDUCED" if artifact["minimized"] else "UNCHANGED",
-                  "path": str(args.out), "content_sha256": artifact["content_sha256"],
-                  "validation_verdict": artifact["expected"]["validation_verdict"],
-                  "minimization": artifact["minimization"]}
-        code = 0 if result["verdict"] == "REDUCED" else 1
+        validate_limits(args.max_executions, args.seconds, args.confirmations)
+        destinations = [path for path in (args.out, args.capture_out, args.export_dir) if path is not None]
+        if len({path.resolve() for path in destinations}) != len(destinations):
+            raise ValueError("capture, reduction and export destinations must be distinct")
+        for path in destinations:
+            if os.path.lexists(path):
+                raise ValueError("output already exists; refusing to execute or overwrite")
+            if not path.parent.is_dir():
+                raise ValueError("output parent directory must already exist")
+        started = time.monotonic()
+        if args.capture:
+            if args.expected_sha256:
+                raise ValueError("--expected-sha256 pins an existing capsule, not a new capture")
+            artifact = replay.capture_migration(args.capture, migrated_project=args.migrated_project,
+                                                 baseline_command=args.baseline_command,
+                                                 migration_command=args.migration_command,
+                                                 timeout_seconds=args.timeout_seconds,
+                                                 total_timeout_seconds=args.seconds,
+                                                 compare_filesystem=args.compare_filesystem)
+            # Keep the full failing input even if reduction is interrupted,
+            # exhausts its budget, or finds a non-reproducible original.
+            replay.write_capsule(artifact, args.capture_out)
+            preserved = {"captured_capsule": str(args.capture_out),
+                         "captured_sha256": artifact["content_sha256"]}
+        else:
+            artifact = replay.load_replay(args.capsule)
+        if args.capture and artifact["expected"]["validation_verdict"] == "PASS":
+            result, code = {"verdict": "NO_FAILURE", "validation_verdict": "PASS", **preserved}, 0
+        else:
+            remaining = args.seconds - (time.monotonic() - started)
+            artifact = minimize_migration(artifact, execute=True,
+                                          baseline_command=args.baseline_command, migration_command=args.migration_command,
+                                          source_files=args.source_file, expected_sha256=args.expected_sha256,
+                                          max_executions=args.max_executions, seconds=remaining,
+                                          confirmations=args.confirmations)
+            replay.write_capsule(artifact, args.out)
+            preserved.update(reduced_capsule=str(args.out), reduced_sha256=artifact["content_sha256"])
+            result = {"verdict": "REDUCED" if artifact["minimized"] else "UNCHANGED",
+                      "path": str(args.out), "content_sha256": artifact["content_sha256"],
+                      "validation_verdict": artifact["expected"]["validation_verdict"],
+                      "minimization": artifact["minimization"], **preserved}
+            if args.export_dir:
+                # Export has its own bounded, non-executing staging allowance.
+                export_capsule(artifact, args.export_dir)
+                result["export_dir"] = str(args.export_dir)
+            code = 0 if result["verdict"] == "REDUCED" else 1
     except (OSError, ValueError, TypeError, KeyError, RecursionError, ReductionBudgetExhausted) as error:
-        result, code = {"verdict": "ERROR", "error": str(error)}, 2
+        result, code = {"verdict": "ERROR", "error": str(error), **preserved}, 2
     print(json.dumps(result, indent=2, allow_nan=False) if args.json else f"{result['verdict']}: {json.dumps(result)}")
     return code
 
