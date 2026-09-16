@@ -15,6 +15,8 @@
 //! captured at successful open and any later inherited source classification;
 //! unknown descriptors are treated as sensitive. Copy and rename propagate
 //! sensitivity before the effect, including a copy that writes before failing.
+//! Observed rename/symlink relationships remain live: a later sensitive copy
+//! into their target also reclassifies aliases and previously opened descriptors.
 //! Before any subsequent network effect, the gate checks whether the outbound
 //! payload or destination CONTAINS a secret sample; if so — and absent a valid
 //! declassification (operator-authorized override, not yet wired) — the effect
@@ -79,6 +81,8 @@ const MAX_TRACKED_DESCRIPTORS: usize = 1_024;
 const MAX_DERIVED_SOURCE_NAMES: usize = 1_024;
 #[cfg(feature = "engine")]
 const MAX_SOURCE_NAME_BYTES: usize = 4_096;
+#[cfg(feature = "engine")]
+const MAX_FILE_ALIAS_EDGES: usize = 1_024;
 
 #[cfg(feature = "engine")]
 struct DescriptorSource {
@@ -92,6 +96,11 @@ struct DescriptorSource {
 #[derive(Default)]
 struct FileLineage {
     sensitive_names: BTreeSet<String>,
+    /// Sticky, undirected name relationships for objects reached by rename or
+    /// symlink. Copies deliberately do NOT equate identities: later mutations
+    /// of an independent public copy must not mark its original source secret.
+    aliases: BTreeMap<String, BTreeSet<String>>,
+    alias_edge_count: usize,
     incomplete: bool,
 }
 
@@ -107,11 +116,52 @@ fn source_name(path: &str) -> Option<String> {
 #[cfg(feature = "engine")]
 impl FileLineage {
     fn is_sensitive(&self, path: &str) -> bool {
-        classify_sensitive_source_path(path).is_some()
-            || source_name(path).is_none_or(|name| {
-                classify_sensitive_source_path(&name).is_some()
-                    || self.sensitive_names.contains(&name)
-            })
+        if classify_sensitive_source_path(path).is_some() {
+            return true;
+        }
+        let Some(name) = source_name(path) else {
+            return true;
+        };
+        // Each name is visited once. The stored edge cap also bounds this
+        // traversal and its temporary worklist, including cycles/self-links.
+        let mut visited = BTreeSet::new();
+        let mut pending = vec![name.as_str()];
+        while let Some(current) = pending.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            if classify_sensitive_source_path(current).is_some()
+                || self.sensitive_names.contains(current)
+            {
+                return true;
+            }
+            if let Some(neighbors) = self.aliases.get(current) {
+                pending.extend(neighbors.iter().map(String::as_str));
+            }
+        }
+        false
+    }
+
+    fn link_names(&mut self, source: &str, destination: &str) {
+        let (Some(left), Some(right)) = (source_name(source), source_name(destination)) else {
+            // For example, a link to a directory '..' has no final source
+            // name. Its alias cannot be declared public on that basis.
+            self.mark_sensitive(destination);
+            return;
+        };
+        if left == right {
+            return;
+        }
+        if self.aliases.get(&left).is_some_and(|neighbors| neighbors.contains(&right)) {
+            return;
+        }
+        if self.alias_edge_count >= MAX_FILE_ALIAS_EDGES {
+            self.incomplete = true;
+        } else {
+            self.aliases.entry(left.clone()).or_default().insert(right.clone());
+            self.aliases.entry(right).or_default().insert(left);
+            self.alias_edge_count += 1;
+        }
     }
 
     fn mark_sensitive(&mut self, path: &str) {
@@ -130,6 +180,9 @@ impl FileLineage {
     }
 
     fn prepare_transfer(&mut self, operation: FsOperation, source: &str, destination: &str) {
+        if matches!(operation, FsOperation::Rename | FsOperation::Symlink) {
+            self.link_names(source, destination);
+        }
         if self.is_sensitive(source) {
             self.mark_sensitive(destination);
         }
@@ -286,7 +339,7 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
                     .is_some_and(|source| {
                         !source.sensitive_at_open
                             && source.name.as_ref().is_some_and(|name| {
-                                !lineage.sensitive_names.contains(name)
+                                !lineage.is_sensitive(name)
                             })
                     });
                 if !known_public {
@@ -436,7 +489,7 @@ impl<P: HostIoProvider> HostIoProvider for FlowGatedHostIo<P> {
                 request, granted, *operation, path, arguments, &lineage,
             ),
             HostIoRequest::FsMeta {
-                operation: operation @ (FsOperation::CopyFile | FsOperation::Rename),
+                operation: operation @ (FsOperation::CopyFile | FsOperation::Rename | FsOperation::Symlink),
                 path,
                 arguments,
                 ..
@@ -572,6 +625,10 @@ mod tests {
             Some(12)
         );
         assert_eq!(
+            descriptor_argument(&["fd=12".into(), "fd=7".into()]),
+            Some(12)
+        );
+        assert_eq!(
             descriptor_argument(&["fd=invalid".into(), "fd=7".into()]),
             None
         );
@@ -663,9 +720,9 @@ mod tests {
     }
 
     #[test]
-    fn public_transfers_do_not_consume_lineage_budget() {
+    fn public_transfers_do_not_mark_sensitive_names() {
         let mut lineage = FileLineage::default();
-        for index in 0..=MAX_DERIVED_SOURCE_NAMES {
+        for index in 0..64 {
             lineage.prepare_transfer(FsOperation::CopyFile, "public", &format!("copy-{index}"));
             lineage.prepare_transfer(FsOperation::Rename, "public", &format!("move-{index}"));
         }
@@ -747,5 +804,62 @@ mod tests {
             gate.perform(&request, &[HostIoCapability::NetworkRecv]),
             Err(HostIoError::Denied { reason }) if reason.starts_with("flow_policy:")
         ));
+    }
+
+    #[test]
+    fn aliases_and_renamed_descriptors_follow_later_target_taint() {
+        let mut lineage = FileLineage::default();
+        lineage.prepare_transfer(FsOperation::Symlink, "target", "alias");
+        lineage.prepare_transfer(FsOperation::Rename, "alias", "moved-alias");
+        lineage.prepare_transfer(FsOperation::Rename, "target", "new-target");
+        assert!(!lineage.is_sensitive("moved-alias"));
+        lineage.prepare_transfer(FsOperation::CopyFile, ".env", "new-target");
+        for name in ["target", "new-target", "alias", "moved-alias"] {
+            assert!(lineage.is_sensitive(name), "lost taint at {name}");
+        }
+    }
+
+    #[test]
+    fn public_copy_does_not_alias_its_source_for_later_taint() {
+        let mut lineage = FileLineage::default();
+        lineage.prepare_transfer(FsOperation::CopyFile, "source", "copy");
+        lineage.prepare_transfer(FsOperation::CopyFile, ".env", "copy");
+        assert!(lineage.is_sensitive("copy"));
+        assert!(!lineage.is_sensitive("source"));
+    }
+
+    #[test]
+    fn alias_cycles_are_bounded_and_duplicate_edges_cost_no_budget() {
+        let mut lineage = FileLineage::default();
+        lineage.link_names("a", "b");
+        lineage.link_names("b", "c");
+        lineage.link_names("c", "a");
+        lineage.link_names("b", "a");
+        lineage.link_names("a", "a");
+        assert_eq!(lineage.alias_edge_count, 3);
+        assert!(!lineage.is_sensitive("a"));
+        lineage.mark_sensitive("c");
+        assert!(lineage.is_sensitive("a"));
+        assert!(lineage.is_sensitive("b"));
+    }
+
+    #[test]
+    fn alias_exhaustion_is_sticky_and_retains_old_relationships() {
+        let gate = gate();
+        {
+            let mut lineage = gate.lineage.lock().expect("lineage");
+            for index in 0..MAX_FILE_ALIAS_EDGES {
+                lineage.link_names("target", &format!("alias-{index}"));
+            }
+            lineage.link_names("alias-0", "target");
+            assert!(!lineage.incomplete);
+            lineage.link_names("target", "one-too-many");
+            assert!(lineage.incomplete);
+            assert_eq!(lineage.alias_edge_count, MAX_FILE_ALIAS_EDGES);
+            lineage.mark_sensitive("target");
+            assert!(lineage.is_sensitive("alias-0"));
+        }
+        assert_denied(&gate, b"");
+        assert_denied(&gate, b"public");
     }
 }
