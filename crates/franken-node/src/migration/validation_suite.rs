@@ -514,11 +514,15 @@ mod tests {
     fn source_tree_changes_after_capture_do_not_change_execution() {
         let project = fixture();
         write(project.path(), "case.test.js", "console.log('captured');");
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // This tests input identity, not deadline enforcement. Hashing the
+        // real Node binary before and after each leg can consume the former
+        // ten-second budget in an unoptimized, parallel CI test run. Keep a
+        // bounded allowance while leaving the separate timeout tests strict.
+        let deadline = Instant::now() + Duration::from_secs(60);
         let snapshot = Snapshot::capture(project.path(), deadline).unwrap();
         write(project.path(), "case.test.js", "process.exit(99);");
         let report = execute_suite(&snapshot, &node(false), &node(true), deadline, Duration::from_secs(3)).unwrap();
-        assert_eq!(report.verdict, "PASS");
+        assert_eq!(report.verdict, "PASS", "captured-source evidence: {report:#?}");
         assert_eq!(report.cases[0].native.as_ref().unwrap().stdout.bytes, 9);
         assert_eq!(fs::read_to_string(project.path().join("case.test.js")).unwrap(), "process.exit(99);");
     }
