@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Unit tests for migration_validation_runner.py."""
+"""Unit and real-process tests for migration_validation_runner.py."""
 
 import json
+import os
+import shutil
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -39,43 +43,40 @@ class TestDiscoverTests(unittest.TestCase):
 
 class TestCanonicalizeOutput(unittest.TestCase):
     def test_replaces_timestamps(self):
-        result = runner.canonicalize_output("at 2024-01-15T10:30:00")
-        self.assertIn("<TIMESTAMP>", result)
+        self.assertIn("<TIMESTAMP>", runner.canonicalize_output("at 2024-01-15T10:30:00"))
 
     def test_replaces_pids(self):
-        result = runner.canonicalize_output("pid=12345")
-        self.assertIn("pid=<PID>", result)
+        self.assertIn("pid=<PID>", runner.canonicalize_output("pid=12345"))
 
     def test_replaces_abs_paths(self):
-        result = runner.canonicalize_output("/home/user/project/file.js")
-        self.assertIn("<ABS_PATH>", result)
+        self.assertIn("<ABS_PATH>", runner.canonicalize_output("/home/user/project/file.js"))
 
     def test_preserves_normal_text(self):
-        result = runner.canonicalize_output("hello world")
-        self.assertEqual(result, "hello world")
+        self.assertEqual(runner.canonicalize_output("hello world"), "hello world")
 
 
 class TestCompareOutputs(unittest.TestCase):
     def test_identical(self):
-        cmp = runner.compare_outputs("a\nb\nc", "a\nb\nc")
-        self.assertTrue(cmp["identical"])
-        self.assertEqual(cmp["divergence_count"], 0)
+        comparison = runner.compare_outputs("a\nb\nc", "a\nb\nc")
+        self.assertTrue(comparison["identical"])
+        self.assertEqual(comparison["divergence_count"], 0)
 
     def test_divergent(self):
-        cmp = runner.compare_outputs("a\nb", "a\nc")
-        self.assertFalse(cmp["identical"])
-        self.assertEqual(cmp["divergence_count"], 1)
+        comparison = runner.compare_outputs("a\nb", "a\nc")
+        self.assertFalse(comparison["identical"])
+        self.assertEqual(comparison["divergence_count"], 1)
 
     def test_different_lengths(self):
-        cmp = runner.compare_outputs("a\nb\nc", "a\nb")
-        self.assertFalse(cmp["identical"])
+        self.assertFalse(runner.compare_outputs("a\nb\nc", "a\nb")["identical"])
 
     def test_canonicalizes_before_compare(self):
-        cmp = runner.compare_outputs(
+        self.assertTrue(runner.compare_outputs(
             "at 2024-01-01T00:00:00 pid=1",
             "at 2025-12-31T23:59:59 pid=999",
-        )
-        self.assertTrue(cmp["identical"])
+        )["identical"])
+
+    def test_missing_line_is_not_a_literal_missing_sentinel(self):
+        self.assertFalse(runner.compare_outputs("a\n<missing>", "a")["identical"])
 
 
 class TestClassifyDivergenceSeverity(unittest.TestCase):
@@ -94,38 +95,275 @@ class TestClassifyDivergenceSeverity(unittest.TestCase):
 
 class TestSelfTest(unittest.TestCase):
     def test_passes(self):
-        result = runner.self_test()
-        self.assertEqual(result["verdict"], "PASS")
+        self.assertEqual(runner.self_test()["verdict"], "PASS")
 
     def test_cites_primary_implementations(self):
         result = runner.self_test()
-        self.assertEqual(
-            result["evidence_paths"]["migration_validation_runner"],
-            "scripts/migration_validation_runner.py",
-        )
-        self.assertEqual(
-            result["evidence_paths"]["lockstep_harness"],
-            "crates/franken-node/src/runtime/lockstep_harness.rs",
-        )
+        self.assertEqual(result["evidence_paths"]["migration_validation_runner"],
+                         "scripts/migration_validation_runner.py")
+        self.assertEqual(result["evidence_paths"]["lockstep_harness"],
+                         "crates/franken-node/src/runtime/lockstep_harness.rs")
         self.assertIn("VALIDATE-IMPL", {check["id"] for check in result["checks"]})
 
     def test_checked_in_evidence_cites_primary_implementations(self):
-        evidence_path = (
-            Path(__file__).resolve().parent.parent
-            / "artifacts"
-            / "section_10_3"
-            / "bd-2st"
-            / "verification_evidence.json"
-        )
-        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
-        self.assertEqual(
-            evidence["evidence_paths"]["migration_validation_runner"],
-            "scripts/migration_validation_runner.py",
-        )
-        self.assertEqual(
-            evidence["evidence_paths"]["lockstep_harness"],
-            "crates/franken-node/src/runtime/lockstep_harness.rs",
-        )
+        evidence = json.loads((Path(__file__).resolve().parent.parent /
+                               "artifacts/section_10_3/bd-2st/verification_evidence.json").read_text(encoding="utf-8"))
+        self.assertEqual(evidence["evidence_paths"]["migration_validation_runner"],
+                         "scripts/migration_validation_runner.py")
+        self.assertEqual(evidence["evidence_paths"]["lockstep_harness"],
+                         "crates/franken-node/src/runtime/lockstep_harness.rs")
+
+
+@unittest.skipUnless(os.name == "posix" and shutil.which("node"), "real Node.js and POSIX required")
+class TestLiveMigrationValidation(unittest.TestCase):
+    """Real Node processes exercise orchestration, not Franken parity claims.
+
+    No subprocess or filesystem mocks. Custom commands deliberately use Node
+    for both legs; the artifact records those commands and is not a release
+    certificate. Native Franken compatibility remains a separate runtime gate.
+    """
+    def setUp(self):
+        self.scratch = tempfile.TemporaryDirectory(prefix="migration-tests-")
+        self.addCleanup(self.scratch.cleanup)
+        self.root = Path(self.scratch.name)
+        self.before = self.root / "before project"
+        self.after = self.root / "after project"
+        self.before.mkdir()
+        self.after.mkdir()
+        self.node = shutil.which("node")
+
+    def write_case(self, before="console.log('ok');", after=None, name="app.test.js"):
+        (self.before / name).write_text(before, encoding="utf-8")
+        (self.after / name).write_text(before if after is None else after, encoding="utf-8")
+
+    def validate(self, **kwargs):
+        options = {"migrated_project": self.after,
+                   "baseline_command": [self.node, "{test}"],
+                   "migration_command": [self.node, "{test}"],
+                   "timeout_seconds": 2, "total_timeout_seconds": 20}
+        options.update(kwargs)
+        return runner.validate_project(self.before, **options)
+
+    def test_real_execution_passes_and_records_nonempty_measurements(self):
+        self.write_case()
+        report = self.validate()
+        self.assertEqual(report["summary"], {"total_tests": 1, "passed": 1,
+                                            "failed": 0, "skipped": 0, "verdict": "PASS"})
+        self.assertEqual(report["phase"], "execution")
+        self.assertFalse(report["release_certification"])
+        self.assertEqual(report["comparison_mode"], "exact-bytes")
+        row = report["validation_results"][0]
+        self.assertEqual(row["baseline"]["streams"]["stdout"]["bytes_observed"], 3)
+        self.assertEqual(row["baseline"]["streams"], row["migration"]["streams"])
+        self.assertNotIn("stdout", row["baseline"])
+
+    def test_same_tree_runs_twice_without_contaminating_input(self):
+        self.write_case("require('fs').writeFileSync('created.txt','bytes'); console.log('ok');")
+        self.assertEqual(self.validate(migrated_project=None)["summary"]["verdict"], "PASS")
+        self.assertFalse((self.before / "created.txt").exists())
+
+    def test_each_test_and_leg_starts_from_fresh_snapshot(self):
+        code = "const fs=require('fs'); console.log(fs.readFileSync('counter','utf8')); fs.writeFileSync('counter','changed');"
+        self.write_case(code, name="a.test.js")
+        self.write_case(code, name="b.test.js")
+        for root in (self.before, self.after):
+            (root / "counter").write_text("original", encoding="utf-8")
+        report = self.validate()
+        self.assertEqual(report["summary"]["passed"], 2)
+        digests = [row["baseline"]["streams"]["stdout"]["sha256"] for row in report["validation_results"]]
+        self.assertEqual(digests[0], digests[1])
+        for root in (self.before, self.after):
+            self.assertEqual((root / "counter").read_text(), "original")
+
+    def test_support_files_and_dependencies_are_staged_but_not_discovered_as_tests(self):
+        self.write_case("console.log(require('fixture-pkg'));")
+        for root in (self.before, self.after):
+            package = root / "node_modules/fixture-pkg"
+            package.mkdir(parents=True)
+            (package / "index.js").write_text("module.exports='from-dependency';", encoding="utf-8")
+            (package / "internal.test.js").write_text("process.exit(9);", encoding="utf-8")
+        report = self.validate()
+        self.assertEqual(report["summary"]["verdict"], "PASS")
+        self.assertEqual(report["summary"]["total_tests"], 1)
+
+    def test_internal_file_and_directory_symlinks_are_preserved(self):
+        self.write_case("console.log(require('fs').readFileSync('alias.txt','utf8'));")
+        for root in (self.before, self.after):
+            (root / "data").mkdir()
+            (root / "data/value.txt").write_text("value", encoding="utf-8")
+            (root / "directory-link").symlink_to("data")
+            (root / "alias.txt").symlink_to(root / "directory-link/value.txt")
+        self.assertEqual(self.validate()["summary"]["verdict"], "PASS")
+
+    def test_external_symlink_fails_before_execution(self):
+        self.write_case()
+        target = self.root / "external.txt"
+        target.write_text("outside", encoding="utf-8")
+        (self.before / "outside-link").symlink_to(target)
+        report = self.validate()
+        self.assertEqual(report["summary"]["verdict"], "ERROR")
+        self.assertIn("external workspace symlink", report["errors"][0]["message"])
+        self.assertEqual(report["validation_results"], [])
+
+    def test_fifo_fails_without_blocking_capture(self):
+        self.write_case()
+        os.mkfifo(self.before / "pipe")
+        report = self.validate()
+        self.assertEqual(report["summary"]["verdict"], "ERROR")
+        self.assertIn("nonregular", report["errors"][0]["message"])
+
+    def test_original_and_rewritten_trees_are_compared(self):
+        self.write_case("console.log(41+1);", "console.log(6*7);")
+        report = self.validate()
+        self.assertEqual(report["summary"]["verdict"], "PASS")
+        self.assertNotEqual(report["inputs"]["baseline_sha256"], report["inputs"]["migration_sha256"])
+
+    def test_stdout_divergence_fails(self):
+        self.write_case("console.log('before');", "console.log('after');")
+        report = self.validate()
+        self.assertEqual(report["summary"]["verdict"], "FAIL")
+        self.assertIn({"channel": "stdout", "reason": "byte_mismatch"}, report["validation_results"][0]["divergences"])
+        self.assertEqual(report["validation_results"][0]["severity"], "critical")
+
+    def test_stderr_divergence_fails_even_when_stdout_matches(self):
+        self.write_case("console.log('ok'); console.error('first');", "console.log('ok'); console.error('second');")
+        report = self.validate()
+        self.assertEqual(report["summary"]["verdict"], "FAIL")
+        self.assertIn({"channel": "stderr", "reason": "byte_mismatch"}, report["validation_results"][0]["divergences"])
+
+    def test_identical_nonzero_exits_are_not_a_pass(self):
+        self.write_case("process.exit(7);")
+        report = self.validate()
+        self.assertEqual(report["summary"]["verdict"], "FAIL")
+        row = report["validation_results"][0]
+        self.assertEqual(row["baseline"]["exit_code"], 7)
+        self.assertEqual(row["migration"]["exit_code"], 7)
+
+    def test_signal_termination_is_not_a_pass(self):
+        self.write_case("process.kill(process.pid,'SIGTERM');")
+        report = self.validate()
+        self.assertEqual(report["summary"]["verdict"], "FAIL")
+        self.assertEqual(report["validation_results"][0]["baseline"]["termination"], "signal")
+
+    def test_missing_runtime_is_error_not_skip_or_pass(self):
+        self.write_case()
+        report = self.validate(migration_command=[str(self.root / "no-runtime"), "{test}"])
+        self.assertEqual(report["summary"]["verdict"], "ERROR")
+        self.assertEqual(report["summary"]["passed"], 0)
+        self.assertEqual(report["summary"]["skipped"], 1)
+        self.assertIn("runtime executable not found", report["errors"][0]["message"])
+
+    def test_missing_project_is_error(self):
+        report = runner.validate_project(self.root / "absent")
+        self.assertEqual(report["summary"]["verdict"], "ERROR")
+
+    def test_empty_project_is_no_tests_not_pass(self):
+        self.assertEqual(self.validate()["summary"]["verdict"], "NO_TESTS")
+
+    def test_missing_migrated_case_is_error(self):
+        (self.before / "app.test.js").write_text("console.log('ok');", encoding="utf-8")
+        report = self.validate()
+        self.assertEqual(report["summary"]["verdict"], "ERROR")
+        self.assertIn("missing test", report["errors"][0]["message"])
+
+    def test_timeouts_are_bounded_and_fail_even_if_both_match(self):
+        self.write_case("setInterval(()=>{},1000);")
+        started = time.monotonic()
+        report = self.validate(timeout_seconds=0.15)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(report["summary"]["verdict"], "FAIL")
+        row = report["validation_results"][0]
+        self.assertEqual(row["baseline"]["termination"], "timeout")
+        self.assertEqual(row["migration"]["termination"], "timeout")
+
+    def test_pipe_inheriting_descendant_cannot_hang_the_runner(self):
+        self.write_case("require('child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'inherit'}); process.exit(0);")
+        started = time.monotonic()
+        report = self.validate(timeout_seconds=0.2)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(report["summary"]["verdict"], "FAIL")
+        self.assertEqual(report["validation_results"][0]["baseline"]["termination"], "timeout")
+
+    def test_output_limit_is_not_a_truncated_prefix_pass(self):
+        self.write_case("process.stdout.write('x'.repeat(100000));")
+        report = self.validate(max_output_bytes=1024)
+        self.assertEqual(report["summary"]["verdict"], "FAIL")
+        stream = report["validation_results"][0]["baseline"]["streams"]["stdout"]
+        self.assertEqual(stream["retained_bytes"], 1024)
+        self.assertGreater(stream["bytes_observed"], 1024)
+        self.assertFalse(stream["complete"])
+
+    def test_stderr_output_limit_is_enforced(self):
+        self.write_case("process.stderr.write('x'.repeat(100000));")
+        report = self.validate(max_output_bytes=1024)
+        self.assertEqual(report["summary"]["verdict"], "FAIL")
+        self.assertEqual(report["validation_results"][0]["migration"]["termination"], "output_limit")
+
+    def test_total_budget_is_distinct_from_per_leg_timeout(self):
+        self.write_case("setInterval(()=>{},1000);")
+        report = self.validate(timeout_seconds=10, total_timeout_seconds=0.15)
+        self.assertEqual(report["summary"]["verdict"], "ERROR")
+        self.assertIn("budget exhausted", report["errors"][0]["message"])
+
+    def test_exact_bytes_keep_trailing_newlines_and_invalid_utf8_distinct(self):
+        for before, after in [("process.stdout.write('ok\\n');", "process.stdout.write('ok');"),
+                              ("process.stdout.write(Buffer.from([255]));", "process.stdout.write(Buffer.from([254]));")]:
+            with self.subTest(before=before):
+                self.write_case(before, after)
+                self.assertEqual(self.validate()["summary"]["verdict"], "FAIL")
+
+    def test_diagnostic_normalization_never_hides_live_differences(self):
+        self.write_case("console.log('pid=1 at 2024-01-01T00:00:00');",
+                        "console.log('pid=2 at 2025-01-01T00:00:00');")
+        self.assertEqual(self.validate()["summary"]["verdict"], "FAIL")
+
+    def test_metacharacters_in_test_names_do_not_invoke_a_shell(self):
+        name = "case;touch SHOULD_NOT_EXIST.test.js"
+        self.write_case(name=name)
+        self.assertEqual(self.validate()["summary"]["verdict"], "PASS")
+        self.assertFalse((self.before / "SHOULD_NOT_EXIST.test.js").exists())
+
+    def test_nonfinite_or_invalid_limits_are_rejected(self):
+        self.write_case()
+        for options in ({"timeout_seconds": float("nan")}, {"timeout_seconds": float("inf")},
+                        {"timeout_seconds": 0}, {"total_timeout_seconds": -1},
+                        {"max_output_bytes": 0}, {"max_output_bytes": True}):
+            with self.subTest(options=options):
+                self.assertEqual(self.validate(**options)["summary"]["verdict"], "ERROR")
+
+    def test_invalid_command_shapes_are_rejected(self):
+        self.write_case()
+        for command in ([], "node {test}", ["node"], ["{test}"], ["node", "{test}", "{test}"], ["node", 1, "{test}"]):
+            with self.subTest(command=command):
+                self.assertEqual(self.validate(migration_command=command)["summary"]["verdict"], "ERROR")
+
+    def test_edge_divergence_is_classified_but_never_silently_passed(self):
+        self.write_case("console.log('one');", "console.log('two');")
+        report = self.validate(band="edge")
+        self.assertEqual(report["summary"]["verdict"], "FAIL")
+        self.assertEqual(report["validation_results"][0]["severity"], "informational")
+
+    def test_input_digest_is_stable_and_binds_file_contents(self):
+        self.write_case()
+        first = self.validate()["inputs"]
+        self.assertEqual(first, self.validate()["inputs"])
+        (self.after / "support.txt").write_text("additional input", encoding="utf-8")
+        changed = self.validate()["inputs"]
+        self.assertEqual(first["baseline_sha256"], changed["baseline_sha256"])
+        self.assertNotEqual(first["migration_sha256"], changed["migration_sha256"])
+
+    def test_cli_exit_code_tracks_real_verdict(self):
+        for candidate, expected in (("console.log('ok');", 0), ("process.exit(1);", 1)):
+            with self.subTest(expected=expected):
+                self.write_case(after=candidate)
+                command = [sys.executable, str(Path(runner.__file__)), str(self.before),
+                           "--migrated-project", str(self.after), "--json",
+                           "--baseline-command", json.dumps([self.node, "{test}"]),
+                           "--migration-command", json.dumps([self.node, "{test}"])]
+                result = subprocess.run(command, capture_output=True, timeout=10, check=False)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                report = json.loads(result.stdout)
+                self.assertEqual(report["summary"]["verdict"], "PASS" if expected == 0 else "FAIL")
 
 
 if __name__ == "__main__":
