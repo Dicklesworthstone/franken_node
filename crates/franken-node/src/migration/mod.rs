@@ -28,6 +28,9 @@ use std::os::unix::process::CommandExt;
 #[cfg(target_os = "linux")]
 mod smoke_supervisor;
 
+#[cfg(target_os = "linux")]
+pub mod validation_suite;
+
 /// Maximum allowed file size for migration operations to prevent DoS via parser bombs.
 /// External package.json, source files, etc. could be maliciously crafted as large files.
 /// 10MB should be more than sufficient for any reasonable package manifest or source file.
@@ -429,6 +432,11 @@ pub struct MigrationValidateReport {
     pub checks: Vec<MigrationValidationCheck>,
     pub blocking_findings: Vec<MigrationAuditFinding>,
     pub warning_findings: Vec<MigrationAuditFinding>,
+    /// Captured project tests compared against Node, when present on Linux.
+    /// Absent in static-only and single-entrypoint smoke reports.
+    #[cfg(target_os = "linux")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_suite: Option<validation_suite::SuiteReport>,
 }
 
 impl MigrationValidateReport {
@@ -1108,11 +1116,23 @@ fn execute_migration_runtime_smoke(
 fn native_migration_smoke_command(
     native_executable: &Path,
     smoke_target: &MigrationRuntimeSmokeTarget,
-) -> Command {
+) -> anyhow::Result<Command> {
+    // `run` deliberately rejects absolute and parent-traversing content paths.
+    // Keep the target's working directory semantics without relaxing that
+    // public boundary or mistakenly resolving a relative path twice.
+    let relative = smoke_target
+        .entry_path
+        .strip_prefix(&smoke_target.working_dir)
+        .map_err(|err| anyhow::anyhow!("smoke entrypoint is outside its working directory: {err}"))?;
+    if relative.as_os_str().is_empty()
+        || relative.components().any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        anyhow::bail!("smoke entrypoint must be a file beneath its working directory");
+    }
     let mut command = Command::new(native_executable);
     command
         .arg("run")
-        .arg(&smoke_target.entry_path)
+        .arg(Path::new(".").join(relative))
         .arg("--runtime")
         .arg("franken-engine")
         .arg("--engine-bin")
@@ -1122,14 +1142,14 @@ fn native_migration_smoke_command(
         .env_remove("FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK")
         // Do not override a project's strict policy with balanced defaults.
         .current_dir(&smoke_target.working_dir);
-    command
+    Ok(command)
 }
 
 fn execute_migration_runtime_smoke_with_target(
     native_executable: &Path,
     smoke_target: &MigrationRuntimeSmokeTarget,
 ) -> anyhow::Result<MigrationRuntimeSmokeReceipt> {
-    let mut command = native_migration_smoke_command(native_executable, smoke_target);
+    let mut command = native_migration_smoke_command(native_executable, smoke_target)?;
     let output = run_command_with_timeout(&mut command, MIGRATION_VALIDATE_RUNTIME_TIMEOUT)?;
     let exit_code = output
         .status
@@ -1430,11 +1450,11 @@ mod native_migration_smoke_command_tests {
             entry_path: PathBuf::from("project with spaces/app.js"),
             display: "fixture".to_string(),
         };
-        let command = native_migration_smoke_command(executable, &target);
+        let command = native_migration_smoke_command(executable, &target).expect("relative target");
         let arguments: Vec<_> = command.get_args().collect();
         let expected: Vec<_> = [
             "run",
-            "project with spaces/app.js",
+            "./app.js",
             "--runtime",
             "franken-engine",
             "--engine-bin",
@@ -1451,6 +1471,31 @@ mod native_migration_smoke_command_tests {
             key == std::ffi::OsStr::new("FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK")
                 && value.is_none()
         }));
+    }
+
+    #[test]
+    fn absolute_smoke_target_is_rebased_without_changing_working_directory() {
+        let target = MigrationRuntimeSmokeTarget {
+            working_dir: PathBuf::from("/workspace/project"),
+            entry_path: PathBuf::from("/workspace/project/src/app.js"),
+            display: "fixture".into(),
+        };
+        let command = native_migration_smoke_command(Path::new("/trusted/native"), &target)
+            .expect("contained target");
+        assert_eq!(command.get_args().nth(1), Some(std::ffi::OsStr::new("./src/app.js")));
+        assert_eq!(command.get_current_dir(), Some(target.working_dir.as_path()));
+    }
+
+    #[test]
+    fn smoke_target_outside_working_directory_is_refused() {
+        for entry in ["/outside/app.js", "/workspace/project/../app.js", "/workspace/project"] {
+            let target = MigrationRuntimeSmokeTarget {
+                working_dir: PathBuf::from("/workspace/project"),
+                entry_path: PathBuf::from(entry),
+                display: "fixture".into(),
+            };
+            assert!(native_migration_smoke_command(Path::new("/trusted/native"), &target).is_err());
+        }
     }
 }
 
@@ -1852,12 +1897,42 @@ pub fn run_validate(
                 .to_string(),
         ),
     });
-    // The runtime smoke test executes the transformed project, so its outcome
-    // depends on which JavaScript runtime is installed. In `--static-only` mode
-    // (used by deterministic golden/CI contexts) we skip it entirely and derive
-    // the verdict from the deterministic static checks alone.
+    #[cfg(target_os = "linux")]
+    let mut test_suite = None;
+    // Static-only never starts guest code. On Linux, an existing test inventory
+    // upgrades runtime validation to complete differential suite execution.
+    // Only an absent inventory retains the single-entrypoint smoke behavior;
+    // suite errors and failures may NEVER fall back to a smoke PASS.
     if !static_only {
         if checks.iter().all(|check| check.passed) {
+            #[cfg(target_os = "linux")]
+            match validation_suite::run_if_present(project_path) {
+                Ok(Some(report)) => {
+                    checks.push(MigrationValidationCheck {
+                        id: "mig-validate-005".into(),
+                        passed: report.verdict == "PASS",
+                        message: format!(
+                            "native differential test suite: verdict={} total={} passed={} failed={} errored={} skipped={} input_sha256={}",
+                            report.verdict, report.total_tests, report.passed, report.failed,
+                            report.errored, report.skipped, report.input_sha256
+                        ),
+                        remediation: Some(
+                            "Inspect test_suite case evidence; passing captured tests is not release certification or filesystem-effect equivalence.".into()
+                        ),
+                    });
+                    test_suite = Some(report);
+                }
+                Ok(None) => checks.push(runtime_smoke_validation_check(project_path)),
+                Err(error) => checks.push(MigrationValidationCheck {
+                    id: "mig-validate-005".into(),
+                    passed: false,
+                    message: format!("native differential validation failed: {error:#}"),
+                    remediation: Some(
+                        "Provide readable bounded project inputs and a real Node reference outside the project; no smoke or reference-success fallback is allowed.".into()
+                    ),
+                }),
+            }
+            #[cfg(not(target_os = "linux"))]
             checks.push(runtime_smoke_validation_check(project_path));
         } else {
             checks.push(runtime_smoke_prerequisite_failure_check());
@@ -1878,6 +1953,8 @@ pub fn run_validate(
         checks,
         blocking_findings,
         warning_findings,
+        #[cfg(target_os = "linux")]
+        test_suite,
     })
 }
 
