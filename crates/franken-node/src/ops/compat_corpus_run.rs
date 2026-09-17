@@ -2172,6 +2172,7 @@ pub fn run_corpus(
         let agreed = lockstep_case_passed(
             observations_complete,
             oracle_agreed,
+            &bun_leg,
             node_leg.as_ref(),
             &franken_leg,
         );
@@ -2310,20 +2311,25 @@ fn classify_failure(bun: &LegCapture, node: Option<&LegCapture>, franken: &LegCa
 fn lockstep_case_passed(
     observations_complete: bool,
     oracle_agreed: bool,
+    bun: &LegCapture,
     node: Option<&LegCapture>,
     franken: &LegCapture,
 ) -> bool {
-    if !observations_complete {
+    if !observations_complete || (!oracle_agreed && node.is_none()) {
         return false;
     }
-    if oracle_agreed {
-        return true;
+    // Agreement proves equality, not success: matching crashes and
+    // policy refusals are failures. Share the artifact admission rule.
+    let mut observations = BTreeMap::from([
+        ("bun".to_string(), LockstepObservationKey::from(&bun.observation)),
+        ("franken-engine-native".to_string(), LockstepObservationKey::from(&franken.observation)),
+    ]);
+    if let Some(node) = node {
+        observations.insert("node".to_string(), LockstepObservationKey::from(&node.observation));
     }
-    node.is_some_and(|node| {
-        node.comparison == franken.comparison
-            && node.observation.exit_code == Some(0)
-            && franken.observation.exit_code == Some(0)
-    })
+    let reference = node.unwrap_or(bun);
+    reference.comparison == franken.comparison
+        && passing_lockstep_observations_are_consistent(&observations).is_ok()
 }
 
 /// Stable class for `failing_tests_tracking`. Does not change pass/fail.
@@ -2402,18 +2408,32 @@ pub(crate) fn passing_lockstep_observations_are_consistent(
     let Some(franken) = observations.get("franken-engine-native") else {
         return Err("cannot pass without franken-engine-native".to_string());
     };
-    if let Some(node) = observations.get("node") {
-        if node != franken {
+    let Some(bun) = observations.get("bun") else {
+        return Err("cannot pass without the bun reference".to_string());
+    };
+    if observations.keys().any(|id| {
+        !matches!(id.as_str(), "bun" | "node" | "franken-engine-native")
+    }) {
+        return Err("cannot pass with an unrecognized runtime identity".to_string());
+    }
+    // This also protects callers outside the outer digest verifier.
+    if observations.values().any(|observation| {
+        observation.timed_out || observation.stdout_truncated || observation.stderr_truncated
+    }) {
+        return Err("cannot pass with timed-out or truncated evidence".to_string());
+    }
+    let node = observations.get("node");
+    let reference = node.unwrap_or(bun);
+    if reference != franken {
+        if node.is_some() {
             return Err("cannot pass unless franken matches the node reference".to_string());
         }
-        if node.exit_code != Some(0) || franken.exit_code != Some(0) {
-            return Err("cannot pass with a non-zero node or franken exit".to_string());
-        }
-        return Ok(());
-    }
-    let unique = observations.values().collect::<BTreeSet<_>>();
-    if unique.len() != 1 {
         return Err("cannot pass with divergent evidence".to_string());
+    }
+    if reference.exit_code != Some(0) || franken.exit_code != Some(0)
+        || reference.termination_kind != "exited" || franken.termination_kind != "exited"
+    {
+        return Err("cannot pass without successful reference and franken exits".to_string());
     }
     Ok(())
 }
@@ -3453,10 +3473,10 @@ mod snapshot_staging_tests {
             stderr_excerpt: String::new(),
         };
         assert!(
-            lockstep_case_passed(true, false, Some(&node), &franken),
+            lockstep_case_passed(true, false, &bun, Some(&node), &franken),
             "matching Node is a pass when Bun disagrees"
         );
-        assert!(!lockstep_case_passed(false, false, Some(&node), &franken));
+        assert!(!lockstep_case_passed(false, false, &bun, Some(&node), &franken));
         let incomplete_reason = classify_failure(&bun, Some(&node), &franken);
         assert!(
             incomplete_reason.contains("franken matched node"),
@@ -3473,13 +3493,13 @@ mod snapshot_staging_tests {
             stderr_excerpt: String::new(),
         };
         assert!(
-            !lockstep_case_passed(true, false, Some(&node), &franken_matches_bun),
+            !lockstep_case_passed(true, false, &bun, Some(&node), &franken_matches_bun),
             "matching only Bun must stay fail"
         );
         let mut crashed = franken;
         crashed.observation.exit_code = Some(1);
         assert!(
-            !lockstep_case_passed(true, false, Some(&node), &crashed),
+            !lockstep_case_passed(true, false, &bun, Some(&node), &crashed),
             "child_process-style abort must not recategorize as pass"
         );
         let mut runtime_observations = BTreeMap::new();
@@ -4126,6 +4146,138 @@ mod lockstep_pass_policy_tests {
             investigation_bead_id: None,
             runtime_observations: observations,
         }
+    }
+
+    fn matching_observations(triad: bool, exit_code: Option<i32>) -> BTreeMap<String, RuntimeLegObservation> {
+        let mut captured = observation('a', 1);
+        captured.exit_code = exit_code;
+        captured.termination_kind = if exit_code.is_some() { "exited" } else { "signal_or_unknown" }.into();
+        let mut observations = BTreeMap::from([
+            ("bun".to_string(), captured.clone()),
+            ("franken-engine-native".to_string(), captured.clone()),
+        ]);
+        if triad { observations.insert("node".into(), captured); }
+        observations
+    }
+
+    fn fingerprints(observations: &BTreeMap<String, RuntimeLegObservation>) -> BTreeMap<String, LockstepObservationKey> {
+        observations.iter().map(|(id, value)| (id.clone(), LockstepObservationKey::from(value))).collect()
+    }
+
+    #[test]
+    fn writer_rejects_matching_nonzero_or_signal_exits_as_pass() {
+        for triad in [false, true] {
+            for exit in [Some(-1), Some(1), Some(7), Some(137), None] {
+                let result = build_corpus_results_document_with_references(None,
+                    &[outcome("pass", matching_observations(triad, exit))], "test-corpus",
+                    "1.3.14-test", triad.then_some("v22.14.0"), "2026-08-21T00:00:00Z", "corpus");
+                assert!(result.is_err(), "matching failures passed: triad={triad} exit={exit:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn writer_preserves_matching_failures_as_measured_failures() {
+        for triad in [false, true] {
+            for exit in [Some(1), Some(7), None] {
+                let document = build_corpus_results_document_with_references(None,
+                    &[outcome("fail", matching_observations(triad, exit))], "test-corpus",
+                    "1.3.14-test", triad.then_some("v22.14.0"), "2026-08-21T00:00:00Z", "corpus")
+                    .expect("measured failures remain publishable");
+                assert_eq!(document["totals"]["passed_test_cases"], 0);
+                assert_eq!(document["totals"]["failed_test_cases"], 1);
+                assert_eq!(document["per_test_results"][0]["status"], "fail");
+                assert_eq!(document["ci_gate"]["release_blocked"], true);
+            }
+        }
+    }
+
+    #[test]
+    fn pass_helper_requires_both_named_runtimes_and_no_unknown_identity() {
+        for missing in ["bun", "franken-engine-native"] {
+            for triad in [false, true] {
+                let mut observations = matching_observations(triad, Some(0));
+                observations.remove(missing);
+                assert!(passing_lockstep_observations_are_consistent(&fingerprints(&observations)).is_err());
+            }
+        }
+        let mut observations = matching_observations(false, Some(0));
+        observations.insert("unknown-runtime".into(), observation('a', 1));
+        assert!(passing_lockstep_observations_are_consistent(&fingerprints(&observations)).is_err());
+        assert!(passing_lockstep_observations_are_consistent(&BTreeMap::new()).is_err());
+    }
+
+    #[test]
+    fn pass_helper_rejects_incomplete_evidence_even_outside_digest_validation() {
+        for triad in [false, true] {
+            for field in 0..3 {
+                let mut observations = matching_observations(triad, Some(0));
+                for observation in observations.values_mut() {
+                    match field { 0 => observation.timed_out = true,
+                        1 => observation.stdout_truncated = true, _ => observation.stderr_truncated = true }
+                }
+                assert!(passing_lockstep_observations_are_consistent(&fingerprints(&observations)).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn pass_helper_requires_normal_termination_not_only_a_zero_code() {
+        for termination in ["signal_or_unknown", "timed_out", "unknown", ""] {
+            let mut observations = matching_observations(false, Some(0));
+            for observation in observations.values_mut() { observation.termination_kind = termination.into(); }
+            assert!(passing_lockstep_observations_are_consistent(&fingerprints(&observations)).is_err());
+        }
+    }
+
+    #[test]
+    fn complete_bun_failure_does_not_override_successful_node_canonical_behavior() {
+        let mut observations = matching_observations(true, Some(0));
+        let bun = observations.get_mut("bun").unwrap();
+        bun.exit_code = Some(7);
+        bun.stdout_digest = format!("sha256:{}", "b".repeat(64));
+        assert!(passing_lockstep_observations_are_consistent(&fingerprints(&observations)).is_ok());
+        let document = build_corpus_results_document_with_references(None, &[outcome("pass", observations)],
+            "test-corpus", "1.3.14-test", Some("v22.14.0"), "2026-08-21T00:00:00Z", "corpus").unwrap();
+        assert_eq!(document["totals"]["passed_test_cases"], 1);
+    }
+
+    #[cfg(feature = "engine")]
+    fn leg(observation: RuntimeLegObservation) -> LegCapture {
+        LegCapture { comparison: b"matching-comparison".to_vec(), observation,
+            stdout_excerpt: String::new(), stderr_excerpt: String::new() }
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn live_oracle_agreement_cannot_turn_matching_crashes_into_pass() {
+        for exit in [Some(1), Some(7), None] {
+            let observations = matching_observations(true, exit);
+            let bun = leg(observations["bun"].clone());
+            let node = leg(observations["node"].clone());
+            let native = leg(observations["franken-engine-native"].clone());
+            assert!(!lockstep_case_passed(true, true, &bun, None, &native));
+            assert!(!lockstep_case_passed(true, true, &bun, Some(&node), &native));
+        }
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn live_oracle_agreement_cannot_override_a_disagreeing_node_reference() {
+        let bun = leg(observation('b', 1));
+        let native = leg(observation('b', 2));
+        let node = leg(observation('a', 3));
+        assert!(!lockstep_case_passed(true, true, &bun, Some(&node), &native));
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn live_dyad_requires_successful_evidence_and_oracle_agreement() {
+        let bun = leg(observation('a', 1));
+        let native = leg(observation('a', 2));
+        assert!(lockstep_case_passed(true, true, &bun, None, &native));
+        assert!(!lockstep_case_passed(true, false, &bun, None, &native));
+        assert!(!lockstep_case_passed(false, true, &bun, None, &native));
     }
 
     #[test]

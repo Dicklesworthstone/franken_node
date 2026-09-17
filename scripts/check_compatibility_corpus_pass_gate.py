@@ -89,9 +89,10 @@ def _observation_fingerprint(observation: dict) -> tuple:
 
 def _assert_passing_lockstep_observations(test_id: str, runtime_observations: dict) -> None:
     """Node is the spec. Bun may diverge on a passing triad row iff franken
-    matches Node (both exit 0). Dyad rows still require unanimous
-    bun+franken. child_process native-eval aborts never match Node's
-    successful exit, so they cannot pass here.
+    matches Node (both exit normally with code 0). Dyads require successful
+    bun+franken agreement. Equality cannot turn matching crashes into
+    compatibility passes. Keep aligned with the Rust live and artifact
+    passing_lockstep_observations_are_consistent rule.
     """
     franken = runtime_observations.get("franken-engine-native")
     if not isinstance(franken, dict):
@@ -99,27 +100,43 @@ def _assert_passing_lockstep_observations(test_id: str, runtime_observations: di
             f"runtime observation row {test_id!r} cannot pass without "
             "franken-engine-native"
         )
+    bun = runtime_observations.get("bun")
+    if not isinstance(bun, dict):
+        raise ValueError(f"runtime observation row {test_id!r} cannot pass without bun")
+    if set(runtime_observations) not in (
+        {"bun", "franken-engine-native"},
+        {"bun", "node", "franken-engine-native"},
+    ) or any(not isinstance(value, dict) for value in runtime_observations.values()):
+        raise ValueError(f"runtime observation row {test_id!r} has invalid runtime identities")
+    if any(
+        observation.get(field) is not False
+        for observation in runtime_observations.values()
+        for field in ("timed_out", "stdout_truncated", "stderr_truncated")
+    ):
+        raise ValueError(
+            f"runtime observation row {test_id!r} cannot pass with timed-out "
+            "or truncated evidence"
+        )
     node = runtime_observations.get("node")
-    if isinstance(node, dict):
-        if _observation_fingerprint(node) != _observation_fingerprint(franken):
+    reference = node if node is not None else bun
+    if _observation_fingerprint(reference) != _observation_fingerprint(franken):
+        if node is not None:
             raise ValueError(
                 f"runtime observation row {test_id!r} cannot pass unless "
                 "franken matches the node reference"
             )
-        if node.get("exit_code") != 0 or franken.get("exit_code") != 0:
-            raise ValueError(
-                f"runtime observation row {test_id!r} cannot pass with a "
-                "non-zero node or franken exit"
-            )
-        return
-    fingerprints = {
-        _observation_fingerprint(observation)
-        for observation in runtime_observations.values()
-        if isinstance(observation, dict)
-    }
-    if len(fingerprints) != 1:
         raise ValueError(
             f"runtime observation row {test_id!r} cannot pass with divergent evidence"
+        )
+    if any(
+        type(observation.get("exit_code")) is not int
+        or observation["exit_code"] != 0
+        or observation.get("termination_kind") != "exited"
+        for observation in (reference, franken)
+    ):
+        raise ValueError(
+            f"runtime observation row {test_id!r} cannot pass without "
+            "successful reference and franken exits"
         )
 
 
@@ -514,30 +531,62 @@ def evaluate_summary_consistency(
     return findings
 
 
-def check_summary(report_path: Path, data: dict | None, results_generated_at: "str | None") -> list[dict]:
+def check_summary(report_path: Path, data: dict | None, results_generated_at: "str | None",
+                  summary_path: Path | None = None) -> list[dict]:
     """Filesystem-facing wrapper: load SUMMARY and evaluate it against the
     recomputed rate from `data`. Emits nothing when the report itself is
     unloadable — the report checks already fail for that case."""
     checks: list[dict] = []
     if data is None:
         return checks
-    if not SUMMARY.exists():
+    canonical_report = report_path.resolve() == REPORT.resolve()
+    if summary_path is None and not canonical_report:
+        return [{"check": "summary: report scope", "pass": True,
+                 "detail": "custom report only; no charter summary asserted (use --summary to verify a bound summary)"}]
+    # The canonical release report always requires the canonical charter
+    # metric, even if a caller supplies another summary. Explicit summaries
+    # are additional evidence, never a way to bypass the canonical binding.
+    selected = [SUMMARY] if canonical_report else []
+    if summary_path is not None and all(path.resolve() != summary_path.resolve() for path in selected):
+        selected.append(summary_path)
+    for selected_path in selected:
+        checks.extend(check_bound_summary(selected_path, report_path, data, results_generated_at))
+    return checks
+
+
+def check_bound_summary(summary_path: Path, report_path: Path, data: dict,
+                        results_generated_at: "str | None") -> list[dict]:
+    checks: list[dict] = []
+    if not summary_path.exists():
         checks.append({
             "check": "summary: charter metric artifact exists",
             "pass": False,
-            "detail": f"MISSING: {SUMMARY}",
+            "detail": f"MISSING: {summary_path}",
         })
         return checks
     try:
-        summary = json.loads(SUMMARY.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        if not isinstance(summary, dict):
+            raise ValueError("summary must be a JSON object")
+    except (OSError, ValueError) as error:
         checks.append({
             "check": "summary: valid json",
             "pass": False,
-            "detail": f"unparseable: {SUMMARY}",
+            "detail": f"unreadable or invalid summary {summary_path}: {error}",
         })
         return checks
-    checks.append({"check": "summary: valid json", "pass": True, "detail": str(SUMMARY)})
+    checks.append({"check": "summary: valid json", "pass": True, "detail": str(summary_path)})
+    metric = summary.get("metric")
+    reference = metric.get("details_ref") if isinstance(metric, dict) else None
+    try:
+        target = Path(reference) if isinstance(reference, str) and reference else None
+        # Existing charter references are repository-relative; explicit
+        # external summaries may use an absolute report path.
+        bound = target is not None and (target if target.is_absolute() else ROOT / target).resolve() == report_path.resolve()
+    except (OSError, ValueError, RuntimeError):
+        bound = False
+    checks.append({"check": "summary: bound to selected report", "pass": bound,
+                   "detail": f"summary={summary_path} details_ref={reference!r} report={report_path}"})
 
     per_tests = data.get("per_test_results", [])
     observed_rate = pass_rate(
@@ -889,6 +938,7 @@ def check_report(data: dict | None, minimum_cases: int = DEFAULT_MIN_CASES) -> l
 def run_checks(
     report_path: Path = REPORT,
     minimum_cases: int = DEFAULT_MIN_CASES,
+    summary_path: Path | None = None,
 ) -> dict:
     checks = []
     checks.append(check_file(CONTRACT, "contract doc"))
@@ -902,7 +952,7 @@ def run_checks(
         corpus_block = data.get("corpus")
         if isinstance(corpus_block, dict):
             generated_at = corpus_block.get("generated_at_utc")
-    checks.extend(check_summary(report_path, data, generated_at))
+    checks.extend(check_summary(report_path, data, generated_at, summary_path))
     checks.extend(check_ifc_regression(data))
 
     passing = sum(1 for c in checks if c["pass"])
@@ -913,6 +963,7 @@ def run_checks(
         "title": TITLE,
         "section": SECTION,
         "report_path": str(report_path),
+        "summary_path": str(summary_path) if summary_path is not None else (str(SUMMARY) if report_path.resolve() == REPORT.resolve() else None),
         "minimum_cases": minimum_cases,
         "overall_pass": failing == 0,
         "verdict": "PASS" if failing == 0 else "FAIL",
@@ -1016,6 +1067,8 @@ def main() -> int:
         default=REPORT,
         help="compatibility corpus report to validate",
     )
+    parser.add_argument("--summary", type=Path,
+                        help="also validate a charter summary bound to --report; canonical report always checks its canonical summary")
     parser.add_argument(
         "--min-cases",
         type=int,
@@ -1043,7 +1096,7 @@ def main() -> int:
                 print(f"[{status}] {check['check']}")
         return 0 if ok else 1
 
-    result = run_checks(args.report, args.min_cases)
+    result = run_checks(args.report, args.min_cases, args.summary)
     if args.json:
         print(json.dumps(result, indent=2))
     else:
