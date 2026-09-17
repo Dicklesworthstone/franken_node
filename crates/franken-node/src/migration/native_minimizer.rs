@@ -263,7 +263,7 @@ fn line_ranges(bytes: &[u8]) -> Vec<std::ops::Range<usize>> {
 }
 
 fn reduce_lines(mut bytes: Vec<u8>, mut evaluate: impl FnMut(Vec<u8>) -> Result<Trial>) -> Result<bool> {
-    let mut granularity = 2;
+    let mut granularity: usize = 2;
     while !bytes.is_empty() {
         let ranges = line_ranges(&bytes);
         granularity = granularity.min(ranges.len());
@@ -271,11 +271,10 @@ fn reduce_lines(mut bytes: Vec<u8>, mut evaluate: impl FnMut(Vec<u8>) -> Result<
         for part in 0..granularity {
             let start = ranges[part * ranges.len() / granularity].start;
             let end = ranges[(part + 1) * ranges.len() / granularity - 1].end;
-            let candidate = [bytes[..start].as_ref(), bytes[end..].as_ref()].concat();
+            let candidate = [&bytes[..start], &bytes[end..]].concat();
             match evaluate(candidate.clone())? {
                 Trial::Accept => {
                     bytes = candidate;
-                    granularity = granularity.saturating_sub(1).max(2);
                     accepted = true;
                     break;
                 }
@@ -283,7 +282,9 @@ fn reduce_lines(mut bytes: Vec<u8>, mut evaluate: impl FnMut(Vec<u8>) -> Result<
                 Trial::Stop => return Ok(false),
             }
         }
-        if !accepted {
+        if accepted {
+            granularity = granularity.saturating_sub(1).max(2);
+        } else {
             if granularity == ranges.len() { return Ok(true); }
             granularity = (granularity * 2).min(ranges.len());
         }
