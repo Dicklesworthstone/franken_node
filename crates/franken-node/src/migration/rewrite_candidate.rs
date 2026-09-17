@@ -169,10 +169,29 @@ impl RewriteCandidate {
     /// Franken on the prepared candidate. No source recapture, two-leg fallback
     /// or second validation run is performed. The caller must approve execution.
     pub fn validate_product(&self, native_executable: &Path, bun_executable: &Path) -> Result<ProductReport> {
+        self.validate_product_with(native_executable, bun_executable, || Ok(None))
+    }
+
+    /// Primary-command variant that honors the caller's explicit failure
+    /// directory selection. A rejected candidate retains all three legs, never
+    /// a pair projection. Library callers can use validate_product for no I/O.
+    pub fn validate_product_retaining_failures(&self, native_executable: &Path,
+        bun_executable: &Path) -> Result<ProductReport> {
+        self.validate_product_with(native_executable, bun_executable,
+            || FailureArchive::from_environment([&self.project, &self.project]))
+    }
+
+    fn validate_product_with(&self, native_executable: &Path, bun_executable: &Path,
+        archive: impl FnOnce() -> Result<Option<FailureArchive>>) -> Result<ProductReport> {
         let candidate = self.candidate.as_ref().context("checked rewrite candidate is not prepared")?;
         budget(self.deadline)?;
-        product_oracle::run_captured([&self.project, &self.project], [&self.original, candidate],
-            native_executable, bun_executable, self.deadline, true)
+        let archive = archive()?;
+        let mut report = product_oracle::run_captured([&self.project, &self.project], [&self.original, candidate],
+            native_executable, bun_executable, self.deadline, true)?;
+        if let Some(archive) = archive {
+            report.failure_capture = archive.finish_product(&report, &self.original, candidate, self.deadline);
+        }
+        Ok(report)
     }
 
     /// Keep both captured hashes and all three runtime observations at the
@@ -411,6 +430,8 @@ mod tests {
         let mut candidate = capture(root.path());
         candidate.prepare(&[Replacement { path: "case.test.js", before: b"console.log(42);",
             after: b"console.log('prepared candidate');" }]).unwrap();
+        // A real, deliberately failing executable exercises refusal and capture;
+        // it is not a replacement native engine or a compatibility claim.
         let report = candidate.validate_native_with(Path::new("/bin/false"),
             || FailureArchive::reserve(outputs.path(), [root.path(), root.path()]).map(Some)).unwrap();
         assert_eq!(report.verdict, "FAIL");
@@ -476,5 +497,46 @@ mod tests {
         assert!(candidate.check_product_validation(&report).unwrap_err().to_string().contains("prepared candidate"));
         candidate.deadline = Instant::now();
         assert!(candidate.check_product_validation(&report).unwrap_err().to_string().contains("budget"));
+    }
+
+    #[test]
+    fn three_runtime_failure_retains_the_prepared_candidate_without_installation() {
+        use super::super::native_replay::failure_capture::{FailureCapture, product};
+        let root = project();
+        let outputs = tempfile::tempdir().unwrap();
+        let mut candidate = capture(root.path());
+        candidate.prepare(&[Replacement { path: "case.test.js", before: b"console.log(42);",
+            after: b"console.log('prepared only');" }]).unwrap();
+        // Deliberately empty-output reference and failing native executable.
+        let report = candidate.validate_product_with(Path::new("/bin/false"), Path::new("/bin/true"),
+            || FailureArchive::reserve(outputs.path(), [root.path(), root.path()]).map(Some)).unwrap();
+        assert_eq!(report.verdict, "INCONCLUSIVE");
+        assert!(candidate.check_product_validation(&report).is_err());
+        let Some(FailureCapture::Saved { capsule_path, content_sha256 }) = &report.failure_capture else { panic!("{report:#?}") };
+        let exported = product::export_any(capsule_path, content_sha256, &outputs.path().join("reproducer")).unwrap();
+        assert_eq!(exported.capsule.candidate_input_sha256, candidate.candidate.as_ref().unwrap().digest);
+        assert_eq!(fs::read(exported.destination.join("candidate/case.test.js")).unwrap(), b"console.log('prepared only');");
+        let replayed = product::replay(capsule_path, content_sha256, Path::new("/bin/false"), Path::new("/bin/true"), false).unwrap();
+        assert_eq!(replayed.verdict, "REPRODUCED");
+        assert_eq!(replayed.validation.cases, report.cases);
+        candidate.ensure_source_unchanged().unwrap();
+        assert_eq!(fs::read(root.path().join("case.test.js")).unwrap(), b"console.log(42);");
+        assert!(!root.path().join(".migrate-backup").exists());
+    }
+
+    #[test]
+    fn product_archive_preflight_cannot_be_bypassed_by_a_missing_runtime() {
+        let root = project();
+        let mut candidate = capture(root.path());
+        let absent = Path::new("/absent/native");
+        assert!(candidate.validate_product_with(absent, absent,
+            || panic!("unprepared candidate must not reserve")).unwrap_err().to_string().contains("not prepared"));
+        candidate.prepare(&[]).unwrap();
+        assert!(candidate.validate_product_with(absent, absent,
+            || FailureArchive::reserve(root.path(), [root.path(), root.path()]).map(Some))
+            .unwrap_err().to_string().contains("outside"));
+        candidate.deadline = Instant::now();
+        assert!(candidate.validate_product_with(absent, absent,
+            || panic!("expired candidate must not reserve")).unwrap_err().to_string().contains("budget"));
     }
 }

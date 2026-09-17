@@ -15,6 +15,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+#[path = "product_replay.rs"]
+pub mod product;
+
 pub const DIRECTORY_ENV: &str = "FRANKEN_NODE_MIGRATION_FAILURE_DIR";
 
 /// Diagnostic attachment, not a replacement for the measured suite verdict.
@@ -99,6 +102,28 @@ impl FailureArchive {
                 let _retained_directory = self.directory.keep();
                 Some(saved)
             }
+            Err(error) => Some(FailureCapture::Unavailable { reason: format!("{error:#}") }),
+        }
+    }
+
+    /// Retain complete native failures OR reference disagreements in the
+    /// three-runtime schema. No extra executions and no Node/native projection.
+    pub(in super::super) fn finish_product(self, report: &super::super::product_oracle::ProductReport,
+        original: &Snapshot, candidate: &Snapshot, deadline: Instant) -> Option<FailureCapture> {
+        if report.verdict == "PASS" { return None; }
+        let result = (|| -> Result<FailureCapture> {
+            budget(deadline)?;
+            ensure!(matches!(report.verdict.as_str(), "FAIL" | "INCONCLUSIVE"),
+                "incomplete or infrastructure-error product runs are not replayable");
+            let captured = product::from_measured(report, [original, candidate], self.projects.clone(), deadline)?;
+            let path = self.directory.path().join("failure.json");
+            let summary = captured.write_capsule(&path)?;
+            fs::File::open(self.directory.path())?.sync_all()?;
+            budget(deadline)?;
+            Ok(FailureCapture::Saved { capsule_path: path, content_sha256: summary.content_sha256 })
+        })();
+        match result {
+            Ok(saved) => { let _retained_directory = self.directory.keep(); Some(saved) }
             Err(error) => Some(FailureCapture::Unavailable { reason: format!("{error:#}") }),
         }
     }
@@ -225,5 +250,32 @@ mod tests {
         assert_eq!(fs::read_dir(&path).unwrap().count(), 0);
         drop(archive);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn product_retention_preserves_reference_disagreement_without_rerunning() {
+        let root = project();
+        let out = tempfile::tempdir().unwrap();
+        let marker = out.path().join("runs");
+        let source = format!("require('fs').appendFileSync({},'once');console.log('reference');",
+            serde_json::to_string(&marker).unwrap());
+        fs::write(root.path().join("case.test.js"), &source).unwrap();
+        let snapshot = Snapshot::capture(root.path(), deadline()).unwrap();
+        let archive = FailureArchive::reserve(out.path(), [root.path(), root.path()]).unwrap();
+        // Deliberate empty-output reference and failed candidate, not Bun/Franken.
+        let report = super::super::super::product_oracle::run_captured([root.path(), root.path()],
+            [&snapshot, &snapshot], Path::new("/bin/false"), Path::new("/bin/true"), deadline(), true).unwrap();
+        assert_eq!(report.verdict, "INCONCLUSIVE");
+        let original = report.clone();
+        fs::write(root.path().join("case.test.js"), "later source").unwrap();
+        let saved = archive.finish_product(&report, &snapshot, &snapshot, deadline()).unwrap();
+        let FailureCapture::Saved { capsule_path, content_sha256 } = saved else { panic!("{saved:?}") };
+        assert_eq!(report, original);
+        assert_eq!(fs::read_to_string(marker).unwrap(), "once");
+        assert_eq!(product::inspect_any(&capsule_path).unwrap().captured_verdict, "INCONCLUSIVE");
+        let exported = product::export_any(&capsule_path, &content_sha256, &out.path().join("export")).unwrap();
+        assert_eq!(fs::read_to_string(exported.destination.join("original/case.test.js")).unwrap(), source);
+        let manifest: serde_json::Value = serde_json::from_slice(&fs::read(exported.destination.join("reproducer.json")).unwrap()).unwrap();
+        assert_eq!(manifest["expected"]["cases"], serde_json::to_value(report.cases).unwrap());
     }
 }

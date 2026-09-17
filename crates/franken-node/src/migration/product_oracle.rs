@@ -69,6 +69,9 @@ pub struct ProductReport {
     pub verdict: String,
     pub cases: Vec<ProductCase>,
     pub errors: Vec<String>,
+    /// Optional live failure retention; never replaces the measured verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_capture: Option<super::FailureCapture>,
 }
 
 impl ProductReport {
@@ -252,6 +255,8 @@ fn classify(test: &Path, legs: [Leg; 3], filesystem: bool) -> ProductCase {
         node: node.observation, bun: bun.observation, native: native.observation, divergences, errors }
 }
 
+// Shared by live comparison and pinned replay; callers establish trusted local
+// runtime identities before dispatch. Neither path imports commands from data.
 pub(super) fn execute(original: &Snapshot, candidate: &Snapshot, runtimes: [&Invocation; 3],
     identities: [RuntimeIdentity; 3], deadline: Instant, leg_timeout: Duration,
     filesystem: bool) -> Result<ProductReport> {
@@ -270,7 +275,7 @@ pub(super) fn execute(original: &Snapshot, candidate: &Snapshot, runtimes: [&Inv
         node_runtime, bun_runtime, native_runtime, distinct_reference_binaries,
         total_tests: tests.len(), passed: 0, failed: 0, reference_failures: 0, reference_divergences: 0,
         native_divergences: 0, errored: 0, skipped: tests.len(), verdict: "ERROR".into(),
-        cases: Vec::new(), errors: Vec::new(),
+        cases: Vec::new(), errors: Vec::new(), failure_capture: None,
     };
     let environment = std::env::vars_os().collect();
     for test in tests {
@@ -426,8 +431,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         write(root.path(), "a.test.js", "require('fs').writeFileSync('artifact',process.argv.includes('bun')?'bun':'node');");
         let report = measured(root.path(), None, true);
-        let row = &report.cases[0];
         assert_eq!(report.verdict, "INCONCLUSIVE");
+        let row = &report.cases[0];
         assert_eq!(row.node.as_ref().unwrap().stdout, row.bun.as_ref().unwrap().stdout);
         assert!(row.divergences.contains(&"node/bun:filesystem:workspace_delta_mismatch".into()));
         assert!(!root.path().join("artifact").exists());
