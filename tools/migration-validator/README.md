@@ -84,9 +84,9 @@ The report schema is `franken-node/product-validation-suite/v1`. It records orig
 
 All three executables must be ordinary executable files outside both projects. Node and Bun must have different executable hashes, so a renamed or copied Node binary cannot accidentally satisfy the second reference. This checks byte distinction, not authenticated runtime brands or independence: the operator must select trusted genuine runtime binaries. Missing Bun is an error, not permission to silently downgrade to two runtimes.
 
-Three-runtime reports use their own replay capsule schema; they are never projected into two-runtime capsules. `--bun-bin` supports live comparison, capture, replay and explicit fix verification. It conflicts with offline inspection/export and the two-runtime minimizer. Primary `migrate validate` and `migrate-report` retain their two-runtime path; checked apply has the explicit three-runtime option below. `release_certification` remains false.
+Three-runtime reports use their own replay capsule schema; they are never projected into two-runtime capsules. `--bun-bin` supports live comparison, capture, replay, explicit fix verification and three-runtime minimization. It conflicts with offline inspection/export. Primary `migrate validate` and `migrate-report` retain their two-runtime path; checked apply has the explicit three-runtime option below. `release_certification` remains false.
 
-The targeted product-oracle checks exercise the production orchestration with explicitly identified role-argument Node processes. The `Native product oracle` workflow also installs real Bun and exercises reference agreement/disagreement, capture, replay, offline export and Bun-only reference drift through the executable CLI, with `/bin/false` as a deliberately failing candidate. These checks do not establish successful native Franken compatibility.
+The targeted product-oracle checks exercise the production orchestration with explicitly identified role-argument Node processes. The `Native product oracle` workflow also installs real Bun and exercises reference agreement/disagreement, capture, replay, reduction, offline export and Bun-only reference drift through the executable CLI, with `/bin/false` as a deliberately failing candidate. These checks do not establish successful native Franken compatibility.
 
 ## Require three-runtime agreement before checked installation
 
@@ -134,7 +134,7 @@ The JSON attachment is `test_suite.failure_capture` for validation, `validation.
 
 Checked rewrites archive both the original and prepared candidate, even when that candidate is rejected and never installed. The archive uses the exact pre-execution snapshots and original report: it does not rerun the project to manufacture a failure or recapture the subsequently mutable source tree. Failed validation still refuses installation. The directory configuration is removed from guest runtime environments to avoid propagating operator capture settings into nested executions; this is not an OS isolation boundary.
 
-Use the saved path and hash from your trusted primary-command output with this operator's inspection, replay and export modes below. Retain the producing validator revision. Static failures, empty-suite smoke fallback, failures before a complete suite report exists, and archive-limit refusals are not replayable captures. The standalone operator retains its explicit `--capture-capsule` behavior and does not read this automatic-retention setting. Minimization remains available only for two-runtime capsules.
+Use the saved path and hash from your trusted primary-command output with this operator's inspection, replay, minimization and export modes below. Retain the producing validator revision. Static failures, empty-suite smoke fallback, failures before a complete suite report exists, and archive-limit refusals are not replayable captures. The standalone operator retains its explicit `--capture-capsule` behavior and does not read this automatic-retention setting. Reduction has stricter seed requirements than replay, described below.
 
 ## Capture a failure for native reexecution
 
@@ -201,9 +201,9 @@ For a product capsule add `--bun-bin /trusted/bin/bun` and use its trusted hash.
 
 Replay refuses input/comparison overrides (`--migrated-project`, `--compare-filesystem`) and cannot be combined with capture or inspection. Replay requires `--execute`, `--expected-sha256` and `--native-bin`, plus `--bun-bin` for product capsules. Offline inspection/export forbids execution/runtime flags.
 
-## Reduce a reproduced two-runtime failure
+## Reduce a reproduced failure or reference disagreement
 
-Minimize captured failing entrypoints while retaining every recorded case observation:
+Minimize a two-runtime capsule while retaining every recorded case observation:
 
 ```bash
 franken-migration-suite ./migration-capsule.json --replay --execute \
@@ -213,17 +213,30 @@ franken-migration-suite ./migration-capsule.json --replay --execute \
   --out ./reduction-report.json
 ```
 
-This is native, execution-backed line-complement reduction. It never edits the source projects or the seed capsule. The seed must be a complete two-runtime `FAIL` with successful reference executions and ordinary, non-signal candidate exits. Captured runtime identities and replay implementation fingerprints must match; reduction cannot be combined with `--verify-fix` or `--bun-bin`. Product capsules are rejected, not projected into a pair. Three-runtime minimization remains unimplemented.
+For a three-runtime capsule, keep Bun in the reduction:
 
-The initial seed, each accepted candidate and the final retained result require repeated full-suite executions. All original observations must remain identical: passing cases as well as failing cases, stdout/stderr byte counts and hashes, termination outcomes, divergence channels, and any captured filesystem effects. A new syntax error, a missing test or an unrelated failure cannot replace the recorded behavior. Rejected candidates are cached by both complete input hashes; incomplete trials are never cached as evidence of rejection.
+```bash
+franken-migration-suite ./product-capsule.json --replay --execute \
+  --expected-sha256 "$PRODUCT_CAPSULE_SHA256" \
+  --native-bin /trusted/bin/franken-node \
+  --bun-bin /trusted/bin/bun \
+  --minimize-capsule ./reduced-product-capsule.json \
+  --out ./product-reduction-report.json
+```
 
-By default, the reducer selects the failing test entrypoints. Use repeated `--source-file src/helper.js` arguments to select supporting sources instead. At most 16 canonical project-relative source paths are allowed. They must be ordinary UTF-8 JS/TS files, each no larger than 1 MiB or 4,096 lines. Explicit selections must exist in both trees when the capsule contains distinct original/candidate inputs; each leg is then reduced independently. Dependencies, configuration, manifests, paths, file modes, links and the test inventory remain unchanged. Newline ranges preserve CRLF, Unicode and unterminated final lines. AST-aware and token-level reduction are not implemented by this operator.
+This is native, execution-backed line-complement reduction. It never edits the source projects or seed capsule. Pair seeds must be complete `FAIL` measurements with successful reference executions and ordinary non-signal candidate exits. Product seeds may be `FAIL` or `INCONCLUSIVE`, but Node and Bun must both have exited successfully for every case and native exits must be ordinary, not signals. Thus reference disagreements can be reduced for diagnosis without pretending they are evidence of a native regression. Reference execution failures, crashing candidates, incomplete runs and passing seeds are refused.
 
-Defaults are `--max-executions 128`, `--minimize-seconds 120`, and `--confirmations 2`. Execution counts include complete-suite attempts, initial confirmations and final confirmations, not individual child processes. Confirmations may be raised to 8; execution budgets must reserve both initial and final confirmations and cannot exceed 4,096. The time budget is 1–3,600 seconds, with the last 20 percent reserved for final checking. The shared 30-second per-leg cap still applies.
+All captured runtime identities, arguments and replay implementation fingerprints must match. Product reduction checks Node, Bun and native before dispatch and around every full-suite attempt. Missing or substituted Bun cannot trigger a pair fallback. Reduction cannot be combined with `--verify-fix`; changing the native runtime is a separate operation.
 
-Search budget exhaustion retains the last confirmed candidate, but never waives fresh final verification. A failed or incomplete final check returns `ERROR` without publishing a reduced capsule. `REDUCED` means fewer selected source bytes with preserved observations, not a fixed migration. `UNCHANGED` means no reduction was retained. `search_complete=false` identifies budget-limited or unresolved searches; even a completed line search is not proof of a global minimum or of deterministic environmental behavior. Statistics include executions, accepted/rejected/unresolved trials, cache hits and the last unresolved diagnostic.
+The initial seed, each accepted candidate and the final retained result require repeated full-suite executions. All original observations must remain identical: passing cases as well as failing cases, every runtime's stdout/stderr byte counts and hashes, termination outcomes, divergence channels, case classifications and captured filesystem effects. The full `ProductCase` set is retained through product reduction; matching Node and native while Bun changes is insufficient. A new syntax error, a missing test or an unrelated failure cannot replace the recorded behavior. Complete rejected candidates are cached by both complete input hashes; incomplete trials are never cached as evidence of rejection or accepted as equivalent.
 
-The output is an ordinary two-runtime replay capsule, usable with `--inspect-capsule`, `--replay` and `--verify-fix`. Its new content hash, parent capsule hash, reducer fingerprint, selected sources, byte counts and final measured evidence are reported in the separate reduction report. The reduced capsule remains sensitive material and is created privately without overwriting an existing path. Publication errors retain completed reduction evidence in JSON output.
+By default, the reducer selects failing entrypoints, including reference-disagreement cases in product mode. Use repeated `--source-file src/helper.js` arguments to select supporting sources instead. At most 16 canonical project-relative source paths are allowed. They must be ordinary UTF-8 JS/TS files, each no larger than 1 MiB or 4,096 lines. Explicit selections must exist in both trees when the capsule contains distinct original/candidate inputs; each tree is reduced independently. Node and Bun always receive the same current original tree, while native receives the current candidate. Dependencies, configuration, manifests, paths, file modes, links and the test inventory remain unchanged. Newline ranges preserve CRLF, Unicode and unterminated final lines. AST-aware and token-level reduction are not implemented.
+
+Both modes share the source policy, complement-search algorithm, rejection cache, unresolved-run accounting and final-confirmation budget. Defaults are `--max-executions 128`, `--minimize-seconds 120`, and `--confirmations 2`. Execution counts include complete-suite attempts, initial confirmations and final confirmations, not individual child processes. Confirmations may be raised to 8; execution budgets must reserve both initial and final confirmations and cannot exceed 4,096. The time budget is 1–3,600 seconds, with the last 20 percent reserved for final checking. The shared 30-second per-leg cap still applies. Use a sufficient explicit time budget for large runtime binaries or large selected suites; resource limits never authorize skipping final checks.
+
+Search budget exhaustion retains the last confirmed candidate, but never waives fresh final verification. A failed or incomplete final check returns `ERROR` without publishing a reduced capsule. This includes Bun-only drift first observed during final confirmation. `REDUCED` means fewer selected source bytes with preserved observations, not a fixed migration: a reduced native failure still contains `FAIL`, and a reduced reference disagreement still contains `INCONCLUSIVE`. `UNCHANGED` means no reduction was retained. `search_complete=false` identifies budget-limited or unresolved searches; even a completed line search is not proof of a global minimum or deterministic environmental behavior. Statistics include executions, accepted/rejected/unresolved trials, cache hits and the last unresolved diagnostic.
+
+The output retains its ordinary pair or product capsule format, usable with inspection, the corresponding replay mode and offline export. Eligible native failures remain usable for explicit fix verification; reference disagreements remain ineligible. Reduction reports use `franken-node/native-minimization/v1` or `franken-node/product-minimization/v1`. They contain the new content hash, parent capsule hash, reducer fingerprint, selected sources, byte counts, statistics and full final measured evidence. The product report also records `captured_verdict`. The reduced capsule remains sensitive material and is created privately without overwriting an existing path. Publication errors retain completed reduction evidence in JSON output.
 
 ## Export a debugging fixture without execution
 
@@ -235,7 +248,7 @@ franken-migration-suite ./reduced-capsule.json \
   --expected-sha256 "$REDUCED_CAPSULE_SHA256"
 ```
 
-Use the hash from your trusted capture or reduction result, not a parent capsule's hash. Export works on reduced/unreduced pair capsules and product capsules. No `--execute`, `--native-bin` or `--bun-bin` is accepted, and no recorded command or runtime is resolved. Unlike reexecution, offline export does not require the producing validator/runtime revision to remain installed.
+Use the hash from your trusted capture or reduction result, not a parent capsule's hash. Export works on reduced/unreduced pair and product capsules. No `--execute`, `--native-bin` or `--bun-bin` is accepted, and no recorded command or runtime is resolved. Unlike reexecution, offline export does not require the producing validator/runtime revision to remain installed.
 
 The new directory is mode 0700 and contains `original/`, `candidate/` and `reproducer.json`. Both trees retain captured bytes, ordinary file modes and contained links. Their input hashes are recomputed and checked before the private (0600) completion manifest is written. The manifest records the complete expected observations and relative project roots; product exports keep all three roles. It does not execute them. `EXPORTED` is a successful extraction, not a successful migration or fresh behavioral validation.
 
@@ -251,7 +264,7 @@ Capsule-specific limits: 128 MiB serialized input, 32 MiB combined expanded snap
 
 Capsules bind the replay, capture, supervision, inventory and workspace-comparison source implementations; product capsules additionally bind the product executor and replay implementation. Reexecution requires matching source fingerprints; retain the validator revision. This is not a binding of the full compiled dependency graph. Runtime hashes likewise do not capture dynamically linked libraries. Clocks, environment variables, random values, temporary absolute paths, external modules and network state can still make exact-input reexecution diverge. `environment_reproduced` and `release_certification` remain false.
 
-Implementations live in `crates/franken-node/src/migration/native_replay.rs`, `product_replay.rs` and `native_minimizer.rs` and are consumed directly by this operator. Product replay shares the existing bounded path/blob/link codec and is exposed under `validation_suite::native_replay::failure_capture::product`. Automatic capture beyond the supported complete primary validation/checked-rewrite failures, three-runtime minimization, AST/token minimization and whole-environment replay remain separate work.
+Implementations live in `crates/franken-node/src/migration/native_replay.rs`, `product_replay.rs`, `native_minimizer.rs` and `product_minimizer.rs` and are consumed directly by this operator. Product replay shares the existing bounded path/blob/link codec and is exposed under `validation_suite::native_replay::failure_capture::product`; its `minimizer` module uses the shared reduction kernel. Automatic capture beyond supported complete primary validation/checked-rewrite failures, AST/token minimization and whole-environment replay remain separate work.
 
 ## Reports and boundaries
 
