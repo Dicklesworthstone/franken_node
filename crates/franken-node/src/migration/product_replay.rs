@@ -20,6 +20,9 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+#[path = "product_minimizer.rs"]
+pub mod minimizer;
+
 const SCHEMA: &str = "franken-node/product-migration-capsule/v1";
 
 #[derive(Serialize, Deserialize)]
