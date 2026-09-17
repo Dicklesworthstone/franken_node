@@ -31,6 +31,9 @@ struct Args {
     /// Trusted installed franken-node executable, outside both project trees.
     #[arg(long, required_unless_present_any = ["list_tests", "inspect_capsule", "export_inputs"])]
     native_bin: Option<PathBuf>,
+    /// Also require Bun to agree with Node on original inputs before admitting the native candidate.
+    #[arg(long, requires_all = ["execute", "native_bin"], conflicts_with_all = ["list_tests", "inspect_capsule", "export_inputs", "replay", "capture_capsule", "expected_sha256", "verify_fix", "minimize_capsule", "source_file", "max_executions", "minimize_seconds", "confirmations"])]
+    bun_bin: Option<PathBuf>,
     /// Approve execution of trusted project or captured code on both runtimes.
     #[arg(long)]
     execute: bool,
@@ -86,6 +89,10 @@ fn run(args: &Args) -> anyhow::Result<serde_json::Value> {
     use validation_suite::native_replay;
 
     // Keep the same consent boundary for library/test callers that bypass Clap.
+    ensure!(args.bun_bin.is_none() || (!args.list_tests && !args.inspect_capsule && !args.replay
+        && args.export_inputs.is_none() && args.capture_capsule.is_none()
+        && args.expected_sha256.is_none() && !args.verify_fix && args.minimize_capsule.is_none()),
+        "--bun-bin is only supported for live project comparison; three-runtime evidence cannot be downgraded to a two-runtime capsule");
     let modes = u8::from(args.list_tests) + u8::from(args.inspect_capsule) + u8::from(args.replay)
         + u8::from(args.export_inputs.is_some());
     ensure!(modes <= 1, "--list-tests, --inspect-capsule, --export-inputs and --replay are mutually exclusive");
@@ -182,6 +189,10 @@ fn run(args: &Args) -> anyhow::Result<serde_json::Value> {
             "execution_performed": false,
             "release_certification": false,
         })
+    } else if let Some(bun) = args.bun_bin.as_deref() {
+        serde_json::to_value(validation_suite::product_oracle::run_project_comparison(
+            project.as_deref().context("project missing")?, migrated_project.as_deref(),
+            args.native_bin.as_deref().context("native runtime missing")?, bun, args.compare_filesystem)?)?
     } else if let Some(capsule_path) = &capsule_destination {
         let captured = native_replay::capture_project(project.as_deref().context("project missing")?,
             migrated_project.as_deref(), args.native_bin.as_deref().context("native runtime missing")?,
@@ -255,7 +266,7 @@ mod tests {
 
     fn arguments(project: PathBuf) -> Args {
         Args { project, migrated_project: None, compare_filesystem: false,
-            native_bin: Some("missing-runtime".into()), execute: true, list_tests: false,
+            native_bin: Some("missing-runtime".into()), bun_bin: None, execute: true, list_tests: false,
             capture_capsule: None, inspect_capsule: false, replay: false,
             expected_sha256: None, export_inputs: None, verify_fix: false, minimize_capsule: None,
             source_file: Vec::new(), max_executions: None, minimize_seconds: None,
@@ -724,5 +735,63 @@ mod tests {
         args.execute = true;
         assert!(run(&args).unwrap_err().to_string().contains("cannot be combined"));
         assert!(!destination.exists());
+    }
+
+    #[test]
+    fn clap_three_runtime_comparison_requires_execution_and_rejects_two_runtime_capsules() {
+        let base = ["suite", "project", "--bun-bin", "/trusted/bun", "--native-bin", "/trusted/native", "--execute"];
+        let args = Args::try_parse_from(base).unwrap();
+        assert_eq!(args.bun_bin, Some("/trusted/bun".into()));
+        assert!(Args::try_parse_from(["suite", "project", "--bun-bin", "/trusted/bun",
+            "--native-bin", "/trusted/native"]).is_err());
+        for flags in [vec!["--list-tests"], vec!["--inspect-capsule"], vec!["--replay"],
+            vec!["--capture-capsule", "capsule.json"], vec!["--export-inputs", "export"],
+            vec!["--verify-fix"], vec!["--minimize-capsule", "reduced.json"]] {
+            let mut argv = base.to_vec();
+            argv.extend(flags);
+            assert!(Args::try_parse_from(&argv).is_err(), "{argv:?}");
+        }
+        let mut paired_inputs = base.to_vec();
+        paired_inputs.extend(["--migrated-project", "candidate", "--compare-filesystem"]);
+        assert!(Args::try_parse_from(paired_inputs).is_ok());
+    }
+
+    #[test]
+    fn three_runtime_cli_keeps_failed_reference_evidence_and_nonzero_exit() {
+        use std::os::unix::fs::PermissionsExt;
+        let project = tempfile::tempdir().unwrap();
+        let outputs = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("case.test.js"), "console.log(42);").unwrap();
+        let destination = outputs.path().join("product.json");
+        // Real failing executables test error classification, not Bun/Franken parity.
+        let args = Args { native_bin: Some("/bin/false".into()), bun_bin: Some("/bin/false".into()),
+            compare_filesystem: true, out: Some(destination.clone()), ..arguments(project.path().into()) };
+        let report = run(&args).unwrap();
+        assert_eq!(report["schema_version"], "franken-node/product-validation-suite/v1");
+        assert_eq!(report["verdict"], "INCONCLUSIVE");
+        assert_eq!(report["reference_failures"], 1);
+        assert_eq!(report["cases"][0]["node"]["exit_code"], 0);
+        assert_eq!(report["cases"][0]["bun"]["exit_code"], 1);
+        assert_eq!(report["cases"][0]["native"]["exit_code"], 1);
+        assert_eq!(report["release_certification"], false);
+        assert_eq!(result_exit_code(&report), 2);
+        assert_eq!(std::fs::metadata(&destination).unwrap().permissions().mode() & 0o777, 0o600);
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(destination).unwrap()).unwrap();
+        assert_eq!(saved["cases"], report["cases"]);
+    }
+
+    #[test]
+    fn three_runtime_preflight_and_consent_precede_project_execution() {
+        let mut args = Args { bun_bin: Some("missing-bun".into()), execute: false,
+            ..arguments("missing-project".into()) };
+        assert!(run(&args).unwrap_err().to_string().contains("--execute"));
+        args.execute = true;
+        args.capture_capsule = Some("capture.json".into());
+        assert!(run(&args).unwrap_err().to_string().contains("cannot be downgraded"));
+        let project = tempfile::tempdir().unwrap();
+        let args = Args { bun_bin: Some("missing-bun".into()), out: Some(project.path().join("report.json")),
+            ..arguments(project.path().into()) };
+        assert!(run(&args).unwrap_err().to_string().contains("outside"));
+        assert!(!project.path().join("report.json").exists());
     }
 }
