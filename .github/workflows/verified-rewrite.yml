@@ -27,6 +27,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
       - name: Compile primary source and execute checked-apply regression tests
         shell: bash
         run: |
@@ -106,7 +107,8 @@ jobs:
           git rev-parse HEAD > evidence/revision.txt
           rustc +stable --version > evidence/rust-version.txt
           node --version > evidence/node-version.txt
-          for file in mod.rs validation_suite.rs rewrite_candidate.rs verified_rewrite.rs rewrite_transaction.rs workspace_effects.rs smoke_supervisor.rs; do
+          bun --version > evidence/bun-version.txt
+          for file in mod.rs validation_suite.rs product_oracle.rs rewrite_candidate.rs verified_rewrite.rs rewrite_transaction.rs workspace_effects.rs smoke_supervisor.rs; do
             printf '%s ' "$file" >> evidence/compiled-source-blobs.txt
             git hash-object "$source/migration/$file" >> evidence/compiled-source-blobs.txt
           done
@@ -135,6 +137,7 @@ jobs:
             evidence/
             crates/franken-node/src/migration/mod.rs
             crates/franken-node/src/migration/validation_suite.rs
+            crates/franken-node/src/migration/product_oracle.rs
             crates/franken-node/src/migration/rewrite_candidate.rs
             crates/franken-node/src/migration/verified_rewrite.rs
             crates/franken-node/src/migration/rewrite_transaction.rs
