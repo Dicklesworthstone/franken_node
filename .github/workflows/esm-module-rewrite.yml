@@ -30,18 +30,37 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p evidence
-          # Immutable manually reviewed patch stored in this repository's Git
-          # object database. No source synthesis, regex rewrite or dependency patch.
-          gh api repos/Dicklesworthstone/franken_node/git/blobs/1c242ad18f59e2cd293dd006390296feb8c73692 --jq .content | base64 --decode > evidence/typescript.patch
-          test "$(git hash-object evidence/typescript.patch)" = 1c242ad18f59e2cd293dd006390296feb8c73692
-          if git apply --recount --reverse --check evidence/typescript.patch 2>/dev/null; then
-            echo 'Typed integration already present'
-          else
-            git apply --recount --check evidence/typescript.patch
-            git apply --recount evidence/typescript.patch
-          fi
+          for blob in 1c242ad18f59e2cd293dd006390296feb8c73692 8618f55d4d0c198dca9eb60a982ca9991de88f87; do
+            gh api "repos/Dicklesworthstone/franken_node/git/blobs/$blob" --jq .content | base64 --decode > "evidence/$blob.patch"
+            test "$(git hash-object "evidence/$blob.patch")" = "$blob"
+          done
+          # Add Git file delimiters to the manually reviewed unified patches.
+          # This changes patch metadata only, never synthesizes source edits.
+          # Recount alone otherwise mistakes a next-file header for removed text.
+          python3 - <<'PY'
+          from pathlib import Path
+          for blob in ('1c242ad18f59e2cd293dd006390296feb8c73692', '8618f55d4d0c198dca9eb60a982ca9991de88f87'):
+              lines = []
+              for line in Path(f'evidence/{blob}.patch').read_text().splitlines(keepends=True):
+                  if line.startswith('--- a/'):
+                      path = line[len('--- a/'):].rstrip('\n')
+                      lines.append(f'diff --git a/{path} b/{path}\n')
+                  lines.append(line)
+              Path(f'evidence/{blob}.git.patch').write_text(''.join(lines))
+          PY
+          for blob in 1c242ad18f59e2cd293dd006390296feb8c73692 8618f55d4d0c198dca9eb60a982ca9991de88f87; do
+            patch="evidence/$blob.git.patch"
+            if git apply --recount --reverse --check "$patch" 2>/dev/null; then
+              echo 'Reviewed integration already present'
+            else
+              git apply --recount --check "$patch"
+              git apply --recount "$patch"
+            fi
+          done
           test "$(git hash-object crates/franken-node/src/migration/module_specifiers.rs)" = fd466221ee8413fc7b30ac74621ab937fd9a5ec0
           test "$(git hash-object crates/franken-node/src/migration/mod.rs)" = 9f07fcddc811e9d3db436e92f92dfe5aed8acb43
+          test "$(git hash-object crates/franken-node/src/migration/validation_suite.rs)" = ca999fdd066bd22bfcf9521b14419f10c594eae4
+          test "$(git hash-object crates/franken-node/tests/native_rewrite_transactions.rs)" = a5196c09e4685d13d70b2867e3a100dbcfe28877
           git diff --check
       - name: Compile the primary implementation and execute real rewrite tests
         shell: bash
@@ -118,16 +137,19 @@ jobs:
           git rev-parse HEAD > evidence/revision.txt
           node --version > evidence/node-version.txt
           rustc +stable --version > evidence/rust-version.txt
-          for file in mod.rs module_specifiers.rs; do
+          for file in mod.rs module_specifiers.rs validation_suite.rs; do
             printf '%s ' "$file" >> evidence/source-blobs.txt
             git hash-object "$source/migration/$file" >> evidence/source-blobs.txt
           done
-          git ls-tree HEAD crates/franken-node/tests/native_rewrite_transactions.rs >> evidence/source-blobs.txt
+          printf 'native_rewrite_transactions.rs ' >> evidence/source-blobs.txt
+          git hash-object crates/franken-node/tests/native_rewrite_transactions.rs >> evidence/source-blobs.txt
           rustfmt +stable --edition 2024 --emit stdout "$source/migration/module_specifiers.rs" > evidence/module_specifiers.formatted.rs
           cargo +stable check --manifest-path "$primary/Cargo.toml" --lib 2>&1 | tee evidence/primary-check.log
           cargo +stable test --manifest-path "$tests/Cargo.toml" -- --nocapture --test-threads=2 2>&1 | tee evidence/esm-tests.log
           cargo +stable clippy --manifest-path "$primary/Cargo.toml" --lib -- -D warnings 2>&1 | tee evidence/primary-clippy.log
           cargo +stable clippy --manifest-path "$tests/Cargo.toml" --all-targets -- -D warnings 2>&1 | tee evidence/esm-clippy.log
+          cargo +stable test --manifest-path tools/migration-validator/Cargo.toml -- --nocapture --test-threads=2 2>&1 | tee evidence/suite-tests.log
+          cargo +stable clippy --manifest-path tools/migration-validator/Cargo.toml --all-targets -- -D warnings 2>&1 | tee evidence/suite-clippy.log
           cp "$tests/Cargo.lock" evidence/Cargo.lock
           python3 - <<'PY'
           import tomllib
@@ -147,11 +169,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git add crates/franken-node/src/migration/mod.rs crates/franken-node/src/migration/module_specifiers.rs crates/franken-node/Cargo.toml Cargo.lock .github/workflows/native-migration-validation.yml .github/workflows/native-rewrite-transaction.yml .github/workflows/verified-rewrite.yml
+          git add crates/franken-node/src/migration/mod.rs crates/franken-node/src/migration/module_specifiers.rs crates/franken-node/src/migration/validation_suite.rs crates/franken-node/tests/native_rewrite_transactions.rs crates/franken-node/Cargo.toml Cargo.lock .github/workflows/native-migration-validation.yml .github/workflows/native-rewrite-transaction.yml .github/workflows/verified-rewrite.yml
           if ! git diff --cached --quiet; then
             git config user.name 'ChatGPT'
             git config user.email 'noreply@openai.com'
-            git commit -m 'feat(migration): support typed TypeScript and TSX without type erasure or module conversion' -m 'Use explicit grammars and preserve type/value import modifiers, annotations, JSX and declarations. Recognize mts/cts in primary audit and rewrite. Refuse ambiguous CommonJS and ambient-module forms. All transformer/public API tests and Clippy passed on these exact source blobs; native engine compatibility not claimed.'
+            git commit -m 'feat(migration): support typed TypeScript/TSX and complete executable test discovery' -m 'Use explicit grammars and preserve type/value import modifiers, annotations, JSX and declarations. Recognize mts/cts in primary audit and rewrite. Refuse ambiguous CommonJS and ambient-module forms. Discover JSX/TSX tests; never count declarations as executable tests. All transformer/public API/operator tests and Clippy passed on these exact sources; native engine compatibility not claimed.'
             git push origin HEAD:main
           fi
           git rev-parse HEAD > evidence/published-revision.txt
@@ -166,6 +188,7 @@ jobs:
             evidence/
             crates/franken-node/src/migration/mod.rs
             crates/franken-node/src/migration/module_specifiers.rs
+            crates/franken-node/src/migration/validation_suite.rs
             crates/franken-node/tests/native_rewrite_transactions.rs
             crates/franken-node/Cargo.toml
             Cargo.lock
