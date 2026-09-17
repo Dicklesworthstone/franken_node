@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::time::{Duration, Instant};
 
@@ -71,6 +71,62 @@ pub struct ProductReport {
     pub errors: Vec<String>,
 }
 
+impl ProductReport {
+    /// Check a LIVE measurement against the caller's exact captured inputs and
+    /// sorted test inventory before allowing a checked installation. This is
+    /// consistency checking, not authentication: an unsigned imported report
+    /// must never authorize source changes, even when all these checks pass.
+    /// No pairwise projection, majority vote or summary-only PASS is sufficient.
+    pub fn check_admission(&self, original_sha256: &str, candidate_sha256: &str,
+        tests: &[PathBuf]) -> Result<()> {
+        let digest = |value: &str| value.len() == 64
+            && value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        ensure!(digest(original_sha256) && digest(candidate_sha256)
+            && self.input_sha256 == original_sha256 && self.candidate_input_sha256 == candidate_sha256,
+            "three-runtime evidence does not match the captured original and prepared candidate");
+        ensure!(self.schema_version == "franken-node/product-validation-suite/v1"
+            && self.oracle == "L1-node-bun-franken-node"
+            && self.scope == "captured-test-process-and-workspace-delta"
+            && !self.release_certification && self.filesystem_comparison
+            && self.filesystem_exclusions.iter().map(String::as_str)
+                .eq(workspace_effects::EXCLUSIONS.iter().copied()),
+            "three-runtime evidence has an unsupported or weakened comparison scope");
+        ensure!(self.distinct_reference_binaries && self.node_runtime.sha256 != self.bun_runtime.sha256,
+            "three-runtime admission requires distinct reference executable hashes");
+        for runtime in [&self.node_runtime, &self.bun_runtime, &self.native_runtime] {
+            ensure!(runtime.executable.is_absolute() && digest(&runtime.sha256),
+                "three-runtime evidence contains an invalid runtime identity");
+        }
+        ensure!(!tests.is_empty() && tests.windows(2).all(|pair| pair[0] < pair[1])
+            && self.verdict == "PASS" && self.total_tests == tests.len()
+            && self.cases.len() == tests.len() && self.passed == tests.len()
+            && self.failed == 0 && self.reference_failures == 0 && self.reference_divergences == 0
+            && self.native_divergences == 0 && self.errored == 0 && self.skipped == 0 && self.errors.is_empty(),
+            "three-runtime evidence is not a complete passing test suite");
+        for (test, row) in tests.iter().zip(&self.cases) {
+            ensure!(test.to_str() == Some(row.test.as_str()),
+                "three-runtime evidence test inventory differs from the captured inventory");
+            ensure!(row.outcome == CaseOutcome::Match && row.errors.is_empty() && row.divergences.is_empty(),
+                "three-runtime evidence contains a nonmatching case: {}", row.test);
+            let node = row.node.as_ref().context("missing Node process evidence")?;
+            let bun = row.bun.as_ref().context("missing Bun process evidence")?;
+            let native = row.native.as_ref().context("missing native process evidence")?;
+            for observation in [node, bun, native] {
+                ensure!(observation.exit_code == Some(0) && observation.signal.is_none()
+                    && digest(&observation.stdout.sha256) && digest(&observation.stderr.sha256)
+                    && observation.workspace_delta.as_ref().is_some_and(|delta| digest(&delta.sha256)),
+                    "three-runtime evidence contains unsuccessful or incomplete observations: {}", row.test);
+            }
+            // Compare the observations themselves, not only the reported case
+            // outcome/divergence list. In particular, Bun cannot disappear at
+            // the installation boundary or disagree only in filesystem effects.
+            ensure!(node == bun && node == native,
+                "three-runtime evidence contains unequal process or workspace observations: {}", row.test);
+        }
+        Ok(())
+    }
+}
+
 /// Run only after explicit operator approval of trusted project execution.
 ///
 /// Both references run the original captured project. The native binary runs
@@ -82,12 +138,25 @@ pub fn run_project_comparison(project: &Path, migrated_project: Option<&Path>,
     native_executable: &Path, bun_executable: &Path, compare_filesystem: bool) -> Result<ProductReport> {
     let deadline = Instant::now() + TOTAL_TIMEOUT;
     let inputs = CapturedInputs::capture(project, migrated_project, deadline)?;
+    run_captured([&inputs.reference_root, &inputs.candidate_root],
+        [&inputs.reference, inputs.candidate_snapshot()], native_executable, bun_executable,
+        deadline, compare_filesystem)
+}
+
+/// Shared with checked rewrite: execute its prepared in-memory candidate,
+/// never recapture the caller's unchanged tree as the proposed rewrite.
+pub(super) fn run_captured(projects: [&Path; 2], snapshots: [&Snapshot; 2],
+    native_executable: &Path, bun_executable: &Path, deadline: Instant,
+    compare_filesystem: bool) -> Result<ProductReport> {
+    budget(deadline)?;
+    matched_tests(snapshots[0], snapshots[1])?;
+    let roots = [projects[0].canonicalize()?, projects[1].canonicalize()?];
     let (node, native) = runtime_invocations(native_executable)?;
     let bun = Invocation { executable: bun_executable.canonicalize().context("resolve Bun executable")?,
         before: Vec::new(), after: Vec::new() };
     let runtimes = [&node, &bun, &native];
     for (role, invocation) in ROLES.into_iter().zip(runtimes) {
-        for root in [&inputs.reference_root, &inputs.candidate_root] {
+        for root in &roots {
             ensure!(!invocation.executable.starts_with(root), "{role} runtime must be outside both measured projects");
         }
         let metadata = fs::metadata(&invocation.executable)?;
@@ -99,7 +168,7 @@ pub fn run_project_comparison(project: &Path, migrated_project: Option<&Path>,
     let identities = [node.identity(deadline)?, bun.identity(deadline)?, native.identity(deadline)?];
     ensure!(identities[0].sha256 != identities[1].sha256,
         "Node and Bun references must have distinct executable hashes");
-    execute(&inputs.reference, inputs.candidate_snapshot(), runtimes, identities,
+    execute(snapshots[0], snapshots[1], runtimes, identities,
         deadline, LEG_TIMEOUT, compare_filesystem)
 }
 
@@ -183,7 +252,7 @@ fn classify(test: &Path, legs: [Leg; 3], filesystem: bool) -> ProductCase {
         node: node.observation, bun: bun.observation, native: native.observation, divergences, errors }
 }
 
-fn execute(original: &Snapshot, candidate: &Snapshot, runtimes: [&Invocation; 3],
+pub(super) fn execute(original: &Snapshot, candidate: &Snapshot, runtimes: [&Invocation; 3],
     identities: [RuntimeIdentity; 3], deadline: Instant, leg_timeout: Duration,
     filesystem: bool) -> Result<ProductReport> {
     let tests = matched_tests(original, candidate)?;
@@ -357,8 +426,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         write(root.path(), "a.test.js", "require('fs').writeFileSync('artifact',process.argv.includes('bun')?'bun':'node');");
         let report = measured(root.path(), None, true);
-        assert_eq!(report.verdict, "INCONCLUSIVE");
         let row = &report.cases[0];
+        assert_eq!(report.verdict, "INCONCLUSIVE");
         assert_eq!(row.node.as_ref().unwrap().stdout, row.bun.as_ref().unwrap().stdout);
         assert!(row.divergences.contains(&"node/bun:filesystem:workspace_delta_mismatch".into()));
         assert!(!root.path().join("artifact").exists());
@@ -453,5 +522,37 @@ mod tests {
         fs::copy("/bin/false", &copied).unwrap();
         assert!(run_project_comparison(root.path(), None, Path::new("/bin/false"), &copied, false)
             .unwrap_err().to_string().contains("outside both"));
+    }
+
+    #[test]
+    fn single_reference_orchestration_evidence_cannot_authorize_product_admission() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), "a.test.js", "console.log(42);");
+        let report = measured(root.path(), None, true);
+        let tests = [PathBuf::from("a.test.js")];
+        assert_eq!(report.verdict, "PASS");
+        assert!(report.check_admission(&report.input_sha256, &report.candidate_input_sha256, &tests)
+            .unwrap_err().to_string().contains("distinct reference"));
+        let mut mislabelled = report.clone();
+        mislabelled.distinct_reference_binaries = true;
+        assert!(mislabelled.check_admission(&report.input_sha256, &report.candidate_input_sha256, &tests).is_err());
+        assert!(report.check_admission(&"0".repeat(64), &report.candidate_input_sha256, &tests)
+            .unwrap_err().to_string().contains("prepared candidate"));
+    }
+
+    #[test]
+    fn captured_product_entrypoint_checks_inventory_and_deadline_before_runtime_access() {
+        let original = tempfile::tempdir().unwrap();
+        let candidate = tempfile::tempdir().unwrap();
+        write(original.path(), "a.test.js", "console.log(42);");
+        write(candidate.path(), "b.test.js", "console.log(42);");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let reference = Snapshot::capture(original.path(), deadline).unwrap();
+        let changed = Snapshot::capture(candidate.path(), deadline).unwrap();
+        let missing = Path::new("/absent/runtime");
+        assert!(run_captured([original.path(), candidate.path()], [&reference, &changed],
+            missing, missing, deadline, true).unwrap_err().to_string().contains("test inventories differ"));
+        assert!(run_captured([original.path(), original.path()], [&reference, &reference],
+            missing, missing, Instant::now(), true).unwrap_err().to_string().contains("budget"));
     }
 }
