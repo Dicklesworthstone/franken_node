@@ -12,6 +12,7 @@ use super::{MigrationRewriteAction, MigrationRewriteReport, MigrationValidateRep
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -60,7 +61,10 @@ fn run_with_validator(project: &Path,
         let transaction = RewriteTransaction::open(&project)?;
         let deadline = Instant::now() + Duration::from_secs(300);
         let mut candidate = RewriteCandidate::capture(&project, deadline)?;
-        let temporary = tempfile::Builder::new().prefix("franken-checked-rewrite-").tempdir()?;
+        // This contains the complete captured source tree, even before any
+        // runtime runs. Privacy cannot depend on a permissive caller umask.
+        let temporary = tempfile::Builder::new().prefix("franken-checked-rewrite-")
+            .permissions(std::fs::Permissions::from_mode(0o700)).tempdir()?;
         let staged = temporary.path().join("project");
         candidate.stage_original(&staged)?;
         let mut prerequisites = run_validate(&staged, true)?;
@@ -146,7 +150,6 @@ pub fn render(report: &CheckedRewriteReport) -> String {
 mod tests {
     use super::*;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
 
     fn project() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
