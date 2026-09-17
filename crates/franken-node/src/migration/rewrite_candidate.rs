@@ -80,7 +80,10 @@ impl RewriteCandidate {
             ensure!(matches!(&entry.data, EntryData::File(bytes) if bytes == edit.before),
                 "checked rewrite preimage mismatch or nonregular target: {}", edit.path);
         }
-        let temporary = tempfile::Builder::new().prefix("franken-rewrite-candidate-").tempdir()?;
+        // Preserve each source file's mode inside an owner-only parent. The
+        // directory must already be private when the first source byte lands.
+        let temporary = tempfile::Builder::new().prefix("franken-rewrite-candidate-")
+            .permissions(fs::Permissions::from_mode(0o700)).tempdir()?;
         let root = temporary.path().join("project");
         self.original.stage(&root, self.deadline)?;
         for edit in replacements {
