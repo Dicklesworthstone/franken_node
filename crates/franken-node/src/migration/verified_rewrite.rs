@@ -16,15 +16,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-// Include the canonical specifier implementation, not a second builtin table.
-// The focused checked-apply host includes this module outside migration/mod.rs;
-// its parent therefore does not expose migration's private normalizer import.
-// Only the normalizer is used here; the ESM entrypoint remains used by the
-// primary migration planner and tested from the same source file.
-#[allow(dead_code)]
-#[path = "module_specifiers.rs"]
-mod checked_specifiers;
-use checked_specifiers::normalize_import_specifier;
+use super::module_specifiers::normalize_import_specifier;
 #[path = "checked_commonjs.rs"]
 mod checked_commonjs;
 
@@ -390,6 +382,7 @@ mod tests {
         let report = node_pair(root.path());
         assert_eq!(report.status, CheckedRewriteStatus::Rejected);
         assert_eq!(source(root.path()), original);
+        assert_eq!(report.rewrite.as_ref().unwrap().rewrites_applied, 0);
         assert_eq!(report.validation.as_ref().unwrap().failed, 1);
     }
 

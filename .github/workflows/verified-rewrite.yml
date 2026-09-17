@@ -94,7 +94,10 @@ jobs:
           TOML
           cat > "$tests/lib.rs" <<RUST
           #![forbid(unsafe_code)]
-          pub use verified_primary::migration::{MigrationRewriteAction, MigrationRewriteReport, MigrationValidateReport, run_rewrite, run_validate};
+          pub use verified_primary::migration::{MigrationRewriteAction, MigrationRewriteEntry, MigrationRollbackEntry, MigrationRewriteReport, MigrationValidateReport, run_rewrite, run_validate};
+          #[allow(dead_code)]
+          #[path = "$source/migration/module_specifiers.rs"]
+          mod module_specifiers;
           #[path = "$source/cli.rs"]
           pub mod cli;
           #[path = "$source/migration/smoke_supervisor.rs"]
