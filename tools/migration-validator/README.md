@@ -53,6 +53,25 @@ Both input trees are captured before execution. Their selected test identities m
 
 Successful validation requires successful exits and exact stdout/stderr bytes for every selected case. `--compare-filesystem` additionally compares final persistent workspace deltas, excluding `.git` trees and the root `.franken-node` directory. Those exclusions are explicitly reported; transient writes and external effects are not measured. A matching pair of failures is still a failure.
 
+## Retain primary-command failures automatically
+
+The primary Linux `franken-node migrate validate`, `franken-node migrate-report` and checked-rewrite validation paths can retain a replay capsule from the measurement that actually failed. Select an existing absolute directory outside the project:
+
+```bash
+FRANKEN_NODE_MIGRATION_FAILURE_DIR=/private/migration-failures \
+  franken-node migrate validate ./project --json
+```
+
+No source archive is persisted by default. Setting this environment variable explicitly opts into retaining sensitive source, dependency and configuration bytes. The directory must already exist and must not be a symlink; relative paths and paths inside either measured project are refused before runtime dispatch. Static-only validation and failed static prerequisites do not reserve storage or run code.
+
+Each eligible invocation reserves a unique private (0700) child directory before resolving or launching runtimes. A complete measured `FAIL` publishes a private (0600) `failure.json` there. A `PASS` removes its unused reservation. Archive limits, deadlines, publication errors and incomplete execution produce a separate `UNAVAILABLE` diagnostic rather than changing the original measurement, weakening admission, or fabricating a replayable capsule. The caller owns retention and removal of successfully saved archives.
+
+The JSON attachment is `test_suite.failure_capture` for validation, `validation.test_suite.failure_capture` for `migrate-report`, and `validation.failure_capture` for checked-rewrite reports. A saved attachment has `status: "SAVED"`, `capsule_path` and `content_sha256`; an unavailable attachment has `status: "UNAVAILABLE"` and `reason`. Without retention configured, the field is omitted. Capture status does not replace the suite verdict or the report's go/no-go decision.
+
+Checked rewrites archive both the original and prepared candidate, even when that candidate is rejected and never installed. The archive uses the exact pre-execution snapshots and original report: it does not rerun the project to manufacture a failure or recapture the subsequently mutable source tree. Failed validation still refuses installation. The directory configuration is removed from both guest runtime environments to avoid propagating operator capture settings into nested executions; this is not an OS isolation boundary.
+
+Use the saved path and hash from your trusted primary-command output with this operator's `--inspect-capsule`, `--replay`, `--minimize-capsule` and `--export-inputs` modes below. Retain the producing validator revision. Static failures, empty-suite smoke fallback, failures before a complete suite report exists, and archive-limit refusals are not replayable captures. The standalone operator retains its explicit `--capture-capsule` behavior and does not read this automatic-retention setting.
+
 ## Capture a failure for native reexecution
 
 Add `--capture-capsule` to persist the actual pre-execution inputs and completed measurement, including a measured `FAIL`:
@@ -154,7 +173,7 @@ Capsule-specific limits: 128 MiB serialized input, 32 MiB combined expanded snap
 
 The capsule binds the replay, capture, supervision, inventory and workspace-comparison source implementations. Reexecution requires matching source fingerprints; retain the validator revision. This is not a binding of its full compiled dependency graph. Runtime hashes likewise do not capture dynamically linked libraries. Clocks, environment variables, random values, temporary absolute paths, external modules and network state can still make exact-input reexecution diverge. `environment_reproduced` and `release_certification` remain false.
 
-The native implementations live in `crates/franken-node/src/migration/native_replay.rs` and `native_minimizer.rs` and are consumed directly by this operator. Automatic capture from every primary `franken-node` CLI failure, AST/token minimization and whole-environment replay remain separate work; this operator does not close those broader delivery obligations.
+The native implementations live in `crates/franken-node/src/migration/native_replay.rs`, `native_minimizer.rs` and `failure_capture.rs`. Primary project-suite validation and checked-rewrite failures have opt-in retention as described above. Coverage of every other primary failure path, AST/token minimization and whole-environment replay remain separate work; these capabilities do not close those broader delivery obligations.
 
 ## Reports and boundaries
 
