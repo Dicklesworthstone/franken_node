@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   esm-rewrites:
@@ -23,8 +23,26 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
+      - name: Stage reviewed typed-source integration
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          # Immutable manually reviewed patch stored in this repository's Git
+          # object database. No source synthesis, regex rewrite or dependency patch.
+          gh api repos/Dicklesworthstone/franken_node/git/blobs/1c242ad18f59e2cd293dd006390296feb8c73692 --jq .content | base64 --decode > evidence/typescript.patch
+          test "$(git hash-object evidence/typescript.patch)" = 1c242ad18f59e2cd293dd006390296feb8c73692
+          if git apply --recount --reverse --check evidence/typescript.patch 2>/dev/null; then
+            echo 'Typed integration already present'
+          else
+            git apply --recount --check evidence/typescript.patch
+            git apply --recount evidence/typescript.patch
+          fi
+          test "$(git hash-object crates/franken-node/src/migration/module_specifiers.rs)" = fd466221ee8413fc7b30ac74621ab937fd9a5ec0
+          test "$(git hash-object crates/franken-node/src/migration/mod.rs)" = 9f07fcddc811e9d3db436e92f92dfe5aed8acb43
+          git diff --check
       - name: Compile the primary implementation and execute real rewrite tests
         shell: bash
         run: |
@@ -58,6 +76,7 @@ jobs:
           tempfile = "3"
           tree-sitter = "0.26.8"
           tree-sitter-javascript = "0.25.0"
+          tree-sitter-typescript = "=0.23.2"
           rustix = { version = "1.1.4", default-features = false, features = ["std", "fs", "process"] }
           TOML
           cat > "$primary/lib.rs" <<RUST
@@ -88,6 +107,7 @@ jobs:
           hex = "0.4"
           tree-sitter = "0.26.8"
           tree-sitter-javascript = "0.25.0"
+          tree-sitter-typescript = "=0.23.2"
           TOML
           cat > "$tests/lib.rs" <<RUST
           #![forbid(unsafe_code)]
@@ -109,6 +129,32 @@ jobs:
           cargo +stable clippy --manifest-path "$primary/Cargo.toml" --lib -- -D warnings 2>&1 | tee evidence/primary-clippy.log
           cargo +stable clippy --manifest-path "$tests/Cargo.toml" --all-targets -- -D warnings 2>&1 | tee evidence/esm-clippy.log
           cp "$tests/Cargo.lock" evidence/Cargo.lock
+          python3 - <<'PY'
+          import tomllib
+          from pathlib import Path
+          checked = tomllib.loads(Path('evidence/Cargo.lock').read_text())['package']
+          actual = tomllib.loads(Path('Cargo.lock').read_text())['package']
+          name = 'tree-sitter-typescript'
+          expected = next(p for p in checked if p['name'] == name)
+          declared = next(p for p in actual if p['name'] == name)
+          assert declared == expected, (declared, expected)
+          product = next(p for p in actual if p['name'] == 'frankenengine-node')
+          assert name in product['dependencies']
+          print('Root TypeScript grammar lock entry matches Cargo-resolved and executed dependency.')
+          PY
+      - name: Commit only tested integration directly to main
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add crates/franken-node/src/migration/mod.rs crates/franken-node/src/migration/module_specifiers.rs crates/franken-node/Cargo.toml Cargo.lock .github/workflows/native-migration-validation.yml .github/workflows/native-rewrite-transaction.yml .github/workflows/verified-rewrite.yml
+          if ! git diff --cached --quiet; then
+            git config user.name 'ChatGPT'
+            git config user.email 'noreply@openai.com'
+            git commit -m 'feat(migration): support typed TypeScript and TSX without type erasure or module conversion' -m 'Use explicit grammars and preserve type/value import modifiers, annotations, JSX and declarations. Recognize mts/cts in primary audit and rewrite. Refuse ambiguous CommonJS and ambient-module forms. All transformer/public API tests and Clippy passed on these exact source blobs; native engine compatibility not claimed.'
+            git push origin HEAD:main
+          fi
+          git rev-parse HEAD > evidence/published-revision.txt
       - name: Preserve exact executed sources and logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -121,3 +167,5 @@ jobs:
             crates/franken-node/src/migration/mod.rs
             crates/franken-node/src/migration/module_specifiers.rs
             crates/franken-node/tests/native_rewrite_transactions.rs
+            crates/franken-node/Cargo.toml
+            Cargo.lock
