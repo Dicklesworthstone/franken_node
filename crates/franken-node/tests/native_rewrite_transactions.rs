@@ -1,5 +1,5 @@
 //! Real filesystem tests of the primary migration rewrite API.
-//! These do not execute guest code or claim transformation equivalence.
+//! ESM regressions also execute trusted Node fixtures; no native-runtime parity is claimed.
 
 use frankenengine_node::migration::run_rewrite;
 use sha2::{Digest, Sha256};
@@ -99,7 +99,7 @@ fn primary_refuses_a_redirected_backup_parent_without_outside_writes() {
     symlink(outside.path(), root.path().join(".migrate-backup/nested")).unwrap();
     assert!(run_rewrite(root.path(), true).is_err());
     originals(root.path());
-    assert!(!outside.path().join("source.js").exists());
+    assert!(!outside.path().join("source.js")).exists());
 }
 
 #[test]
@@ -256,5 +256,137 @@ fn primary_rollback_history_and_preview_do_not_expose_saved_source_contents() {
         assert!(!encoded.contains("require('fs')"));
         assert!(!encoded.contains("existsSync"));
         assert_eq!(serde_json::from_str::<RollbackReport>(&encoded).unwrap(), *report);
+    }
+}
+
+/// Execute the actual public rewrite, writer and rollback paths on trusted
+/// fixtures. Node before/after agreement measures these transformations, not
+/// native Franken compatibility or equivalence of unexecuted applications.
+mod esm_source_rewrites {
+    use super::*;
+    use std::process::{Command, Output};
+
+    fn fixture(source: &str) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("src")).unwrap();
+        fs::write(root.path().join("package.json"),
+            r#"{"name":"esm-rewrite","version":"1.0.0","type":"module","engines":{"node":">=20"}}"#).unwrap();
+        fs::write(root.path().join("src/main.mjs"), source).unwrap();
+        fs::set_permissions(root.path().join("src/main.mjs"), fs::Permissions::from_mode(0o755)).unwrap();
+        root
+    }
+
+    fn execute(root: &Path) -> Output {
+        Command::new("node").arg("src/main.mjs").current_dir(root).output().expect("real Node required")
+    }
+
+    fn equivalent(before: &Output, after: &Output) {
+        assert!(before.status.success(), "reference stderr: {:?}", before.stderr);
+        assert!(after.status.success(), "rewritten stderr: {:?}", after.stderr);
+        assert_eq!(before.stdout, after.stdout);
+        assert_eq!(before.stderr, after.stderr);
+    }
+
+    #[test]
+    fn primary_multiline_and_dynamic_imports_execute_then_rollback_to_original_bytes() {
+        use frankenengine_node::migration::rollback::{self, RollbackStatus};
+        let source = "#!/usr/bin/env node\nimport {\n basename\n} /* load */ from 'path';\nexport { sep } from 'path';\nconst fs=await import(\n'fs/promises'\n);\nconsole.log(basename('/x/y'),typeof fs.readFile);\n";
+        let root = fixture(source);
+        let before = execute(root.path());
+        let plan = run_rewrite(root.path(), false).unwrap();
+        assert_eq!(plan.rewrites_planned, 1);
+        assert_eq!(plan.rewrites_applied, 0);
+        assert!(!root.path().join(".migrate-backup").exists());
+        let report = run_rewrite(root.path(), true).unwrap();
+        assert_eq!(report.rewrites_applied, 1, "{report:#?}");
+        assert_eq!(report.manual_review_items, 0, "{report:#?}");
+        let rewritten = fs::read_to_string(root.path().join("src/main.mjs")).unwrap();
+        assert!(rewritten.contains("from 'node:path'"));
+        assert!(rewritten.contains("import(\n'node:fs/promises'\n)"));
+        assert_eq!(fs::read_to_string(root.path().join(".migrate-backup/src/main.mjs")).unwrap(), source);
+        assert_eq!(fs::metadata(root.path().join("src/main.mjs")).unwrap().permissions().mode() & 0o777, 0o755);
+        equivalent(&before, &execute(root.path()));
+        let repeated = run_rewrite(root.path(), true).unwrap();
+        assert_eq!(repeated.rewrites_applied, 0);
+        assert!(repeated.rollback_entries.is_empty());
+        let history = rollback::run(root.path(), None, false);
+        assert_eq!(history.history.len(), 1);
+        let restored = rollback::run(root.path(), Some(&history.history[0].transaction_id), true);
+        assert_eq!(restored.status, RollbackStatus::RolledBack, "{restored:#?}");
+        assert_eq!(fs::read_to_string(root.path().join("src/main.mjs")).unwrap(), source);
+        equivalent(&before, &execute(root.path()));
+    }
+
+    #[test]
+    fn primary_preserves_multiline_template_data_that_looks_like_imports() {
+        let source = "import path from 'path';\nconst text=`payload\nimport fs from 'fs';\nrequire('os');\nmodule.exports = 1;\nend`;\nconsole.log(text,path.basename('/a/b'));\n";
+        let root = fixture(source);
+        let before = execute(root.path());
+        let report = run_rewrite(root.path(), true).unwrap();
+        assert_eq!(report.rewrites_applied, 1, "{report:#?}");
+        assert_eq!(report.manual_review_items, 0, "{report:#?}");
+        equivalent(&before, &execute(root.path()));
+        let rewritten = fs::read_to_string(root.path().join("src/main.mjs")).unwrap();
+        assert!(rewritten.contains("\nimport fs from 'fs';\n"));
+        assert!(!rewritten.contains("node:fs"));
+    }
+
+    #[test]
+    fn primary_does_not_redirect_builtin_named_third_party_package_exports() {
+        let source = "import custom from 'fs/custom';import {basename} from 'path';console.log(custom,basename('/a/b'));";
+        let root = fixture(source);
+        let package = root.path().join("node_modules/fs");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(package.join("package.json"), r#"{"name":"fs","type":"module","exports":{"./custom":"./custom.mjs"}}"#).unwrap();
+        fs::write(package.join("custom.mjs"), "export default 'external-package';").unwrap();
+        let before = execute(root.path());
+        let report = run_rewrite(root.path(), true).unwrap();
+        assert_eq!(report.rewrites_applied, 1);
+        assert_eq!(report.rollback_entries.len(), 1);
+        let rewritten = fs::read_to_string(root.path().join("src/main.mjs")).unwrap();
+        assert!(rewritten.contains("from 'fs/custom'"));
+        assert!(rewritten.contains("from 'node:path'"));
+        equivalent(&before, &execute(root.path()));
+        assert_eq!(fs::read_to_string(package.join("custom.mjs")).unwrap(), "export default 'external-package';");
+    }
+
+    #[test]
+    fn primary_rejects_malformed_or_unresolved_imports_without_installing_partial_source() {
+        for source in ["import fs from 'fs'; const x = ;", "import fs from 'fs'; import(name);",
+                       "import fs from 'fs'; const x=require('path');"] {
+            let root = fixture(source);
+            let report = run_rewrite(root.path(), true).unwrap();
+            assert_eq!(report.rewrites_applied, 0, "{report:#?}");
+            assert_eq!(report.rewrites_planned, 0);
+            assert!(report.manual_review_items > 0);
+            assert!(report.rollback_entries.is_empty());
+            assert_eq!(fs::read_to_string(root.path().join("src/main.mjs")).unwrap(), source);
+            assert!(!root.path().join(".migrate-backup/src/main.mjs").exists());
+        }
+    }
+
+    #[test]
+    fn primary_multiple_imports_on_one_line_are_all_migrated() {
+        let source = "import fs from 'fs';import path from 'path';import os from 'os';console.log(typeof fs.readFile,path.basename('/a/b'),typeof os.platform);";
+        let root = fixture(source);
+        let before = execute(root.path());
+        let report = run_rewrite(root.path(), true).unwrap();
+        assert_eq!(report.rewrites_applied, 1);
+        let rewritten = fs::read_to_string(root.path().join("src/main.mjs")).unwrap();
+        for specifier in ["node:fs", "node:path", "node:os"] { assert!(rewritten.contains(specifier)); }
+        equivalent(&before, &execute(root.path()));
+    }
+
+    #[test]
+    fn primary_jsx_preserves_import_like_text_while_migrating_the_real_import() {
+        let root = fixture("import path from 'path';const view=<div>import fs from 'fs';</div>;export {view};");
+        // The selected JavaScript grammar accepts JSX syntax; this test checks
+        // source preservation only, not Node's ability to execute JSX directly.
+        let report = run_rewrite(root.path(), true).unwrap();
+        assert_eq!(report.rewrites_applied, 1, "{report:#?}");
+        assert_eq!(report.manual_review_items, 0);
+        let rewritten = fs::read_to_string(root.path().join("src/main.mjs")).unwrap();
+        assert!(rewritten.contains("from 'node:path'"));
+        assert!(rewritten.contains("<div>import fs from 'fs';</div>"));
     }
 }
