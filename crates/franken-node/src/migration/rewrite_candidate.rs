@@ -92,6 +92,49 @@ impl RewriteCandidate {
         Ok(())
     }
 
+    /// Check a LIVE executor result before installing this exact candidate.
+    ///
+    /// A PASS summary alone is not evidence: bind both input trees, every test
+    /// counterpart and the comparison scope, and independently check the raw
+    /// observations rather than trusting the divergence list. This checks
+    /// consistency, not authenticity; unsigned reports loaded from disk or a
+    /// remote party must not be used to authorize installation through this API.
+    pub fn check_validation(&self, report: &SuiteReport) -> Result<()> {
+        budget(self.deadline)?;
+        let candidate = self.candidate.as_ref().context("checked rewrite candidate is not prepared")?;
+        let tests = matched_tests(&self.original, candidate)?;
+        ensure!(report.input_sha256 == self.original.digest
+            && report.candidate_input_sha256 == candidate.digest,
+            "validation evidence does not match the captured original and prepared candidate");
+        ensure!(report.schema_version == "franken-node/native-validation-suite/v1"
+            && report.scope == "captured-test-process-and-workspace-delta"
+            && !report.release_certification && report.filesystem_comparison
+            && report.filesystem_exclusions.iter().map(String::as_str)
+                .eq(super::workspace_effects::EXCLUSIONS.iter().copied()),
+            "validation evidence has an unsupported or weakened comparison scope");
+        ensure!(report.verdict == "PASS" && report.total_tests == tests.len()
+            && report.passed == tests.len() && report.failed == 0 && report.errored == 0
+            && report.skipped == 0 && report.errors.is_empty() && report.cases.len() == tests.len(),
+            "validation evidence is not a complete passing test suite");
+        for (test, row) in tests.iter().zip(&report.cases) {
+            ensure!(test.to_str() == Some(row.test.as_str()),
+                "validation evidence test inventory differs from the captured inventory");
+            ensure!(row.status == "PASS" && row.errors.is_empty() && row.divergences.is_empty(),
+                "validation evidence contains a nonpassing case: {}", row.test);
+            let reference = row.reference.as_ref().context("missing reference process evidence")?;
+            let native = row.native.as_ref().context("missing candidate process evidence")?;
+            ensure!(reference.exit_code == Some(0) && native.exit_code == Some(0)
+                && reference.signal.is_none() && native.signal.is_none(),
+                "validation evidence contains an unsuccessful process: {}", row.test);
+            ensure!(reference.stdout == native.stdout && reference.stderr == native.stderr,
+                "validation evidence contains unequal process output: {}", row.test);
+            ensure!(reference.workspace_delta.is_some()
+                && reference.workspace_delta == native.workspace_delta,
+                "validation evidence contains missing or unequal workspace effects: {}", row.test);
+        }
+        Ok(())
+    }
+
     pub fn validate_native(&self, native_executable: &Path) -> Result<SuiteReport> {
         let candidate = self.candidate.as_ref().context("checked rewrite candidate is not prepared")?;
         run_captured((&self.project, &self.project), (&self.original, candidate),
@@ -151,6 +194,7 @@ mod tests {
         let report = candidate.validate_node_pair().unwrap();
         assert_eq!(report.verdict, "PASS", "{report:#?}");
         assert_ne!(report.input_sha256, report.candidate_input_sha256);
+        candidate.check_validation(&report).unwrap();
         assert!(candidate.ensure_source_unchanged().is_err());
     }
 
@@ -202,5 +246,95 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         assert!(RewriteCandidate::capture(root.path(), Instant::now() + Duration::from_secs(5))
             .err().unwrap().to_string().contains("nonempty"));
+    }
+
+    #[test]
+    fn a_passing_report_for_another_prepared_candidate_cannot_be_reused() {
+        let root = project();
+        let mut candidate = capture(root.path());
+        candidate.prepare(&[]).unwrap();
+        let report = candidate.validate_node_pair().unwrap();
+        candidate.check_validation(&report).unwrap();
+        candidate.prepare(&[Replacement { path: "config.json", before: b"{}", after: b"{\"changed\":true}" }]).unwrap();
+        assert_eq!(candidate.input_sha256(), report.input_sha256);
+        assert!(candidate.check_validation(&report).unwrap_err().to_string().contains("prepared candidate"));
+        assert!(candidate.prepare(&[Replacement { path: "absent", before: b"", after: b"" }]).is_err());
+        assert!(candidate.check_validation(&report).unwrap_err().to_string().contains("not prepared"));
+    }
+
+    #[test]
+    fn summaries_cannot_hide_missing_duplicate_or_substituted_test_counterparts() {
+        let root = project();
+        fs::write(root.path().join("other.test.js"), "console.log(42);").unwrap();
+        let mut candidate = capture(root.path());
+        candidate.prepare(&[]).unwrap();
+        let report = candidate.validate_node_pair().unwrap();
+        candidate.check_validation(&report).unwrap();
+        let mut missing = report.clone();
+        missing.cases.pop();
+        missing.total_tests -= 1;
+        missing.passed -= 1;
+        assert!(candidate.check_validation(&missing).is_err());
+        let mut duplicate = report.clone();
+        duplicate.cases[1] = duplicate.cases[0].clone();
+        assert!(candidate.check_validation(&duplicate).is_err());
+        let mut substituted = report.clone();
+        substituted.cases[0].test = "unmeasured.test.js".into();
+        assert!(candidate.check_validation(&substituted).is_err());
+        let mut reordered = report;
+        reordered.cases.swap(0, 1);
+        assert!(candidate.check_validation(&reordered).is_err());
+    }
+
+    #[test]
+    fn raw_observations_must_agree_even_when_divergences_are_empty() {
+        let root = project();
+        let mut candidate = capture(root.path());
+        candidate.prepare(&[]).unwrap();
+        let report = candidate.validate_node_pair().unwrap();
+        candidate.check_validation(&report).unwrap();
+        for mutate in [
+            (|r: &mut SuiteReport| r.cases[0].native.as_mut().unwrap().stdout.sha256.push('0')) as fn(&mut SuiteReport),
+            |r| r.cases[0].native.as_mut().unwrap().stderr.bytes += 1,
+            |r| r.cases[0].native.as_mut().unwrap().workspace_delta.as_mut().unwrap().sha256.push('0'),
+            |r| r.cases[0].native.as_mut().unwrap().workspace_delta = None,
+            |r| r.cases[0].reference = None,
+            |r| r.cases[0].native.as_mut().unwrap().exit_code = Some(7),
+            |r| r.cases[0].reference.as_mut().unwrap().signal = Some(9),
+        ] {
+            let mut changed = report.clone();
+            mutate(&mut changed);
+            assert!(changed.cases[0].divergences.is_empty());
+            assert!(candidate.check_validation(&changed).is_err(), "{changed:#?}");
+        }
+    }
+
+    #[test]
+    fn comparison_scope_and_complete_execution_are_mandatory() {
+        let root = project();
+        let mut candidate = capture(root.path());
+        candidate.prepare(&[]).unwrap();
+        let report = candidate.validate_node_pair().unwrap();
+        candidate.check_validation(&report).unwrap();
+        for mutate in [
+            (|r: &mut SuiteReport| r.filesystem_comparison = false) as fn(&mut SuiteReport),
+            |r| r.filesystem_exclusions.push("**/*".into()),
+            |r| r.scope = "captured-test-process-stdout-stderr-exit".into(),
+            |r| r.schema_version = "unknown/v2".into(),
+            |r| r.input_sha256.push('0'),
+            |r| r.release_certification = true,
+            |r| r.skipped = 1,
+            |r| r.failed = 1,
+            |r| r.errored = 1,
+            |r| r.errors.push("incomplete identity recheck".into()),
+            |r| r.cases[0].errors.push("incomplete observation".into()),
+            |r| r.cases[0].status = "ERROR".into(),
+        ] {
+            let mut changed = report.clone();
+            mutate(&mut changed);
+            assert!(candidate.check_validation(&changed).is_err(), "{changed:#?}");
+        }
+        candidate.deadline = Instant::now();
+        assert!(candidate.check_validation(&report).is_err());
     }
 }
