@@ -22,6 +22,10 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+#[path = "syntax_reduction.rs"]
+mod syntax_reduction;
+pub use syntax_reduction::SyntaxStatistics;
+
 const MAX_SOURCE_FILES: usize = 16;
 const MAX_SOURCE_BYTES: usize = 1024 * 1024;
 const MAX_SOURCE_LINES: usize = 4096;
@@ -72,6 +76,9 @@ pub struct Statistics {
     pub cache_hits: usize,
     pub budget_exhausted: Option<String>,
     pub last_unresolved: Option<String>,
+    /// Structural planning is not execution evidence. These counters describe
+    /// syntax coverage separately from admitted full-suite measurements.
+    pub syntax: SyntaxStatistics,
 }
 
 #[derive(Debug, Serialize)]
@@ -344,11 +351,33 @@ fn reduce_lines(mut bytes: Vec<u8>, mut evaluate: impl FnMut(Vec<u8>) -> Result<
     Ok(true)
 }
 
-/// Shared line-complement search. All original cases must reproduce before
+fn evaluate<O: ReductionOracle>(best: &mut Inputs, target: &SourceSelection,
+    bytes: Vec<u8>, confirmations: usize, rejected: &mut BTreeSet<(String, String)>,
+    oracle: &mut O) -> Result<Trial> {
+    let trial = best.replacing(target, bytes)?;
+    let key = trial.key();
+    if rejected.contains(&key) { oracle.statistics().cache_hits += 1; return Ok(Trial::Reject); }
+    for _ in 0..confirmations {
+        let Some(measured) = oracle.measure(&trial, false)? else {
+            return Ok(if oracle.statistics().budget_exhausted.is_some() { Trial::Stop } else { Trial::Reject });
+        };
+        if !oracle.preserves(&measured) {
+            oracle.statistics().rejected += 1;
+            rejected.insert(key);
+            return Ok(Trial::Reject);
+        }
+    }
+    oracle.statistics().accepted += 1;
+    *best = trial;
+    Ok(Trial::Accept)
+}
+
+/// Shared line and syntax search. All original cases must reproduce before
 /// search, each acceptance is repeated, and fresh final evidence is mandatory.
-/// Only complete rejections are cached, keyed by BOTH complete input hashes.
+/// Only complete behavioral rejections are cached, keyed by BOTH input hashes.
+/// Syntax planning shares the search deadline, never the reserved final time.
 pub(super) fn reduce_inputs<O: ReductionOracle>(mut best: Inputs, targets: &[SourceSelection],
-    confirmations: usize, oracle: &mut O) -> Result<(Inputs, O::Report, bool)> {
+    confirmations: usize, search_deadline: Instant, oracle: &mut O) -> Result<(Inputs, O::Report, bool)> {
     ensure!((2..=8).contains(&confirmations), "invalid reduction confirmation count");
     for _ in 0..confirmations {
         let measured = oracle.measure(&best, false)?.context("initial reduction confirmation was incomplete")?;
@@ -360,26 +389,21 @@ pub(super) fn reduce_inputs<O: ReductionOracle>(mut best: Inputs, targets: &[Sou
         let before = best.bytes(targets)?;
         for target in targets {
             let bytes = source(best.selected(target), &target.path)?.to_vec();
-            let completed = reduce_lines(bytes, |bytes| {
-                let trial = best.replacing(target, bytes)?;
-                let key = trial.key();
-                if rejected.contains(&key) { oracle.statistics().cache_hits += 1; return Ok(Trial::Reject); }
-                for _ in 0..confirmations {
-                    let Some(measured) = oracle.measure(&trial, false)? else {
-                        // Unresolved executions are never accepted or cached.
-                        return Ok(if oracle.statistics().budget_exhausted.is_some() { Trial::Stop } else { Trial::Reject });
-                    };
-                    if !oracle.preserves(&measured) {
-                        oracle.statistics().rejected += 1;
-                        rejected.insert(key);
-                        return Ok(Trial::Reject);
-                    }
-                }
-                oracle.statistics().accepted += 1;
-                best = trial;
-                Ok(Trial::Accept)
-            })?;
+            let completed = reduce_lines(bytes, |bytes|
+                evaluate(&mut best, target, bytes, confirmations, &mut rejected, oracle))?;
             if !completed { search_complete = false; break 'sweeps; }
+            let bytes = source(best.selected(target), &target.path)?.to_vec();
+            let syntax = syntax_reduction::reduce(bytes, search_deadline, |bytes|
+                evaluate(&mut best, target, bytes, confirmations, &mut rejected, oracle))?;
+            search_complete &= syntax.complete;
+            oracle.statistics().syntax.merge(syntax.statistics);
+            if syntax.stopped {
+                if Instant::now() >= search_deadline {
+                    oracle.statistics().budget_exhausted = Some("wall_time_budget".into());
+                }
+                search_complete = false;
+                break 'sweeps;
+            }
         }
         if best.bytes(targets)? == before { break; }
     }
@@ -391,6 +415,12 @@ pub(super) fn reduce_inputs<O: ReductionOracle>(mut best: Inputs, targets: &[Sou
     }
     let validation = final_report.context("final reduction confirmation missing")?;
     Ok((best, validation, search_complete && oracle.statistics().unresolved == 0))
+}
+
+/// Both report formats bind the structural proposal implementation as well as
+/// their runtime-specific executor. This is not a compiled-dependency binding.
+pub(super) fn syntax_fingerprint() -> String {
+    hex::encode(Sha256::digest(include_bytes!("syntax_reduction.rs")))
 }
 
 fn minimize_loaded(loaded: Loaded, reference: &Invocation, native: &Invocation,
@@ -412,7 +442,8 @@ fn minimize_loaded(loaded: Loaded, reference: &Invocation, native: &Invocation,
         "reduction requires the captured runtime identities and arguments");
     let mut oracle = Oracle { reference, native, expected: &expected, options, deadline,
         search_deadline: started + duration.mul_f64(0.8), statistics: Statistics::default() };
-    let (best, validation, search_complete) = reduce_inputs(best, &targets, options.confirmations, &mut oracle)?;
+    let (best, validation, search_complete) = reduce_inputs(best, &targets, options.confirmations,
+        oracle.search_deadline, &mut oracle)?;
     budget(deadline)?;
     let reduced_source_bytes = best.bytes(&targets)?;
     let mut blobs = BTreeMap::new();
@@ -429,6 +460,7 @@ fn minimize_loaded(loaded: Loaded, reference: &Invocation, native: &Invocation,
     let mut hash = Sha256::new();
     hash.update(b"franken-node/native-minimizer/v1\0");
     hash.update(include_bytes!("native_minimizer.rs"));
+    hash.update(syntax_fingerprint().as_bytes());
     hash.update(implementation_hash().as_bytes());
     let report = MinimizationReport { schema_version: "franken-node/native-minimization/v1".into(),
         verdict: if reduced_source_bytes < original_source_bytes { "REDUCED" } else { "UNCHANGED" }.into(),
@@ -625,8 +657,6 @@ mod tests {
              fs.writeFileSync(p,String(n+1)); \
              console.log((process.argv.includes('candidate')?'native:':'reference:')+(n<6?'stable':'drift'));\n",
             serde_json::to_string(&counter).unwrap()));
-        // Capture uses calls 0/1, initial confirmations use 2..5. No search
-        // execution slots remain; the mandatory final run sees changed state.
         let loaded = seed(root.path(), None);
         let error = minimize_loaded(loaded, &node(false), &node(true),
             &Options { max_executions: 4, ..options() }, Instant::now()).err().unwrap();
@@ -710,5 +740,48 @@ mod tests {
         assert_eq!(statistics.executions, 4);
         assert!(measure_with_budget::<()>(&options, timing, &mut statistics, true,
             |_| panic!("no capacity remains")).is_err());
+    }
+
+    #[test]
+    fn minified_pair_failure_reduces_with_all_observations_and_replays() {
+        let root = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let original = "function unused(){return 12345;}(()=>{const unused=99;console.log(process.argv.includes('candidate')?'wrong':'right');})();";
+        put(root.path(), "case.test.js", original);
+        put(root.path(), "passing.test.js", "console.log('passing');");
+        let loaded = seed(root.path(), None);
+        let expected = loaded.capsule.payload.expected.cases.clone();
+        let reduced = minimize_loaded(loaded, &node(false), &node(true), &options(), Instant::now()).unwrap();
+        assert_eq!(reduced.report.verdict, "REDUCED");
+        assert!(reduced.report.statistics.syntax.accepted >= 2);
+        assert_eq!(reduced.report.validation.cases, expected);
+        assert_eq!(reduced.report.validation.passed, 1);
+        assert!(reduced.report.statistics.executions <= options().max_executions);
+        let path = output.path().join("syntax.json");
+        let pin = reduced.write_capsule(&path).unwrap().content_sha256;
+        let loaded = load(&path, Some(&pin), deadline()).unwrap();
+        let result = std::str::from_utf8(source(&loaded.original, Path::new("case.test.js")).unwrap()).unwrap();
+        assert!(!result.contains("unused"), "{result}");
+        assert_eq!(super::super::reexecute(loaded, &node(false), &node(true), false, deadline()).unwrap().verdict, "REPRODUCED");
+        assert_eq!(fs::read_to_string(root.path().join("case.test.js")).unwrap(), original);
+    }
+
+    #[test]
+    fn minified_declarator_reduction_preserves_live_values() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "case.test.js", "const dead=12345,live=42;console.log(process.argv.includes('candidate')?live+1:live);");
+        let loaded = seed(root.path(), None);
+        let expected = loaded.capsule.payload.expected.cases.clone();
+        let reduced = minimize_loaded(loaded, &node(false), &node(true), &options(), Instant::now()).unwrap();
+        assert_eq!(reduced.report.verdict, "REDUCED");
+        assert!(reduced.report.statistics.syntax.accepted > 0);
+        assert_eq!(reduced.report.validation.cases, expected);
+        let restored = tempfile::tempdir().unwrap();
+        let path = restored.path().join("reduced.json");
+        let pin = reduced.write_capsule(&path).unwrap().content_sha256;
+        let loaded = load(&path, Some(&pin), deadline()).unwrap();
+        let text = std::str::from_utf8(source(&loaded.original, Path::new("case.test.js")).unwrap()).unwrap();
+        assert!(!text.contains("dead"), "{text}");
+        assert!(text.contains("live=42"), "{text}");
     }
 }

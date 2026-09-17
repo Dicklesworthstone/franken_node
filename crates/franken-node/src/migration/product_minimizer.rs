@@ -1,16 +1,16 @@
 //! Minimize a pinned three-runtime failure without projecting away a reference.
 //!
 //! Node and Bun always share the original tree; only the native leg receives
-//! a distinct candidate. The pair reducer supplies source validation, search,
-//! caching, execution budgets and mandatory fresh final confirmations. This
-//! adapter supplies the real three-leg executor and complete product evidence.
+//! a distinct candidate. The pair reducer supplies source validation, line and
+//! syntax search, caching, budgets and mandatory fresh final confirmations.
+//! This adapter supplies the real three-leg executor and product evidence.
 
 use super::{Capsule, CapsuleSummary, CaseOutcome, Invocation, LEG_TIMEOUT, Loaded,
     MAX_CAPSULE_BYTES, Payload, ProductReport, SCHEMA, Snapshot, budget, complete,
     implementation, load, output_destination, payload_hash, product_oracle,
     runtime_invocations, same_runtime, stored, summary};
 use super::super::super::{RuntimeIdentity, minimizer::{Inputs, Measurement, ReductionOracle,
-    SourceSelection, Statistics, measure_with_budget, reduce_inputs, select_sources}};
+    SourceSelection, Statistics, measure_with_budget, reduce_inputs, select_sources, syntax_fingerprint}};
 pub use super::super::super::minimizer::Options;
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
@@ -184,7 +184,8 @@ fn minimize_loaded(loaded: Loaded, runtimes: [&Invocation; 3], options: &Options
         "product reduction requires all captured runtime identities and arguments");
     let mut oracle = Oracle { runtimes, expected: &expected, options, deadline,
         search_deadline: started + duration.mul_f64(0.8), statistics: Statistics::default() };
-    let (best, validation, search_complete) = reduce_inputs(inputs, &targets, options.confirmations, &mut oracle)?;
+    let (best, validation, search_complete) = reduce_inputs(inputs, &targets, options.confirmations,
+        oracle.search_deadline, &mut oracle)?;
     budget(deadline)?;
     let reduced_source_bytes = best.bytes(&targets)?;
     let (original, candidate, blobs) = stored(&best.original, best.candidate(), deadline)?;
@@ -197,6 +198,7 @@ fn minimize_loaded(loaded: Loaded, runtimes: [&Invocation; 3], options: &Options
         reducer.update((source.len() as u64).to_le_bytes());
         reducer.update(source.as_bytes());
     }
+    reducer.update(syntax_fingerprint().as_bytes());
     reducer.update(implementation().as_bytes());
     budget(deadline)?;
     let report = MinimizationReport { schema_version: "franken-node/product-minimization/v1".into(),
@@ -451,5 +453,40 @@ mod tests {
         oracle.runtimes[1] = &missing;
         assert!(oracle.measure(&inputs, true).unwrap_err().to_string().contains("final reduction confirmation failed"));
         assert_eq!(inputs.original.digest, capsule.payload.expected.input_sha256);
+    }
+
+    #[test]
+    fn minified_product_sources_reduce_without_dropping_either_tree_or_reference() {
+        let original = tempfile::tempdir().unwrap();
+        let candidate = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        for (root, value) in [(original.path(), "original"), (candidate.path(), "candidate")] {
+            put(root, "case.test.js", &format!("(()=>{{const unused=12345;require('fs').writeFileSync('artifact','{value}');console.log('measured');}})();"));
+            put(root, "passing.test.js", "globalThis.answer=42;");
+        }
+        let (node, _) = runtime_invocations(Path::new("/bin/false")).unwrap();
+        let empty = invocation("/bin/true");
+        let loaded = seed(original.path(), Some(candidate.path()), [&node, &empty, &node]);
+        let expected = loaded.capsule.payload.expected.cases.clone();
+        let reduced = minimize_loaded(loaded, [&node, &empty, &node], &options(), Instant::now()).unwrap();
+        assert_eq!(reduced.report.verdict, "REDUCED");
+        assert_eq!(reduced.report.validation.cases, expected);
+        assert_eq!(reduced.report.validation.passed, 1);
+        assert!(reduced.report.statistics.syntax.accepted >= 2);
+        assert!(reduced.report.statistics.executions <= options().max_executions);
+        let path = output.path().join("syntax-product.json");
+        let pin = reduced.write_capsule(&path).unwrap().content_sha256;
+        let exported = export_inputs(&path, &pin, &output.path().join("export")).unwrap();
+        for tree in ["original", "candidate"] {
+            let text = fs::read_to_string(exported.destination.join(tree).join("case.test.js")).unwrap();
+            assert!(!text.contains("unused"), "{text}");
+            assert!(!exported.destination.join(tree).join("artifact").exists());
+        }
+        let loaded = load(&path, Some(&pin), deadline()).unwrap();
+        let repeated = reexecute(loaded, [&node, &empty, &node], false, deadline()).unwrap();
+        assert_eq!(repeated.verdict, "REPRODUCED");
+        assert_eq!(repeated.validation.cases, expected);
+        assert!(!original.path().join("artifact").exists());
+        assert!(!candidate.path().join("artifact").exists());
     }
 }
