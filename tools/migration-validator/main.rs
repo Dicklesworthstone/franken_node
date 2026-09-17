@@ -50,7 +50,10 @@ struct Args {
     #[arg(long, requires = "pinned_capsule_mode")]
     expected_sha256: Option<String>,
     /// Export pinned original/candidate trees into a new private directory without running code.
-    #[arg(long, group = "pinned_capsule_mode", requires = "expected_sha256", conflicts_with_all = ["execute", "native_bin", "migrated_project", "compare_filesystem", "capture_capsule", "list_tests", "inspect_capsule", "replay"])]
+    // Conflicts override requirements in Clap: requiring replay indirectly is
+    // not enough when export itself conflicts with replay. State every unsafe
+    // combination explicitly rather than relying on transitive requirements.
+    #[arg(long, group = "pinned_capsule_mode", requires = "expected_sha256", conflicts_with_all = ["execute", "native_bin", "migrated_project", "compare_filesystem", "capture_capsule", "list_tests", "inspect_capsule", "replay", "verify_fix", "minimize_capsule", "source_file", "max_executions", "minimize_seconds", "confirmations"])]
     export_inputs: Option<PathBuf>,
     /// Permit a changed candidate runtime while requiring every original reference observation to remain unchanged.
     #[arg(long, requires = "replay")]
@@ -667,10 +670,14 @@ mod tests {
         assert!(Args::try_parse_from(["suite", "capsule.json", "--export-inputs", "fixture"]).is_err());
         for flags in [vec!["--execute"], vec!["--native-bin", "/bin/false"], vec!["--inspect-capsule"],
             vec!["--list-tests"], vec!["--replay"], vec!["--verify-fix"], vec!["--compare-filesystem"],
-            vec!["--source-file", "case.js"]] {
+            vec!["--source-file", "case.js"], vec!["--minimize-capsule", "reduced.json"],
+            vec!["--max-executions", "40"], vec!["--minimize-seconds", "60"],
+            vec!["--confirmations", "3"], vec!["--migrated-project", "candidate"],
+            vec!["--capture-capsule", "capture.json"]] {
             let mut argv = base.to_vec();
             argv.extend(flags);
-            assert!(Args::try_parse_from(argv).is_err());
+            let error = Args::try_parse_from(&argv).expect_err("offline export must reject execution options");
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict, "{argv:?}: {error}");
         }
         assert!(Args::try_parse_from(["suite", "project", "--native-bin", "/bin/false",
             "--execute", "--expected-sha256", &pin]).is_err());
