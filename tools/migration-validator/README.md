@@ -53,6 +53,41 @@ Both input trees are captured before execution. Their selected test identities m
 
 Successful validation requires successful exits and exact stdout/stderr bytes for every selected case. `--compare-filesystem` additionally compares final persistent workspace deltas, excluding `.git` trees and the root `.franken-node` directory. Those exclusions are explicitly reported; transient writes and external effects are not measured. A matching pair of failures is still a failure.
 
+## Compare against both Node and Bun
+
+Add an explicitly selected Bun executable to measure the captured project inventory on all three runtimes:
+
+```bash
+franken-migration-suite ./original-project \
+  --migrated-project ./rewritten-project \
+  --native-bin /trusted/bin/franken-node \
+  --bun-bin /trusted/bin/bun \
+  --compare-filesystem --execute \
+  --out ./three-runtime-comparison.json
+```
+
+Node and Bun each receive the original captured project. Native Franken receives the optional rewritten candidate, or the original capture when `--migrated-project` is omitted. Each selected test runs exactly once per role, with fresh workspace copies and the shared subprocess supervisor. This extends the captured migration-suite operator; it does not replace the separate single-target/corpus lockstep harness or the L2 engine-boundary oracle.
+
+Reference agreement is required, not majority voting. Classification is deliberately ordered:
+
+| Case outcome | Meaning |
+|---|---|
+| `ERROR` | A leg or filesystem observation is incomplete. Completed observations from other legs remain available. |
+| `REFERENCE_FAILURE` | Node or Bun exited unsuccessfully or by signal, including matching failures. |
+| `REFERENCE_DIVERGENCE` | Both references succeeded but their stdout, stderr or requested filesystem deltas disagree. |
+| `NATIVE_DIVERGENCE` | Both references succeeded and agreed, but the native candidate failed or differed. |
+| `MATCH` | All three succeeded and agreed in the requested comparison scope. |
+
+The suite returns `ERROR` for incomplete cases, skipped work, or runtime identity errors; otherwise `INCONCLUSIVE` if any reference failed or disagreed; otherwise `FAIL` for native divergences; otherwise `PASS`. `INCONCLUSIVE` exits 2 and cannot authorize migration. In particular, native agreement with only one disagreeing reference is not a pass. Each case retains available observations for all three roles and labeled divergence channels, including native differences even when the reference outcome takes precedence. Aggregate outcome counters are disjoint; `failed` counts all three complete nonmatching outcomes.
+
+The report schema is `franken-node/product-validation-suite/v1`. It records original/candidate input hashes, all three executable hashes and arguments, the exact selected tests, exit/signal observations, output byte counts and hashes, comparison exclusions and optional workspace summaries. Comparisons use complete raw output bytes and complete filesystem deltas, not the summary preview. All runtime binaries are fingerprinted before any case and rechecked after the suite. The operation retains the 300-second total and 30-second per-leg limits. Errors do not erase earlier results or permit smoke fallback.
+
+All three executables must be ordinary executable files outside both projects. Node and Bun must have different executable hashes, so a renamed or copied Node binary cannot accidentally satisfy the second reference. This checks byte distinction, not authenticated runtime brands or independence: the operator must select trusted genuine runtime binaries. Missing Bun is an error, not permission to silently downgrade to two runtimes.
+
+Three-runtime reports are not accepted as two-runtime replay capsules. `--bun-bin` conflicts with capture, replay, minimization, fix-verification and offline inspection/export modes, and requires explicit execution approval. Three-runtime capsule persistence and checked-apply admission are not integrated yet. The existing primary validation and checked-rewrite commands continue using their two-runtime path; opt into this broader comparison through this operator. `release_certification` remains false.
+
+The targeted product-oracle checks exercise the production orchestration with explicitly identified role-argument Node processes. The `Native product oracle` workflow also installs real Bun, runs real Node/Bun reference agreement and disagreement through the executable CLI, and deliberately uses `/bin/false` for the native leg to prove failure classification. Neither test category establishes successful native Franken compatibility.
+
 ## Retain primary-command failures automatically
 
 The primary Linux `franken-node migrate validate`, `franken-node migrate-report` and checked-rewrite validation paths can retain a replay capsule from the measurement that actually failed. Select an existing absolute directory outside the project:
@@ -173,7 +208,7 @@ Capsule-specific limits: 128 MiB serialized input, 32 MiB combined expanded snap
 
 The capsule binds the replay, capture, supervision, inventory and workspace-comparison source implementations. Reexecution requires matching source fingerprints; retain the validator revision. This is not a binding of its full compiled dependency graph. Runtime hashes likewise do not capture dynamically linked libraries. Clocks, environment variables, random values, temporary absolute paths, external modules and network state can still make exact-input reexecution diverge. `environment_reproduced` and `release_certification` remain false.
 
-The native implementations live in `crates/franken-node/src/migration/native_replay.rs`, `native_minimizer.rs` and `failure_capture.rs`. Primary project-suite validation and checked-rewrite failures have opt-in retention as described above. Coverage of every other primary failure path, AST/token minimization and whole-environment replay remain separate work; these capabilities do not close those broader delivery obligations.
+The native implementations live in `crates/franken-node/src/migration/native_replay.rs` and `native_minimizer.rs` and are consumed directly by this operator. Automatic capture beyond the supported complete primary validation/checked-rewrite failures, AST/token minimization and whole-environment replay remain separate work; this operator does not close those broader delivery obligations.
 
 ## Reports and boundaries
 
@@ -185,8 +220,10 @@ Exit codes:
 |---|---|
 | 0 | `INVENTORY`, `PASS`, `INTEGRITY_VALID`, `REPRODUCED`, `FIX_VERIFIED`, `REDUCED`, `EXPORTED` |
 | 1 | `FAIL`, `DIVERGED`, `FIX_NOT_VERIFIED`, `UNCHANGED` |
-| 2 | `ERROR`, `REFERENCE_DRIFT`, invalid arguments or other failures |
+| 2 | `ERROR`, `INCONCLUSIVE`, `REFERENCE_DRIFT`, invalid arguments or other failures |
 
 Inspection success is not execution success, reproduction success is not migration success, and reduction/export do not fix the captured failure. Inspect the verdict, schema and nested validation, not only the exit code.
+
+Validation execution and checked-rewrite staging create their enclosing temporary directories with explicit owner-only permissions before copying source bytes. Archive reservations are likewise private from creation, independent of a permissive umask. These permissions protect against access by other local users, not code running as the same user or privileged processes.
 
 Execute only trusted code. Workspace copies are not an OS sandbox: ambient credentials, absolute paths, network access and external services remain available. Sequential filesystem capture and runtime identity rechecks are not atomic snapshots or defenses against every active swap-and-restore race. Runtime byte hashes and captured input hashes establish measured identities, not signed authenticity or full environmental replay. The Rust regression suite includes explicit real Node/Node orchestration cases and deliberate `/bin/false` failures; neither establishes native Franken compatibility.
