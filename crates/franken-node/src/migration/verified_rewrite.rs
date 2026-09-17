@@ -58,8 +58,9 @@ pub fn run(project: &Path, native_executable: &Path) -> CheckedRewriteReport {
 
 /// Explicit library entrypoint, independent of primary-command environment
 /// selection. Both reference runtimes must agree before any new installation.
-/// No capsule is requested by this API: the pair capsule format cannot retain
-/// Bun evidence. The complete measurement is retained in product_validation.
+/// No capsule is requested by this API. The complete measurement is retained
+/// in product_validation; the primary entrypoint additionally supports opt-in
+/// three-runtime failure retention through FRANKEN_NODE_MIGRATION_FAILURE_DIR.
 pub fn run_product(project: &Path, native_executable: &Path, bun_executable: &Path) -> CheckedRewriteReport {
     run_selected(project, native_executable, Some(bun_executable), false)
 }
@@ -69,10 +70,10 @@ fn run_selected(project: &Path, native_executable: &Path, bun: Option<&Path>,
     run_with_evidence(project, |candidate| {
         if let Some(bun) = bun {
             ensure!(bun.is_absolute(), "{BUN_ENV} requires an absolute trusted Bun executable path");
-            ensure!(!archive_requested,
-                "three-runtime checked apply cannot write a two-runtime failure capsule; unset FRANKEN_NODE_MIGRATION_FAILURE_DIR and retain the complete checked-rewrite JSON report");
-            candidate.validate_product(native_executable, bun)
-                .map(|report| ValidationEvidence::Product(Box::new(report)))
+            let measured = if archive_requested {
+                candidate.validate_product_retaining_failures(native_executable, bun)
+            } else { candidate.validate_product(native_executable, bun) };
+            measured.map(|report| ValidationEvidence::Product(Box::new(report)))
         } else {
             candidate.validate_native(native_executable)
                 .map(|report| ValidationEvidence::Pair(Box::new(report)))
@@ -199,10 +200,12 @@ pub fn render(report: &CheckedRewriteReport) -> String {
             validation.errored, validation.skipped);
     }
     if let Some(validation) = &report.product_validation {
-        let _ = writeln!(text, "product_validation={} oracle={} tests={} passed={} reference_failures={} reference_divergences={} native_divergences={} errored={} skipped={}",
+        let _ = writeln!(text, "product_validation={} oracle={} tests={} passed={} failed={} errored={} skipped={}",
             validation.verdict, validation.oracle, validation.total_tests, validation.passed,
-            validation.reference_failures, validation.reference_divergences, validation.native_divergences,
-            validation.errored, validation.skipped);
+            validation.failed, validation.errored, validation.skipped);
+        if let Some(capture) = &validation.failure_capture {
+            let _ = writeln!(text, "product_failure_capture={capture:?}");
+        }
     }
     for error in &report.errors { let _ = writeln!(text, "{error}"); }
     let _ = writeln!(text, "Captured-test validation only; release_certification=false.");
@@ -603,13 +606,12 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_pair_capsule_retention_cannot_silently_drop_bun_evidence() {
+    fn product_capture_selection_reaches_the_three_runtime_executor() {
         let root = project();
-        let report = run_selected(root.path(), Path::new("/absent/native"),
-            Some(Path::new("/absent/bun")), true);
-        assert_eq!(report.status, CheckedRewriteStatus::Error);
-        assert!(report.errors[0].contains("two-runtime failure capsule"));
-        assert!(report.product_validation.is_none() && report.validation.is_none());
+        let report = run_selected(root.path(), Path::new("/bin/false"), Some(&runtime("bun")), true);
+        assert_eq!(report.status, CheckedRewriteStatus::Rejected, "{report:#?}");
+        assert_eq!(report.product_validation.as_ref().unwrap().verdict, "FAIL");
+        assert!(report.validation.is_none());
         assert_eq!(report.rewrite.as_ref().unwrap().rewrites_applied, 0);
     }
 
@@ -641,5 +643,47 @@ mod tests {
         assert_eq!(measured.passed, 1);
         assert!(measured.cases[0].node.is_some() && measured.cases[0].bun.is_some() && measured.cases[0].native.is_some());
         assert!(second.validation.is_none());
+    }
+
+    #[test]
+    fn product_capture_environment_reaches_primary_checked_apply() {
+        use super::super::validation_suite::native_replay::failure_capture::{DIRECTORY_ENV, FailureCapture, product};
+        const CHILD_ROOT: &str = "FRANKEN_PRODUCT_CAPTURE_TEST_CHILD_ROOT";
+        const CHILD_REPORT: &str = "FRANKEN_PRODUCT_CAPTURE_TEST_CHILD_REPORT";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let report = run(Path::new(&root), Path::new("/bin/false"));
+            assert_eq!(report.status, CheckedRewriteStatus::Rejected, "{report:#?}");
+            fs::write(std::env::var_os(CHILD_REPORT).unwrap(), serde_json::to_vec(&report).unwrap()).unwrap();
+            return;
+        }
+        let root = project();
+        let out = tempfile::tempdir().unwrap();
+        let original = source(root.path());
+        let report_path = out.path().join("report.json");
+        let marker = out.path().join("executions");
+        fs::write(root.path().join("case.test.mjs"), format!(
+            "import fs from 'node:fs';\nimport {{ value }} from './helper.mjs';\nfs.appendFileSync({},(process.versions.bun?'bun':'node')+'\\n');\nconsole.log(value);\n",
+            serde_json::to_string(&marker).unwrap())).unwrap();
+        // Configure a separate test process, never mutate the global test
+        // environment. The child calls the actual primary entrypoint once.
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.arg("product_capture_environment_reaches_primary_checked_apply").arg("--nocapture")
+            .env(CHILD_ROOT, root.path()).env(CHILD_REPORT, &report_path)
+            .env(BUN_ENV, runtime("bun")).env(DIRECTORY_ENV, out.path());
+        let output = super::super::smoke_supervisor::run_command_with_timeout(&mut command,
+            Duration::from_secs(120), Duration::from_secs(1)).unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let report: CheckedRewriteReport = serde_json::from_slice(&fs::read(report_path).unwrap()).unwrap();
+        let measured = report.product_validation.as_ref().unwrap();
+        let Some(FailureCapture::Saved { capsule_path, content_sha256 }) = &measured.failure_capture
+            else { panic!("{report:#?}") };
+        assert_eq!(fs::read_to_string(marker).unwrap(), "node\nbun\n");
+        assert_eq!(product::inspect_any(capsule_path).unwrap().captured_verdict, "FAIL");
+        let exported = product::export_any(capsule_path, content_sha256, &out.path().join("fixture")).unwrap();
+        assert!(fs::read_to_string(exported.destination.join("candidate/helper.mjs")).unwrap().contains("node:path"));
+        assert_eq!(source(root.path()), original);
+        assert!(!root.path().join(".migrate-backup/helper.mjs").exists());
+        assert!(report.validation.is_none());
+        assert_eq!(report.rewrite.as_ref().unwrap().rewrites_applied, 0);
     }
 }
