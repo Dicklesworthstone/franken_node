@@ -11,6 +11,8 @@ use std::path::Path;
 use std::process::Output;
 use std::time::Duration;
 
+const FAILURE_DIRECTORY: &str = "FRANKEN_NODE_MIGRATION_FAILURE_DIR";
+
 fn project(first_case: &str) -> TempDir {
     let project = TempDir::new().expect("project");
     std::fs::write(
@@ -27,8 +29,14 @@ fn project(first_case: &str) -> TempDir {
 }
 
 fn invoke(path: &Path, report: bool, static_only: bool, empty_path: bool) -> Output {
+    invoke_with_archive(path, report, static_only, empty_path, None)
+}
+
+fn invoke_with_archive(path: &Path, report: bool, static_only: bool, empty_path: bool,
+    archive: Option<&Path>) -> Output {
     let mut command = franken_node_command();
-    command.current_dir(repo_root());
+    command.current_dir(repo_root()).env_remove(FAILURE_DIRECTORY);
+    if let Some(directory) = archive { command.env(FAILURE_DIRECTORY, directory); }
     if report {
         command.arg("migrate-report");
     } else {
@@ -178,5 +186,78 @@ fn successful_native_suite_requires_two_complete_measured_cases() {
         assert_eq!(row["native"]["stdout"], row["reference"]["stdout"]);
         assert!(row["divergences"].as_array().expect("divergences").is_empty());
     }
+    assert_no_guest_state(&project);
+}
+
+#[test]
+fn primary_validate_and_report_retain_their_actual_failed_measurements_when_requested() {
+    use std::os::unix::fs::PermissionsExt;
+    for report_mode in [false, true] {
+        let project = project("const = ;\n");
+        let archives = TempDir::new().expect("private archive parent");
+        let output = invoke_with_archive(project.path(), report_mode, false, false, Some(archives.path()));
+        let report = parse_json_stdout(&output, "automatic primary failure capture");
+        let validation = if report_mode { &report["validation"] } else { &report };
+        assert_eq!(validation["status"], "fail", "{report}");
+        let suite = &validation["test_suite"];
+        assert_eq!(suite["verdict"], "FAIL", "{report}");
+        assert_eq!(suite["total_tests"], 2);
+        let capture = &suite["failure_capture"];
+        assert_eq!(capture["status"], "SAVED", "{report}");
+        let path = Path::new(capture["capsule_path"].as_str().expect("retained capsule path"));
+        assert!(path.starts_with(archives.path()));
+        assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(path.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+        let archive: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(archive["content_sha256"], capture["content_sha256"]);
+        let expected = &archive["payload"]["expected"];
+        assert_eq!(expected["cases"], suite["cases"]);
+        assert_eq!(expected["input_sha256"], suite["input_sha256"]);
+        assert_eq!(expected["candidate_input_sha256"], suite["candidate_input_sha256"]);
+        assert_eq!(expected["reference_runtime"], suite["reference_runtime"]);
+        assert_eq!(expected["native_runtime"], suite["native_runtime"]);
+        assert!(expected.get("failure_capture").is_none(), "archive must not recursively refer to its own hash");
+        if report_mode {
+            assert_eq!(report["executive_summary"]["go_no_go"], "no_go");
+        } else {
+            assert!(!output.status.success());
+        }
+        assert_no_guest_state(&project);
+        assert_eq!(std::fs::read_to_string(project.path().join("a.test.js")).unwrap(), "const = ;\n");
+    }
+}
+
+#[test]
+fn invalid_failure_storage_blocks_dispatch_instead_of_ignoring_the_requested_capture() {
+    let project = project("require('fs').writeFileSync('executed','unexpected');\n");
+    // An empty PATH also proves that storage preflight precedes Node discovery.
+    let output = invoke_with_archive(project.path(), false, false, true, Some(project.path()));
+    let report = parse_json_stdout(&output, "invalid failure storage");
+    assert!(!output.status.success());
+    assert_eq!(report["status"], "fail");
+    assert!(report.get("test_suite").is_none());
+    let message = report["checks"][4]["message"].as_str().expect("failure reason");
+    assert!(message.contains(FAILURE_DIRECTORY), "{report}");
+    assert!(!message.contains("requires Node"), "archive preflight must run first: {report}");
+    assert_no_guest_state(&project);
+}
+
+#[test]
+fn static_only_and_failed_prerequisites_never_reserve_failure_storage() {
+    let project = project("require('fs').writeFileSync('executed','unexpected');\n");
+    // Even invalid capture configuration is irrelevant to static-only work.
+    let output = invoke_with_archive(project.path(), false, true, true, Some(project.path()));
+    let report = parse_json_stdout(&output, "static-only with capture configured");
+    assert!(output.status.success(), "{report}");
+    assert_eq!(report["status"], "pass");
+    assert!(report.get("test_suite").is_none());
+    let archives = TempDir::new().unwrap();
+    std::fs::write(project.path().join("package.json"),
+        r#"{"name":"blocked","scripts":{"postinstall":"echo blocked"}}"#).unwrap();
+    let output = invoke_with_archive(project.path(), false, false, true, Some(archives.path()));
+    let report = parse_json_stdout(&output, "static prerequisite before failure storage");
+    assert!(!output.status.success());
+    assert!(report["checks"][4]["message"].as_str().unwrap().contains("static validation checks failed"));
+    assert_eq!(std::fs::read_dir(archives.path()).unwrap().count(), 0);
     assert_no_guest_state(&project);
 }
