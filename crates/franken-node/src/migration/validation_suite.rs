@@ -25,6 +25,9 @@ use std::time::{Duration, Instant};
 mod workspace_effects;
 pub use workspace_effects::DeltaSummary;
 
+#[path = "test_inventory.rs"]
+mod test_inventory;
+
 #[cfg(test)]
 #[path = "paired_validation_tests.rs"]
 mod paired_tests;
@@ -244,10 +247,7 @@ impl Snapshot {
     }
 
     fn tests(&self) -> Result<Vec<PathBuf>> {
-        let tests: Vec<_> = self.entries.iter().filter(|(path, entry)|
-            !matches!(entry.data, EntryData::Directory) && is_test(path)).map(|(path, _)| path.clone()).collect();
-        ensure!(tests.len() <= MAX_TESTS, "native validation test limit exceeded");
-        Ok(tests)
+        test_inventory::discover(&self.entries)
     }
 
     fn stage(&self, destination: &Path, deadline: Instant) -> Result<()> {
