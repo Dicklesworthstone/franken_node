@@ -42,7 +42,7 @@ jobs:
           cargo +stable test --manifest-path "$manifest" archive_configuration_is_not_forwarded -- --nocapture
           cargo +stable test --manifest-path "$manifest" captured_sources_are_staged -- --nocapture
           cargo +stable build --manifest-path "$manifest"
-      - name: Real Node and Bun reference agreement and disagreement through the CLI
+      - name: Real Node and Bun comparison capture replay and reference drift through the CLI
         shell: bash
         run: |
           set -euo pipefail
@@ -82,7 +82,8 @@ jobs:
                   return json.loads(result.stdout)
 
               destination = root / 'measured.json'
-              report = run(base + ['--bun-bin', bun, '--out', str(destination)], 1)
+              capsule = root / 'captured.json'
+              report = run(base + ['--bun-bin', bun, '--capture-capsule', str(capsule), '--out', str(destination)], 1)
               assert report['schema_version'] == 'franken-node/product-validation-suite/v1'
               assert report['verdict'] == 'FAIL' and report['native_divergences'] == 1
               assert report['reference_failures'] == report['reference_divergences'] == 0
@@ -97,15 +98,70 @@ jobs:
               assert report['release_certification'] is False
               assert json.loads(destination.read_text())['cases'] == report['cases']
               assert destination.stat().st_mode & 0o777 == 0o600
+              assert capsule.stat().st_mode & 0o777 == 0o600
               assert not (original / 'artifact').exists() and not (candidate / 'artifact').exists()
               assert (original / 'scripts/check.js').read_text() == source
+              pin = report['capsule']['content_sha256']
+              assert report['capsule']['schema_version'] == 'franken-node/product-migration-capsule/v1'
+              archive_bytes = capsule.read_bytes()
 
+              # Neither later tree may replace the frozen original/candidate.
+              (original / 'scripts/check.js').write_text('process.exit(99);')
+              (candidate / 'scripts/check.js').write_text('throw new Error("not captured");')
+              replay_args = [str(binary), str(capsule), '--replay', '--execute', '--expected-sha256', pin,
+                             '--native-bin', '/bin/false', '--bun-bin', bun]
+              replayed = run(replay_args, 0)
+              assert replayed['verdict'] == 'REPRODUCED'
+              assert replayed['validation']['verdict'] == 'FAIL'
+              assert replayed['validation']['cases'] == report['cases']
+              assert run(replay_args + ['--verify-fix'], 1)['verdict'] == 'FIX_NOT_VERIFIED'
+              downgraded = run(replay_args[:-2], 2)
+              assert downgraded['verdict'] == 'ERROR'
+              inspected = run([str(binary), str(capsule), '--inspect-capsule'], 0)
+              assert inspected['content_sha256'] == pin and inspected['execution_performed'] is False
+              exported_dir = root / 'exported'
+              exported = run([str(binary), str(capsule), '--export-inputs', str(exported_dir),
+                              '--expected-sha256', pin], 0)
+              assert exported['execution_performed'] is False
+              assert exported_dir.stat().st_mode & 0o777 == 0o700
+              assert (exported_dir / 'original/scripts/check.js').read_text() == source
+              assert (exported_dir / 'candidate/scripts/check.js').read_text() == source
+              assert json.loads((exported_dir / 'reproducer.json').read_text())['expected']['cases'] == report['cases']
+              assert not (exported_dir / 'original/artifact').exists()
+              assert capsule.read_bytes() == archive_bytes
+
+              # Reference disagreement is preserved, never converted to a pair
+              # PASS or accepted as a baseline for verifying a native fix.
               (original / 'scripts/check.js').write_text("console.log(process.versions.bun ? 'bun' : 'node');\n")
-              disagreement = run(base + ['--bun-bin', bun], 2)
+              disagreement_capsule = root / 'disagreement.json'
+              disagreement = run(base + ['--bun-bin', bun, '--capture-capsule', str(disagreement_capsule)], 2)
               assert disagreement['verdict'] == 'INCONCLUSIVE'
               assert disagreement['reference_divergences'] == 1
               assert disagreement['cases'][0]['outcome'] == 'REFERENCE_DIVERGENCE'
               assert disagreement['cases'][0]['native']['exit_code'] == 1
+              args = [str(binary), str(disagreement_capsule), '--replay', '--execute',
+                      '--expected-sha256', disagreement['capsule']['content_sha256'],
+                      '--native-bin', '/bin/false', '--bun-bin', bun]
+              repeated = run(args, 0)
+              assert repeated['verdict'] == 'REPRODUCED'
+              assert repeated['validation']['cases'] == disagreement['cases']
+              assert run(args + ['--verify-fix'], 2)['verdict'] == 'ERROR'
+
+              # Only Bun changes its observation when external state changes.
+              # Stable Node evidence is not sufficient to verify a fix.
+              marker = root / 'ambient-state'
+              (original / 'scripts/check.js').write_text(
+                  "console.log(process.versions.bun && require('fs').existsSync("
+                  + json.dumps(str(marker)) + ") ? 'drift' : 'same');")
+              drift_capsule = root / 'drift.json'
+              drift_seed = run(base + ['--bun-bin', bun, '--capture-capsule', str(drift_capsule)], 1)
+              marker.write_text('changed external state')
+              drift = run([str(binary), str(drift_capsule), '--replay', '--verify-fix', '--execute',
+                           '--expected-sha256', drift_seed['capsule']['content_sha256'],
+                           '--native-bin', '/bin/false', '--bun-bin', bun], 2)
+              assert drift['verdict'] == 'REFERENCE_DRIFT'
+              assert drift['validation']['cases'][0]['node'] == drift_seed['cases'][0]['node']
+              assert drift['validation']['cases'][0]['bun'] != drift_seed['cases'][0]['bun']
 
               missing = run(base + ['--bun-bin', str(root / 'missing-bun')], 2)
               assert missing['verdict'] == 'ERROR' and 'resolve Bun' in missing['error']
@@ -114,7 +170,7 @@ jobs:
               denied = subprocess.run([str(binary), str(original), '--bun-bin', bun,
                   '--native-bin', '/bin/false'], capture_output=True, text=True, timeout=10)
               assert denied.returncode == 2 and '--execute' in denied.stderr
-              print('Real Node/Bun: matching references, native failure, reference disagreement, missing/aliased Bun, private reports and execution consent verified.')
+              print('Real Node/Bun: reference agreement/disagreement, native failure, three-runtime capture/replay/export, Bun-only drift, private reports and execution consent verified.')
           PY
       - name: Strict production and test lint
         run: cargo +stable clippy --manifest-path tools/migration-validator/Cargo.toml --all-targets -- -D warnings
