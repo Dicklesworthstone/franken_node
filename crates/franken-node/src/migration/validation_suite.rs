@@ -28,6 +28,9 @@ pub use workspace_effects::DeltaSummary;
 #[path = "test_inventory.rs"]
 mod test_inventory;
 
+#[path = "product_oracle.rs"]
+pub mod product_oracle;
+
 #[path = "native_replay.rs"]
 pub mod native_replay;
 use native_replay::failure_capture::FailureArchive;
@@ -384,7 +387,8 @@ fn execute_suite_pair(reference_snapshot: &Snapshot, candidate_snapshot: &Snapsh
         let mut row = TestCaseResult { test: test.to_string_lossy().into_owned(), status: "ERROR".into(),
             reference: None, native: None, divergences: Vec::new(), errors: Vec::new() };
         let result = (|| -> Result<()> {
-            let case = tempfile::Builder::new().prefix("franken-native-validation-").tempdir()?;
+            let case = tempfile::Builder::new().prefix("franken-native-validation-")
+                .permissions(fs::Permissions::from_mode(0o700)).tempdir()?;
             let mut outputs = Vec::new();
             let mut deltas = Vec::new();
             for (name, snapshot, invocation) in [("reference", reference_snapshot, reference),
@@ -841,7 +845,7 @@ mod tests {
     #[test]
     fn native_command_uses_relative_case_and_disables_degraded_fallback() {
         let invocation = Invocation { executable: PathBuf::from("/trusted/native"), before: vec!["run".into()],
-            after: vec!["--runtime".into(), "franken-engine".into(), "--console-only".into()] };
+            after: vec!["--runtime".into(), "franken-engine", "--console-only"].into_iter().map(OsString::from).collect() };
         let environment = BTreeMap::from([("FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK".into(), "1".into())]);
         let command = invocation.command(Path::new("tests/a.test.js"), Path::new("/workspace"), &environment);
         let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
@@ -917,9 +921,29 @@ mod tests {
     fn archive_configuration_is_not_forwarded_to_either_guest_runtime() {
         let key = native_replay::failure_capture::DIRECTORY_ENV;
         let environment = BTreeMap::from([(key.into(), "/private/captures".into())]);
+        let workspace = fixture();
+        write(workspace.path(), "test.js", &format!(
+            "if(Object.hasOwn(process.env,{}))process.exit(91);console.log('clean');",
+            serde_json::to_string(key).unwrap()));
         for invocation in [node(false), node(true)] {
-            let command = invocation.command(Path::new("test.js"), Path::new("/workspace"), &environment);
-            assert!(command.get_envs().any(|(name, value)| name == key && value.is_none()));
+            let mut command = invocation.command(Path::new("test.js"), workspace.path(), &environment);
+            // After env_clear, env_remove can omit the mapping entirely; it
+            // need not retain a tombstone in Command's explicit environment.
+            assert!(command.get_envs().all(|(name, value)| name != key || value.is_none()));
+            let output = smoke_supervisor::run_command_with_timeout(&mut command,
+                Duration::from_secs(5), DRAIN_TIMEOUT).unwrap();
+            assert!(output.status.success());
+            assert_eq!(output.stdout, b"clean\n");
         }
+    }
+
+    #[test]
+    fn captured_sources_are_staged_beneath_an_owner_only_directory() {
+        let project = fixture();
+        write(project.path(), "case.test.js", "const fs=require('fs'); const p=require('path'); console.log(fs.statSync(p.dirname(process.cwd())).mode & 0o077);");
+        let report = measured(project.path());
+        assert_eq!(report.verdict, "PASS");
+        assert_eq!(report.cases[0].reference.as_ref().unwrap().stdout.sha256,
+            hex::encode(Sha256::digest(b"0\n")));
     }
 }
