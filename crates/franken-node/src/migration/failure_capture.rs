@@ -11,6 +11,7 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -50,8 +51,14 @@ impl FailureArchive {
         for project in &projects {
             ensure!(!directory.starts_with(project), "failure archive directory must be outside both input projects");
         }
+        // tempfile directories default to 0777 masked by the caller's umask,
+        // unlike its private files. Set permissions AT CREATION, not after
+        // source material or archive names have become visible to other users.
         let directory = tempfile::Builder::new().prefix("franken-migration-failure-")
+            .permissions(fs::Permissions::from_mode(0o700))
             .tempdir_in(directory).context("reserve private failure archive storage")?;
+        ensure!(fs::symlink_metadata(directory.path())?.permissions().mode() & 0o077 == 0,
+            "failure archive reservation is accessible to other users");
         Ok(Self { directory, projects })
     }
 
@@ -102,7 +109,7 @@ mod tests {
     use super::*;
     use super::super::{inspect, load, reexecute};
     use super::super::super::{Invocation, execute_suite_pair, node_on_path};
-    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::os::unix::fs::symlink;
     use std::time::Duration;
 
     fn deadline() -> Instant { Instant::now() + Duration::from_secs(90) }
@@ -206,5 +213,17 @@ mod tests {
         symlink(output.path(), &alias).unwrap();
         assert!(FailureArchive::reserve(&alias, [root.path(), candidate.path()]).is_err());
         assert_eq!(fs::read_dir(root.path().join("captures")).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn reservation_is_private_before_any_runtime_or_archive_write() {
+        let root = project();
+        let output = tempfile::tempdir().unwrap();
+        let archive = FailureArchive::reserve(output.path(), [root.path(), root.path()]).unwrap();
+        let path = archive.directory.path().to_path_buf();
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(fs::read_dir(&path).unwrap().count(), 0);
+        drop(archive);
+        assert!(!path.exists());
     }
 }
