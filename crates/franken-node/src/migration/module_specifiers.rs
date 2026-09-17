@@ -140,7 +140,7 @@ fn plan(source: &str, deadline: Instant) -> Result<Vec<(Range<usize>, String)>, 
     }
 }
 
-fn text(source: &str, node: Node<'_>) -> &str {
+fn text<'a>(source: &'a str, node: Node<'_>) -> &'a str {
     &source[node.byte_range()]
 }
 

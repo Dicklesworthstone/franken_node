@@ -24,6 +24,9 @@ use std::time::Duration;
 use std::time::Instant;
 use tree_sitter::{Language, Node, Parser as JsParser};
 
+mod module_specifiers;
+use module_specifiers::normalize_import_specifier;
+
 #[cfg(all(unix, not(target_os = "linux")))]
 use std::os::unix::process::CommandExt;
 
@@ -3042,142 +3045,12 @@ fn prove_commonjs_to_esm_precondition(
 }
 
 fn rewrite_esm_imports(source: &str) -> EsmImportRewrite {
-    let has_esm_syntax = source.lines().any(line_has_esm_module_syntax);
-    let has_commonjs_syntax = source
-        .lines()
-        .any(|line| line_contains_require_call(line) || line_has_commonjs_export(line));
-    let mut manual_findings = BTreeSet::new();
-    if has_esm_syntax && has_commonjs_syntax {
-        manual_findings
-            .insert("ESM/CJS module mixing detected; automatic import rewrite skipped".to_string());
-    } else if has_commonjs_syntax {
-        manual_findings.insert(
-            "CommonJS require()/exports found in ESM-classified source; manual migration required"
-                .to_string(),
-        );
-    }
-
-    if !manual_findings.is_empty() {
-        return EsmImportRewrite {
-            rewritten_content: source.to_string(),
-            rewrite_count: 0,
-            manual_findings: manual_findings.into_iter().collect(),
-        };
-    }
-
-    let mut rewritten_content = String::with_capacity(source.len());
-    let mut rewrite_count = 0_usize;
-    for line in source.split_inclusive('\n') {
-        let (body, line_ending) = split_line_ending(line);
-        if let Some(rewritten_line) = rewrite_esm_import_line(body) {
-            rewritten_content.push_str(&rewritten_line);
-            rewrite_count = rewrite_count.saturating_add(1);
-        } else {
-            rewritten_content.push_str(body);
-        }
-        rewritten_content.push_str(line_ending);
-    }
-
-    if rewrite_count == 0 {
-        return EsmImportRewrite {
-            rewritten_content: source.to_string(),
-            rewrite_count: 0,
-            manual_findings: Vec::new(),
-        };
-    }
-
+    let rewrite = module_specifiers::rewrite_esm(source);
     EsmImportRewrite {
-        rewritten_content,
-        rewrite_count,
-        manual_findings: Vec::new(),
+        rewritten_content: rewrite.rewritten_content,
+        rewrite_count: rewrite.rewrite_count,
+        manual_findings: rewrite.manual_findings,
     }
-}
-
-fn rewrite_esm_import_line(line: &str) -> Option<String> {
-    let (code, suffix_comment) = split_js_trailing_line_comment(line);
-    let (specifier_start, specifier_end, specifier) = esm_module_specifier_span(code)?;
-    let normalized_specifier = normalize_import_specifier(&specifier);
-    if normalized_specifier == specifier {
-        return None;
-    }
-
-    let mut rewritten_line = String::with_capacity(
-        code.len()
-            .saturating_sub(specifier.len())
-            .saturating_add(normalized_specifier.len()),
-    );
-    rewritten_line.push_str(&code[..specifier_start]);
-    rewritten_line.push_str(&normalized_specifier);
-    rewritten_line.push_str(&code[specifier_end..]);
-    Some(append_js_suffix_comment(rewritten_line, suffix_comment))
-}
-
-fn esm_module_specifier_span(code: &str) -> Option<(usize, usize, String)> {
-    let leading_whitespace = code.len().saturating_sub(code.trim_start().len());
-    let trimmed = &code[leading_whitespace..];
-    if is_ignorable_js_line(trimmed) {
-        return None;
-    }
-
-    if let Some(after_import) = trimmed.strip_prefix("import ") {
-        let after_import_offset = leading_whitespace.saturating_add("import ".len());
-        let after_import_whitespace = after_import
-            .len()
-            .saturating_sub(after_import.trim_start().len());
-        let side_effect_offset = after_import_offset.saturating_add(after_import_whitespace);
-        if after_import
-            .trim_start()
-            .chars()
-            .next()
-            .is_some_and(|ch| ch == '"' || ch == '\'')
-        {
-            return parse_js_string_literal_at(code, side_effect_offset);
-        }
-        return parse_esm_from_specifier(code, after_import_offset);
-    }
-
-    if trimmed.starts_with("export ") {
-        return parse_esm_from_specifier(code, leading_whitespace.saturating_add("export ".len()));
-    }
-
-    None
-}
-
-fn parse_esm_from_specifier(code: &str, search_start: usize) -> Option<(usize, usize, String)> {
-    let from_offset = code.get(search_start..)?.rfind(" from ")?;
-    let from_start = search_start.saturating_add(from_offset);
-    let after_from = from_start.saturating_add(" from ".len());
-    let rest = code.get(after_from..)?;
-    let whitespace = rest.len().saturating_sub(rest.trim_start().len());
-    parse_js_string_literal_at(code, after_from.saturating_add(whitespace))
-}
-
-fn parse_js_string_literal_at(code: &str, quote_index: usize) -> Option<(usize, usize, String)> {
-    let quote = code.get(quote_index..)?.chars().next()?;
-    if quote != '"' && quote != '\'' {
-        return None;
-    }
-
-    let literal_start = quote_index.saturating_add(quote.len_utf8());
-    let mut escaped = false;
-    for (relative_index, ch) in code.get(literal_start..)?.char_indices() {
-        if escaped {
-            return None;
-        }
-        if ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        if ch == quote {
-            let literal_end = literal_start.saturating_add(relative_index);
-            let specifier = code.get(literal_start..literal_end)?.to_string();
-            if specifier.trim().is_empty() {
-                return None;
-            }
-            return Some((literal_start, literal_end, specifier));
-        }
-    }
-    None
 }
 
 fn analyze_commonjs_with_js_parser(source: &str) -> Result<CommonJsParserAnalysis, String> {
@@ -3761,63 +3634,6 @@ fn is_simple_js_identifier(candidate: &str) -> bool {
         return false;
     }
     chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
-}
-
-fn normalize_import_specifier(specifier: &str) -> String {
-    if specifier.starts_with("node:") {
-        return specifier.to_string();
-    }
-    if is_node_builtin_specifier(specifier) {
-        return format!("node:{specifier}");
-    }
-    specifier.to_string()
-}
-
-fn is_node_builtin_specifier(specifier: &str) -> bool {
-    let base = specifier.split('/').next().unwrap_or(specifier);
-    matches!(
-        base,
-        "assert"
-            | "async_hooks"
-            | "buffer"
-            | "child_process"
-            | "cluster"
-            | "console"
-            | "constants"
-            | "crypto"
-            | "dgram"
-            | "diagnostics_channel"
-            | "dns"
-            | "domain"
-            | "events"
-            | "fs"
-            | "http"
-            | "http2"
-            | "https"
-            | "inspector"
-            | "module"
-            | "net"
-            | "os"
-            | "path"
-            | "perf_hooks"
-            | "process"
-            | "punycode"
-            | "querystring"
-            | "readline"
-            | "repl"
-            | "stream"
-            | "string_decoder"
-            | "timers"
-            | "tls"
-            | "tty"
-            | "url"
-            | "util"
-            | "v8"
-            | "vm"
-            | "wasi"
-            | "worker_threads"
-            | "zlib"
-    )
 }
 
 fn is_lockfile(name: &str) -> bool {
