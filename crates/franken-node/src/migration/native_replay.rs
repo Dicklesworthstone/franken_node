@@ -16,6 +16,9 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
+#[path = "native_minimizer.rs"]
+pub mod minimizer;
+
 const SCHEMA: &str = "franken-node/native-migration-capsule/v1";
 const MAX_CAPSULE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_EXPANDED_BYTES: usize = 32 * 1024 * 1024;
