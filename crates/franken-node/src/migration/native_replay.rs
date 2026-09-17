@@ -6,7 +6,7 @@
 use super::{CapturedInputs, Entry, EntryData, Invocation, RuntimeIdentity, Snapshot, SuiteReport,
     MAX_ENTRIES, MAX_PATH_BYTES, TOTAL_TIMEOUT, LEG_TIMEOUT, budget, execute_suite_pair,
     matched_tests, open_regular, runtime_invocations, same_file_version, workspace_effects};
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -160,7 +160,9 @@ impl CapturedRun {
         let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
         file.write_all(&encoded)?;
         file.sync_all()?;
-        Ok(summary(&self.capsule))
+        let mut result = summary(&self.capsule);
+        result.execution_performed = true;
+        Ok(result)
     }
 }
 
@@ -188,12 +190,20 @@ pub fn capture_project(project: &Path, migrated: Option<&Path>, native: &Path,
         projects: [inputs.reference_root, inputs.candidate_root], unavailable })
 }
 
+fn checked_link_target(target: &str) -> Result<&Path> {
+    ensure!(!target.is_empty() && target.len() <= MAX_PATH_BYTES && !target.contains('\\')
+        && !target.chars().any(char::is_control) && Path::new(target).is_relative(),
+        "unsafe capsule symlink target");
+    Ok(Path::new(target))
+}
+
 fn store_snapshot(snapshot: &Snapshot, blobs: &mut BTreeMap<String, String>, expanded: &mut usize,
     metadata: &mut usize, deadline: Instant) -> Result<StoredSnapshot> {
     let mut entries = Vec::new();
     for (path, entry) in &snapshot.entries {
         budget(deadline)?;
         let path = path.to_str().context("non-UTF-8 capsule path")?.to_owned();
+        relative_path(&path)?;
         *metadata += path.len() + 128;
         let data = match &entry.data {
             EntryData::Directory => StoredData::Directory,
@@ -206,6 +216,7 @@ fn store_snapshot(snapshot: &Snapshot, blobs: &mut BTreeMap<String, String>, exp
             }
             EntryData::Link(target) => {
                 let target = target.to_str().context("non-UTF-8 capsule link target")?.to_owned();
+                check_link(Path::new(&path), checked_link_target(&target)?, &snapshot.entries, deadline)?;
                 *metadata += target.len();
                 StoredData::Symlink { target }
             }
@@ -248,11 +259,9 @@ fn restore_snapshot(stored: &StoredSnapshot, blobs: &BTreeMap<String, Vec<u8>>, 
                 EntryData::File(bytes.clone())
             }
             StoredData::Symlink { target } => {
-                ensure!(!target.is_empty() && target.len() <= MAX_PATH_BYTES && !target.contains('\\')
-                    && !target.chars().any(char::is_control) && Path::new(target).is_relative(),
-                    "unsafe capsule symlink target");
+                let target_path = checked_link_target(target)?;
                 *metadata += target.len();
-                EntryData::Link(PathBuf::from(target))
+                EntryData::Link(target_path.to_path_buf())
             }
         };
         ensure!(*metadata <= MAX_METADATA_BYTES, "capsule metadata exceeds 8 MiB");
@@ -383,7 +392,7 @@ fn load(path: &Path, pin: Option<&str>, deadline: Instant) -> Result<Loaded> {
         budget(deadline)?;
         ensure!(is_hash(&blob.sha256) && previous < blob.sha256.as_str(), "capsule blobs must be unique and sorted");
         previous = &blob.sha256;
-        ensure!(blob.hex.len() % 2 == 0, "invalid capsule file encoding");
+        ensure!(blob.hex.len().is_multiple_of(2), "invalid capsule file encoding");
         decoded_bytes = decoded_bytes.checked_add(blob.hex.len() / 2).context("capsule size overflow")?;
         ensure!(decoded_bytes <= MAX_EXPANDED_BYTES, "capsule decoded bytes exceed 32 MiB");
         let decoded = hex::decode(&blob.hex)?;
@@ -436,11 +445,19 @@ fn reexecute(loaded: Loaded, reference: &Invocation, native: &Invocation, verify
             row.reference.as_ref().is_some_and(|run| run.exit_code == Some(0) && run.signal.is_none())),
             "fix verification requires a captured failure with a successful reference for every case");
     }
-    let validation = execute_suite_pair(&loaded.original, loaded.candidate(), reference, native,
+    let mut validation = execute_suite_pair(&loaded.original, loaded.candidate(), reference, native,
         deadline, LEG_TIMEOUT, expected.filesystem_comparison)?;
-    let mismatched_tests = expected.cases.iter().zip(&validation.cases)
-        .filter(|(before, after)| if verify_fix { before.reference != after.reference } else { before != after })
-        .map(|(before, _)| before.test.clone()).collect::<Vec<_>>();
+    // The executor fingerprints again around execution. Its actual identities
+    // must agree with admission too, not merely with its own final recheck.
+    if !same_runtime(&expected.reference_runtime, &validation.reference_runtime)
+        || !same_runtime(&native_identity, &validation.native_runtime) {
+        validation.errors.push("runtime identity changed between replay admission and execution".into());
+        validation.verdict = "ERROR".into();
+    }
+    let mismatched_tests = expected.cases.iter().enumerate().filter(|(index, before)|
+        validation.cases.get(*index).is_none_or(|after|
+            if verify_fix { before.reference != after.reference } else { *before != after }))
+        .map(|(_, before)| before.test.clone()).collect::<Vec<_>>();
     let complete = complete_report(&validation, &loaded.original, loaded.candidate()).is_ok();
     let verdict = if !complete { "ERROR" }
         else if verify_fix && !mismatched_tests.is_empty() { "REFERENCE_DRIFT" }
@@ -544,8 +561,8 @@ mod tests {
         let (_root, _out, path, pin) = fixture("console.log('ok');");
         assert!(load(&path, Some(&"0".repeat(64)), deadline()).is_err());
         edit(&path, |capsule| {
-            for leg in [&mut capsule.payload.expected.cases[0].reference,
-                &mut capsule.payload.expected.cases[0].native] {
+            let row = &mut capsule.payload.expected.cases[0];
+            for leg in [&mut row.reference, &mut row.native] {
                 leg.as_mut().unwrap().stdout.sha256 = "0".repeat(64);
             }
         });
@@ -587,12 +604,14 @@ mod tests {
 
     #[test]
     fn imported_paths_and_missing_blobs_are_rejected_before_staging() {
+        let (_root, _out, path, _pin) = fixture("console.log('ok');");
+        let original = fs::read(&path).unwrap();
         for name in ["../outside.js", "/absolute.js", "./case.test.js", "a//b.js", ".git/config", "undeclared/case.test.js"] {
-            let (_root, _out, path, _pin) = fixture("console.log('ok');");
+            fs::write(&path, &original).unwrap();
             edit(&path, |capsule| capsule.payload.original.entries[0].path = name.into());
             assert!(inspect(&path).is_err(), "{name}");
         }
-        let (_root, _out, path, _pin) = fixture("console.log('ok');");
+        fs::write(&path, original).unwrap();
         edit(&path, |capsule| capsule.payload.blobs.clear());
         assert!(inspect(&path).is_err());
     }
@@ -651,5 +670,61 @@ mod tests {
         fs::File::create(&huge).unwrap().set_len(MAX_CAPSULE_BYTES as u64 + 1).unwrap();
         assert!(inspect(&huge).is_err());
         assert!(load(&path, None, Instant::now()).is_err());
+    }
+
+    #[test]
+    fn distinct_candidate_inputs_manifests_modes_and_links_round_trip() {
+        let original = tempfile::tempdir().unwrap();
+        let candidate = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        for root in [original.path(), candidate.path()] {
+            write(root, "scripts/check.js", "console.log('reference');");
+            write(root, ".franken-node/migration-tests.json",
+                r#"{"schema_version":"franken-node/migration-tests/v1","tests":["scripts/check.js"]}"#);
+            write(root, "data/value", "same dependency");
+            symlink("data/value", root.join("alias")).unwrap();
+            fs::set_permissions(root.join("scripts/check.js"), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        write(candidate.path(), "scripts/check.js", "console.log('candidate');");
+        let run = capture_project(original.path(), Some(candidate.path()), Path::new("/bin/false"), true).unwrap();
+        let path = out.path().join("paired.json");
+        let meta = run.write_capsule(&path).unwrap();
+        assert_ne!(meta.input_sha256, meta.candidate_input_sha256);
+        let loaded = load(&path, Some(&meta.content_sha256), deadline()).unwrap();
+        assert_eq!(loaded.candidate().entries[Path::new("scripts/check.js")].mode, 0o755);
+        assert!(matches!(&loaded.candidate().entries[Path::new("scripts/check.js")].data,
+            EntryData::File(bytes) if bytes == b"console.log('candidate');"));
+        assert!(matches!(&loaded.candidate().entries[Path::new("alias")].data,
+            EntryData::Link(target) if target == Path::new("data/value")));
+        assert_eq!(meta.tests, ["scripts/check.js"]);
+        let result = replay(&path, &meta.content_sha256, Path::new("/bin/false"), false).unwrap();
+        assert_eq!(result.verdict, "REPRODUCED");
+    }
+
+    #[test]
+    fn unsupported_capture_paths_and_size_fail_before_runtime_resolution() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), "case.test.js", "console.log('ok');");
+        write(root.path(), "bad\nname", "unsupported capsule filename");
+        let error = capture_project(root.path(), None, Path::new("/absent/native"), false).err().unwrap();
+        assert!(error.to_string().contains("unsafe capsule path"));
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), "case.test.js", "console.log('ok');");
+        fs::File::create(root.path().join("big")).unwrap().set_len(MAX_EXPANDED_BYTES as u64 + 1).unwrap();
+        let error = capture_project(root.path(), None, Path::new("/absent/native"), false).err().unwrap();
+        assert!(error.to_string().contains("32 MiB"));
+    }
+
+    #[test]
+    fn incomplete_execution_retains_measurement_but_cannot_publish_a_capsule() {
+        let root = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        write(root.path(), "case.test.js", "process.stdout.write('x'.repeat(17*1024*1024));");
+        let run = capture_project(root.path(), None, Path::new("/bin/false"), false).unwrap();
+        assert_eq!(run.report.verdict, "ERROR");
+        let path = out.path().join("incomplete.json");
+        assert!(run.write_capsule(&path).is_err());
+        assert!(!path.exists());
+        assert!(!run.report.cases[0].errors.is_empty());
     }
 }
