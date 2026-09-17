@@ -156,9 +156,41 @@ jobs:
               assert capsule.read_bytes() == archive_bytes
               assert (original / 'scripts/check.js').read_text() == 'process.exit(99);'
 
+              # These seeds have exactly one line. Whole-line removal loses
+              # measured output/effects; the original leg must shrink through
+              # structural edits, not just comments or a discarded native leg.
+              minified = "function unused(){return 12345;}(()=>{const dead=456;console.log(42);require('fs').writeFileSync('artifact','same');})();"
+              for label, flags in [('pair', []), ('product', ['--bun-bin', bun])]:
+                  for project in (original, candidate):
+                      (project / 'scripts/check.js').write_text(minified)
+                  seed_path = root / (label + '-minified-seed.json')
+                  measured = run(base + flags + ['--capture-capsule', str(seed_path)], 1)
+                  old_bytes = seed_path.read_bytes()
+                  small_path = root / (label + '-minified-small.json')
+                  minimized = run([str(binary), str(seed_path), '--replay', '--execute',
+                      '--expected-sha256', measured['capsule']['content_sha256'], '--native-bin', '/bin/false']
+                      + flags + ['--minimize-capsule', str(small_path), '--max-executions', '48', '--minimize-seconds', '300'], 0)
+                  assert minimized['validation']['cases'] == measured['cases']
+                  assert minimized['statistics']['syntax']['accepted'] >= 2
+                  assert minimized['statistics']['executions'] <= 48
+                  assert minimized['reduced_source_bytes'] < minimized['original_source_bytes']
+                  small_pin = minimized['content_sha256']
+                  replayed = run([str(binary), str(small_path), '--replay', '--execute',
+                      '--expected-sha256', small_pin, '--native-bin', '/bin/false'] + flags, 0)
+                  assert replayed['verdict'] == 'REPRODUCED'
+                  assert replayed['validation']['cases'] == measured['cases']
+                  export_dir = root / (label + '-minified-export')
+                  run([str(binary), str(small_path), '--export-inputs', str(export_dir), '--expected-sha256', small_pin], 0)
+                  extracted = (export_dir / 'original/scripts/check.js').read_text()
+                  assert len(extracted) < len(minified) and 'unused' not in extracted and 'dead' not in extracted
+                  assert not (export_dir / 'original/artifact').exists()
+                  assert seed_path.read_bytes() == old_bytes
+                  assert (original / 'scripts/check.js').read_text() == minified
+                  assert (candidate / 'scripts/check.js').read_text() == minified
+
               # Reference disagreement is preserved, never converted to a pair
               # PASS or accepted as a baseline for verifying a native fix.
-              disagreement_source = "// removable\nconsole.log(process.versions.bun ? 'bun' : 'node');\n// tail\n"
+              disagreement_source = "function unused(){return 123;}console.log(process.versions.bun ? 'bun' : 'node');"
               (original / 'scripts/check.js').write_text(disagreement_source)
               disagreement_capsule = root / 'disagreement.json'
               disagreement = run(base + ['--bun-bin', bun, '--capture-capsule', str(disagreement_capsule)], 2)
@@ -173,7 +205,9 @@ jobs:
               assert repeated['verdict'] == 'REPRODUCED'
               assert repeated['validation']['cases'] == disagreement['cases']
               assert run(args + ['--verify-fix'], 2)['verdict'] == 'ERROR'
-              assert reduce(args, disagreement, 'reduced-disagreement')['captured_verdict'] == 'INCONCLUSIVE'
+              disagreement_reduced = reduce(args, disagreement, 'reduced-disagreement')
+              assert disagreement_reduced['captured_verdict'] == 'INCONCLUSIVE'
+              assert disagreement_reduced['statistics']['syntax']['accepted'] > 0
               assert (original / 'scripts/check.js').read_text() == disagreement_source
 
               # Only Bun changes its observation when external state changes.
@@ -219,7 +253,7 @@ jobs:
               denied = subprocess.run([str(binary), str(original), '--bun-bin', bun,
                   '--native-bin', '/bin/false'], capture_output=True, text=True, timeout=10)
               assert denied.returncode == 2 and '--execute' in denied.stderr
-              print('Real Node/Bun: native failure and reference-disagreement reduction, all-role replay, Bun-only final drift refusal, archive privacy and execution consent verified.')
+              print('Real Node/Bun: minified pair/product reduction, native failure and reference disagreement, all-role replay, Bun-only final drift refusal, archive privacy and execution consent verified.')
           PY
       - name: Strict production and test lint
         run: cargo +stable clippy --manifest-path tools/migration-validator/Cargo.toml --all-targets -- -D warnings
