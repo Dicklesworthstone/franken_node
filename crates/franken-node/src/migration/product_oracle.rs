@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Output;
 use std::time::{Duration, Instant};
 
@@ -112,8 +112,8 @@ struct Leg {
 }
 
 fn measure(snapshot: &Snapshot, invocation: &Invocation, test: &Path, workspace: &Path,
-    environment: &BTreeMap<OsString, OsString>, deadline: Instant, leg_timeout: Duration,
-    filesystem: bool) -> Leg {
+    environment: &BTreeMap<OsString, OsString>, timing: (Instant, Duration), filesystem: bool) -> Leg {
+    let (deadline, leg_timeout) = timing;
     let mut leg = Leg::default();
     let result = (|| -> Result<()> {
         budget(deadline)?;
@@ -215,7 +215,7 @@ fn execute(original: &Snapshot, candidate: &Snapshot, runtimes: [&Invocation; 3]
         for (index, invocation) in runtimes.iter().enumerate() {
             let snapshot = if index == 2 { candidate } else { original };
             legs[index] = measure(snapshot, invocation, &test, &case.path().join(ROLES[index]),
-                &environment, deadline, leg_timeout, filesystem);
+                &environment, (deadline, leg_timeout), filesystem);
         }
         let row = classify(&test, legs, filesystem);
         report.skipped -= 1;
