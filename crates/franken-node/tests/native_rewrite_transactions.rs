@@ -99,7 +99,7 @@ fn primary_refuses_a_redirected_backup_parent_without_outside_writes() {
     symlink(outside.path(), root.path().join(".migrate-backup/nested")).unwrap();
     assert!(run_rewrite(root.path(), true).is_err());
     originals(root.path());
-    assert!(!outside.path().join("source.js")).exists());
+    assert!(!outside.path().join("source.js").exists());
 }
 
 #[test]
