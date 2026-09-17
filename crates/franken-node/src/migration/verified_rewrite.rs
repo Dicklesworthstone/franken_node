@@ -88,22 +88,15 @@ fn run_with_validator(project: &Path,
         }).collect();
         candidate.prepare(&replacements)?;
         let validation = validate(&candidate)?;
-        // Never authorize from a summary-only or incomplete result. Normal
-        // production observations come directly from the live suite executor.
-        let complete_pass = validation.verdict == "PASS" && validation.total_tests > 0
-            && validation.passed == validation.total_tests && validation.failed == 0
-            && validation.errored == 0 && validation.skipped == 0 && validation.errors.is_empty()
-            && validation.cases.len() == validation.total_tests && validation.filesystem_comparison
-            && validation.input_sha256 == candidate.input_sha256()
-            && validation.cases.iter().all(|row| row.status == "PASS" && row.errors.is_empty()
-                && row.divergences.is_empty() && [&row.reference, &row.native].iter().all(|leg|
-                    leg.as_ref().is_some_and(|run| run.exit_code == Some(0) && run.signal.is_none()
-                        && run.workspace_delta.is_some())));
+        // Bind the live executor's evidence to BOTH captured trees and the
+        // exact test inventory. Never authorize from a summary-only result or
+        // trust empty divergence lists over unequal process/workspace evidence.
+        let admission = candidate.check_validation(&validation);
         let infrastructure_error = validation.verdict == "ERROR";
         report.validation = Some(validation);
-        if !complete_pass {
+        if let Err(error) = admission {
             report.status = if infrastructure_error { CheckedRewriteStatus::Error } else { CheckedRewriteStatus::Rejected };
-            report.errors.push("candidate did not pass complete process and filesystem comparison; new rewrites not installed".into());
+            report.errors.push(format!("candidate did not pass complete process and filesystem comparison; new rewrites not installed: {error:#}"));
             return Ok(());
         }
         // Include unchanged dependencies/configuration in this check, not only
@@ -334,5 +327,32 @@ mod tests {
         assert!(render(&report).contains("rewrites_applied=0"));
         let decoded: CheckedRewriteReport = serde_json::from_value(json).unwrap();
         assert!(!decoded.is_success());
+    }
+
+    #[test]
+    fn inconsistent_passing_evidence_never_reaches_installation() {
+        for mutate in [
+            (|r: &mut SuiteReport| r.candidate_input_sha256.push('0')) as fn(&mut SuiteReport),
+            |r| r.cases[0].test = "unmeasured.test.mjs".into(),
+            |r| r.cases[0].native.as_mut().unwrap().stdout.sha256.push('0'),
+            |r| r.cases[0].native.as_mut().unwrap().workspace_delta.as_mut().unwrap().sha256.push('0'),
+            |r| r.filesystem_exclusions.push("**/*".into()),
+        ] {
+            let root = project();
+            let original = source(root.path());
+            let report = run_with_validator(root.path(), |candidate| {
+                let mut measured = candidate.validate_node_pair()?;
+                assert_eq!(measured.verdict, "PASS");
+                mutate(&mut measured);
+                Ok(measured)
+            });
+            assert_eq!(report.status, CheckedRewriteStatus::Rejected, "{report:#?}");
+            assert_eq!(source(root.path()), original);
+            assert_eq!(report.rewrite.as_ref().unwrap().rewrites_applied, 0);
+            assert!(!report.rewrite.as_ref().unwrap().apply_mode);
+            assert!(!root.path().join(".migrate-backup/helper.mjs").exists());
+            assert_eq!(report.validation.as_ref().unwrap().verdict, "PASS");
+            assert!(report.errors[0].contains("new rewrites not installed"));
+        }
     }
 }
