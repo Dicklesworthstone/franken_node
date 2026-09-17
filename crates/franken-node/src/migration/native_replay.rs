@@ -415,6 +415,57 @@ fn load(path: &Path, pin: Option<&str>, deadline: Instant) -> Result<Loaded> {
     Ok(Loaded { capsule, original, candidate })
 }
 
+#[derive(Debug, Serialize)]
+pub struct ExportedInputs {
+    pub schema_version: String,
+    pub verdict: String,
+    pub destination: PathBuf,
+    pub capsule: CapsuleSummary,
+    pub execution_performed: bool,
+}
+
+/// Restore inspectable original/candidate trees without running project code or
+/// resolving any runtime. Require the independently trusted capsule identity.
+/// The destination must not exist; private partial output can remain on error.
+/// `reproducer.json` is written only after both restored identities are checked.
+pub fn export_inputs(path: &Path, expected_sha256: &str, destination: &Path) -> Result<ExportedInputs> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let deadline = Instant::now() + TOTAL_TIMEOUT;
+    let destination = output_destination(destination, &[])?;
+    let loaded = load(path, Some(expected_sha256), deadline)?;
+    budget(deadline)?;
+    fs::DirBuilder::new().mode(0o700).create(&destination)
+        .context("create private reproducer directory without replacing existing output")?;
+    let original = destination.join("original");
+    let candidate = destination.join("candidate");
+    loaded.original.stage(&original, deadline)?;
+    loaded.candidate().stage(&candidate, deadline)?;
+    ensure!(Snapshot::capture(&original, deadline)?.digest == loaded.original.digest
+        && Snapshot::capture(&candidate, deadline)?.digest == loaded.candidate().digest,
+        "exported project identity differs from captured inputs; reproducer is incomplete");
+    budget(deadline)?;
+    let manifest = serde_json::json!({
+        "schema_version": "franken-node/native-reproducer/v1",
+        "content_sha256": &loaded.capsule.content_sha256,
+        "original_project": "original",
+        "candidate_project": "candidate",
+        "expected": &loaded.capsule.payload.expected,
+        "execution_performed": false,
+        "environment_reproduced": false,
+        "release_certification": false,
+    });
+    let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600)
+        .open(destination.join("reproducer.json"))?;
+    serde_json::to_writer_pretty(&mut file, &manifest)?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    // Flush directory entries, without claiming an atomic multi-file export.
+    fs::File::open(&destination)?.sync_all()?;
+    Ok(ExportedInputs { schema_version: "franken-node/native-reproducer-export/v1".into(),
+        verdict: "EXPORTED".into(), destination, capsule: summary(&loaded.capsule), execution_performed: false })
+}
+
 /// Offline inspection never resolves a runtime or stages/executes project code.
 pub fn inspect(path: &Path) -> Result<CapsuleSummary> {
     Ok(summary(&load(path, None, Instant::now() + TOTAL_TIMEOUT)?.capsule))
@@ -729,5 +780,76 @@ mod tests {
         assert!(run.write_capsule(&path).is_err());
         assert!(!path.exists());
         assert!(!run.report.cases[0].errors.is_empty());
+    }
+
+    #[test]
+    fn export_restores_both_captured_trees_and_permissions_without_editing_sources() {
+        let original = tempfile::tempdir().unwrap();
+        let candidate = tempfile::tempdir().unwrap();
+        let outputs = tempfile::tempdir().unwrap();
+        for (root, value) in [(original.path(), "reference"), (candidate.path(), "candidate")] {
+            write(root, "scripts/check.js", &format!("console.log('{value}');"));
+            write(root, ".franken-node/migration-tests.json",
+                r#"{"schema_version":"franken-node/migration-tests/v1","tests":["scripts/check.js"]}"#);
+            write(root, "data/value", "captured data");
+            symlink("data/value", root.join("alias")).unwrap();
+            fs::set_permissions(root.join("scripts/check.js"), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let captured = capture_project(original.path(), Some(candidate.path()), Path::new("/bin/false"), true).unwrap();
+        let capsule = outputs.path().join("capsule.json");
+        let identity = captured.write_capsule(&capsule).unwrap();
+        let original_archive = fs::read(&capsule).unwrap();
+        write(original.path(), "scripts/check.js", "later source");
+        let destination = outputs.path().join("fixture");
+        let exported = export_inputs(&capsule, &identity.content_sha256, &destination).unwrap();
+        assert_eq!(exported.verdict, "EXPORTED");
+        assert!(!exported.execution_performed && !exported.capsule.execution_performed);
+        assert_eq!(fs::metadata(&destination).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(fs::read_to_string(destination.join("original/scripts/check.js")).unwrap(), "console.log('reference');");
+        assert_eq!(fs::read_to_string(destination.join("candidate/scripts/check.js")).unwrap(), "console.log('candidate');");
+        assert_eq!(fs::read_link(destination.join("candidate/alias")).unwrap(), Path::new("data/value"));
+        assert_eq!(fs::metadata(destination.join("original/scripts/check.js")).unwrap().permissions().mode() & 0o777, 0o755);
+        let manifest_path = destination.join("reproducer.json");
+        assert_eq!(fs::metadata(&manifest_path).unwrap().permissions().mode() & 0o777, 0o600);
+        let manifest: serde_json::Value = serde_json::from_slice(&fs::read(manifest_path).unwrap()).unwrap();
+        assert_eq!(manifest["expected"]["cases"], serde_json::to_value(&captured.report.cases).unwrap());
+        assert_eq!(manifest["original_project"], "original");
+        assert_eq!(manifest["candidate_project"], "candidate");
+        assert_eq!(manifest["execution_performed"], false);
+        assert_eq!(fs::read(capsule).unwrap(), original_archive);
+        assert_eq!(fs::read_to_string(original.path().join("scripts/check.js")).unwrap(), "later source");
+    }
+
+    #[test]
+    fn offline_export_does_not_require_available_or_current_runtime_implementations() {
+        let (_root, outputs, path, _) = fixture("console.log('captured');");
+        edit(&path, |capsule| {
+            capsule.payload.implementation_sha256 = "0".repeat(64);
+            capsule.payload.expected.reference_runtime.executable = "/absent/reference".into();
+            capsule.payload.expected.native_runtime.executable = "/absent/candidate".into();
+        });
+        let pin = inspect(&path).unwrap().content_sha256;
+        let exported = export_inputs(&path, &pin, &outputs.path().join("offline")).unwrap();
+        assert!(!exported.execution_performed);
+        assert_eq!(exported.capsule.captured_verdict, "PASS");
+        assert!(exported.destination.join("original/case.test.js").is_file());
+        assert!(exported.destination.join("candidate/case.test.js").is_file());
+    }
+
+    #[test]
+    fn invalid_pin_and_existing_or_symlinked_exports_never_replace_data() {
+        let (_root, outputs, path, pin) = fixture("console.log('captured');");
+        let destination = outputs.path().join("fixture");
+        assert!(export_inputs(&path, &"0".repeat(64), &destination).is_err());
+        assert!(!destination.exists());
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join("keep"), "preserve").unwrap();
+        assert!(export_inputs(&path, &pin, &destination).is_err());
+        let alias = outputs.path().join("alias");
+        symlink(&destination, &alias).unwrap();
+        assert!(export_inputs(&path, &pin, &alias).is_err());
+        assert_eq!(fs::read_to_string(destination.join("keep")).unwrap(), "preserve");
+        assert!(!destination.join("original").exists());
+        assert!(!destination.join("reproducer.json").exists());
     }
 }
