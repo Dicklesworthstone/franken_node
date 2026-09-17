@@ -148,9 +148,16 @@ fn source<'a>(snapshot: &'a Snapshot, path: &Path) -> Result<&'a [u8]> {
 
 fn selections(original: &Snapshot, candidate: Option<&Snapshot>, expected: &SuiteReport,
     options: &Options) -> Result<Vec<SourceSelection>> {
-    let paths: Vec<_> = if options.source_files.is_empty() {
+    let paths = if options.source_files.is_empty() {
         expected.cases.iter().filter(|row| row.status == "FAIL").map(|row| row.test.clone()).collect()
     } else { options.source_files.clone() };
+    select_sources(original, candidate, paths)
+}
+
+/// Shared source policy. The caller chooses the default failing-case identities
+/// from its own evidence schema; the source and path rules never depend on it.
+pub(super) fn select_sources(original: &Snapshot, candidate: Option<&Snapshot>,
+    paths: Vec<String>) -> Result<Vec<SourceSelection>> {
     ensure!(!paths.is_empty() && paths.len() <= MAX_SOURCE_FILES, "select between 1 and 16 reduction source files");
     let mut unique = BTreeSet::new();
     for name in paths {
@@ -178,16 +185,19 @@ fn selections(original: &Snapshot, candidate: Option<&Snapshot>, expected: &Suit
     Ok(result)
 }
 
-struct Inputs { original: Snapshot, candidate: Option<Snapshot> }
+pub(super) struct Inputs {
+    pub(super) original: Snapshot,
+    pub(super) candidate: Option<Snapshot>,
+}
 impl Inputs {
-    fn candidate(&self) -> &Snapshot { self.candidate.as_ref().unwrap_or(&self.original) }
+    pub(super) fn candidate(&self) -> &Snapshot { self.candidate.as_ref().unwrap_or(&self.original) }
     fn selected(&self, target: &SourceSelection) -> &Snapshot {
         match target.leg {
             SourceLeg::Shared | SourceLeg::Original => &self.original,
             SourceLeg::Candidate => self.candidate(),
         }
     }
-    fn bytes(&self, targets: &[SourceSelection]) -> Result<usize> {
+    pub(super) fn bytes(&self, targets: &[SourceSelection]) -> Result<usize> {
         targets.iter().try_fold(0_usize, |sum, target|
             Ok(sum + source(self.selected(target), &target.path)?.len()))
     }
@@ -206,6 +216,49 @@ impl Inputs {
     fn key(&self) -> (String, String) { (self.original.digest.clone(), self.candidate().digest.clone()) }
 }
 
+/// Complete observations may prove acceptance or rejection. An unresolved run
+/// proves neither. Fatal identity/invariant errors use Result::Err instead.
+pub(super) enum Measurement<R> { Complete(R), Unresolved(anyhow::Error) }
+
+/// Reserve final confirmation capacity independently of the evidence schema.
+/// All callers share the same accounting, timeout and unresolved-run behavior.
+pub(super) fn measure_with_budget<R>(options: &Options, timing: (Instant, Instant),
+    statistics: &mut Statistics, final_check: bool,
+    run: impl FnOnce(Instant) -> Result<Measurement<R>>) -> Result<Option<R>> {
+    let (final_deadline, search_deadline) = timing;
+    let limit = options.max_executions - if final_check { 0 } else { options.confirmations };
+    let deadline = if final_check { final_deadline } else { search_deadline };
+    let reason = if statistics.executions >= limit { Some("execution_budget") }
+        else if Instant::now() >= deadline { Some("wall_time_budget") } else { None };
+    if let Some(reason) = reason {
+        ensure!(!final_check, "final reduction confirmation budget exhausted: {reason}");
+        statistics.budget_exhausted = Some(reason.into());
+        return Ok(None);
+    }
+    statistics.executions += 1;
+    match run(deadline)? {
+        Measurement::Complete(report) => Ok(Some(report)),
+        Measurement::Unresolved(error) => {
+            ensure!(!final_check, "final reduction confirmation failed: {error:#}");
+            statistics.unresolved += 1;
+            statistics.last_unresolved = Some(format!("{error:#}"));
+            if Instant::now() >= deadline {
+                statistics.budget_exhausted = Some("wall_time_budget".into());
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// Runtime-specific execution/comparison, without a lossy common report type.
+/// Reports stay in their original pair or product schema through final checks.
+pub(super) trait ReductionOracle {
+    type Report;
+    fn measure(&mut self, inputs: &Inputs, final_check: bool) -> Result<Option<Self::Report>>;
+    fn preserves(&self, report: &Self::Report) -> bool;
+    fn statistics(&mut self) -> &mut Statistics;
+}
+
 struct Oracle<'a> {
     reference: &'a Invocation,
     native: &'a Invocation,
@@ -216,48 +269,25 @@ struct Oracle<'a> {
     statistics: Statistics,
 }
 
-impl Oracle<'_> {
-    fn measure(&mut self, inputs: &Inputs, final_check: bool) -> Result<Option<SuiteReport>> {
-        let limit = self.options.max_executions - if final_check { 0 } else { self.options.confirmations };
-        let deadline = if final_check { self.deadline } else { self.search_deadline };
-        let reason = if self.statistics.executions >= limit { Some("execution_budget") }
-            else if Instant::now() >= deadline { Some("wall_time_budget") } else { None };
-        if let Some(reason) = reason {
-            ensure!(!final_check, "final reduction confirmation budget exhausted: {reason}");
-            self.statistics.budget_exhausted = Some(reason.into());
-            return Ok(None);
-        }
-        self.statistics.executions += 1;
-        let report = match execute_suite_pair(&inputs.original, inputs.candidate(), self.reference, self.native,
-            deadline, LEG_TIMEOUT, self.expected.filesystem_comparison) {
-            Ok(report) => report,
-            Err(error) => {
-                // A search deadline can expire during staging or the initial
-                // runtime fingerprint, before the executor has a report. Keep
-                // the last confirmed input and require its reserved final runs;
-                // an unresolved trial is never acceptance or a cached reject.
-                ensure!(!final_check, "final reduction confirmation failed: {error:#}");
-                self.unresolved(&error, deadline);
-                return Ok(None);
-            }
-        };
-        ensure!(same_runtime(&self.expected.reference_runtime, &report.reference_runtime)
-            && same_runtime(&self.expected.native_runtime, &report.native_runtime),
-            "runtime identity changed during reduction");
-        if let Err(error) = complete_report(&report, &inputs.original, inputs.candidate()) {
-            ensure!(!final_check, "final reduction confirmation was incomplete: {error:#}");
-            self.unresolved(&error, deadline);
-            return Ok(None);
-        }
-        Ok(Some(report))
-    }
+impl ReductionOracle for Oracle<'_> {
+    type Report = SuiteReport;
 
-    fn unresolved(&mut self, error: &anyhow::Error, deadline: Instant) {
-        self.statistics.unresolved += 1;
-        self.statistics.last_unresolved = Some(format!("{error:#}"));
-        if Instant::now() >= deadline {
-            self.statistics.budget_exhausted = Some("wall_time_budget".into());
-        }
+    fn measure(&mut self, inputs: &Inputs, final_check: bool) -> Result<Option<SuiteReport>> {
+        measure_with_budget(self.options, (self.deadline, self.search_deadline),
+            &mut self.statistics, final_check, |deadline| {
+                let report = match execute_suite_pair(&inputs.original, inputs.candidate(), self.reference, self.native,
+                    deadline, LEG_TIMEOUT, self.expected.filesystem_comparison) {
+                    Ok(report) => report,
+                    Err(error) => return Ok(Measurement::Unresolved(error)),
+                };
+                ensure!(same_runtime(&self.expected.reference_runtime, &report.reference_runtime)
+                    && same_runtime(&self.expected.native_runtime, &report.native_runtime),
+                    "runtime identity changed during reduction");
+                if let Err(error) = complete_report(&report, &inputs.original, inputs.candidate()) {
+                    return Ok(Measurement::Unresolved(error));
+                }
+                Ok(Measurement::Complete(report))
+            })
     }
 
     fn preserves(&self, report: &SuiteReport) -> bool {
@@ -265,6 +295,8 @@ impl Oracle<'_> {
             && report.scope == self.expected.scope && report.filesystem_comparison == self.expected.filesystem_comparison
             && report.filesystem_exclusions == self.expected.filesystem_exclusions
     }
+
+    fn statistics(&mut self) -> &mut Statistics { &mut self.statistics }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -312,6 +344,55 @@ fn reduce_lines(mut bytes: Vec<u8>, mut evaluate: impl FnMut(Vec<u8>) -> Result<
     Ok(true)
 }
 
+/// Shared line-complement search. All original cases must reproduce before
+/// search, each acceptance is repeated, and fresh final evidence is mandatory.
+/// Only complete rejections are cached, keyed by BOTH complete input hashes.
+pub(super) fn reduce_inputs<O: ReductionOracle>(mut best: Inputs, targets: &[SourceSelection],
+    confirmations: usize, oracle: &mut O) -> Result<(Inputs, O::Report, bool)> {
+    ensure!((2..=8).contains(&confirmations), "invalid reduction confirmation count");
+    for _ in 0..confirmations {
+        let measured = oracle.measure(&best, false)?.context("initial reduction confirmation was incomplete")?;
+        ensure!(oracle.preserves(&measured), "captured failure did not reproduce during initial confirmation");
+    }
+    let mut rejected = BTreeSet::new();
+    let mut search_complete = true;
+    'sweeps: loop {
+        let before = best.bytes(targets)?;
+        for target in targets {
+            let bytes = source(best.selected(target), &target.path)?.to_vec();
+            let completed = reduce_lines(bytes, |bytes| {
+                let trial = best.replacing(target, bytes)?;
+                let key = trial.key();
+                if rejected.contains(&key) { oracle.statistics().cache_hits += 1; return Ok(Trial::Reject); }
+                for _ in 0..confirmations {
+                    let Some(measured) = oracle.measure(&trial, false)? else {
+                        // Unresolved executions are never accepted or cached.
+                        return Ok(if oracle.statistics().budget_exhausted.is_some() { Trial::Stop } else { Trial::Reject });
+                    };
+                    if !oracle.preserves(&measured) {
+                        oracle.statistics().rejected += 1;
+                        rejected.insert(key);
+                        return Ok(Trial::Reject);
+                    }
+                }
+                oracle.statistics().accepted += 1;
+                best = trial;
+                Ok(Trial::Accept)
+            })?;
+            if !completed { search_complete = false; break 'sweeps; }
+        }
+        if best.bytes(targets)? == before { break; }
+    }
+    let mut final_report = None;
+    for _ in 0..confirmations {
+        let measured = oracle.measure(&best, true)?.context("missing final reduction confirmation")?;
+        ensure!(oracle.preserves(&measured), "reduced failure drifted during final confirmation; no capsule produced");
+        final_report = Some(measured);
+    }
+    let validation = final_report.context("final reduction confirmation missing")?;
+    Ok((best, validation, search_complete && oracle.statistics().unresolved == 0))
+}
+
 fn minimize_loaded(loaded: Loaded, reference: &Invocation, native: &Invocation,
     options: &Options, started: Instant) -> Result<MinimizedRun> {
     options.validate()?;
@@ -322,7 +403,7 @@ fn minimize_loaded(loaded: Loaded, reference: &Invocation, native: &Invocation,
     let expected = capsule.payload.expected.clone();
     let parent_content_sha256 = capsule.content_sha256.clone();
     drop(capsule);
-    let mut best = Inputs { original, candidate };
+    let best = Inputs { original, candidate };
     let original_source_bytes = best.bytes(&targets)?;
     let duration = Duration::from_secs(options.seconds);
     let deadline = started + duration;
@@ -331,50 +412,8 @@ fn minimize_loaded(loaded: Loaded, reference: &Invocation, native: &Invocation,
         "reduction requires the captured runtime identities and arguments");
     let mut oracle = Oracle { reference, native, expected: &expected, options, deadline,
         search_deadline: started + duration.mul_f64(0.8), statistics: Statistics::default() };
-    for _ in 0..options.confirmations {
-        let measured = oracle.measure(&best, false)?.context("initial reduction confirmation was incomplete")?;
-        ensure!(oracle.preserves(&measured), "captured failure did not reproduce during initial confirmation");
-    }
-    let mut rejected = BTreeSet::new();
-    let mut search_complete = true;
-    'sweeps: loop {
-        let before = best.bytes(&targets)?;
-        for target in &targets {
-            let bytes = source(best.selected(target), &target.path)?.to_vec();
-            let completed = reduce_lines(bytes, |bytes| {
-                let trial = best.replacing(target, bytes)?;
-                let key = trial.key();
-                if rejected.contains(&key) { oracle.statistics.cache_hits += 1; return Ok(Trial::Reject); }
-                for _ in 0..options.confirmations {
-                    let Some(measured) = oracle.measure(&trial, false)? else {
-                        // Unresolved executions do not establish uninteresting
-                        // behavior and cannot support a completed-minimum claim.
-                        return Ok(if oracle.statistics.budget_exhausted.is_some() { Trial::Stop } else { Trial::Reject });
-                    };
-                    if !oracle.preserves(&measured) {
-                        oracle.statistics.rejected += 1;
-                        rejected.insert(key);
-                        return Ok(Trial::Reject);
-                    }
-                }
-                oracle.statistics.accepted += 1;
-                best = trial;
-                Ok(Trial::Accept)
-            })?;
-            if !completed { search_complete = false; break 'sweeps; }
-        }
-        if best.bytes(&targets)? == before { break; }
-    }
-    // Cached acceptance is never final proof. Reserve both execution slots and
-    // wall time for these fresh full-suite measurements of the retained best.
-    let mut final_report = None;
-    for _ in 0..options.confirmations {
-        let measured = oracle.measure(&best, true)?.context("missing final reduction confirmation")?;
-        ensure!(oracle.preserves(&measured), "reduced failure drifted during final confirmation; no capsule produced");
-        final_report = Some(measured);
-    }
+    let (best, validation, search_complete) = reduce_inputs(best, &targets, options.confirmations, &mut oracle)?;
     budget(deadline)?;
-    let validation = final_report.context("final reduction confirmation missing")?;
     let reduced_source_bytes = best.bytes(&targets)?;
     let mut blobs = BTreeMap::new();
     let mut expanded = 0;
@@ -395,8 +434,7 @@ fn minimize_loaded(loaded: Loaded, reference: &Invocation, native: &Invocation,
         verdict: if reduced_source_bytes < original_source_bytes { "REDUCED" } else { "UNCHANGED" }.into(),
         parent_content_sha256, content_sha256: content_sha256.clone(), reducer_sha256: hex::encode(hash.finalize()),
         selected_sources: targets, original_source_bytes, reduced_source_bytes, confirmations: options.confirmations,
-        search_complete: search_complete && oracle.statistics.unresolved == 0,
-        statistics: oracle.statistics, execution_performed: true, environment_reproduced: false,
+        search_complete, statistics: oracle.statistics, execution_performed: true, environment_reproduced: false,
         release_certification: false, validation };
     Ok(MinimizedRun { report, capsule: Capsule { payload, content_sha256 } })
 }
@@ -649,5 +687,28 @@ mod tests {
         assert_eq!(oracle.statistics.executions, opts.confirmations);
         oracle.deadline = Instant::now();
         assert!(oracle.measure(&inputs, true).unwrap_err().to_string().contains("final reduction confirmation budget exhausted"));
+    }
+
+    #[test]
+    fn shared_budget_never_promotes_unresolved_or_fatal_measurements() {
+        let options = Options { max_executions: 4, ..Options::default() };
+        let mut statistics = Statistics::default();
+        let timing = (deadline(), deadline());
+        assert!(measure_with_budget::<()>(&options, timing, &mut statistics, false,
+            |_| Ok(Measurement::Unresolved(anyhow::anyhow!("staging failed")))).unwrap().is_none());
+        assert_eq!((statistics.executions, statistics.unresolved, statistics.accepted, statistics.rejected), (1, 1, 0, 0));
+        let error = measure_with_budget::<()>(&options, timing, &mut statistics, false,
+            |_| anyhow::bail!("runtime changed")).unwrap_err();
+        assert!(error.to_string().contains("runtime changed"));
+        assert_eq!(statistics.executions, 2);
+        assert!(measure_with_budget::<()>(&options, timing, &mut statistics, false,
+            |_| panic!("reserved final slots cannot be spent by search")).unwrap().is_none());
+        for _ in 0..2 {
+            assert!(measure_with_budget(&options, timing, &mut statistics, true,
+                |_| Ok(Measurement::Complete(()))).unwrap().is_some());
+        }
+        assert_eq!(statistics.executions, 4);
+        assert!(measure_with_budget::<()>(&options, timing, &mut statistics, true,
+            |_| panic!("no capacity remains")).is_err());
     }
 }
