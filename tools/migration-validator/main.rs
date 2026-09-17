@@ -20,7 +20,7 @@ pub mod validation_suite;
 #[derive(Debug, Parser)]
 #[command(version)]
 struct Args {
-    /// Project directory, or a capsule file with --replay or --inspect-capsule.
+    /// Project directory, or a capsule file with --replay, --inspect-capsule or --export-inputs.
     project: PathBuf,
     /// Rewritten candidate tree. Defaults to the original captured input.
     #[arg(long)]
@@ -29,7 +29,7 @@ struct Args {
     #[arg(long)]
     compare_filesystem: bool,
     /// Trusted installed franken-node executable, outside both project trees.
-    #[arg(long, required_unless_present_any = ["list_tests", "inspect_capsule"])]
+    #[arg(long, required_unless_present_any = ["list_tests", "inspect_capsule", "export_inputs"])]
     native_bin: Option<PathBuf>,
     /// Approve execution of trusted project or captured code on both runtimes.
     #[arg(long)]
@@ -44,11 +44,14 @@ struct Args {
     #[arg(long, conflicts_with_all = ["execute", "native_bin", "migrated_project", "compare_filesystem", "capture_capsule", "list_tests", "replay"])]
     inspect_capsule: bool,
     /// Reexecute a capsule using trusted local runtimes, not commands imported from the capsule.
-    #[arg(long, requires_all = ["execute", "expected_sha256"], conflicts_with_all = ["migrated_project", "compare_filesystem", "capture_capsule", "list_tests", "inspect_capsule"])]
+    #[arg(long, group = "pinned_capsule_mode", requires_all = ["execute", "expected_sha256"], conflicts_with_all = ["migrated_project", "compare_filesystem", "capture_capsule", "list_tests", "inspect_capsule"])]
     replay: bool,
     /// Independently trusted capsule content hash. A checksum from an untrusted capsule is not authentication.
-    #[arg(long, requires = "replay")]
+    #[arg(long, requires = "pinned_capsule_mode")]
     expected_sha256: Option<String>,
+    /// Export pinned original/candidate trees into a new private directory without running code.
+    #[arg(long, group = "pinned_capsule_mode", requires = "expected_sha256", conflicts_with_all = ["execute", "native_bin", "migrated_project", "compare_filesystem", "capture_capsule", "list_tests", "inspect_capsule", "replay"])]
+    export_inputs: Option<PathBuf>,
     /// Permit a changed candidate runtime while requiring every original reference observation to remain unchanged.
     #[arg(long, requires = "replay")]
     verify_fix: bool,
@@ -80,19 +83,22 @@ fn run(args: &Args) -> anyhow::Result<serde_json::Value> {
     use validation_suite::native_replay;
 
     // Keep the same consent boundary for library/test callers that bypass Clap.
-    let modes = u8::from(args.list_tests) + u8::from(args.inspect_capsule) + u8::from(args.replay);
-    ensure!(modes <= 1, "--list-tests, --inspect-capsule and --replay are mutually exclusive");
-    let read_only = args.list_tests || args.inspect_capsule;
-    ensure!(!read_only || (!args.execute && args.native_bin.is_none() && args.migrated_project.is_none()
+    let modes = u8::from(args.list_tests) + u8::from(args.inspect_capsule) + u8::from(args.replay)
+        + u8::from(args.export_inputs.is_some());
+    ensure!(modes <= 1, "--list-tests, --inspect-capsule, --export-inputs and --replay are mutually exclusive");
+    let no_execution = args.list_tests || args.inspect_capsule || args.export_inputs.is_some();
+    ensure!(!no_execution || (!args.execute && args.native_bin.is_none() && args.migrated_project.is_none()
         && !args.compare_filesystem && args.capture_capsule.is_none()),
-        "--list-tests and --inspect-capsule cannot be combined with execution or runtime-comparison options");
-    ensure!(args.replay || (args.expected_sha256.is_none() && !args.verify_fix),
-        "--expected-sha256 and --verify-fix require --replay");
+        "--list-tests, --inspect-capsule and --export-inputs cannot be combined with execution or runtime-comparison options");
+    ensure!(args.replay || args.export_inputs.is_some() || args.expected_sha256.is_none(),
+        "--expected-sha256 requires --replay or --export-inputs");
+    ensure!(args.replay || !args.verify_fix, "--verify-fix requires --replay");
+    ensure!(args.export_inputs.is_none() || args.expected_sha256.is_some(), "--export-inputs requires --expected-sha256");
     ensure!(!args.replay || (args.expected_sha256.is_some() && args.migrated_project.is_none()
         && !args.compare_filesystem && args.capture_capsule.is_none()),
         "--replay requires --expected-sha256 and cannot override captured inputs or comparison scope");
-    ensure!(read_only || args.execute, "--execute is required: projects run with your authority");
-    ensure!(read_only || args.native_bin.is_some(), "--native-bin is required for execution");
+    ensure!(no_execution || args.execute, "--execute is required: projects run with your authority");
+    ensure!(no_execution || args.native_bin.is_some(), "--native-bin is required for execution");
     ensure!(args.minimize_capsule.is_none() || (args.replay && !args.verify_fix),
         "--minimize-capsule requires --replay and cannot be combined with --verify-fix");
     ensure!(args.minimize_capsule.is_some() || (args.source_file.is_empty()
@@ -104,7 +110,7 @@ fn run(args: &Args) -> anyhow::Result<serde_json::Value> {
     };
     if args.minimize_capsule.is_some() { reduction_options.validate()?; }
 
-    let capsule_mode = args.inspect_capsule || args.replay;
+    let capsule_mode = args.inspect_capsule || args.replay || args.export_inputs.is_some();
     let project = if capsule_mode { None } else { Some(args.project.canonicalize().context("resolve project")?) };
     let migrated_project = args.migrated_project.as_deref().map(|path| path.canonicalize())
         .transpose().context("resolve migrated project")?;
@@ -114,14 +120,22 @@ fn run(args: &Args) -> anyhow::Result<serde_json::Value> {
         .map(|path| native_replay::output_destination(path, &roots)).transpose()?;
     let reduced_destination = args.minimize_capsule.as_deref()
         .map(|path| native_replay::output_destination(path, &roots)).transpose()?;
+    let export_destination = args.export_inputs.as_deref()
+        .map(|path| native_replay::output_destination(path, &roots)).transpose()?;
     if let (Some(report), Some(capsule)) = (&destination, &capsule_destination) {
         ensure!(report != capsule, "report and capsule require distinct output paths");
     }
     if let (Some(report), Some(capsule)) = (&destination, &reduced_destination) {
         ensure!(report != capsule, "report and reduced capsule require distinct output paths");
     }
+    if let (Some(report), Some(directory)) = (&destination, &export_destination) {
+        ensure!(report != directory, "report and exported directory require distinct output paths");
+    }
 
-    let mut result = if args.inspect_capsule {
+    let mut result = if let Some(destination) = &export_destination {
+        serde_json::to_value(native_replay::export_inputs(&args.project,
+            args.expected_sha256.as_deref().context("trusted capsule hash missing")?, destination)?)?
+    } else if args.inspect_capsule {
         // Keep the original path: do not canonicalize away an input symlink
         // before the capsule reader's NOFOLLOW/regular-file checks.
         let mut value = serde_json::to_value(native_replay::inspect(&args.project)?)?;
@@ -215,7 +229,7 @@ fn run(_args: &Args) -> anyhow::Result<serde_json::Value> {
 
 fn result_exit_code(result: &serde_json::Value) -> u8 {
     match result["verdict"].as_str() {
-        Some("PASS" | "INVENTORY" | "INTEGRITY_VALID" | "REPRODUCED" | "FIX_VERIFIED" | "REDUCED") => 0,
+        Some("PASS" | "INVENTORY" | "INTEGRITY_VALID" | "REPRODUCED" | "FIX_VERIFIED" | "REDUCED" | "EXPORTED") => 0,
         Some("FAIL" | "DIVERGED" | "FIX_NOT_VERIFIED" | "UNCHANGED") => 1,
         _ => 2,
     }
@@ -240,7 +254,7 @@ mod tests {
         Args { project, migrated_project: None, compare_filesystem: false,
             native_bin: Some("missing-runtime".into()), execute: true, list_tests: false,
             capture_capsule: None, inspect_capsule: false, replay: false,
-            expected_sha256: None, verify_fix: false, minimize_capsule: None,
+            expected_sha256: None, export_inputs: None, verify_fix: false, minimize_capsule: None,
             source_file: Vec::new(), max_executions: None, minimize_seconds: None,
             confirmations: None, out: None }
     }
@@ -641,5 +655,67 @@ mod tests {
         }
         assert_eq!(std::fs::read(capsule).unwrap(), original_capsule);
         assert_eq!(std::fs::read_to_string(project.path().join("case.test.js")).unwrap(), "process.exit(99);");
+    }
+
+    #[test]
+    fn clap_export_requires_a_pin_but_prohibits_runtime_execution_flags() {
+        let pin = "0".repeat(64);
+        let base = ["suite", "capsule.json", "--export-inputs", "fixture", "--expected-sha256", &pin];
+        let args = Args::try_parse_from(base).unwrap();
+        assert_eq!(args.export_inputs, Some("fixture".into()));
+        assert!(!args.execute && args.native_bin.is_none());
+        assert!(Args::try_parse_from(["suite", "capsule.json", "--export-inputs", "fixture"]).is_err());
+        for flags in [vec!["--execute"], vec!["--native-bin", "/bin/false"], vec!["--inspect-capsule"],
+            vec!["--list-tests"], vec!["--replay"], vec!["--verify-fix"], vec!["--compare-filesystem"],
+            vec!["--source-file", "case.js"]] {
+            let mut argv = base.to_vec();
+            argv.extend(flags);
+            assert!(Args::try_parse_from(argv).is_err());
+        }
+        assert!(Args::try_parse_from(["suite", "project", "--native-bin", "/bin/false",
+            "--execute", "--expected-sha256", &pin]).is_err());
+    }
+
+    #[test]
+    fn cli_export_restores_private_inputs_without_running_the_captured_program() {
+        use std::os::unix::fs::PermissionsExt;
+        let project = tempfile::tempdir().unwrap();
+        let outputs = tempfile::tempdir().unwrap();
+        let source = "require('fs').writeFileSync('executed','yes');";
+        std::fs::write(project.path().join("case.test.js"), source).unwrap();
+        let capsule = outputs.path().join("capsule.json");
+        let captured = run(&Args { native_bin: Some("/bin/false".into()), compare_filesystem: true,
+            capture_capsule: Some(capsule.clone()), ..arguments(project.path().into()) }).unwrap();
+        let destination = outputs.path().join("fixture");
+        let exported = run(&Args { execute: false, native_bin: None, export_inputs: Some(destination.clone()),
+            expected_sha256: Some(captured["capsule"]["content_sha256"].as_str().unwrap().into()),
+            ..arguments(capsule) }).unwrap();
+        assert_eq!(exported["verdict"], "EXPORTED");
+        assert_eq!(exported["execution_performed"], false);
+        assert_eq!(exported["capsule"]["execution_performed"], false);
+        assert_eq!(exported["capsule"]["captured_verdict"], "FAIL");
+        assert_eq!(result_exit_code(&exported), 0);
+        for tree in ["original", "candidate"] {
+            assert_eq!(std::fs::read_to_string(destination.join(tree).join("case.test.js")).unwrap(), source);
+            assert!(!destination.join(tree).join("executed").exists());
+        }
+        assert_eq!(std::fs::metadata(&destination).unwrap().permissions().mode() & 0o777, 0o700);
+        assert!(destination.join("reproducer.json").is_file());
+    }
+
+    #[test]
+    fn programmatic_export_pin_and_destination_checks_precede_capsule_access() {
+        let outputs = tempfile::tempdir().unwrap();
+        let destination = outputs.path().join("fixture");
+        let mut args = Args { execute: false, native_bin: None, export_inputs: Some(destination.clone()),
+            ..arguments("missing-capsule".into()) };
+        assert!(run(&args).unwrap_err().to_string().contains("requires --expected-sha256"));
+        args.expected_sha256 = Some("0".repeat(64));
+        args.out = Some(destination.clone());
+        assert!(run(&args).unwrap_err().to_string().contains("distinct"));
+        args.out = None;
+        args.execute = true;
+        assert!(run(&args).unwrap_err().to_string().contains("cannot be combined"));
+        assert!(!destination.exists());
     }
 }
