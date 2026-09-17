@@ -31,8 +31,8 @@ struct Args {
     /// Trusted installed franken-node executable, outside both project trees.
     #[arg(long, required_unless_present_any = ["list_tests", "inspect_capsule", "export_inputs"])]
     native_bin: Option<PathBuf>,
-    /// Select the trusted Bun reference for three-runtime comparison, capture or replay.
-    #[arg(long, requires_all = ["execute", "native_bin"], conflicts_with_all = ["list_tests", "inspect_capsule", "export_inputs", "minimize_capsule", "source_file", "max_executions", "minimize_seconds", "confirmations"])]
+    /// Select the trusted Bun reference for three-runtime comparison, capture, replay or reduction.
+    #[arg(long, requires_all = ["execute", "native_bin"], conflicts_with_all = ["list_tests", "inspect_capsule", "export_inputs"])]
     bun_bin: Option<PathBuf>,
     /// Approve execution of trusted project or captured code on the selected runtimes.
     #[arg(long)]
@@ -61,7 +61,7 @@ struct Args {
     /// Permit a changed candidate runtime while requiring every reference observation to remain unchanged.
     #[arg(long, requires = "replay")]
     verify_fix: bool,
-    /// Reduce a pinned two-runtime failing capsule and save a newly confirmed private replay capsule.
+    /// Reduce a pinned failing capsule; three-runtime capsules require --bun-bin and retain all three roles.
     #[arg(long, requires = "replay", conflicts_with = "verify_fix")]
     minimize_capsule: Option<PathBuf>,
     /// Source file to reduce in the captured trees; repeat to select supporting sources.
@@ -91,10 +91,8 @@ fn run(args: &Args) -> anyhow::Result<serde_json::Value> {
 
     // Keep the same consent boundary for library/test callers that bypass Clap.
     ensure!(args.bun_bin.is_none() || (!args.list_tests && !args.inspect_capsule
-        && args.export_inputs.is_none() && args.minimize_capsule.is_none()
-        && args.source_file.is_empty() && args.max_executions.is_none()
-        && args.minimize_seconds.is_none() && args.confirmations.is_none()),
-        "--bun-bin cannot be combined with offline inspection/export or two-runtime minimization");
+        && args.export_inputs.is_none()),
+        "--bun-bin cannot be combined with offline inspection/export");
     let modes = u8::from(args.list_tests) + u8::from(args.inspect_capsule) + u8::from(args.replay)
         + u8::from(args.export_inputs.is_some());
     ensure!(modes <= 1, "--list-tests, --inspect-capsule, --export-inputs and --replay are mutually exclusive");
@@ -154,17 +152,25 @@ fn run(args: &Args) -> anyhow::Result<serde_json::Value> {
         value["verdict"] = "INTEGRITY_VALID".into();
         value
     } else if let Some(path) = &reduced_destination {
-        let reduced = native_replay::minimizer::minimize(&args.project,
-            args.expected_sha256.as_deref().context("trusted capsule hash missing")?,
-            args.native_bin.as_deref().context("native runtime missing")?, &reduction_options)?;
-        let mut value = serde_json::to_value(&reduced.report)?;
-        match reduced.write_capsule(path) {
+        let pin = args.expected_sha256.as_deref().context("trusted capsule hash missing")?;
+        let native = args.native_bin.as_deref().context("native runtime missing")?;
+        // Preserve the selected schema through execution and publication. A
+        // product capsule without Bun must fail the pair reader, never lose a
+        // reference. Both reducers require fresh final evidence before return.
+        let (mut value, published) = if let Some(bun) = args.bun_bin.as_deref() {
+            let reduced = product::minimizer::minimize(&args.project, pin, native, bun, &reduction_options)?;
+            (serde_json::to_value(&reduced.report)?, reduced.write_capsule(path))
+        } else {
+            let reduced = native_replay::minimizer::minimize(&args.project, pin, native, &reduction_options)?;
+            (serde_json::to_value(&reduced.report)?, reduced.write_capsule(path))
+        };
+        match published {
             Ok(summary) => {
                 value["capsule"] = serde_json::to_value(summary)?;
                 value["capsule_path"] = path.to_string_lossy().as_ref().into();
             }
             Err(error) => {
-                value["minimization_verdict"] = reduced.report.verdict.clone().into();
+                value["minimization_verdict"] = value["verdict"].clone();
                 value["verdict"] = "ERROR".into();
                 value["capsule_publication_error"] = format!("{error:#}").into();
             }
@@ -817,7 +823,7 @@ mod tests {
         assert!(run(&args).unwrap_err().to_string().contains("--execute"));
         args.execute = true;
         args.minimize_capsule = Some("reduced.json".into());
-        assert!(run(&args).unwrap_err().to_string().contains("two-runtime minimization"));
+        assert!(run(&args).unwrap_err().to_string().contains("requires --replay"));
         let project = tempfile::tempdir().unwrap();
         let args = Args { bun_bin: Some("missing-bun".into()), out: Some(project.path().join("report.json")),
             ..arguments(project.path().into()) };
@@ -903,5 +909,75 @@ mod tests {
         assert!(!report["cases"][0]["errors"].as_array().unwrap().is_empty());
         assert!(report["capsule_publication_error"].as_str().unwrap().contains("not replayable"));
         assert!(!capsule.exists());
+    }
+
+    #[test]
+    fn clap_three_runtime_reduction_requires_pinned_execution_and_keeps_tuning_constraints() {
+        let pin = "0".repeat(64);
+        let base = ["suite", "capsule.json", "--replay", "--execute", "--expected-sha256", &pin,
+            "--native-bin", "/trusted/native", "--bun-bin", "/trusted/bun", "--minimize-capsule", "reduced.json"];
+        let args = Args::try_parse_from(base).unwrap();
+        assert!(args.replay && args.execute && args.bun_bin.is_some());
+        for tuning in [vec!["--source-file", "helper.js"], vec!["--max-executions", "40"],
+            vec!["--minimize-seconds", "60"], vec!["--confirmations", "3"]] {
+            let mut valid = base.to_vec();
+            valid.extend(tuning.iter().copied());
+            assert!(Args::try_parse_from(valid).is_ok());
+            let mut live = vec!["suite", "project", "--execute", "--native-bin", "/trusted/native", "--bun-bin", "/trusted/bun"];
+            live.extend(tuning);
+            assert!(Args::try_parse_from(live).is_err());
+        }
+        for forbidden in ["--verify-fix", "--inspect-capsule", "--list-tests", "--compare-filesystem"] {
+            let mut invalid = base.to_vec();
+            invalid.push(forbidden);
+            assert!(Args::try_parse_from(invalid).is_err());
+        }
+        let args = Args { replay: true, expected_sha256: Some(pin), bun_bin: Some("/missing/bun".into()),
+            minimize_capsule: Some("reduced.json".into()), confirmations: Some(1), ..arguments("missing-capsule".into()) };
+        assert!(run(&args).unwrap_err().to_string().contains("confirmations"));
+    }
+
+    #[test]
+    fn three_runtime_reduction_cli_exports_a_smaller_replayable_reference_disagreement() {
+        use std::os::unix::fs::PermissionsExt;
+        let project = tempfile::tempdir().unwrap();
+        let outputs = tempfile::tempdir().unwrap();
+        let source = "// removable\nconsole.log('reference');\n// tail\n";
+        std::fs::write(project.path().join("case.test.js"), source).unwrap();
+        // Explicit empty-output reference/candidate, not Bun/Franken substitutes.
+        let capsule = outputs.path().join("seed.json");
+        let captured = run(&Args { bun_bin: Some("/bin/true".into()), native_bin: Some("/bin/true".into()),
+            compare_filesystem: true, capture_capsule: Some(capsule.clone()), ..arguments(project.path().into()) }).unwrap();
+        assert_eq!(captured["verdict"], "INCONCLUSIVE");
+        let seed_bytes = std::fs::read(&capsule).unwrap();
+        std::fs::write(project.path().join("case.test.js"), "process.exit(99);").unwrap();
+        let reduced_path = outputs.path().join("reduced.json");
+        let report_path = outputs.path().join("reduction-report.json");
+        let reduced = run(&Args { replay: true, expected_sha256: Some(captured["capsule"]["content_sha256"].as_str().unwrap().into()),
+            bun_bin: Some("/bin/true".into()), native_bin: Some("/bin/true".into()),
+            minimize_capsule: Some(reduced_path.clone()), max_executions: Some(32), minimize_seconds: Some(600),
+            out: Some(report_path.clone()), ..arguments(capsule.clone()) }).unwrap();
+        assert_eq!(reduced["schema_version"], "franken-node/product-minimization/v1");
+        assert_eq!(reduced["verdict"], "REDUCED", "{reduced:#}");
+        assert_eq!(reduced["validation"]["cases"], captured["cases"]);
+        assert_eq!(reduced["validation"]["verdict"], "INCONCLUSIVE");
+        assert!(reduced["reduced_source_bytes"].as_u64().unwrap() < source.len() as u64);
+        assert_eq!(result_exit_code(&reduced), 0);
+        let pin = reduced["content_sha256"].as_str().unwrap();
+        let replayed = run(&Args { replay: true, expected_sha256: Some(pin.into()),
+            bun_bin: Some("/bin/true".into()), native_bin: Some("/bin/true".into()), ..arguments(reduced_path.clone()) }).unwrap();
+        assert_eq!(replayed["verdict"], "REPRODUCED");
+        assert_eq!(replayed["validation"]["cases"], captured["cases"]);
+        let exported = outputs.path().join("fixture");
+        run(&Args { native_bin: None, execute: false, export_inputs: Some(exported.clone()),
+            expected_sha256: Some(pin.into()), ..arguments(reduced_path.clone()) }).unwrap();
+        assert_eq!(std::fs::read_to_string(exported.join("original/case.test.js")).unwrap(), "console.log('reference');\n");
+        for path in [&reduced_path, &report_path] {
+            assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(report_path).unwrap()).unwrap();
+        assert_eq!(saved["validation"], reduced["validation"]);
+        assert_eq!(std::fs::read(capsule).unwrap(), seed_bytes);
+        assert_eq!(std::fs::read_to_string(project.path().join("case.test.js")).unwrap(), "process.exit(99);");
     }
 }
