@@ -16,6 +16,18 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+// Include the canonical specifier implementation, not a second builtin table.
+// The focused checked-apply host includes this module outside migration/mod.rs;
+// its parent therefore does not expose migration's private normalizer import.
+// Only the normalizer is used here; the ESM entrypoint remains used by the
+// primary migration planner and tested from the same source file.
+#[allow(dead_code)]
+#[path = "module_specifiers.rs"]
+mod checked_specifiers;
+use checked_specifiers::normalize_import_specifier;
+#[path = "checked_commonjs.rs"]
+mod checked_commonjs;
+
 /// Explicit primary-command opt-in. An invalid selection must not fall back to
 /// the two-runtime checker. This is operator configuration, not project metadata.
 pub const BUN_ENV: &str = "FRANKEN_NODE_CHECKED_REWRITE_BUN_BIN";
@@ -125,6 +137,10 @@ fn run_with_evidence(project: &Path,
             return Ok(());
         }
         let mut plan = run_rewrite(&staged, false)?;
+        // We do not rename .cjs files, change package type, or relink a module
+        // graph. Refine legacy format-conversion proposals into literal-only
+        // CommonJS candidates before any runtime sees or approves those bytes.
+        checked_commonjs::refine(&mut plan, deadline)?;
         plan.project_path.clone_from(&report.project_path);
         let manual_review = plan.manual_review_items;
         report.rewrite = Some(plan);
@@ -247,20 +263,22 @@ mod tests {
     }
 
     #[test]
-    fn generated_esm_in_cjs_is_rejected_without_installing_a_broken_file() {
+    fn commonjs_candidates_keep_the_cjs_boundary_instead_of_generating_invalid_esm() {
         let root = project();
         let code = "const path = require('path');\nconsole.log(path.sep);\n";
-        fs::write(root.path().join("broken.test.cjs"), code).unwrap();
+        fs::write(root.path().join("commonjs.test.cjs"), code).unwrap();
         let original = source(root.path());
         let report = node_pair(root.path());
-        assert_eq!(report.status, CheckedRewriteStatus::Rejected, "{report:#?}");
-        assert_eq!(source(root.path()), original);
-        assert_eq!(fs::read_to_string(root.path().join("broken.test.cjs")).unwrap(), code);
-        assert_eq!(report.rewrite.as_ref().unwrap().rewrites_applied, 0);
-        let row = &report.validation.as_ref().unwrap().cases[0];
-        assert_eq!(row.reference.as_ref().unwrap().exit_code, Some(0));
-        assert_ne!(row.native.as_ref().unwrap().exit_code, Some(0));
-        assert!(!root.path().join(".migrate-backup/helper.mjs").exists());
+        assert_eq!(report.status, CheckedRewriteStatus::Applied, "{report:#?}");
+        assert!(source(root.path()).contains("node:path"));
+        assert_eq!(fs::read_to_string(root.path().join("commonjs.test.cjs")).unwrap(),
+            "const path = require('node:path');\nconsole.log(path.sep);\n");
+        assert_eq!(report.rewrite.as_ref().unwrap().rewrites_applied, 2);
+        assert_eq!(report.validation.as_ref().unwrap().passed, 2);
+        assert_eq!(fs::read_to_string(root.path().join(".migrate-backup/commonjs.test.cjs")).unwrap(), code);
+        assert_eq!(fs::read_to_string(root.path().join(".migrate-backup/helper.mjs")).unwrap(), original);
+        let repeated = node_pair(root.path());
+        assert_eq!(repeated.status, CheckedRewriteStatus::Unchanged, "{repeated:#?}");
     }
 
     #[test]

@@ -88,6 +88,8 @@ jobs:
           sha2 = "0.11"
           hex = "0.4"
           tempfile = "3"
+          tree-sitter = "0.26.8"
+          tree-sitter-javascript = "0.25.0"
           rustix = { version = "1.1.4", default-features = false, features = ["std", "fs", "process"] }
           TOML
           cat > "$tests/lib.rs" <<RUST
@@ -108,7 +110,7 @@ jobs:
           rustc +stable --version > evidence/rust-version.txt
           node --version > evidence/node-version.txt
           bun --version > evidence/bun-version.txt
-          for file in mod.rs validation_suite.rs product_oracle.rs rewrite_candidate.rs verified_rewrite.rs rewrite_transaction.rs workspace_effects.rs smoke_supervisor.rs; do
+          for file in mod.rs validation_suite.rs product_oracle.rs rewrite_candidate.rs verified_rewrite.rs checked_commonjs.rs module_specifiers.rs rewrite_transaction.rs workspace_effects.rs smoke_supervisor.rs; do
             printf '%s ' "$file" >> evidence/compiled-source-blobs.txt
             git hash-object "$source/migration/$file" >> evidence/compiled-source-blobs.txt
           done
@@ -118,7 +120,7 @@ jobs:
             rustfmt +stable --edition 2024 --config skip_children=true --emit stdout "$source/$file" > /dev/null
           done
           cargo +stable check --manifest-path "$primary/Cargo.toml" --lib 2>&1 | tee evidence/primary-check.log
-          cargo +stable test --manifest-path "$tests/Cargo.toml" verified_rewrite::tests -- --nocapture --test-threads=2 2>&1 | tee evidence/checked-apply-tests.log
+          cargo +stable test --manifest-path "$tests/Cargo.toml" verified_rewrite:: -- --nocapture --test-threads=2 2>&1 | tee evidence/checked-apply-tests.log
           cargo +stable test --manifest-path "$tests/Cargo.toml" rewrite_candidate::tests -- --nocapture --test-threads=2 2>&1 | tee evidence/candidate-tests.log
           cargo +stable test --manifest-path "$tests/Cargo.toml" checked_rewrite_cli_tests -- --nocapture 2>&1 | tee evidence/cli-tests.log
           # Whole production libraries are linted. Existing CLI inline tests
@@ -140,6 +142,8 @@ jobs:
             crates/franken-node/src/migration/product_oracle.rs
             crates/franken-node/src/migration/rewrite_candidate.rs
             crates/franken-node/src/migration/verified_rewrite.rs
+            crates/franken-node/src/migration/checked_commonjs.rs
+            crates/franken-node/src/migration/module_specifiers.rs
             crates/franken-node/src/migration/rewrite_transaction.rs
             crates/franken-node/src/cli.rs
             crates/franken-node/src/main.rs
