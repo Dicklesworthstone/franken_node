@@ -5,6 +5,7 @@
 //! a candidate never executes code or edits the caller's source tree.
 
 use super::{EntryData, FailureArchive, Snapshot, SuiteReport, budget, matched_tests, run_captured_with_archive};
+use super::product_oracle::{self, ProductReport};
 use anyhow::{Context, Result, ensure};
 use std::collections::BTreeSet;
 use std::fs;
@@ -164,6 +165,25 @@ impl RewriteCandidate {
             native_executable, self.deadline, true, archive)
     }
 
+    /// Execute Node and explicitly selected Bun on original inputs, and native
+    /// Franken on the prepared candidate. No source recapture, two-leg fallback
+    /// or second validation run is performed. The caller must approve execution.
+    pub fn validate_product(&self, native_executable: &Path, bun_executable: &Path) -> Result<ProductReport> {
+        let candidate = self.candidate.as_ref().context("checked rewrite candidate is not prepared")?;
+        budget(self.deadline)?;
+        product_oracle::run_captured([&self.project, &self.project], [&self.original, candidate],
+            native_executable, bun_executable, self.deadline, true)
+    }
+
+    /// Keep both captured hashes and all three runtime observations at the
+    /// installation boundary. Only a live executor result is admissible.
+    pub fn check_product_validation(&self, report: &ProductReport) -> Result<()> {
+        budget(self.deadline)?;
+        let candidate = self.candidate.as_ref().context("checked rewrite candidate is not prepared")?;
+        let tests = matched_tests(&self.original, candidate)?;
+        report.check_admission(&self.original.digest, &candidate.digest, &tests)
+    }
+
     /// The whole tree, including non-rewritten dependencies and configuration,
     /// must still match. This is a pre-install check, not an OS filesystem lock.
     pub fn ensure_source_unchanged(&self) -> Result<()> {
@@ -181,6 +201,18 @@ impl RewriteCandidate {
         super::execute_suite_pair(&self.original,
             self.candidate.as_ref().context("candidate not prepared")?,
             &node, &node, self.deadline, std::time::Duration::from_secs(5), true)
+    }
+
+    /// Test-only real Node/Bun/Node commands: exercise installation orchestration
+    /// without pretending Node is native Franken. Absent from production builds.
+    #[cfg(test)]
+    pub fn validate_node_bun_node(&self, bun_executable: &Path) -> Result<ProductReport> {
+        let candidate = self.candidate.as_ref().context("candidate not prepared")?;
+        let node = super::Invocation { executable: super::node_on_path()?, before: vec![], after: vec![] };
+        let bun = super::Invocation { executable: bun_executable.canonicalize()?, before: vec![], after: vec![] };
+        let identities = [node.identity(self.deadline)?, bun.identity(self.deadline)?, node.identity(self.deadline)?];
+        product_oracle::execute(&self.original, candidate, [&node, &bun, &node], identities,
+            self.deadline, std::time::Duration::from_secs(5), true)
     }
 }
 
@@ -379,8 +411,6 @@ mod tests {
         let mut candidate = capture(root.path());
         candidate.prepare(&[Replacement { path: "case.test.js", before: b"console.log(42);",
             after: b"console.log('prepared candidate');" }]).unwrap();
-        // A real, deliberately failing executable exercises refusal and capture;
-        // it is not a replacement native engine or a compatibility claim.
         let report = candidate.validate_native_with(Path::new("/bin/false"),
             || FailureArchive::reserve(outputs.path(), [root.path(), root.path()]).map(Some)).unwrap();
         assert_eq!(report.verdict, "FAIL");
@@ -418,5 +448,33 @@ mod tests {
             || panic!("expired validation cannot reserve storage")).unwrap_err();
         assert!(error.to_string().contains("budget"));
         assert_eq!(fs::read(root.path().join("case.test.js")).unwrap(), b"console.log(42);");
+    }
+
+    #[test]
+    fn three_runtime_candidate_validation_refuses_unprepared_expired_and_missing_references() {
+        let root = project();
+        let mut candidate = capture(root.path());
+        let missing = Path::new("/absent/product-reference");
+        assert!(candidate.validate_product(missing, missing).unwrap_err().to_string().contains("not prepared"));
+        candidate.prepare(&[]).unwrap();
+        assert!(candidate.validate_product(Path::new("/bin/false"), missing)
+            .unwrap_err().to_string().contains("resolve Bun"));
+        candidate.deadline = Instant::now();
+        assert!(candidate.validate_product(missing, missing).unwrap_err().to_string().contains("budget"));
+        assert_eq!(fs::read(root.path().join("case.test.js")).unwrap(), b"console.log(42);");
+    }
+
+    #[test]
+    fn three_runtime_admission_stays_bound_to_preparation_and_operation_deadline() {
+        let root = project();
+        let mut candidate = capture(root.path());
+        candidate.prepare(&[]).unwrap();
+        // Same-Node roles deliberately prove refusal, not product equivalence.
+        let report = candidate.validate_node_bun_node(&super::super::node_on_path().unwrap()).unwrap();
+        assert!(candidate.check_product_validation(&report).unwrap_err().to_string().contains("distinct reference"));
+        candidate.prepare(&[Replacement { path: "config.json", before: b"{}", after: b"{\"new\":true}" }]).unwrap();
+        assert!(candidate.check_product_validation(&report).unwrap_err().to_string().contains("prepared candidate"));
+        candidate.deadline = Instant::now();
+        assert!(candidate.check_product_validation(&report).unwrap_err().to_string().contains("budget"));
     }
 }
