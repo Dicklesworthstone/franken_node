@@ -71,6 +71,7 @@ pub struct Statistics {
     pub unresolved: usize,
     pub cache_hits: usize,
     pub budget_exhausted: Option<String>,
+    pub last_unresolved: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -227,17 +228,36 @@ impl Oracle<'_> {
             return Ok(None);
         }
         self.statistics.executions += 1;
-        let report = execute_suite_pair(&inputs.original, inputs.candidate(), self.reference, self.native,
-            deadline, LEG_TIMEOUT, self.expected.filesystem_comparison)?;
+        let report = match execute_suite_pair(&inputs.original, inputs.candidate(), self.reference, self.native,
+            deadline, LEG_TIMEOUT, self.expected.filesystem_comparison) {
+            Ok(report) => report,
+            Err(error) => {
+                // A search deadline can expire during staging or the initial
+                // runtime fingerprint, before the executor has a report. Keep
+                // the last confirmed input and require its reserved final runs;
+                // an unresolved trial is never acceptance or a cached reject.
+                ensure!(!final_check, "final reduction confirmation failed: {error:#}");
+                self.unresolved(&error, deadline);
+                return Ok(None);
+            }
+        };
         ensure!(same_runtime(&self.expected.reference_runtime, &report.reference_runtime)
             && same_runtime(&self.expected.native_runtime, &report.native_runtime),
             "runtime identity changed during reduction");
         if let Err(error) = complete_report(&report, &inputs.original, inputs.candidate()) {
             ensure!(!final_check, "final reduction confirmation was incomplete: {error:#}");
-            self.statistics.unresolved += 1;
+            self.unresolved(&error, deadline);
             return Ok(None);
         }
         Ok(Some(report))
+    }
+
+    fn unresolved(&mut self, error: &anyhow::Error, deadline: Instant) {
+        self.statistics.unresolved += 1;
+        self.statistics.last_unresolved = Some(format!("{error:#}"));
+        if Instant::now() >= deadline {
+            self.statistics.budget_exhausted = Some("wall_time_budget".into());
+        }
     }
 
     fn preserves(&self, report: &SuiteReport) -> bool {
@@ -574,5 +594,60 @@ mod tests {
             &Options { max_executions: 4, ..options() }, Instant::now()).err().unwrap();
         assert!(error.to_string().contains("final confirmation"), "{error:#}");
         assert_eq!(fs::read_to_string(counter).unwrap(), "8");
+    }
+
+    #[test]
+    fn failed_search_dispatch_preserves_inputs_but_never_weakens_final_confirmation() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "case.test.js", failing_source());
+        let Loaded { capsule, original, candidate } = seed(root.path(), None);
+        let inputs = Inputs { original, candidate };
+        let identity = inputs.key();
+        let reference = node(false);
+        let native = node(true);
+        let absent = Invocation { executable: root.path().join("missing-runtime"), before: vec![], after: vec![] };
+        let opts = options();
+        let mut oracle = Oracle { reference: &absent, native: &native,
+            expected: &capsule.payload.expected, options: &opts, deadline: deadline(),
+            search_deadline: deadline(), statistics: Statistics::default() };
+        assert!(oracle.measure(&inputs, false).unwrap().is_none());
+        assert_eq!(oracle.statistics.executions, 1);
+        assert_eq!(oracle.statistics.unresolved, 1);
+        assert!(oracle.statistics.last_unresolved.as_deref().unwrap().contains("missing-runtime"));
+        assert_eq!(oracle.statistics.accepted, 0);
+        assert_eq!(oracle.statistics.rejected, 0);
+        assert_eq!(inputs.key(), identity);
+        oracle.reference = &reference;
+        for _ in 0..opts.confirmations {
+            let measured = oracle.measure(&inputs, true).unwrap().unwrap();
+            assert!(oracle.preserves(&measured));
+        }
+        oracle.reference = &absent;
+        assert!(oracle.measure(&inputs, true).unwrap_err().to_string().contains("final reduction confirmation failed"));
+        assert_eq!(inputs.key(), identity);
+    }
+
+    #[test]
+    fn exhausted_search_clock_keeps_final_confirmation_time_separate() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "case.test.js", failing_source());
+        let Loaded { capsule, original, candidate } = seed(root.path(), None);
+        let inputs = Inputs { original, candidate };
+        let reference = node(false);
+        let native = node(true);
+        let opts = options();
+        let mut oracle = Oracle { reference: &reference, native: &native,
+            expected: &capsule.payload.expected, options: &opts, deadline: deadline(),
+            search_deadline: Instant::now(), statistics: Statistics::default() };
+        assert!(oracle.measure(&inputs, false).unwrap().is_none());
+        assert_eq!(oracle.statistics.executions, 0);
+        assert_eq!(oracle.statistics.budget_exhausted.as_deref(), Some("wall_time_budget"));
+        for _ in 0..opts.confirmations {
+            let measured = oracle.measure(&inputs, true).unwrap().unwrap();
+            assert!(oracle.preserves(&measured));
+        }
+        assert_eq!(oracle.statistics.executions, opts.confirmations);
+        oracle.deadline = Instant::now();
+        assert!(oracle.measure(&inputs, true).unwrap_err().to_string().contains("final reduction confirmation budget exhausted"));
     }
 }
