@@ -28,6 +28,9 @@ pub use workspace_effects::DeltaSummary;
 #[path = "test_inventory.rs"]
 mod test_inventory;
 
+#[path = "native_replay.rs"]
+pub mod native_replay;
+
 #[cfg(test)]
 #[path = "paired_validation_tests.rs"]
 mod paired_tests;
@@ -230,6 +233,12 @@ impl Snapshot {
                 entries.insert(relative, Entry { mode: metadata.mode() & 0o777, data });
             }
         }
+        Ok(Self::from_entries(entries))
+    }
+
+    // Shared identity contract for live capture and validated replay imports.
+    // Imported entries must be structurally validated before calling this.
+    fn from_entries(entries: BTreeMap<PathBuf, Entry>) -> Self {
         let mut hash = Sha256::new();
         hash.update(b"franken-node/native-validation-input/v1\0");
         for (path, entry) in &entries {
@@ -243,7 +252,7 @@ impl Snapshot {
                 hash.update(part);
             }
         }
-        Ok(Self { entries, digest: hex::encode(hash.finalize()) })
+        Self { entries, digest: hex::encode(hash.finalize()) }
     }
 
     fn tests(&self) -> Result<Vec<PathBuf>> {
@@ -451,27 +460,53 @@ pub fn run_project(project: &Path, native_executable: &Path) -> Result<SuiteRepo
 pub fn run_project_comparison(project: &Path, migrated_project: Option<&Path>,
     native_executable: &Path, compare_filesystem: bool) -> Result<SuiteReport> {
     let deadline = Instant::now() + TOTAL_TIMEOUT;
-    let reference_root = project.canonicalize()?;
-    let candidate_root = migrated_project.unwrap_or(project).canonicalize()?;
-    ensure!(reference_root == candidate_root || (!reference_root.starts_with(&candidate_root)
-        && !candidate_root.starts_with(&reference_root)), "distinct input projects must not be nested");
-    let reference_snapshot = Snapshot::capture(&reference_root, deadline)?;
-    ensure!(!reference_snapshot.tests()?.is_empty(), "no tests discovered; an empty suite cannot pass");
-    let captured_candidate = if reference_root == candidate_root { None }
-        else { Some(Snapshot::capture(&candidate_root, deadline)?) };
-    let candidate_snapshot = captured_candidate.as_ref().unwrap_or(&reference_snapshot);
-    matched_tests(&reference_snapshot, candidate_snapshot)?;
-    run_captured((&reference_root, &candidate_root), (&reference_snapshot, candidate_snapshot),
-        native_executable, deadline, compare_filesystem)
+    CapturedInputs::capture(project, migrated_project, deadline)?
+        .execute(native_executable, deadline, compare_filesystem)
 }
 
-fn run_captured(projects: (&Path, &Path), snapshots: (&Snapshot, &Snapshot), native_executable: &Path,
-    deadline: Instant, compare_filesystem: bool) -> Result<SuiteReport> {
+// Live validation and replay capture must execute exactly the same snapshots;
+// do not recapture the source tree after execution to manufacture an archive.
+struct CapturedInputs {
+    reference_root: PathBuf,
+    candidate_root: PathBuf,
+    reference: Snapshot,
+    candidate: Option<Snapshot>,
+}
+
+impl CapturedInputs {
+    fn capture(project: &Path, migrated_project: Option<&Path>, deadline: Instant) -> Result<Self> {
+        let reference_root = project.canonicalize()?;
+        let candidate_root = migrated_project.unwrap_or(project).canonicalize()?;
+        ensure!(reference_root == candidate_root || (!reference_root.starts_with(&candidate_root)
+            && !candidate_root.starts_with(&reference_root)), "distinct input projects must not be nested");
+        let reference = Snapshot::capture(&reference_root, deadline)?;
+        ensure!(!reference.tests()?.is_empty(), "no tests discovered; an empty suite cannot pass");
+        let candidate = if reference_root == candidate_root { None }
+            else { Some(Snapshot::capture(&candidate_root, deadline)?) };
+        matched_tests(&reference, candidate.as_ref().unwrap_or(&reference))?;
+        Ok(Self { reference_root, candidate_root, reference, candidate })
+    }
+
+    fn candidate_snapshot(&self) -> &Snapshot { self.candidate.as_ref().unwrap_or(&self.reference) }
+
+    fn execute(&self, native: &Path, deadline: Instant, compare_filesystem: bool) -> Result<SuiteReport> {
+        run_captured((&self.reference_root, &self.candidate_root), (&self.reference, self.candidate_snapshot()),
+            native, deadline, compare_filesystem)
+    }
+}
+
+fn runtime_invocations(native_executable: &Path) -> Result<(Invocation, Invocation)> {
     let executable = native_executable.canonicalize()?;
     let native = Invocation { executable: executable.clone(), before: vec!["run".into()],
         after: vec!["--runtime".into(), "franken-engine".into(), "--engine-bin".into(),
             executable.into_os_string(), "--console-only".into()] };
     let reference = Invocation { executable: node_on_path()?, before: vec![], after: vec![] };
+    Ok((reference, native))
+}
+
+fn run_captured(projects: (&Path, &Path), snapshots: (&Snapshot, &Snapshot), native_executable: &Path,
+    deadline: Instant, compare_filesystem: bool) -> Result<SuiteReport> {
+    let (reference, native) = runtime_invocations(native_executable)?;
     for project in [projects.0, projects.1] {
         let project = project.canonicalize()?;
         ensure!(!reference.executable.starts_with(&project), "reference runtime must be outside both measured projects");
