@@ -845,7 +845,7 @@ mod tests {
     #[test]
     fn native_command_uses_relative_case_and_disables_degraded_fallback() {
         let invocation = Invocation { executable: PathBuf::from("/trusted/native"), before: vec!["run".into()],
-            after: vec!["--runtime".into(), "franken-engine", "--console-only"].into_iter().map(OsString::from).collect() };
+            after: vec!["--runtime".into(), "franken-engine".into(), "--console-only".into()] };
         let environment = BTreeMap::from([("FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK".into(), "1".into())]);
         let command = invocation.command(Path::new("tests/a.test.js"), Path::new("/workspace"), &environment);
         let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
