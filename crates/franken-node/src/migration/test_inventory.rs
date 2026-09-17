@@ -67,7 +67,8 @@ pub(super) fn discover(entries: &BTreeMap<PathBuf, Entry>) -> Result<Vec<PathBuf
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::migration::validation_suite::{Invocation, Snapshot, execute_suite_pair, matched_tests, node_on_path, run_if_present};
+    use super::super::{Invocation, Snapshot, execute_suite_pair, matched_tests, node_on_path, run_if_present};
+    use super::super::rewrite_candidate::{Replacement, RewriteCandidate};
     use std::fs;
     use std::os::unix::fs::symlink;
     use std::time::{Duration, Instant};
@@ -248,5 +249,24 @@ mod tests {
         assert_eq!((report.total_tests, report.failed, report.skipped), (1, 1, 0));
         assert_eq!(report.cases[0].reference.as_ref().unwrap().exit_code, Some(7));
         assert_eq!(report.cases[0].native.as_ref().unwrap().exit_code, Some(7));
+    }
+
+    #[test]
+    fn checked_candidates_use_the_manifest_without_heuristic_test_names() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), "scripts/check.js", "console.log(42);");
+        manifest(root.path(), &["scripts/check.js"]);
+        let mut candidate = RewriteCandidate::capture(root.path(),
+            Instant::now() + Duration::from_secs(90)).unwrap();
+        candidate.prepare(&[Replacement { path: "scripts/check.js",
+            before: b"console.log(42);", after: b"console.log(6*7);" }]).unwrap();
+        let report = candidate.validate_node_pair().unwrap();
+        candidate.check_validation(&report).unwrap();
+        assert_eq!(report.cases[0].test, "scripts/check.js");
+        assert_ne!(report.input_sha256, report.candidate_input_sha256);
+        candidate.ensure_source_unchanged().unwrap();
+        let raw = fs::read(root.path().join(MANIFEST_PATH)).unwrap();
+        assert!(candidate.prepare(&[Replacement { path: MANIFEST_PATH,
+            before: &raw, after: b"{}" }]).unwrap_err().to_string().contains("reserved metadata"));
     }
 }
