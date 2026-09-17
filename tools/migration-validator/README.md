@@ -84,13 +84,34 @@ The report schema is `franken-node/product-validation-suite/v1`. It records orig
 
 All three executables must be ordinary executable files outside both projects. Node and Bun must have different executable hashes, so a renamed or copied Node binary cannot accidentally satisfy the second reference. This checks byte distinction, not authenticated runtime brands or independence: the operator must select trusted genuine runtime binaries. Missing Bun is an error, not permission to silently downgrade to two runtimes.
 
-Three-runtime reports are not accepted as two-runtime replay capsules. `--bun-bin` conflicts with capture, replay, minimization, fix-verification and offline inspection/export modes, and requires explicit execution approval. Three-runtime capsule persistence and checked-apply admission are not integrated yet. The existing primary validation and checked-rewrite commands continue using their two-runtime path; opt into this broader comparison through this operator. `release_certification` remains false.
+Three-runtime reports are not accepted as two-runtime replay capsules. `--bun-bin` conflicts with capture, replay, minimization, fix-verification and offline inspection/export modes, and requires explicit execution approval. Three-runtime capsule persistence is not integrated yet. Primary `migrate validate` and `migrate-report` retain their two-runtime path; checked apply has the explicit three-runtime option below. `release_certification` remains false.
 
 The targeted product-oracle checks exercise the production orchestration with explicitly identified role-argument Node processes. The `Native product oracle` workflow also installs real Bun, runs real Node/Bun reference agreement and disagreement through the executable CLI, and deliberately uses `/bin/false` for the native leg to prove failure classification. Neither test category establishes successful native Franken compatibility.
 
+## Require three-runtime agreement before checked installation
+
+The primary Linux checked-rewrite command can require both references:
+
+```bash
+FRANKEN_NODE_CHECKED_REWRITE_BUN_BIN=/trusted/bin/bun \
+  franken-node migrate rewrite ./project --apply --verify --json
+```
+
+This is an explicit operator-selected absolute Bun path. It does not read a runtime selection from project files, and it does not grant execution under dry-run semantics: `--verify` still requires `--apply`. With the variable unset, the existing Node/native checked-apply path is unchanged. Empty, relative, missing or byte-identical-to-Node Bun selections fail closed; they never trigger a fallback pair comparison. The Rust API `migration::verified_rewrite::run_product(project, native, bun)` selects the same three-runtime path directly, without consulting the primary command's environment selection or requesting capsule retention.
+
+The shared checked pipeline captures inputs, checks static prerequisites, plans and prepares replacements, then executes Node and Bun on the original snapshot and native Franken on the prepared candidate. It does not recapture the unchanged source directory in place of the candidate or run a second pairwise validation. The existing writer lock covers planning, all three runtime legs and installation. Static failures and unresolved manual-review findings still block runtime dispatch. After a passing measurement, the complete source tree must still match the original snapshot, including unchanged dependencies/configuration, before the transaction writer may install anything.
+
+The installation decision requires both exact input hashes, the complete sorted captured test inventory, successful termination and matching output/workspace observations for every case, distinct reference hashes and the mandatory filesystem-comparison scope. It checks raw observation summaries independently of reported outcome/divergence lists. A summary-only `PASS`, missing Bun row, duplicate/substituted test, weakened exclusion scope or inconsistent counter cannot authorize installation. These checks validate live evidence consistency, not the authenticity of unsigned reports imported from disk; the command has no report-import approval path.
+
+Checked reports keep schema `franken-node/checked-rewrite/v1`. Three-runtime measurements appear in `product_validation`; `validation` is null, not a two-runtime projection. Two-runtime reports continue using `validation`, with `product_validation` omitted. Human output includes the product oracle and separate reference/native divergence counts. Complete `FAIL` or `INCONCLUSIVE` measurements produce `REJECTED` (primary command exit 1) and retain all observations without applying new rewrites. Infrastructure/configuration failures produce `ERROR` (exit 2). `APPLIED` and `UNCHANGED` exit 0; even an unchanged plan requires all three successful legs.
+
+Do not combine this primary three-runtime mode with `FRANKEN_NODE_MIGRATION_FAILURE_DIR`: the current capsule schema cannot retain Bun evidence. The command refuses that combination before runtime dispatch instead of silently omitting the requested archive or saving an incomplete pair projection. Retain the full checked-rewrite JSON privately instead; it includes source preimages as well as validation evidence. Three-runtime capsule persistence remains separate work.
+
+The checked-apply regressions use real Node/Bun/Node processes for positive installation orchestration, with Node explicitly identified as the test-only candidate, and `/bin/false` for public native-failure cases. They exercise backups, file modes, writer locking, source drift, reference disagreements, complete evidence and no-fallback behavior; they do not establish successful native Franken compatibility or whole-environment equivalence.
+
 ## Retain primary-command failures automatically
 
-The primary Linux `franken-node migrate validate`, `franken-node migrate-report` and checked-rewrite validation paths can retain a replay capsule from the measurement that actually failed. Select an existing absolute directory outside the project:
+The primary Linux `franken-node migrate validate`, `franken-node migrate-report` and two-runtime checked-rewrite validation paths can retain a replay capsule from the measurement that actually failed. Select an existing absolute directory outside the project:
 
 ```bash
 FRANKEN_NODE_MIGRATION_FAILURE_DIR=/private/migration-failures \
@@ -101,7 +122,7 @@ No source archive is persisted by default. Setting this environment variable exp
 
 Each eligible invocation reserves a unique private (0700) child directory before resolving or launching runtimes. A complete measured `FAIL` publishes a private (0600) `failure.json` there. A `PASS` removes its unused reservation. Archive limits, deadlines, publication errors and incomplete execution produce a separate `UNAVAILABLE` diagnostic rather than changing the original measurement, weakening admission, or fabricating a replayable capsule. The caller owns retention and removal of successfully saved archives.
 
-The JSON attachment is `test_suite.failure_capture` for validation, `validation.test_suite.failure_capture` for `migrate-report`, and `validation.failure_capture` for checked-rewrite reports. A saved attachment has `status: "SAVED"`, `capsule_path` and `content_sha256`; an unavailable attachment has `status: "UNAVAILABLE"` and `reason`. Without retention configured, the field is omitted. Capture status does not replace the suite verdict or the report's go/no-go decision.
+The JSON attachment is `test_suite.failure_capture` for validation, `validation.test_suite.failure_capture` for `migrate-report`, and `validation.failure_capture` for two-runtime checked-rewrite reports. A saved attachment has `status: "SAVED"`, `capsule_path` and `content_sha256`; an unavailable attachment has `status: "UNAVAILABLE"` and `reason`. Without retention configured, the field is omitted. Capture status does not replace the suite verdict or the report's go/no-go decision.
 
 Checked rewrites archive both the original and prepared candidate, even when that candidate is rejected and never installed. The archive uses the exact pre-execution snapshots and original report: it does not rerun the project to manufacture a failure or recapture the subsequently mutable source tree. Failed validation still refuses installation. The directory configuration is removed from both guest runtime environments to avoid propagating operator capture settings into nested executions; this is not an OS isolation boundary.
 
@@ -208,13 +229,13 @@ Capsule-specific limits: 128 MiB serialized input, 32 MiB combined expanded snap
 
 The capsule binds the replay, capture, supervision, inventory and workspace-comparison source implementations. Reexecution requires matching source fingerprints; retain the validator revision. This is not a binding of its full compiled dependency graph. Runtime hashes likewise do not capture dynamically linked libraries. Clocks, environment variables, random values, temporary absolute paths, external modules and network state can still make exact-input reexecution diverge. `environment_reproduced` and `release_certification` remain false.
 
-The native implementations live in `crates/franken-node/src/migration/native_replay.rs` and `native_minimizer.rs` and are consumed directly by this operator. Automatic capture beyond the supported complete primary validation/checked-rewrite failures, AST/token minimization and whole-environment replay remain separate work; this operator does not close those broader delivery obligations.
+The native implementations live in `crates/franken-node/src/migration/native_replay.rs` and `native_minimizer.rs` and are consumed directly by this operator. Automatic capture beyond the supported complete primary two-runtime validation/checked-rewrite failures, three-runtime capsules, AST/token minimization and whole-environment replay remain separate work; this operator does not close those broader delivery obligations.
 
 ## Reports and boundaries
 
 JSON is printed to stdout. Optional `--out` works for inspection, validation, replay, reduction and export: the destination must not exist, and a new report is written privately with mode 0600 and fsynced. For project modes its parent must be outside both input trees. Publication failure returns `ERROR` while retaining completed evidence on stdout; an incomplete new file can remain after an I/O failure.
 
-Exit codes:
+Standalone operator exit codes (primary checked-apply status/exit mapping is described separately above):
 
 | Exit | Verdicts |
 |---|---|
@@ -226,4 +247,4 @@ Inspection success is not execution success, reproduction success is not migrati
 
 Validation execution and checked-rewrite staging create their enclosing temporary directories with explicit owner-only permissions before copying source bytes. Archive reservations are likewise private from creation, independent of a permissive umask. These permissions protect against access by other local users, not code running as the same user or privileged processes.
 
-Execute only trusted code. Workspace copies are not an OS sandbox: ambient credentials, absolute paths, network access and external services remain available. Sequential filesystem capture and runtime identity rechecks are not atomic snapshots or defenses against every active swap-and-restore race. Runtime byte hashes and captured input hashes establish measured identities, not signed authenticity or full environmental replay. The Rust regression suite includes explicit real Node/Node orchestration cases and deliberate `/bin/false` failures; neither establishes native Franken compatibility.
+Execute only trusted code. Workspace copies are not an OS sandbox: ambient credentials, absolute paths, network access and external services remain available. Sequential filesystem capture and runtime identity rechecks are not atomic snapshots or defenses against every active swap-and-restore race. Runtime byte hashes and captured input hashes establish measured identities, not signed authenticity or full environmental replay. The Rust regression suite includes explicit real Node/Node and Node/Bun/Node orchestration cases and deliberate `/bin/false` failures; none establishes native Franken compatibility.
