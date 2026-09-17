@@ -104,30 +104,70 @@ Fix verification requires a captured `FAIL` with a successful reference executio
 
 Replay refuses input/comparison overrides (`--migrated-project`, `--compare-filesystem`) and cannot be combined with capture or inspection. Replay requires `--execute`, `--expected-sha256` and `--native-bin`. Offline inspection forbids execution/runtime flags.
 
+## Reduce a reproduced failure
+
+Minimize the captured failing entrypoints while retaining every recorded case observation:
+
+```bash
+franken-migration-suite ./migration-capsule.json --replay --execute \
+  --expected-sha256 "$CAPSULE_SHA256" \
+  --native-bin /trusted/bin/franken-node \
+  --minimize-capsule ./reduced-capsule.json \
+  --out ./reduction-report.json
+```
+
+This is native, execution-backed line-complement reduction. It never edits the source projects or the seed capsule. The seed must be a complete `FAIL` with successful reference executions and ordinary, non-signal candidate exits. Captured runtime identities and replay implementation fingerprints must match; reduction cannot be combined with `--verify-fix`.
+
+The initial seed, each accepted candidate and the final retained result require repeated full-suite executions. All original observations must remain identical: passing cases as well as failing cases, stdout/stderr byte counts and hashes, termination outcomes, divergence channels, and any captured filesystem effects. A new syntax error, a missing test or an unrelated failure cannot replace the recorded behavior. Rejected candidates are cached by both complete input hashes; incomplete trials are never cached as evidence of rejection.
+
+By default, the reducer selects the failing test entrypoints. Use repeated `--source-file src/helper.js` arguments to select supporting sources instead. At most 16 canonical project-relative source paths are allowed. They must be ordinary UTF-8 JS/TS files, each no larger than 1 MiB or 4,096 lines. Explicit selections must exist in both trees when the capsule contains distinct original/candidate inputs; each leg is then reduced independently. Dependencies, configuration, manifests, paths, file modes, links and the test inventory remain unchanged. Newline ranges preserve CRLF, Unicode and unterminated final lines. AST-aware and token-level reduction are not implemented by this operator.
+
+Defaults are `--max-executions 128`, `--minimize-seconds 120`, and `--confirmations 2`. Execution counts include complete-suite attempts, initial confirmations and final confirmations, not individual child processes. Confirmations may be raised to 8; execution budgets must reserve both initial and final confirmations and cannot exceed 4,096. The time budget is 1–3,600 seconds, with the last 20 percent reserved for final checking. The shared 30-second per-leg cap still applies.
+
+Search budget exhaustion retains the last confirmed candidate, but never waives fresh final verification. A failed or incomplete final check returns `ERROR` without publishing a reduced capsule. `REDUCED` means fewer selected source bytes with preserved observations, not a fixed migration. `UNCHANGED` means no reduction was retained. `search_complete=false` identifies budget-limited or unresolved searches; even a completed line search is not proof of a global minimum or of deterministic environmental behavior. Statistics include executions, accepted/rejected/unresolved trials, cache hits and the last unresolved diagnostic.
+
+The output is an ordinary native replay capsule, usable with `--inspect-capsule`, `--replay` and `--verify-fix`. Its new content hash, parent capsule hash, reducer fingerprint, selected sources, byte counts and final measured evidence are reported in the separate reduction report. The reduced capsule remains sensitive material and is created privately without overwriting an existing path. Publication errors retain completed reduction evidence in JSON output.
+
+## Export a debugging fixture without execution
+
+Restore a pinned capsule into a new private directory:
+
+```bash
+franken-migration-suite ./reduced-capsule.json \
+  --export-inputs ./debug-fixture \
+  --expected-sha256 "$REDUCED_CAPSULE_SHA256"
+```
+
+Use the reduced hash from your trusted reduction result, not the parent capsule's hash. Export also works on unreduced capsules. No `--execute` or `--native-bin` is accepted, and no recorded command or runtime is resolved. Unlike reexecution, offline export does not require the producing validator/runtime revision to remain installed.
+
+The new directory is mode 0700 and contains `original/`, `candidate/` and `reproducer.json`. Both trees retain captured bytes, ordinary file modes and contained links. Their input hashes are recomputed and checked before the private (0600) completion manifest is written. The manifest records the expected observations and relative project roots; it does not execute them. `EXPORTED` is a successful extraction, not a successful migration or fresh behavioral validation.
+
+The destination must not exist, including as a symlink. Its parent must already exist. Existing files and directories are never merged, replaced or deleted. On an I/O failure a private partial export can remain; export is not an atomic multi-file transaction. Extracted sources may contain secrets or executable project configuration: review and contain them before opening them in tools that automatically execute workspace code.
+
 ## Capsule contract and limits
 
 The native schema is `franken-node/native-migration-capsule/v1`, separate from the standalone Python replay schema. It records both input identities, sorted entry inventories, ordinary permission modes, contained symlink chains, deduplicated hex-encoded file bytes, test-manifest contents and complete per-case observations. An unchanged candidate shares the original snapshot.
 
 Import validates canonical relative paths, declared directory parents, link containment/cycles, unique entries and blobs, referenced file hashes, reconstructed snapshot hashes, exact test counterparts, comparison scope and consistency between observations and verdicts before staging. Capsules use compact canonical JSON: do not pretty-print, append whitespace or edit their encoding. Round-trip canonical checks also reject unknown/duplicate data silently ignored by nested report deserializers.
 
-Capsule-specific limits: 128 MiB serialized input, 32 MiB combined expanded snapshot file bytes, 8 MiB entry metadata, 50,000 entries per snapshot and 64 symlink-resolution hops. The shared executor retains its 1,024-case, 4 KiB path, 300-second operation and 30-second leg limits. Incomplete execution or resource refusal cannot produce a passing/reproduced result.
+Capsule-specific limits: 128 MiB serialized input, 32 MiB combined expanded snapshot file bytes, 8 MiB entry metadata, 50,000 entries per snapshot and 64 symlink-resolution hops. The shared executor retains its 1,024-case, 4 KiB path and 30-second leg limits. Ordinary capture/replay/export have a 300-second operation budget; minimization uses its separately bounded budget above. Incomplete execution or resource refusal cannot produce a passing/reproduced result.
 
 The capsule binds the replay, capture, supervision, inventory and workspace-comparison source implementations. Reexecution requires matching source fingerprints; retain the validator revision. This is not a binding of its full compiled dependency graph. Runtime hashes likewise do not capture dynamically linked libraries. Clocks, environment variables, random values, temporary absolute paths, external modules and network state can still make exact-input reexecution diverge. `environment_reproduced` and `release_certification` remain false.
 
-The native library implementation lives in `crates/franken-node/src/migration/native_replay.rs` and is consumed directly by this operator. Automatic capture from every primary `franken-node` CLI failure and automatic minimization remain separate work; this operator does not close those broader delivery obligations.
+The native implementations live in `crates/franken-node/src/migration/native_replay.rs` and `native_minimizer.rs` and are consumed directly by this operator. Automatic capture from every primary `franken-node` CLI failure, AST/token minimization and whole-environment replay remain separate work; this operator does not close those broader delivery obligations.
 
 ## Reports and boundaries
 
-JSON is printed to stdout. Optional `--out` works for inspection, validation and replay: the destination must not exist, and a new report is written privately with mode 0600 and fsynced. For project modes its parent must be outside both input trees. Publication failure returns `ERROR` while retaining completed evidence on stdout; an incomplete new file can remain after an I/O failure.
+JSON is printed to stdout. Optional `--out` works for inspection, validation, replay, reduction and export: the destination must not exist, and a new report is written privately with mode 0600 and fsynced. For project modes its parent must be outside both input trees. Publication failure returns `ERROR` while retaining completed evidence on stdout; an incomplete new file can remain after an I/O failure.
 
 Exit codes:
 
 | Exit | Verdicts |
 |---|---|
-| 0 | `INVENTORY`, `PASS`, `INTEGRITY_VALID`, `REPRODUCED`, `FIX_VERIFIED` |
-| 1 | `FAIL`, `DIVERGED`, `FIX_NOT_VERIFIED` |
+| 0 | `INVENTORY`, `PASS`, `INTEGRITY_VALID`, `REPRODUCED`, `FIX_VERIFIED`, `REDUCED`, `EXPORTED` |
+| 1 | `FAIL`, `DIVERGED`, `FIX_NOT_VERIFIED`, `UNCHANGED` |
 | 2 | `ERROR`, `REFERENCE_DRIFT`, invalid arguments or other failures |
 
-Inspection success is not execution success, and reproduction success is not migration success. Inspect the verdict, schema and nested validation, not only the exit code.
+Inspection success is not execution success, reproduction success is not migration success, and reduction/export do not fix the captured failure. Inspect the verdict, schema and nested validation, not only the exit code.
 
 Execute only trusted code. Workspace copies are not an OS sandbox: ambient credentials, absolute paths, network access and external services remain available. Sequential filesystem capture and runtime identity rechecks are not atomic snapshots or defenses against every active swap-and-restore race. Runtime byte hashes and captured input hashes establish measured identities, not signed authenticity or full environmental replay. The Rust regression suite includes explicit real Node/Node orchestration cases and deliberate `/bin/false` failures; neither establishes native Franken compatibility.
