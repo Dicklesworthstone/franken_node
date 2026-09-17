@@ -30,6 +30,8 @@ mod test_inventory;
 
 #[path = "native_replay.rs"]
 pub mod native_replay;
+use native_replay::failure_capture::FailureArchive;
+pub use native_replay::failure_capture::FailureCapture;
 
 #[cfg(test)]
 #[path = "paired_validation_tests.rs"]
@@ -100,6 +102,9 @@ pub struct SuiteReport {
     pub verdict: String,
     pub cases: Vec<TestCaseResult>,
     pub errors: Vec<String>,
+    /// Optional operator-requested retention. Never changes the measured verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_capture: Option<FailureCapture>,
 }
 
 #[derive(Clone)]
@@ -314,7 +319,8 @@ impl Invocation {
         let mut command = Command::new(&self.executable);
         command.args(&self.before).arg(Path::new(".").join(test)).args(&self.after)
             .current_dir(workspace).env_clear().envs(environment)
-            .env_remove("FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK");
+            .env_remove("FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK")
+            .env_remove(native_replay::failure_capture::DIRECTORY_ENV);
         command
     }
 }
@@ -370,6 +376,7 @@ fn execute_suite_pair(reference_snapshot: &Snapshot, candidate_snapshot: &Snapsh
         reference_runtime: reference.identity(deadline)?,
         native_runtime: native.identity(deadline)?, total_tests: tests.len(), passed: 0, failed: 0,
         errored: 0, skipped: tests.len(), verdict: "ERROR".into(), cases: Vec::new(), errors: Vec::new(),
+        failure_capture: None,
     };
     let environment = std::env::vars_os().collect();
     for test in tests {
@@ -436,14 +443,22 @@ fn execute_suite_pair(reference_snapshot: &Snapshot, candidate_snapshot: &Snapsh
     Ok(report)
 }
 
-/// Optional-suite integration entrypoint for the product binary. The current
-/// standalone operator uses `run_project`; native migrate dispatch wiring is
-/// separate. Errors must never be converted to a single-entrypoint smoke PASS.
+/// Primary migrate validate/report entrypoint, reached after static prerequisites.
+/// Caller-selected failure storage is reserved before runtime dispatch. Neither
+/// capture errors nor an empty inventory may become a fabricated suite PASS.
 pub fn run_if_present(project: &Path) -> Result<Option<SuiteReport>> {
+    run_if_present_with(project, || Ok(std::env::current_exe()?),
+        || FailureArchive::from_environment([project, project]))
+}
+
+fn run_if_present_with(project: &Path, native: impl FnOnce() -> Result<PathBuf>,
+    archive: impl FnOnce() -> Result<Option<FailureArchive>>) -> Result<Option<SuiteReport>> {
     let deadline = Instant::now() + TOTAL_TIMEOUT;
     let snapshot = Snapshot::capture(project, deadline)?;
     if snapshot.tests()?.is_empty() { return Ok(None); }
-    run_captured((project, project), (&snapshot, &snapshot), &std::env::current_exe()?, deadline, false).map(Some)
+    let archive = archive()?;
+    run_captured_with_archive((project, project), (&snapshot, &snapshot),
+        &native()?, deadline, false, archive).map(Some)
 }
 
 /// Execute a nonempty captured project suite using an explicitly selected
@@ -513,6 +528,15 @@ fn run_captured(projects: (&Path, &Path), snapshots: (&Snapshot, &Snapshot), nat
         ensure!(!native.executable.starts_with(&project), "native runtime must be outside both measured projects");
     }
     execute_suite_pair(snapshots.0, snapshots.1, &reference, &native, deadline, LEG_TIMEOUT, compare_filesystem)
+}
+
+fn run_captured_with_archive(projects: (&Path, &Path), snapshots: (&Snapshot, &Snapshot), native: &Path,
+    deadline: Instant, compare_filesystem: bool, archive: Option<FailureArchive>) -> Result<SuiteReport> {
+    let mut report = run_captured(projects, snapshots, native, deadline, compare_filesystem)?;
+    if let Some(archive) = archive {
+        report.failure_capture = archive.finish(&report, snapshots.0, snapshots.1, deadline);
+    }
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -823,5 +847,79 @@ mod tests {
         let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
         assert_eq!(args, ["run", "./tests/a.test.js", "--runtime", "franken-engine", "--console-only"]);
         assert!(command.get_envs().all(|(key, value)| key != "FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK" || value.is_none()));
+    }
+
+    #[test]
+    fn primary_optional_suite_captures_the_failure_without_a_second_guest_execution() {
+        let project = fixture();
+        let output = fixture();
+        let marker = output.path().join("executions");
+        let source = format!("require('fs').appendFileSync({},'run\\n'); console.log('reference');",
+            serde_json::to_string(&marker).unwrap());
+        write(project.path(), "case.test.js", &source);
+        let report = run_if_present_with(project.path(), || Ok("/bin/false".into()),
+            || FailureArchive::reserve(output.path(), [project.path(), project.path()]).map(Some))
+            .unwrap().unwrap();
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(report.total_tests, 1);
+        assert_eq!(fs::read_to_string(marker).unwrap(), "run\n");
+        let Some(FailureCapture::Saved { capsule_path, content_sha256 }) = &report.failure_capture
+            else { panic!("{report:#?}") };
+        let captured = native_replay::inspect(capsule_path).unwrap();
+        assert_eq!(captured.content_sha256, *content_sha256);
+        assert_eq!(captured.input_sha256, report.input_sha256);
+        assert_eq!(captured.captured_verdict, "FAIL");
+        assert_eq!(fs::read_to_string(project.path().join("case.test.js")).unwrap(), source);
+        let value = serde_json::to_value(&report).unwrap();
+        assert_eq!(value["failure_capture"]["status"], "SAVED");
+        assert_eq!(serde_json::from_value::<SuiteReport>(value).unwrap(), report);
+    }
+
+    #[test]
+    fn archive_preflight_precedes_runtime_resolution_but_empty_inventory_allocates_nothing() {
+        let project = fixture();
+        assert!(run_if_present_with(project.path(), || panic!("empty suite resolves no runtime"),
+            || panic!("empty suite reserves no storage")).unwrap().is_none());
+        write(project.path(), "case.test.js", "console.log('reference');");
+        let error = run_if_present_with(project.path(), || panic!("invalid archive must precede runtime resolution"),
+            || FailureArchive::reserve(project.path(), [project.path(), project.path()]).map(Some)).unwrap_err();
+        assert!(error.to_string().contains("outside"));
+    }
+
+    #[test]
+    fn unrequested_retention_preserves_the_existing_report_wire_shape() {
+        let project = fixture();
+        write(project.path(), "case.test.js", "console.log('reference');");
+        let report = run_if_present_with(project.path(), || Ok("/bin/false".into()), || Ok(None))
+            .unwrap().unwrap();
+        assert_eq!(report.verdict, "FAIL");
+        assert!(report.failure_capture.is_none());
+        let encoded = serde_json::to_value(&report).unwrap();
+        assert!(encoded.get("failure_capture").is_none());
+        assert_eq!(serde_json::from_value::<SuiteReport>(encoded).unwrap(), report);
+    }
+
+    #[test]
+    fn incomplete_primary_failure_reports_unavailable_capture_without_losing_errors() {
+        let project = fixture();
+        let output = fixture();
+        write(project.path(), "case.test.js", "process.stdout.write('x'.repeat(17*1024*1024));");
+        let report = run_if_present_with(project.path(), || Ok("/bin/false".into()),
+            || FailureArchive::reserve(output.path(), [project.path(), project.path()]).map(Some))
+            .unwrap().unwrap();
+        assert_eq!(report.verdict, "ERROR");
+        assert!(!report.cases[0].errors.is_empty());
+        assert!(matches!(report.failure_capture, Some(FailureCapture::Unavailable { .. })));
+        assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn archive_configuration_is_not_forwarded_to_either_guest_runtime() {
+        let key = native_replay::failure_capture::DIRECTORY_ENV;
+        let environment = BTreeMap::from([(key.into(), "/private/captures".into())]);
+        for invocation in [node(false), node(true)] {
+            let command = invocation.command(Path::new("test.js"), Path::new("/workspace"), &environment);
+            assert!(command.get_envs().any(|(name, value)| name == key && value.is_none()));
+        }
     }
 }
