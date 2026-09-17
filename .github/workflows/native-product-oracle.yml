@@ -21,12 +21,17 @@ jobs:
   real-references:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # Repeated reduction fingerprints large real runtime binaries. Optimize
+      # hashing while retaining debug assertions, all tests and strict deadlines.
+      CARGO_PROFILE_DEV_OPT_LEVEL: '1'
+      CARGO_PROFILE_TEST_OPT_LEVEL: '1'
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-      - name: Compile and exercise production comparison and privacy regressions
+      - name: Compile and exercise complete production operator and reduction regressions
         shell: bash
         run: |
           set -euo pipefail
@@ -36,13 +41,9 @@ jobs:
           bun --version
           git rev-parse HEAD
           manifest=tools/migration-validator/Cargo.toml
-          cargo +stable test --manifest-path "$manifest" product_oracle:: -- --nocapture --test-threads=2
-          cargo +stable test --manifest-path "$manifest" three_runtime -- --nocapture --test-threads=2
-          cargo +stable test --manifest-path "$manifest" failure_capture:: -- --nocapture --test-threads=2
-          cargo +stable test --manifest-path "$manifest" archive_configuration_is_not_forwarded -- --nocapture
-          cargo +stable test --manifest-path "$manifest" captured_sources_are_staged -- --nocapture
+          cargo +stable test --manifest-path "$manifest" -- --nocapture --test-threads=2
           cargo +stable build --manifest-path "$manifest"
-      - name: Real Node and Bun comparison capture replay and reference drift through the CLI
+      - name: Real Node and Bun comparison capture replay reduction and reference drift through the CLI
         shell: bash
         run: |
           set -euo pipefail
@@ -64,7 +65,7 @@ jobs:
           with tempfile.TemporaryDirectory(prefix='product-oracle-', dir=os.environ['RUNNER_TEMP']) as directory:
               root = Path(directory)
               original, candidate = root / 'original', root / 'candidate'
-              source = "console.log(42);require('fs').writeFileSync('artifact','same');\n"
+              source = "// removable setup\nconsole.log(42);require('fs').writeFileSync('artifact','same');\n"
               for project in (original, candidate):
                   (project / 'scripts').mkdir(parents=True)
                   (project / '.franken-node').mkdir()
@@ -130,9 +131,35 @@ jobs:
               assert not (exported_dir / 'original/artifact').exists()
               assert capsule.read_bytes() == archive_bytes
 
+              def reduce(args, before, name):
+                  path = root / (name + '.json')
+                  report_path = root / (name + '-report.json')
+                  result = run(args + ['--minimize-capsule', str(path), '--out', str(report_path),
+                                       '--max-executions', '48', '--minimize-seconds', '300'], 0)
+                  assert result['schema_version'] == 'franken-node/product-minimization/v1'
+                  assert result['verdict'] == 'REDUCED'
+                  assert result['validation']['verdict'] == before['verdict']
+                  assert result['validation']['cases'] == before['cases']
+                  assert result['reduced_source_bytes'] < result['original_source_bytes']
+                  assert result['statistics']['executions'] <= 48 and result['confirmations'] == 2
+                  assert result['release_certification'] is False and result['environment_reproduced'] is False
+                  assert path.stat().st_mode & 0o777 == 0o600
+                  assert report_path.stat().st_mode & 0o777 == 0o600
+                  assert json.loads(report_path.read_text())['validation'] == result['validation']
+                  replay = run([str(binary), str(path), '--replay', '--execute', '--expected-sha256', result['content_sha256'],
+                                '--native-bin', '/bin/false', '--bun-bin', bun], 0)
+                  assert replay['verdict'] == 'REPRODUCED' and replay['validation']['cases'] == before['cases']
+                  return result
+
+              reduced_failure = reduce(replay_args, report, 'reduced-failure')
+              assert reduced_failure['captured_verdict'] == 'FAIL'
+              assert capsule.read_bytes() == archive_bytes
+              assert (original / 'scripts/check.js').read_text() == 'process.exit(99);'
+
               # Reference disagreement is preserved, never converted to a pair
               # PASS or accepted as a baseline for verifying a native fix.
-              (original / 'scripts/check.js').write_text("console.log(process.versions.bun ? 'bun' : 'node');\n")
+              disagreement_source = "// removable\nconsole.log(process.versions.bun ? 'bun' : 'node');\n// tail\n"
+              (original / 'scripts/check.js').write_text(disagreement_source)
               disagreement_capsule = root / 'disagreement.json'
               disagreement = run(base + ['--bun-bin', bun, '--capture-capsule', str(disagreement_capsule)], 2)
               assert disagreement['verdict'] == 'INCONCLUSIVE'
@@ -146,6 +173,8 @@ jobs:
               assert repeated['verdict'] == 'REPRODUCED'
               assert repeated['validation']['cases'] == disagreement['cases']
               assert run(args + ['--verify-fix'], 2)['verdict'] == 'ERROR'
+              assert reduce(args, disagreement, 'reduced-disagreement')['captured_verdict'] == 'INCONCLUSIVE'
+              assert (original / 'scripts/check.js').read_text() == disagreement_source
 
               # Only Bun changes its observation when external state changes.
               # Stable Node evidence is not sufficient to verify a fix.
@@ -163,6 +192,26 @@ jobs:
               assert drift['validation']['cases'][0]['node'] == drift_seed['cases'][0]['node']
               assert drift['validation']['cases'][0]['bun'] != drift_seed['cases'][0]['bun']
 
+              # Capture and two seed confirmations agree. Search has no slots;
+              # only the mandatory fresh final Bun leg sees drift. No reduced
+              # capsule may be published even though Node is still unchanged.
+              counter = root / 'bun-counter'
+              counter.write_text('0')
+              (original / 'scripts/check.js').write_text(
+                  "if(process.versions.bun){const fs=require('fs');const p=" + json.dumps(str(counter))
+                  + ";const n=Number(fs.readFileSync(p,'utf8'));fs.writeFileSync(p,String(n+1));"
+                  + "console.log(n<3?'same':'drift');}else console.log('same');\n")
+              final_seed_path = root / 'final-drift-seed.json'
+              final_seed = run(base + ['--bun-bin', bun, '--capture-capsule', str(final_seed_path)], 1)
+              refused_path = root / 'must-not-publish.json'
+              refused = run([str(binary), str(final_seed_path), '--replay', '--execute',
+                             '--expected-sha256', final_seed['capsule']['content_sha256'],
+                             '--native-bin', '/bin/false', '--bun-bin', bun,
+                             '--minimize-capsule', str(refused_path), '--max-executions', '4',
+                             '--minimize-seconds', '300'], 2)
+              assert refused['verdict'] == 'ERROR' and 'final confirmation' in refused['error']
+              assert counter.read_text() == '4' and not refused_path.exists()
+
               missing = run(base + ['--bun-bin', str(root / 'missing-bun')], 2)
               assert missing['verdict'] == 'ERROR' and 'resolve Bun' in missing['error']
               alias = run(base + ['--bun-bin', node], 2)
@@ -170,7 +219,7 @@ jobs:
               denied = subprocess.run([str(binary), str(original), '--bun-bin', bun,
                   '--native-bin', '/bin/false'], capture_output=True, text=True, timeout=10)
               assert denied.returncode == 2 and '--execute' in denied.stderr
-              print('Real Node/Bun: reference agreement/disagreement, native failure, three-runtime capture/replay/export, Bun-only drift, private reports and execution consent verified.')
+              print('Real Node/Bun: native failure and reference-disagreement reduction, all-role replay, Bun-only final drift refusal, archive privacy and execution consent verified.')
           PY
       - name: Strict production and test lint
         run: cargo +stable clippy --manifest-path tools/migration-validator/Cargo.toml --all-targets -- -D warnings
