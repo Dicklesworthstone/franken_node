@@ -20,17 +20,19 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Restore the immutable reviewed patch and test harness
+      - name: Prepare the reviewed admission and summary changes
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p evidence
-          git fetch --depth=1 origin 02cd2a7c98aee1bfa904b803677417bfd6d3fb1f
-          git show 02cd2a7c98aee1bfa904b803677417bfd6d3fb1f:.github/workflows/corpus-success-admission.yml > evidence/reviewed-workflow.yml
+          for revision in 02cd2a7c98aee1bfa904b803677417bfd6d3fb1f edaec2773c4fc199d28179136eae913495067f22; do
+            git fetch --depth=1 origin "$revision"
+            git show "$revision:.github/workflows/corpus-success-admission.yml" > "evidence/$revision.yml"
+          done
           python3 - <<'PY'
           from pathlib import Path
-          lines = Path('evidence/reviewed-workflow.yml').read_text().splitlines()
-          def extract_step(name, output):
+          def extract_step(revision, name, output):
+              lines = Path(f'evidence/{revision}.yml').read_text().splitlines()
               marker = '      - name: ' + name
               assert lines.count(marker) == 1
               index = lines.index(marker) + 1
@@ -43,199 +45,625 @@ jobs:
                   index += 1
               assert code and code[0] == 'set -euo pipefail'
               Path(output).write_text('\n'.join(code) + '\n')
-          extract_step('Apply reviewed source corrections', 'evidence/apply-reviewed.sh')
-          extract_step('Compile actual Rust admission, writer and digest functions', 'evidence/test-rust.sh')
+          extract_step('02cd2a7c98aee1bfa904b803677417bfd6d3fb1f', 'Apply reviewed source corrections', 'evidence/apply-admission.sh')
+          extract_step('02cd2a7c98aee1bfa904b803677417bfd6d3fb1f', 'Compile actual Rust admission, writer and digest functions', 'evidence/test-rust.sh')
+          extract_step('edaec2773c4fc199d28179136eae913495067f22', 'Apply report-scoped summary validation', 'evidence/apply-summary.sh')
+          # Extend the temporary harness's item selection, not production code.
+          path = Path('evidence/test-rust.sh')
+          text = path.read_text()
+          old = '"round2", "pass_rate_pct", "aggregate",'
+          assert text.count(old) == 1
+          path.write_text(text.replace(old, '"round2", "pass_rate_pct", "pass_rate_meets_floor", "aggregate",'))
           PY
-          bash evidence/apply-reviewed.sh
-      - name: Apply report-scoped summary validation
+          bash evidence/apply-admission.sh
+          bash evidence/apply-summary.sh
+      - name: Apply immutable policy and measurement corrections
         shell: bash
         run: |
           set -euo pipefail
-          cat > evidence/summary-scope.patch <<'PATCH'
+          cat > evidence/policy.patch <<'PATCH'
+          diff --git a/crates/franken-node/src/ops/compat_corpus_run.rs b/crates/franken-node/src/ops/compat_corpus_run.rs
+          --- a/crates/franken-node/src/ops/compat_corpus_run.rs
+          +++ b/crates/franken-node/src/ops/compat_corpus_run.rs
+          @@ -2594,36 +2594,56 @@
+          -fn thresholds_from(existing: Option<&Value>) -> (f64, f64, BTreeMap<String, f64>) {
+          -    let overall = existing
+          -        .and_then(|doc| doc.pointer("/thresholds/overall_pass_rate_min_pct"))
+          -        .and_then(Value::as_f64)
+          -        .unwrap_or(DEFAULT_OVERALL_MIN_PCT);
+          -    let family_floor = existing
+          -        .and_then(|doc| doc.pointer("/thresholds/per_family_pass_rate_min_pct"))
+          -        .and_then(Value::as_f64)
+          -        .unwrap_or(DEFAULT_FAMILY_FLOOR_PCT);
+          +fn thresholds_from(existing: Option<&Value>) -> Result<(f64, f64, BTreeMap<String, f64>)> {
+          +    fn percentage(value: Option<&Value>, minimum: f64, label: &str) -> Result<f64> {
+          +        let Some(value) = value else { return Ok(minimum); };
+          +        let value = value.as_f64().with_context(|| format!("{label} must be a numeric percentage"))?;
+          +        if !value.is_finite() || value < minimum || value > 100.0 {
+          +            bail!("{label} must be finite and within {minimum}..=100; required floors cannot be weakened");
+          +        }
+          +        Ok(value)
+          +    }
+          +    let thresholds = existing.and_then(|doc| doc.get("thresholds"));
+          +    if thresholds.is_some_and(|value| !value.is_object()) {
+          +        bail!("thresholds must be an object");
+          +    }
+          +    let overall = percentage(thresholds.and_then(|value| value.get("overall_pass_rate_min_pct")),
+          +        DEFAULT_OVERALL_MIN_PCT, "overall compatibility floor")?;
+          +    let family_floor = percentage(thresholds.and_then(|value| value.get("per_family_pass_rate_min_pct")),
+          +        DEFAULT_FAMILY_FLOOR_PCT, "per-family compatibility floor")?;
+               let mut band_floors: BTreeMap<String, f64> = DEFAULT_BAND_FLOORS
+                   .iter()
+                   .map(|(band, floor)| ((*band).to_string(), *floor))
+                   .collect();
+          -    if let Some(bands) = existing
+          -        .and_then(|doc| doc.pointer("/thresholds/band_pass_rate_min_pct"))
+          -        .and_then(Value::as_object)
+          -    {
+          -        band_floors = bands
+          -            .iter()
+          -            .filter_map(|(band, floor)| floor.as_f64().map(|f| (band.clone(), f)))
+          -            .collect();
+          +    if let Some(bands) = thresholds.and_then(|value| value.get("band_pass_rate_min_pct")) {
+          +        let bands = bands.as_object().context("band_pass_rate_min_pct must be an object")?;
+          +        for (band, value) in bands {
+          +            let minimum = *band_floors.get(band).with_context(|| format!("unknown compatibility band `{band}`"))?;
+          +            band_floors.insert(band.clone(), percentage(Some(value), minimum, band)?);
+          +        }
+               }
+          -    (overall, family_floor, band_floors)
+          +    Ok((overall, family_floor, band_floors))
+           }
+          @@ -2822,3 +2842,3 @@
+          -    let (overall_min, family_floor, band_floors) = thresholds_from(existing);
+          +    let (overall_min, family_floor, band_floors) = thresholds_from(existing)?;
+               let families_ok = family_breakdown
+                   .iter()
+          @@ -2981,21 +3001,14 @@
+          -    document.insert(
+          -        "thresholds".to_string(),
+          -        carry(
+          -            "thresholds",
+          -            json!({
+          -                "overall_pass_rate_min_pct": DEFAULT_OVERALL_MIN_PCT,
+          -                "per_family_pass_rate_min_pct": DEFAULT_FAMILY_FLOOR_PCT,
+          -                "band_pass_rate_min_pct": {
+          -                    "core": 99.0,
+          -                    "high-value": 95.0,
+          -                    "edge": 90.0,
+          -                },
+          -            }),
+          -        ),
+          -    );
+          +    // Publish the effective policy, including mandatory omitted band floors.
+          +    // Preserve unrelated annotations but never report a different policy from
+          +    // the one actually used to compute release_blocked.
+          +    let mut threshold_document = existing.and_then(|doc| doc.get("thresholds"))
+          +        .and_then(Value::as_object).cloned().unwrap_or_default();
+          +    threshold_document.insert("overall_pass_rate_min_pct".into(), json!(overall_min));
+          +    threshold_document.insert("per_family_pass_rate_min_pct".into(), json!(family_floor));
+          +    threshold_document.insert("band_pass_rate_min_pct".into(), json!(band_floors));
+          +    document.insert("thresholds".into(), Value::Object(threshold_document));
+               document.insert(
+                   "totals".to_string(),
+                   json!({
           diff --git a/scripts/check_compatibility_corpus_pass_gate.py b/scripts/check_compatibility_corpus_pass_gate.py
           --- a/scripts/check_compatibility_corpus_pass_gate.py
           +++ b/scripts/check_compatibility_corpus_pass_gate.py
-          @@ -489,25 +489,64 @@
-          -def check_summary(report_path: Path, data: dict | None, results_generated_at: "str | None") -> list[dict]:
-          +def check_summary(report_path: Path, data: dict | None, results_generated_at: "str | None",
-          +                  summary_path: Path | None = None) -> list[dict]:
-               """Filesystem-facing wrapper: load SUMMARY and evaluate it against the
-               recomputed rate from `data`. Emits nothing when the report itself is
-               unloadable — the report checks already fail for that case."""
-               checks: list[dict] = []
-               if data is None:
-                   return checks
-          -    if not SUMMARY.exists():
-          +    canonical_report = report_path.resolve() == REPORT.resolve()
-          +    if summary_path is None and not canonical_report:
-          +        return [{"check": "summary: report scope", "pass": True,
-          +                 "detail": "custom report only; no charter summary asserted (use --summary to verify a bound summary)"}]
-          +    # The canonical release report always requires the canonical charter
-          +    # metric, even if a caller supplies another summary. Explicit summaries
-          +    # are additional evidence, never a way to bypass the canonical binding.
-          +    selected = [SUMMARY] if canonical_report else []
-          +    if summary_path is not None and all(path.resolve() != summary_path.resolve() for path in selected):
-          +        selected.append(summary_path)
-          +    for selected_path in selected:
-          +        checks.extend(check_bound_summary(selected_path, report_path, data, results_generated_at))
-          +    return checks
-          +
-          +
-          +def check_bound_summary(summary_path: Path, report_path: Path, data: dict,
-          +                        results_generated_at: "str | None") -> list[dict]:
-          +    checks: list[dict] = []
-          +    if not summary_path.exists():
-                   checks.append({
-                       "check": "summary: charter metric artifact exists",
-                       "pass": False,
-          -            "detail": f"MISSING: {SUMMARY}",
-          +            "detail": f"MISSING: {summary_path}",
-                   })
-                   return checks
-               try:
-          -        summary = json.loads(SUMMARY.read_text(encoding="utf-8"))
-          -    except json.JSONDecodeError:
-          +        summary = json.loads(summary_path.read_text(encoding="utf-8"))
-          +        if not isinstance(summary, dict):
-          +            raise ValueError("summary must be a JSON object")
-          +    except (OSError, ValueError) as error:
-                   checks.append({
-                       "check": "summary: valid json",
-                       "pass": False,
-          -            "detail": f"unparseable: {SUMMARY}",
-          +            "detail": f"unreadable or invalid summary {summary_path}: {error}",
-                   })
-                   return checks
-          -    checks.append({"check": "summary: valid json", "pass": True, "detail": str(SUMMARY)})
-          +    checks.append({"check": "summary: valid json", "pass": True, "detail": str(summary_path)})
-          +    metric = summary.get("metric")
-          +    reference = metric.get("details_ref") if isinstance(metric, dict) else None
-          +    try:
-          +        target = Path(reference) if isinstance(reference, str) and reference else None
-          +        # Existing charter references are repository-relative; explicit
-          +        # external summaries may use an absolute report path.
-          +        bound = target is not None and (target if target.is_absolute() else ROOT / target).resolve() == report_path.resolve()
-          +    except (OSError, ValueError, RuntimeError):
-          +        bound = False
-          +    checks.append({"check": "summary: bound to selected report", "pass": bound,
-          +                   "detail": f"summary={summary_path} details_ref={reference!r} report={report_path}"})
+          @@ -11,6 +11,7 @@
+           import hashlib
+           import hmac
+           import json
+          +import math
+           import sys
+           from datetime import datetime
+          @@ -37,6 +38,9 @@
+           MAX_RUNTIME_OBSERVATION_STREAM_BYTES = 1_048_576
+          +DEFAULT_OVERALL_MIN_PCT = 95.0
+          +DEFAULT_FAMILY_FLOOR_PCT = 80.0
+          +DEFAULT_BAND_FLOORS = {"core": 99.0, "high-value": 95.0, "edge": 90.0}
            
+           
+           def compute_result_digest(per_test_results: list[dict]) -> str:
+          @@ -615,6 +615,56 @@
+          -def evaluate_gate(data: dict) -> dict:
+          +def effective_thresholds(data: dict) -> tuple[float, float, dict[str, float], list[str]]:
+          +    """Report settings may strengthen required floors, never weaken them.
+          +
+          +    Invalid settings retain conservative defaults and explicit errors, so
+          +    every consumer can emit a failed report rather than silently relax policy.
+          +    """
+          +    errors = []
+          +    thresholds = data.get("thresholds", {})
+          +    if not isinstance(thresholds, dict):
+          +        errors.append("thresholds must be an object")
+          +        thresholds = {}
+          +
+          +    def percentage(container: dict, key: str, minimum: float, label: str) -> float:
+          +        if key not in container:
+          +            return minimum
+          +        value = container[key]
+          +        if not isinstance(value, (int, float)) or isinstance(value, bool):
+          +            errors.append(f"{label} must be a finite percentage >= {minimum} and <= 100")
+          +            return minimum
+          +        try:
+          +            numeric = float(value)
+          +        except (ValueError, OverflowError):
+          +            numeric = float("nan")
+          +        if not math.isfinite(numeric) or not minimum <= numeric <= 100:
+          +            errors.append(f"{label} must be a finite percentage >= {minimum} and <= 100")
+          +            return minimum
+          +        return numeric
+          +
+          +    overall = percentage(thresholds, "overall_pass_rate_min_pct", DEFAULT_OVERALL_MIN_PCT, "overall floor")
+          +    family = percentage(thresholds, "per_family_pass_rate_min_pct", DEFAULT_FAMILY_FLOOR_PCT, "family floor")
+          +    declared_bands = thresholds.get("band_pass_rate_min_pct", {})
+          +    if not isinstance(declared_bands, dict):
+          +        errors.append("band_pass_rate_min_pct must be an object")
+          +        declared_bands = {}
+          +    if any(band not in DEFAULT_BAND_FLOORS for band in declared_bands):
+          +        errors.append("band_pass_rate_min_pct contains an unknown band")
+          +    bands = {band: percentage(declared_bands, band, minimum, f"{band} floor")
+          +             for band, minimum in DEFAULT_BAND_FLOORS.items()}
+          +    return overall, family, bands, errors
+          +
+          +
+          +def evaluate_gate(data: dict) -> dict:
                per_tests = data.get("per_test_results", [])
-          @@ -910,6 +910,7 @@
-           def run_checks(
-               report_path: Path = REPORT,
-               minimum_cases: int = DEFAULT_MIN_CASES,
-          +    summary_path: Path | None = None,
-           ) -> dict:
-               checks = []
-          @@ -929,3 +930,3 @@
-          -    checks.extend(check_summary(report_path, data, generated_at))
-          +    checks.extend(check_summary(report_path, data, generated_at, summary_path))
-               checks.extend(check_ifc_regression(data))
-          @@ -940,3 +941,4 @@
-                   "report_path": str(report_path),
-          +        "summary_path": str(summary_path) if summary_path is not None else (str(SUMMARY) if report_path.resolve() == REPORT.resolve() else None),
-                   "minimum_cases": minimum_cases,
-          @@ -1033,6 +1034,9 @@
-                   help="compatibility corpus report to validate",
-               )
-          +    parser.add_argument("--summary", type=Path,
-          +                        help="also validate a charter summary bound to --report; canonical report always checks its canonical summary")
-               parser.add_argument(
-                   "--min-cases",
-          @@ -1070,3 +1074,3 @@
-          -    result = run_checks(args.report, args.min_cases)
-          +    result = run_checks(args.report, args.min_cases, args.summary)
-               if args.json:
-                   print(json.dumps(result, indent=2))
+               prev = data.get("previous_release", {})
+          -    thresholds = data.get("thresholds", {})
+           
+          @@ -625,8 +675,5 @@
+          -    overall_threshold = float(thresholds.get("overall_pass_rate_min_pct", 95.0))
+          -    family_floor = float(thresholds.get("per_family_pass_rate_min_pct", 80.0))
+          -    band_thresholds = thresholds.get("band_pass_rate_min_pct", {})
+          +    overall_threshold, family_floor, band_thresholds, policy_errors = effective_thresholds(data)
+           
+               family_breakdown = aggregate_by_key(per_tests, "api_family")
+          @@ -638,6 +685,6 @@
+          -    threshold_met = current_rate >= overall_threshold and families_ok and bands_ok
+          +    threshold_met = not policy_errors and current_rate >= overall_threshold and families_ok and bands_ok
+               regression = current_rate < prev_rate
+          @@ -645,6 +692,9 @@
+                   "overall_threshold": overall_threshold,
+          +        "family_floor": family_floor,
+          +        "band_thresholds": band_thresholds,
+          +        "policy_errors": policy_errors,
+                   "threshold_met": threshold_met,
+          @@ -787,6 +837,11 @@
+               gate_eval = evaluate_gate(data)
+          +    checks.append({
+          +        "check": "gate: thresholds preserve mandatory floors",
+          +        "pass": not gate_eval["policy_errors"],
+          +        "detail": "; ".join(gate_eval["policy_errors"]) or "valid effective policy",
+          +    })
+               checks.append({
+                   "check": "gate: overall threshold >=95 met",
+          @@ -795,4 +850,4 @@
+          -    family_floor = float(data.get("thresholds", {}).get("per_family_pass_rate_min_pct", 80.0))
+          +    family_floor = gate_eval["family_floor"]
+               low_families = [
+          @@ -806,4 +861,4 @@
+          -    band_thresholds = data.get("thresholds", {}).get("band_pass_rate_min_pct", {})
+          +    band_thresholds = gate_eval["band_thresholds"]
+               for band, threshold in band_thresholds.items():
+          @@ -830,4 +885,4 @@
+                   "check": "ci gate: report reflects met threshold and non-blocked release",
+          -        "pass": bool(ci.get("threshold_met", False)) and not bool(ci.get("release_blocked", True)),
+          +        "pass": ci.get("threshold_met") is True and ci.get("release_blocked") is False,
+                   "detail": f"threshold_met={ci.get('threshold_met')} release_blocked={ci.get('release_blocked')}",
+          @@ -882,9 +937,14 @@
+               adversarial = json.loads(json.dumps(data))
+          +    # A fixed 30-row mutation stops crossing any floor on a large corpus.
+          +    # Scale the challenge below the effective overall floor by one percentage
+          +    # point, preserving conservative behavior despite display rounding.
+          +    target_passes = int(len(per_tests) * max(0.0, gate_eval["overall_threshold"] - 1.0) / 100.0)
+          +    flips_needed = max(1, sum(row.get("status") == "pass" for row in per_tests) - target_passes)
+               flips = 0
+               for row in adversarial.get("per_test_results", []):
+                   if row.get("status") == "pass":
+                       row["status"] = "fail"
+                       flips += 1
+          -        if flips >= 30:
+          +        if flips >= flips_needed:
+                       break
+               adv_eval = evaluate_gate(adversarial)
+          diff --git a/crates/franken-node/src/ops/compat_corpus_run.rs b/crates/franken-node/src/ops/compat_corpus_run.rs
+          --- a/crates/franken-node/src/ops/compat_corpus_run.rs
+          +++ b/crates/franken-node/src/ops/compat_corpus_run.rs
+          @@ -4320,3 +4320,86 @@
+               #[test]
+          +    fn report_policy_cannot_weaken_mandatory_scalar_floors() {
+          +        for (key, minimum) in [("overall_pass_rate_min_pct", 95.0), ("per_family_pass_rate_min_pct", 80.0)] {
+          +            for value in [json!(minimum - 0.01), json!(101), json!(-1), json!(true), json!("100"), Value::Null] {
+          +                let mut policy = Map::new();
+          +                policy.insert(key.into(), value);
+          +                assert!(thresholds_from(Some(&json!({"thresholds": policy}))).is_err());
+          +            }
+          +        }
+          +    }
+          +
+          +    #[test]
+          +    fn malformed_or_weakened_band_policies_are_rejected() {
+          +        for value in [json!([]), json!(true), Value::Null, json!(0)] {
+          +            assert!(thresholds_from(Some(&json!({"thresholds": value}))).is_err());
+          +            assert!(thresholds_from(Some(&json!({"thresholds": {"band_pass_rate_min_pct": value}}))).is_err());
+          +        }
+          +        for (band, minimum) in DEFAULT_BAND_FLOORS {
+          +            for value in [json!(minimum - 0.01), json!(101), json!("99"), Value::Null] {
+          +                let bands = BTreeMap::from([(band, value)]);
+          +                assert!(thresholds_from(Some(&json!({"thresholds": {"band_pass_rate_min_pct": bands}}))).is_err());
+          +            }
+          +        }
+          +        assert!(thresholds_from(Some(&json!({"thresholds": {"band_pass_rate_min_pct": {"unsafe": 0}}}))).is_err());
+          +    }
+          +
+          +    #[test]
+          +    fn partial_policy_can_strengthen_but_never_remove_default_bands() {
+          +        let empty = thresholds_from(Some(&json!({"thresholds": {"band_pass_rate_min_pct": {}}}))).unwrap();
+          +        assert_eq!(empty, thresholds_from(None).unwrap());
+          +        let (overall, family, bands) = thresholds_from(Some(&json!({"thresholds": {
+          +            "overall_pass_rate_min_pct": 96, "band_pass_rate_min_pct": {"edge": 93}}}))).unwrap();
+          +        assert_eq!((overall, family), (96.0, 80.0));
+          +        assert_eq!(bands, BTreeMap::from([("core".into(), 99.0), ("high-value".into(), 95.0), ("edge".into(), 93.0)]));
+          +    }
+          +
+          +    fn policy_outcomes() -> Vec<CaseOutcome> {
+          +        (0..22).map(|index| {
+          +            let status = if index == 0 { "fail" } else { "pass" };
+          +            let mut row = outcome(status, matching_observations(false, Some(if index == 0 { 7 } else { 0 })));
+          +            row.test_id = format!("policy::{index:02}");
+          +            row.band = if index == 20 { "core" } else if index == 21 { "high-value" } else { "edge" }.into();
+          +            row
+          +        }).collect()
+          +    }
+          +
+          +    #[test]
+          +    fn writer_reports_and_enforces_the_effective_stricter_policy() {
+          +        let rows = policy_outcomes();
+          +        let build = |existing: Option<&Value>| build_corpus_results_document_with_references(existing, &rows,
+          +            "test-corpus", "1.3.14-test", None, "2026-09-17T00:00:00Z", "corpus").unwrap();
+          +        assert_eq!(build(None)["ci_gate"]["threshold_met"], true);
+          +        let report = build(Some(&json!({"thresholds": {"overall_pass_rate_min_pct": 96,
+          +            "band_pass_rate_min_pct": {"edge": 92}, "note": "stricter pilot"}})));
+          +        assert_eq!(report["ci_gate"]["threshold_met"], false);
+          +        assert_eq!(report["ci_gate"]["release_blocked"], true);
+          +        assert_eq!(report["thresholds"]["overall_pass_rate_min_pct"], 96.0);
+          +        assert_eq!(report["thresholds"]["per_family_pass_rate_min_pct"], 80.0);
+          +        assert_eq!(report["thresholds"]["band_pass_rate_min_pct"]["core"], 99.0);
+          +        assert_eq!(report["thresholds"]["band_pass_rate_min_pct"]["high-value"], 95.0);
+          +        assert_eq!(report["thresholds"]["band_pass_rate_min_pct"]["edge"], 92.0);
+          +        assert_eq!(report["thresholds"]["note"], "stricter pilot");
+          +    }
+          +
+          +    #[test]
+          +    fn empty_band_override_cannot_hide_missing_band_coverage() {
+          +        let rows = vec![outcome("pass", matching_observations(false, Some(0)))];
+          +        let report = build_corpus_results_document_with_references(Some(&json!({"thresholds": {
+          +            "band_pass_rate_min_pct": {}}})), &rows, "test-corpus", "1.3.14-test", None,
+          +            "2026-09-17T00:00:00Z", "corpus").unwrap();
+          +        assert_eq!(report["ci_gate"]["threshold_met"], false);
+          +        assert_eq!(report["thresholds"]["band_pass_rate_min_pct"].as_object().unwrap().len(), 3);
+          +    }
+          +
+          +    #[test]
+               fn writer_accepts_triad_pass_when_franken_matches_node_and_bun_diverges() {
+                   let mut observations = BTreeMap::new();
           diff --git a/tests/test_check_compatibility_corpus_pass_gate.py b/tests/test_check_compatibility_corpus_pass_gate.py
           --- a/tests/test_check_compatibility_corpus_pass_gate.py
           +++ b/tests/test_check_compatibility_corpus_pass_gate.py
-          @@ -410,6 +410,94 @@
+          @@ -400,3 +400,82 @@
           -class TestConstants(unittest.TestCase):
-          +class TestSummaryReportBinding(unittest.TestCase):
-          +    def setUp(self):
-          +        self.scratch = tempfile.TemporaryDirectory()
-          +        self.addCleanup(self.scratch.cleanup)
-          +        self.root = Path(self.scratch.name)
-          +        self.report_path = self.root / "report.json"
-          +        self.report = passing_report()
-          +        write_report(self.report_path, self.report)
-          +        self.summary_path = self.root / "summary.json"
+          +class TestMandatoryThresholdPolicy(unittest.TestCase):
+          +    def test_omitted_and_partial_policies_retain_all_mandatory_floors(self):
+          +        default = mod.effective_thresholds({})
+          +        self.assertEqual(default, (95.0, 80.0, {"core": 99.0, "high-value": 95.0, "edge": 90.0}, []))
+          +        self.assertEqual(mod.effective_thresholds({"thresholds": {"band_pass_rate_min_pct": {}}}), default)
+          +        stronger = mod.effective_thresholds({"thresholds": {"overall_pass_rate_min_pct": 96,
+          +            "band_pass_rate_min_pct": {"edge": 93}}})
+          +        self.assertEqual(stronger, (96.0, 80.0, {"core": 99.0, "high-value": 95.0, "edge": 93.0}, []))
           +
-          +    def summary(self, **metric_overrides):
-          +        metric = {"observed_pct": 100.0, "details_ref": str(self.report_path)}
-          +        metric.update(metric_overrides)
-          +        write_report(self.summary_path, {"verdict": "GREEN", "timestamp": "2026-09-17T00:00:00Z", "metric": metric})
+          +    def test_invalid_scalar_floors_cannot_pass_even_with_perfect_measurements(self):
+          +        report = passing_report()
+          +        for key, floor in (("overall_pass_rate_min_pct", 95), ("per_family_pass_rate_min_pct", 80)):
+          +            for value in (floor - 0.01, -1, 101, True, None, "100", [], {}, float("nan"), float("inf"), 10**1000):
+          +                with self.subTest(key=key, value=repr(value)[:30]):
+          +                    changed = copy.deepcopy(report)
+          +                    changed["thresholds"][key] = value
+          +                    gate = mod.evaluate_gate(changed)
+          +                    self.assertTrue(gate["policy_errors"])
+          +                    self.assertFalse(gate["threshold_met"])
+          +                    self.assertTrue(gate["release_blocked"])
           +
-          +    def test_custom_report_does_not_assert_the_unrelated_canonical_summary(self):
-          +        result = mod.run_checks(self.report_path, 1000)
-          +        self.assertTrue(result["overall_pass"], result["checks"])
-          +        self.assertIsNone(result["summary_path"])
-          +        self.assertIn("no charter summary asserted", named_check(result, "summary: report scope")["detail"])
+          +    def test_invalid_band_values_shapes_and_unknown_names_are_rejected(self):
+          +        for band, floor in mod.DEFAULT_BAND_FLOORS.items():
+          +            for value in (floor - 0.01, 101, True, None, "100"):
+          +                self.assertTrue(mod.effective_thresholds({"thresholds": {"band_pass_rate_min_pct": {band: value}}})[3])
+          +        for value in (None, True, 10, "99", []):
+          +            self.assertTrue(mod.effective_thresholds({"thresholds": value})[3])
+          +            self.assertTrue(mod.effective_thresholds({"thresholds": {"band_pass_rate_min_pct": value}})[3])
+          +        self.assertTrue(mod.effective_thresholds({"thresholds": {"band_pass_rate_min_pct": {"unsafe": 0}}})[3])
           +
-          +    def test_explicit_bound_summary_is_verified(self):
-          +        self.summary()
-          +        result = mod.run_checks(self.report_path, 1000, self.summary_path)
-          +        self.assertTrue(result["overall_pass"], result["checks"])
-          +        self.assertTrue(named_check(result, "summary: bound to selected report")["pass"])
+          +    def test_empty_band_override_does_not_hide_missing_coverage(self):
+          +        data = {"thresholds": {"band_pass_rate_min_pct": {}}, "per_test_results": [
+          +            {"status": "pass", "api_family": "fs", "band": "core"}]}
+          +        result = mod.evaluate_gate(data)
+          +        self.assertFalse(result["threshold_met"])
+          +        self.assertEqual(result["band_thresholds"], mod.DEFAULT_BAND_FLOORS)
           +
-          +    def test_equal_metrics_do_not_replace_a_report_binding(self):
-          +        self.summary(details_ref=str(self.root / "different.json"))
-          +        result = mod.run_checks(self.report_path, 1000, self.summary_path)
-          +        self.assertFalse(result["overall_pass"])
-          +        self.assertFalse(named_check(result, "summary: bound to selected report")["pass"])
+          +    def test_full_gate_reports_policy_refusal_instead_of_crashing(self):
+          +        report = passing_report()
+          +        for policy in (None, [], {"overall_pass_rate_min_pct": 94}, {"band_pass_rate_min_pct": []}):
+          +            changed = copy.deepcopy(report)
+          +            changed["thresholds"] = policy
+          +            checks = mod.check_report(changed, 1000)
+          +            check = next(item for item in checks if item["check"] == "gate: thresholds preserve mandatory floors")
+          +            self.assertFalse(check["pass"])
           +
-          +    def test_explicit_summary_missing_or_invalid_never_passes(self):
-          +        self.assertFalse(mod.run_checks(self.report_path, 1000, self.summary_path)["overall_pass"])
-          +        for value in ([], None, "not an object"):
-          +            write_report(self.summary_path, value)
-          +            result = mod.run_checks(self.report_path, 1000, self.summary_path)
-          +            self.assertFalse(result["overall_pass"])
-          +            self.assertFalse(named_check(result, "summary: valid json")["pass"])
+          +    def test_string_truthiness_cannot_masquerade_as_gate_booleans(self):
+          +        report = passing_report()
+          +        report["ci_gate"] = {"threshold_met": "false", "release_blocked": ""}
+          +        checks = mod.check_report(report, 1000)
+          +        self.assertFalse(next(item for item in checks if item["check"] ==
+          +            "ci gate: report reflects met threshold and non-blocked release")["pass"])
           +
-          +    def test_bound_but_wrong_summary_metric_still_fails(self):
-          +        self.summary(observed_pct=99.0)
-          +        result = mod.run_checks(self.report_path, 1000, self.summary_path)
-          +        self.assertFalse(result["overall_pass"])
-          +        self.assertFalse(named_check(result, "summary: consistent with measured results")["pass"])
-          +
-          +    def test_canonical_report_alias_cannot_bypass_the_canonical_summary(self):
-          +        alias = self.root / "canonical-alias.json"
-          +        alias.symlink_to(mod.REPORT)
-          +        self.summary(details_ref=str(mod.REPORT))
-          +        checks = mod.check_summary(alias, self.report, None, self.summary_path)
-          +        self.assertFalse(all(check["pass"] for check in checks))
-          +        self.assertTrue(any(str(mod.SUMMARY) in check["detail"] for check in checks))
-          +        self.assertFalse(any(check["check"] == "summary: report scope" for check in checks))
-          +
-          +    def test_cli_explicit_summary_checks_the_same_bound_pair(self):
-          +        self.summary()
-          +        command = [sys.executable, str(ROOT / "scripts/check_compatibility_corpus_pass_gate.py"),
-          +                   "--report", str(self.report_path), "--summary", str(self.summary_path), "--json"]
-          +        result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=10)
-          +        self.assertEqual(result.returncode, 0, result.stderr)
-          +        self.assertEqual(json.loads(result.stdout)["summary_path"], str(self.summary_path))
-          +        self.summary(details_ref="wrong-report.json")
-          +        result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=10)
-          +        self.assertEqual(result.returncode, 1, result.stderr)
-          +        self.assertFalse(json.loads(result.stdout)["overall_pass"])
+          +    def test_large_valid_corpus_is_not_rejected_by_fixed_size_adversarial_probe(self):
+          +        report = passing_report(total=5000)
+          +        checks = mod.check_report(report, 1000)
+          +        self.assertTrue(all(check["pass"] for check in checks), [check for check in checks if not check["pass"]])
+          +        challenge = next(check for check in checks if check["check"] == "adversarial: threshold drop blocks release")
+          +        self.assertTrue(challenge["pass"])
           +
           +
           +class TestConstants(unittest.TestCase):
                def test_bead_section_and_default_contract_size(self):
                    self.assertEqual(mod.BEAD_ID, "bd-28sz")
           PATCH
-          if ! git apply --recount --reverse --check evidence/summary-scope.patch 2>/dev/null; then
-            git apply --recount --check evidence/summary-scope.patch
-            git apply --recount evidence/summary-scope.patch
-          fi
+          git apply --recount --check evidence/policy.patch
+          git apply --recount evidence/policy.patch
+          cat > evidence/exact-threshold.patch <<'PATCH'
+          diff --git a/crates/franken-node/src/ops/compat_corpus_run.rs b/crates/franken-node/src/ops/compat_corpus_run.rs
+          --- a/crates/franken-node/src/ops/compat_corpus_run.rs
+          +++ b/crates/franken-node/src/ops/compat_corpus_run.rs
+          @@ -2577,3 +2577,13 @@
+          -fn aggregate<'a>(
+          +/// Display rounding must never promote a below-floor measurement into PASS.
+          +/// Counts are bounded by corpus capture; this compares the unrounded ratio.
+          +fn pass_rate_meets_floor(passed: usize, total: usize, floor: f64) -> bool {
+          +    #[allow(clippy::cast_precision_loss)]
+          +    let meets = (passed as f64) * 100.0 >= floor * (total as f64);
+          +    total > 0 && passed <= total && floor.is_finite() && (0.0..=100.0).contains(&floor) && meets
+          +}
+          +
+          +fn aggregate<'a>(
+               outcomes: &'a [CaseOutcome],
+          @@ -2839,14 +2849,12 @@
+               let families_ok = family_breakdown
+                   .iter()
+          -        .all(|(_, (t, p))| pass_rate_pct(*p, *t) >= family_floor);
+          +        .all(|(_, (t, p))| pass_rate_meets_floor(*p, *t, family_floor));
+               let bands_ok = band_floors.iter().all(|(band, floor)| {
+                   band_breakdown
+                       .get(band)
+          -            .map(|(t, p)| pass_rate_pct(*p, *t))
+          -            .unwrap_or(-1.0)
+          -            >= *floor
+          +            .is_some_and(|(t, p)| pass_rate_meets_floor(*p, *t, *floor))
+               });
+          -    let threshold_met = overall_rate >= overall_min && families_ok && bands_ok;
+          +    let threshold_met = pass_rate_meets_floor(passed, total, overall_min) && families_ok && bands_ok;
+           
+               // Ratchet: only a prior GENUINE oracle run is a valid floor. When the
+          @@ -2896,4 +2904,4 @@
+               let mut failing_families: Vec<String> = family_breakdown
+                   .iter()
+          -        .filter(|(_, (t, p))| pass_rate_pct(*p, *t) < family_floor)
+          +        .filter(|(_, (t, p))| !pass_rate_meets_floor(*p, *t, family_floor))
+                   .map(|(family, (t, p))| format!("{family} {:.2}%", pass_rate_pct(*p, *t)))
+          @@ -4330,3 +4330,36 @@
+               #[test]
+          +    fn display_rounding_cannot_raise_a_measurement_to_its_floor() {
+          +        assert_eq!(pass_rate_pct(3891, 4096), 95.0);
+          +        assert!(!pass_rate_meets_floor(3891, 4096, 95.0));
+          +        assert!(pass_rate_meets_floor(3892, 4096, 95.0));
+          +        assert!(pass_rate_meets_floor(95, 100, 95.0));
+          +        assert!(!pass_rate_meets_floor(0, 0, 95.0));
+          +        assert!(!pass_rate_meets_floor(101, 100, 95.0));
+          +        assert!(!pass_rate_meets_floor(100, 100, f64::NAN));
+          +    }
+          +
+          +    #[test]
+          +    fn full_writer_blocks_below_floor_even_when_the_display_reads_95_percent() {
+          +        let rows: Vec<_> = (0..4096).map(|index| {
+          +            let mut row = outcome(if index < 205 { "fail" } else { "pass" },
+          +                matching_observations(false, Some(if index < 205 { 7 } else { 0 })));
+          +            row.test_id = format!("rounding::{index:04}");
+          +            row.band = if index == 4094 { "core" } else if index == 4095 { "high-value" } else { "edge" }.into();
+          +            row
+          +        }).collect();
+          +        let report = build_corpus_results_document_with_references(None, &rows, "test-corpus",
+          +            "1.3.14-test", None, "2026-09-17T00:00:00Z", "corpus").unwrap();
+          +        assert_eq!(report["totals"]["overall_pass_rate_pct"], 95.0);
+          +        assert_eq!(report["totals"]["passed_test_cases"], 3891);
+          +        assert_eq!(report["ci_gate"]["threshold_met"], false);
+          +        assert_eq!(report["ci_gate"]["release_blocked"], true);
+          +    }
+          +
+          +    #[test]
+               fn writer_accepts_triad_pass_when_franken_matches_node_and_bun_diverges() {
+                   let mut observations = BTreeMap::new();
+          diff --git a/scripts/check_compatibility_corpus_pass_gate.py b/scripts/check_compatibility_corpus_pass_gate.py
+          --- a/scripts/check_compatibility_corpus_pass_gate.py
+          +++ b/scripts/check_compatibility_corpus_pass_gate.py
+          @@ -622,3 +622,9 @@
+          -def aggregate_by_key(per_tests: list[dict], key: str) -> dict[str, dict]:
+          +def pass_rate_meets_floor(passed: int, total: int, floor: float) -> bool:
+          +    """Compare measured counts, never a rounded display percentage."""
+          +    return total > 0 and 0 <= passed <= total and math.isfinite(floor) and 0 <= floor <= 100 and passed * 100 >= floor * total
+          +
+          +
+          +def aggregate_by_key(per_tests: list[dict], key: str) -> dict[str, dict]:
+               out: dict[str, dict] = {}
+          @@ -703,12 +709,13 @@
+          -    families_ok = all(v["pass_rate_pct"] >= family_floor for v in family_breakdown.values())
+          +    families_ok = all(pass_rate_meets_floor(v["passed"], v["total"], family_floor) for v in family_breakdown.values())
+               bands_ok = all(
+          -        band_breakdown.get(band, {"pass_rate_pct": -1.0})["pass_rate_pct"] >= float(req)
+          +        pass_rate_meets_floor(band_breakdown.get(band, {}).get("passed", 0),
+          +                             band_breakdown.get(band, {}).get("total", 0), req)
+                   for band, req in band_thresholds.items()
+               )
+          -    threshold_met = not policy_errors and current_rate >= overall_threshold and families_ok and bands_ok
+          +    overall_met = pass_rate_meets_floor(passed, total, overall_threshold)
+          +    threshold_met = not policy_errors and overall_met and families_ok and bands_ok
+               regression = current_rate < prev_rate
+          @@ -721,3 +728,4 @@
+                   "overall_threshold": overall_threshold,
+          +        "overall_threshold_met": overall_met,
+                   "family_floor": family_floor,
+          @@ -870,3 +878,3 @@
+                   "check": "gate: overall threshold >=95 met",
+          -        "pass": gate_eval["current_rate"] >= gate_eval["overall_threshold"],
+          +        "pass": gate_eval["overall_threshold_met"],
+                   "detail": f"current={gate_eval['current_rate']} threshold={gate_eval['overall_threshold']}",
+          @@ -877,3 +885,3 @@
+                   fam for fam, stat in gate_eval["family_breakdown"].items()
+          -        if stat["pass_rate_pct"] < family_floor
+          +        if not pass_rate_meets_floor(stat["passed"], stat["total"], family_floor)
+               ]
+          @@ -887,6 +895,7 @@
+               for band, threshold in band_thresholds.items():
+                   observed = gate_eval["band_breakdown"].get(band, {}).get("pass_rate_pct", -1.0)
+          +        counts = gate_eval["band_breakdown"].get(band, {})
+                   checks.append({
+                       "check": f"gate: band {band} >= {threshold}%",
+          -            "pass": observed >= float(threshold),
+          +            "pass": pass_rate_meets_floor(counts.get("passed", 0), counts.get("total", 0), threshold),
+                       "detail": f"observed={observed}",
+          diff --git a/tests/test_check_compatibility_corpus_pass_gate.py b/tests/test_check_compatibility_corpus_pass_gate.py
+          --- a/tests/test_check_compatibility_corpus_pass_gate.py
+          +++ b/tests/test_check_compatibility_corpus_pass_gate.py
+          @@ -480,3 +480,41 @@
+          -class TestConstants(unittest.TestCase):
+          +class TestExactThresholdComparison(unittest.TestCase):
+          +    def test_display_rounding_does_not_promote_a_below_floor_rate(self):
+          +        self.assertEqual(mod.pass_rate(3891, 4096), 95.0)
+          +        self.assertFalse(mod.pass_rate_meets_floor(3891, 4096, 95.0))
+          +        self.assertTrue(mod.pass_rate_meets_floor(3892, 4096, 95.0))
+          +        self.assertTrue(mod.pass_rate_meets_floor(95, 100, 95.0))
+          +        self.assertFalse(mod.pass_rate_meets_floor(0, 0, 95.0))
+          +
+          +    def test_every_floor_uses_unrounded_counts(self):
+          +        for floor in (80, 90, 95, 99):
+          +            passed, total = floor * 1000 - 1, 100000
+          +            self.assertEqual(mod.pass_rate(passed, total), float(floor))
+          +            self.assertFalse(mod.pass_rate_meets_floor(passed, total, float(floor)))
+          +
+          +    def test_actual_gate_blocks_a_rounded_95_percent_measurement(self):
+          +        rows = [{"api_family": "fs", "band": "edge", "status": "fail" if index < 205 else "pass"}
+          +                for index in range(4096)]
+          +        rows[-1]["band"] = "core"
+          +        rows[-2]["band"] = "high-value"
+          +        gate = mod.evaluate_gate({"per_test_results": rows})
+          +        self.assertEqual(gate["current_rate"], 95.0)
+          +        self.assertFalse(gate["overall_threshold_met"])
+          +        self.assertFalse(gate["threshold_met"])
+          +        self.assertTrue(gate["release_blocked"])
+          +
+          +
+          +class TestConstants(unittest.TestCase):
+               def test_bead_section_and_default_contract_size(self):
+                   self.assertEqual(mod.BEAD_ID, "bd-28sz")
+          PATCH
+          git apply --recount --check evidence/exact-threshold.patch
+          git apply --recount evidence/exact-threshold.patch
+          cat > evidence/summary-integrity.patch <<'PATCH'
+          diff --git a/scripts/check_compatibility_corpus_pass_gate.py b/scripts/check_compatibility_corpus_pass_gate.py
+          --- a/scripts/check_compatibility_corpus_pass_gate.py
+          +++ b/scripts/check_compatibility_corpus_pass_gate.py
+          @@ -453,7 +453,9 @@
+               if not value:
+                   return None
+               try:
+          -        return datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+          +        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+          +        # A timezone-free datetime cannot establish an RFC 3339 freshness order.
+          +        return parsed if parsed.utcoffset() is not None else None
+               except ValueError:
+                   return None
+          @@ -474,11 +476,22 @@
+               reported_pct = metric.get("observed_pct")
+          -    if not isinstance(reported_pct, (int, float)) or isinstance(reported_pct, bool):
+          +    try:
+          +        valid_percentage = (isinstance(reported_pct, (int, float))
+          +                            and not isinstance(reported_pct, bool)
+          +                            and math.isfinite(float(reported_pct))
+          +                            and 0.0 <= float(reported_pct) <= 100.0)
+          +    except (ValueError, OverflowError):
+          +        valid_percentage = False
+          +    if not valid_percentage:
+                   findings.append({
+                       "finding": "SUMMARY_OBSERVED_PCT_MISSING",
+          -            "detail": "metric.observed_pct is absent or non-numeric",
+          +            "detail": "metric.observed_pct must be a finite numeric percentage in 0..100",
+                   })
+          @@ -488,6 +501,11 @@
+               summary_ts = _parse_rfc3339(str(summary.get("timestamp", "")))
+               results_ts = _parse_rfc3339(results_generated_at or "")
+          +    if results_generated_at and results_ts is None:
+          +        findings.append({
+          +            "finding": "RESULTS_TIMESTAMP_UNPARSEABLE",
+          +            "detail": f"results generated_at_utc={results_generated_at!r} is not timezone-aware RFC 3339",
+          +        })
+               if summary_ts is None:
+                   findings.append({
+                       "finding": "SUMMARY_TIMESTAMP_UNPARSEABLE",
+          diff --git a/tests/test_check_compatibility_corpus_pass_gate.py b/tests/test_check_compatibility_corpus_pass_gate.py
+          --- a/tests/test_check_compatibility_corpus_pass_gate.py
+          +++ b/tests/test_check_compatibility_corpus_pass_gate.py
+          @@ -450,3 +450,39 @@
+          -class TestConstants(unittest.TestCase):
+          +class TestSummaryMeasurementIntegrity(unittest.TestCase):
+          +    def summary(self, percentage=100.0, timestamp="2026-09-17T00:00:00Z"):
+          +        return {"verdict": "GREEN", "timestamp": timestamp, "metric": {"observed_pct": percentage}}
+          +
+          +    def test_nonfinite_and_out_of_range_metrics_cannot_satisfy_summary_consistency(self):
+          +        for value in (float("nan"), float("inf"), -float("inf"), -1, 101, 10**1000, True, "100", None):
+          +            with self.subTest(value=repr(value)[:30]):
+          +                findings = mod.evaluate_summary_consistency(self.summary(value), 100.0, True, "2026-09-16T00:00:00Z")
+          +                self.assertIn("SUMMARY_OBSERVED_PCT_MISSING", {item["finding"] for item in findings})
+          +
+          +    def test_naive_summary_timestamp_fails_without_raising_type_error(self):
+          +        findings = mod.evaluate_summary_consistency(self.summary(timestamp="2026-09-17T00:00:00"),
+          +            100.0, True, "2026-09-16T00:00:00Z")
+          +        self.assertIn("SUMMARY_TIMESTAMP_UNPARSEABLE", {item["finding"] for item in findings})
+          +
+          +    def test_declared_invalid_results_timestamp_is_not_silently_ignored(self):
+          +        for value in ("2026-09-16T00:00:00", "not-a-timestamp"):
+          +            findings = mod.evaluate_summary_consistency(self.summary(), 100.0, True, value)
+          +            self.assertIn("RESULTS_TIMESTAMP_UNPARSEABLE", {item["finding"] for item in findings})
+          +
+          +    def test_equivalent_offset_timestamps_are_compared_as_instants(self):
+          +        self.assertEqual(mod.evaluate_summary_consistency(self.summary(timestamp="2026-09-16T20:00:00-04:00"),
+          +            100.0, True, "2026-09-17T00:00:00Z"), [])
+          +        findings = mod.evaluate_summary_consistency(self.summary(timestamp="2026-09-16T19:59:59-04:00"),
+          +            100.0, True, "2026-09-17T00:00:00Z")
+          +        self.assertIn("SUMMARY_STALE_VS_RESULTS", {item["finding"] for item in findings})
+          +
+          +
+          +class TestConstants(unittest.TestCase):
+               def test_bead_section_and_default_contract_size(self):
+                   self.assertEqual(mod.BEAD_ID, "bd-28sz")
+          PATCH
+          git apply --recount --check evidence/summary-integrity.patch
+          git apply --recount evidence/summary-integrity.patch
           git diff --check
-      - name: Execute full Python and actual Rust admission regressions
+      - name: Execute the complete Python gate and production Rust admission tests
         shell: bash
         run: |
           set -euo pipefail
           python3 -m unittest discover -s tests -p test_check_compatibility_corpus_pass_gate.py -v 2>&1 | tee evidence/python-tests.log
+          python3 -m py_compile scripts/check_compatibility_corpus_pass_gate.py tests/test_check_compatibility_corpus_pass_gate.py
           bash evidence/test-rust.sh
       - name: Publish tested corrections directly to main
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -246,7 +674,7 @@ jobs:
           if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'fix(compat): reject matching failures and bind summaries to measured reports' -m 'Require successful canonical executions in live Rust, artifact construction, and Python verification. Keep complete failures as valid FAIL evidence. Custom report validation no longer compares unrelated charter data; --summary verifies an explicitly bound pair and cannot bypass the canonical report summary. Full Python tests and actual selected Rust live/writer/digest tests passed.'
+            git commit -m 'fix(compat): enforce successful execution, immutable floors and bound summary evidence' -m 'Reject matching runtime failures as PASS; preserve Node-canonical success. Merge mandatory band floors and reject weakened/invalid thresholds. Compare unrounded counts. Validate explicitly paired summaries without confusing custom reports with canonical charter data. Full Python gate tests and selected production Rust live/writer/digest tests passed. No canonical artifacts, threshold constants or digest schemas changed.'
             git push origin HEAD:main
           fi
           git rev-parse HEAD > evidence/published-revision.txt
