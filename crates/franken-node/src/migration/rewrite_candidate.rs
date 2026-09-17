@@ -4,7 +4,7 @@
 //! capture, invocation, supervision and comparison implementations. Preparing
 //! a candidate never executes code or edits the caller's source tree.
 
-use super::{EntryData, Snapshot, SuiteReport, budget, matched_tests, run_captured};
+use super::{EntryData, FailureArchive, Snapshot, SuiteReport, budget, matched_tests, run_captured_with_archive};
 use anyhow::{Context, Result, ensure};
 use std::collections::BTreeSet;
 use std::fs;
@@ -144,10 +144,21 @@ impl RewriteCandidate {
         Ok(())
     }
 
+    /// Validate the prepared bytes. Caller-selected failure retention uses the
+    /// same original and candidate snapshots; it neither installs nor reruns a
+    /// rejected rewrite. A saved capsule is never installation authorization.
     pub fn validate_native(&self, native_executable: &Path) -> Result<SuiteReport> {
+        self.validate_native_with(native_executable,
+            || FailureArchive::from_environment([&self.project, &self.project]))
+    }
+
+    fn validate_native_with(&self, native_executable: &Path,
+        archive: impl FnOnce() -> Result<Option<FailureArchive>>) -> Result<SuiteReport> {
         let candidate = self.candidate.as_ref().context("checked rewrite candidate is not prepared")?;
-        run_captured((&self.project, &self.project), (&self.original, candidate),
-            native_executable, self.deadline, true)
+        budget(self.deadline)?;
+        let archive = archive()?;
+        run_captured_with_archive((&self.project, &self.project), (&self.original, candidate),
+            native_executable, self.deadline, true, archive)
     }
 
     /// The whole tree, including non-rewritten dependencies and configuration,
@@ -355,5 +366,54 @@ mod tests {
         assert_eq!(candidate.test_inventory().unwrap(), [PathBuf::from("case.test.js")]);
         assert!(candidate.candidate.is_none());
         assert!(candidate.ensure_source_unchanged().is_err());
+    }
+
+    #[test]
+    fn rejected_prepared_bytes_can_be_replayed_and_exported_without_installation() {
+        use super::super::{FailureCapture, native_replay};
+        let root = project();
+        let outputs = tempfile::tempdir().unwrap();
+        let mut candidate = capture(root.path());
+        candidate.prepare(&[Replacement { path: "case.test.js", before: b"console.log(42);",
+            after: b"console.log('prepared candidate');" }]).unwrap();
+        // A real, deliberately failing executable exercises refusal and capture;
+        // it is not a replacement native engine or a compatibility claim.
+        let report = candidate.validate_native_with(Path::new("/bin/false"),
+            || FailureArchive::reserve(outputs.path(), [root.path(), root.path()]).map(Some)).unwrap();
+        assert_eq!(report.verdict, "FAIL");
+        assert!(candidate.check_validation(&report).is_err());
+        candidate.ensure_source_unchanged().unwrap();
+        let Some(FailureCapture::Saved { capsule_path, content_sha256 }) = &report.failure_capture
+            else { panic!("{report:#?}") };
+        assert_ne!(report.input_sha256, report.candidate_input_sha256);
+        let summary = native_replay::inspect(capsule_path).unwrap();
+        assert_eq!(summary.input_sha256, candidate.original.digest);
+        assert_eq!(summary.candidate_input_sha256, candidate.candidate.as_ref().unwrap().digest);
+        let exported = native_replay::export_inputs(capsule_path, content_sha256, &outputs.path().join("reproducer")).unwrap();
+        assert_eq!(fs::read(exported.destination.join("original/case.test.js")).unwrap(), b"console.log(42);");
+        assert_eq!(fs::read(exported.destination.join("candidate/case.test.js")).unwrap(), b"console.log('prepared candidate');");
+        let replayed = native_replay::replay(capsule_path, content_sha256, Path::new("/bin/false"), false).unwrap();
+        assert_eq!(replayed.verdict, "REPRODUCED");
+        assert_eq!(replayed.validation.cases, report.cases);
+        assert_eq!(fs::read(root.path().join("case.test.js")).unwrap(), b"console.log(42);");
+        assert!(!root.path().join(".migrate-backup").exists());
+    }
+
+    #[test]
+    fn unprepared_expired_and_invalid_archive_requests_never_dispatch() {
+        let root = project();
+        let mut candidate = capture(root.path());
+        let error = candidate.validate_native_with(Path::new("/absent/native"),
+            || panic!("unprepared candidate cannot reserve storage")).unwrap_err();
+        assert!(error.to_string().contains("not prepared"));
+        candidate.prepare(&[]).unwrap();
+        let error = candidate.validate_native_with(Path::new("/absent/native"),
+            || FailureArchive::reserve(root.path(), [root.path(), root.path()]).map(Some)).unwrap_err();
+        assert!(error.to_string().contains("outside"));
+        candidate.deadline = Instant::now();
+        let error = candidate.validate_native_with(Path::new("/absent/native"),
+            || panic!("expired validation cannot reserve storage")).unwrap_err();
+        assert!(error.to_string().contains("budget"));
+        assert_eq!(fs::read(root.path().join("case.test.js")).unwrap(), b"console.log(42);");
     }
 }
