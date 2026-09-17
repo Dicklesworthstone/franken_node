@@ -46,7 +46,7 @@ franken-node migrate rewrite /path/to/project --json
 franken-node migrate rewrite /path/to/project --apply --json
 ```
 
-The command's transformation rules are unchanged. Ordinary `--apply` does not prove JavaScript behavioral equivalence. Add `--verify` for the checked installation path described below, or use migration validation against preserved original and rewritten inputs before making deployment decisions; see [bd-2st_contract.md](bd-2st_contract.md).
+The transaction writer does not decide transformation semantics; the ESM transformation rules are described below. Ordinary `--apply` does not prove JavaScript behavioral equivalence. Add `--verify` for the checked installation path described below, or use migration validation against preserved original and rewritten inputs before making deployment decisions; see [bd-2st_contract.md](bd-2st_contract.md).
 
 ### Complete-plan preflight and installation
 
@@ -86,6 +86,24 @@ rch exec -- cargo test -p frankenengine-node --features test-support \
 ```
 
 The read-only `Native rewrite transactions` workflow additionally compiles the exact transaction module in standalone and nested layouts and compiles the complete primary migration module with its production timeout configuration. These focused builds do not substitute for a full product/engine build.
+
+## Syntax-Aware ESM Specifier Rewriting
+
+The primary ESM transformation uses `migration/module_specifiers.rs` and the existing Tree-sitter JavaScript/JSX grammar. It no longer treats individual source lines as import declarations. No new command or flag is required: dry-run planning, ordinary apply and checked apply all consume the same transformation. Existing file/package-based module-format classification remains in force.
+
+Recognized forms include multiline default/named/namespace imports, side-effect imports, compact declarations without optional spaces, multiple declarations on one line, named/star/namespace re-exports, and literal dynamic `import()` expressions. Literal dynamic imports may use quotes or a template without interpolation; executable imports inside template substitutions are visited. Import attributes, dynamic-import options, comments around tokens, declaration placement and dynamic-import timing are retained.
+
+Only the byte ranges inside recognized module-specifier literals may change. Hashbangs, CRLF/newlines, Unicode, quote style, comments, regexes, ordinary strings, template raw text and JSX text remain unchanged. The rewriter does not hoist declarations, regenerate the AST as formatted source, rename files, add package configuration, or convert an ESM source to a different module format.
+
+Builtin matching uses an exact allowlist for the public unprefixed Node 20/22 baseline. Recognized subpaths such as `fs/promises`, `path/posix`, `stream/web` and `util/types` become explicit `node:` imports. Arbitrary package subpaths such as `fs/custom` and `stream/adapter` remain untouched, as do relative paths, URLs, existing `node:` specifiers and unknown package names. Unprefixed names of prefix-only builtins, such as `test`, are not rewritten into a different module. The same exact normalizer is shared by the existing CommonJS conversion path; that conversion's format/hoisting behavior is otherwise unchanged.
+
+Malformed or unsupported syntax, computed/interpolated imports, escaped specifier literals, and recognized CommonJS calls/export mutations in ESM-classified source require manual review. Refusal returns the entire source unchanged and creates no partial replacement for that file. The grammar does not implement typed TypeScript: such source is explicitly reported for manual migration instead of guessed from lines. Conservative CommonJS detection does not prove lexical binding identity and may require review for a locally defined `require` function.
+
+Planning is bounded to 10 MiB of source, one million visited syntax nodes, 65,536 edits and a two-second parse/traversal budget. The parse callback supports cancellation; AST traversal is iterative rather than recursive. Proposed edits are checked for overlap before the result is constructed in one forward pass. Parser/budget failure is a manual finding, not an empty-success substitute. Existing whole-project transaction limits still apply.
+
+The ESM rewrite changes only specifier spelling, not the product's security policy or capability grants. Ordinary apply may still install independently valid changes in other files while reporting manual-review items; checked apply refuses installation when review items remain. Explicit builtin spelling does not by itself certify compatibility with the selected native runtime.
+
+Regression coverage includes exact byte-preservation tests and actual Node execution before and after transformation. Public `run_rewrite` tests exercise multiline imports, dynamic imports, third-party package exports, idempotence, immutable backups, executable modes and native rollback to the original bytes. JSX tests establish source preservation, not direct Node JSX execution. These tests validate the transformer and writer; they are not native Franken compatibility measurements or a full product build.
 
 ## Checked Application Before Installation (Linux)
 
@@ -163,6 +181,8 @@ Rollback has the same local trust and concurrency limits as the writer: it is no
    nonempty process/filesystem PASS and a fresh captured-input identity check.
 10. Native rollback previews are nonmutating; explicit restoration preflights all
     sources and backups, preserves later user edits, and records resumable intent.
+11. ESM specifier migration edits only recognized syntax-node ranges; a refused
+    source produces no partial replacement, and builtin matching is exact.
 
 ## References
 
