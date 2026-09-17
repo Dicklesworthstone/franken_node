@@ -37,6 +37,15 @@ impl RewriteCandidate {
 
     pub fn input_sha256(&self) -> &str { &self.original.digest }
 
+    /// Inspect the exact captured selection without resolving a runtime,
+    /// executing a test, preparing replacements or touching the source tree.
+    /// A later execution must capture/recheck its own inputs; this is not a
+    /// reusable approval token or a claim that the selected tests passed.
+    pub fn test_inventory(&self) -> Result<Vec<PathBuf>> {
+        budget(self.deadline)?;
+        self.original.tests()
+    }
+
     /// Destination must not exist. The owner keeps its private parent alive.
     pub fn stage_original(&self, destination: &Path) -> Result<()> {
         self.original.stage(destination, self.deadline)
@@ -336,5 +345,15 @@ mod tests {
         }
         candidate.deadline = Instant::now();
         assert!(candidate.check_validation(&report).is_err());
+    }
+
+    #[test]
+    fn inventory_inspection_uses_captured_bytes_without_preparing_or_executing() {
+        let root = project();
+        let candidate = capture(root.path());
+        fs::write(root.path().join("other.test.js"), "throw new Error('not captured');").unwrap();
+        assert_eq!(candidate.test_inventory().unwrap(), [PathBuf::from("case.test.js")]);
+        assert!(candidate.candidate.is_none());
+        assert!(candidate.ensure_source_unchanged().is_err());
     }
 }
