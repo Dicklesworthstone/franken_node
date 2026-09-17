@@ -1,0 +1,120 @@
+name: Native product oracle
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/franken-node/src/migration/**'
+      - 'tools/migration-validator/**'
+      - '.github/workflows/native-product-oracle.yml'
+  pull_request:
+    paths:
+      - 'crates/franken-node/src/migration/**'
+      - 'tools/migration-validator/**'
+      - '.github/workflows/native-product-oracle.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  real-references:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+      - name: Compile and exercise production comparison and privacy regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal --component clippy
+          rustc +stable --version
+          node --version
+          bun --version
+          git rev-parse HEAD
+          manifest=tools/migration-validator/Cargo.toml
+          cargo +stable test --manifest-path "$manifest" product_oracle:: -- --nocapture --test-threads=2
+          cargo +stable test --manifest-path "$manifest" three_runtime -- --nocapture --test-threads=2
+          cargo +stable test --manifest-path "$manifest" failure_capture:: -- --nocapture --test-threads=2
+          cargo +stable test --manifest-path "$manifest" archive_configuration_is_not_forwarded -- --nocapture
+          cargo +stable test --manifest-path "$manifest" captured_sources_are_staged -- --nocapture
+          cargo +stable build --manifest-path "$manifest"
+      - name: Real Node and Bun reference agreement and disagreement through the CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import shutil
+          import subprocess
+          import tempfile
+          from pathlib import Path
+
+          binary = Path('tools/migration-validator/target/debug/franken-migration-suite').resolve()
+          bun = shutil.which('bun')
+          node = shutil.which('node')
+          assert bun and node, 'Both actual reference runtimes are mandatory'
+          # /bin/false is a deliberately failing native leg, NEVER a stand-in
+          # claiming to implement native Franken semantics. These cases prove
+          # the real reference integration and fail-closed operator behavior.
+          with tempfile.TemporaryDirectory(prefix='product-oracle-', dir=os.environ['RUNNER_TEMP']) as directory:
+              root = Path(directory)
+              original, candidate = root / 'original', root / 'candidate'
+              source = "console.log(42);require('fs').writeFileSync('artifact','same');\n"
+              for project in (original, candidate):
+                  (project / 'scripts').mkdir(parents=True)
+                  (project / '.franken-node').mkdir()
+                  (project / 'scripts/check.js').write_text(source)
+                  (project / 'fixture.test.js').write_text("throw new Error('not an entrypoint');\n")
+                  (project / '.franken-node/migration-tests.json').write_text(json.dumps({
+                      'schema_version': 'franken-node/migration-tests/v1', 'tests': ['scripts/check.js']}))
+              (candidate / 'candidate-only.txt').write_text('different captured inputs')
+              base = [str(binary), str(original), '--migrated-project', str(candidate),
+                      '--native-bin', '/bin/false', '--compare-filesystem', '--execute']
+
+              def run(arguments, expected_exit):
+                  result = subprocess.run(arguments, capture_output=True, text=True, timeout=340)
+                  assert result.returncode == expected_exit, (result.returncode, result.stdout, result.stderr)
+                  return json.loads(result.stdout)
+
+              destination = root / 'measured.json'
+              report = run(base + ['--bun-bin', bun, '--out', str(destination)], 1)
+              assert report['schema_version'] == 'franken-node/product-validation-suite/v1'
+              assert report['verdict'] == 'FAIL' and report['native_divergences'] == 1
+              assert report['reference_failures'] == report['reference_divergences'] == 0
+              assert report['total_tests'] == 1 and report['skipped'] == report['errored'] == 0
+              assert report['input_sha256'] != report['candidate_input_sha256']
+              assert report['distinct_reference_binaries'] is True
+              assert report['node_runtime']['sha256'] != report['bun_runtime']['sha256']
+              row = report['cases'][0]
+              assert row['node'] == row['bun'] and row['node']['exit_code'] == 0
+              assert row['node']['workspace_delta']['changed_paths'] == 1
+              assert row['native']['exit_code'] == 1 and row['outcome'] == 'NATIVE_DIVERGENCE'
+              assert report['release_certification'] is False
+              assert json.loads(destination.read_text())['cases'] == report['cases']
+              assert destination.stat().st_mode & 0o777 == 0o600
+              assert not (original / 'artifact').exists() and not (candidate / 'artifact').exists()
+              assert (original / 'scripts/check.js').read_text() == source
+
+              (original / 'scripts/check.js').write_text("console.log(process.versions.bun ? 'bun' : 'node');\n")
+              disagreement = run(base + ['--bun-bin', bun], 2)
+              assert disagreement['verdict'] == 'INCONCLUSIVE'
+              assert disagreement['reference_divergences'] == 1
+              assert disagreement['cases'][0]['outcome'] == 'REFERENCE_DIVERGENCE'
+              assert disagreement['cases'][0]['native']['exit_code'] == 1
+
+              missing = run(base + ['--bun-bin', str(root / 'missing-bun')], 2)
+              assert missing['verdict'] == 'ERROR' and 'resolve Bun' in missing['error']
+              alias = run(base + ['--bun-bin', node], 2)
+              assert alias['verdict'] == 'ERROR' and 'distinct executable hashes' in alias['error']
+              denied = subprocess.run([str(binary), str(original), '--bun-bin', bun,
+                  '--native-bin', '/bin/false'], capture_output=True, text=True, timeout=10)
+              assert denied.returncode == 2 and '--execute' in denied.stderr
+              print('Real Node/Bun: matching references, native failure, reference disagreement, missing/aliased Bun, private reports and execution consent verified.')
+          PY
+      - name: Strict production and test lint
+        run: cargo +stable clippy --manifest-path tools/migration-validator/Cargo.toml --all-targets -- -D warnings
