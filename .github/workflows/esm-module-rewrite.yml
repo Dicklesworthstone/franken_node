@@ -25,6 +25,7 @@ jobs:
           set -euo pipefail
           mkdir -p evidence
           cat > evidence/integration.patch <<'PATCH'
+          diff --git a/crates/franken-node/src/migration/mod.rs b/crates/franken-node/src/migration/mod.rs
           --- a/crates/franken-node/src/migration/mod.rs
           +++ b/crates/franken-node/src/migration/mod.rs
           @@ -24,6 +24,9 @@
@@ -248,6 +249,7 @@ jobs:
            fn is_lockfile(name: &str) -> bool {
                matches!(
                    name,
+          diff --git a/crates/franken-node/src/migration/module_specifiers.rs b/crates/franken-node/src/migration/module_specifiers.rs
           --- a/crates/franken-node/src/migration/module_specifiers.rs
           +++ b/crates/franken-node/src/migration/module_specifiers.rs
           @@ -143,3 +143,3 @@
