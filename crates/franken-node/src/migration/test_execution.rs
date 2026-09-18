@@ -16,7 +16,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Output;
 use std::time::{Duration, Instant};
 
-/// Environment values can be sensitive; deliberately not Debug or Serialize.
+/// Environment values can be sensitive; Debug deliberately excludes them.
 #[derive(Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Settings {
@@ -26,6 +26,13 @@ pub(super) struct Settings {
     pub(super) stdin: Option<String>,
     #[serde(default, deserialize_with = "unique_map")]
     pub(super) environment: BTreeMap<String, Option<String>>,
+}
+
+impl fmt::Debug for Settings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Settings").field("cwd", &self.cwd).field("stdin", &self.stdin)
+            .field("environment_count", &self.environment.len()).finish_non_exhaustive()
+    }
 }
 
 /// Serde's ordinary map deserializer overwrites duplicate keys. Ambiguous
@@ -150,8 +157,9 @@ pub(super) fn run(snapshot: &Snapshot, settings: &Settings, test: &Path, invocat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::{inventory, matched_execution};
-    use super::super::super::{execute_suite_pair, matched_tests, node_on_path, rewrite_candidate::{Replacement, RewriteCandidate}};
+    use super::super::{inventory, matched_execution, run_test};
+    use super::super::super::{execute_suite_pair, matched_tests, native_replay, node_on_path,
+        product_oracle, rewrite_candidate::{Replacement, RewriteCandidate}};
     use std::fs;
     use std::os::unix::fs::symlink;
 
@@ -271,6 +279,8 @@ mod tests {
         assert!(validate(&mut settings, &entries).is_err());
         settings.environment = (0..5).map(|i| (format!("APP_{i}"), Some("x".repeat(4096)))).collect();
         assert!(validate(&mut settings, &entries).is_err());
+        let settings = Settings { environment: BTreeMap::from([("APP_SECRET".into(), Some("private-value".into()))]), ..Settings::default() };
+        assert!(!format!("{settings:?}").contains("private-value"));
     }
 
     #[test]
@@ -300,5 +310,75 @@ mod tests {
         let input = fs::read(root.path().join("fixtures/input.bin")).unwrap();
         assert!(candidate.prepare(&[Replacement {path:"fixtures/input.bin", before:&input, after:b"different"}])
             .unwrap_err().to_string().contains("stdin bytes differ"));
+    }
+
+    #[test]
+    fn per_case_overrides_remove_values_without_mutating_the_base_environment() {
+        let root = fixture();
+        put(root.path(), "scripts/other.cjs", b"console.log(process.env.APP_MODE,process.env.DROP_ME);console.log(require('fs').readFileSync(0).length);");
+        put(root.path(), ".franken-node/migration-tests.json", br#"{"schema_version":"franken-node/migration-tests/v1","tests":["scripts/check.cjs","scripts/other.cjs"],"execution":{"scripts/check.cjs":{"cwd":"packages/api","stdin":"fixtures/input.bin","environment":{"APP_MODE":"captured","DROP_ME":null}}}}"#);
+        let captured = snapshot(root.path());
+        let workspaces = tempfile::tempdir().unwrap();
+        let environment = BTreeMap::from([(OsString::from("APP_MODE"), OsString::from("ambient")),
+            (OsString::from("DROP_ME"), OsString::from("retained"))]);
+        for (index, test) in ["scripts/check.cjs", "scripts/other.cjs"].into_iter().enumerate() {
+            let workspace = workspaces.path().join(index.to_string());
+            captured.stage(&workspace, Instant::now() + Duration::from_secs(30)).unwrap();
+            let output = run_test(&captured, &node(), Path::new(test), &workspace, &environment,
+                (Duration::from_secs(5), Duration::from_secs(1))).unwrap();
+            assert!(output.status.success());
+            if index == 0 { assert!(output.stdout.ends_with(b"captured package-local true\n")); }
+            else { assert_eq!(output.stdout, b"ambient retained\n0\n"); }
+        }
+        assert_eq!(environment[&OsString::from("APP_MODE")], "ambient");
+    }
+
+    #[test]
+    fn all_three_legs_share_settings_and_record_effects_from_the_workspace_root() {
+        let root = fixture();
+        let captured = snapshot(root.path());
+        let runtime = node();
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let identity = runtime.identity(deadline).unwrap();
+        // Explicit Node/Node/Node exercises orchestration, not brand independence.
+        let report = product_oracle::execute(&captured, &captured, [&runtime, &runtime, &runtime],
+            [identity.clone(), identity.clone(), identity], deadline, Duration::from_secs(5), true).unwrap();
+        assert_eq!(report.verdict, "PASS", "{report:#?}");
+        assert_eq!(report.cases[0].node, report.cases[0].bun);
+        assert_eq!(report.cases[0].node, report.cases[0].native);
+        assert!(!report.distinct_reference_binaries);
+        assert!(serde_json::to_string(&report.cases[0]).unwrap().contains("packages/api/artifact"));
+    }
+
+    #[test]
+    fn pair_and_product_capsules_replay_settings_and_fixture_bytes_not_later_sources() {
+        use native_replay::failure_capture::product;
+        for three in [false, true] {
+            let root = fixture();
+            let output = tempfile::tempdir().unwrap();
+            let capsule = output.path().join("input-capsule.json");
+            let (pin, cases) = if three {
+                // Deliberate empty reference and failing candidate, not Bun/native implementations.
+                let captured = product::capture_project(root.path(), None, Path::new("/bin/false"), Path::new("/bin/true"), true).unwrap();
+                assert_eq!(captured.report.verdict, "INCONCLUSIVE");
+                (captured.write_capsule(&capsule).unwrap().content_sha256, serde_json::to_value(&captured.report.cases).unwrap())
+            } else {
+                let captured = native_replay::capture_project(root.path(), None, Path::new("/bin/false"), true).unwrap();
+                assert_eq!(captured.report.verdict, "FAIL");
+                (captured.write_capsule(&capsule).unwrap().content_sha256, serde_json::to_value(&captured.report.cases).unwrap())
+            };
+            put(root.path(), "fixtures/input.bin", b"changed request");
+            put(root.path(), "packages/api/local.txt", b"later package");
+            manifest(root.path(), serde_json::json!({}));
+            let replay = if three {
+                serde_json::to_value(product::replay(&capsule, &pin, Path::new("/bin/false"), Path::new("/bin/true"), false).unwrap()).unwrap()
+            } else {
+                serde_json::to_value(native_replay::replay(&capsule, &pin, Path::new("/bin/false"), false).unwrap()).unwrap()
+            };
+            assert_eq!(replay["verdict"], "REPRODUCED");
+            assert_eq!(replay["validation"]["cases"], cases);
+            assert!(!root.path().join("packages/api/artifact").exists());
+            assert_eq!(fs::read(root.path().join("fixtures/input.bin")).unwrap(), b"changed request");
+        }
     }
 }

@@ -1,15 +1,17 @@
-//! Test selection from captured inputs, never the mutable source tree.
-//!
-//! An optional `.franken-node/migration-tests.json` selects standalone JS/TS
-//! harnesses explicitly. Without it, retain the existing discovery rules. A
-//! malformed explicit manifest is an error, never permission to fall back to
-//! a smaller heuristic suite. The manifest is part of the input tree hash.
+//! Test selection and execution settings from captured inputs, never the
+//! mutable source tree. Invalid manifests fail closed without heuristic fallback.
 
-use super::{Entry, EntryData, MAX_PATH_BYTES, MAX_TESTS, excluded_from_discovery, is_test};
+use super::{Entry, EntryData, Invocation, MAX_PATH_BYTES, MAX_TESTS, Snapshot, excluded_from_discovery, is_test};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
+use std::process::Output;
+use std::time::{Duration, Instant};
+
+#[path = "test_execution.rs"]
+mod execution;
 
 const MANIFEST_PATH: &str = ".franken-node/migration-tests.json";
 const MANIFEST_SCHEMA: &str = "franken-node/migration-tests/v1";
@@ -20,18 +22,24 @@ const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 struct Manifest {
     schema_version: String,
     tests: Vec<String>,
+    #[serde(default, deserialize_with = "execution::unique_map")]
+    execution: BTreeMap<String, execution::Settings>,
 }
 
 pub(super) fn discover(entries: &BTreeMap<PathBuf, Entry>) -> Result<Vec<PathBuf>> {
+    Ok(inventory(entries)?.into_keys().collect())
+}
+
+fn inventory(entries: &BTreeMap<PathBuf, Entry>) -> Result<BTreeMap<PathBuf, execution::Settings>> {
     // Capture deliberately does not descend through symlinks. Do not silently
     // ignore a manifest hidden behind a linked configuration directory.
     ensure!(!entries.get(Path::new(".franken-node"))
         .is_some_and(|entry| matches!(entry.data, EntryData::Link(_))),
         "migration test configuration directory must not be a symlink");
     let Some(entry) = entries.get(Path::new(MANIFEST_PATH)) else {
-        let tests: Vec<_> = entries.iter().filter(|(path, entry)|
+        let tests: BTreeMap<_, _> = entries.iter().filter(|(path, entry)|
             !matches!(entry.data, EntryData::Directory) && is_test(path))
-            .map(|(path, _)| path.clone()).collect();
+            .map(|(path, _)| (path.clone(), execution::Settings::default())).collect();
         ensure!(tests.len() <= MAX_TESTS, "native validation test limit exceeded");
         return Ok(tests);
     };
@@ -43,7 +51,7 @@ pub(super) fn discover(entries: &BTreeMap<PathBuf, Entry>) -> Result<Vec<PathBuf
     ensure!(manifest.schema_version == MANIFEST_SCHEMA, "unsupported migration test manifest schema");
     ensure!(!manifest.tests.is_empty(), "explicit migration test inventory must not be empty");
     ensure!(manifest.tests.len() <= MAX_TESTS, "native validation test limit exceeded");
-    let mut selected = BTreeSet::new();
+    let mut selected = BTreeMap::new();
     for name in manifest.tests {
         let path = Path::new(&name);
         ensure!(!name.is_empty() && name.len() <= MAX_PATH_BYTES
@@ -59,9 +67,40 @@ pub(super) fn discover(entries: &BTreeMap<PathBuf, Entry>) -> Result<Vec<PathBuf
             "migration test manifest requires a standalone JS/TS entrypoint: {name}");
         ensure!(matches!(entries.get(path).map(|entry| &entry.data), Some(EntryData::File(_))),
             "migration test entrypoint is missing or is not a regular captured file: {name}");
-        ensure!(selected.insert(path.to_path_buf()), "duplicate migration test entrypoint: {name}");
+        ensure!(selected.insert(path.to_path_buf(), execution::Settings::default()).is_none(),
+            "duplicate migration test entrypoint: {name}");
     }
-    Ok(selected.into_iter().collect())
+    for (name, mut settings) in manifest.execution {
+        let target = selected.get_mut(Path::new(&name)).context("execution settings refer to an unselected test")?;
+        // Exact key spelling is mandatory; Path equality alone normalizes ./.
+        ensure!(name == Path::new(&name).components().map(|part| part.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>().join("/"), "noncanonical execution test key");
+        execution::validate(&mut settings, entries)?;
+        *target = settings;
+    }
+    Ok(selected)
+}
+
+/// Identical test paths are not sufficient: a candidate cannot change the
+/// input request, working directory or configuration that defines the test.
+/// Used by live runs, checked preparation, imported capsules and reduction.
+pub(super) fn matched_execution(original: &Snapshot, candidate: &Snapshot) -> Result<()> {
+    let reference = inventory(&original.entries)?;
+    let native = inventory(&candidate.entries)?;
+    ensure!(reference == native, "test execution settings differ between original and candidate");
+    for settings in reference.values() {
+        ensure!(execution::input(settings, original)? == execution::input(settings, candidate)?,
+            "captured test stdin bytes differ between original and candidate");
+    }
+    Ok(())
+}
+
+pub(super) fn run_test(snapshot: &Snapshot, invocation: &Invocation, test: &Path, workspace: &Path,
+    environment: &BTreeMap<OsString, OsString>, timing: (Duration, Duration)) -> Result<Output> {
+    let deadline = Instant::now().checked_add(timing.0).context("test execution deadline overflow")?;
+    let tests = inventory(&snapshot.entries)?;
+    let settings = tests.get(test).context("test is not present in the captured execution inventory")?;
+    execution::run(snapshot, settings, test, invocation, workspace, environment, (deadline, timing.1))
 }
 
 #[cfg(test)]
@@ -256,17 +295,15 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         write(root.path(), "scripts/check.js", "console.log(42);");
         manifest(root.path(), &["scripts/check.js"]);
-        let mut candidate = RewriteCandidate::capture(root.path(),
-            Instant::now() + Duration::from_secs(90)).unwrap();
-        candidate.prepare(&[Replacement { path: "scripts/check.js",
-            before: b"console.log(42);", after: b"console.log(6*7);" }]).unwrap();
+        let mut candidate = RewriteCandidate::capture(root.path(), Instant::now() + Duration::from_secs(90)).unwrap();
+        candidate.prepare(&[Replacement { path: "scripts/check.js", before: b"console.log(42);", after: b"console.log(6*7);" }]).unwrap();
         let report = candidate.validate_node_pair().unwrap();
         candidate.check_validation(&report).unwrap();
         assert_eq!(report.cases[0].test, "scripts/check.js");
         assert_ne!(report.input_sha256, report.candidate_input_sha256);
         candidate.ensure_source_unchanged().unwrap();
         let raw = fs::read(root.path().join(MANIFEST_PATH)).unwrap();
-        assert!(candidate.prepare(&[Replacement { path: MANIFEST_PATH,
-            before: &raw, after: b"{}" }]).unwrap_err().to_string().contains("reserved metadata"));
+        assert!(candidate.prepare(&[Replacement { path: MANIFEST_PATH, before: &raw, after: b"{}" }])
+            .unwrap_err().to_string().contains("reserved metadata"));
     }
 }

@@ -9,7 +9,7 @@
 
 use super::{CapturedInputs, DRAIN_TIMEOUT, Invocation, LEG_TIMEOUT, RunObservation,
     RuntimeIdentity, Snapshot, TOTAL_TIMEOUT, budget, matched_tests, observe,
-    runtime_invocations, smoke_supervisor, workspace_effects};
+    runtime_invocations, test_inventory, workspace_effects};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -24,13 +24,7 @@ const ROLES: [&str; 3] = ["node", "bun", "native"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum CaseOutcome {
-    Match,
-    ReferenceFailure,
-    ReferenceDivergence,
-    NativeDivergence,
-    Error,
-}
+pub enum CaseOutcome { Match, ReferenceFailure, ReferenceDivergence, NativeDivergence, Error }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProductCase {
@@ -120,9 +114,8 @@ impl ProductReport {
                     && observation.workspace_delta.as_ref().is_some_and(|delta| digest(&delta.sha256)),
                     "three-runtime evidence contains unsuccessful or incomplete observations: {}", row.test);
             }
-            // Compare the observations themselves, not only the reported case
-            // outcome/divergence list. In particular, Bun cannot disappear at
-            // the installation boundary or disagree only in filesystem effects.
+            // Compare observations, not just reported outcomes. Bun cannot
+            // disappear or disagree only in filesystem effects at admission.
             ensure!(node == bun && node == native,
                 "three-runtime evidence contains unequal process or workspace observations: {}", row.test);
         }
@@ -131,12 +124,8 @@ impl ProductReport {
 }
 
 /// Run only after explicit operator approval of trusted project execution.
-///
-/// Both references run the original captured project. The native binary runs
-/// the captured candidate. Missing Bun, mismatched inventories and aliased
-/// reference binaries cannot silently fall back to a two-runtime comparison.
-/// The explicitly selected Bun executable is trusted; this is not runtime-brand
-/// authentication. Ambient and external effects remain outside isolation.
+/// Both references run the original capture and native runs the candidate.
+/// Missing/aliased Bun and mismatched inventories never trigger pair fallback.
 pub fn run_project_comparison(project: &Path, migrated_project: Option<&Path>,
     native_executable: &Path, bun_executable: &Path, compare_filesystem: bool) -> Result<ProductReport> {
     let deadline = Instant::now() + TOTAL_TIMEOUT;
@@ -146,8 +135,8 @@ pub fn run_project_comparison(project: &Path, migrated_project: Option<&Path>,
         deadline, compare_filesystem)
 }
 
-/// Shared with checked rewrite: execute its prepared in-memory candidate,
-/// never recapture the caller's unchanged tree as the proposed rewrite.
+/// Execute checked rewrite's prepared in-memory candidate, never recapture
+/// the caller's unchanged tree as the proposed rewrite.
 pub(super) fn run_captured(projects: [&Path; 2], snapshots: [&Snapshot; 2],
     native_executable: &Path, bun_executable: &Path, deadline: Instant,
     compare_filesystem: bool) -> Result<ProductReport> {
@@ -166,13 +155,11 @@ pub(super) fn run_captured(projects: [&Path; 2], snapshots: [&Snapshot; 2],
         ensure!(metadata.is_file() && metadata.permissions().mode() & 0o111 != 0,
             "{role} runtime must be an executable regular file");
     }
-    // Fingerprint all three before any guest starts. A renamed/copy-of-Node
-    // reference is not a second oracle; compare bytes, not only path strings.
+    // Different bytes do not authenticate brands; local selection is trusted.
     let identities = [node.identity(deadline)?, bun.identity(deadline)?, native.identity(deadline)?];
     ensure!(identities[0].sha256 != identities[1].sha256,
         "Node and Bun references must have distinct executable hashes");
-    execute(snapshots[0], snapshots[1], runtimes, identities,
-        deadline, LEG_TIMEOUT, compare_filesystem)
+    execute(snapshots[0], snapshots[1], runtimes, identities, deadline, LEG_TIMEOUT, compare_filesystem)
 }
 
 #[derive(Default)]
@@ -195,19 +182,15 @@ fn measure(snapshot: &Snapshot, invocation: &Invocation, test: &Path, workspace:
             .transpose().context("initial workspace observation failed")?;
         budget(deadline)?;
         let timeout = leg_timeout.min(deadline.saturating_duration_since(Instant::now()));
-        let output = smoke_supervisor::run_command_with_timeout(
-            &mut invocation.command(test, workspace, environment), timeout, DRAIN_TIMEOUT)
-            .context("execution failed")?;
-        // Keep completed process evidence even when final filesystem collection
-        // fails. No truncated output or incomplete effect set can match.
+        let output = test_inventory::run_test(snapshot, invocation, test, workspace,
+            environment, (timeout, DRAIN_TIMEOUT)).context("execution failed")?;
+        // Keep completed evidence even when final filesystem collection fails.
         leg.observation = Some(observe(&output));
         leg.output = Some(output);
         if let Some(before) = before {
-            let after = workspace_effects::observe(workspace, deadline)
-                .context("final workspace observation failed")?;
+            let after = workspace_effects::observe(workspace, deadline).context("final workspace observation failed")?;
             let delta = workspace_effects::delta(&before, &after);
-            leg.observation.as_mut().expect("process observed").workspace_delta =
-                Some(workspace_effects::summarize(&delta)?);
+            leg.observation.as_mut().expect("process observed").workspace_delta = Some(workspace_effects::summarize(&delta)?);
             leg.delta = Some(delta);
         }
         Ok(())
@@ -255,8 +238,7 @@ fn classify(test: &Path, legs: [Leg; 3], filesystem: bool) -> ProductCase {
         node: node.observation, bun: bun.observation, native: native.observation, divergences, errors }
 }
 
-// Shared by live comparison and pinned replay; callers establish trusted local
-// runtime identities before dispatch. Neither path imports commands from data.
+// Shared by live comparison and pinned replay; runtime commands stay local.
 pub(super) fn execute(original: &Snapshot, candidate: &Snapshot, runtimes: [&Invocation; 3],
     identities: [RuntimeIdentity; 3], deadline: Instant, leg_timeout: Duration,
     filesystem: bool) -> Result<ProductReport> {
@@ -308,7 +290,7 @@ pub(super) fn execute(original: &Snapshot, candidate: &Snapshot, runtimes: [&Inv
         }
         report.cases.push(row);
     }
-    // Identity changes are infrastructure errors even after three-way agreement.
+    // Identity changes remain infrastructure errors after three-way agreement.
     for ((role, invocation), before) in ROLES.into_iter().zip(runtimes)
         .zip([&report.node_runtime, &report.bun_runtime, &report.native_runtime]) {
         match invocation.identity(deadline) {
@@ -336,22 +318,19 @@ mod tests {
     fn invocation(role: &str) -> Invocation {
         Invocation { executable: node_on_path().unwrap(), before: Vec::new(), after: vec![role.into()] }
     }
-    // Explicit real Node invocations with role arguments test the three-leg
-    // orchestration. They do NOT establish Bun or native compatibility. The
-    // public entrypoint separately refuses byte-identical Node/Bun references.
+    // Explicit Node invocations with role arguments test orchestration, NOT
+    // Bun/native compatibility. The public entrypoint refuses aliased references.
     fn measured(original: &Path, candidate: Option<&Path>, filesystem: bool) -> ProductReport {
         let deadline = Instant::now() + Duration::from_secs(120);
         let inputs = CapturedInputs::capture(original, candidate, deadline).unwrap();
         measured_inputs(&inputs, filesystem, deadline, Duration::from_secs(5))
     }
-    fn measured_inputs(inputs: &CapturedInputs, filesystem: bool, deadline: Instant,
-        timeout: Duration) -> ProductReport {
+    fn measured_inputs(inputs: &CapturedInputs, filesystem: bool, deadline: Instant, timeout: Duration) -> ProductReport {
         let node = invocation("node");
         let bun = invocation("bun");
         let native = invocation("native");
         let identities = [node.identity(deadline).unwrap(), bun.identity(deadline).unwrap(), native.identity(deadline).unwrap()];
-        execute(&inputs.reference, inputs.candidate_snapshot(), [&node, &bun, &native],
-            identities, deadline, timeout, filesystem).unwrap()
+        execute(&inputs.reference, inputs.candidate_snapshot(), [&node, &bun, &native], identities, deadline, timeout, filesystem).unwrap()
     }
 
     #[test]
@@ -490,8 +469,7 @@ mod tests {
         write(root.path(), "scripts/check.js", &format!(
             "require('fs').appendFileSync({},process.argv[2]+'\\n');console.log(42);", serde_json::to_string(&marker).unwrap()));
         write(root.path(), "fixture.test.js", "throw new Error('not an entrypoint');");
-        write(root.path(), ".franken-node/migration-tests.json",
-            r#"{"schema_version":"franken-node/migration-tests/v1","tests":["scripts/check.js"]}"#);
+        write(root.path(), ".franken-node/migration-tests.json", r#"{"schema_version":"franken-node/migration-tests/v1","tests":["scripts/check.js"]}"#);
         let report = measured(root.path(), None, true);
         assert_eq!(report.verdict, "PASS");
         assert_eq!(report.total_tests, 1);
@@ -503,8 +481,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let marker = outside.path().join("executed");
-        write(root.path(), "a.test.js", &format!("require('fs').writeFileSync({},'bad');",
-            serde_json::to_string(&marker).unwrap()));
+        write(root.path(), "a.test.js", &format!("require('fs').writeFileSync({},'bad');", serde_json::to_string(&marker).unwrap()));
         let renamed = outside.path().join("not-bun");
         fs::copy(node_on_path().unwrap(), &renamed).unwrap();
         let error = run_project_comparison(root.path(), None, Path::new("/bin/false"), &renamed, false).unwrap_err();
@@ -555,9 +532,9 @@ mod tests {
         let reference = Snapshot::capture(original.path(), deadline).unwrap();
         let changed = Snapshot::capture(candidate.path(), deadline).unwrap();
         let missing = Path::new("/absent/runtime");
-        assert!(run_captured([original.path(), candidate.path()], [&reference, &changed],
-            missing, missing, deadline, true).unwrap_err().to_string().contains("test inventories differ"));
-        assert!(run_captured([original.path(), original.path()], [&reference, &reference],
-            missing, missing, Instant::now(), true).unwrap_err().to_string().contains("budget"));
+        assert!(run_captured([original.path(), candidate.path()], [&reference, &changed], missing, missing, deadline, true)
+            .unwrap_err().to_string().contains("test inventories differ"));
+        assert!(run_captured([original.path(), original.path()], [&reference, &reference], missing, missing, Instant::now(), true)
+            .unwrap_err().to_string().contains("budget"));
     }
 }

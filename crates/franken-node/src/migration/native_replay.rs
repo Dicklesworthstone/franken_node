@@ -107,7 +107,7 @@ fn implementation_hash() -> String {
     hash.update(b"franken-node/native-replay-implementation/v1\0");
     for source in [include_str!("native_replay.rs"), include_str!("validation_suite.rs"),
         include_str!("smoke_supervisor.rs"), include_str!("workspace_effects.rs"),
-        include_str!("test_inventory.rs")] {
+        include_str!("test_inventory.rs"), include_str!("test_execution.rs")] {
         hash.update((source.len() as u64).to_le_bytes());
         hash.update(source.as_bytes());
     }

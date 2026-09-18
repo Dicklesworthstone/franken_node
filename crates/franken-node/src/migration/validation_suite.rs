@@ -139,9 +139,7 @@ fn excluded_from_discovery(path: &Path) -> bool {
 }
 
 fn is_test(path: &Path) -> bool {
-    if excluded_from_discovery(path) {
-        return false;
-    }
+    if excluded_from_discovery(path) { return false; }
     let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
     let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
     let supported = ["js", "mjs", "cjs", "ts", "mts", "cts"].contains(&extension);
@@ -183,9 +181,7 @@ fn captured_link(root: &Path, path: &Path) -> Result<PathBuf> {
     }
     let target = lexical.strip_prefix(root).context("external lexical symlink refused")?;
     ensure!(!target.components().any(|part| part.as_os_str() == ".git"), "link into excluded .git refused");
-    if raw.is_relative() {
-        return Ok(raw);
-    }
+    if raw.is_relative() { return Ok(raw); }
     let mut rebased = PathBuf::new();
     for _ in parent.strip_prefix(root)?.components() { rebased.push(".."); }
     rebased.push(target);
@@ -263,9 +259,7 @@ impl Snapshot {
         Self { entries, digest: hex::encode(hash.finalize()) }
     }
 
-    fn tests(&self) -> Result<Vec<PathBuf>> {
-        test_inventory::discover(&self.entries)
-    }
+    fn tests(&self) -> Result<Vec<PathBuf>> { test_inventory::discover(&self.entries) }
 
     fn stage(&self, destination: &Path, deadline: Instant) -> Result<()> {
         fs::create_dir(destination)?;
@@ -360,6 +354,7 @@ fn matched_tests(reference: &Snapshot, candidate: &Snapshot) -> Result<Vec<PathB
         "test inventories differ: original has {} cases and candidate has {}; added or removed test counterparts cannot be ignored",
         tests.len(), candidate_tests.len());
     ensure!(!tests.is_empty(), "empty test suite cannot pass");
+    test_inventory::matched_execution(reference, candidate)?;
     Ok(tests)
 }
 
@@ -402,8 +397,8 @@ fn execute_suite_pair(reference_snapshot: &Snapshot, candidate_snapshot: &Snapsh
                 } else { None };
                 budget(deadline)?;
                 let timeout = leg_timeout.min(deadline.saturating_duration_since(Instant::now()));
-                let output = smoke_supervisor::run_command_with_timeout(
-                    &mut invocation.command(&test, &workspace, &environment), timeout, DRAIN_TIMEOUT)
+                let output = test_inventory::run_test(snapshot, invocation, &test, &workspace,
+                    &environment, (timeout, DRAIN_TIMEOUT))
                     .with_context(|| format!("{name} execution failed"))?;
                 let observation = if name == "reference" { &mut row.reference } else { &mut row.native };
                 // Persist process evidence BEFORE filesystem observation so an
@@ -547,9 +542,7 @@ fn run_captured_with_archive(projects: (&Path, &Path), snapshots: (&Snapshot, &S
 mod tests {
     use super::*;
 
-    fn fixture() -> tempfile::TempDir {
-        tempfile::tempdir().expect("project")
-    }
+    fn fixture() -> tempfile::TempDir { tempfile::tempdir().expect("project") }
 
     fn write(root: &Path, path: &str, source: &str) {
         let path = root.join(path);
@@ -680,11 +673,9 @@ mod tests {
 
     #[test]
     fn exact_bytes_preserve_newline_and_invalid_utf8_differences() {
-        for source in [
-            "process.stdout.write(process.argv.includes('candidate') ? 'ok' : 'ok\\n');",
+        for source in ["process.stdout.write(process.argv.includes('candidate') ? 'ok' : 'ok\\n');",
             "process.stdout.write(Buffer.from([process.argv.includes('candidate') ? 255 : 254]));",
-            "console.log(process.argv.includes('candidate') ? 'pid=2' : 'pid=1');",
-        ] {
+            "console.log(process.argv.includes('candidate') ? 'pid=2' : 'pid=1');"] {
             let project = fixture();
             write(project.path(), "case.test.js", source);
             assert_eq!(measured(project.path()).verdict, "FAIL");
@@ -862,13 +853,11 @@ mod tests {
             serde_json::to_string(&marker).unwrap());
         write(project.path(), "case.test.js", &source);
         let report = run_if_present_with(project.path(), || Ok("/bin/false".into()),
-            || FailureArchive::reserve(output.path(), [project.path(), project.path()]).map(Some))
-            .unwrap().unwrap();
+            || FailureArchive::reserve(output.path(), [project.path(), project.path()]).map(Some)).unwrap().unwrap();
         assert_eq!(report.verdict, "FAIL");
         assert_eq!(report.total_tests, 1);
         assert_eq!(fs::read_to_string(marker).unwrap(), "run\n");
-        let Some(FailureCapture::Saved { capsule_path, content_sha256 }) = &report.failure_capture
-            else { panic!("{report:#?}") };
+        let Some(FailureCapture::Saved { capsule_path, content_sha256 }) = &report.failure_capture else { panic!("{report:#?}") };
         let captured = native_replay::inspect(capsule_path).unwrap();
         assert_eq!(captured.content_sha256, *content_sha256);
         assert_eq!(captured.input_sha256, report.input_sha256);
@@ -894,8 +883,7 @@ mod tests {
     fn unrequested_retention_preserves_the_existing_report_wire_shape() {
         let project = fixture();
         write(project.path(), "case.test.js", "console.log('reference');");
-        let report = run_if_present_with(project.path(), || Ok("/bin/false".into()), || Ok(None))
-            .unwrap().unwrap();
+        let report = run_if_present_with(project.path(), || Ok("/bin/false".into()), || Ok(None)).unwrap().unwrap();
         assert_eq!(report.verdict, "FAIL");
         assert!(report.failure_capture.is_none());
         let encoded = serde_json::to_value(&report).unwrap();
@@ -909,8 +897,7 @@ mod tests {
         let output = fixture();
         write(project.path(), "case.test.js", "process.stdout.write('x'.repeat(17*1024*1024));");
         let report = run_if_present_with(project.path(), || Ok("/bin/false".into()),
-            || FailureArchive::reserve(output.path(), [project.path(), project.path()]).map(Some))
-            .unwrap().unwrap();
+            || FailureArchive::reserve(output.path(), [project.path(), project.path()]).map(Some)).unwrap().unwrap();
         assert_eq!(report.verdict, "ERROR");
         assert!(!report.cases[0].errors.is_empty());
         assert!(matches!(report.failure_capture, Some(FailureCapture::Unavailable { .. })));
@@ -923,15 +910,13 @@ mod tests {
         let environment = BTreeMap::from([(key.into(), "/private/captures".into())]);
         let workspace = fixture();
         write(workspace.path(), "test.js", &format!(
-            "if(Object.hasOwn(process.env,{}))process.exit(91);console.log('clean');",
-            serde_json::to_string(key).unwrap()));
+            "if(Object.hasOwn(process.env,{}))process.exit(91);console.log('clean');", serde_json::to_string(key).unwrap()));
         for invocation in [node(false), node(true)] {
             let mut command = invocation.command(Path::new("test.js"), workspace.path(), &environment);
             // After env_clear, env_remove can omit the mapping entirely; it
             // need not retain a tombstone in Command's explicit environment.
             assert!(command.get_envs().all(|(name, value)| name != key || value.is_none()));
-            let output = smoke_supervisor::run_command_with_timeout(&mut command,
-                Duration::from_secs(5), DRAIN_TIMEOUT).unwrap();
+            let output = smoke_supervisor::run_command_with_timeout(&mut command, Duration::from_secs(5), DRAIN_TIMEOUT).unwrap();
             assert!(output.status.success());
             assert_eq!(output.stdout, b"clean\n");
         }
@@ -943,7 +928,6 @@ mod tests {
         write(project.path(), "case.test.js", "const fs=require('fs'); const p=require('path'); console.log(fs.statSync(p.dirname(process.cwd())).mode & 0o077);");
         let report = measured(project.path());
         assert_eq!(report.verdict, "PASS");
-        assert_eq!(report.cases[0].reference.as_ref().unwrap().stdout.sha256,
-            hex::encode(Sha256::digest(b"0\n")));
+        assert_eq!(report.cases[0].reference.as_ref().unwrap().stdout.sha256, hex::encode(Sha256::digest(b"0\n")));
     }
 }

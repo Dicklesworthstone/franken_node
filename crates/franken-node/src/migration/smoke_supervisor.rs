@@ -283,17 +283,15 @@ fn run_bounded_input(
     if remaining.is_zero() { bail!("runtime smoke timed out preparing captured stdin"); }
     let mut stdout = BoundedBytes { bytes: Vec::new(), limit, label: "stdout" };
     let mut stderr = BoundedBytes { bytes: Vec::new(), limit, label: "stderr" };
-    let completion = supervise_with_input(
-        command,
-        remaining,
-        drain_timeout,
-        stdin,
-        |_| Ok(()),
-        |stream, bytes| match stream {
-            Stream::Stdout => stdout.receive(bytes),
-            Stream::Stderr => stderr.receive(bytes),
-        },
-    )?;
+    let observer = |stream, bytes: &[u8]| match stream {
+        Stream::Stdout => stdout.receive(bytes),
+        Stream::Stderr => stderr.receive(bytes),
+    };
+    let completion = if input.is_some() {
+        supervise_with_input(command, remaining, drain_timeout, stdin, |_| Ok(()), observer)
+    } else {
+        supervise_with_observer(command, remaining, drain_timeout, |_| Ok(()), observer)
+    }?;
     match completion.reason {
         StopReason::RuntimeTimeout => bail!(
             "runtime smoke command timed out after {}ms",
