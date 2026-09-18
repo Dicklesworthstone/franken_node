@@ -176,6 +176,7 @@ which = { version = "8.0.2", optional = true }
 ctrlc = { version = "3", optional = true, features = ["termination"] }
 tree-sitter = "0.26.8"
 tree-sitter-javascript = "0.25.0"
+tree-sitter-typescript = "=0.23.2"
 blake3 = { version = "1.5", optional = true }
 lazy_static = "1.5.0"
 loom = { version = "0.7", optional = true }

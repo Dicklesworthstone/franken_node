@@ -2199,6 +2199,7 @@ dependencies = [
  "tracing-subscriber",
  "tree-sitter",
  "tree-sitter-javascript",
+ "tree-sitter-typescript",
  "uds_windows",
  "ureq",
  "url",
@@ -6633,4 +6634,14 @@ checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
 dependencies = [
  "cc",
  "pkg-config",
+]
+
+[[package]]
+name = "tree-sitter-typescript"
+version = "0.23.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c5f76ed8d947a75cc446d5fccd8b602ebf0cde64ccf2ffa434d873d7a575eff"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
 ]
