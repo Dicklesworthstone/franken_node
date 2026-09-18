@@ -146,8 +146,12 @@ pub(super) fn run(snapshot: &Snapshot, settings: &Settings, test: &Path, invocat
     let bytes = input(settings, snapshot)?;
     let remaining = timing.0.saturating_duration_since(Instant::now());
     ensure!(!remaining.is_zero(), "test execution setup exhausted the runtime budget");
-    smoke_supervisor::run_command_with_input(&mut command, remaining, timing.1, bytes)
-        .context("execute captured test settings")
+    // Keep ordinary EOF-only execution on the existing supervisor entrypoint;
+    // configured input uses the same owner/drain/cleanup implementation.
+    match bytes {
+        Some(bytes) => smoke_supervisor::run_command_with_input(&mut command, remaining, timing.1, Some(bytes)),
+        None => smoke_supervisor::run_command_with_timeout(&mut command, remaining, timing.1),
+    }.context("execute captured test settings")
 }
 
 #[cfg(test)]
