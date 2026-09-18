@@ -7,96 +7,19 @@ on:
       - '.github/workflows/typescript-grammar.yml'
       - 'crates/franken-node/src/migration/source_syntax.rs'
       - 'crates/franken-node/src/migration/module_specifiers.rs'
+      - 'crates/franken-node/Cargo.toml'
+      - 'Cargo.lock'
+  pull_request:
+    paths:
+      - '.github/workflows/typescript-grammar.yml'
+      - 'crates/franken-node/src/migration/source_syntax.rs'
+      - 'crates/franken-node/src/migration/module_specifiers.rs'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  register-grammar:
-    # A one-time, exact patch to the two large authoritative Cargo files.
-    # This job never executes repository code and cannot rewrite other paths.
-    # Once registered, it only verifies the pin. No force-push or rebasing.
-    if: github.repository == 'Dicklesworthstone/franken_node' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - name: Register the reviewed grammar dependency without changing other dependencies
-        id: registration
-        shell: bash
-        run: |
-          set -euo pipefail
-          manifest=crates/franken-node/Cargo.toml
-          if [ "$(git hash-object "$manifest")" = 810532026ea043d24254436f7775299fe2094050 ]; then
-            test "$(git hash-object Cargo.lock)" = aa40bd175841c78150a48fc656bee0f1101950cb
-            git apply --recount <<'PATCH'
-          diff --git a/crates/franken-node/Cargo.toml b/crates/franken-node/Cargo.toml
-          --- a/crates/franken-node/Cargo.toml
-          +++ b/crates/franken-node/Cargo.toml
-          @@ -170,6 +170,7 @@
-           ctrlc = { version = "3", optional = true, features = ["termination"] }
-           tree-sitter = "0.26.8"
-           tree-sitter-javascript = "0.25.0"
-          +tree-sitter-typescript = "=0.23.2"
-           blake3 = { version = "1.5", optional = true }
-           lazy_static = "1.5.0"
-           loom = { version = "0.7", optional = true }
-          diff --git a/Cargo.lock b/Cargo.lock
-          --- a/Cargo.lock
-          +++ b/Cargo.lock
-          @@ -2198,6 +2198,7 @@
-            "tracing",
-            "tracing-subscriber",
-            "tree-sitter",
-            "tree-sitter-javascript",
-          + "tree-sitter-typescript",
-            "uds_windows",
-            "ureq",
-          PATCH
-            cat >> Cargo.lock <<'TOML'
-
-          [[package]]
-          name = "tree-sitter-typescript"
-          version = "0.23.2"
-          source = "registry+https://github.com/rust-lang/crates.io-index"
-          checksum = "6c5f76ed8d947a75cc446d5fccd8b602ebf0cde64ccf2ffa434d873d7a575eff"
-          dependencies = [
-           "cc",
-           "tree-sitter-language",
-          ]
-          TOML
-            git diff --check
-            git add -- crates/franken-node/Cargo.toml Cargo.lock
-            git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'build(migration): pin TypeScript grammar in the native dependency graph'
-            echo 'changed=true' >> "$GITHUB_OUTPUT"
-          else
-            python3 - <<'PY'
-          import pathlib, tomllib
-          manifest = tomllib.loads(pathlib.Path('crates/franken-node/Cargo.toml').read_text())
-          lock = tomllib.loads(pathlib.Path('Cargo.lock').read_text())
-          assert manifest['dependencies']['tree-sitter-typescript'] == '=0.23.2'
-          package = [p for p in lock['package'] if p['name'] == 'tree-sitter-typescript']
-          assert len(package) == 1
-          assert package[0]['version'] == '0.23.2'
-          assert package[0]['checksum'] == '6c5f76ed8d947a75cc446d5fccd8b602ebf0cde64ccf2ffa434d873d7a575eff'
-          node = next(p for p in lock['package'] if p['name'] == 'frankenengine-node')
-          assert 'tree-sitter-typescript' in node['dependencies']
-          PY
-          fi
-      - name: Publish only the exact dependency commit to main
-        if: steps.registration.outputs.changed == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/main
-
   parser:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -128,9 +51,26 @@ jobs:
           #![forbid(unsafe_code)]
           #[path = "$GITHUB_WORKSPACE/crates/franken-node/src/migration/source_syntax.rs"]
           mod source_syntax;
-          pub fn parse(source: &str, deadline: std::time::Instant) -> Result<tree_sitter::Tree, String> {
-              source_syntax::parse(source, deadline)
+          pub fn parse(source: &str, extension: &str, deadline: std::time::Instant) -> Result<tree_sitter::Tree, String> {
+              let syntax = match extension {
+                  "tsx" => source_syntax::Syntax::Tsx,
+                  "ts" | "mts" | "cts" => source_syntax::Syntax::TypeScript,
+                  _ => source_syntax::Syntax::JavaScript,
+              };
+              source_syntax::parse(source, syntax, deadline)
           }
           RUST
           cargo +stable test --manifest-path "$probe/Cargo.toml"
           cargo +stable clippy --manifest-path "$probe/Cargo.toml" --all-targets -- -D warnings
+          python3 - <<'PY'
+          import pathlib, tomllib
+          manifest = tomllib.loads(pathlib.Path('crates/franken-node/Cargo.toml').read_text())
+          lock = tomllib.loads(pathlib.Path('Cargo.lock').read_text())
+          assert manifest['dependencies']['tree-sitter-typescript'] == '=0.23.2'
+          package = [p for p in lock['package'] if p['name'] == 'tree-sitter-typescript']
+          assert len(package) == 1
+          assert package[0]['version'] == '0.23.2'
+          assert package[0]['checksum'] == '6c5f76ed8d947a75cc446d5fccd8b602ebf0cde64ccf2ffa434d873d7a575eff'
+          node = next(p for p in lock['package'] if p['name'] == 'frankenengine-node')
+          assert 'tree-sitter-typescript' in node['dependencies']
+          PY

@@ -687,7 +687,7 @@ pub fn run_audit(project_path: &Path) -> anyhow::Result<MigrationAuditReport> {
                 "js" | "cjs" | "mjs" | "jsx" => {
                     summary.js_files = summary.js_files.saturating_add(1)
                 }
-                "ts" | "tsx" => summary.ts_files = summary.ts_files.saturating_add(1),
+                "ts" | "tsx" | "mts" | "cts" => summary.ts_files = summary.ts_files.saturating_add(1),
                 _ => {}
             }
         }
@@ -929,7 +929,10 @@ pub fn run_rewrite(project_path: &Path, apply: bool) -> anyhow::Result<Migration
         let module_format = classify_source_module_format(project_path, &path);
         let (rewritten_content, rewrite_count, manual_findings, rewrite_action, rewrite_detail) =
             match module_format {
-                SourceModuleFormat::CommonJs => {
+                // Typed sources use specifier-only migration, independent of
+                // their package's output format. Never send typed CommonJS
+                // through a JavaScript converter that may hoist ESM syntax.
+                SourceModuleFormat::CommonJs if !is_typescript_source_file(&path) => {
                     let rewrite = rewrite_commonjs_requires(&raw);
                     (
                         rewrite.rewritten_content,
@@ -942,8 +945,8 @@ pub fn run_rewrite(project_path: &Path, apply: bool) -> anyhow::Result<Migration
                         ),
                     )
                 }
-                SourceModuleFormat::Esm => {
-                    let rewrite = rewrite_esm_imports(&raw);
+                _ => {
+                    let rewrite = rewrite_esm_imports(&raw, &path);
                     (
                         rewrite.rewritten_content,
                         rewrite.rewrite_count,
@@ -2484,9 +2487,15 @@ fn is_migration_source_file(path: &Path) -> bool {
         .is_some_and(|extension| {
             matches!(
                 extension.to_ascii_lowercase().as_str(),
-                "js" | "cjs" | "mjs" | "jsx" | "ts" | "tsx"
+                "js" | "cjs" | "mjs" | "jsx" | "ts" | "tsx" | "mts" | "cts"
             )
         })
+}
+
+fn is_typescript_source_file(path: &Path) -> bool {
+    path.extension().and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(),
+            "ts" | "tsx" | "mts" | "cts"))
 }
 
 fn classify_source_module_format(project_path: &Path, source_path: &Path) -> SourceModuleFormat {
@@ -2496,8 +2505,8 @@ fn classify_source_module_format(project_path: &Path, source_path: &Path) -> Sou
         .map(str::to_ascii_lowercase)
         .as_deref()
     {
-        Some("mjs") => SourceModuleFormat::Esm,
-        Some("cjs") => SourceModuleFormat::CommonJs,
+        Some("mjs" | "mts") => SourceModuleFormat::Esm,
+        Some("cjs" | "cts") => SourceModuleFormat::CommonJs,
         Some("js" | "jsx" | "ts" | "tsx") => {
             if nearest_package_declares_module_type(project_path, source_path) {
                 SourceModuleFormat::Esm
@@ -3044,8 +3053,12 @@ fn prove_commonjs_to_esm_precondition(
     }
 }
 
-fn rewrite_esm_imports(source: &str) -> EsmImportRewrite {
-    let rewrite = module_specifiers::rewrite_esm(source);
+fn rewrite_esm_imports(source: &str, path: &Path) -> EsmImportRewrite {
+    let rewrite = if is_typescript_source_file(path) {
+        let tsx = path.extension().and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("tsx"));
+        module_specifiers::rewrite_typescript(source, tsx)
+    } else { module_specifiers::rewrite_esm(source) };
     EsmImportRewrite {
         rewritten_content: rewrite.rewritten_content,
         rewrite_count: rewrite.rewrite_count,

@@ -1,12 +1,16 @@
-//! Syntax-aware ESM specifier migration. No module-format conversion or
-//! declaration hoisting: only the contents of recognized specifier literals
-//! may change. The exact allowlist deliberately excludes prefix-only builtins
-//! and arbitrary subpaths of packages with builtin-like names.
+//! Syntax-aware ESM specifier migration for JavaScript, TypeScript and TSX.
+//! No module-format conversion, type erasure or declaration hoisting: only
+//! recognized specifier literal contents may change. The exact allowlist
+//! excludes prefix-only builtins and arbitrary package subpaths.
 
 use std::collections::BTreeSet;
-use std::ops::{ControlFlow, Range};
+use std::ops::Range;
 use std::time::{Duration, Instant};
-use tree_sitter::{Node, ParseOptions, Parser};
+use tree_sitter::Node;
+
+#[path = "source_syntax.rs"]
+mod source_syntax;
+use source_syntax::Syntax;
 
 const MAX_SOURCE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_NODES: usize = 1_000_000;
@@ -43,7 +47,17 @@ pub(super) fn normalize_import_specifier(specifier: &str) -> String {
 }
 
 pub(super) fn rewrite_esm(source: &str) -> Rewrite {
-    match plan(source, Instant::now() + REWRITE_TIMEOUT) {
+    rewrite(source, Syntax::JavaScript)
+}
+
+/// Select the typed grammar explicitly; a JavaScript parse failure must not
+/// reinterpret the source or change the package's module format.
+pub(super) fn rewrite_typescript(source: &str, tsx: bool) -> Rewrite {
+    rewrite(source, if tsx { Syntax::Tsx } else { Syntax::TypeScript })
+}
+
+fn rewrite(source: &str, syntax: Syntax) -> Rewrite {
+    match plan(source, syntax, Instant::now() + REWRITE_TIMEOUT) {
         Ok(edits) => {
             // Construct forward in one pass; repeated replace_range would be
             // quadratic for files containing many imports. All edits were
@@ -63,24 +77,11 @@ pub(super) fn rewrite_esm(source: &str) -> Rewrite {
     }
 }
 
-fn plan(source: &str, deadline: Instant) -> Result<Vec<(Range<usize>, String)>, String> {
+fn plan(source: &str, syntax: Syntax, deadline: Instant) -> Result<Vec<(Range<usize>, String)>, String> {
     if source.len() > MAX_SOURCE_BYTES {
         return Err("ESM rewrite source exceeds the 10 MiB limit; manual migration required".into());
     }
-    let mut parser = Parser::new();
-    parser.set_language(&tree_sitter_javascript::LANGUAGE.into())
-        .map_err(|error| format!("JavaScript parser unavailable: {error}"))?;
-    let mut progress = |_: &tree_sitter::ParseState| {
-        if Instant::now() >= deadline { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
-    };
-    let bytes = source.as_bytes();
-    let mut input = |offset: usize, _| bytes.get(offset..).unwrap_or_default();
-    let tree = parser.parse_with_options(&mut input, None,
-        Some(ParseOptions::new().progress_callback(&mut progress)))
-        .ok_or_else(|| "ESM rewrite parsing budget exhausted; manual migration required".to_owned())?;
-    if tree.root_node().has_error() {
-        return Err("JavaScript/JSX parser rejected source; unsupported syntax (including typed TypeScript) requires manual migration".into());
-    }
+    let tree = source_syntax::parse(source, syntax, deadline)?;
     let mut cursor = tree.walk();
     let mut count = 0_usize;
     let mut edits = Vec::new();
@@ -93,8 +94,26 @@ fn plan(source: &str, deadline: Instant) -> Result<Vec<(Range<usize>, String)>, 
         let node = cursor.node();
         match node.kind() {
             "import_statement" | "export_statement" => {
+                // TypeScript's `export = value` is CommonJS interop, not an
+                // ESM export to normalize. Never hide it behind a clean parse.
+                let mut tokens = node.walk();
+                if node.kind() == "export_statement"
+                    && node.children(&mut tokens).any(|child| child.kind() == "=") {
+                    findings.insert("TypeScript export assignment requires manual module-format migration".into());
+                }
                 if let Some(literal) = node.child_by_field_name("source") {
                     add_literal(source, literal, &mut edits, &mut findings)?;
+                }
+            }
+            "import_require_clause" => {
+                findings.insert("TypeScript import-equals require requires manual module-format migration".into());
+            }
+            "internal_module" | "module" => {
+                // `declare module 'fs'` can define or augment a different type
+                // surface from node:fs. Name resolution is not proved by a
+                // syntax tree; preserve the whole source for manual review.
+                if node.child_by_field_name("name").is_some_and(|name| name.kind() == "string") {
+                    findings.insert("TypeScript ambient module declaration or augmentation requires manual migration".into());
                 }
             }
             "call_expression" => {
@@ -191,11 +210,15 @@ mod tests {
     use std::process::{Command, Output};
 
     fn changed(source: &str, expected: &str, count: usize) {
-        let result = rewrite_esm(source);
+        changed_with(source, expected, count, Syntax::JavaScript);
+    }
+
+    fn changed_with(source: &str, expected: &str, count: usize, syntax: Syntax) {
+        let result = rewrite(source, syntax);
         assert!(result.manual_findings.is_empty(), "{result:?}");
         assert_eq!(result.rewrite_count, count);
         assert_eq!(result.rewritten_content, expected);
-        let repeated = rewrite_esm(&result.rewritten_content);
+        let repeated = rewrite(&result.rewritten_content, syntax);
         assert_eq!(repeated.rewrite_count, 0);
         assert_eq!(repeated.rewritten_content, expected);
     }
@@ -277,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_or_typed_source_is_not_partially_rewritten() {
+    fn malformed_or_typed_source_is_not_partially_rewritten_as_javascript() {
         for source in ["import fs from 'fs'; const x = ;", "import fs from 'fs'; const x: number=1;"] {
             let result = rewrite_esm(source);
             assert_eq!(result.rewritten_content, source);
@@ -299,9 +322,11 @@ mod tests {
 
     #[test]
     fn traversal_deadline_and_source_size_limits_refuse_without_partial_plan() {
-        assert!(plan("import fs from 'fs';", Instant::now()).is_err());
-        let source = " ".repeat(MAX_SOURCE_BYTES + 1);
-        assert!(plan(&source, Instant::now() + REWRITE_TIMEOUT).unwrap_err().contains("10 MiB"));
+        for syntax in [Syntax::JavaScript, Syntax::TypeScript, Syntax::Tsx] {
+            assert!(plan("import fs from 'fs';", syntax, Instant::now()).is_err());
+            let source = " ".repeat(MAX_SOURCE_BYTES + 1);
+            assert!(plan(&source, syntax, Instant::now() + REWRITE_TIMEOUT).unwrap_err().contains("10 MiB"));
+        }
     }
 
     fn execute(root: &std::path::Path, source: &str) -> Output {
@@ -349,6 +374,84 @@ mod tests {
         let after = execute(root.path(), &rewritten.rewritten_content);
         assert!(before.status.success(), "{:?}", before.stderr);
         assert!(after.status.success(), "{:?}", after.stderr);
+        assert_eq!(before.stdout, after.stdout);
+        assert_eq!(before.stderr, after.stderr);
+    }
+
+    #[test]
+    fn type_only_imports_inline_types_and_reexports_keep_annotations() {
+        changed_with("import type { Stats } from 'fs';\nimport { basename, type PlatformPath } from 'path';\nexport type { Stats as FileStats } from 'fs';\ninterface Request {path:string; stat?:Stats}\nconst choose = <T extends Request>(x:T):string => basename(x.path);\n",
+            "import type { Stats } from 'node:fs';\nimport { basename, type PlatformPath } from 'node:path';\nexport type { Stats as FileStats } from 'node:fs';\ninterface Request {path:string; stat?:Stats}\nconst choose = <T extends Request>(x:T):string => basename(x.path);\n", 3, Syntax::TypeScript);
+    }
+
+    #[test]
+    fn type_import_expressions_and_typed_dynamic_imports_are_normalized() {
+        changed_with("type Stat = import('fs').Stats;\nconst load = async ():Promise<typeof import('path')> => import('path');",
+            "type Stat = import('node:fs').Stats;\nconst load = async ():Promise<typeof import('node:path')> => import('node:path');", 3, Syntax::TypeScript);
+    }
+
+    #[test]
+    fn tsx_preserves_jsx_text_attributes_satisfies_and_type_parameters() {
+        changed_with("import {sep} from 'path';type Props={name:string};const props={name:'fs'} satisfies Props;const view=<span title='path'>{sep} fs</span>;const id=<T,>(x:T):T=>x;",
+            "import {sep} from 'node:path';type Props={name:string};const props={name:'fs'} satisfies Props;const view=<span title='path'>{sep} fs</span>;const id=<T,>(x:T):T=>x;", 1, Syntax::Tsx);
+    }
+
+    #[test]
+    fn typed_sources_keep_hashbang_unicode_crlf_and_literal_types() {
+        changed_with("#!/usr/bin/env node\r\n// π\r\nimport type {Stats} from 'fs';\r\ntype Name='fs'|'path';const n:number=42;const t=`import('fs')`;",
+            "#!/usr/bin/env node\r\n// π\r\nimport type {Stats} from 'node:fs';\r\ntype Name='fs'|'path';const n:number=42;const t=`import('fs')`;", 1, Syntax::TypeScript);
+    }
+
+    #[test]
+    fn typescript_interop_and_ambient_modules_cannot_hide_partial_rewrites() {
+        for suffix in [
+            "import os = require('os');",
+            "export = fs;",
+            "declare module 'fs' { export const replacement:number; }",
+            "const x:number=1;const os=require('os');",
+            "const x:number=1;module.exports=x;",
+        ] {
+            let source = format!("import fs from 'fs';{suffix}");
+            let result = rewrite_typescript(&source, false);
+            assert_eq!(result.rewritten_content, source, "{result:?}");
+            assert_eq!(result.rewrite_count, 0, "{result:?}");
+            assert!(!result.manual_findings.is_empty(), "{result:?}");
+        }
+    }
+
+    #[test]
+    fn typed_computed_escaped_and_malformed_imports_keep_the_entire_original() {
+        for suffix in ["const x:string='fs';import(x);", "type T=import('f\\x73').Stats;", "const x:string='fs';import(`${x}`);", "interface X {value:}"] {
+            let source = format!("import path from 'path';{suffix}");
+            let result = rewrite_typescript(&source, false);
+            assert_eq!(result.rewrite_count, 0, "{result:?}");
+            assert_eq!(result.rewritten_content, source);
+            assert!(!result.manual_findings.is_empty());
+        }
+    }
+
+    #[test]
+    fn typed_package_subpaths_and_prefix_only_names_are_not_builtin_aliases() {
+        changed_with("import type {T} from 'fs/custom';import type {Test} from 'test';type Item={t:T};export type {Sql} from 'sqlite';",
+            "import type {T} from 'fs/custom';import type {Test} from 'test';type Item={t:T};export type {Sql} from 'sqlite';", 0, Syntax::TypeScript);
+    }
+
+    #[test]
+    fn real_node_executes_original_and_rewritten_typescript_without_transpiler_rewrites() {
+        let root = tempfile::tempdir().unwrap();
+        let source = "import type {Stats} from 'fs';import {basename} from 'path';interface Request{path:string;stat?:Stats}const request:Request={path:'/tmp/42'};console.log(basename(request.path));";
+        let rewrite = rewrite_typescript(source, false);
+        assert_eq!(rewrite.rewrite_count, 2, "{rewrite:?}");
+        let execute = |text: &str| {
+            fs::write(root.path().join("case.mts"), text).unwrap();
+            Command::new("node").args(["--experimental-strip-types", "case.mts"])
+                .env("NODE_NO_WARNINGS", "1").current_dir(root.path()).output().unwrap()
+        };
+        let before = execute(source);
+        let after = execute(&rewrite.rewritten_content);
+        assert!(before.status.success(), "{:?}", before.stderr);
+        assert!(after.status.success(), "{:?}", after.stderr);
+        assert_eq!(before.stdout, b"42\n");
         assert_eq!(before.stdout, after.stdout);
         assert_eq!(before.stderr, after.stderr);
     }

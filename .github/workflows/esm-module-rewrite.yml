@@ -33,7 +33,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-      - name: Stage the exact reviewed integration on its captured base
+      - name: Stage declaration-safe inventory and test registration on exact captured inputs
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -41,18 +41,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p evidence
-          if [ "$(git hash-object crates/franken-node/src/migration/mod.rs)" = cfd95481f97f821836cdffff89c9c12f81b5f688 ]; then
-            test "$(git hash-object crates/franken-node/src/migration/module_specifiers.rs)" = e7a1e0cc3f4723a52fb44884c25b9d2389d89880
-            while read -r blob path; do
-              gh api "repos/Dicklesworthstone/franken_node/git/blobs/$blob" --jq .content | base64 --decode > "evidence/$blob"
-              test "$(git hash-object "evidence/$blob")" = "$blob"
-              cp "evidence/$blob" "$path"
-            done <<'BLOBS'
-          b9176b324de5b3110e1a8d455391558880dfded2 crates/franken-node/src/migration/source_syntax.rs
-          1d4043d5997b160c72bcbb947dc98e0a5db7a3cb crates/franken-node/src/migration/module_specifiers.rs
-          ab1ae3f0190a568b7ce511119980d6325840739b crates/franken-node/tests/typed_module_rewrites.rs
-          BLOBS
-            for blob in 300e1a3e18dcfe3dccdc689313d2794e259d061b e97e9c290b0f68b6257072d2444a6ae786cb8ffb; do
+          if [ "$(git hash-object crates/franken-node/src/migration/validation_suite.rs)" = 4489679fd5c9f41d1392117852179a4cdf72db72 ]; then
+            test "$(git hash-object crates/franken-node/src/migration/test_inventory.rs)" = 9f7ac917a2c7ad9a55a48589c4369d9ed8bffa99
+            for blob in 1516abeea12212b81a4b97269c90b266f148ffbd e97e9c290b0f68b6257072d2444a6ae786cb8ffb; do
               gh api "repos/Dicklesworthstone/franken_node/git/blobs/$blob" --jq .content | base64 --decode > "evidence/$blob.patch"
               test "$(git hash-object "evidence/$blob.patch")" = "$blob"
               git apply --recount --check "evidence/$blob.patch"
@@ -162,16 +153,16 @@ jobs:
           product = tomllib.loads(Path('crates/franken-node/Cargo.toml').read_text())
           assert any(t['name'] == 'typed_module_rewrites' for t in product['test'])
           PY
-      - name: Commit only tested integration directly to main
+      - name: Commit only tested inventory and test registration directly to main
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          git add -- crates/franken-node/src/migration/mod.rs crates/franken-node/src/migration/module_specifiers.rs crates/franken-node/src/migration/source_syntax.rs crates/franken-node/src/migration/validation_suite.rs crates/franken-node/src/migration/test_inventory.rs crates/franken-node/tests/typed_module_rewrites.rs crates/franken-node/Cargo.toml .github/workflows/native-migration-validation.yml .github/workflows/native-rewrite-transaction.yml .github/workflows/verified-rewrite.yml
+          git add -- crates/franken-node/src/migration/validation_suite.rs crates/franken-node/src/migration/test_inventory.rs crates/franken-node/Cargo.toml .github/workflows/native-migration-validation.yml .github/workflows/native-rewrite-transaction.yml .github/workflows/verified-rewrite.yml
           if ! git diff --cached --quiet; then
-            git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'feat(migration): execute typed TypeScript and TSX migration with exact syntax preservation' -m 'Primary APIs, declaration-safe test selection, real Node/Bun execution, rollback, complete operator tests and strict lint verified before publication. Native engine qualification is not claimed.'
+            git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'feat(migration): include JSX tests and exclude declaration-only coverage' -m 'Primary typed migration APIs, exact rollback, real Node/Bun reference execution, full operator suite and strict lint verified before publication. Native engine qualification is not claimed.'
             auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
             git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/main
           fi
