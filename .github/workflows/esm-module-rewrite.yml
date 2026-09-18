@@ -7,62 +7,60 @@ on:
       - '.github/workflows/esm-module-rewrite.yml'
       - 'crates/franken-node/src/migration/**'
       - 'crates/franken-node/tests/native_rewrite_transactions.rs'
+      - 'crates/franken-node/tests/typed_module_rewrites.rs'
   pull_request:
     paths:
       - '.github/workflows/esm-module-rewrite.yml'
       - 'crates/franken-node/src/migration/**'
       - 'crates/franken-node/tests/native_rewrite_transactions.rs'
+      - 'crates/franken-node/tests/typed_module_rewrites.rs'
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   esm-rewrites:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      CARGO_PROFILE_DEV_OPT_LEVEL: '1'
+      CARGO_PROFILE_TEST_OPT_LEVEL: '1'
     steps:
       - uses: actions/checkout@v4
-      - name: Stage reviewed typed-source integration
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+      - name: Stage the exact reviewed integration on its captured base
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p evidence
-          for blob in 1c242ad18f59e2cd293dd006390296feb8c73692 8618f55d4d0c198dca9eb60a982ca9991de88f87; do
-            gh api "repos/Dicklesworthstone/franken_node/git/blobs/$blob" --jq .content | base64 --decode > "evidence/$blob.patch"
-            test "$(git hash-object "evidence/$blob.patch")" = "$blob"
-          done
-          # Add Git file delimiters to the manually reviewed unified patches.
-          # This changes patch metadata only, never synthesizes source edits.
-          # Recount alone otherwise mistakes a next-file header for removed text.
-          python3 - <<'PY'
-          from pathlib import Path
-          for blob in ('1c242ad18f59e2cd293dd006390296feb8c73692', '8618f55d4d0c198dca9eb60a982ca9991de88f87'):
-              lines = []
-              for line in Path(f'evidence/{blob}.patch').read_text().splitlines(keepends=True):
-                  if line.startswith('--- a/'):
-                      path = line[len('--- a/'):].rstrip('\n')
-                      lines.append(f'diff --git a/{path} b/{path}\n')
-                  lines.append(line)
-              Path(f'evidence/{blob}.git.patch').write_text(''.join(lines))
-          PY
-          for blob in 1c242ad18f59e2cd293dd006390296feb8c73692 8618f55d4d0c198dca9eb60a982ca9991de88f87; do
-            patch="evidence/$blob.git.patch"
-            if git apply --recount --reverse --check "$patch" 2>/dev/null; then
-              echo 'Reviewed integration already present'
-            else
-              git apply --recount --check "$patch"
-              git apply --recount "$patch"
-            fi
-          done
-          test "$(git hash-object crates/franken-node/src/migration/module_specifiers.rs)" = fd466221ee8413fc7b30ac74621ab937fd9a5ec0
-          test "$(git hash-object crates/franken-node/src/migration/mod.rs)" = 9f07fcddc811e9d3db436e92f92dfe5aed8acb43
-          test "$(git hash-object crates/franken-node/src/migration/validation_suite.rs)" = ca999fdd066bd22bfcf9521b14419f10c594eae4
-          test "$(git hash-object crates/franken-node/tests/native_rewrite_transactions.rs)" = a5196c09e4685d13d70b2867e3a100dbcfe28877
-          git diff --check
-      - name: Compile the primary implementation and execute real rewrite tests
+          if [ "$(git hash-object crates/franken-node/src/migration/mod.rs)" = cfd95481f97f821836cdffff89c9c12f81b5f688 ]; then
+            test "$(git hash-object crates/franken-node/src/migration/module_specifiers.rs)" = e7a1e0cc3f4723a52fb44884c25b9d2389d89880
+            while read -r blob path; do
+              gh api "repos/Dicklesworthstone/franken_node/git/blobs/$blob" --jq .content | base64 --decode > "evidence/$blob"
+              test "$(git hash-object "evidence/$blob")" = "$blob"
+              cp "evidence/$blob" "$path"
+            done <<'BLOBS'
+          b9176b324de5b3110e1a8d455391558880dfded2 crates/franken-node/src/migration/source_syntax.rs
+          1d4043d5997b160c72bcbb947dc98e0a5db7a3cb crates/franken-node/src/migration/module_specifiers.rs
+          ab1ae3f0190a568b7ce511119980d6325840739b crates/franken-node/tests/typed_module_rewrites.rs
+          BLOBS
+            for blob in 300e1a3e18dcfe3dccdc689313d2794e259d061b e97e9c290b0f68b6257072d2444a6ae786cb8ffb; do
+              gh api "repos/Dicklesworthstone/franken_node/git/blobs/$blob" --jq .content | base64 --decode > "evidence/$blob.patch"
+              test "$(git hash-object "evidence/$blob.patch")" = "$blob"
+              git apply --recount --check "evidence/$blob.patch"
+              git apply --recount "evidence/$blob.patch"
+            done
+            git diff --check
+          fi
+      - name: Compile primary source and execute real typed rewrite and rollback tests
         shell: bash
         run: |
           set -euo pipefail
@@ -118,6 +116,9 @@ jobs:
           [[test]]
           name = "primary_rewrites"
           path = "$GITHUB_WORKSPACE/crates/franken-node/tests/native_rewrite_transactions.rs"
+          [[test]]
+          name = "typed_module_rewrites"
+          path = "$GITHUB_WORKSPACE/crates/franken-node/tests/typed_module_rewrites.rs"
           [dependencies]
           frankenengine_node = { package = "esm-primary", path = "$primary" }
           tempfile = "3"
@@ -136,13 +137,12 @@ jobs:
           RUST
           git rev-parse HEAD > evidence/revision.txt
           node --version > evidence/node-version.txt
+          bun --version > evidence/bun-version.txt
           rustc +stable --version > evidence/rust-version.txt
-          for file in mod.rs module_specifiers.rs validation_suite.rs; do
+          for file in mod.rs module_specifiers.rs source_syntax.rs validation_suite.rs test_inventory.rs; do
             printf '%s ' "$file" >> evidence/source-blobs.txt
             git hash-object "$source/migration/$file" >> evidence/source-blobs.txt
           done
-          printf 'native_rewrite_transactions.rs ' >> evidence/source-blobs.txt
-          git hash-object crates/franken-node/tests/native_rewrite_transactions.rs >> evidence/source-blobs.txt
           rustfmt +stable --edition 2024 --emit stdout "$source/migration/module_specifiers.rs" > evidence/module_specifiers.formatted.rs
           cargo +stable check --manifest-path "$primary/Cargo.toml" --lib 2>&1 | tee evidence/primary-check.log
           cargo +stable test --manifest-path "$tests/Cargo.toml" -- --nocapture --test-threads=2 2>&1 | tee evidence/esm-tests.log
@@ -157,24 +157,23 @@ jobs:
           checked = tomllib.loads(Path('evidence/Cargo.lock').read_text())['package']
           actual = tomllib.loads(Path('Cargo.lock').read_text())['package']
           name = 'tree-sitter-typescript'
-          expected = next(p for p in checked if p['name'] == name)
-          declared = next(p for p in actual if p['name'] == name)
-          assert declared == expected, (declared, expected)
-          product = next(p for p in actual if p['name'] == 'frankenengine-node')
-          assert name in product['dependencies']
-          print('Root TypeScript grammar lock entry matches Cargo-resolved and executed dependency.')
+          assert next(p for p in checked if p['name'] == name) == next(p for p in actual if p['name'] == name)
+          assert name in next(p for p in actual if p['name'] == 'frankenengine-node')['dependencies']
+          product = tomllib.loads(Path('crates/franken-node/Cargo.toml').read_text())
+          assert any(t['name'] == 'typed_module_rewrites' for t in product['test'])
           PY
       - name: Commit only tested integration directly to main
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          git add crates/franken-node/src/migration/mod.rs crates/franken-node/src/migration/module_specifiers.rs crates/franken-node/src/migration/validation_suite.rs crates/franken-node/tests/native_rewrite_transactions.rs crates/franken-node/Cargo.toml Cargo.lock .github/workflows/native-migration-validation.yml .github/workflows/native-rewrite-transaction.yml .github/workflows/verified-rewrite.yml
+          git add -- crates/franken-node/src/migration/mod.rs crates/franken-node/src/migration/module_specifiers.rs crates/franken-node/src/migration/source_syntax.rs crates/franken-node/src/migration/validation_suite.rs crates/franken-node/src/migration/test_inventory.rs crates/franken-node/tests/typed_module_rewrites.rs crates/franken-node/Cargo.toml .github/workflows/native-migration-validation.yml .github/workflows/native-rewrite-transaction.yml .github/workflows/verified-rewrite.yml
           if ! git diff --cached --quiet; then
-            git config user.name 'ChatGPT'
-            git config user.email 'noreply@openai.com'
-            git commit -m 'feat(migration): support typed TypeScript/TSX and complete executable test discovery' -m 'Use explicit grammars and preserve type/value import modifiers, annotations, JSX and declarations. Recognize mts/cts in primary audit and rewrite. Refuse ambiguous CommonJS and ambient-module forms. Discover JSX/TSX tests; never count declarations as executable tests. All transformer/public API/operator tests and Clippy passed on these exact sources; native engine compatibility not claimed.'
-            git push origin HEAD:main
+            git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'feat(migration): execute typed TypeScript and TSX migration with exact syntax preservation' -m 'Primary APIs, declaration-safe test selection, real Node/Bun execution, rollback, complete operator tests and strict lint verified before publication. Native engine qualification is not claimed.'
+            auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/main
           fi
           git rev-parse HEAD > evidence/published-revision.txt
       - name: Preserve exact executed sources and logs
@@ -188,7 +187,9 @@ jobs:
             evidence/
             crates/franken-node/src/migration/mod.rs
             crates/franken-node/src/migration/module_specifiers.rs
+            crates/franken-node/src/migration/source_syntax.rs
             crates/franken-node/src/migration/validation_suite.rs
-            crates/franken-node/tests/native_rewrite_transactions.rs
+            crates/franken-node/src/migration/test_inventory.rs
+            crates/franken-node/tests/typed_module_rewrites.rs
             crates/franken-node/Cargo.toml
             Cargo.lock
