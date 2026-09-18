@@ -255,5 +255,96 @@ jobs:
               assert denied.returncode == 2 and '--execute' in denied.stderr
               print('Real Node/Bun: minified pair/product reduction, native failure and reference disagreement, all-role replay, Bun-only final drift refusal, archive privacy and execution consent verified.')
           PY
+      - name: Captured package-local settings and binary stdin on real Node and Bun
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import shutil
+          import subprocess
+          import tempfile
+          from pathlib import Path
+
+          binary = Path('tools/migration-validator/target/debug/franken-migration-suite').resolve()
+          bun = shutil.which('bun')
+          assert bun, 'actual Bun is required'
+          environment = dict(os.environ, APP_MODE='ambient', DROP_ME='ambient')
+
+          def run(args, expected):
+              result = subprocess.run([str(binary)] + args, capture_output=True, text=True,
+                                      env=environment, timeout=340)
+              assert result.returncode == expected, (result.returncode, result.stdout, result.stderr)
+              return json.loads(result.stdout)
+
+          with tempfile.TemporaryDirectory(prefix='execution-settings-', dir=os.environ['RUNNER_TEMP']) as directory:
+              root = Path(directory)
+              test = 'packages/api/check.cjs'
+              request = bytes([0, 255, 120, 10, 10])
+              source = "// removable\nconst fs=require('node:fs');if(process.env.APP_MODE!=='fixture'||process.env.DROP_ME!==undefined)process.exit(90);const input=fs.readFileSync(0);process.stdout.write(input);console.log(fs.readFileSync('local.txt','utf8'));fs.writeFileSync('artifact',input);\n// tail\n"
+              config = {'schema_version':'franken-node/migration-tests/v1',
+                        'tests':[test, 'check-default.cjs'],
+                        'execution':{test:{'cwd':'packages/api','stdin':'fixtures/request.bin',
+                                           'environment':{'APP_MODE':'fixture','DROP_ME':None}}}}
+              for label, runtime_flags in [('pair', []), ('product', ['--bun-bin', bun])]:
+                  original, candidate = root / (label+'-original'), root / (label+'-candidate')
+                  for project in (original, candidate):
+                      (project / 'packages/api').mkdir(parents=True)
+                      (project / '.franken-node').mkdir()
+                      (project / 'fixtures').mkdir()
+                      (project / test).write_text(source)
+                      (project / 'packages/api/local.txt').write_text('package-local')
+                      (project / 'fixtures/request.bin').write_bytes(request)
+                      (project / '.franken-node/migration-tests.json').write_text(json.dumps(config))
+                      (project / 'check-default.cjs').write_text("if(process.env.APP_MODE!=='ambient'||process.env.DROP_ME!=='ambient'||require('node:fs').readFileSync(0).length!==0)process.exit(91);console.log('default');")
+                  (candidate / 'candidate-only.txt').write_text('distinct inputs')
+                  capsule = root / (label+'-capsule.json')
+                  base = [str(original), '--migrated-project', str(candidate), '--native-bin', '/bin/false',
+                          '--execute', '--compare-filesystem'] + runtime_flags
+                  # /bin/false is intentionally a failing native leg, not a
+                  # Franken implementation or a successful compatibility claim.
+                  captured = run(base + ['--capture-capsule', str(capsule)], 1)
+                  assert captured['total_tests'] == 2 and captured['verdict'] == 'FAIL'
+                  row = next(row for row in captured['cases'] if row['test'] == test)
+                  reference = row['node'] if label == 'product' else row['reference']
+                  assert reference['exit_code'] == 0
+                  assert reference['stdout']['sha256'] == hashlib.sha256(request+b'package-local\n').hexdigest()
+                  assert reference['workspace_delta']['changed_paths'] == 1
+                  assert 'packages/api/artifact' in json.dumps(reference['workspace_delta'])
+                  if label == 'product':
+                      assert row['node'] == row['bun'] and captured['reference_divergences'] == 0
+                  pin = captured['capsule']['content_sha256']
+                  seed_bytes = capsule.read_bytes()
+                  for project in (original, candidate):
+                      (project / 'fixtures/request.bin').write_bytes(b'later input')
+                      (project / '.franken-node/migration-tests.json').write_text('{}')
+                  replay_args = [str(capsule), '--replay', '--execute', '--expected-sha256', pin,
+                                 '--native-bin', '/bin/false'] + runtime_flags
+                  replayed = run(replay_args, 0)
+                  assert replayed['verdict'] == 'REPRODUCED' and replayed['validation']['cases'] == captured['cases']
+                  reduced_path = root / (label+'-reduced.json')
+                  reduced = run(replay_args + ['--minimize-capsule', str(reduced_path), '--source-file', test,
+                                               '--max-executions', '16', '--minimize-seconds', '300'], 0)
+                  assert reduced['validation']['cases'] == captured['cases']
+                  exported = root / (label+'-fixture')
+                  run([str(reduced_path), '--export-inputs', str(exported),
+                       '--expected-sha256', reduced['content_sha256']], 0)
+                  for tree in ('original','candidate'):
+                      assert (exported / tree / 'fixtures/request.bin').read_bytes() == request
+                      assert json.loads((exported / tree / '.franken-node/migration-tests.json').read_text()) == config
+                      assert not (exported / tree / 'packages/api/artifact').exists()
+                  assert capsule.read_bytes() == seed_bytes
+                  assert not (original / 'packages/api/artifact').exists()
+                  assert (original / 'fixtures/request.bin').read_bytes() == b'later input'
+                  # All preflight checks occur before missing runtime resolution.
+                  for project in (original, candidate):
+                      (project / '.franken-node/migration-tests.json').write_text(json.dumps(config))
+                  (candidate / 'fixtures/request.bin').write_bytes(b'different candidate request')
+                  refused = run([str(original),'--migrated-project',str(candidate),'--native-bin','/absent/native','--execute'] + runtime_flags, 2)
+                  assert 'stdin bytes differ' in refused['error']
+              print('Configured Node/Bun: exact binary stdin, package-local paths, isolated environment overrides, all-case replay/reduction/export and input-substitution refusal verified.')
+          PY
       - name: Strict production and test lint
         run: cargo +stable clippy --manifest-path tools/migration-validator/Cargo.toml --all-targets -- -D warnings

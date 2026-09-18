@@ -89,13 +89,16 @@ fn application_variable(name: &str) -> bool {
             | "SHELL" | "ENV" | "BASH_ENV" | "IFS" | "CDPATH" | "GCONV_PATH")
 }
 
-pub(super) fn validate(settings: &mut Settings, entries: &BTreeMap<PathBuf, Entry>) -> Result<()> {
+pub(super) fn validate(settings: &mut Settings, entries: &BTreeMap<PathBuf, Entry>, test: &Path) -> Result<()> {
     if settings.cwd.as_deref() == Some(".") { settings.cwd = None; }
     if let Some(name) = &settings.cwd {
         let path = captured_path(entries, name)?;
         ensure!(matches!(entries.get(path).map(|entry| &entry.data), Some(EntryData::Directory)),
             "test working directory must be an ordinary captured directory");
     }
+    // The primary runtime rejects parent traversal and absolute script paths.
+    // Keep this boundary; do not use privileged argv or disable its validation.
+    script_from(Path::new(settings.cwd.as_deref().unwrap_or("")), test)?;
     if let Some(name) = &settings.stdin {
         let path = captured_path(entries, name)?;
         let Some(Entry { data: EntryData::File(bytes), .. }) = entries.get(path) else {
@@ -124,23 +127,16 @@ pub(super) fn input<'a>(settings: &Settings, snapshot: &'a Snapshot) -> Result<O
     }).transpose()
 }
 
-// Compute a literal script argument relative to the selected working directory.
-// The validated endpoints are inside the workspace; introduced .. components
-// only return to their common captured ancestor, never outside the workspace.
-fn script_from(cwd: &Path, script: &Path) -> PathBuf {
-    let from: Vec<_> = cwd.components().collect();
-    let to: Vec<_> = script.components().collect();
-    let shared = from.iter().zip(&to).take_while(|(left, right)| left == right).count();
-    let mut result = PathBuf::new();
-    for _ in shared..from.len() { result.push(".."); }
-    for part in &to[shared..] { result.push(part.as_os_str()); }
-    result
+fn script_from(cwd: &Path, script: &Path) -> Result<PathBuf> {
+    let relative = script.strip_prefix(cwd).context("test entrypoint must be inside its working directory")?;
+    ensure!(!relative.as_os_str().is_empty(), "test entrypoint cannot be its working directory");
+    Ok(relative.to_path_buf())
 }
 
 pub(super) fn run(snapshot: &Snapshot, settings: &Settings, test: &Path, invocation: &Invocation,
     workspace: &Path, environment: &BTreeMap<OsString, OsString>, timing: (Instant, Duration)) -> Result<Output> {
     let cwd = Path::new(settings.cwd.as_deref().unwrap_or(""));
-    let mut command = invocation.command(&script_from(cwd, test), &workspace.join(cwd), environment);
+    let mut command = invocation.command(&script_from(cwd, test)?, &workspace.join(cwd), environment);
     for (name, value) in &settings.environment {
         match value {
             Some(value) => { command.env(name, value); }
@@ -163,6 +159,7 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::symlink;
 
+    const TEST: &str = "packages/api/check.cjs";
     fn put(root: &Path, name: &str, bytes: &[u8]) {
         let path = root.join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -170,16 +167,15 @@ mod tests {
     }
     fn manifest(root: &Path, execution: serde_json::Value) {
         put(root, ".franken-node/migration-tests.json", &serde_json::to_vec(&serde_json::json!({
-            "schema_version":"franken-node/migration-tests/v1", "tests":["scripts/check.cjs"],
-            "execution": execution,
+            "schema_version":"franken-node/migration-tests/v1", "tests":[TEST], "execution": execution,
         })).unwrap());
     }
     fn fixture() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
-        put(root.path(), "scripts/check.cjs", b"const fs=require('fs');process.stdout.write(fs.readFileSync(0));console.log(process.env.APP_MODE,fs.readFileSync('local.txt','utf8'),process.env.DROP_ME===undefined);fs.writeFileSync('artifact','ok');");
+        put(root.path(), TEST, b"const fs=require('fs');process.stdout.write(fs.readFileSync(0));console.log(process.env.APP_MODE,fs.readFileSync('local.txt','utf8'),process.env.DROP_ME===undefined);fs.writeFileSync('artifact','ok');");
         put(root.path(), "packages/api/local.txt", b"package-local");
         put(root.path(), "fixtures/input.bin", &[0, 255, b'x', b'\n']);
-        manifest(root.path(), serde_json::json!({"scripts/check.cjs":{
+        manifest(root.path(), serde_json::json!({(TEST):{
             "cwd":"packages/api", "stdin":"fixtures/input.bin",
             "environment":{"APP_MODE":"captured", "DROP_ME":null}
         }}));
@@ -195,7 +191,7 @@ mod tests {
         let root = fixture();
         let captured = snapshot(root.path());
         put(root.path(), "fixtures/input.bin", b"later input");
-        manifest(root.path(), serde_json::json!({"scripts/check.cjs":{"cwd":"scripts"}}));
+        manifest(root.path(), serde_json::json!({(TEST):{"cwd":"."}}));
         let report = execute_suite_pair(&captured, &captured, &node(), &node(),
             Instant::now() + Duration::from_secs(120), Duration::from_secs(5), true).unwrap();
         assert_eq!(report.verdict, "PASS", "{report:#?}");
@@ -215,10 +211,10 @@ mod tests {
         let candidate = fixture();
         let before = snapshot(original.path());
         matched_tests(&before, &snapshot(candidate.path())).unwrap();
-        for settings in [serde_json::json!({"cwd":"scripts"}),
+        for settings in [serde_json::json!({"cwd":"."}),
             serde_json::json!({"environment":{"APP_MODE":"different"}}),
             serde_json::json!({"stdin":"packages/api/local.txt"})] {
-            manifest(candidate.path(), serde_json::json!({"scripts/check.cjs":settings}));
+            manifest(candidate.path(), serde_json::json!({(TEST):settings}));
             assert!(matched_tests(&before, &snapshot(candidate.path())).is_err());
         }
         let candidate = fixture();
@@ -238,7 +234,7 @@ mod tests {
             serde_json::json!({"stdin":"packages/api"}), serde_json::json!({"stdin":".franken-node/migration-tests.json"}),
             serde_json::json!({"stdin":"fixtures\\input.bin"}), serde_json::json!({"args":["--eval","bad"]}),
             serde_json::json!({"timeout":999})] {
-            manifest(root.path(), serde_json::json!({"scripts/check.cjs":settings}));
+            manifest(root.path(), serde_json::json!({(TEST):settings}));
             assert!(inventory(&snapshot(root.path()).entries).is_err());
         }
         manifest(root.path(), serde_json::json!({"unselected.cjs":{}}));
@@ -249,11 +245,11 @@ mod tests {
     fn ambiguous_duplicate_settings_and_environment_keys_are_rejected() {
         let root = fixture();
         for execution in [
-            r#"{"scripts/check.cjs":{},"scripts/check.cjs":{"cwd":"packages/api"}}"#,
-            r#"{"scripts/check.cjs":{"environment":{"APP_MODE":"one","APP_MODE":"two"}}}"#,
-            r#"{"scripts/check.cjs":{"cwd":"packages/api","cwd":"scripts"}}"#,
+            r#"{"packages/api/check.cjs":{},"packages/api/check.cjs":{"cwd":"packages/api"}}"#,
+            r#"{"packages/api/check.cjs":{"environment":{"APP_MODE":"one","APP_MODE":"two"}}}"#,
+            r#"{"packages/api/check.cjs":{"cwd":"packages/api","cwd":"."}}"#,
         ] {
-            let raw = format!(r#"{{"schema_version":"franken-node/migration-tests/v1","tests":["scripts/check.cjs"],"execution":{execution}}}"#);
+            let raw = format!(r#"{{"schema_version":"franken-node/migration-tests/v1","tests":["{TEST}"],"execution":{execution}}}"#);
             put(root.path(), ".franken-node/migration-tests.json", raw.as_bytes());
             assert!(inventory(&snapshot(root.path()).entries).is_err());
         }
@@ -266,19 +262,19 @@ mod tests {
             "FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK", "FRANKEN_NODE_MIGRATION_FAILURE_DIR",
             "RUST_LOG", "BASH_ENV", "", "1NAME", "NAME=VALUE"] {
             let mut settings = Settings { environment: BTreeMap::from([(name.into(), Some("value".into()))]), ..Settings::default() };
-            assert!(validate(&mut settings, &entries).is_err(), "{name}");
+            assert!(validate(&mut settings, &entries, Path::new(TEST)).is_err(), "{name}");
         }
         let mut settings = Settings { environment: BTreeMap::from([("APP_MODE".into(), Some("test".into())),
             ("NODE_ENV".into(), Some("test".into())), ("UNSET_ME".into(), None)]), ..Settings::default() };
-        validate(&mut settings, &entries).unwrap();
+        validate(&mut settings, &entries, Path::new(TEST)).unwrap();
         for value in ["x".repeat(4097), "embedded\0nul".into()] {
             settings.environment.insert("APP_MODE".into(), Some(value));
-            assert!(validate(&mut settings, &entries).is_err());
+            assert!(validate(&mut settings, &entries, Path::new(TEST)).is_err());
         }
         settings.environment = (0..65).map(|i| (format!("APP_{i}"), None)).collect();
-        assert!(validate(&mut settings, &entries).is_err());
+        assert!(validate(&mut settings, &entries, Path::new(TEST)).is_err());
         settings.environment = (0..5).map(|i| (format!("APP_{i}"), Some("x".repeat(4096)))).collect();
-        assert!(validate(&mut settings, &entries).is_err());
+        assert!(validate(&mut settings, &entries, Path::new(TEST)).is_err());
         let settings = Settings { environment: BTreeMap::from([("APP_SECRET".into(), Some("private-value".into()))]), ..Settings::default() };
         assert!(!format!("{settings:?}").contains("private-value"));
     }
@@ -289,21 +285,34 @@ mod tests {
         put(root.path(), "fixtures/input.bin", &vec![0; smoke_supervisor::MAX_INPUT_BYTES + 1]);
         assert!(inventory(&snapshot(root.path()).entries).is_err());
         let mut root_settings = Settings { cwd: Some(".".into()), ..Settings::default() };
-        validate(&mut root_settings, &BTreeMap::new()).unwrap();
+        validate(&mut root_settings, &BTreeMap::new(), Path::new(TEST)).unwrap();
         assert!(root_settings == Settings::default());
-        assert_eq!(script_from(Path::new("packages/api"), Path::new("scripts/check.cjs")), Path::new("../../scripts/check.cjs"));
-        assert_eq!(script_from(Path::new("packages/api"), Path::new("packages/api/check.cjs")), Path::new("check.cjs"));
-        assert_eq!(script_from(Path::new(""), Path::new("scripts/check.cjs")), Path::new("scripts/check.cjs"));
+        assert!(script_from(Path::new("packages/api"), Path::new("scripts/check.cjs")).is_err());
+        assert_eq!(script_from(Path::new("packages/api"), Path::new(TEST)).unwrap(), Path::new("check.cjs"));
+        assert_eq!(script_from(Path::new(""), Path::new(TEST)).unwrap(), Path::new(TEST));
+    }
+
+    #[test]
+    fn working_directory_cannot_require_parent_traversal_in_the_runtime_command() {
+        let root = fixture();
+        manifest(root.path(), serde_json::json!({(TEST):{"cwd":"fixtures"}}));
+        let error = inventory(&snapshot(root.path()).entries).unwrap_err();
+        assert!(error.to_string().contains("entrypoint must be inside"));
+        let path = script_from(Path::new("packages"), Path::new(TEST)).unwrap();
+        let runtime = node();
+        let environment = BTreeMap::new();
+        let command = runtime.command(&path, root.path(), &environment);
+        assert_eq!(command.get_args().next().unwrap(), "./api/check.cjs");
     }
 
     #[test]
     fn checked_rewrites_measure_configured_harnesses_and_refuse_input_substitution() {
         let root = fixture();
         let mut candidate = RewriteCandidate::capture(root.path(), Instant::now() + Duration::from_secs(120)).unwrap();
-        let before = fs::read(root.path().join("scripts/check.cjs")).unwrap();
+        let before = fs::read(root.path().join(TEST)).unwrap();
         let mut after = b"// equivalent candidate\n".to_vec();
         after.extend_from_slice(&before);
-        candidate.prepare(&[Replacement { path:"scripts/check.cjs", before:&before, after:&after }]).unwrap();
+        candidate.prepare(&[Replacement { path:TEST, before:&before, after:&after }]).unwrap();
         let report = candidate.validate_node_pair().unwrap();
         candidate.check_validation(&report).unwrap();
         candidate.ensure_source_unchanged().unwrap();
@@ -316,12 +325,12 @@ mod tests {
     fn per_case_overrides_remove_values_without_mutating_the_base_environment() {
         let root = fixture();
         put(root.path(), "scripts/other.cjs", b"console.log(process.env.APP_MODE,process.env.DROP_ME);console.log(require('fs').readFileSync(0).length);");
-        put(root.path(), ".franken-node/migration-tests.json", br#"{"schema_version":"franken-node/migration-tests/v1","tests":["scripts/check.cjs","scripts/other.cjs"],"execution":{"scripts/check.cjs":{"cwd":"packages/api","stdin":"fixtures/input.bin","environment":{"APP_MODE":"captured","DROP_ME":null}}}}"#);
+        put(root.path(), ".franken-node/migration-tests.json", br#"{"schema_version":"franken-node/migration-tests/v1","tests":["packages/api/check.cjs","scripts/other.cjs"],"execution":{"packages/api/check.cjs":{"cwd":"packages/api","stdin":"fixtures/input.bin","environment":{"APP_MODE":"captured","DROP_ME":null}}}}"#);
         let captured = snapshot(root.path());
         let workspaces = tempfile::tempdir().unwrap();
         let environment = BTreeMap::from([(OsString::from("APP_MODE"), OsString::from("ambient")),
             (OsString::from("DROP_ME"), OsString::from("retained"))]);
-        for (index, test) in ["scripts/check.cjs", "scripts/other.cjs"].into_iter().enumerate() {
+        for (index, test) in [TEST, "scripts/other.cjs"].into_iter().enumerate() {
             let workspace = workspaces.path().join(index.to_string());
             captured.stage(&workspace, Instant::now() + Duration::from_secs(30)).unwrap();
             let output = run_test(&captured, &node(), Path::new(test), &workspace, &environment,

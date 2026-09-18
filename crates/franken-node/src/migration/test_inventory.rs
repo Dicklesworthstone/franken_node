@@ -71,11 +71,14 @@ fn inventory(entries: &BTreeMap<PathBuf, Entry>) -> Result<BTreeMap<PathBuf, exe
             "duplicate migration test entrypoint: {name}");
     }
     for (name, mut settings) in manifest.execution {
-        let target = selected.get_mut(Path::new(&name)).context("execution settings refer to an unselected test")?;
-        // Exact key spelling is mandatory; Path equality alone normalizes ./.
-        ensure!(name == Path::new(&name).components().map(|part| part.as_os_str().to_string_lossy())
-            .collect::<Vec<_>>().join("/"), "noncanonical execution test key");
-        execution::validate(&mut settings, entries)?;
+        let path = Path::new(&name);
+        // Path equality can normalize interior ./ segments, so require exact
+        // canonical spelling before looking up the already validated test.
+        ensure!(!name.is_empty() && path.components().all(|part| matches!(part, Component::Normal(_)))
+            && name == path.components().map(|part| part.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/"),
+            "noncanonical execution test key");
+        let target = selected.get_mut(path).context("execution settings refer to an unselected test")?;
+        execution::validate(&mut settings, entries, path)?;
         *target = settings;
     }
     Ok(selected)
