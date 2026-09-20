@@ -130,3 +130,106 @@ files, explicit manifest settings, or program output. Inherited environment
 values and executable binaries are not exported. Review the contents before
 sharing. SHA-256 detects changes relative to a trusted digest; it is not a
 signature, authenticity proof, or proof of equivalent external side effects.
+
+## Verified inspection and real re-execution
+
+Inspection validates the archive, object hashes, captured paths, contained
+symlink graph, snapshot digests and stream accounting. It does not stage files,
+execute commands, import project code, or print raw captured output:
+
+```sh
+python3 scripts/migration_validation_runner.py \
+  --inspect-bundle failure.fnmigration --json
+```
+
+Re-execution requires a trusted **external** digest from the original report,
+plus both commands explicitly supplied by the operator. Commands stored inside
+the archive are never implicitly executed. The executable location may change,
+but its bytes and permission mode must match; arguments after the executable
+must be identical to the recorded command.
+
+```sh
+DIGEST=$(python3 -c 'import json; print(json.load(open("validation.json"))["replay_bundle"]["sha256"])')
+python3 scripts/migration_validation_runner.py \
+  --replay-bundle failure.fnmigration --expected-bundle-sha256 "$DIGEST" \
+  --baseline-command '["node", "{test}"]' \
+  --migration-command '["franken-node", "run", "--console-only", "{test}"]' \
+  --out replay.json --json
+```
+
+The command above matches a capture made with the default runtime templates.
+For a capture made with custom commands, supply those same argument arrays.
+Both projects, dependencies, binary stdin and per-test settings are reconstructed
+from the verified archive in new private temporary workspaces. The original
+project directories are not read and need not exist. Original limits, band and
+filesystem comparison mode are reused, not silently overridden.
+
+Before the first guest launch, the recovered input identities, selected runtime
+measurements and effective per-test environment hashes must all match. Restore
+the original application environment before replay; inherited values are not
+available from the archive. There is no option to waive mismatches and still
+call the result a reproduction. The existing before/after runtime checks also
+apply to the re-executed suite.
+
+Results separate reproduction from compatibility:
+
+| Replay outcome | CLI exit | Meaning |
+| --- | --- | --- |
+| `REPRODUCED` | 0 | Actual process outcomes, exact stream hashes/counts/completeness, and requested workspace deltas match. |
+| `CHANGED` | 1 | The verified inputs ran, but the observed behavior changed. |
+| `ERROR` | 2 | Verification, identity/environment admission, or execution infrastructure failed. |
+
+The original `PASS`/`FAIL` compatibility result and the new
+`execution.summary.verdict` remain separate. Reproducing a nonzero exit does
+**not** convert a compatibility failure into success. Timing measurements and
+relocated temporary paths in report metadata are excluded from comparison;
+paths printed by a guest remain literal output and are **not** normalized.
+Incomplete/error suites are inspectable but cannot earn `REPRODUCED`.
+
+Re-execution is real execution of trusted project code, not a sandbox. The
+archive does not contain external services, absolute-path files, system time,
+entropy, dynamic libraries or a script runtime's interpreter. Those differences
+can produce `CHANGED` even when captured inputs and executable files match.
+Network and other external effects can occur again. This feature does not
+claim deterministic ambient-effect replay or native Node/Franken parity.
+
+The reader rejects compressed/duplicate/unknown archive members, unsafe paths,
+symlink escapes/cycles, children beneath links, missing objects and inconsistent
+summary/output accounting before execution. It bounds ZIP directory allocation
+before invoking the ZIP parser, and never uses archive extraction helpers.
+Archive validation is not publisher authentication: obtain the expected digest
+from a source trusted independently of the bundle.
+
+## Cancellation and partial evidence
+
+The standalone runner owns SIGINT/SIGTERM for the duration of a CLI invocation.
+The first signal is latched rather than raised inside process launch, pipe
+handling, or cleanup. No later test or candidate leg is started after a
+cancellation request. The current process group is killed, its direct child is
+reaped, and already-written stdout/stderr receive a bounded best-effort drain.
+Repeated signals do not interrupt this cleanup or change first-signal attribution.
+
+A cancelled invocation exits 130 for SIGINT or 143 for SIGTERM. Its overall
+verdict is `ERROR`, with `cancellation.signal` and an `ExecutionCancelled` error;
+completed observations are not discarded. An interrupted process is marked
+`termination: "cancelled"`, with incomplete streams. An earlier timeout or output
+limit remains the recorded process cause if it preceded cancellation. With
+`--bundle`, capture still attempts to publish the input snapshots and retained
+partial output. With `--out`, the CLI still attempts to publish the JSON report.
+Disk or publication failures remain errors; no artifact durability is promised
+when publication itself fails. A signal arriving after an archive has already
+been serialized does not rewrite that immutable archive: it can describe the
+completed execution while the outer invocation reports interruption.
+
+Interrupted bundles can be inspected, but cannot be certified as `REPRODUCED`.
+Cancellation during `--replay-bundle` also returns `ERROR`, retains partial
+execution diagnostics, and leaves the original bundle unchanged. Pre-cancelled
+library calls launch nothing. Libraries may supply a per-call
+`CancellationState`; only the CLI installs signal handlers, and restores them
+when it returns. Independent library invocations do not share cancellation state.
+
+This is POSIX process-group supervision, not hostile-code containment. It does
+not claim termination of descendants that deliberately escape the group, reap
+non-child processes, handle SIGKILL/power loss, or bound uninterruptible kernel
+I/O. The post-termination drain is limited to 250 milliseconds and the configured
+stream byte bound; incomplete streams never become successful comparisons.
