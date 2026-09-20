@@ -64,6 +64,7 @@ MAX_PROJECT_FILES = 50_000
 MAX_PROJECT_BYTES = 256 * 1024 * 1024
 MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 MAX_INPUT_BYTES = 1024 * 1024
+MAX_EXECUTABLE_BYTES = 512 * 1024 * 1024
 MIGRATION_TEST_MANIFEST = ".franken-node/migration-tests.json"
 MIGRATION_TEST_SCHEMA = "franken-node/migration-tests/v1"
 MAX_MANIFEST_BYTES = 64 * 1024
@@ -315,6 +316,11 @@ def _test_environment(base: dict[str, str], settings: ExecutionSettings) -> dict
     return environment
 
 
+def _file_version(metadata: os.stat_result) -> tuple[int, ...]:
+    return (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mode,
+            metadata.st_nlink, metadata.st_mtime_ns, metadata.st_ctime_ns)
+
+
 def capture_project(project: Path, deadline: float) -> tuple[list[SnapshotEntry], str]:
     """Capture bounded regular files and contained symlinks before either leg.
 
@@ -353,6 +359,8 @@ def capture_project(project: Path, deadline: float) -> tuple[list[SnapshotEntry]
             elif stat.S_ISDIR(metadata.st_mode):
                 entry = SnapshotEntry(relative, None, mode)
             elif stat.S_ISREG(metadata.st_mode):
+                if metadata.st_nlink != 1:
+                    raise ValueError(f"hard-linked workspace files require explicit isolation: {relative}")
                 if metadata.st_size > MAX_PROJECT_BYTES - total:
                     raise ValueError(f"project exceeds {MAX_PROJECT_BYTES}-byte capture budget")
                 flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
@@ -360,11 +368,11 @@ def capture_project(project: Path, deadline: float) -> tuple[list[SnapshotEntry]
                     before = os.fstat(source.fileno())
                     if not stat.S_ISREG(before.st_mode):
                         raise ValueError(f"nonregular project input refused: {relative}")
+                    if _file_version(metadata) != _file_version(before):
+                        raise ValueError(f"project input changed before capture: {relative}")
                     data = source.read(MAX_PROJECT_BYTES - total + 1)
                     after = os.fstat(source.fileno())
-                if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
-                    before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size,
-                                          after.st_mtime_ns, after.st_ctime_ns):
+                if _file_version(before) != _file_version(after):
                     raise ValueError(f"project input changed during capture: {relative}")
                 total += len(data)
                 if total > MAX_PROJECT_BYTES:
@@ -441,6 +449,52 @@ def resolve_command(command: tuple[str, ...] | list[str]) -> list[str]:
     if executable is None:
         raise ValueError(f"runtime executable not found: {command[0]}")
     return [str(Path(executable).resolve()), *command[1:]]
+
+
+def runtime_identity(executable: str, deadline: float) -> dict:
+    """Measure executable bytes with a deadline and size bound.
+
+    This identifies a selected file, not a runtime brand or interpreter chain.
+    Before/after-suite measurements detect persistent replacement; they do not
+    pin executable descriptors at exec or detect a swap restored between checks.
+    """
+    path = Path(executable)
+    if not path.is_absolute():
+        raise ValueError("runtime identity requires an absolute executable path")
+    flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
+    with os.fdopen(os.open(path, flags), "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_mode & 0o111 == 0:
+            raise ValueError("runtime must be an executable regular file")
+        if before.st_size > MAX_EXECUTABLE_BYTES:
+            raise ValueError("runtime binary exceeds the 512 MiB limit")
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("validation budget exhausted while measuring runtime identity")
+            chunk = stream.read(min(65536, MAX_EXECUTABLE_BYTES - total + 1))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_EXECUTABLE_BYTES:
+                raise ValueError("runtime binary grew beyond the 512 MiB limit")
+            digest.update(chunk)
+        if (_file_version(before) != _file_version(os.fstat(stream.fileno()))
+                or _file_version(before) != _file_version(path.lstat())):
+            raise ValueError("runtime executable changed during identity measurement")
+    return {"executable": str(path), "sha256": digest.hexdigest(), "bytes": total,
+            "mode": stat.S_IMODE(before.st_mode)}
+
+
+def measure_runtime_identities(commands: dict[str, list[str]], deadline: float) -> dict:
+    # A Node/Node test pair intentionally has one binary; avoid hashing it twice
+    # in the same phase, without calling that evidence of runtime independence.
+    measured = {}
+    for command in commands.values():
+        if command[0] not in measured:
+            measured[command[0]] = runtime_identity(command[0], deadline)
+    return {role: dict(measured[command[0]]) for role, command in commands.items()}
 
 
 def run_command(command: list[str], cwd: Path, *, timeout: float,
@@ -545,6 +599,9 @@ def validate_project(project_dir: Path, *, migrated_project: Path | None = None,
               "summary": {"total_tests": 0, "passed": 0, "failed": 0, "skipped": 0,
                           "errored": 0, "verdict": "ERROR"}}
     summary = report["summary"]
+    commands = {}
+    identities = None
+    deadline = None
     try:
         if os.name != "posix":
             raise ValueError("bounded process-group execution currently requires POSIX")
@@ -561,6 +618,9 @@ def validate_project(project_dir: Path, *, migrated_project: Path | None = None,
         migration_root = Path(migrated_project or project_dir).resolve(strict=True)
         if not baseline_root.is_dir() or not migration_root.is_dir():
             raise ValueError("both project paths must be directories")
+        if baseline_root != migration_root and (baseline_root.is_relative_to(migration_root)
+                                               or migration_root.is_relative_to(baseline_root)):
+            raise ValueError("distinct input projects must not be nested")
         # Capture before executing anything; every case starts from these bytes.
         baseline_entries, baseline_digest = capture_project(baseline_root, deadline)
         if migration_root == baseline_root:
@@ -589,7 +649,15 @@ def validate_project(project_dir: Path, *, migrated_project: Path | None = None,
             matched_test_execution(baseline_inventory, migration_inventory, baseline_by_path, migration_by_path)
             baseline = resolve_command(baseline_command)
             migration = resolve_command(migration_command)
-            report["commands"] = {"baseline": baseline, "migration": migration}
+            commands = {"baseline": baseline, "migration": migration}
+            for command in commands.values():
+                if any(Path(command[0]).is_relative_to(project) for project in (baseline_root, migration_root)):
+                    raise ValueError("runtime executables must be outside both measured projects")
+            identities = measure_runtime_identities(commands, deadline)
+            report["commands"] = commands
+            report["runtime_identities"] = identities
+            report["runtime_identity_scope"] = "executable-bytes-before-and-after-suite"
+            report["runtime_identity_rechecked"] = False
             report["limits"] = {"per_leg_seconds": timeout_seconds, "total_seconds": total_timeout_seconds,
                                 "per_stream_bytes": max_output_bytes}
             environment = dict(os.environ)
@@ -647,6 +715,19 @@ def validate_project(project_dir: Path, *, migrated_project: Path | None = None,
     except (OSError, ValueError, RuntimeError, TimeoutError, subprocess.SubprocessError) as error:
         report["errors"].append({"type": type(error).__name__, "message": str(error)})
         summary["verdict"] = "ERROR"
+    finally:
+        # Recheck even after an execution/collection error. A completed case is
+        # kept as evidence, but may not authorize a suite PASS on changed code.
+        if identities is not None:
+            try:
+                after = measure_runtime_identities(commands, deadline)
+                if after != identities:
+                    raise ValueError("runtime executable changed during validation")
+                report["runtime_identity_rechecked"] = True
+            except (OSError, ValueError, RuntimeError, TimeoutError) as error:
+                report["errors"].append({"type": type(error).__name__,
+                                         "message": f"runtime identity recheck failed: {error}"})
+                summary["verdict"] = "ERROR"
     return report
 
 
