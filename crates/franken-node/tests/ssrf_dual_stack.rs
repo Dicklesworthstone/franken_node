@@ -5,7 +5,7 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use frankenengine_extension_host::host_io::{
     HostIoCapability, HostIoOutcome, HostIoProvider, HostIoRequest, HostIoResponse,
@@ -153,10 +153,102 @@ fn helper_literal_and_dns_policy_classifications_agree_and_preserve_serialized_t
     for address in [PUBLIC_V6, "2606:4700:4700::1111", "::ffff:8.8.8.8", "64:ff9b::808:808",
         "fd00::1", "::", "2001:db8::1", "64:ff9b::a9fe:a9fe"] {
         let denied = SsrfPolicyTemplate::is_private_ip(address);
-        for host in [address.to_string(), format!("[{address}]")] {
+        for host in [address.to_string(), format!("[{address}]" )] {
             assert_eq!(restored.check_ssrf(&host, 443, Protocol::Http, "trace", "time").is_err(), denied, "{host}");
         }
         assert_eq!(restored.check_ssrf_resolved_ips("service.invalid", &[address.parse().unwrap()],
             443, Protocol::Tcp, "trace", "time").is_err(), denied, "{address}");
     }
+}
+
+#[derive(Debug)]
+struct AdmittedSet {
+    request: HostIoRequest,
+    destinations: Vec<SocketAddr>,
+    deadline: Instant,
+}
+
+#[derive(Debug)]
+struct SetProvider(Arc<Mutex<Vec<AdmittedSet>>>);
+impl HostIoProvider for SetProvider {
+    fn name(&self) -> &str { "approved-set-observer" }
+    fn perform(&self, _: &HostIoRequest, _: &[HostIoCapability]) -> HostIoOutcome {
+        panic!("ordinary execution must not be used for an approved address set");
+    }
+}
+impl PinnedNetworkProvider for SetProvider {
+    fn supports_pinned_tls(&self) -> bool { true }
+    fn perform_pinned_network_candidates(&self, request: &HostIoRequest,
+        grants: &[HostIoCapability], destinations: &[SocketAddr], deadline: Instant) -> HostIoOutcome {
+        assert!(grants.contains(&request.required_capability()));
+        self.0.lock().unwrap().push(AdmittedSet {
+            request: request.clone(), destinations: destinations.to_vec(), deadline,
+        });
+        Ok(HostIoResponse::NetworkRequest { response: Vec::new() })
+    }
+}
+
+#[test]
+fn gate_passes_the_whole_approved_set_once_with_stable_order_and_no_duplicates() {
+    for request in requests("service.invalid:443") {
+        let state = Arc::new(Observed::default());
+        let admitted = Arc::new(Mutex::new(Vec::new()));
+        let gate = SsrfGatedHostIo::with_resolver(
+            SetProvider(Arc::clone(&admitted)), policy(), "approved-set",
+            Resolver { state: Arc::clone(&state), answers: [PUBLIC_V6, PUBLIC_V4, PUBLIC_V6, PUBLIC_V4]
+                .iter().map(|ip| ip.parse().unwrap()).collect() },
+        );
+        let before = Instant::now();
+        assert!(gate.perform(&request, &[request.required_capability()]).is_ok());
+        assert_eq!(state.dns.load(Ordering::SeqCst), 1);
+        let calls = admitted.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].request, request);
+        assert_eq!(calls[0].destinations, [
+            SocketAddr::new(PUBLIC_V6.parse().unwrap(), 443),
+            SocketAddr::new(PUBLIC_V4.parse().unwrap(), 443),
+        ]);
+        assert!(calls[0].deadline > before);
+        assert!(calls[0].deadline <= before + Duration::from_secs(11));
+        assert_eq!(gate.audit_records().len(), 1);
+    }
+}
+
+#[test]
+fn no_approved_set_reaches_transport_when_any_answer_is_denied_or_capacity_overflows() {
+    for answers in [
+        vec![PUBLIC_V6.parse().unwrap(), "fd00::1".parse().unwrap(), PUBLIC_V4.parse().unwrap()],
+        vec![PUBLIC_V6.parse().unwrap(); 65],
+        Vec::new(),
+    ] {
+        let state = Arc::new(Observed::default());
+        let admitted = Arc::new(Mutex::new(Vec::new()));
+        let gate = SsrfGatedHostIo::with_resolver(
+            SetProvider(Arc::clone(&admitted)), policy(), "invalid-set",
+            Resolver { state, answers },
+        );
+        for request in requests("service.invalid:443") {
+            assert!(gate.perform(&request, &[request.required_capability()]).is_err());
+        }
+        assert!(admitted.lock().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn singleton_provider_default_validates_the_full_set_before_executing_once() {
+    let observed = Arc::new(Observed::default());
+    let provider = Provider(Arc::clone(&observed));
+    let request = requests("service.invalid:443")[3].clone();
+    let first = SocketAddr::new(PUBLIC_V4.parse().unwrap(), 443);
+    let second = SocketAddr::new(PUBLIC_V6.parse().unwrap(), 443);
+    let wrong_port = SocketAddr::new(second.ip(), 444);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    for destinations in [vec![], vec![first; 65], vec![first, wrong_port]] {
+        assert!(provider.perform_pinned_network_candidates(&request,
+            &[HostIoCapability::NetworkSend], &destinations, deadline).is_err());
+    }
+    assert!(observed.effects.lock().unwrap().is_empty());
+    assert!(provider.perform_pinned_network_candidates(&request,
+        &[HostIoCapability::NetworkSend], &[first, second], deadline).is_ok());
+    assert_eq!(*observed.effects.lock().unwrap(), vec![(request, first)]);
 }

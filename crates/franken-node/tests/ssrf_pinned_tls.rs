@@ -437,3 +437,91 @@ fn ipv6_literal_https_rejects_trusted_wrong_ip_certificates_before_application_b
     assert!(peer.sni.is_none());
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
+
+#[derive(Debug)]
+struct AddressSetDns {
+    addresses: Vec<IpAddr>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl EndpointResolver for AddressSetDns {
+    fn resolve(&self, _: &str, _: u16) -> io::Result<Vec<IpAddr>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(self.addresses.clone())
+    }
+}
+
+#[test]
+fn approved_connection_failover_reaches_ipv4_and_ipv6_tls_without_resolving_again() {
+    for bind in ["127.0.0.1:0", "[::1]:0"] {
+        let root = tempfile::tempdir().unwrap();
+        let key = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let inner = SandboxedHostIo::with_root(root.path()).unwrap()
+            .with_extra_tls_roots_pem(key.cert.pem().as_bytes()).unwrap();
+        let listener = TcpListener::bind(bind).expect("local IPv4/IPv6 required");
+        let live = listener.local_addr().unwrap();
+        let server = tls_peer(listener, &key, REPLY.to_vec());
+        let calls = Arc::new(AtomicUsize::new(0));
+        // localhost's explicit local exception permits both loopback families;
+        // ordinary DNS-hostname exceptions remain unable to bypass CIDRs.
+        let gate = SsrfGatedHostIo::with_resolver(inner, exception("localhost", live.port()),
+            "approved-failover", AddressSetDns {
+                addresses: vec!["127.0.0.2".parse().unwrap(), live.ip(), live.ip()],
+                calls: Arc::clone(&calls),
+            });
+        let original = request("localhost", live.port(), 4096);
+        let result = gate.perform(&original, &[HostIoCapability::NetworkSend]);
+        let peer = server.join().unwrap();
+        assert_eq!(result, Ok(HostIoResponse::NetworkRequest { response: REPLY.to_vec() }));
+        assert_eq!(peer.sni.as_deref(), Some("localhost"));
+        let HostIoRequest::NetworkRequest { payload, .. } = original else { unreachable!() };
+        assert_eq!(peer.request, payload);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(gate.audit_records().len(), 1);
+    }
+}
+
+#[test]
+fn tls_authentication_and_partial_http_failures_never_replay_on_another_candidate() {
+    for wrong_identity in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let cert_name = if wrong_identity { "wrong.invalid" } else { "localhost" };
+        let key = rcgen::generate_simple_self_signed(vec![cert_name.into()]).unwrap();
+        let inner = SandboxedHostIo::with_root(root.path()).unwrap()
+            .with_extra_tls_roots_pem(key.cert.pem().as_bytes()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let first = listener.local_addr().unwrap();
+        let second = TcpListener::bind(SocketAddr::new("127.0.0.2".parse().unwrap(), first.port())).unwrap();
+        second.set_nonblocking(true).unwrap();
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nx".to_vec();
+        let server = tls_peer(listener, &key, response);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = SsrfGatedHostIo::with_resolver(inner, exception("localhost", first.port()),
+            "no-effect-retry", AddressSetDns {
+                addresses: vec![first.ip(), second.local_addr().unwrap().ip()],
+                calls: Arc::clone(&calls),
+            });
+        let original = request("localhost", first.port(), 4096);
+        let result = gate.perform(&original, &[HostIoCapability::NetworkSend]);
+        let peer = server.join().unwrap();
+        assert!(matches!(result, Err(HostIoError::Io { .. })), "{result:?}");
+        if wrong_identity {
+            assert!(peer.request.is_empty());
+        } else {
+            let HostIoRequest::NetworkRequest { payload, .. } = original else { unreachable!() };
+            assert_eq!(peer.request, payload);
+        }
+        // Even a speculative losing TCP socket must receive no TLS or guest
+        // bytes. The connection selector owns and closes losers before I/O.
+        match second.accept() {
+            Ok((mut socket, _)) => {
+                socket.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+                let mut byte = [0; 1];
+                assert_eq!(socket.read(&mut byte).unwrap(), 0);
+            }
+            Err(error) => assert_eq!(error.kind(), io::ErrorKind::WouldBlock),
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(gate.audit_records().len(), 1);
+    }
+}
