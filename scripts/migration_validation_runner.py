@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -62,6 +63,17 @@ MAX_TEST_FILES = 1024
 MAX_PROJECT_FILES = 50_000
 MAX_PROJECT_BYTES = 256 * 1024 * 1024
 MAX_OUTPUT_BYTES = 16 * 1024 * 1024
+MAX_INPUT_BYTES = 1024 * 1024
+MIGRATION_TEST_MANIFEST = ".franken-node/migration-tests.json"
+MIGRATION_TEST_SCHEMA = "franken-node/migration-tests/v1"
+MAX_MANIFEST_BYTES = 64 * 1024
+MAX_TEST_PATH_BYTES = 4096
+TEST_EXTENSIONS = frozenset({"js", "mjs", "cjs", "ts", "mts", "cts"})
+DISCOVERY_EXCLUSIONS = frozenset({"node_modules", ".git", ".migrate-backup", ".franken-node"})
+EXECUTION_EXCLUSIONS = DISCOVERY_EXCLUSIONS | {".beads", ".franken-rewrite"}
+PRIVATE_RUNTIME_VARIABLES = (
+    "FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK", "FRANKEN_NODE_MIGRATION_FAILURE_DIR",
+)
 
 
 def raise_walk_error(error: OSError) -> None:
@@ -69,22 +81,24 @@ def raise_walk_error(error: OSError) -> None:
     raise error
 
 
+def _is_discovered_test(name: str) -> bool:
+    path = Path(name)
+    extension = path.suffix.removeprefix(".")
+    return (not (set(path.parts) & DISCOVERY_EXCLUSIONS)
+            and extension in TEST_EXTENSIONS
+            and (path.name.endswith((f".test.{extension}", f".spec.{extension}"))
+                 or bool(set(path.parts[:-1]) & {"test", "__tests__"})))
+
+
 def discover_tests(project_dir: Path) -> list[Path]:
-    """Discover only project tests, excluding dependency and VCS directories."""
-    tests = set()
-    for directory, names, files in os.walk(project_dir, followlinks=False, onerror=raise_walk_error):
-        names[:] = sorted(n for n in names if n not in {"node_modules", ".git"})
-        for name in sorted(files):
-            path = Path(directory) / name
-            relative = path.relative_to(project_dir)
-            if (name.endswith((".test.js", ".test.ts", ".spec.js", ".spec.ts",
-                               ".test.mjs", ".spec.mjs", ".test.cjs", ".spec.cjs"))
-                    or (set(relative.parts[:-1]) & {"test", "__tests__"}
-                        and path.suffix in {".js", ".ts", ".mjs", ".cjs"})):
-                tests.add(path)
-                if len(tests) > MAX_TEST_FILES:
-                    raise ValueError(f"test discovery exceeds {MAX_TEST_FILES} files")
-    return sorted(tests)
+    """Select tests from a bounded capture, including an explicit manifest.
+
+    Invalid explicit inventories never fall back to heuristic discovery.
+    Validation itself reuses its existing capture instead of recapturing here.
+    """
+    root = Path(project_dir).resolve(strict=True)
+    entries, _ = capture_project(root, time.monotonic() + 300.0)
+    return [root / name for name in captured_test_inventory(entries)]
 
 
 def canonicalize_output(output: str) -> str:
@@ -119,6 +133,186 @@ class SnapshotEntry:
     data: bytes | None
     mode: int
     link: str | None = None
+
+
+@dataclass(frozen=True, repr=False)
+class ExecutionSettings:
+    """Captured application inputs, never a shell or a runtime selection."""
+
+    cwd: str = ""
+    stdin: str | None = None
+    environment: tuple[tuple[str, str | None], ...] = ()
+
+    def __repr__(self) -> str:
+        # Environment values can be secrets. Do not include them in errors.
+        return (f"ExecutionSettings(cwd={self.cwd!r}, stdin={self.stdin!r}, "
+                f"environment_count={len(self.environment)})")
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict:
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate migration test manifest key")
+        value[key] = item
+    return value
+
+
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError("non-finite migration test manifest value")
+
+
+def _utf8_size(value: str) -> int:
+    try:
+        return len(value.encode("utf-8"))
+    except UnicodeError:
+        raise ValueError("migration test settings must contain valid Unicode") from None
+
+
+def _canonical_test_path(name: object, excluded=DISCOVERY_EXCLUSIONS) -> str:
+    if (not isinstance(name, str) or not name or _utf8_size(name) > MAX_TEST_PATH_BYTES
+            or "\\" in name or any(unicodedata.category(char) == "Cc" for char in name)
+            or any(part in {"", ".", ".."} for part in name.split("/"))):
+        raise ValueError("migration test paths must be canonical project-relative paths")
+    if set(name.split("/")) & excluded:
+        raise ValueError("migration test paths cannot select dependencies, backups or reserved state")
+    return name
+
+
+def _ordinary_parents(entries: dict[str, SnapshotEntry], name: str) -> None:
+    parts = name.split("/")
+    for length in range(1, len(parts)):
+        entry = entries.get("/".join(parts[:length]))
+        if entry is None or entry.link is not None or entry.data is not None:
+            raise ValueError("execution paths must have ordinary captured directory parents")
+
+
+def _ordinary_file(entries: dict[str, SnapshotEntry], name: str) -> bytes:
+    _ordinary_parents(entries, name)
+    entry = entries.get(name)
+    if entry is None or entry.link is not None or entry.data is None:
+        raise ValueError("migration test input must be an ordinary captured file")
+    return entry.data
+
+
+def _application_variable(name: str) -> bool:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", name):
+        return False
+    if name == "NODE_ENV":
+        return True
+    upper = name.upper()
+    return (not upper.startswith(("NODE_", "BUN_", "FRANKEN_", "LD_", "DYLD_", "RUST_", "CARGO_", "NPM_"))
+            and upper not in {"PATH", "HOME", "PWD", "OLDPWD", "TMPDIR", "TMP", "TEMP", "SHELL",
+                              "ENV", "BASH_ENV", "IFS", "CDPATH", "GCONV_PATH"})
+
+
+def _execution_settings(raw: object, entries: dict[str, SnapshotEntry], test: str) -> ExecutionSettings:
+    if not isinstance(raw, dict) or set(raw) - {"cwd", "stdin", "environment"}:
+        raise ValueError("invalid or unknown migration test execution settings")
+    cwd = raw.get("cwd")
+    if cwd in (None, "."):
+        cwd = ""
+    else:
+        cwd = _canonical_test_path(cwd, EXECUTION_EXCLUSIONS)
+        _ordinary_parents(entries, cwd)
+        entry = entries.get(cwd)
+        if entry is None or entry.data is not None or entry.link is not None:
+            raise ValueError("test working directory must be an ordinary captured directory")
+    if cwd and not test.startswith(cwd + "/"):
+        raise ValueError("test entrypoint must be inside its working directory")
+    stdin = raw.get("stdin")
+    if stdin is not None:
+        stdin = _canonical_test_path(stdin, EXECUTION_EXCLUSIONS)
+        if len(_ordinary_file(entries, stdin)) > MAX_INPUT_BYTES:
+            raise ValueError("captured test stdin exceeds 1 MiB")
+    environment = raw.get("environment", {})
+    if not isinstance(environment, dict) or len(environment) > 64:
+        raise ValueError("at most 64 application environment overrides per test")
+    size = 0
+    for name, value in environment.items():
+        if not _application_variable(name):
+            raise ValueError("test environment cannot override runtime, loader or operator controls")
+        if value is not None and (not isinstance(value, str) or "\0" in value or _utf8_size(value) > 4096):
+            raise ValueError("test environment value must be a string of at most 4096 bytes without NUL, or null")
+        size += len(name) + (0 if value is None else _utf8_size(value))
+    if size > 16 * 1024:
+        raise ValueError("test environment exceeds 16 KiB")
+    return ExecutionSettings(cwd, stdin, tuple(sorted(environment.items())))
+
+
+def captured_test_inventory(capture: list[SnapshotEntry]) -> dict[str, ExecutionSettings]:
+    """Interpret only immutable captured bytes; never read live project files."""
+    entries = {entry.path: entry for entry in capture}
+    if len(entries) != len(capture):
+        raise ValueError("duplicate captured project path")
+    config = entries.get(".franken-node")
+    if config is not None and config.link is not None:
+        raise ValueError("migration test configuration directory must not be a symlink")
+    manifest = entries.get(MIGRATION_TEST_MANIFEST)
+    if manifest is None:
+        tests = {entry.path: ExecutionSettings() for entry in capture
+                 if (entry.data is not None or entry.link is not None) and _is_discovered_test(entry.path)}
+        if len(tests) > MAX_TEST_FILES:
+            raise ValueError(f"test discovery exceeds {MAX_TEST_FILES} files")
+        return dict(sorted(tests.items()))
+    contents = _ordinary_file(entries, MIGRATION_TEST_MANIFEST)
+    if len(contents) > MAX_MANIFEST_BYTES:
+        raise ValueError("migration test manifest exceeds the 64 KiB limit")
+    try:
+        raw = json.loads(contents.decode("utf-8"), object_pairs_hook=_unique_json_object,
+                         parse_constant=_reject_json_constant)
+    except (ValueError, RecursionError):
+        raise ValueError("invalid migration test manifest") from None
+    if (not isinstance(raw, dict) or set(raw) - {"schema_version", "tests", "execution"}
+            or raw.get("schema_version") != MIGRATION_TEST_SCHEMA):
+        raise ValueError("unsupported migration test manifest schema or fields")
+    names = raw.get("tests")
+    if not isinstance(names, list) or not 0 < len(names) <= MAX_TEST_FILES:
+        raise ValueError("explicit migration test inventory must contain 1 to 1024 tests")
+    tests = {}
+    for name in names:
+        name = _canonical_test_path(name)
+        if Path(name).suffix.removeprefix(".") not in TEST_EXTENSIONS:
+            raise ValueError("migration test manifest requires a standalone JS/TS entrypoint")
+        _ordinary_file(entries, name)
+        if name in tests:
+            raise ValueError("duplicate migration test entrypoint")
+        tests[name] = ExecutionSettings()
+    overrides = raw.get("execution", {})
+    if not isinstance(overrides, dict):
+        raise ValueError("migration test execution must be an object")
+    for name, value in overrides.items():
+        _canonical_test_path(name)
+        if name not in tests:
+            raise ValueError("execution settings refer to an unselected test")
+        tests[name] = _execution_settings(value, entries, name)
+    return dict(sorted(tests.items()))
+
+
+def _test_input(settings: ExecutionSettings, entries: dict[str, SnapshotEntry]) -> bytes | None:
+    return None if settings.stdin is None else _ordinary_file(entries, settings.stdin)
+
+
+def matched_test_execution(baseline: dict[str, ExecutionSettings], migration: dict[str, ExecutionSettings],
+                           baseline_entries: dict[str, SnapshotEntry],
+                           migration_entries: dict[str, SnapshotEntry]) -> None:
+    if baseline != migration:
+        raise ValueError("test execution settings differ between original and candidate")
+    for name, settings in baseline.items():
+        if _test_input(settings, baseline_entries) != _test_input(migration[name], migration_entries):
+            raise ValueError("captured test stdin bytes differ between original and candidate")
+
+
+def _test_environment(base: dict[str, str], settings: ExecutionSettings) -> dict[str, str]:
+    environment = dict(base)
+    for name, value in settings.environment:
+        if value is None:
+            environment.pop(name, None)
+        else:
+            environment[name] = value
+    for name in PRIVATE_RUNTIME_VARIABLES:
+        environment.pop(name, None)
+    return environment
 
 
 def capture_project(project: Path, deadline: float) -> tuple[list[SnapshotEntry], str]:
@@ -250,18 +444,21 @@ def resolve_command(command: tuple[str, ...] | list[str]) -> list[str]:
 
 
 def run_command(command: list[str], cwd: Path, *, timeout: float,
-                max_output_bytes: int, environment: dict[str, str]) -> dict:
+                max_output_bytes: int, environment: dict[str, str], input_bytes: bytes | None = None) -> dict:
     """Bound both pipes and process lifetime, including inherited child pipes.
 
     A new POSIX session lets timeout/overflow cleanup kill this leg's process
     group. Even identical failures never qualify as successful validation.
     """
+    if input_bytes is not None and (not isinstance(input_bytes, bytes) or len(input_bytes) > MAX_INPUT_BYTES):
+        raise ValueError("captured test stdin must be bytes of at most 1 MiB")
     started = time.monotonic()
     output = {"stdout": bytearray(), "stderr": bytearray()}
     counts = {name: 0 for name in output}
     hashes = {name: hashlib.sha256() for name in output}
     reason = None
-    with subprocess.Popen(command, cwd=cwd, env=environment, stdin=subprocess.DEVNULL,
+    with subprocess.Popen(command, cwd=cwd, env=environment,
+                          stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           start_new_session=True) as process:
         try:
@@ -269,12 +466,34 @@ def run_command(command: list[str], cwd: Path, *, timeout: float,
                 for name, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
                     os.set_blocking(stream.fileno(), False)
                     selector.register(stream, selectors.EVENT_READ, name)
+                input_offset = 0
+                if process.stdin is not None:
+                    if input_bytes:
+                        os.set_blocking(process.stdin.fileno(), False)
+                        selector.register(process.stdin, selectors.EVENT_WRITE, "stdin")
+                    else:
+                        process.stdin.close()
                 while selector.get_map() or process.poll() is None:
                     remaining = timeout - (time.monotonic() - started)
                     if remaining <= 0:
                         reason = "timeout"
                         break
                     for key, _ in selector.select(min(remaining, 0.05)):
+                        if key.data == "stdin":
+                            try:
+                                count = os.write(key.fileobj.fileno(), input_bytes[input_offset:input_offset + 65536])
+                            except BlockingIOError:
+                                continue
+                            except BrokenPipeError:
+                                # A test may legitimately finish without consuming stdin.
+                                selector.unregister(key.fileobj)
+                                key.fileobj.close()
+                                continue
+                            input_offset += count
+                            if input_offset == len(input_bytes):
+                                selector.unregister(key.fileobj)
+                                key.fileobj.close()
+                            continue
                         chunk = os.read(key.fileobj.fileno(), 65536)
                         if not chunk:
                             selector.unregister(key.fileobj)
@@ -350,13 +569,12 @@ def validate_project(project_dir: Path, *, migrated_project: Path | None = None,
             migration_entries, migration_digest = capture_project(migration_root, deadline)
         with tempfile.TemporaryDirectory(prefix="franken-migration-") as temporary:
             root = Path(temporary)
-            discovery = root / "discovery"
-            stage_project(baseline_entries, discovery, deadline)
-            baseline_tests = {path.relative_to(discovery).as_posix() for path in discover_tests(discovery)}
-            migration_discovery = root / "migration-discovery"
-            stage_project(migration_entries, migration_discovery, deadline)
-            migration_tests = {path.relative_to(migration_discovery).as_posix()
-                               for path in discover_tests(migration_discovery)}
+            baseline_inventory = captured_test_inventory(baseline_entries)
+            migration_inventory = captured_test_inventory(migration_entries)
+            baseline_by_path = {entry.path: entry for entry in baseline_entries}
+            migration_by_path = {entry.path: entry for entry in migration_entries}
+            baseline_tests = set(baseline_inventory)
+            migration_tests = set(migration_inventory)
             tests = sorted(baseline_tests | migration_tests)
             report["test_discovery"] = {"test_files_found": len(tests), "test_files": tests,
                                         "missing_baseline": sorted(migration_tests - baseline_tests),
@@ -368,6 +586,7 @@ def validate_project(project_dir: Path, *, migrated_project: Path | None = None,
             if not tests:
                 summary["verdict"] = "NO_TESTS"
                 return report
+            matched_test_execution(baseline_inventory, migration_inventory, baseline_by_path, migration_by_path)
             baseline = resolve_command(baseline_command)
             migration = resolve_command(migration_command)
             report["commands"] = {"baseline": baseline, "migration": migration}
@@ -392,14 +611,18 @@ def validate_project(project_dir: Path, *, migrated_project: Path | None = None,
                         stage_project(entries, workspace, deadline)
                         if not (workspace / test).is_file():
                             raise ValueError(f"{leg} project is missing test {test}")
-                        command = [f"./{test}" if arg == "{test}" else arg for arg in template]
+                        settings = baseline_inventory[test] if leg == "baseline" else migration_inventory[test]
+                        by_path = baseline_by_path if leg == "baseline" else migration_by_path
+                        script = test[len(settings.cwd) + 1:] if settings.cwd else test
+                        command = [f"./{script}" if arg == "{test}" else arg for arg in template]
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
                             raise TimeoutError("total validation budget exhausted")
-                        captures[leg] = run_command(command, workspace,
+                        captures[leg] = run_command(command, workspace / settings.cwd,
                                                     timeout=min(timeout_seconds, remaining),
                                                     max_output_bytes=max_output_bytes,
-                                                    environment=environment)
+                                                    environment=_test_environment(environment, settings),
+                                                    input_bytes=_test_input(settings, by_path))
                         # Keep completed-leg evidence even if the other leg
                         # encounters an infrastructure failure or total timeout.
                         row[leg] = {k: v for k, v in captures[leg].items() if k not in {"stdout", "stderr"}}
