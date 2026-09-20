@@ -1,857 +1,498 @@
-//! bd-656a2 (http leg, T3/T4): integration coverage for the product-layer SSRF
-//! egress gate (`SsrfGatedHostIo`).
+//! Registered public-API coverage for SSRF admission and pinned network I/O.
 //!
-//! The crate-root `#![cfg(any(not(test), franken_node_inline_tests))]` gates the
-//! lib's inline `#[cfg(test)]` modules out of the normal `cargo test` lane, so
-//! the gate is verified here through the crate's PUBLIC API against the real,
-//! not-test library — independent of the (separately tracked) broken inline
-//! lane. The decision tests use a mock inner provider; the "allowed" path drives
-//! the REAL engine `SandboxedHostIo` network mechanism against a loopback
-//! listener with NO mocks, proving gate -> mechanism delegation end to end.
+//! The baseline suite is preserved byte-for-byte in its companion module,
+//! including its real-socket and filesystem flow-policy regressions. New tests
+//! run here, not in the separately gated library-inline test configuration.
 
 #![cfg(feature = "engine")]
 
-use std::io::Read;
-use std::net::TcpListener;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+#[path = "ssrf_gated_host_io_egress_baseline.rs"]
+mod baseline;
 
-use frankenengine_extension_host::host_io::{
-    FsMetaResult, HostIoCapability, HostIoError, HostIoOutcome, HostIoProvider, HostIoRequest,
-    HostIoResponse, SandboxedHostIo,
-};
-use frankenengine_node::config::{NetworkAllowlistEntry, NetworkPolicyConfig, SsrfEnforcementMode};
-use frankenengine_node::ops::ssrf_gated_host_io::SsrfGatedHostIo;
-use frankenengine_node::security::ssrf_policy::SsrfPolicyTemplate;
-
-/// Mock inner provider that records the requests forwarded to it (via a shared
-/// handle the test keeps after the provider is moved into the gate) and always
-/// succeeds — so a test asserts purely on the GATE's allow/deny decision: was
-/// the inner mechanism reached?
-#[derive(Debug)]
-struct RecordingInner {
-    seen: Arc<Mutex<Vec<HostIoRequest>>>,
-}
-
-impl HostIoProvider for RecordingInner {
-    fn name(&self) -> &str {
-        "recording-inner"
-    }
-
-    fn perform(&self, request: &HostIoRequest, _granted: &[HostIoCapability]) -> HostIoOutcome {
-        self.seen.lock().unwrap().push(request.clone());
-        Ok(match request {
-            HostIoRequest::FsRead { .. } => HostIoResponse::FsRead { bytes: Vec::new() },
-            HostIoRequest::FsWrite { .. } => HostIoResponse::FsWrite { bytes_written: 0 },
-            HostIoRequest::FsMeta { .. } => HostIoResponse::FsMeta {
-                result: FsMetaResult::Unit,
-            },
-            HostIoRequest::NetworkSend { payload, .. } => HostIoResponse::NetworkSend {
-                bytes_sent: payload.len() as u64,
-            },
-            HostIoRequest::NetworkRecv { .. } => HostIoResponse::NetworkRecv { bytes: Vec::new() },
-            HostIoRequest::NetworkRequest { .. } => HostIoResponse::NetworkRequest {
-                response: b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_vec(),
-            },
-            HostIoRequest::RandomRead { byte_len } => HostIoResponse::RandomRead {
-                bytes: vec![0; usize::try_from(*byte_len).expect("bounded test request")],
-            },
-        })
-    }
-}
-
-/// A template that blocks nothing — lets a test authorize an otherwise
-/// SSRF-blocked loopback endpoint without a signed allowlist receipt.
-fn permissive_template() -> SsrfPolicyTemplate {
-    SsrfPolicyTemplate {
-        connector_id: "test-permissive".to_string(),
-        blocked_cidrs: Vec::new(),
-        allowlist: Vec::new(),
-        audit_log: Vec::new(),
-    }
-}
-
-fn net_send(endpoint: &str) -> HostIoRequest {
-    HostIoRequest::NetworkSend {
-        endpoint: endpoint.to_string(),
-        payload: b"GET / HTTP/1.1\r\nHost: x\r\n\r\n".to_vec(),
-    }
-}
-
-// bd-3894s slice (4): the single-socket round-trip variant the http leg now uses.
-fn net_request(endpoint: &str) -> HostIoRequest {
-    HostIoRequest::NetworkRequest {
-        endpoint: endpoint.to_string(),
-        payload: b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".to_vec(),
-        max_len: 4096,
-        use_tls: false,
-    }
-}
-
-// bd-3894s slice (5): the TLS-marked round trip (an https guest URL) — the SSRF
-// gate must treat it exactly like the plaintext form (scheme carries no policy
-// privilege).
-fn net_request_tls(endpoint: &str) -> HostIoRequest {
-    HostIoRequest::NetworkRequest {
-        endpoint: endpoint.to_string(),
-        payload: b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".to_vec(),
-        max_len: 4096,
-        use_tls: true,
-    }
-}
-
-/// bd-3894s slice (5): a TLS-marked round trip is SSRF-gated identically to the
-/// plaintext form — an https URL must not smuggle an egress past the gate.
-#[test]
-fn default_policy_denies_loopback_tls_round_trip_bd_3894s() {
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let gated = SsrfGatedHostIo::new(RecordingInner { seen: seen.clone() }, "trace-tls-roundtrip");
-    let outcome = gated.perform(
-        &net_request_tls("127.0.0.1:8443"),
-        &[HostIoCapability::NetworkSend],
-    );
-    assert!(
-        matches!(outcome, Err(HostIoError::Denied { .. })),
-        "a loopback TLS round trip must be SSRF-denied, got {outcome:?}"
-    );
-    assert!(
-        seen.lock().unwrap().is_empty(),
-        "the inner mechanism must never see a denied TLS round trip"
-    );
-}
-
-/// bd-3894s slice (4): a `NetworkRequest` round trip is an egress and MUST be
-/// SSRF-gated exactly like `NetworkSend` — a loopback target is denied before the
-/// inner mechanism ever sees it. This is the regression guarding against the
-/// round-trip variant slipping past the gate.
-#[test]
-fn default_policy_denies_loopback_round_trip() {
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let gated = SsrfGatedHostIo::new(RecordingInner { seen: seen.clone() }, "trace-roundtrip");
-    let outcome = gated.perform(
-        &net_request("127.0.0.1:8080"),
-        &[HostIoCapability::NetworkSend],
-    );
-    assert!(
-        matches!(outcome, Err(HostIoError::Denied { .. })),
-        "a loopback round trip must be SSRF-denied, got {outcome:?}"
-    );
-    assert!(
-        seen.lock().unwrap().is_empty(),
-        "a denied round trip must never reach the inner network mechanism"
-    );
-}
-
-/// bd-3894s slice (4): an allowlisted endpoint authorizes the round trip and it
-/// reaches the inner mechanism (mirrors the `NetworkSend` allow path).
-#[test]
-fn permissive_policy_allows_round_trip() {
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let gated = SsrfGatedHostIo::with_policy(
-        RecordingInner { seen: seen.clone() },
-        permissive_template(),
-        "trace-roundtrip-allow",
-    );
-    let outcome = gated.perform(
-        &net_request("127.0.0.1:8080"),
-        &[HostIoCapability::NetworkSend],
-    );
-    assert!(
-        matches!(outcome, Ok(HostIoResponse::NetworkRequest { .. })),
-        "an allowlisted round trip must reach the inner mechanism, got {outcome:?}"
-    );
-    assert_eq!(
-        seen.lock().unwrap().len(),
-        1,
-        "the authorized round trip must be delegated to the inner provider exactly once"
-    );
-}
-
-#[test]
-fn default_policy_denies_loopback_egress() {
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let gated = SsrfGatedHostIo::new(RecordingInner { seen: seen.clone() }, "trace-loopback");
-    let outcome = gated.perform(
-        &net_send("127.0.0.1:8080"),
-        &[HostIoCapability::NetworkSend],
-    );
-    assert!(
-        matches!(outcome, Err(HostIoError::Denied { .. })),
-        "loopback egress must be SSRF-denied, got {outcome:?}"
-    );
-    assert!(
-        seen.lock().unwrap().is_empty(),
-        "a denied egress must never reach the inner network mechanism"
-    );
-    assert_eq!(
-        gated.audit_records().len(),
-        1,
-        "the SSRF decision must be audited"
-    );
-}
-
-#[test]
-fn default_policy_denies_cloud_metadata_egress() {
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let gated = SsrfGatedHostIo::new(RecordingInner { seen: seen.clone() }, "trace-metadata");
-    let outcome = gated.perform(
-        &net_send("169.254.169.254:80"),
-        &[HostIoCapability::NetworkSend],
-    );
-    assert!(
-        matches!(outcome, Err(HostIoError::Denied { .. })),
-        "cloud-metadata (link-local) egress must be SSRF-denied, got {outcome:?}"
-    );
-    assert!(seen.lock().unwrap().is_empty());
-}
-
-#[test]
-fn malformed_endpoint_denies_fail_closed() {
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    // Even under a permissive policy an unparseable endpoint (no port) must deny.
-    let gated = SsrfGatedHostIo::with_policy(
-        RecordingInner { seen: seen.clone() },
-        permissive_template(),
-        "trace-malformed",
-    );
-    let outcome = gated.perform(&net_send("not-a-host"), &[HostIoCapability::NetworkSend]);
-    assert!(
-        matches!(outcome, Err(HostIoError::Denied { .. })),
-        "an unparseable endpoint must deny fail-closed, got {outcome:?}"
-    );
-    assert!(seen.lock().unwrap().is_empty());
-}
-
-#[test]
-fn filesystem_effects_bypass_the_ssrf_gate() {
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let gated = SsrfGatedHostIo::new(RecordingInner { seen: seen.clone() }, "trace-fs");
-    let outcome = gated.perform(
-        &HostIoRequest::FsRead {
-            path: "report.txt".to_string(),
-        },
-        &[HostIoCapability::FsRead],
-    );
-    assert!(
-        matches!(outcome, Ok(HostIoResponse::FsRead { .. })),
-        "filesystem effects must pass through the gate untouched, got {outcome:?}"
-    );
-    assert_eq!(
-        seen.lock().unwrap().len(),
-        1,
-        "the fs effect must reach the inner provider"
-    );
-}
-
-/// Mock-free: a policy-permitted egress is delegated to the REAL engine
-/// `SandboxedHostIo` network mechanism and reaches a loopback listener. Proves
-/// the gate -> mechanism delegation end to end (the allowed half of the http
-/// producer's acceptance bar, at the host-I/O layer).
-#[test]
-fn permitted_egress_reaches_real_loopback_listener() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-    let addr = listener.local_addr().expect("listener addr");
-    let server = std::thread::spawn(move || {
-        let (mut stream, _peer) = listener.accept().expect("accept egress");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .expect("read timeout");
-        let mut buf = vec![0u8; 256];
-        let n = stream.read(&mut buf).unwrap_or(0);
-        buf.truncate(n);
-        buf
-    });
-
-    // The sandboxed provider needs a real fs root for its fs arms; the network
-    // arm ignores it.
-    let mut root = std::env::temp_dir();
-    root.push(format!("franken_node_ssrf_gate_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).expect("scratch root");
-
-    let inner = SandboxedHostIo::with_root(&root).expect("sandboxed provider");
-    // A permissive template authorizes the loopback endpoint that the default
-    // policy would (correctly) block.
-    let gated = SsrfGatedHostIo::with_policy(inner, permissive_template(), "trace-allow");
-
-    let endpoint = addr.to_string();
-    let outcome = gated.perform(&net_send(&endpoint), &[HostIoCapability::NetworkSend]);
-    assert!(
-        matches!(outcome, Ok(HostIoResponse::NetworkSend { .. })),
-        "a policy-permitted egress must be performed by the real mechanism, got {outcome:?}"
-    );
-
-    let received = server.join().expect("server thread");
-    let wire = String::from_utf8_lossy(&received);
-    assert!(
-        wire.starts_with("GET / HTTP/1.1\r\n"),
-        "the loopback listener must observe the framed request, got {wire:?}"
-    );
-
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-/// bd-3894s (slice 6): the default `[security.network_policy]` (Block mode, no
-/// allowlist) wired through `from_network_policy` denies loopback egress — the
-/// config path is fail-closed by default, matching `new`.
-#[test]
-fn from_network_policy_block_default_denies_loopback() {
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let policy = NetworkPolicyConfig::default();
-    let gated = SsrfGatedHostIo::from_network_policy(
-        RecordingInner { seen: seen.clone() },
-        &policy,
-        "trace-cfg-block",
-    );
-    let outcome = gated.perform(
-        &net_send("127.0.0.1:8080"),
-        &[HostIoCapability::NetworkSend],
-    );
-    assert!(
-        matches!(outcome, Err(HostIoError::Denied { .. })),
-        "default config (Block) must deny loopback, got {outcome:?}"
-    );
-    assert!(
-        seen.lock().unwrap().is_empty(),
-        "a config-denied egress must never reach the inner mechanism"
-    );
-}
-
-/// bd-3894s (slice 6): a config allowlist entry for the loopback host bypasses
-/// the matched default-deny CIDR (via the synthesized `PolicyReceipt`), so the
-/// egress reaches the inner mechanism. This is the operator-controlled exception
-/// that lets a specific internal endpoint through under an otherwise default-deny
-/// policy.
-#[test]
-fn from_network_policy_allowlist_permits_loopback() {
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let mut policy = NetworkPolicyConfig::default();
-    policy.allowlist.push(NetworkAllowlistEntry {
-        host: "127.0.0.1".to_string(),
-        port: None,
-        reason: "test: permit local sink".to_string(),
-    });
-    let gated = SsrfGatedHostIo::from_network_policy(
-        RecordingInner { seen: seen.clone() },
-        &policy,
-        "trace-cfg-allow",
-    );
-    let outcome = gated.perform(
-        &net_send("127.0.0.1:8080"),
-        &[HostIoCapability::NetworkSend],
-    );
-    assert!(
-        matches!(outcome, Ok(HostIoResponse::NetworkSend { .. })),
-        "an allowlisted loopback host must be permitted, got {outcome:?}"
-    );
-    assert_eq!(
-        seen.lock().unwrap().len(),
-        1,
-        "the allowlisted egress must reach the inner mechanism"
-    );
-}
-
-/// bd-3894s (slice 6): explicit operator opt-out (`ssrf_enforcement = "none"`)
-/// empties the deny-list, so even loopback is permitted. Still routed through the
-/// gate (the decision is audited), but the policy authorizes it.
-#[test]
-fn from_network_policy_enforcement_none_permits_loopback() {
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let policy = NetworkPolicyConfig {
-        ssrf_enforcement: SsrfEnforcementMode::None,
-        ..NetworkPolicyConfig::default()
-    };
-    let gated = SsrfGatedHostIo::from_network_policy(
-        RecordingInner { seen: seen.clone() },
-        &policy,
-        "trace-cfg-none",
-    );
-    let outcome = gated.perform(
-        &net_send("127.0.0.1:8080"),
-        &[HostIoCapability::NetworkSend],
-    );
-    assert!(
-        matches!(outcome, Ok(HostIoResponse::NetworkSend { .. })),
-        "ssrf_enforcement=none must permit loopback, got {outcome:?}"
-    );
-    assert_eq!(seen.lock().unwrap().len(), 1);
-}
-
-/// The default policy denies loopback even when wrapping the real
-/// `SandboxedHostIo`: no connection is attempted (fail-closed before the socket).
-#[test]
-fn default_policy_blocks_real_mechanism_for_loopback() {
-    let mut root = std::env::temp_dir();
-    root.push(format!("franken_node_ssrf_block_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).expect("scratch root");
-
-    let inner = SandboxedHostIo::with_root(&root).expect("sandboxed provider");
-    let gated = SsrfGatedHostIo::new(inner, "trace-block-real");
-    let outcome = gated.perform(&net_send("127.0.0.1:9"), &[HostIoCapability::NetworkSend]);
-    assert!(
-        matches!(outcome, Err(HostIoError::Denied { .. })),
-        "the default policy must block loopback before the real mechanism connects, got {outcome:?}"
-    );
-
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-// Keep these tests in this registered integration target: ordinary cargo test
-// does not execute the product library's inline test modules.
-#[cfg(unix)]
-mod flow_gate_regressions {
-    use super::*;
-    use frankenengine_extension_host::host_io::{FsOperation, HostIoExceptionProvenance};
-    use frankenengine_node::ops::flow_gated_host_io::FlowGatedHostIo;
-    use std::path::Path;
+mod dns_pinning {
+    use std::io::{self, Read, Write};
+    use std::net::{IpAddr, TcpListener};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
 
-    const NETWORK_PROBE: &str = "test network mechanism reached";
+    use frankenengine_extension_host::host_io::{
+        HostIoCapability, HostIoError, HostIoExceptionProvenance, HostIoOutcome, HostIoProvider,
+        HostIoRequest, HostIoResponse, SandboxedHostIo,
+    };
+    use frankenengine_node::ops::ssrf_gated_host_io::{EndpointResolver, SsrfGatedHostIo};
+    use frankenengine_node::security::network_guard::Action;
+    use frankenengine_node::security::ssrf_policy::{
+        AllowlistEntry, PolicyReceipt, SsrfPolicyTemplate,
+    };
 
-    /// Real sandboxed filesystem with a network-only test double. The distinct
-    /// Io error proves delegation without pretending an external request ran.
-    /// The final test below uses the real network mechanism as well.
-    #[derive(Debug)]
-    struct NetworkProbe {
-        inner: SandboxedHostIo,
-        calls: Arc<AtomicUsize>,
+    #[derive(Debug, Default)]
+    struct Observed {
+        dns_calls: AtomicUsize,
+        requests: Mutex<Vec<(HostIoRequest, Vec<HostIoCapability>)>>,
     }
 
-    impl HostIoProvider for NetworkProbe {
+    #[derive(Debug)]
+    struct ResolverPlan {
+        addresses: Vec<IpAddr>,
+        fail: bool,
+        rebind: bool,
+    }
+
+    impl ResolverPlan {
+        fn addresses(addresses: &[&str]) -> Self {
+            Self {
+                addresses: addresses.iter().map(|ip| ip.parse().unwrap()).collect(),
+                fail: false,
+                rebind: false,
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct ControlledResolver {
+        observed: Arc<Observed>,
+        plan: ResolverPlan,
+    }
+
+    impl EndpointResolver for ControlledResolver {
+        fn resolve(&self, _: &str, _: u16) -> io::Result<Vec<IpAddr>> {
+            let previous = self.observed.dns_calls.fetch_add(1, Ordering::SeqCst);
+            if self.plan.fail {
+                return Err(io::Error::other("injected DNS failure"));
+            }
+            if self.plan.rebind && previous > 0 {
+                return Ok(vec!["127.0.0.1".parse().unwrap()]);
+            }
+            Ok(self.plan.addresses.clone())
+        }
+    }
+
+    /// Deliberately does not check capabilities: the gate must reject before
+    /// DNS even when wrapping a permissive provider.
+    #[derive(Debug)]
+    struct Recorder {
+        observed: Arc<Observed>,
+        fail: bool,
+    }
+
+    impl HostIoProvider for Recorder {
         fn name(&self) -> &str {
-            "flow-test-network-probe"
+            "dns-pinning-recorder"
         }
 
         fn filesystem_exception_provenance(&self) -> HostIoExceptionProvenance {
-            self.inner.filesystem_exception_provenance()
+            HostIoExceptionProvenance::ProviderInternal
         }
 
         fn perform(&self, request: &HostIoRequest, granted: &[HostIoCapability]) -> HostIoOutcome {
-            let capability = request.required_capability();
-            if !granted.contains(&capability) {
-                return Err(HostIoError::CapabilityMissing { capability });
+            self.observed
+                .requests
+                .lock()
+                .unwrap()
+                .push((request.clone(), granted.to_vec()));
+            if self.fail {
+                return Err(HostIoError::Io {
+                    detail: "injected inner failure".into(),
+                });
             }
-            match request {
-                HostIoRequest::NetworkSend { .. }
-                | HostIoRequest::NetworkRequest { .. }
-                | HostIoRequest::NetworkRecv { .. } => {
-                    self.calls.fetch_add(1, Ordering::SeqCst);
-                    Err(HostIoError::Io {
-                        detail: NETWORK_PROBE.to_string(),
-                    })
-                }
-                _ => self.inner.perform(request, granted),
-            }
+            Ok(match request {
+                HostIoRequest::NetworkSend { payload, .. } => HostIoResponse::NetworkSend {
+                    bytes_sent: u64::try_from(payload.len()).unwrap(),
+                },
+                HostIoRequest::NetworkRecv { .. } => HostIoResponse::NetworkRecv {
+                    bytes: vec![0, 255],
+                },
+                HostIoRequest::NetworkRequest { .. } => HostIoResponse::NetworkRequest {
+                    response: b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_vec(),
+                },
+                HostIoRequest::FsRead { .. } => HostIoResponse::FsRead {
+                    bytes: b"local".to_vec(),
+                },
+                HostIoRequest::RandomRead { byte_len } => HostIoResponse::RandomRead {
+                    bytes: vec![7; usize::try_from(*byte_len).unwrap()],
+                },
+                other => panic!("unexpected fixture request: {other:?}"),
+            })
         }
     }
 
-    fn probe(root: &Path, calls: &Arc<AtomicUsize>) -> FlowGatedHostIo<NetworkProbe> {
-        FlowGatedHostIo::new(
-            NetworkProbe {
-                inner: SandboxedHostIo::with_root(root).expect("sandboxed filesystem"),
-                calls: Arc::clone(calls),
-            },
-            "flow-integration",
-        )
+    struct Harness {
+        observed: Arc<Observed>,
+        gate: SsrfGatedHostIo<Recorder, ControlledResolver>,
     }
 
-    fn sinks(payload: &[u8]) -> [HostIoRequest; 3] {
+    fn policy() -> SsrfPolicyTemplate {
+        SsrfPolicyTemplate::default_template("pinning-policy".into())
+    }
+
+    fn exception_policy(host: &str, port: u16) -> SsrfPolicyTemplate {
+        let mut policy = policy();
+        policy.allowlist.push(AllowlistEntry {
+            host: host.into(),
+            port: Some(port),
+            reason: "explicit test endpoint".into(),
+            receipt: PolicyReceipt {
+                receipt_id: "pinning-receipt".into(),
+                connector_id: policy.connector_id.clone(),
+                host: host.into(),
+                issued_at: "2026-09-19T00:00:00Z".into(),
+                reason: "explicit test endpoint".into(),
+                trace_id: "pinning-integration".into(),
+            },
+        });
+        policy
+    }
+
+    fn harness(policy: SsrfPolicyTemplate, plan: ResolverPlan, fail_inner: bool) -> Harness {
+        let observed = Arc::new(Observed::default());
+        let gate = SsrfGatedHostIo::with_resolver(
+            Recorder {
+                observed: Arc::clone(&observed),
+                fail: fail_inner,
+            },
+            policy,
+            "pinning-integration",
+            ControlledResolver {
+                observed: Arc::clone(&observed),
+                plan,
+            },
+        );
+        Harness { observed, gate }
+    }
+
+    fn network_requests(endpoint: &str) -> [HostIoRequest; 3] {
         [
             HostIoRequest::NetworkSend {
-                endpoint: "127.0.0.1:9".into(),
-                payload: payload.to_vec(),
+                endpoint: endpoint.into(),
+                payload: vec![0, 1, 255, 128],
+            },
+            HostIoRequest::NetworkRecv {
+                endpoint: endpoint.into(),
+                max_len: 123,
             },
             HostIoRequest::NetworkRequest {
-                endpoint: "127.0.0.1:9".into(),
-                payload: payload.to_vec(),
-                max_len: 4096,
+                endpoint: endpoint.into(),
+                payload: b"GET / HTTP/1.1\r\nHost: service.example\r\n\r\n".to_vec(),
+                max_len: 4567,
                 use_tls: false,
-            },
-            HostIoRequest::NetworkRequest {
-                endpoint: "127.0.0.1:9".into(),
-                payload: payload.to_vec(),
-                max_len: 4096,
-                use_tls: true,
             },
         ]
     }
 
-    fn assert_flow_denied(
-        gate: &impl HostIoProvider,
-        calls: &AtomicUsize,
-        request: &HostIoRequest,
-    ) {
-        let before = calls.load(Ordering::SeqCst);
-        let outcome = gate.perform(request, &[request.required_capability()]);
-        assert!(
-            matches!(&outcome, Err(HostIoError::Denied { reason }) if reason.starts_with("flow_policy:")),
-            "expected flow-policy denial, got {outcome:?}"
-        );
-        assert_eq!(calls.load(Ordering::SeqCst), before, "denied effect delegated");
-    }
-
-    fn assert_probe_reached(
-        gate: &impl HostIoProvider,
-        calls: &AtomicUsize,
-        request: &HostIoRequest,
-    ) {
-        let before = calls.load(Ordering::SeqCst);
-        let outcome = gate.perform(request, &[request.required_capability()]);
-        assert_eq!(
-            outcome,
-            Err(HostIoError::Io {
-                detail: NETWORK_PROBE.to_string(),
-            })
-        );
-        assert_eq!(calls.load(Ordering::SeqCst), before + 1);
-    }
-
-    fn read_path(gate: &impl HostIoProvider, path: &str, expected: &[u8]) {
-        assert_eq!(
-            gate.perform(
-                &HostIoRequest::FsRead { path: path.into() },
-                &[HostIoCapability::FsRead],
-            ),
-            Ok(HostIoResponse::FsRead {
-                bytes: expected.to_vec(),
-            })
-        );
-    }
-
-    fn meta(operation: FsOperation, path: &str, arguments: Vec<String>) -> HostIoRequest {
-        HostIoRequest::FsMeta {
-            operation,
-            path: path.into(),
-            arguments,
-            data: Vec::new(),
+    fn tls_request(endpoint: &str) -> HostIoRequest {
+        HostIoRequest::NetworkRequest {
+            endpoint: endpoint.into(),
+            payload: b"GET / HTTP/1.1\r\nHost: service.example\r\n\r\n".to_vec(),
+            max_len: 4096,
+            use_tls: true,
         }
     }
 
-    fn open_fd(gate: &impl HostIoProvider, path: &str) -> u64 {
-        let outcome = gate.perform(
-            &meta(FsOperation::Open, path, vec!["flags=r".into()]),
-            &[HostIoCapability::FsWrite],
-        );
-        match outcome {
-            Ok(HostIoResponse::FsMeta {
-                result: FsMetaResult::Unsigned(fd),
-            }) => fd,
-            other => panic!("expected an opened descriptor, got {other:?}"),
-        }
+    fn assert_not_delegated(harness: &Harness) {
+        assert!(harness.observed.requests.lock().unwrap().is_empty());
     }
 
-    fn read_fd(gate: &impl HostIoProvider, fd: u64, ignored_path: &str, expected: &[u8]) {
-        let request = meta(
-            FsOperation::ReadFd,
-            ignored_path,
-            vec![
-                format!("fd={fd}"),
-                format!("length={}", expected.len()),
-                "position=0".into(),
-            ],
-        );
-        assert_eq!(
-            gate.perform(&request, &[HostIoCapability::FsRead]),
-            Ok(HostIoResponse::FsMeta {
-                result: FsMetaResult::Bytes(expected.to_vec()),
-            })
-        );
+    fn assert_admission_audit(harness: &Harness, code: &str) {
+        let records = harness.gate.audit_records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].action, Action::Deny);
+        assert_eq!(records[0].cidr_matched.as_deref(), Some(code));
+        assert_eq!(records[0].trace_id, "pinning-integration");
+        assert!(!records[0].allowlisted);
     }
 
     #[test]
-    fn untrackable_sensitive_reads_deny_all_payload_sinks_without_delegation() {
-        for size in [1, 7, 64 * 1024 + 1] {
-            let root = tempfile::tempdir().expect("scratch root");
-            let secret = vec![b'x'; size];
-            std::fs::write(root.path().join(".env"), &secret).expect("secret fixture");
-            let calls = Arc::new(AtomicUsize::new(0));
-            let gate = probe(root.path(), &calls);
-            read_path(&gate, ".env", &secret);
-            for payload in [b"".as_slice(), b"public".as_slice(), secret.as_slice()] {
-                for request in sinks(payload) {
-                    assert_flow_denied(&gate, &calls, &request);
-                }
-            }
-            // Egress refusal must not disable local filesystem work.
-            let write = HostIoRequest::FsWrite {
-                path: "local.txt".into(),
-                data: b"ok".to_vec(),
-            };
+    fn all_network_variants_require_capability_before_dns() {
+        for request in network_requests("service.example:80")
+            .into_iter()
+            .chain([tls_request("service.example:443")])
+        {
+            let harness = harness(policy(), ResolverPlan::addresses(&["93.184.216.34"]), false);
+            let required = request.required_capability();
+            let outcome = harness.gate.perform(&request, &[HostIoCapability::RandomRead]);
+            assert_eq!(outcome, Err(HostIoError::CapabilityMissing { capability: required }));
+            assert_eq!(harness.observed.dns_calls.load(Ordering::SeqCst), 0);
+            assert_not_delegated(&harness);
+            assert_admission_audit(&harness, "capability_missing");
+        }
+    }
+
+    #[test]
+    fn send_receive_and_round_trip_pin_only_endpoint_and_preserve_grants() {
+        let originals = network_requests("service.example:80");
+        let expected = network_requests("93.184.216.34:80");
+        let grants = [
+            HostIoCapability::NetworkSend,
+            HostIoCapability::NetworkRecv,
+            HostIoCapability::RandomRead,
+        ];
+        for (original, pinned) in originals.into_iter().zip(expected) {
+            let harness = harness(policy(), ResolverPlan::addresses(&["93.184.216.34"]), false);
+            let before = original.clone();
+            assert!(harness.gate.perform(&original, &grants).is_ok());
+            assert_eq!(original, before, "the transcript request must remain unchanged");
+            assert_eq!(harness.observed.dns_calls.load(Ordering::SeqCst), 1);
             assert_eq!(
-                gate.perform(&write, &[HostIoCapability::FsWrite]),
-                Ok(HostIoResponse::FsWrite { bytes_written: 2 })
+                *harness.observed.requests.lock().unwrap(),
+                vec![(pinned, grants.to_vec())]
             );
+            assert_eq!(harness.gate.audit_records()[0].host, "service.example");
+        }
+    }
+
+    #[test]
+    fn a_later_rebound_answer_cannot_reuse_an_earlier_authorization() {
+        let mut plan = ResolverPlan::addresses(&["93.184.216.34"]);
+        plan.rebind = true;
+        let harness = harness(policy(), plan, false);
+        let request = network_requests("service.example:80")[0].clone();
+        let grants = [HostIoCapability::NetworkSend];
+        assert!(harness.gate.perform(&request, &grants).is_ok());
+        assert_eq!(harness.observed.dns_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            harness.observed.requests.lock().unwrap()[0].0,
+            network_requests("93.184.216.34:80")[0]
+        );
+        assert!(matches!(harness.gate.perform(&request, &grants), Err(HostIoError::Denied { .. })));
+        assert_eq!(harness.observed.dns_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(harness.observed.requests.lock().unwrap().len(), 1);
+        let records = harness.gate.audit_records();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].action, Action::Allow);
+        assert_eq!(records[1].action, Action::Deny);
+    }
+
+    #[test]
+    fn a_denied_answer_anywhere_in_the_dns_set_blocks_delegation() {
+        for addresses in [
+            ["93.184.216.34", "127.0.0.1"],
+            ["10.0.0.1", "93.184.216.34"],
+            ["93.184.216.34", "169.254.169.254"],
+            ["93.184.216.34", "::1"],
+        ] {
+            let harness = harness(policy(), ResolverPlan::addresses(&addresses), false);
+            let request = network_requests("service.example:80")[0].clone();
+            assert!(matches!(
+                harness.gate.perform(&request, &[HostIoCapability::NetworkSend]),
+                Err(HostIoError::Denied { .. })
+            ));
+            assert_not_delegated(&harness);
+            assert_eq!(harness.gate.audit_records()[0].action, Action::Deny);
+        }
+    }
+
+    #[test]
+    fn exceptions_cannot_bypass_empty_failed_or_overflowing_dns_answers() {
+        let empty = ResolverPlan::addresses(&[]);
+        let mut failed = ResolverPlan::addresses(&[]);
+        failed.fail = true;
+        let mut overflow = ResolverPlan::addresses(&[]);
+        overflow.addresses = vec!["93.184.216.34".parse().unwrap(); 65];
+        for (plan, code) in [
+            (empty, "dns_resolution_required"),
+            (failed, "dns_resolution_failed"),
+            (overflow, "dns_answer_limit_exceeded"),
+        ] {
+            let harness = harness(exception_policy("service.example", 80), plan, false);
+            let request = network_requests("service.example:80")[0].clone();
+            assert!(matches!(
+                harness.gate.perform(&request, &[HostIoCapability::NetworkSend]),
+                Err(HostIoError::Denied { .. })
+            ));
+            assert_not_delegated(&harness);
+            assert_admission_audit(&harness, code);
+        }
+    }
+
+    #[test]
+    fn malformed_endpoints_are_rejected_and_audited_without_dns() {
+        let mut endpoints: Vec<String> = [
+            "", ":80", "host", "host:0", "host:+80", "host:65536",
+            "http://host:80", "user@host:80", "host/path:80", "host\\path:80",
+            " host:80", "host\r\n:80", "host\0:80", "a..b:80", "host..:80",
+            "[127.0.0.1]:80", "::1:80", "[::1:80", "[fe80::1%eth0]:80",
+            "127.1:80", "2130706433:80", "0x7f000001:80", "0177.0.0.1:80",
+            "127.0.0.1.:80", "-host:80", "host-:80", "höst.example:80",
+        ].into_iter().map(str::to_string).collect();
+        endpoints.push(format!("{}.example:80", "a".repeat(64)));
+        endpoints.push(format!("{}:80", "a".repeat(4096)));
+        for endpoint in endpoints {
+            let harness = harness(policy(), ResolverPlan::addresses(&["93.184.216.34"]), false);
+            let request = network_requests(&endpoint)[0].clone();
+            assert!(matches!(
+                harness.gate.perform(&request, &[HostIoCapability::NetworkSend]),
+                Err(HostIoError::Denied { .. })
+            ), "{endpoint:?}");
+            assert_eq!(harness.observed.dns_calls.load(Ordering::SeqCst), 0);
+            assert_not_delegated(&harness);
+            assert_admission_audit(&harness, "invalid_endpoint");
+            assert!(harness.gate.audit_records()[0].host.chars().count() <= 260);
+        }
+    }
+
+    #[test]
+    fn explicit_hostname_exception_is_port_scoped_and_still_pins_private_address() {
+        let harness = harness(
+            exception_policy("service.example", 80),
+            ResolverPlan::addresses(&["127.0.0.1"]),
+            false,
+        );
+        let grants = [HostIoCapability::NetworkSend];
+        let allowed = network_requests("Service.Example.:80")[0].clone();
+        assert!(harness.gate.perform(&allowed, &grants).is_ok());
+        assert_eq!(
+            harness.observed.requests.lock().unwrap()[0].0,
+            network_requests("127.0.0.1:80")[0]
+        );
+        assert!(harness.gate.audit_records()[0].allowlisted);
+        let wrong_port = network_requests("service.example:81")[0].clone();
+        assert!(matches!(harness.gate.perform(&wrong_port, &grants), Err(HostIoError::Denied { .. })));
+        assert_eq!(harness.observed.requests.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn numeric_endpoints_bypass_dns_and_keep_tls_ip_identity() {
+        for request in network_requests("93.184.216.34:443")
+            .into_iter()
+            .chain([tls_request("93.184.216.34:443")])
+        {
+            let harness = harness(policy(), ResolverPlan::addresses(&[]), false);
+            let grants = [request.required_capability()];
+            assert!(harness.gate.perform(&request, &grants).is_ok());
+            assert_eq!(harness.observed.dns_calls.load(Ordering::SeqCst), 0);
             assert_eq!(
-                std::fs::read(root.path().join("local.txt")).expect("local copy"),
-                b"ok"
+                *harness.observed.requests.lock().unwrap(),
+                vec![(request, grants.to_vec())]
             );
         }
+        // An explicit IPv6 loopback receipt remains valid; pinning must retain
+        // brackets and must not turn an IP certificate identity into a hostname.
+        let harness = harness(exception_policy("[::1]", 443), ResolverPlan::addresses(&[]), false);
+        let request = tls_request("[::1]:443");
+        assert!(harness.gate.perform(&request, &[HostIoCapability::NetworkSend]).is_ok());
+        assert_eq!(harness.observed.dns_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(harness.observed.requests.lock().unwrap()[0].0, request);
     }
 
     #[test]
-    fn exact_sample_boundaries_reject_framed_secrets_but_allow_public_payloads() {
-        for size in [8, 64 * 1024] {
-            let root = tempfile::tempdir().expect("scratch root");
-            let secret = vec![0x91; size];
-            std::fs::write(root.path().join(".env"), &secret).expect("binary secret");
-            let calls = Arc::new(AtomicUsize::new(0));
-            let gate = probe(root.path(), &calls);
-            read_path(&gate, ".env", &secret);
-            let mut framed = b"header:".to_vec();
-            framed.extend_from_slice(&secret);
-            framed.extend_from_slice(b":trailer");
-            for request in sinks(&framed) {
-                assert_flow_denied(&gate, &calls, &request);
-            }
-            for request in sinks(b"public") {
-                assert_probe_reached(&gate, &calls, &request);
-            }
-        }
-    }
-
-    #[test]
-    fn sample_budget_deduplicates_before_capacity_and_never_forgets_overflow() {
-        let root = tempfile::tempdir().expect("scratch root");
-        let calls = Arc::new(AtomicUsize::new(0));
-        let gate = probe(root.path(), &calls);
-        for index in 0..16 {
-            let sample = format!("secret-token-{index:04}");
-            std::fs::write(root.path().join(".env"), &sample).expect("rotate secret");
-            read_path(&gate, ".env", sample.as_bytes());
-        }
-        std::fs::write(root.path().join(".env"), b"secret-token-0000").expect("reread secret");
-        read_path(&gate, ".env", b"secret-token-0000");
-        assert_probe_reached(&gate, &calls, &sinks(b"public")[0]);
-        assert_flow_denied(&gate, &calls, &sinks(b"secret-token-0000")[0]);
-        std::fs::write(root.path().join(".env"), b"seventeenth-secret").expect("overflow secret");
-        read_path(&gate, ".env", b"seventeenth-secret");
-        for request in sinks(b"public").into_iter().chain(sinks(b"")) {
-            assert_flow_denied(&gate, &calls, &request);
-        }
-    }
-
-    #[test]
-    fn empty_failed_and_nonsensitive_reads_do_not_close_egress() {
-        let root = tempfile::tempdir().expect("scratch root");
-        let calls = Arc::new(AtomicUsize::new(0));
-        let gate = probe(root.path(), &calls);
-        std::fs::write(root.path().join(".env"), b"").expect("empty secret");
-        for _ in 0..17 {
-            read_path(&gate, ".env", b"");
-        }
-        std::fs::write(root.path().join("public.txt"), b"x").expect("short public file");
-        read_path(&gate, "public.txt", b"x");
-        std::fs::write(root.path().join(".env"), b"unread-secret").expect("unread secret");
-        assert!(matches!(
-            gate.perform(
-                &HostIoRequest::FsRead { path: ".env".into() },
-                &[],
-            ),
-            Err(HostIoError::CapabilityMissing { .. })
-        ));
-        assert!(
-            gate.perform(
-                &HostIoRequest::FsRead {
-                    path: ".env.missing".into(),
-                },
-                &[HostIoCapability::FsRead],
-            )
-            .is_err()
+    fn hostname_tls_cannot_use_an_exception_to_skip_address_pinning() {
+        let harness = harness(
+            exception_policy("service.example", 443),
+            ResolverPlan::addresses(&["93.184.216.34"]),
+            false,
         );
-        assert_probe_reached(&gate, &calls, &sinks(b"public")[0]);
+        let outcome = harness.gate.perform(
+            &tls_request("service.example:443"),
+            &[HostIoCapability::NetworkSend],
+        );
+        assert!(matches!(outcome, Err(HostIoError::Denied { reason })
+            if reason.contains("tls_address_pinning_unavailable")));
+        assert_eq!(harness.observed.dns_calls.load(Ordering::SeqCst), 0);
+        assert_not_delegated(&harness);
+        assert_admission_audit(&harness, "tls_address_pinning_unavailable");
     }
 
     #[test]
-    fn descriptor_reads_use_open_provenance_not_the_ignored_request_path() {
-        let root = tempfile::tempdir().expect("scratch root");
-        std::fs::write(root.path().join(".env"), b"descriptor-secret").expect("secret fixture");
-        std::fs::write(root.path().join("public.txt"), b"public-file-bytes")
-            .expect("public fixture");
-        let calls = Arc::new(AtomicUsize::new(0));
-        let gate = probe(root.path(), &calls);
-        let secret_fd = open_fd(&gate, ".env");
-        read_fd(&gate, secret_fd, "public.txt", b"");
-        assert_probe_reached(&gate, &calls, &sinks(b"public")[0]);
-        read_fd(&gate, secret_fd, "public.txt", b"descriptor-secret");
-        for request in sinks(b"prefix:descriptor-secret:suffix") {
-            assert_flow_denied(&gate, &calls, &request);
-        }
-        let public_fd = open_fd(&gate, "public.txt");
-        read_fd(&gate, public_fd, ".env", b"public-file-bytes");
-        assert_probe_reached(&gate, &calls, &sinks(b"public-file-bytes")[0]);
-    }
-
-    #[test]
-    fn failed_close_keeps_provenance_and_successful_close_keeps_observed_secrets() {
-        let root = tempfile::tempdir().expect("scratch root");
-        std::fs::write(root.path().join(".env"), b"descriptor-secret").expect("secret fixture");
-        let calls = Arc::new(AtomicUsize::new(0));
-        let gate = probe(root.path(), &calls);
-        let fd = open_fd(&gate, ".env");
-        let close = meta(FsOperation::CloseFd, "", vec![format!("fd={fd}")]);
-        assert!(matches!(
-            gate.perform(&close, &[]),
-            Err(HostIoError::CapabilityMissing { .. })
-        ));
-        read_fd(&gate, fd, "", b"descriptor-secret");
-        assert_flow_denied(&gate, &calls, &sinks(b"descriptor-secret")[0]);
+    fn an_inner_failure_is_propagated_without_retrying_a_side_effect() {
+        let harness = harness(
+            policy(),
+            ResolverPlan::addresses(&["93.184.216.34", "8.8.8.8"]),
+            true,
+        );
+        let request = network_requests("service.example:80")[0].clone();
         assert_eq!(
-            gate.perform(&close, &[HostIoCapability::FsWrite]),
-            Ok(HostIoResponse::FsMeta {
-                result: FsMetaResult::Unit,
-            })
+            harness.gate.perform(&request, &[HostIoCapability::NetworkSend]),
+            Err(HostIoError::Io { detail: "injected inner failure".into() })
         );
-        assert_flow_denied(&gate, &calls, &sinks(b"descriptor-secret")[0]);
+        assert_eq!(harness.observed.dns_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(harness.observed.requests.lock().unwrap().len(), 1);
     }
 
     #[test]
-    fn successful_reads_from_preexisting_untracked_descriptors_are_sensitive() {
-        let root = tempfile::tempdir().expect("scratch root");
-        std::fs::write(root.path().join(".env"), b"untracked-secret").expect("secret fixture");
-        let inner = SandboxedHostIo::with_root(root.path()).expect("sandboxed filesystem");
-        let fd = inner.open_fd(".env", "r").expect("open before wrapping");
-        let calls = Arc::new(AtomicUsize::new(0));
-        let gate = FlowGatedHostIo::new(
-            NetworkProbe {
-                inner,
-                calls: Arc::clone(&calls),
-            },
-            "untracked-descriptor",
-        );
-        read_fd(&gate, fd, "public.txt", b"untracked-secret");
-        assert_flow_denied(&gate, &calls, &sinks(b"untracked-secret")[0]);
-    }
-
-    #[test]
-    fn metadata_results_and_exception_provenance_remain_unchanged() {
-        let root = tempfile::tempdir().expect("scratch root");
-        std::fs::write(root.path().join(".env"), b"tiny").expect("unread secret fixture");
-        let calls = Arc::new(AtomicUsize::new(0));
-        let gate = probe(root.path(), &calls);
+    fn local_effects_and_filesystem_exception_provenance_pass_through() {
+        let harness = harness(policy(), ResolverPlan::addresses(&[]), false);
         assert_eq!(
-            gate.filesystem_exception_provenance(),
+            harness.gate.filesystem_exception_provenance(),
             HostIoExceptionProvenance::ProviderInternal
         );
-        assert_eq!(
-            gate.perform(
-                &meta(FsOperation::Exists, ".env", Vec::new()),
-                &[HostIoCapability::FsRead],
-            ),
-            Ok(HostIoResponse::FsMeta {
-                result: FsMetaResult::Bool(true),
-            })
-        );
-        assert_probe_reached(&gate, &calls, &sinks(b"public")[0]);
-    }
-
-    #[test]
-    fn debug_output_redacts_source_bytes_and_inner_provider() {
-        let root = tempfile::tempdir().expect("scratch root");
-        let secret = b"never-print-this-secret";
-        std::fs::write(root.path().join(".env"), secret).expect("secret fixture");
-        let calls = Arc::new(AtomicUsize::new(0));
-        let gate = probe(root.path(), &calls);
-        read_path(&gate, ".env", secret);
-        let debug = format!("{gate:?}");
-        assert!(!debug.contains("never-print-this-secret"));
-        assert!(!debug.contains(&format!("{secret:?}")));
-        assert!(!debug.contains("NetworkProbe"));
-    }
-
-    #[test]
-    fn destinations_are_checked_before_network_delegation_including_receive() {
-        let root = tempfile::tempdir().expect("scratch root");
-        std::fs::write(root.path().join(".env"), b"secret-host-label")
-            .expect("hostname secret fixture");
-        let calls = Arc::new(AtomicUsize::new(0));
-        let gate = probe(root.path(), &calls);
-        read_path(&gate, ".env", b"secret-host-label");
-        let forbidden_endpoint = "secret-host-label.example.invalid:443";
-        for mut request in sinks(b"") {
-            match &mut request {
-                HostIoRequest::NetworkSend { endpoint, .. }
-                | HostIoRequest::NetworkRequest { endpoint, .. } => {
-                    *endpoint = forbidden_endpoint.into();
-                }
-                other => panic!("unexpected payload sink: {other:?}"),
-            }
-            assert_flow_denied(&gate, &calls, &request);
+        for request in [
+            HostIoRequest::FsRead { path: "local.txt".into() },
+            HostIoRequest::RandomRead { byte_len: 2 },
+        ] {
+            let grants = [request.required_capability()];
+            assert!(harness.gate.perform(&request, &grants).is_ok());
+            assert_eq!(
+                harness.observed.requests.lock().unwrap().last().unwrap(),
+                &(request, grants.to_vec())
+            );
         }
-        let forbidden_receive = HostIoRequest::NetworkRecv {
-            endpoint: forbidden_endpoint.into(),
-            max_len: 4096,
-        };
-        assert_flow_denied(&gate, &calls, &forbidden_receive);
-        let public_receive = HostIoRequest::NetworkRecv {
-            endpoint: "public.example.invalid:443".into(),
-            max_len: 4096,
-        };
-        assert_probe_reached(&gate, &calls, &public_receive);
+        assert_eq!(harness.observed.dns_calls.load(Ordering::SeqCst), 0);
+        assert!(harness.gate.audit_records().is_empty());
     }
 
     #[test]
-    fn incomplete_tracking_cannot_be_bypassed_with_a_receive_only_connection() {
-        let root = tempfile::tempdir().expect("scratch root");
-        std::fs::write(root.path().join(".env"), b"x").expect("untrackable secret");
-        let calls = Arc::new(AtomicUsize::new(0));
-        let gate = probe(root.path(), &calls);
-        read_path(&gate, ".env", b"x");
-        assert_flow_denied(
-            &gate,
-            &calls,
-            &HostIoRequest::NetworkRecv {
-                endpoint: "public.example.invalid:443".into(),
-                max_len: 4096,
-            },
-        );
-    }
-
-    #[test]
-    fn composed_gates_block_secret_socket_and_send_public_bytes_to_real_listener() {
-        let root = tempfile::tempdir().expect("scratch root");
-        let secret = b"real-loopback-secret";
-        std::fs::write(root.path().join(".env"), secret).expect("secret fixture");
+    fn pinned_hostname_round_trip_reaches_real_socket_with_original_host_header() {
+        let root = tempfile::tempdir().expect("sandbox root");
+        let inner = SandboxedHostIo::with_root(root.path()).expect("real mechanism");
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
         listener.set_nonblocking(true).expect("bounded accept");
-        let endpoint = listener
-            .local_addr()
-            .expect("listener address")
-            .to_string();
-        let inner = SandboxedHostIo::with_root(root.path()).expect("real provider");
-        let gate = FlowGatedHostIo::new(
-            SsrfGatedHostIo::with_policy(inner, permissive_template(), "endpoint-allowed"),
-            "real-flow-gate",
+        let port = listener.local_addr().unwrap().port();
+        let payload = format!(
+            "GET /pinned HTTP/1.1\r\nHost: pinned-egress.invalid:{port}\r\nConnection: close\r\n\r\n"
+        ).into_bytes();
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK".to_vec();
+        let server_response = response.clone();
+        let server = std::thread::spawn(move || -> io::Result<Vec<u8>> {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => return Err(error),
+                }
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+            stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+            let mut received = Vec::new();
+            while !received.windows(4).any(|window| window == b"\r\n\r\n") {
+                let mut buffer = [0; 1024];
+                let count = stream.read(&mut buffer)?;
+                if count == 0 || received.len() + count > 4096 {
+                    return Err(io::Error::other("incomplete or oversized request"));
+                }
+                received.extend_from_slice(&buffer[..count]);
+            }
+            stream.write_all(&server_response)?;
+            Ok(received)
+        });
+        let observed = Arc::new(Observed::default());
+        let gate = SsrfGatedHostIo::with_resolver(
+            inner,
+            exception_policy("pinned-egress.invalid", port),
+            "pinning-integration",
+            ControlledResolver {
+                observed: Arc::clone(&observed),
+                plan: ResolverPlan::addresses(&["127.0.0.1"]),
+            },
         );
-        read_path(&gate, ".env", secret);
-        let forbidden = HostIoRequest::NetworkSend {
-            endpoint: endpoint.clone(),
-            payload: secret.to_vec(),
+        let request = HostIoRequest::NetworkRequest {
+            endpoint: format!("pinned-egress.invalid:{port}"),
+            payload: payload.clone(),
+            max_len: 4096,
+            use_tls: false,
         };
-        assert!(matches!(
-            gate.perform(&forbidden, &[HostIoCapability::NetworkSend]),
-            Err(HostIoError::Denied { .. })
-        ));
-        assert!(
-            matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
-        );
-        let public = b"public data";
-        let permitted = HostIoRequest::NetworkSend {
-            endpoint,
-            payload: public.to_vec(),
-        };
-        assert_eq!(
-            gate.perform(&permitted, &[HostIoCapability::NetworkSend]),
-            Ok(HostIoResponse::NetworkSend {
-                bytes_sent: u64::try_from(public.len()).expect("small payload"),
-            })
-        );
-        let (mut stream, _) = listener.accept().expect("public connection");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .expect("bounded read");
-        let mut received = Vec::new();
-        stream.read_to_end(&mut received).expect("read public bytes");
-        assert_eq!(received.as_slice(), public);
+        let outcome = gate.perform(&request, &[HostIoCapability::NetworkSend]);
+        // Always join the bounded listener, including when admission fails.
+        let received = server.join().expect("listener thread").expect("HTTP exchange");
+        assert_eq!(outcome, Ok(HostIoResponse::NetworkRequest { response }));
+        assert_eq!(received, payload);
+        assert_eq!(observed.dns_calls.load(Ordering::SeqCst), 1);
+        let records = gate.audit_records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].host, "pinned-egress.invalid");
+        assert!(records[0].allowlisted);
     }
 }
