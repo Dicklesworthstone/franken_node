@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "runtime_invoke_watchdog.py"
 spec = importlib.util.spec_from_file_location("runtime_invoke_watchdog", SCRIPT)
@@ -124,6 +125,170 @@ class WatchdogTests(unittest.TestCase):
                                     "--", "app.js", "--output-dir=/tmp/other"], capture_output=True, timeout=5)
         self.assertEqual(completed.returncode, 2)
         self.assertFalse(self.artifacts.exists())
+
+
+    def assert_process_stopped(self, pid):
+        # An orphan killed by the supervisor can remain a zombie until PID 1
+        # reaps it; kill(pid, 0) alone incorrectly reports it as still running.
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            try:
+                state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+            except FileNotFoundError:
+                return
+            if state == "Z":
+                return
+            time.sleep(0.01)
+        self.fail(f"process {pid} remained alive after cleanup")
+
+    @unittest.skipUnless(Path("/proc/self/stat").exists(), "process-state assertion uses procfs")
+    def test_descendant_ignoring_term_is_killed_after_leader_exits(self):
+        code = """
+import os,signal,time
+reader,writer=os.pipe()
+pid=os.fork()
+if pid == 0:
+    os.close(reader)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    os.write(writer,b'ready')
+    os.close(writer)
+    time.sleep(60)
+else:
+    os.close(writer)
+    os.read(reader,5)
+    print(pid,flush=True)
+"""
+        result = self.run_code(code)
+        pid = int((self.artifacts / "stdout.log").read_text())
+        self.assertEqual(result["outcome"], "completed")
+        self.assertTrue(result["cleanup"]["kill_sent"])
+        self.assert_process_stopped(pid)
+
+    @unittest.skipUnless(Path("/proc/self/stat").exists(), "process-state assertion uses procfs")
+    def test_deadline_stops_parent_and_descendant(self):
+        code = """
+import os,signal,time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+pid=os.fork()
+if pid != 0:
+    print(pid,flush=True)
+time.sleep(60)
+"""
+        result = self.run_code(code, budget=1000)
+        self.assertEqual(result["outcome"], "wrapper_timeout")
+        pid = int((self.artifacts / "stdout.log").read_text())
+        self.assert_process_stopped(pid)
+        self.assert_process_stopped(result["runtime_pid"])
+
+    def test_preexisting_cancellation_never_launches_runtime(self):
+        cancellation = watchdog.Cancellation()
+        cancellation.request(signal.SIGTERM)
+        result = watchdog.supervise([str(self.root / "nonexistent")], self.artifacts,
+                                    cancellation=cancellation)
+        self.assertEqual(result["outcome"], "cancelled")
+        self.assertEqual(result["wrapper_exit_code"], 143)
+        self.assertNotIn("runtime_pid", result)
+        self.assertTrue(result["fail_closed"])
+        self.assertFalse(result["wrapper_deadline_exceeded"])
+
+    def test_cancellation_preserves_first_signal_and_restores_handlers(self):
+        previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+        with watchdog.cancellation_signals() as cancellation:
+            cancellation.request(signal.SIGINT)
+            cancellation.request(signal.SIGTERM)
+            self.assertEqual(cancellation.signum, signal.SIGINT)
+        for sig, handler in previous.items():
+            self.assertEqual(signal.getsignal(sig), handler)
+
+    def cancel_cli(self, sig, repeat=False):
+        binary = self.root / "fake-node"
+        ready = self.root / "ready"
+        binary.write_text(f"#!{sys.executable}\nimport signal,time\nfrom pathlib import Path\n"
+                          f"signal.signal(signal.SIGTERM,signal.SIG_IGN)\n"
+                          f"Path({str(ready)!r}).write_text('ready')\ntime.sleep(60)\n")
+        binary.chmod(0o700)
+        process = subprocess.Popen([sys.executable, str(SCRIPT), "--franken-node-bin", str(binary),
+                                    "--artifacts-dir", str(self.artifacts), "--wall-time-ms", "10000",
+                                    "--kill-grace-ms", "300", "--", "app.js"],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        runtime_pid = None
+        try:
+            deadline = time.monotonic() + 6
+            while time.monotonic() < deadline:
+                receipt_path = self.artifacts / "watchdog.json"
+                if receipt_path.exists():
+                    receipt = json.loads(receipt_path.read_text())
+                    runtime_pid = receipt.get("runtime_pid")
+                    if ready.exists() and runtime_pid:
+                        self.assertTrue(receipt["fail_closed"])
+                        self.assertEqual(receipt["outcome"], "running")
+                        break
+                time.sleep(0.01)
+            else:
+                self.fail("native runtime did not become ready")
+            process.send_signal(sig)
+            if repeat:
+                time.sleep(0.03)
+                process.send_signal(signal.SIGINT)
+            stdout, stderr = process.communicate(timeout=4)
+            self.assertEqual(process.returncode, 128 + sig, stderr)
+            result = json.loads(stdout)
+            self.assertEqual(result["outcome"], "cancelled")
+            self.assertEqual(result["cancellation_signal"], sig)
+            self.assertFalse(result["wrapper_deadline_exceeded"])
+            self.assertTrue(result["cleanup"]["leader_reaped"])
+            self.assertEqual(result, json.loads((self.artifacts / "watchdog.json").read_text()))
+        finally:
+            if runtime_pid is not None:
+                try:
+                    os.killpg(runtime_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=3)
+
+    def test_sigterm_cancellation_survives_a_second_signal(self):
+        self.cancel_cli(signal.SIGTERM, repeat=True)
+
+    def test_ctrl_c_cleans_up_runtime_and_publishes_receipt(self):
+        self.cancel_cli(signal.SIGINT)
+
+    def test_receipt_write_failure_after_spawn_stops_native_scope(self):
+        original = watchdog._write_receipt
+        count = 0
+
+        def fail_once(path, receipt):
+            nonlocal count
+            count += 1
+            if count == 2:
+                raise OSError("simulated storage failure after spawn")
+            original(path, receipt)
+
+        with mock.patch.object(watchdog, "_write_receipt", side_effect=fail_once):
+            with self.assertRaisesRegex(OSError, "storage failure"):
+                self.run_code("import time; time.sleep(60)")
+        result = json.loads((self.artifacts / "watchdog.json").read_text())
+        self.assertEqual(result["outcome"], "supervisor_error")
+        self.assertTrue(result["fail_closed"])
+        self.assertTrue(result["cleanup"]["leader_reaped"])
+
+    def test_invalid_command_is_rejected_before_artifacts_are_created(self):
+        for command in ("echo unsafe", [], [""], ["bad\x00binary"], [1]):
+            with self.subTest(command=command), self.assertRaises(ValueError):
+                watchdog.supervise(command, self.artifacts)
+        self.assertFalse(self.artifacts.exists())
+
+
+    def test_cleanup_error_cannot_publish_native_exit_zero_as_success(self):
+        with mock.patch.object(watchdog, "_signal_group", side_effect=PermissionError("denied")):
+            with self.assertRaises(PermissionError):
+                self.run_code("pass")
+        result = json.loads((self.artifacts / "watchdog.json").read_text())
+        self.assertEqual(result["runtime_exit_code"], 0)
+        self.assertEqual(result["outcome"], "supervisor_error")
+        self.assertEqual(result["wrapper_exit_code"], 125)
+        self.assertTrue(result["fail_closed"])
 
 
 if __name__ == "__main__":

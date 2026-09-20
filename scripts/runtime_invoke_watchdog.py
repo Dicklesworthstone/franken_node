@@ -18,6 +18,7 @@ exit code. Exit 125 indicates a supervisor or launch failure.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import math
 import os
@@ -28,10 +29,39 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any, Sequence
+from typing import Any, Iterator, Sequence
 
 
 SCHEMA = "franken-node.runtime-invoke-watchdog.v1"
+
+
+class Cancellation:
+    """Cancellation is latched, never raised asynchronously across Popen()."""
+
+    def __init__(self) -> None:
+        self.signum: int | None = None
+
+    def request(self, signum: int) -> None:
+        if self.signum is None:
+            self.signum = signum
+
+
+@contextmanager
+def cancellation_signals() -> Iterator[Cancellation]:
+    """Keep TERM/INT from interrupting scope cleanup or receipt publication.
+
+    Used by the CLI on its main thread, not implicitly by library callers.
+    Repeated signals preserve the first cancellation cause.
+    """
+    cancellation = Cancellation()
+    previous = {}
+    try:
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            previous[sig] = signal.signal(sig, lambda number, _frame: cancellation.request(number))
+        yield cancellation
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
 
 
 def positive_ms(value: str) -> int:
@@ -91,13 +121,15 @@ def _stop_process(process: subprocess.Popen[bytes], grace_ms: int) -> dict[str, 
 
 
 def supervise(command: Sequence[str], artifacts_dir: Path, *, wall_time_ms: int = 30000,
-              kill_grace_ms: int = 250, cwd: Path | None = None) -> dict[str, Any]:
+              kill_grace_ms: int = 250, cwd: Path | None = None,
+              cancellation: Cancellation | None = None) -> dict[str, Any]:
     """Supervise a native invocation. Never parse logs to guess timeout origin.
 
     The command is an argument vector, not a shell command. The output directory
     is exclusive so a failed launch cannot reuse a previous run's success files.
     No environment variables are copied into the receipt.
     """
+    cancellation = cancellation or Cancellation()
     positive_ms(str(wall_time_ms))
     positive_ms(str(kill_grace_ms))
     if os.name != "posix":
@@ -129,10 +161,13 @@ def supervise(command: Sequence[str], artifacts_dir: Path, *, wall_time_ms: int 
 
     _write_receipt(receipt_path, receipt)
     process: subprocess.Popen[bytes] | None = None
+    cleanup_done = False
     try:
         # Files, not PIPEs: large output cannot exhaust supervisor memory and a
         # descendant retaining stdout cannot keep communicate() blocked forever.
         with open(receipt["stdout_path"], "xb") as stdout, open(receipt["stderr_path"], "xb") as stderr:
+            if cancellation.signum is not None:
+                return receipt
             try:
                 process = subprocess.Popen(list(command), cwd=receipt["cwd"],
                                            stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
@@ -143,33 +178,57 @@ def supervise(command: Sequence[str], artifacts_dir: Path, *, wall_time_ms: int 
             else:
                 receipt["runtime_pid"] = process.pid
                 event("runtime_spawned")
-                remaining = max(0, wall_time_ms / 1000 - (time.monotonic() - started))
+                # A supervisor killed without a final receipt still leaves a
+                # fail-closed record identifying the native PID and log paths.
+                _write_receipt(receipt_path, receipt)
+                deadline = started + wall_time_ms / 1000
                 try:
-                    returncode = process.wait(timeout=remaining)
-                except subprocess.TimeoutExpired:
-                    receipt.update(outcome="wrapper_timeout", wrapper_exit_code=124,
-                                   wrapper_deadline_exceeded=True, timeout_layer="wrapper")
-                    event("wrapper_deadline_exceeded")
-                else:
-                    receipt.update(outcome="completed" if returncode == 0 else "runtime_failed",
-                                   fail_closed=returncode != 0,
-                                   wrapper_exit_code=returncode if returncode >= 0 else 128 - returncode)
-                    event("runtime_exited")
+                    while cancellation.signum is None:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            receipt.update(outcome="wrapper_timeout", wrapper_exit_code=124,
+                                           wrapper_deadline_exceeded=True, timeout_layer="wrapper")
+                            event("wrapper_deadline_exceeded")
+                            break
+                        try:
+                            returncode = process.wait(timeout=min(remaining, 0.05))
+                        except subprocess.TimeoutExpired:
+                            continue
+                        receipt.update(outcome="completed" if returncode == 0 else "runtime_failed",
+                                       fail_closed=returncode != 0,
+                                       wrapper_exit_code=returncode if returncode >= 0 else 128 - returncode)
+                        event("runtime_exited")
+                        break
                 finally:
                     receipt["cleanup"] = _stop_process(process, kill_grace_ms)
+                    cleanup_done = True
                     receipt["runtime_exit_code"] = process.returncode
                     event("runtime_scope_stopped")
                 if not receipt["cleanup"]["leader_reaped"]:
                     receipt.update(outcome="cleanup_failed", fail_closed=True, wrapper_exit_code=125)
     except BaseException as error:
-        if process is not None:
-            receipt["cleanup"] = _stop_process(process, kill_grace_ms)
-            receipt["runtime_exit_code"] = process.returncode
+        # Mark failure before retrying cleanup: a signalling failure must never
+        # leave an earlier native exit-zero result published as success.
         receipt.update(outcome="supervisor_error", fail_closed=True, wrapper_exit_code=125,
                        error=f"{type(error).__name__}: {error}")
         event("wrapper_failed")
+        if process is not None and not cleanup_done:
+            try:
+                receipt["cleanup"] = _stop_process(process, kill_grace_ms)
+            except OSError as cleanup_error:
+                receipt["cleanup"] = {"scope": "process_group", "leader_reaped": False,
+                                      "error": str(cleanup_error)}
+            receipt["runtime_exit_code"] = process.returncode
         raise
     finally:
+        if cancellation.signum is not None:
+            receipt["cancellation_signal"] = cancellation.signum
+            event("wrapper_cancelled")
+            # Preserve an already observed deadline or cleanup failure. A
+            # cancellation cannot turn any prior failure into a success.
+            if receipt["outcome"] in ("running", "completed", "runtime_failed"):
+                receipt.update(outcome="cancelled", fail_closed=True,
+                               wrapper_exit_code=128 + cancellation.signum)
         receipt["elapsed_ms"] = round((time.monotonic() - started) * 1000, 3)
         for stream in ("stdout", "stderr"):
             path = Path(receipt[f"{stream}_path"])
@@ -200,8 +259,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     command = [binary, "runtime", "invoke", "--output-dir",
                str(args.artifacts_dir.resolve() / "runtime"), *runtime_args]
     try:
-        receipt = supervise(command, args.artifacts_dir, wall_time_ms=args.wall_time_ms,
-                            kill_grace_ms=args.kill_grace_ms, cwd=args.cwd)
+        with cancellation_signals() as cancellation:
+            receipt = supervise(command, args.artifacts_dir, wall_time_ms=args.wall_time_ms,
+                                kill_grace_ms=args.kill_grace_ms, cwd=args.cwd,
+                                cancellation=cancellation)
     except (OSError, ValueError) as error:
         print(f"runtime watchdog: {error}", file=sys.stderr)
         return 125
