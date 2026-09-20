@@ -97,3 +97,36 @@ persistent workspace deltas when requested. Matching crashes, timeouts, or
 truncated output do not pass. This remains a trusted-project process comparison,
 not an OS sandbox, release certificate, deterministic ambient-environment replay,
 or proof that network and other external effects were equivalent.
+
+## Portable captured evidence
+
+Add `--bundle /outside/the/projects/failure.fnmigration` to preserve the exact
+captured inputs and retained stdout/stderr, instead of discarding them when the
+temporary workspaces close. This is opt-in for both successful and failed runs:
+
+```sh
+python3 scripts/migration_validation_runner.py original \
+  --migrated-project candidate --compare-filesystem \
+  --bundle failure.fnmigration --out validation.json --json
+```
+
+The destination must be a new file, outside both projects, in an existing
+directory. Publication is private (`0600`), fsynced, atomic and no-clobber. A
+concurrent creator is not overwritten. Failure to publish changes the overall
+verdict to `ERROR`, while retaining completed test observations.
+
+The stored ZIP contains `manifest.json` and deduplicated `objects/<sha256>`
+members. The manifest preserves both source snapshots, file/directory modes,
+contained links, runtime identities, execution settings, comparison limits,
+per-test effective-environment hashes and the actual report. Binary stdin is
+part of the captured project. Raw retained outputs are separate hash-addressed
+objects; overflow and timeout outputs retain their incomplete metadata. The
+report's `replay_bundle.sha256` measures the complete published archive.
+
+Limits are 512 MiB per archive, 16 MiB per manifest and 60,000 unique objects,
+in addition to the existing project and per-stream limits. Bundles contain raw
+project files and may contain credentials or other sensitive data from those
+files, explicit manifest settings, or program output. Inherited environment
+values and executable binaries are not exported. Review the contents before
+sharing. SHA-256 detects changes relative to a trusted digest; it is not a
+signature, authenticity proof, or proof of equivalent external side effects.

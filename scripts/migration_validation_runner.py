@@ -25,6 +25,7 @@ import sys
 import tempfile
 import time
 import unicodedata
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -69,6 +70,10 @@ MIGRATION_TEST_MANIFEST = ".franken-node/migration-tests.json"
 MIGRATION_TEST_SCHEMA = "franken-node/migration-tests/v1"
 MAX_MANIFEST_BYTES = 64 * 1024
 MAX_TEST_PATH_BYTES = 4096
+REPLAY_BUNDLE_SCHEMA = "franken-node/migration-replay/v1"
+MAX_REPLAY_BUNDLE_BYTES = 512 * 1024 * 1024
+MAX_REPLAY_MANIFEST_BYTES = 16 * 1024 * 1024
+MAX_REPLAY_OBJECTS = 60_000
 TEST_EXTENSIONS = frozenset({"js", "mjs", "cjs", "ts", "mts", "cts"})
 DISCOVERY_EXCLUSIONS = frozenset({"node_modules", ".git", ".migrate-backup", ".franken-node"})
 EXECUTION_EXCLUSIONS = DISCOVERY_EXCLUSIONS | {".beads", ".franken-rewrite"}
@@ -321,6 +326,152 @@ def _file_version(metadata: os.stat_result) -> tuple[int, ...]:
             metadata.st_nlink, metadata.st_mtime_ns, metadata.st_ctime_ns)
 
 
+def snapshot_digest(entries: list[SnapshotEntry]) -> str:
+    """The same length-framed input identity for live and recovered captures."""
+    digest = hashlib.sha256(b"franken-migration-input-v1\0")
+    for entry in entries:
+        for part in (entry.path.encode(), str(entry.mode).encode(),
+                     b"link" if entry.link is not None else b"dir" if entry.data is None else b"file",
+                     entry.link.encode() if entry.link is not None else entry.data or b""):
+            digest.update(len(part).to_bytes(8, "big"))
+            digest.update(part)
+    return digest.hexdigest()
+
+
+def environment_digest(environment: dict[str, str]) -> str:
+    """Bind effective environment bytes without exporting inherited secrets."""
+    digest = hashlib.sha256(b"franken-migration-environment-v1\0")
+    for name, value in sorted(environment.items()):
+        for part in (os.fsencode(name), os.fsencode(value)):
+            digest.update(len(part).to_bytes(8, "big"))
+            digest.update(part)
+    return digest.hexdigest()
+
+
+def _bundle_destination(destination: Path, projects: tuple[Path, ...]) -> Path:
+    destination = Path(os.path.abspath(destination))
+    parent = destination.parent.resolve(strict=True)
+    if not parent.is_dir() or os.path.lexists(destination):
+        raise ValueError("replay bundle requires a new file in an existing directory")
+    destination = parent / destination.name
+    if any(destination.is_relative_to(project) for project in projects):
+        raise ValueError("replay bundle must be outside both measured projects")
+    return destination
+
+
+class ReplayBundleWriter:
+    """Opt-in, bounded capture of the actual inputs and retained process bytes.
+
+    Objects are spooled once by SHA-256, not held again in memory. Publication
+    is private, no-clobber and atomic. Bundles deliberately exclude the inherited
+    environment and executable binaries; a hash is not a signing certificate.
+    """
+
+    def __init__(self, destination: Path, baseline: list[SnapshotEntry],
+                 migration: list[SnapshotEntry], environments: dict[str, str]):
+        self.destination = destination
+        self.objects: dict[str, tuple[int, int]] = {}
+        self.observations: list[dict] = []
+        self.environments = environments
+        self.byte_count = 0
+        self.spool = tempfile.TemporaryFile(dir=destination.parent)
+        try:
+            self.snapshots = {"baseline": self._snapshot(baseline),
+                              "migration": self._snapshot(migration)}
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        self.spool.close()
+
+    def _store(self, data: bytes) -> str:
+        digest = hashlib.sha256(data).hexdigest()
+        if digest in self.objects:
+            return digest
+        count = len(self.objects) + 1
+        # Reserve space for the manifest and both ZIP headers for each object.
+        if (count > MAX_REPLAY_OBJECTS
+                or self.byte_count + len(data) + MAX_REPLAY_MANIFEST_BYTES + 256 * count
+                > MAX_REPLAY_BUNDLE_BYTES):
+            raise ValueError("replay bundle exceeds its bounded object/byte budget")
+        self.spool.seek(self.byte_count)
+        self.spool.write(data)
+        self.objects[digest] = (self.byte_count, len(data))
+        self.byte_count += len(data)
+        return digest
+
+    def _snapshot(self, entries: list[SnapshotEntry]) -> list[dict]:
+        captured = []
+        for entry in entries:
+            _canonical_test_path(entry.path, {".git"})
+            item = {"path": entry.path, "mode": entry.mode}
+            if entry.link is not None:
+                item.update(kind="link", target=entry.link)
+            elif entry.data is None:
+                item.update(kind="directory")
+            else:
+                item.update(kind="file", blob=self._store(entry.data))
+            captured.append(item)
+        return captured
+
+    def record(self, test: str, leg: str, capture: dict) -> None:
+        self.observations.append({"test": test, "leg": leg,
+                                  "stdout": self._store(capture["stdout"]),
+                                  "stderr": self._store(capture["stderr"])})
+
+    @staticmethod
+    def _member(name: str) -> zipfile.ZipInfo:
+        info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+        info.compress_type = zipfile.ZIP_STORED
+        info.create_system = 3
+        info.external_attr = (stat.S_IFREG | 0o600) << 16
+        return info
+
+    def publish(self, report: dict) -> dict:
+        manifest = {"schema_version": REPLAY_BUNDLE_SCHEMA, "report": report,
+                    "snapshots": self.snapshots, "observations": self.observations,
+                    "environment_sha256": self.environments,
+                    "objects": {digest: size for digest, (_, size) in sorted(self.objects.items())}}
+        payload = json.dumps(manifest, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+        if len(payload) > MAX_REPLAY_MANIFEST_BYTES:
+            raise ValueError("replay bundle manifest exceeds 16 MiB")
+        # Link publishes a completed inode without overwriting a concurrent
+        # creator, unlike replace(). The temporary inode is private (0600).
+        with tempfile.NamedTemporaryFile(prefix=".franken-replay-", dir=self.destination.parent) as stream:
+            with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_STORED, allowZip64=False) as archive:
+                archive.writestr(self._member("manifest.json"), payload)
+                for digest, (offset, size) in sorted(self.objects.items()):
+                    self.spool.seek(offset)
+                    with archive.open(self._member(f"objects/{digest}"), "w") as member:
+                        remaining = size
+                        while remaining:
+                            chunk = self.spool.read(min(65536, remaining))
+                            if not chunk:
+                                raise OSError("incomplete replay object spool")
+                            member.write(chunk)
+                            remaining -= len(chunk)
+            stream.flush()
+            size = stream.tell()
+            if size > MAX_REPLAY_BUNDLE_BYTES:
+                raise ValueError("replay bundle exceeds 512 MiB")
+            os.fsync(stream.fileno())
+            stream.seek(0)
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: stream.read(65536), b""):
+                digest.update(chunk)
+            os.link(stream.name, self.destination)
+            directory_fd = os.open(self.destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        return {"path": str(self.destination), "schema_version": REPLAY_BUNDLE_SCHEMA,
+                "sha256": digest.hexdigest(), "bytes": size,
+                "contains_raw_project_and_process_bytes": True,
+                "authenticated": False, "ambient_effects_replayable": False}
+
+
 def capture_project(project: Path, deadline: float) -> tuple[list[SnapshotEntry], str]:
     """Capture bounded regular files and contained symlinks before either leg.
 
@@ -331,7 +482,6 @@ def capture_project(project: Path, deadline: float) -> tuple[list[SnapshotEntry]
     """
     entries = []
     total = 0
-    digest = hashlib.sha256(b"franken-migration-input-v1\0")
     for directory, names, files in os.walk(project, followlinks=False, onerror=raise_walk_error):
         names[:] = sorted(n for n in names if n != ".git")
         for name in sorted(names + [name for name in files if name != ".git"]):
@@ -383,13 +533,7 @@ def capture_project(project: Path, deadline: float) -> tuple[list[SnapshotEntry]
             entries.append(entry)
             if len(entries) > MAX_PROJECT_FILES:
                 raise ValueError(f"project exceeds {MAX_PROJECT_FILES}-entry capture budget")
-            # Length framing preserves path, type, mode, content and link identity.
-            for part in (relative.encode(), str(mode).encode(),
-                         b"link" if entry.link is not None else b"dir" if entry.data is None else b"file",
-                         entry.link.encode() if entry.link is not None else entry.data or b""):
-                digest.update(len(part).to_bytes(8, "big"))
-                digest.update(part)
-    return entries, digest.hexdigest()
+    return entries, snapshot_digest(entries)
 
 
 def stage_project(entries: list[SnapshotEntry], destination: Path, deadline: float) -> None:
@@ -585,7 +729,7 @@ def validate_project(project_dir: Path, *, migrated_project: Path | None = None,
                      migration_command=DEFAULT_MIGRATION_COMMAND,
                      timeout_seconds: float = 30.0, total_timeout_seconds: float = 300.0,
                      max_output_bytes: int = 1_048_576, band: str = "core",
-                     compare_filesystem: bool = False) -> dict:
+                     compare_filesystem: bool = False, bundle_path: Path | None = None) -> dict:
     """Execute a nonempty test set; FAIL/ERROR/NO_TESTS can never yield PASS."""
     report = {"schema_version": "migration-validation-v1", "project": str(project_dir),
               "migrated_project": str(migrated_project or project_dir),
@@ -602,6 +746,7 @@ def validate_project(project_dir: Path, *, migrated_project: Path | None = None,
     commands = {}
     identities = None
     deadline = None
+    bundle = None
     try:
         if os.name != "posix":
             raise ValueError("bounded process-group execution currently requires POSIX")
@@ -621,6 +766,8 @@ def validate_project(project_dir: Path, *, migrated_project: Path | None = None,
         if baseline_root != migration_root and (baseline_root.is_relative_to(migration_root)
                                                or migration_root.is_relative_to(baseline_root)):
             raise ValueError("distinct input projects must not be nested")
+        if bundle_path is not None:
+            bundle_path = _bundle_destination(bundle_path, (baseline_root, migration_root))
         # Capture before executing anything; every case starts from these bytes.
         baseline_entries, baseline_digest = capture_project(baseline_root, deadline)
         if migration_root == baseline_root:
@@ -661,6 +808,10 @@ def validate_project(project_dir: Path, *, migrated_project: Path | None = None,
             report["limits"] = {"per_leg_seconds": timeout_seconds, "total_seconds": total_timeout_seconds,
                                 "per_stream_bytes": max_output_bytes}
             environment = dict(os.environ)
+            if bundle_path is not None:
+                bundle = ReplayBundleWriter(bundle_path, baseline_entries, migration_entries,
+                    {test: environment_digest(_test_environment(environment, settings))
+                     for test, settings in baseline_inventory.items()})
             # Freeze a single inherited environment for both legs; do not invent
             # permissive policy, signing keys, or degraded-runtime overrides.
             for index, test in enumerate(tests):
@@ -694,6 +845,8 @@ def validate_project(project_dir: Path, *, migrated_project: Path | None = None,
                         # Keep completed-leg evidence even if the other leg
                         # encounters an infrastructure failure or total timeout.
                         row[leg] = {k: v for k, v in captures[leg].items() if k not in {"stdout", "stderr"}}
+                        if bundle is not None:
+                            bundle.record(test, leg, captures[leg])
                         if compare_filesystem:
                             final_entries, _ = capture_project(workspace, deadline)
                             deltas[leg] = workspace_delta(entries, final_entries)
@@ -728,6 +881,15 @@ def validate_project(project_dir: Path, *, migrated_project: Path | None = None,
                 report["errors"].append({"type": type(error).__name__,
                                          "message": f"runtime identity recheck failed: {error}"})
                 summary["verdict"] = "ERROR"
+        if bundle is not None:
+            try:
+                report["replay_bundle"] = bundle.publish(report)
+            except (OSError, ValueError, RuntimeError, zipfile.LargeZipFile) as error:
+                report["errors"].append({"type": type(error).__name__,
+                                         "message": f"replay bundle publication failed: {error}"})
+                summary["verdict"] = "ERROR"
+            finally:
+                bundle.close()
     return report
 
 
@@ -827,6 +989,8 @@ def main() -> int:
     parser.add_argument("--max-output-bytes", type=int, default=1_048_576)
     parser.add_argument("--band", choices=("core", "high-value", "edge"), default="core")
     parser.add_argument("--out", type=Path, help="atomically write the JSON validation report")
+    parser.add_argument("--bundle", type=Path,
+                        help="opt in to a private replay bundle containing raw source, inputs and output; never overwrites")
     parser.add_argument("--compare-filesystem", action="store_true",
                         help="also compare persistent workspace file/link/mode changes; .git excluded")
     parser.add_argument("--json", action="store_true")
@@ -834,6 +998,8 @@ def main() -> int:
     args = parser.parse_args()
     if not args.self_test and args.project_dir is None:
         parser.error("project_dir is required unless --self-test is used")
+    if args.bundle is not None and args.out is not None and args.bundle.resolve() == args.out.resolve():
+        parser.error("--out and --bundle must be different files")
     if args.self_test:
         result = self_test()
         verdict = result["verdict"]
@@ -842,7 +1008,7 @@ def main() -> int:
                                   baseline_command=args.baseline_command, migration_command=args.migration_command,
                                   timeout_seconds=args.timeout_seconds, total_timeout_seconds=args.total_timeout_seconds,
                                   max_output_bytes=args.max_output_bytes, band=args.band,
-                                  compare_filesystem=args.compare_filesystem)
+                                  compare_filesystem=args.compare_filesystem, bundle_path=args.bundle)
         verdict = result["summary"]["verdict"]
     if args.out is not None:
         try:
