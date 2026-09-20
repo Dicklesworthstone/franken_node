@@ -33,6 +33,8 @@ struct RecordingInner {
     seen: Arc<Mutex<Vec<HostIoRequest>>>,
 }
 
+impl frankenengine_node::ops::ssrf_gated_host_io::PinnedNetworkProvider for RecordingInner {}
+
 impl HostIoProvider for RecordingInner {
     fn name(&self) -> &str {
         "recording-inner"
