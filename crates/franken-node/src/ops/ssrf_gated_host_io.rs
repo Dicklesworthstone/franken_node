@@ -3,7 +3,7 @@
 //! Policy stays in franken_node; DNS/socket/TLS mechanisms stay in the engine.
 //! Network effects are capability-checked before DNS and resolved answers are
 //! checked against policy before selecting a connect address. Configured native
-//! execution passes that address separately from the original request: HTTPS
+//! execution passes the complete approved set separately from the request: HTTPS
 //! authenticates the original hostname, never the routing IP. The native
 //! provider retains its roots, byte limits and one deadline spanning DNS,
 //! connection, handshake and response. Filesystem and entropy pass through.
@@ -136,6 +136,22 @@ pub trait PinnedNetworkProvider: HostIoProvider {
     ) -> HostIoOutcome {
         perform_numeric_network(self, request, granted, destination, deadline)
     }
+
+    /// A provider may try another approved address only while establishing TCP,
+    /// before TLS or application I/O. The default deliberately calls the
+    /// singleton method once: an arbitrary provider's error does not prove that
+    /// its side effect never happened. Native execution overrides this method
+    /// with the engine's owned connection selection and shared deadline.
+    fn perform_pinned_network_candidates(
+        &self,
+        request: &HostIoRequest,
+        granted: &[HostIoCapability],
+        destinations: &[SocketAddr],
+        deadline: Instant,
+    ) -> HostIoOutcome {
+        let first = validate_pinned_candidates(request, granted, destinations, deadline)?;
+        self.perform_pinned_network(request, granted, first, deadline)
+    }
 }
 
 #[cfg(feature = "engine")]
@@ -157,6 +173,66 @@ impl PinnedNetworkProvider for SandboxedHostIo {
     ) -> HostIoOutcome {
         SandboxedHostIo::perform_pinned_network(self, request, granted, destination, deadline)
     }
+
+    fn perform_pinned_network_candidates(
+        &self,
+        request: &HostIoRequest,
+        granted: &[HostIoCapability],
+        destinations: &[SocketAddr],
+        deadline: Instant,
+    ) -> HostIoOutcome {
+        SandboxedHostIo::perform_pinned_network_candidates(
+            self, request, granted, destinations, deadline,
+        )
+    }
+}
+
+#[cfg(feature = "engine")]
+fn validate_pinned_candidates(
+    request: &HostIoRequest,
+    granted: &[HostIoCapability],
+    destinations: &[SocketAddr],
+    deadline: Instant,
+) -> Result<SocketAddr, HostIoError> {
+    let capability = request.required_capability();
+    if !granted.contains(&capability) {
+        return Err(HostIoError::CapabilityMissing { capability });
+    }
+    ensure_time_remaining(deadline).map_err(|error| HostIoError::Io {
+        detail: error.to_string(),
+    })?;
+    let invalid = || HostIoError::Denied {
+        reason: "ssrf: invalid pinned destination set".to_string(),
+    };
+    if destinations.is_empty() || destinations.len() > MAX_RESOLVED_ADDRESSES {
+        return Err(invalid());
+    }
+    let endpoint = match request {
+        HostIoRequest::NetworkSend { endpoint, .. }
+        | HostIoRequest::NetworkRecv { endpoint, .. }
+        | HostIoRequest::NetworkRequest { endpoint, .. } => endpoint,
+        _ => return Err(invalid()),
+    };
+    let (host, port) = split_host_port(endpoint).ok_or_else(invalid)?;
+    let literal = literal_ip(host);
+    if destinations.iter().any(|address| {
+        address.port() != port || literal.is_some_and(|ip| ip != address.ip())
+    }) {
+        return Err(invalid());
+    }
+    Ok(destinations[0])
+}
+
+#[cfg(feature = "engine")]
+fn perform_numeric_network_candidates<P: HostIoProvider + ?Sized>(
+    provider: &P,
+    request: &HostIoRequest,
+    granted: &[HostIoCapability],
+    destinations: &[SocketAddr],
+    deadline: Instant,
+) -> HostIoOutcome {
+    let first = validate_pinned_candidates(request, granted, destinations, deadline)?;
+    perform_numeric_network(provider, request, granted, first, deadline)
 }
 
 /// Numeric-only delegation is safe for an arbitrary HostIoProvider: a DNS
@@ -267,21 +343,16 @@ fn split_host_port(endpoint: &str) -> Option<(&str, u16)> {
                 || bytes.len() > 63
                 || !bytes[0].is_ascii_alphanumeric()
                 || !bytes[bytes.len() - 1].is_ascii_alphanumeric()
-                || !bytes
-                    .iter()
-                    .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+                || !bytes.iter().all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
             {
                 return None;
             }
         }
         let numeric_alias = canonical.split('.').all(|label| {
             label.bytes().all(|byte| byte.is_ascii_digit())
-                || label
-                    .strip_prefix("0x")
-                    .or_else(|| label.strip_prefix("0X"))
-                    .is_some_and(|digits| {
-                        !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
-                    })
+                || label.strip_prefix("0x").or_else(|| label.strip_prefix("0X"))
+                    .is_some_and(|digits| !digits.is_empty()
+                        && digits.bytes().all(|byte| byte.is_ascii_hexdigit()))
         });
         if numeric_alias && host.parse::<Ipv4Addr>().is_err() {
             return None;
@@ -299,8 +370,6 @@ fn literal_ip(host: &str) -> Option<IpAddr> {
         .ok()
 }
 
-/// Build the run's policy from `[security.network_policy]`. Monitor is treated
-/// as Block; only explicit opt-out empties the IPv4 deny-list.
 #[cfg(feature = "engine")]
 fn build_ssrf_template(policy: &NetworkPolicyConfig, trace_id: &str) -> SsrfPolicyTemplate {
     let connector_id = format!("run:{trace_id}");
@@ -337,7 +406,7 @@ fn build_ssrf_template(policy: &NetworkPolicyConfig, trace_id: &str) -> SsrfPoli
 
 #[cfg(feature = "engine")]
 type PinnedExecutor<P> =
-    fn(&P, &HostIoRequest, &[HostIoCapability], SocketAddr, Instant) -> HostIoOutcome;
+    fn(&P, &HostIoRequest, &[HostIoCapability], &[SocketAddr], Instant) -> HostIoOutcome;
 
 /// A host-I/O decorator binding every network authorization to its connect IP.
 /// The transport contract is chosen once at construction, never from a provider
@@ -376,7 +445,7 @@ impl<P: HostIoProvider> SsrfGatedHostIo<P> {
             resolver: SystemEndpointResolver,
             timeout: |_| SANDBOXED_HOST_IO_NETWORK_TIMEOUT,
             tls_supported: |_| false,
-            execute_network: perform_numeric_network::<P>,
+            execute_network: perform_numeric_network_candidates::<P>,
         }
     }
 }
@@ -413,7 +482,7 @@ impl<P: PinnedNetworkProvider, R: EndpointResolver> SsrfGatedHostIo<P, R> {
             resolver,
             timeout: P::network_timeout,
             tls_supported: P::supports_pinned_tls,
-            execute_network: P::perform_pinned_network,
+            execute_network: P::perform_pinned_network_candidates,
         }
     }
 }
@@ -458,7 +527,7 @@ impl<P: HostIoProvider, R: EndpointResolver> SsrfGatedHostIo<P, R> {
         endpoint: &str,
         use_tls: bool,
         granted: &[HostIoCapability],
-    ) -> Result<(SocketAddr, Instant), HostIoError> {
+    ) -> Result<(Vec<SocketAddr>, Instant), HostIoError> {
         let started = Instant::now();
         let capability = request.required_capability();
         if !granted.contains(&capability) {
@@ -499,10 +568,9 @@ impl<P: HostIoProvider, R: EndpointResolver> SsrfGatedHostIo<P, R> {
         if resolved.len() > MAX_RESOLVED_ADDRESSES {
             return Err(self.deny(host, port, "dns_answer_limit_exceeded"));
         }
-        let selected = resolved
-            .first()
-            .copied()
-            .ok_or_else(|| self.deny(host, port, "dns_resolution_required"))?;
+        if resolved.is_empty() {
+            return Err(self.deny(host, port, "dns_resolution_required"));
+        }
         let timestamp = chrono::Utc::now().to_rfc3339();
         let mut policy = self.policy.lock().map_err(|_| HostIoError::Denied {
             reason: "ssrf: policy lock poisoned".to_string(),
@@ -519,7 +587,19 @@ impl<P: HostIoProvider, R: EndpointResolver> SsrfGatedHostIo<P, R> {
         ensure_time_remaining(deadline)
             .map_err(|_| self.deny(host, port, "network_deadline_exceeded"))?;
         match decision {
-            Ok(Action::Allow) => Ok((SocketAddr::new(selected, port), deadline)),
+            Ok(Action::Allow) => {
+                // Never truncate before admission: a denied or excessive
+                // later answer must block the entire operation. Deduplicate
+                // only the fully checked set, preserving resolver preference.
+                let mut addresses = Vec::with_capacity(resolved.len());
+                for ip in resolved {
+                    let address = SocketAddr::new(ip, port);
+                    if !addresses.contains(&address) {
+                        addresses.push(address);
+                    }
+                }
+                Ok((addresses, deadline))
+            }
             Ok(Action::Deny) | Err(_) => Err(HostIoError::Denied {
                 reason: format!("ssrf: egress to {host}:{port} blocked by policy"),
             }),
@@ -547,8 +627,8 @@ impl<P: HostIoProvider, R: EndpointResolver> HostIoProvider for SsrfGatedHostIo<
             | HostIoRequest::FsMeta { .. }
             | HostIoRequest::RandomRead { .. } => return self.inner.perform(request, granted),
         };
-        let (address, deadline) = self.gate_endpoint(request, endpoint, use_tls, granted)?;
-        (self.execute_network)(&self.inner, request, granted, address, deadline)
+        let (addresses, deadline) = self.gate_endpoint(request, endpoint, use_tls, granted)?;
+        (self.execute_network)(&self.inner, request, granted, &addresses, deadline)
     }
 }
 
