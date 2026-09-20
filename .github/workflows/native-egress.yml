@@ -8,47 +8,83 @@ on:
       - 'crates/franken-node/src/security/ssrf_policy/**'
       - 'crates/franken-node/src/ops/*host_io.rs'
       - 'crates/franken-node/tests/ssrf*'
+      - 'tools/egress-validation/**'
       - '.github/workflows/native-egress.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
 
+env:
+  CARGO_BUILD_JOBS: 2
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CARGO_TERM_COLOR: never
+
 jobs:
   address-policy:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: node
     steps:
       - uses: actions/checkout@v4
         with:
+          path: node
           persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: Dicklesworthstone/franken_engine
+          ref: main
+          path: franken_engine
+          persist-credentials: false
+      - name: Install Rust and identify both source revisions
+        run: |
+          rustup toolchain install nightly --profile minimal --component clippy --component rustfmt
+          rustc +nightly --version
+          git rev-parse HEAD
+          git -C ../franken_engine rev-parse HEAD
       - name: Execute production IPv6 classifier and allocation boundary tests
-        shell: bash
         run: |
           set -euo pipefail
-          rustup toolchain install stable --profile minimal --component rustfmt
-          rustc +stable --version
-          git rev-parse HEAD
           source=crates/franken-node/src/security/ssrf_policy/ipv6.rs
-          rustc +stable --edition 2024 --test "$source" -D warnings -o "$RUNNER_TEMP/ipv6-policy-tests"
+          rustc +nightly --edition 2024 --test "$source" -D warnings -o "$RUNNER_TEMP/ipv6-policy-tests"
           "$RUNNER_TEMP/ipv6-policy-tests" --nocapture | tee ipv6-policy-tests.log
-      - name: Retain exact policy and transport sources for cross-layer regression diagnosis
+      - name: Execute actual production egress modules and registered socket tests
+        run: |
+          status=0
+          cargo +nightly test --manifest-path tools/egress-validation/Cargo.toml --test ssrf_gated_host_io_egress -- --nocapture > native-egress-tests.log 2>&1 || status=$?
+          tail -n 160 native-egress-tests.log
+          exit "$status"
+      - name: Check actual egress library and registered tests
+        if: always()
+        run: |
+          status=0
+          cargo +nightly check --manifest-path tools/egress-validation/Cargo.toml --all-targets > native-egress-check.log 2>&1 || status=$?
+          tail -n 100 native-egress-check.log
+          test "$status" -eq 0 || exit "$status"
+          cargo +nightly clippy --manifest-path tools/egress-validation/Cargo.toml --all-targets -- -D warnings > native-egress-clippy.log 2>&1 || status=$?
+          tail -n 160 native-egress-clippy.log
+          exit "$status"
+      - name: Check touched formatting and retain rustfmt output
+        if: always()
+        run: |
+          rustfmt +nightly --edition 2024 crates/franken-node/src/security/ssrf_policy.rs crates/franken-node/src/ops/ssrf_gated_host_io.rs crates/franken-node/tests/ssrf_gated_host_io_egress.rs tools/egress-validation/build.rs tools/egress-validation/harness.rs
+          git diff --exit-code -- crates/franken-node/src/security/ssrf_policy.rs crates/franken-node/src/security/ssrf_policy crates/franken-node/src/ops/ssrf_gated_host_io.rs crates/franken-node/tests/ssrf*.rs tools/egress-validation
+      - name: Retain exact validation output and policy/transport sources
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: native-egress-validation
           retention-days: 7
           path: |
-            ipv6-policy-tests.log
-            crates/franken-node/src/security/ssrf_policy.rs
-            crates/franken-node/src/security/ssrf_policy/
-            crates/franken-node/src/security/network_guard.rs
-            crates/franken-node/src/security/remote_cap.rs
-            crates/franken-node/src/ops/ssrf_gated_host_io.rs
-            crates/franken-node/src/ops/flow_gated_host_io.rs
-            crates/franken-node/tests/ssrf*.rs
-            crates/franken-node/src/config.rs
-            crates/franken-node/src/config/timeouts.rs
-            crates/franken-node/src/capacity_defaults.rs
-            crates/franken-node/src/lock_utils.rs
-            docs/plans/PLAN_TO_CREATE_FRANKEN_NODE.md
+            node/ipv6-policy-tests.log
+            node/native-egress-*.log
+            node/tools/egress-validation/Cargo.lock
+            node/tools/egress-validation/build.rs
+            node/tools/egress-validation/harness.rs
+            node/crates/franken-node/src/security/ssrf_policy.rs
+            node/crates/franken-node/src/security/ssrf_policy/
+            node/crates/franken-node/src/ops/ssrf_gated_host_io.rs
+            node/crates/franken-node/tests/ssrf*.rs

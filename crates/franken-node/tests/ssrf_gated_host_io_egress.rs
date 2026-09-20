@@ -9,6 +9,8 @@
 mod baseline;
 #[path = "ssrf_pinned_tls.rs"]
 mod pinned_tls;
+#[path = "ssrf_dual_stack.rs"]
+mod dual_stack;
 
 mod dns_pinning {
     use std::io::{self, Read, Write};
@@ -288,16 +290,15 @@ mod dns_pinning {
     }
 
     #[test]
-    fn explicit_hostname_exception_is_port_scoped_and_still_pins_private_address() {
+    fn hostname_exception_cannot_authorize_private_dns_answers_on_either_port() {
         let harness = harness(exception_policy("service.example", 80), ResolverPlan::addresses(&["127.0.0.1"]), false);
         let grants = [HostIoCapability::NetworkSend];
         let allowed = network_requests("Service.Example.:80")[0].clone();
-        assert!(harness.gate.perform(&allowed, &grants).is_ok());
-        assert_eq!(harness.observed.requests.lock().unwrap()[0].0, network_requests("127.0.0.1:80")[0]);
-        assert!(harness.gate.audit_records()[0].allowlisted);
+        assert!(matches!(harness.gate.perform(&allowed, &grants), Err(HostIoError::Denied { .. })));
+        assert!(!harness.gate.audit_records()[0].allowlisted);
         let wrong_port = network_requests("service.example:81")[0].clone();
         assert!(matches!(harness.gate.perform(&wrong_port, &grants), Err(HostIoError::Denied { .. })));
-        assert_eq!(harness.observed.requests.lock().unwrap().len(), 1);
+        assert!(harness.observed.requests.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -382,8 +383,12 @@ mod dns_pinning {
             Ok(received)
         });
         let observed = Arc::new(Observed::default());
+        // Transport-only fixture: authorize the local listener explicitly by
+        // disabling IPv4 CIDR blocking, not by weakening DNS rebinding policy.
+        let mut transport_policy = policy();
+        transport_policy.blocked_cidrs.clear();
         let gate = SsrfGatedHostIo::with_resolver(
-            inner, exception_policy("pinned-egress.invalid", port), "pinning-integration",
+            inner, transport_policy, "pinning-integration",
             ControlledResolver { observed: Arc::clone(&observed), plan: ResolverPlan::addresses(&["127.0.0.1"]) },
         );
         let request = HostIoRequest::NetworkRequest {
@@ -397,6 +402,6 @@ mod dns_pinning {
         let records = gate.audit_records();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].host, "pinned-egress.invalid");
-        assert!(records[0].allowlisted);
+        assert!(!records[0].allowlisted);
     }
 }

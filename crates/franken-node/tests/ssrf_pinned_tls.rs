@@ -43,6 +43,16 @@ fn exception(host: &str, port: u16) -> SsrfPolicyTemplate {
     policy
 }
 
+fn transport_fixture_policy() -> SsrfPolicyTemplate {
+    // These .invalid-name tests exercise the real transport on a local socket.
+    // A hostname allowlist entry deliberately does NOT bypass private DNS
+    // checks. Use an explicit test-only CIDR opt-out, with separate tests below
+    // proving production defaults and hostname exceptions still deny rebinding.
+    let mut policy = SsrfPolicyTemplate::default_template("local-transport-fixture".into());
+    policy.blocked_cidrs.clear();
+    policy
+}
+
 fn request(host: &str, port: u16, max_len: u64) -> HostIoRequest {
     HostIoRequest::NetworkRequest {
         endpoint: format!("{host}:{port}"),
@@ -115,7 +125,7 @@ fn permitted_hostname_https_uses_the_pinned_socket_and_original_identity() {
     let address = listener.local_addr().unwrap();
     let server = tls_peer(listener, &key, REPLY.to_vec());
     let calls = Arc::new(AtomicUsize::new(0));
-    let gate = SsrfGatedHostIo::with_resolver(inner, exception(AUTHORITY, address.port()),
+    let gate = SsrfGatedHostIo::with_resolver(inner, transport_fixture_policy(),
         "pinned-tls", FixedDns { ip: address.ip(), calls: Arc::clone(&calls) });
     let original = request(AUTHORITY, address.port(), 4096);
     let before = original.clone();
@@ -130,7 +140,7 @@ fn permitted_hostname_https_uses_the_pinned_socket_and_original_identity() {
     let audit = gate.audit_records();
     assert_eq!(audit.len(), 1);
     assert_eq!(audit[0].host, AUTHORITY);
-    assert!(audit[0].allowlisted);
+    assert!(!audit[0].allowlisted);
 }
 
 #[test]
@@ -173,7 +183,7 @@ fn certificate_trust_and_hostname_failures_never_send_http_or_retry() {
         let address = listener.local_addr().unwrap();
         let server = tls_peer(listener, &key, REPLY.to_vec());
         let calls = Arc::new(AtomicUsize::new(0));
-        let gate = SsrfGatedHostIo::with_resolver(inner, exception(AUTHORITY, address.port()),
+        let gate = SsrfGatedHostIo::with_resolver(inner, transport_fixture_policy(),
             "bad-tls", FixedDns { ip: address.ip(), calls: Arc::clone(&calls) });
         let result = gate.perform(&request(AUTHORITY, address.port(), 4096), &[HostIoCapability::NetworkSend]);
         let peer = server.join().unwrap();
@@ -215,7 +225,7 @@ fn tls_response_caps_truncation_and_unclean_eof_remain_fail_closed() {
         let address = listener.local_addr().unwrap();
         let server = tls_peer(listener, &key, response);
         let calls = Arc::new(AtomicUsize::new(0));
-        let gate = SsrfGatedHostIo::with_resolver(inner, exception(AUTHORITY, address.port()),
+        let gate = SsrfGatedHostIo::with_resolver(inner, transport_fixture_policy(),
             "framing", FixedDns { ip: address.ip(), calls: Arc::clone(&calls) });
         let result = gate.perform(&request(AUTHORITY, address.port(), 4096), &[HostIoCapability::NetworkSend]);
         let peer = server.join().unwrap();
@@ -234,7 +244,7 @@ fn stalled_tls_handshake_obeys_the_configured_whole_effect_budget() {
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
-    let gate = SsrfGatedHostIo::with_resolver(inner, exception(AUTHORITY, address.port()),
+    let gate = SsrfGatedHostIo::with_resolver(inner, transport_fixture_policy(),
         "stalled-tls", FixedDns { ip: address.ip(), calls: Arc::clone(&calls) });
     // The listener accepts TCP in the kernel but never sends a ServerHello.
     let started = Instant::now();
@@ -381,4 +391,49 @@ fn system_resolver_rejects_expired_and_malformed_requests_without_dns() {
         assert_eq!(resolver.resolve_until(host, 80, Instant::now() + Duration::from_secs(1))
             .unwrap_err().kind(), io::ErrorKind::InvalidInput, "{host}");
     }
+}
+
+#[test]
+fn ipv6_literal_https_uses_exact_ip_certificate_and_never_dns_or_sni() {
+    let root = tempfile::tempdir().unwrap();
+    let key = rcgen::generate_simple_self_signed(vec!["::1".into()]).unwrap();
+    let inner = SandboxedHostIo::with_root(root.path()).unwrap()
+        .with_extra_tls_roots_pem(key.cert.pem().as_bytes()).unwrap();
+    // IPv6 availability is required in this native lane: never report a skipped
+    // connection as proof of IPv6 support.
+    let listener = TcpListener::bind("[::1]:0").expect("IPv6 loopback required");
+    let port = listener.local_addr().unwrap().port();
+    let server = tls_peer(listener, &key, REPLY.to_vec());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let gate = SsrfGatedHostIo::with_resolver(inner, exception("0:0:0:0:0:0:0:1", port),
+        "ipv6-tls", FixedDns { ip: "127.0.0.1".parse().unwrap(), calls: Arc::clone(&calls) });
+    let original = request("[::1]", port, 4096);
+    let result = gate.perform(&original, &[HostIoCapability::NetworkSend]);
+    let peer = server.join().unwrap();
+    assert_eq!(result, Ok(HostIoResponse::NetworkRequest { response: REPLY.to_vec() }));
+    assert!(peer.sni.is_none(), "IP identities do not send DNS SNI");
+    let HostIoRequest::NetworkRequest { payload, .. } = original else { unreachable!() };
+    assert_eq!(peer.request, payload);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(gate.audit_records()[0].allowlisted);
+}
+
+#[test]
+fn ipv6_literal_https_rejects_trusted_wrong_ip_certificates_before_application_bytes() {
+    let root = tempfile::tempdir().unwrap();
+    let key = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
+    let inner = SandboxedHostIo::with_root(root.path()).unwrap()
+        .with_extra_tls_roots_pem(key.cert.pem().as_bytes()).unwrap();
+    let listener = TcpListener::bind("[::1]:0").expect("IPv6 loopback required");
+    let port = listener.local_addr().unwrap().port();
+    let server = tls_peer(listener, &key, REPLY.to_vec());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let gate = SsrfGatedHostIo::with_resolver(inner, exception("::1", port),
+        "ipv6-wrong-identity", FixedDns { ip: "::1".parse().unwrap(), calls: Arc::clone(&calls) });
+    let result = gate.perform(&request("[::1]", port, 4096), &[HostIoCapability::NetworkSend]);
+    let peer = server.join().unwrap();
+    assert!(matches!(result, Err(HostIoError::Io { .. })), "{result:?}");
+    assert!(peer.request.is_empty());
+    assert!(peer.sni.is_none());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
