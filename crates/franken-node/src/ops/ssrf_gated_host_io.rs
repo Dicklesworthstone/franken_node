@@ -1,12 +1,12 @@
 //! Product-layer SSRF admission and address-pinned guest network execution.
 //!
 //! Policy stays in franken_node; DNS/socket/TLS mechanisms stay in the engine.
-//! Every network effect is capability-checked before DNS, all resolved answers
-//! are checked, and the chosen SocketAddr is passed separately from the original
-//! request. HTTPS authenticates the original hostname, never the routing IP.
-//! The production provider retains its configured roots, byte limits and one
-//! absolute deadline spanning resolution, connection, handshake and response.
-//! Filesystem and entropy requests pass through without network admission.
+//! Network effects are capability-checked before DNS and resolved answers are
+//! checked against policy before selecting a connect address. Configured native
+//! execution passes that address separately from the original request: HTTPS
+//! authenticates the original hostname, never the routing IP. The native
+//! provider retains its roots, byte limits and one deadline spanning DNS,
+//! connection, handshake and response. Filesystem and entropy pass through.
 
 #[cfg(feature = "engine")]
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -38,15 +38,20 @@ const MAX_ENDPOINT_LEN: usize = 260;
 const MAX_RESOLVED_ADDRESSES: usize = 64;
 
 /// Trusted resolver: returns address evidence, never performs the guest effect.
-/// Custom resolvers must honor `resolve_until` for interruptible waiting. The
-/// default adapter checks before and after a synchronous custom resolution but
-/// cannot interrupt an arbitrary implementation. SystemEndpointResolver uses
-/// the engine's bounded shared worker admission, not that synchronous adapter.
+/// The default adapter checks before and after a synchronous custom resolution
+/// but cannot interrupt an arbitrary implementation. Custom blocking resolvers
+/// must override `resolve_until` to bound caller waiting. SystemEndpointResolver
+/// uses the engine's bounded shared worker admission, not the default adapter.
 #[cfg(feature = "engine")]
 pub trait EndpointResolver: core::fmt::Debug + Send + Sync {
     fn resolve(&self, host: &str, port: u16) -> std::io::Result<Vec<IpAddr>>;
 
-    fn resolve_until(&self, host: &str, port: u16, deadline: Instant) -> std::io::Result<Vec<IpAddr>> {
+    fn resolve_until(
+        &self,
+        host: &str,
+        port: u16,
+        deadline: Instant,
+    ) -> std::io::Result<Vec<IpAddr>> {
         ensure_time_remaining(deadline)?;
         let result = self.resolve(host, port)?;
         ensure_time_remaining(deadline)?;
@@ -65,9 +70,8 @@ fn ensure_time_remaining(deadline: Instant) -> std::io::Result<()> {
     Ok(())
 }
 
-/// System DNS uses a process-wide bounded engine resolver. Timed-out lookups
-/// retain their worker slots until libc returns; retries cannot grow an
-/// unbounded population of stuck DNS threads. No DNS worker may connect.
+/// System DNS uses the process-wide bounded engine resolver. Timed-out lookups
+/// retain their slots until libc returns. No DNS worker may connect.
 #[cfg(feature = "engine")]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemEndpointResolver;
@@ -75,20 +79,30 @@ pub struct SystemEndpointResolver;
 #[cfg(feature = "engine")]
 impl EndpointResolver for SystemEndpointResolver {
     fn resolve(&self, host: &str, port: u16) -> std::io::Result<Vec<IpAddr>> {
-        let deadline = Instant::now().checked_add(SANDBOXED_HOST_IO_NETWORK_TIMEOUT)
+        let deadline = Instant::now()
+            .checked_add(SANDBOXED_HOST_IO_NETWORK_TIMEOUT)
             .ok_or_else(|| std::io::Error::other("network deadline overflow"))?;
         self.resolve_until(host, port, deadline)
     }
 
-    fn resolve_until(&self, host: &str, port: u16, deadline: Instant) -> std::io::Result<Vec<IpAddr>> {
-        // Public callers cannot bypass endpoint validation or allocate an
-        // unbounded endpoint string before entering the bounded engine resolver.
+    fn resolve_until(
+        &self,
+        host: &str,
+        port: u16,
+        deadline: Instant,
+    ) -> std::io::Result<Vec<IpAddr>> {
         if host.len() > MAX_ENDPOINT_LEN {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "hostname too long"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "hostname too long",
+            ));
         }
         let endpoint = format!("{host}:{port}");
         if split_host_port(&endpoint).is_none() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid endpoint"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid endpoint",
+            ));
         }
         SandboxedHostIo::resolve_network_endpoint_until(&endpoint, deadline)
             .map(|addresses| addresses.into_iter().map(|address| address.ip()).collect())
@@ -99,10 +113,10 @@ impl EndpointResolver for SystemEndpointResolver {
 /// Implementations must never resolve the original endpoint again or restart
 /// the supplied deadline. TLS support is opt-in, not inferred from a name.
 ///
-/// The default is useful for numeric-only host providers: it delegates a
-/// numeric endpoint and rejects DNS-name TLS rather than changing certificate
-/// identity. Custom blocking providers must override this method to enforce
-/// the deadline during their own I/O, not merely before and after it.
+/// The default delegates a numeric endpoint and rejects hostname TLS rather
+/// than changing certificate identity. Custom blocking providers must override
+/// execution to enforce the deadline during their own I/O, not merely before
+/// and after it. SandboxedHostIo supplies that stronger implementation.
 #[cfg(feature = "engine")]
 pub trait PinnedNetworkProvider: HostIoProvider {
     fn network_timeout(&self) -> Duration {
@@ -120,37 +134,7 @@ pub trait PinnedNetworkProvider: HostIoProvider {
         destination: SocketAddr,
         deadline: Instant,
     ) -> HostIoOutcome {
-        let capability = request.required_capability();
-        if !granted.contains(&capability) {
-            return Err(HostIoError::CapabilityMissing { capability });
-        }
-        let timeout = |error: std::io::Error| HostIoError::Io { detail: error.to_string() };
-        ensure_time_remaining(deadline).map_err(timeout)?;
-        let endpoint = destination.to_string();
-        let pinned = match request {
-            HostIoRequest::NetworkSend { payload, .. } => HostIoRequest::NetworkSend {
-                endpoint, payload: payload.clone(),
-            },
-            HostIoRequest::NetworkRecv { max_len, .. } => HostIoRequest::NetworkRecv {
-                endpoint, max_len: *max_len,
-            },
-            HostIoRequest::NetworkRequest { endpoint: original, payload, max_len, use_tls } => {
-                if *use_tls && original.parse::<SocketAddr>().ok() != Some(destination) {
-                    return Err(HostIoError::Denied {
-                        reason: "ssrf: tls_address_pinning_unavailable".to_string(),
-                    });
-                }
-                HostIoRequest::NetworkRequest {
-                    endpoint, payload: payload.clone(), max_len: *max_len, use_tls: *use_tls,
-                }
-            }
-            _ => return Err(HostIoError::Denied {
-                reason: "ssrf: pinned transport requires a network request".to_string(),
-            }),
-        };
-        let outcome = self.perform(&pinned, granted);
-        ensure_time_remaining(deadline).map_err(timeout)?;
-        outcome
+        perform_numeric_network(self, request, granted, destination, deadline)
     }
 }
 
@@ -173,6 +157,78 @@ impl PinnedNetworkProvider for SandboxedHostIo {
     ) -> HostIoOutcome {
         SandboxedHostIo::perform_pinned_network(self, request, granted, destination, deadline)
     }
+}
+
+/// Numeric-only delegation is safe for an arbitrary HostIoProvider: a DNS
+/// hostname is never passed downstream, and TLS identities are never rewritten.
+#[cfg(feature = "engine")]
+fn perform_numeric_network<P: HostIoProvider + ?Sized>(
+    provider: &P,
+    request: &HostIoRequest,
+    granted: &[HostIoCapability],
+    destination: SocketAddr,
+    deadline: Instant,
+) -> HostIoOutcome {
+    let capability = request.required_capability();
+    if !granted.contains(&capability) {
+        return Err(HostIoError::CapabilityMissing { capability });
+    }
+    let timeout = |error: std::io::Error| HostIoError::Io {
+        detail: error.to_string(),
+    };
+    ensure_time_remaining(deadline).map_err(timeout)?;
+    let original = match request {
+        HostIoRequest::NetworkSend { endpoint, .. }
+        | HostIoRequest::NetworkRecv { endpoint, .. }
+        | HostIoRequest::NetworkRequest { endpoint, .. } => endpoint,
+        _ => {
+            return Err(HostIoError::Denied {
+                reason: "ssrf: pinned transport requires a network request".to_string(),
+            });
+        }
+    };
+    let invalid = || HostIoError::Denied {
+        reason: "ssrf: pinned transport authority mismatch".to_string(),
+    };
+    let (host, port) = split_host_port(original).ok_or_else(invalid)?;
+    if port != destination.port()
+        || literal_ip(host).is_some_and(|address| address != destination.ip())
+    {
+        return Err(invalid());
+    }
+    let endpoint = destination.to_string();
+    let pinned = match request {
+        HostIoRequest::NetworkSend { payload, .. } => HostIoRequest::NetworkSend {
+            endpoint,
+            payload: payload.clone(),
+        },
+        HostIoRequest::NetworkRecv { max_len, .. } => HostIoRequest::NetworkRecv {
+            endpoint,
+            max_len: *max_len,
+        },
+        HostIoRequest::NetworkRequest {
+            payload,
+            max_len,
+            use_tls,
+            ..
+        } => {
+            if *use_tls && literal_ip(host).is_none() {
+                return Err(HostIoError::Denied {
+                    reason: "ssrf: tls_address_pinning_unavailable".to_string(),
+                });
+            }
+            HostIoRequest::NetworkRequest {
+                endpoint,
+                payload: payload.clone(),
+                max_len: *max_len,
+                use_tls: *use_tls,
+            }
+        }
+        _ => unreachable!("non-network requests were rejected before delegation"),
+    };
+    let outcome = provider.perform(&pinned, granted);
+    ensure_time_remaining(deadline).map_err(timeout)?;
+    outcome
 }
 
 /// Parse only unambiguous socket endpoints before invoking a resolver. Preserve
@@ -211,14 +267,18 @@ fn split_host_port(endpoint: &str) -> Option<(&str, u16)> {
                 || bytes.len() > 63
                 || !bytes[0].is_ascii_alphanumeric()
                 || !bytes[bytes.len() - 1].is_ascii_alphanumeric()
-                || !bytes.iter().all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+                || !bytes
+                    .iter()
+                    .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
             {
                 return None;
             }
         }
         let numeric_alias = canonical.split('.').all(|label| {
             label.bytes().all(|byte| byte.is_ascii_digit())
-                || label.strip_prefix("0x").or_else(|| label.strip_prefix("0X"))
+                || label
+                    .strip_prefix("0x")
+                    .or_else(|| label.strip_prefix("0X"))
                     .is_some_and(|digits| {
                         !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
                     })
@@ -239,9 +299,8 @@ fn literal_ip(host: &str) -> Option<IpAddr> {
         .ok()
 }
 
-/// Build the run's SSRF policy from `[security.network_policy]`. Enforcement
-/// remains fail-safe: Monitor is treated as Block; only explicit opt-out empties
-/// the IPv4 deny-list. The canonical policy still controls unsupported IP forms.
+/// Build the run's policy from `[security.network_policy]`. Monitor is treated
+/// as Block; only explicit opt-out empties the IPv4 deny-list.
 #[cfg(feature = "engine")]
 fn build_ssrf_template(policy: &NetworkPolicyConfig, trace_id: &str) -> SsrfPolicyTemplate {
     let connector_id = format!("run:{trace_id}");
@@ -276,7 +335,14 @@ fn build_ssrf_template(policy: &NetworkPolicyConfig, trace_id: &str) -> SsrfPoli
     template
 }
 
+#[cfg(feature = "engine")]
+type PinnedExecutor<P> =
+    fn(&P, &HostIoRequest, &[HostIoCapability], SocketAddr, Instant) -> HostIoOutcome;
+
 /// A host-I/O decorator binding every network authorization to its connect IP.
+/// The transport contract is chosen once at construction, never from a provider
+/// name or guest input. Function pointers preserve generic non-network wrappers
+/// without claiming that arbitrary providers implement hostname TLS.
 #[cfg(feature = "engine")]
 #[derive(Debug)]
 pub struct SsrfGatedHostIo<P: HostIoProvider, R: EndpointResolver = SystemEndpointResolver> {
@@ -284,23 +350,42 @@ pub struct SsrfGatedHostIo<P: HostIoProvider, R: EndpointResolver = SystemEndpoi
     policy: Mutex<SsrfPolicyTemplate>,
     trace_id: String,
     resolver: R,
+    timeout: fn(&P) -> Duration,
+    tls_supported: fn(&P) -> bool,
+    execute_network: PinnedExecutor<P>,
 }
 
 #[cfg(feature = "engine")]
-impl<P: PinnedNetworkProvider> SsrfGatedHostIo<P> {
+impl<P: HostIoProvider> SsrfGatedHostIo<P> {
+    /// Wrap any provider with default SSRF policy and numeric-only transport.
+    /// For native hostname HTTPS and provider-specific deadlines, use
+    /// `from_network_policy` or `with_resolver` with a PinnedNetworkProvider.
     pub fn new(inner: P, trace_id: impl Into<String>) -> Self {
         let trace_id = trace_id.into();
         let policy = SsrfPolicyTemplate::default_template(format!("run:{trace_id}"));
         Self::with_policy(inner, policy, trace_id)
     }
 
+    /// Use an explicit policy with generic numeric-only transport. This does
+    /// not assert hostname TLS support for an otherwise arbitrary host provider.
     pub fn with_policy(inner: P, policy: SsrfPolicyTemplate, trace_id: impl Into<String>) -> Self {
-        Self::with_resolver(inner, policy, trace_id, SystemEndpointResolver)
+        Self {
+            inner,
+            policy: Mutex::new(policy),
+            trace_id: trace_id.into(),
+            resolver: SystemEndpointResolver,
+            timeout: |_| SANDBOXED_HOST_IO_NETWORK_TIMEOUT,
+            tls_supported: |_| false,
+            execute_network: perform_numeric_network::<P>,
+        }
     }
+}
 
-    /// The production run constructor: SandboxedHostIo supplies pinned HTTPS
-    /// automatically, using the same operator roots and limits already installed
-    /// on that provider. No opt-out, environment flag or plaintext fallback.
+#[cfg(feature = "engine")]
+impl<P: PinnedNetworkProvider> SsrfGatedHostIo<P> {
+    /// Production run constructor. SandboxedHostIo supplies pinned HTTPS
+    /// automatically, using its existing operator roots and limits. No opt-out,
+    /// environment flag, second DNS lookup, or plaintext fallback is used.
     pub fn from_network_policy(
         inner: P,
         policy: &NetworkPolicyConfig,
@@ -308,24 +393,39 @@ impl<P: PinnedNetworkProvider> SsrfGatedHostIo<P> {
     ) -> Self {
         let trace_id = trace_id.into();
         let template = build_ssrf_template(policy, &trace_id);
-        Self::with_policy(inner, template, trace_id)
+        Self::with_resolver(inner, template, trace_id, SystemEndpointResolver)
     }
 }
 
 #[cfg(feature = "engine")]
 impl<P: PinnedNetworkProvider, R: EndpointResolver> SsrfGatedHostIo<P, R> {
+    /// Select the provider's explicit pinned transport and a trusted resolver.
     pub fn with_resolver(
         inner: P,
         policy: SsrfPolicyTemplate,
         trace_id: impl Into<String>,
         resolver: R,
     ) -> Self {
-        Self { inner, policy: Mutex::new(policy), trace_id: trace_id.into(), resolver }
+        Self {
+            inner,
+            policy: Mutex::new(policy),
+            trace_id: trace_id.into(),
+            resolver,
+            timeout: P::network_timeout,
+            tls_supported: P::supports_pinned_tls,
+            execute_network: P::perform_pinned_network,
+        }
     }
+}
 
+#[cfg(feature = "engine")]
+impl<P: HostIoProvider, R: EndpointResolver> SsrfGatedHostIo<P, R> {
     #[must_use]
     pub fn audit_records(&self) -> Vec<SsrfAuditRecord> {
-        self.policy.lock().map(|policy| policy.audit_log.clone()).unwrap_or_default()
+        self.policy
+            .lock()
+            .map(|policy| policy.audit_log.clone())
+            .unwrap_or_default()
     }
 
     fn record_denial(&self, host: &str, port: u16, code: &'static str) {
@@ -347,7 +447,9 @@ impl<P: PinnedNetworkProvider, R: EndpointResolver> SsrfGatedHostIo<P, R> {
     fn deny(&self, host: &str, port: u16, code: &'static str) -> HostIoError {
         self.record_denial(host, port, code);
         let bounded_host: String = host.chars().take(MAX_ENDPOINT_LEN).collect();
-        HostIoError::Denied { reason: format!("ssrf: {code} for {bounded_host:?}:{port}") }
+        HostIoError::Denied {
+            reason: format!("ssrf: {code} for {bounded_host:?}:{port}"),
+        }
     }
 
     fn gate_endpoint(
@@ -368,41 +470,51 @@ impl<P: PinnedNetworkProvider, R: EndpointResolver> SsrfGatedHostIo<P, R> {
             return Err(self.deny(endpoint, 0, "invalid_endpoint"));
         };
         let literal = literal_ip(host);
-        if use_tls && literal.is_none() && !self.inner.supports_pinned_tls() {
+        if use_tls && literal.is_none() && !(self.tls_supported)(&self.inner) {
             return Err(self.deny(host, port, "tls_address_pinning_unavailable"));
         }
-        let duration = self.inner.network_timeout();
-        let deadline = started.checked_add(duration)
+        let duration = (self.timeout)(&self.inner);
+        let deadline = started
+            .checked_add(duration)
             .filter(|_| !duration.is_zero())
             .ok_or_else(|| self.deny(host, port, "invalid_network_timeout"))?;
         let resolved = match literal {
             Some(address) => vec![address],
-            None => self.resolver.resolve_until(host, port, deadline).map_err(|error| {
-                let code = match error.kind() {
-                    std::io::ErrorKind::TimedOut => "network_deadline_exceeded",
-                    std::io::ErrorKind::WouldBlock => "dns_capacity_exhausted",
-                    std::io::ErrorKind::InvalidData => "dns_answer_limit_exceeded",
-                    std::io::ErrorKind::NotFound => "dns_resolution_required",
-                    _ => "dns_resolution_failed",
-                };
-                self.deny(host, port, code)
-            })?,
+            None => self
+                .resolver
+                .resolve_until(host, port, deadline)
+                .map_err(|error| {
+                    let code = match error.kind() {
+                        std::io::ErrorKind::TimedOut => "network_deadline_exceeded",
+                        std::io::ErrorKind::WouldBlock => "dns_capacity_exhausted",
+                        std::io::ErrorKind::InvalidData => "dns_answer_limit_exceeded",
+                        std::io::ErrorKind::NotFound => "dns_resolution_required",
+                        _ => "dns_resolution_failed",
+                    };
+                    self.deny(host, port, code)
+                })?,
         };
         ensure_time_remaining(deadline)
             .map_err(|_| self.deny(host, port, "network_deadline_exceeded"))?;
         if resolved.len() > MAX_RESOLVED_ADDRESSES {
             return Err(self.deny(host, port, "dns_answer_limit_exceeded"));
         }
-        let selected = resolved.first().copied()
+        let selected = resolved
+            .first()
+            .copied()
             .ok_or_else(|| self.deny(host, port, "dns_resolution_required"))?;
         let timestamp = chrono::Utc::now().to_rfc3339();
         let mut policy = self.policy.lock().map_err(|_| HostIoError::Denied {
             reason: "ssrf: policy lock poisoned".to_string(),
         })?;
         let decision = policy.check_ssrf_resolved_ips(
-            host, &resolved, port, Protocol::Http, &self.trace_id, &timestamp,
+            host,
+            &resolved,
+            port,
+            Protocol::Http,
+            &self.trace_id,
+            &timestamp,
         );
-        // Release the policy lock before recording a timeout or doing I/O.
         drop(policy);
         ensure_time_remaining(deadline)
             .map_err(|_| self.deny(host, port, "network_deadline_exceeded"))?;
@@ -416,7 +528,7 @@ impl<P: PinnedNetworkProvider, R: EndpointResolver> SsrfGatedHostIo<P, R> {
 }
 
 #[cfg(feature = "engine")]
-impl<P: PinnedNetworkProvider, R: EndpointResolver> HostIoProvider for SsrfGatedHostIo<P, R> {
+impl<P: HostIoProvider, R: EndpointResolver> HostIoProvider for SsrfGatedHostIo<P, R> {
     fn name(&self) -> &str {
         "ssrf-gated-host-io"
     }
@@ -436,9 +548,7 @@ impl<P: PinnedNetworkProvider, R: EndpointResolver> HostIoProvider for SsrfGated
             | HostIoRequest::RandomRead { .. } => return self.inner.perform(request, granted),
         };
         let (address, deadline) = self.gate_endpoint(request, endpoint, use_tls, granted)?;
-        // The original request is preserved for TLS identity, Host bytes and
-        // the outer transcript. Only the connection target is separately pinned.
-        self.inner.perform_pinned_network(request, granted, address, deadline)
+        (self.execute_network)(&self.inner, request, granted, address, deadline)
     }
 }
 
@@ -453,7 +563,10 @@ mod tests {
     struct RecordingInner(Arc<Mutex<Vec<HostIoRequest>>>);
 
     impl HostIoProvider for RecordingInner {
-        fn name(&self) -> &str { "pinning-test" }
+        fn name(&self) -> &str {
+            "pinning-test"
+        }
+
         fn perform(&self, request: &HostIoRequest, _: &[HostIoCapability]) -> HostIoOutcome {
             self.0.lock().unwrap().push(request.clone());
             Ok(HostIoResponse::NetworkSend { bytes_sent: 0 })
@@ -463,7 +576,10 @@ mod tests {
     impl PinnedNetworkProvider for RecordingInner {}
 
     #[derive(Debug)]
-    struct Answers { calls: Arc<AtomicUsize>, first: Vec<IpAddr> }
+    struct Answers {
+        calls: Arc<AtomicUsize>,
+        first: Vec<IpAddr>,
+    }
 
     impl EndpointResolver for Answers {
         fn resolve(&self, _: &str, _: u16) -> std::io::Result<Vec<IpAddr>> {
@@ -479,7 +595,8 @@ mod tests {
         HostIoRequest::NetworkRequest {
             endpoint: endpoint.into(),
             payload: b"GET / HTTP/1.1\r\nHost: service.example\r\n\r\n".to_vec(),
-            max_len: 4096, use_tls,
+            max_len: 4096,
+            use_tls,
         }
     }
 
@@ -489,8 +606,12 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let gate = SsrfGatedHostIo::with_resolver(
             RecordingInner(Arc::clone(&seen)),
-            SsrfPolicyTemplate::default_template("pinning".into()), "pinning",
-            Answers { calls: Arc::clone(&calls), first: vec!["93.184.216.34".parse().unwrap()] },
+            SsrfPolicyTemplate::default_template("pinning".into()),
+            "pinning",
+            Answers {
+                calls: Arc::clone(&calls),
+                first: vec!["93.184.216.34".parse().unwrap()],
+            },
         );
         let original = request("service.example:80", false);
         let before = original.clone();
@@ -506,14 +627,23 @@ mod tests {
 
     #[test]
     fn every_resolved_address_is_checked_before_delegating() {
-        for addresses in [vec!["93.184.216.34", "127.0.0.1"], vec!["169.254.169.254", "93.184.216.34"], vec![]] {
+        for addresses in [
+            vec!["93.184.216.34", "127.0.0.1"],
+            vec!["169.254.169.254", "93.184.216.34"],
+            vec![],
+        ] {
             let seen = Arc::new(Mutex::new(Vec::new()));
             let gate = SsrfGatedHostIo::with_resolver(
                 RecordingInner(Arc::clone(&seen)),
-                SsrfPolicyTemplate::default_template("mixed".into()), "mixed",
-                Answers { calls: Arc::new(AtomicUsize::new(0)), first: addresses.iter().map(|ip| ip.parse().unwrap()).collect() },
+                SsrfPolicyTemplate::default_template("mixed".into()),
+                "mixed",
+                Answers {
+                    calls: Arc::new(AtomicUsize::new(0)),
+                    first: addresses.iter().map(|ip| ip.parse().unwrap()).collect(),
+                },
             );
-            assert!(gate.perform(&request("service.example:80", false), &[HostIoCapability::NetworkSend]).is_err());
+            assert!(gate.perform(&request("service.example:80", false),
+                &[HostIoCapability::NetworkSend]).is_err());
             assert!(seen.lock().unwrap().is_empty());
         }
     }
@@ -523,11 +653,15 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let calls = Arc::new(AtomicUsize::new(0));
         let gate = SsrfGatedHostIo::with_resolver(
-            RecordingInner(Arc::clone(&seen)), SsrfPolicyTemplate::default_template("tls".into()), "tls",
+            RecordingInner(Arc::clone(&seen)),
+            SsrfPolicyTemplate::default_template("tls".into()),
+            "tls",
             Answers { calls: Arc::clone(&calls), first: Vec::new() },
         );
-        let outcome = gate.perform(&request("service.example:443", true), &[HostIoCapability::NetworkSend]);
-        assert!(matches!(outcome, Err(HostIoError::Denied { reason }) if reason.contains("tls_address_pinning_unavailable")));
+        let outcome = gate.perform(&request("service.example:443", true),
+            &[HostIoCapability::NetworkSend]);
+        assert!(matches!(outcome, Err(HostIoError::Denied { reason })
+            if reason.contains("tls_address_pinning_unavailable")));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert!(seen.lock().unwrap().is_empty());
         let numeric = request("93.184.216.34:443", true);
@@ -541,8 +675,13 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let calls = Arc::new(AtomicUsize::new(0));
         let gate = SsrfGatedHostIo::with_resolver(
-            RecordingInner(Arc::clone(&seen)), SsrfPolicyTemplate::default_template("capability".into()), "capability",
-            Answers { calls: Arc::clone(&calls), first: vec!["93.184.216.34".parse().unwrap()] },
+            RecordingInner(Arc::clone(&seen)),
+            SsrfPolicyTemplate::default_template("capability".into()),
+            "capability",
+            Answers {
+                calls: Arc::clone(&calls),
+                first: vec!["93.184.216.34".parse().unwrap()],
+            },
         );
         assert!(matches!(gate.perform(&request("service.example:80", false), &[]),
             Err(HostIoError::CapabilityMissing { capability: HostIoCapability::NetworkSend })));
@@ -569,5 +708,41 @@ mod tests {
         ] {
             assert!(split_host_port(endpoint).is_some(), "{endpoint:?}");
         }
+    }
+
+    #[test]
+    fn arbitrary_non_network_provider_can_be_wrapped_without_claiming_tls_support() {
+        #[derive(Debug)]
+        struct EntropyOnly;
+        impl HostIoProvider for EntropyOnly {
+            fn name(&self) -> &str { "entropy-only" }
+            fn perform(&self, request: &HostIoRequest, _: &[HostIoCapability]) -> HostIoOutcome {
+                match request {
+                    HostIoRequest::RandomRead { byte_len } => Ok(HostIoResponse::RandomRead {
+                        bytes: vec![9; usize::try_from(*byte_len).unwrap()],
+                    }),
+                    _ => panic!("unsupported network transport was reached"),
+                }
+            }
+        }
+        let gate = SsrfGatedHostIo::new(EntropyOnly, "generic-provider");
+        assert_eq!(gate.perform(&HostIoRequest::RandomRead { byte_len: 2 },
+            &[HostIoCapability::RandomRead]), Ok(HostIoResponse::RandomRead { bytes: vec![9, 9] }));
+        assert!(matches!(gate.perform(&request("service.invalid:443", true),
+            &[HostIoCapability::NetworkSend]), Err(HostIoError::Denied { reason })
+            if reason.contains("tls_address_pinning_unavailable")));
+    }
+
+    #[test]
+    fn numeric_transport_refuses_port_or_literal_identity_retargeting() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider = RecordingInner(Arc::clone(&seen));
+        let original = request("93.184.216.34:443", true);
+        for address in ["93.184.216.34:80", "127.0.0.1:443"] {
+            assert!(perform_numeric_network(&provider, &original,
+                &[HostIoCapability::NetworkSend], address.parse().unwrap(),
+                Instant::now() + Duration::from_secs(1)).is_err());
+        }
+        assert!(seen.lock().unwrap().is_empty());
     }
 }
