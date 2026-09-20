@@ -14,6 +14,26 @@ use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 use crate::push_bounded;
 const MAX_ALLOWLIST_ENTRIES: usize = 4096;
 
+mod ipv6;
+
+/// One destination decision for both literal addresses and DNS evidence.
+/// Embedded IPv4 transports inherit the configured IPv4 CIDRs; they cannot
+/// hide an internal target behind an apparently unrelated IPv6 prefix.
+fn destination_block_label(ip: IpAddr, blocked_cidrs: &[CidrRange]) -> Option<String> {
+    let ipv4 = match ip {
+        IpAddr::V4(ipv4) => ipv4,
+        IpAddr::V6(ipv6) => match ipv6::classify(ipv6) {
+            ipv6::Destination::PublicUnicast => return None,
+            ipv6::Destination::Denied(label) => return Some(label.to_string()),
+            ipv6::Destination::EmbeddedIpv4(ipv4) => ipv4,
+        },
+    };
+    blocked_cidrs
+        .iter()
+        .find(|cidr| cidr.contains(ipv4.octets()))
+        .map(|cidr| cidr.to_string())
+}
+
 enum DnsHostnameResolution<'a> {
     Required,
     Resolved(&'a [IpAddr]),
@@ -253,6 +273,9 @@ fn blocked_hostname_label(host: &str) -> Option<&'static str> {
 
 fn normalize_host_for_allowlist_match(host: &str) -> String {
     let trimmed = host.trim();
+    if let Some(ip) = ipv6::parse_literal(trimmed) {
+        return ip.to_string();
+    }
     trimmed
         .strip_suffix('.')
         .unwrap_or(trimmed)
@@ -270,7 +293,8 @@ impl SsrfPolicyTemplate {
         }
     }
 
-    /// Check whether an endpoint string should be treated as internal/private.
+    /// Check whether an endpoint is internal, reserved or otherwise denied by
+    /// the default address policy. A hostname still requires DNS admission.
     pub fn is_private_ip(ip: &str) -> bool {
         let ip = ip.trim();
         if has_null_byte(ip) {
@@ -282,8 +306,11 @@ impl SsrfPolicyTemplate {
         if has_multiple_trailing_dots(ip) {
             return true;
         }
-        // Handle IPv6 loopback
-        if ip == "::1" || ip == "[::1]" {
+        if let Some(address) = ipv6::parse_literal(ip) {
+            return destination_block_label(IpAddr::V6(address), &standard_blocked_cidrs())
+                .is_some();
+        }
+        if ip.contains(':') {
             return true;
         }
         if blocked_hostname_label(ip).is_some() {
@@ -300,7 +327,7 @@ impl SsrfPolicyTemplate {
                 }
                 let clean_ip = ip.trim_start_matches('[').trim_end_matches(']');
                 if clean_ip.parse::<std::net::IpAddr>().is_ok() {
-                    return true; // Deny unsupported IP literals (like IPv6) by treating them as private
+                    return true; // Valid literals were handled above; malformed brackets deny.
                 }
                 if has_bracket_delimiters(ip) {
                     return true; // Treat malformed bracketed host literals as private to deny fail-closed
@@ -322,14 +349,7 @@ impl SsrfPolicyTemplate {
     }
 
     fn resolved_ip_block_label(&self, ip: IpAddr) -> Option<String> {
-        match ip {
-            IpAddr::V4(ipv4) => self
-                .blocked_cidrs
-                .iter()
-                .find(|cidr| cidr.contains(ipv4.octets()))
-                .map(|cidr| cidr.to_string()),
-            IpAddr::V6(_) => Some("ipv6_unsupported".to_string()),
-        }
+        destination_block_label(ip, &self.blocked_cidrs)
     }
 
     fn evaluate_resolved_hostname(
@@ -471,25 +491,26 @@ impl SsrfPolicyTemplate {
                 host: host.to_string(),
             });
         }
-        // Handle IPv6 loopback
-        if host == "::1" || host == "[::1]" {
-            if let Some(_entry) = self.find_allowlist(host, port) {
-                self.emit_audit(host, port, Action::Allow, None, true, trace_id, timestamp);
-                return Ok(Action::Allow);
-            }
+        // Only exact IPv6 grammar reaches this branch. In particular, do not
+        // strip arbitrary brackets and then accidentally authorize the result.
+        if let Some(address) = ipv6::parse_literal(host) {
+            let label = self.resolved_ip_block_label(IpAddr::V6(address));
+            let allowlisted = label.is_some() && self.find_allowlist(host, port).is_some();
+            let action = if label.is_none() || allowlisted { Action::Allow } else { Action::Deny };
             self.emit_audit(
-                host,
-                port,
-                Action::Deny,
-                Some("::1/128"),
-                false,
-                trace_id,
-                timestamp,
+                host, port, action, label.as_deref(), allowlisted, trace_id, timestamp,
             );
-            return Err(SsrfError::SsrfDenied {
-                host: host.to_string(),
-                cidr: "::1/128".to_string(),
-            });
+            return match (action, label) {
+                (Action::Deny, Some(cidr)) => Err(SsrfError::SsrfDenied {
+                    host: host.to_string(), cidr,
+                }),
+                _ => Ok(Action::Allow),
+            };
+        }
+        if host.contains(':') {
+            self.emit_audit(host, port, Action::Deny, Some("invalid_ip_format"),
+                false, trace_id, timestamp);
+            return Err(SsrfError::SsrfInvalidIp { host: host.to_string() });
         }
         if let Some(label) = blocked_hostname_label(host) {
             if self.find_allowlist(host, port).is_some() {
@@ -1354,15 +1375,14 @@ mod tests {
     }
 
     #[test]
-    fn check_ssrf_rejects_public_ipv6_literals_as_unsupported() {
+    fn check_ssrf_allows_public_ipv6_literals_under_the_address_policy() {
         let mut t = SsrfPolicyTemplate::default_template("conn-1".into());
         let result = t.check_ssrf("2001:4860:4860::8888", 443, Protocol::Http, "td7", "ts");
 
-        match result.expect_err("IPv6 literals must fail closed") {
-            SsrfError::SsrfDenied { cidr, .. } => assert_eq!(cidr, "ipv6_unsupported"),
-            other => unreachable!("expected IPv6 unsupported denial, got {:?}", other),
-        }
-        assert!(SsrfPolicyTemplate::is_private_ip("2001:4860:4860::8888"));
+        assert_eq!(result, Ok(Action::Allow));
+        assert_eq!(t.audit_log[0].action, Action::Allow);
+        assert!(!t.audit_log[0].allowlisted);
+        assert!(!SsrfPolicyTemplate::is_private_ip("2001:4860:4860::8888"));
     }
 
     #[test]
@@ -2657,10 +2677,10 @@ mod ssrf_additional_negative_tests {
     }
 
     #[test]
-    fn check_ssrf_rejects_bracketed_public_ipv6_literal() {
+    fn check_ssrf_allows_bracketed_public_ipv6_literal() {
         let mut policy = template();
 
-        let err = policy
+        let result = policy
             .check_ssrf(
                 "[2001:4860:4860::8888]",
                 443,
@@ -2668,13 +2688,11 @@ mod ssrf_additional_negative_tests {
                 "trace-bracketed-ipv6",
                 "ts",
             )
-            .unwrap_err();
+            .unwrap();
 
-        match err {
-            SsrfError::SsrfDenied { cidr, .. } => assert_eq!(cidr, "ipv6_unsupported"),
-            other => unreachable!("expected IPv6 unsupported denial, got {:?}", other),
-        }
-        assert_eq!(policy.audit_log[0].action, Action::Deny);
+        assert_eq!(result, Action::Allow);
+        assert_eq!(policy.audit_log[0].action, Action::Allow);
+        assert!(!policy.audit_log[0].allowlisted);
     }
 
     #[test]
