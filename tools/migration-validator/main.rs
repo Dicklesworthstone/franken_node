@@ -37,6 +37,14 @@ struct Args {
     /// Approve execution of trusted project or captured code on the selected runtimes.
     #[arg(long)]
     execute: bool,
+    /// Independently reviewed original input hash from --list-tests. Requires both role pins.
+    #[arg(long, requires_all = ["execute", "expected_candidate_input_sha256"],
+        conflicts_with_all = ["list_tests", "inspect_capsule", "replay", "export_inputs", "capture_capsule"])]
+    expected_input_sha256: Option<String>,
+    /// Independently reviewed candidate input hash. For one tree repeat the original hash.
+    #[arg(long, requires_all = ["execute", "expected_input_sha256"],
+        conflicts_with_all = ["list_tests", "inspect_capsule", "replay", "export_inputs", "capture_capsule"])]
+    expected_candidate_input_sha256: Option<String>,
     /// Inspect the captured test inventory without resolving runtimes or executing project code.
     #[arg(long, conflicts_with_all = ["execute", "native_bin", "migrated_project", "compare_filesystem", "capture_capsule", "replay", "inspect_capsule"])]
     list_tests: bool,
@@ -97,6 +105,11 @@ fn run(args: &Args) -> anyhow::Result<serde_json::Value> {
         + u8::from(args.export_inputs.is_some());
     ensure!(modes <= 1, "--list-tests, --inspect-capsule, --export-inputs and --replay are mutually exclusive");
     let no_execution = args.list_tests || args.inspect_capsule || args.export_inputs.is_some();
+    let approved_live = args.expected_input_sha256.is_some() || args.expected_candidate_input_sha256.is_some();
+    ensure!(!approved_live || (args.expected_input_sha256.is_some()
+        && args.expected_candidate_input_sha256.is_some() && args.execute && !no_execution
+        && !args.replay && args.capture_capsule.is_none()),
+        "reviewed input execution requires --execute and both --expected-input-sha256 and --expected-candidate-input-sha256; it cannot be combined with offline or capsule modes");
     ensure!(!no_execution || (!args.execute && args.native_bin.is_none() && args.migrated_project.is_none()
         && !args.compare_filesystem && args.capture_capsule.is_none()),
         "--list-tests, --inspect-capsule and --export-inputs cannot be combined with execution or runtime-comparison options");
@@ -204,6 +217,27 @@ fn run(args: &Args) -> anyhow::Result<serde_json::Value> {
             "execution_performed": false,
             "release_certification": false,
         })
+    } else if let Some(original_pin) = args.expected_input_sha256.as_deref() {
+        let candidate_pin = args.expected_candidate_input_sha256.as_deref().context("candidate input approval missing")?;
+        let approved = validation_suite::ApprovedInputs::capture(
+            project.as_deref().context("project missing")?, migrated_project.as_deref(),
+            original_pin, candidate_pin)?;
+        let native = args.native_bin.as_deref().context("native runtime missing")?;
+        let mut value = if let Some(bun) = args.bun_bin.as_deref() {
+            serde_json::to_value(approved.run_product(native, bun, args.compare_filesystem)?)?
+        } else {
+            serde_json::to_value(approved.run_pair(native, args.compare_filesystem)?)?
+        };
+        // This records input admission, not authenticity, workload success,
+        // runtime provenance, or approval of ambient/external effects.
+        value["input_approval"] = serde_json::json!({
+            "schema_version": "franken-node/reviewed-input-admission/v1",
+            "expected_input_sha256": original_pin,
+            "expected_candidate_input_sha256": candidate_pin,
+            "matched_before_execution": true,
+            "scope": "captured-project-inputs-only",
+        });
+        value
     } else if let Some(bun) = args.bun_bin.as_deref() {
         let project = project.as_deref().context("project missing")?;
         let native = args.native_bin.as_deref().context("native runtime missing")?;
@@ -300,6 +334,7 @@ mod tests {
     fn arguments(project: PathBuf) -> Args {
         Args { project, migrated_project: None, compare_filesystem: false,
             native_bin: Some("missing-runtime".into()), bun_bin: None, execute: true, list_tests: false,
+            expected_input_sha256: None, expected_candidate_input_sha256: None,
             capture_capsule: None, inspect_capsule: false, replay: false,
             expected_sha256: None, export_inputs: None, verify_fix: false, minimize_capsule: None,
             source_file: Vec::new(), max_executions: None, minimize_seconds: None,
@@ -308,6 +343,117 @@ mod tests {
 
     fn inspection(project: PathBuf) -> Args {
         Args { native_bin: None, execute: false, list_tests: true, ..arguments(project) }
+    }
+
+    fn reviewed_pin(project: &std::path::Path) -> String {
+        run(&inspection(project.into())).unwrap()["input_sha256"].as_str().unwrap().to_owned()
+    }
+
+    #[test]
+    fn reviewed_input_clap_requires_both_pins_and_rejects_capsule_or_offline_modes() {
+        let pin = "a".repeat(64);
+        let base = ["suite", "project", "--native-bin", "/bin/false", "--execute",
+            "--expected-input-sha256", &pin, "--expected-candidate-input-sha256", &pin];
+        let parsed = Args::try_parse_from(base).unwrap();
+        assert_eq!(parsed.expected_input_sha256.as_deref(), Some(pin.as_str()));
+        assert_eq!(parsed.expected_candidate_input_sha256.as_deref(), Some(pin.as_str()));
+        for flag in ["--expected-input-sha256", "--expected-candidate-input-sha256"] {
+            assert!(Args::try_parse_from(["suite", "project", "--native-bin", "/bin/false", "--execute", flag, &pin]).is_err());
+        }
+        for flags in [vec!["--list-tests"], vec!["--inspect-capsule"],
+            vec!["--capture-capsule", "capture.json"],
+            vec!["--replay", "--expected-sha256", &pin],
+            vec!["--export-inputs", "exported", "--expected-sha256", &pin]] {
+            let mut argv = base.to_vec();
+            argv.extend(flags);
+            assert!(Args::try_parse_from(argv).is_err());
+        }
+        let no_consent: Vec<_> = base.into_iter().filter(|arg| *arg != "--execute").collect();
+        assert!(Args::try_parse_from(no_consent).is_err());
+    }
+
+    #[test]
+    fn reviewed_input_programmatic_checks_cannot_bypass_consent_or_missing_pins() {
+        let pin = "a".repeat(64);
+        let base = || Args { expected_input_sha256: Some(pin.clone()),
+            expected_candidate_input_sha256: Some(pin.clone()), ..arguments("/missing-reviewed-project".into()) };
+        for args in [Args { execute: false, ..base() },
+            Args { expected_input_sha256: None, ..base() },
+            Args { expected_candidate_input_sha256: None, ..base() },
+            Args { capture_capsule: Some("capture.json".into()), ..base() },
+            Args { replay: true, expected_sha256: Some("b".repeat(64)), ..base() }] {
+            let error = run(&args).unwrap_err();
+            assert!(error.to_string().contains("reviewed input execution"), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn changed_reviewed_input_is_refused_before_resolving_any_runtime() {
+        let project = tempfile::tempdir().unwrap();
+        let private = tempfile::tempdir().unwrap();
+        let sentinel = private.path().join("must-not-execute");
+        let source = format!("require('fs').writeFileSync({},'executed');", serde_json::to_string(&sentinel).unwrap());
+        std::fs::write(project.path().join("case.test.js"), &source).unwrap();
+        let pin = reviewed_pin(project.path());
+        std::fs::write(project.path().join("case.test.js"), format!("{source}\nconsole.log('unreviewed');")).unwrap();
+        for bun in [None, Some(PathBuf::from("/definitely/missing-reviewed-bun"))] {
+            let error = run(&Args { expected_input_sha256: Some(pin.clone()),
+                expected_candidate_input_sha256: Some(pin.clone()), bun_bin: bun,
+                ..arguments(project.path().into()) }).unwrap_err();
+            assert!(error.to_string().starts_with("original captured input"), "{error:#}");
+            assert!(!sentinel.exists());
+        }
+    }
+
+    #[test]
+    fn reviewed_candidate_cannot_be_substituted_or_mistaken_for_the_original() {
+        let original = tempfile::tempdir().unwrap();
+        let candidate = tempfile::tempdir().unwrap();
+        std::fs::write(original.path().join("case.test.js"), "console.log('original');").unwrap();
+        std::fs::write(candidate.path().join("case.test.js"), "console.log('candidate');").unwrap();
+        let original_pin = reviewed_pin(original.path());
+        let candidate_pin = reviewed_pin(candidate.path());
+        assert_ne!(original_pin, candidate_pin);
+        std::fs::write(candidate.path().join("case.test.js"), "console.log('substituted');").unwrap();
+        let error = run(&Args { migrated_project: Some(candidate.path().into()),
+            expected_input_sha256: Some(original_pin), expected_candidate_input_sha256: Some(candidate_pin),
+            ..arguments(original.path().into()) }).unwrap_err();
+        assert!(error.to_string().starts_with("candidate captured input"), "{error:#}");
+    }
+
+    #[test]
+    fn reviewed_pair_and_product_keep_measurement_verdicts_and_input_admission_separate() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("case.test.js"), "console.log('reviewed');").unwrap();
+        let pin = reviewed_pin(project.path());
+        // Deliberately failing roles prove input admission cannot promote a
+        // failed native leg or reference failure into a compatibility pass.
+        for (bun, expected) in [(None, "FAIL"), (Some(PathBuf::from("/bin/false")), "INCONCLUSIVE")] {
+            let report = run(&Args { native_bin: Some("/bin/false".into()), bun_bin: bun,
+                expected_input_sha256: Some(pin.clone()), expected_candidate_input_sha256: Some(pin.clone()),
+                ..arguments(project.path().into()) }).unwrap();
+            assert_eq!(report["verdict"], expected);
+            assert_eq!(report["input_sha256"], pin);
+            assert_eq!(report["candidate_input_sha256"], pin);
+            assert_eq!(report["input_approval"]["matched_before_execution"], true);
+            assert_eq!(report["input_approval"]["scope"], "captured-project-inputs-only");
+            assert_eq!(report["release_certification"], false);
+            assert_ne!(result_exit_code(&report), 0);
+        }
+    }
+
+    #[test]
+    fn reviewed_input_never_ignores_capsule_retention_requests() {
+        let project = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("case.test.js"), "console.log('reviewed');").unwrap();
+        let pin = reviewed_pin(project.path());
+        let capsule = output.path().join("capture.json");
+        let error = run(&Args { capture_capsule: Some(capsule.clone()),
+            expected_input_sha256: Some(pin.clone()), expected_candidate_input_sha256: Some(pin),
+            ..arguments(project.path().into()) }).unwrap_err();
+        assert!(error.to_string().contains("cannot be combined"));
+        assert!(!capsule.exists());
     }
 
     #[test]
