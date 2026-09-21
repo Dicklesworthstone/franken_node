@@ -26,9 +26,9 @@ class WatchdogTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.artifacts = self.root / "artifacts"
 
-    def run_code(self, code, budget=2000):
-        return watchdog.supervise([sys.executable, "-u", "-c", code], self.artifacts,
-                                  wall_time_ms=budget, kill_grace_ms=100)
+    def run_code(self, code, budget=2000, **kwargs):
+        return watchdog.supervise([sys.executable, "-S", "-u", "-c", code], self.artifacts,
+                                  wall_time_ms=budget, kill_grace_ms=100, **kwargs)
 
     def test_success_preserves_raw_streams_and_receipt(self):
         result = self.run_code("import os; os.write(1, b'output\\xff'); os.write(2, b'warning\\x00')")
@@ -100,7 +100,7 @@ class WatchdogTests(unittest.TestCase):
             watchdog.supervise([sys.executable], self.artifacts, wall_time_ms=0)
         self.assertFalse(self.artifacts.exists())
 
-    def test_large_output_does_not_block_or_require_pipes(self):
+    def test_large_output_drains_both_streams_without_deadlock(self):
         result = self.run_code("import os; os.write(1,b'x'*2000000); os.write(2,b'y'*2000000)")
         self.assertEqual(result["outcome"], "completed")
         self.assertEqual(result["stdout_bytes"], 2000000)
@@ -289,6 +289,201 @@ time.sleep(60)
         self.assertEqual(result["outcome"], "supervisor_error")
         self.assertEqual(result["wrapper_exit_code"], 125)
         self.assertTrue(result["fail_closed"])
+
+
+    def test_output_limit_validation_precedes_launch_and_artifacts(self):
+        for value in ("0", "-1", "nan", "inf", "1.5", "1073741825", "9" * 500):
+            with self.subTest(value=value), self.assertRaises(argparse.ArgumentTypeError):
+                watchdog.positive_bytes(value)
+        with self.assertRaises(argparse.ArgumentTypeError):
+            self.run_code("pass", max_output_bytes=0)
+        self.assertFalse(self.artifacts.exists())
+
+    def test_exact_output_limit_preserves_binary_bytes_and_completeness(self):
+        payload = bytes(range(256)) * 16
+        result = self.run_code("import os; data=bytes(range(256))*16; "
+                               "os.write(1,data); os.write(2,data)", max_output_bytes=len(payload))
+        self.assertEqual(result["outcome"], "completed")
+        self.assertTrue(result["output_complete"])
+        self.assertFalse(result["output_limit_exceeded"])
+        for stream in ("stdout", "stderr"):
+            self.assertEqual((self.artifacts / f"{stream}.log").read_bytes(), payload)
+            self.assertEqual(result[f"{stream}_observed_bytes"], len(payload))
+            self.assertTrue(result[f"{stream}_eof"])
+
+    def test_stdout_flood_is_stopped_at_quota_not_wall_deadline(self):
+        result = self.run_code("import os,signal; signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+                               "os.write(2,b'diagnostic'); "
+                               "exec(\"while True: os.write(1,b'\\\\xff'*65536)\")",
+                               max_output_bytes=32768)
+        self.assertEqual(result["outcome"], "output_limit_exceeded")
+        self.assertEqual(result["wrapper_exit_code"], 125)
+        self.assertEqual(result["output_limit_streams"], ["stdout"])
+        self.assertEqual(result["stdout_bytes"], 32768)
+        self.assertEqual((self.artifacts / "stdout.log").read_bytes(), b"\xff" * 32768)
+        self.assertGreater(result["stdout_observed_bytes"], 32768)
+        self.assertEqual((self.artifacts / "stderr.log").read_bytes(), b"diagnostic")
+        self.assertTrue(result["fail_closed"])
+        self.assertFalse(result["wrapper_deadline_exceeded"])
+        self.assertFalse(result["output_complete"])
+        self.assertTrue(result["cleanup"]["leader_reaped"])
+        self.assertEqual(result["runtime_exit_code"], -signal.SIGKILL)
+        self.assertLess(result["elapsed_ms"], 1500)
+
+    def test_stderr_is_subject_to_the_same_quota(self):
+        result = self.run_code("import os; os.write(2,b'e'*8192)", max_output_bytes=1024)
+        self.assertEqual(result["outcome"], "output_limit_exceeded")
+        self.assertEqual(result["output_limit_streams"], ["stderr"])
+        self.assertEqual((self.artifacts / "stderr.log").read_bytes(), b"e" * 1024)
+        self.assertGreater(result["stderr_observed_bytes"], 1024)
+        self.assertFalse(result["stderr_complete"])
+
+    def test_overflow_in_buffered_tail_cannot_publish_native_exit_zero(self):
+        attach = watchdog._OutputCapture.attach
+
+        def attach_after_exit(capture, process):
+            attach(capture, process)
+            process.wait(timeout=2)  # Eight bytes fit in the real OS pipe.
+
+        with mock.patch.object(watchdog._OutputCapture, "attach", attach_after_exit), \
+                mock.patch.object(watchdog, "IO_CHUNK_BYTES", 4):
+            result = self.run_code("import os; os.write(1,b'abcdefgh')", max_output_bytes=4)
+        self.assertEqual(result["runtime_exit_code"], 0)
+        self.assertEqual(result["outcome"], "output_limit_exceeded")
+        self.assertEqual((self.artifacts / "stdout.log").read_bytes(), b"abcd")
+        self.assertEqual(result["stdout_observed_bytes"], 8)
+        self.assertTrue(result["fail_closed"])
+
+    def test_timeout_cause_survives_overflow_during_term_handler(self):
+        code = """
+import os,signal,time
+def stop(*_):
+    os.write(1,b'x'*8192)
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM,stop)
+time.sleep(60)
+"""
+        result = self.run_code(code, budget=400, max_output_bytes=32)
+        self.assertEqual(result["outcome"], "wrapper_timeout")
+        self.assertTrue(result["wrapper_deadline_exceeded"])
+        self.assertTrue(result["output_limit_exceeded"])
+        self.assertEqual(result["stdout_bytes"], 32)
+        self.assertTrue(result["fail_closed"])
+
+    def test_both_streams_continue_draining_during_cleanup_without_growing_logs(self):
+        code = """
+import os,signal,time
+signal.signal(signal.SIGTERM,signal.SIG_IGN)
+for _ in range(20):
+    os.write(1,b'x'*16384)
+    os.write(2,b'y'*16384)
+time.sleep(60)
+"""
+        result = self.run_code(code, max_output_bytes=32768)
+        self.assertEqual(result["outcome"], "output_limit_exceeded")
+        self.assertEqual(result["output_limit_streams"], ["stderr", "stdout"])
+        self.assertEqual(result["stdout_bytes"], 32768)
+        self.assertEqual(result["stderr_bytes"], 32768)
+        self.assertTrue(result["cleanup"]["leader_reaped"])
+
+    def test_closed_streams_do_not_disable_wall_deadline(self):
+        result = self.run_code("import os,time; os.close(1); os.close(2); time.sleep(60)", budget=300)
+        self.assertEqual(result["outcome"], "wrapper_timeout")
+        self.assertTrue(result["stdout_eof"])
+        self.assertTrue(result["stderr_eof"])
+        self.assertLess(result["elapsed_ms"], 1500)
+
+    def test_detached_pipe_holder_is_bounded_and_cannot_claim_complete_success(self):
+        pid_file = self.root / "detached-pid"
+        code = f"""
+import os,time
+from pathlib import Path
+reader,writer=os.pipe()
+pid=os.fork()
+if pid == 0:
+    os.close(reader)
+    os.setsid()
+    Path({str(pid_file)!r}).write_text(str(os.getpid()))
+    os.write(writer,b'ready')
+    os.close(writer)
+    time.sleep(60)
+else:
+    os.close(writer)
+    os.read(reader,5)
+    print('parent finished',flush=True)
+"""
+        try:
+            result = self.run_code(code)
+            self.assertEqual(result["runtime_exit_code"], 0)
+            self.assertEqual(result["outcome"], "output_incomplete")
+            self.assertTrue(result["fail_closed"])
+            self.assertFalse(result["output_complete"])
+            self.assertFalse(result["wrapper_deadline_exceeded"])
+            self.assertLess(result["elapsed_ms"], 1500)
+        finally:
+            if pid_file.exists():
+                try:
+                    os.kill(int(pid_file.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_capture_storage_failure_still_stops_and_reaps_runtime(self):
+        attach = watchdog._OutputCapture.attach
+
+        def attach_failing_sink(capture, process):
+            attach(capture, process)
+            capture.sinks["stdout"] = mock.Mock()
+            capture.sinks["stdout"].write.side_effect = OSError("log storage unavailable")
+
+        with mock.patch.object(watchdog._OutputCapture, "attach", attach_failing_sink):
+            with self.assertRaisesRegex(OSError, "log storage"):
+                self.run_code("import time; print('data',flush=True); time.sleep(60)")
+        result = json.loads((self.artifacts / "watchdog.json").read_text())
+        self.assertEqual(result["outcome"], "supervisor_error")
+        self.assertTrue(result["cleanup"]["leader_reaped"])
+        self.assertTrue(result["fail_closed"])
+        self.assertFalse(result["output_complete"])
+        self.assertIn("log storage unavailable", result["output_error"])
+
+    def test_cleanup_drain_storage_failure_cannot_publish_native_success(self):
+        attach = watchdog._OutputCapture.attach
+        pump = watchdog._OutputCapture.pump
+        first = True
+
+        def attach_failing_sink(capture, process):
+            attach(capture, process)
+            process.wait(timeout=2)
+            capture.sinks["stdout"] = mock.Mock()
+            capture.sinks["stdout"].write.side_effect = OSError("cleanup log write failed")
+
+        def skip_initial_read(capture, timeout):
+            nonlocal first
+            if first:
+                first = False
+                return
+            pump(capture, timeout)
+
+        with mock.patch.object(watchdog._OutputCapture, "attach", attach_failing_sink), \
+                mock.patch.object(watchdog._OutputCapture, "pump", skip_initial_read):
+            result = self.run_code("print('buffered output')")
+        self.assertEqual(result["runtime_exit_code"], 0)
+        self.assertEqual(result["outcome"], "supervisor_error")
+        self.assertTrue(result["cleanup"]["leader_reaped"])
+        self.assertIn("cleanup log write failed", result["cleanup"]["output_error"])
+        self.assertTrue(result["fail_closed"])
+
+    def test_cli_output_limit_is_enforced(self):
+        binary = self.root / "fake-node"
+        binary.write_text(f"#!{sys.executable}\nimport os\nos.write(1,b'x'*8192)\n")
+        binary.chmod(0o700)
+        completed = subprocess.run([sys.executable, str(SCRIPT), "--franken-node-bin", str(binary),
+                                    "--artifacts-dir", str(self.artifacts), "--max-output-bytes", "64",
+                                    "--", "app.js"], capture_output=True, text=True, timeout=5)
+        self.assertEqual(completed.returncode, 125, completed.stderr)
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["outcome"], "output_limit_exceeded")
+        self.assertEqual(result["max_output_bytes_per_stream"], 64)
+        self.assertEqual((self.artifacts / "stdout.log").stat().st_size, 64)
 
 
 if __name__ == "__main__":

@@ -23,16 +23,19 @@ import json
 import math
 import os
 from pathlib import Path
+import selectors
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import time
-from typing import Any, Iterator, Sequence
+from typing import Any, BinaryIO, Iterator, Sequence
 
 
 SCHEMA = "franken-node.runtime-invoke-watchdog.v1"
+DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024
+IO_CHUNK_BYTES = 64 * 1024
 
 
 class Cancellation:
@@ -75,6 +78,104 @@ def positive_ms(value: str) -> int:
     return number
 
 
+def positive_bytes(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("byte limit must be a positive integer") from None
+    if not 1 <= number <= 1024 * 1024 * 1024:
+        raise argparse.ArgumentTypeError("byte limit must be between 1 and 1073741824")
+    return number
+
+
+class _OutputCapture:
+    """Drain both pipes fairly, retaining only a bounded prefix of each stream.
+
+    EOF is tracked independently of leader exit. Observed counts describe bytes
+    actually read, not an estimate of everything a terminated guest generated.
+    """
+
+    def __init__(self, stdout: BinaryIO, stderr: BinaryIO, limit: int) -> None:
+        self.selector = selectors.DefaultSelector()
+        self.sinks = {"stdout": stdout, "stderr": stderr}
+        self.limit = limit
+        self.observed = {name: 0 for name in self.sinks}
+        self.retained = {name: 0 for name in self.sinks}
+        self.eof = {name: False for name in self.sinks}
+        self.exceeded: list[str] = []
+        self.error: str | None = None
+        self.closed = False
+
+    def attach(self, process: subprocess.Popen[bytes]) -> None:
+        try:
+            for name in self.sinks:
+                pipe = getattr(process, name)
+                if pipe is None:
+                    raise ValueError(f"missing {name} pipe")
+                os.set_blocking(pipe.fileno(), False)
+                self.selector.register(pipe, selectors.EVENT_READ, name)
+        except BaseException:
+            self.close()
+            for pipe in (process.stdout, process.stderr):
+                if pipe is not None:
+                    pipe.close()
+            raise
+
+    def pump(self, timeout: float) -> None:
+        if self.closed or not self.selector.get_map():
+            time.sleep(max(0, timeout))
+            return
+        try:
+            # One bounded read per ready stream prevents a stdout flood from
+            # starving stderr, deadline checks, or cancellation handling.
+            for key, _ in self.selector.select(max(0, timeout)):
+                name = key.data
+                try:
+                    data = os.read(key.fd, IO_CHUNK_BYTES)
+                except BlockingIOError:
+                    continue
+                if not data:
+                    self.eof[name] = True
+                    self.selector.unregister(key.fileobj)
+                    key.fileobj.close()
+                    continue
+                self.observed[name] += len(data)
+                remaining = self.limit - self.retained[name]
+                if len(data) > remaining and name not in self.exceeded:
+                    self.exceeded.append(name)
+                pending = memoryview(data)[:remaining]
+                while pending:
+                    written = self.sinks[name].write(pending)
+                    if written is None or written <= 0:
+                        raise OSError(f"failed to retain {name} output")
+                    self.retained[name] += written
+                    pending = pending[written:]
+        except (OSError, ValueError) as error:
+            self.error = f"{type(error).__name__}: {error}"
+            self.close()
+            raise
+
+    def close(self) -> None:
+        if not self.closed:
+            for key in list(self.selector.get_map().values()):
+                self.selector.unregister(key.fileobj)
+                key.fileobj.close()
+            self.selector.close()
+            self.closed = True
+
+    def record(self, receipt: dict[str, Any]) -> None:
+        receipt["output_limit_exceeded"] = bool(self.exceeded)
+        receipt["output_limit_streams"] = sorted(self.exceeded)
+        for name in self.sinks:
+            receipt[f"{name}_observed_bytes"] = self.observed[name]
+            receipt[f"{name}_eof"] = self.eof[name]
+            receipt[f"{name}_complete"] = (
+                self.eof[name] and name not in self.exceeded and self.error is None)
+        receipt["output_complete"] = all(receipt[f"{name}_complete"] for name in self.sinks)
+        if self.error is not None:
+            receipt["output_error"] = self.error
+
+
 def _write_receipt(path: Path, receipt: dict[str, Any]) -> None:
     """Never expose a partially written or stale success receipt."""
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
@@ -102,26 +203,46 @@ def _signal_group(pid: int, sig: int) -> bool:
         return False
 
 
-def _stop_process(process: subprocess.Popen[bytes], grace_ms: int) -> dict[str, Any]:
+def _stop_process(process: subprocess.Popen[bytes], grace_ms: int,
+                  capture: _OutputCapture | None = None) -> dict[str, Any]:
     """Terminate the whole invocation scope, even after its leader exits."""
     cleanup: dict[str, Any] = {"scope": "process_group", "term_sent": False,
                               "kill_sent": False, "leader_reaped": False}
+
+    def drain_until(deadline: float, *, stop_at_eof: bool = False) -> None:
+        while (remaining := deadline - time.monotonic()) > 0:
+            if capture is None or capture.closed:
+                if not stop_at_eof:
+                    time.sleep(remaining)
+                return
+            if stop_at_eof and all(capture.eof.values()):
+                return
+            try:
+                capture.pump(min(remaining, 0.01))
+            except (OSError, ValueError) as error:
+                # Failed evidence storage cannot prevent KILL and reaping.
+                cleanup["output_error"] = str(error)
+
     cleanup["term_sent"] = _signal_group(process.pid, signal.SIGTERM)
     # Do not equate the leader exiting with all descendants exiting. A child may
     # ignore TERM, or may inherit output handles after the leader has finished.
     if cleanup["term_sent"]:
-        time.sleep(grace_ms / 1000)
+        drain_until(time.monotonic() + grace_ms / 1000)
         cleanup["kill_sent"] = _signal_group(process.pid, signal.SIGKILL)
     try:
         process.wait(timeout=max(grace_ms / 1000, 0.1))
         cleanup["leader_reaped"] = True
     except subprocess.TimeoutExpired:
         cleanup["error"] = "process did not exit after SIGKILL"
+    # Drain the finite pipe tail after exit, but never wait indefinitely for a
+    # detached descendant holding a writer. Such evidence is explicitly partial.
+    drain_until(time.monotonic() + max(grace_ms / 1000, 0.1), stop_at_eof=True)
     return cleanup
 
 
 def supervise(command: Sequence[str], artifacts_dir: Path, *, wall_time_ms: int = 30000,
               kill_grace_ms: int = 250, cwd: Path | None = None,
+              max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
               cancellation: Cancellation | None = None) -> dict[str, Any]:
     """Supervise a native invocation. Never parse logs to guess timeout origin.
 
@@ -132,6 +253,7 @@ def supervise(command: Sequence[str], artifacts_dir: Path, *, wall_time_ms: int 
     cancellation = cancellation or Cancellation()
     positive_ms(str(wall_time_ms))
     positive_ms(str(kill_grace_ms))
+    positive_bytes(str(max_output_bytes))
     if os.name != "posix":
         raise ValueError("watchdog requires POSIX process-group termination")
     if isinstance(command, (str, bytes)) or not command or any(
@@ -149,6 +271,9 @@ def supervise(command: Sequence[str], artifacts_dir: Path, *, wall_time_ms: int 
         "fail_closed": True, "wrapper_exit_code": 125, "runtime_exit_code": None,
         "wrapper_deadline_exceeded": False, "timeout_layer": None,
         "wall_time_ms": wall_time_ms, "kill_grace_ms": kill_grace_ms,
+        "max_output_bytes_per_stream": max_output_bytes,
+        "output_limit_exceeded": False, "output_limit_streams": [],
+        "output_complete": False,
         "stdout_path": str(artifacts_dir / "stdout.log"),
         "stderr_path": str(artifacts_dir / "stderr.log"),
         "native_receipts_dir": str(artifacts_dir / "runtime"),
@@ -161,28 +286,29 @@ def supervise(command: Sequence[str], artifacts_dir: Path, *, wall_time_ms: int 
 
     _write_receipt(receipt_path, receipt)
     process: subprocess.Popen[bytes] | None = None
+    capture: _OutputCapture | None = None
     cleanup_done = False
     try:
-        # Files, not PIPEs: large output cannot exhaust supervisor memory and a
-        # descendant retaining stdout cannot keep communicate() blocked forever.
-        with open(receipt["stdout_path"], "xb") as stdout, open(receipt["stderr_path"], "xb") as stderr:
+        with open(receipt["stdout_path"], "xb", buffering=0) as stdout, \
+                open(receipt["stderr_path"], "xb", buffering=0) as stderr:
+            capture = _OutputCapture(stdout, stderr, max_output_bytes)
             if cancellation.signum is not None:
                 return receipt
             try:
                 process = subprocess.Popen(list(command), cwd=receipt["cwd"],
-                                           stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
-                                           start_new_session=True)
+                                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                           stderr=subprocess.PIPE, bufsize=0, start_new_session=True)
             except OSError as error:
                 receipt.update(outcome="spawn_error", error=str(error))
                 event("wrapper_spawn_failed")
             else:
                 receipt["runtime_pid"] = process.pid
                 event("runtime_spawned")
-                # A supervisor killed without a final receipt still leaves a
-                # fail-closed record identifying the native PID and log paths.
-                _write_receipt(receipt_path, receipt)
                 deadline = started + wall_time_ms / 1000
                 try:
+                    capture.attach(process)
+                    # Persist the live PID before attempting any guest I/O.
+                    _write_receipt(receipt_path, receipt)
                     while cancellation.signum is None:
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
@@ -190,22 +316,31 @@ def supervise(command: Sequence[str], artifacts_dir: Path, *, wall_time_ms: int 
                                            wrapper_deadline_exceeded=True, timeout_layer="wrapper")
                             event("wrapper_deadline_exceeded")
                             break
-                        try:
-                            returncode = process.wait(timeout=min(remaining, 0.05))
-                        except subprocess.TimeoutExpired:
-                            continue
-                        receipt.update(outcome="completed" if returncode == 0 else "runtime_failed",
-                                       fail_closed=returncode != 0,
-                                       wrapper_exit_code=returncode if returncode >= 0 else 128 - returncode)
-                        event("runtime_exited")
-                        break
+                        capture.pump(min(remaining, 0.05))
+                        if capture.exceeded:
+                            receipt.update(outcome="output_limit_exceeded", fail_closed=True,
+                                           wrapper_exit_code=125)
+                            event("wrapper_output_limit_exceeded")
+                            break
+                        returncode = process.poll()
+                        if returncode is not None:
+                            receipt.update(outcome="completed" if returncode == 0 else "runtime_failed",
+                                           fail_closed=returncode != 0,
+                                           wrapper_exit_code=returncode if returncode >= 0 else 128 - returncode)
+                            event("runtime_exited")
+                            break
+                    if cancellation.signum is not None and receipt["outcome"] == "running":
+                        receipt.update(outcome="cancelled", fail_closed=True,
+                                       wrapper_exit_code=128 + cancellation.signum)
                 finally:
-                    receipt["cleanup"] = _stop_process(process, kill_grace_ms)
+                    receipt["cleanup"] = _stop_process(process, kill_grace_ms, capture)
                     cleanup_done = True
                     receipt["runtime_exit_code"] = process.returncode
                     event("runtime_scope_stopped")
                 if not receipt["cleanup"]["leader_reaped"]:
                     receipt.update(outcome="cleanup_failed", fail_closed=True, wrapper_exit_code=125)
+                elif capture.error is not None:
+                    receipt.update(outcome="supervisor_error", fail_closed=True, wrapper_exit_code=125)
     except BaseException as error:
         # Mark failure before retrying cleanup: a signalling failure must never
         # leave an earlier native exit-zero result published as success.
@@ -214,13 +349,25 @@ def supervise(command: Sequence[str], artifacts_dir: Path, *, wall_time_ms: int 
         event("wrapper_failed")
         if process is not None and not cleanup_done:
             try:
-                receipt["cleanup"] = _stop_process(process, kill_grace_ms)
+                receipt["cleanup"] = _stop_process(process, kill_grace_ms, capture)
             except OSError as cleanup_error:
                 receipt["cleanup"] = {"scope": "process_group", "leader_reaped": False,
                                       "error": str(cleanup_error)}
             receipt["runtime_exit_code"] = process.returncode
         raise
     finally:
+        if capture is not None:
+            capture.record(receipt)
+            capture.close()
+            # The last buffered bytes can cross the quota after the leader has
+            # exited zero. Incomplete or truncated evidence is never a success.
+            if receipt["outcome"] in ("running", "completed", "runtime_failed"):
+                if capture.exceeded:
+                    receipt.update(outcome="output_limit_exceeded", fail_closed=True, wrapper_exit_code=125)
+                    event("wrapper_output_limit_exceeded")
+                elif process is not None and not receipt["output_complete"]:
+                    receipt.update(outcome="output_incomplete", fail_closed=True, wrapper_exit_code=125)
+                    event("wrapper_output_incomplete")
         if cancellation.signum is not None:
             receipt["cancellation_signal"] = cancellation.signum
             event("wrapper_cancelled")
@@ -243,6 +390,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--artifacts-dir", required=True, type=Path)
     parser.add_argument("--wall-time-ms", default=30000, type=positive_ms)
     parser.add_argument("--kill-grace-ms", default=250, type=positive_ms)
+    parser.add_argument("--max-output-bytes", default=DEFAULT_MAX_OUTPUT_BYTES, type=positive_bytes,
+                        help="maximum retained bytes per output stream (default: 16777216)")
     parser.add_argument("--cwd", type=Path)
     parser.add_argument("runtime_args", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
@@ -262,6 +411,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         with cancellation_signals() as cancellation:
             receipt = supervise(command, args.artifacts_dir, wall_time_ms=args.wall_time_ms,
                                 kill_grace_ms=args.kill_grace_ms, cwd=args.cwd,
+                                max_output_bytes=args.max_output_bytes,
                                 cancellation=cancellation)
     except (OSError, ValueError) as error:
         print(f"runtime watchdog: {error}", file=sys.stderr)
