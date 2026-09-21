@@ -63,6 +63,7 @@ jobs:
           tempfile = "3"
           tree-sitter = "0.26.8"
           tree-sitter-javascript = "0.25.0"
+          tree-sitter-typescript = "=0.23.2"
           rustix = { version = "1.1.4", default-features = false, features = ["std", "fs", "process"] }
           TOML
           cat > "$harness/lib.rs" <<RUST
@@ -143,10 +144,13 @@ jobs:
           }
           RUST
           git rev-parse HEAD > evidence/franken_node.revision
-          git ls-tree HEAD crates/franken-node/src/migration/mod.rs crates/franken-node/src/config/timeouts.rs crates/franken-node/tests/native_project_suite_cli.rs > evidence/primary-source-blobs.txt
+          git ls-tree HEAD crates/franken-node/src/migration/mod.rs crates/franken-node/src/migration/syntax_reduction.rs crates/franken-node/src/config/timeouts.rs crates/franken-node/tests/native_project_suite_cli.rs > evidence/primary-source-blobs.txt
           rustc +stable --version > evidence/primary-rust-version.txt
+          node --version > evidence/primary-node-version.txt
           rustfmt +stable --edition 2024 --config skip_children=true --emit stdout "$source_root/migration/mod.rs" > /dev/null
           rustfmt +stable --edition 2024 --config skip_children=true --emit stdout crates/franken-node/tests/native_project_suite_cli.rs > /dev/null
+          cargo +stable test --manifest-path tools/migration-validator/Cargo.toml syntax_reduction -- --nocapture --test-threads=2 2>&1 | tee evidence/syntax-reduction-tests.log
+          cargo +stable clippy --manifest-path tools/migration-validator/Cargo.toml --all-targets -- -D warnings 2>&1 | tee evidence/syntax-reduction-clippy.log
           cargo +stable check --manifest-path "$harness/Cargo.toml" --lib 2>&1 | tee evidence/primary-module-check.log
           cargo +stable test --manifest-path "$harness/Cargo.toml" --test primary_dispatch -- --nocapture 2>&1 | tee evidence/primary-dispatch-tests.log
           cargo +stable clippy --manifest-path "$harness/Cargo.toml" --lib -- -D warnings 2>&1 | tee evidence/primary-module-clippy.log
@@ -158,6 +162,7 @@ jobs:
           path: |
             evidence/
             crates/franken-node/src/migration/mod.rs
+            crates/franken-node/src/migration/syntax_reduction.rs
             crates/franken-node/src/config/timeouts.rs
             crates/franken-node/tests/native_project_suite_cli.rs
           retention-days: 7
