@@ -58,7 +58,8 @@ security approval is fabricated, and `franken-node run` is unchanged.
 ## Executed tests
 
 ```sh
-cargo test --manifest-path tools/module-graph/Cargo.toml --all-targets
+cargo test --manifest-path tools/module-graph/Cargo.toml \
+  --bin franken-module-graph --test cli --test topology --test package_targets
 ```
 
 The graph builder's own unit tests run alongside executable CLI regressions.
