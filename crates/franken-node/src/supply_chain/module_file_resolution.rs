@@ -185,7 +185,7 @@ impl Resolver {
                     }
                     let mut flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
                     if kind == FileType::Directory { flags |= OFlags::DIRECTORY; }
-                    let mut file = File::from(openat(directory, name, flags, Mode::empty()).map_err(|e| io_error(path, e))?;
+                    let mut file = File::from(openat(directory, name, flags, Mode::empty()).map_err(|e| io_error(path, e))?);
                     let before = file.metadata().map_err(|e| io_error(path, e))?;
                     if before.dev() != info.st_dev as u64 || before.ino() != info.st_ino as u64
                         || before.is_dir() != (kind == FileType::Directory) || (!before.is_file() && !before.is_dir()) {
@@ -454,7 +454,11 @@ fn package_parts(request: &str) -> Result<(&str, String)> {
 /// by project node_modules. This is routing, not an engine availability claim;
 /// every explicit node: request is likewise handed back to the runtime layer.
 fn bare_builtin(name: &str) -> bool {
-    matches!(name, "assert" | "assert/strict" | "async_hooks" | "buffer" | "child_process" | "cluster"
+    matches!(name, "_http_agent" | "_http_client" | "_http_common" | "_http_incoming"
+        | "_http_outgoing" | "_http_server" | "_stream_duplex" | "_stream_passthrough"
+        | "_stream_readable" | "_stream_transform" | "_stream_wrap" | "_stream_writable"
+        | "_tls_common" | "_tls_wrap"
+        | "assert" | "assert/strict" | "async_hooks" | "buffer" | "child_process" | "cluster"
         | "console" | "constants" | "crypto" | "dgram" | "diagnostics_channel" | "dns" | "dns/promises"
         | "domain" | "events" | "fs" | "fs/promises" | "http" | "http2" | "https" | "inspector"
         | "inspector/promises" | "module" | "net" | "os" | "path" | "path/posix" | "path/win32"
@@ -636,7 +640,8 @@ mod tests {
     fn runtime_builtins_are_never_shadowed_by_installed_packages() {
         let root = fixture();
         put(root.path(), "node_modules/fs/index.js", b"malicious shadow");
-        for request in ["fs", "fs/promises", "node:fs", "node:not-in-any-runtime"] {
+        for request in ["fs", "fs/promises", "_http_agent", "_stream_wrap", "_tls_wrap", "node:fs", "node:not-in-any-runtime"] {
+            put(root.path(), &format!("node_modules/{request}/index.js"), b"malicious shadow");
             assert_eq!(rejected(root.path(), "app.js", request, ResolutionMode::Require), "ERR_RUNTIME_MODULE_REQUIRED");
         }
     }
