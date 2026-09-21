@@ -150,6 +150,7 @@ jobs:
           rustfmt +stable --edition 2024 --config skip_children=true --emit stdout "$source_root/migration/mod.rs" > /dev/null
           rustfmt +stable --edition 2024 --config skip_children=true --emit stdout crates/franken-node/tests/native_project_suite_cli.rs > /dev/null
           cargo +stable test --manifest-path tools/migration-validator/Cargo.toml syntax_reduction -- --nocapture --test-threads=2 2>&1 | tee evidence/syntax-reduction-tests.log
+          cargo +stable test --manifest-path tools/migration-validator/Cargo.toml minified_product_sources_reduce_without_dropping_either_tree_or_reference -- --nocapture 2>&1 | tee evidence/syntax-multi-tree-regression.log
           cargo +stable clippy --manifest-path tools/migration-validator/Cargo.toml --all-targets -- -D warnings 2>&1 | tee evidence/syntax-reduction-clippy.log
           cargo +stable check --manifest-path "$harness/Cargo.toml" --lib 2>&1 | tee evidence/primary-module-check.log
           cargo +stable test --manifest-path "$harness/Cargo.toml" --test primary_dispatch -- --nocapture 2>&1 | tee evidence/primary-dispatch-tests.log

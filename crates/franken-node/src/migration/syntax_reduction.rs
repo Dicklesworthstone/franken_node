@@ -319,17 +319,20 @@ fn plan(tree: &Tree, deadline: Instant) -> Result<Plan> {
     Ok(Plan { edits, complete })
 }
 
-/// Repeat structural search from the newly accepted bytes. Stale syntax-node
-/// offsets are never reused. A skipped/limited parse marks search incomplete;
-/// the caller still owns mandatory fresh final behavioral confirmations.
-pub(super) fn reduce(mut source: Vec<u8>, search_deadline: Instant,
+/// Yield after the first accepted edit so the parent's next source/input tree
+/// gets an opportunity before this source consumes more execution budget.
+/// The parent must repeat full source sweeps until no bytes change, as
+/// native_minimizer::reduce_inputs does. `complete` describes uncapped syntax
+/// coverage, not a per-source fixed point. A skipped/limited parse still marks
+/// search incomplete; mandatory fresh final confirmations remain the parent's.
+pub(super) fn reduce(source: Vec<u8>, search_deadline: Instant,
     mut evaluate: impl FnMut(Vec<u8>) -> Result<Trial>) -> Result<Progress> {
     let mut progress = Progress { complete: true, stopped: false, statistics: SyntaxStatistics::default() };
     let mut parser = match parser() {
         Ok(parser) => parser,
         Err(error) => return Ok(progress.skip(format!("syntax parser unavailable: {error:#}"), search_deadline)),
     };
-    while !source.is_empty() {
+    if !source.is_empty() {
         let phase_deadline = search_deadline.min(Instant::now() + PARSE_BUDGET);
         progress.statistics.passes += 1;
         let tree = match parse(&mut parser, &source, phase_deadline) {
@@ -348,7 +351,6 @@ pub(super) fn reduce(mut source: Vec<u8>, search_deadline: Instant,
             progress.statistics.truncated_passes += 1;
         }
         progress.statistics.proposals += proposals.edits.len();
-        let mut accepted = false;
         for edit in proposals.edits {
             let candidate = edit.apply(&source);
             progress.statistics.candidates_checked += 1;
@@ -357,18 +359,15 @@ pub(super) fn reduce(mut source: Vec<u8>, search_deadline: Instant,
                 Ok(None) => { progress.statistics.parse_rejections += 1; continue; }
                 Err(error) => return Ok(progress.skip(format!("{error:#}"), search_deadline)),
             }
-            match evaluate(candidate.clone())? {
+            match evaluate(candidate)? {
                 Trial::Accept => {
-                    source = candidate;
                     progress.statistics.accepted += 1;
-                    accepted = true;
-                    break;
+                    return Ok(progress);
                 }
                 Trial::Reject => {}
                 Trial::Stop => { progress.complete = false; progress.stopped = true; return Ok(progress); }
             }
         }
-        if !accepted { break; }
     }
     Ok(progress)
 }
@@ -384,6 +383,26 @@ mod tests {
     }
     fn includes_edit(source: &str, expected: &str) -> bool {
         proposals(source).edits.iter().any(|edit| edit.apply(source.as_bytes()) == expected.as_bytes())
+    }
+
+    // Drive the same repeated-sweep contract as the production parent when a
+    // test needs a fixed point for one source. Every acceptance is still made
+    // by the supplied oracle; no assertion or observation is relaxed.
+    fn reduce_all(mut source: Vec<u8>, deadline: Instant,
+        mut evaluate: impl FnMut(Vec<u8>) -> Result<Trial>) -> Result<Progress> {
+        let mut total = Progress { complete: true, stopped: false, statistics: SyntaxStatistics::default() };
+        loop {
+            let before = source.len();
+            let progress = reduce(source.clone(), deadline, |candidate| {
+                let result = evaluate(candidate.clone())?;
+                if result == Trial::Accept { source = candidate; }
+                Ok(result)
+            })?;
+            total.complete &= progress.complete;
+            total.stopped |= progress.stopped;
+            total.statistics.merge(progress.statistics);
+            if total.stopped || source.len() == before { return Ok(total); }
+        }
     }
 
     #[test]
@@ -438,7 +457,7 @@ mod tests {
     #[test]
     fn accepted_offsets_are_rebuilt_and_every_evaluated_candidate_parses() {
         let mut best = b"const unused=123;(()=>{const dead=456;console.log(42);})();".to_vec();
-        let result = reduce(best.clone(), deadline(), |candidate| {
+        let result = reduce_all(best.clone(), deadline(), |candidate| {
             assert!(parse(&mut parser().unwrap(), &candidate, deadline()).unwrap().is_some());
             if candidate.windows(b"console.log(42)".len()).any(|bytes| bytes == b"console.log(42)") {
                 best = candidate;
@@ -552,7 +571,7 @@ mod tests {
         let expected = run(&best);
         assert!(expected.status.success());
         assert_eq!(expected.stdout, b"42\n");
-        let result = reduce(best.clone(), Instant::now() + Duration::from_secs(30), |candidate| {
+        let result = reduce_all(best.clone(), Instant::now() + Duration::from_secs(30), |candidate| {
             let observed = run(&candidate);
             if observed.status == expected.status && observed.stdout == expected.stdout
                 && observed.stderr == expected.stderr {
@@ -637,7 +656,7 @@ mod tests {
             let expected = run(source);
             assert!(expected.status.success());
             let mut best = source.to_vec();
-            let result = reduce(best.clone(), Instant::now() + Duration::from_secs(30), |candidate| {
+            let result = reduce_all(best.clone(), Instant::now() + Duration::from_secs(30), |candidate| {
                 let observed = run(&candidate);
                 if observed.status == expected.status && observed.stdout == expected.stdout
                     && observed.stderr == expected.stderr {
@@ -657,5 +676,34 @@ mod tests {
             assert_eq!(observed.stderr, expected.stderr);
             assert_eq!(observed.status, expected.status);
         }
+    }
+
+    #[test]
+    fn accepted_edit_yields_to_other_sources_before_searching_for_more() {
+        let mut calls_after_accept = 0;
+        let mut accepted = false;
+        let mut best = b"const unused=123;console.log(42+0);".to_vec();
+        let result = reduce(best.clone(), deadline(), |candidate| {
+            if accepted { calls_after_accept += 1; }
+            let text = std::str::from_utf8(&candidate).unwrap();
+            if text.contains("console.log(") && text.contains("42") {
+                accepted = true;
+                best = candidate;
+                Ok(Trial::Accept)
+            } else { Ok(Trial::Reject) }
+        }).unwrap();
+        assert!(accepted);
+        assert_eq!(result.statistics.accepted, 1);
+        assert_eq!(calls_after_accept, 0);
+        assert!(result.complete && !result.stopped);
+        let next = reduce_all(best.clone(), deadline(), |candidate| {
+            let text = std::str::from_utf8(&candidate).unwrap();
+            if text.contains("console.log(") && text.contains("42") {
+                best = candidate;
+                Ok(Trial::Accept)
+            } else { Ok(Trial::Reject) }
+        }).unwrap();
+        assert!(next.statistics.accepted > 0);
+        assert_eq!(best, b"console.log(42);");
     }
 }
