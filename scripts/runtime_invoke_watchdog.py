@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+import hashlib
 import json
 import math
 import os
@@ -26,6 +27,7 @@ from pathlib import Path
 import selectors
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -35,6 +37,7 @@ from typing import Any, BinaryIO, Iterator, Sequence
 
 SCHEMA = "franken-node.runtime-invoke-watchdog.v1"
 DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024
+DEFAULT_MAX_STDIN_BYTES = 16 * 1024 * 1024
 IO_CHUNK_BYTES = 64 * 1024
 
 
@@ -88,6 +91,109 @@ def positive_bytes(value: str) -> int:
     return number
 
 
+def read_stdin_file(path: Path, limit: int = DEFAULT_MAX_STDIN_BYTES) -> bytes:
+    """Capture one bounded regular file, rejecting symlink and nonregular sources.
+
+    The opened descriptor and final path must still identify the same unchanged
+    file. The returned immutable bytes, not this path, are used for execution.
+    This detects ordinary concurrent changes, not a hostile filesystem server.
+    """
+    positive_bytes(str(limit))
+
+    def identity(info: os.stat_result) -> tuple[int, ...]:
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+                info.st_mtime_ns, info.st_ctime_ns)
+
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode):
+        raise ValueError("stdin source must be a regular file, not a symlink or device")
+    if before.st_size > limit:
+        raise ValueError(f"stdin source exceeds {limit} bytes")
+    flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
+    with os.fdopen(os.open(path, flags), "rb", buffering=0) as source:
+        opened = os.fstat(source.fileno())
+        if identity(opened) != identity(before):
+            raise ValueError("stdin source changed before capture")
+        content = bytearray()
+        while True:
+            part = source.read(min(IO_CHUNK_BYTES, limit - len(content) + 1))
+            if not part:
+                break
+            content.extend(part)
+            if len(content) > limit:
+                raise ValueError(f"stdin source exceeds {limit} bytes")
+        if (identity(os.fstat(source.fileno())) != identity(opened)
+                or identity(path.lstat()) != identity(opened)
+                or len(content) != opened.st_size):
+            raise ValueError("stdin source changed during capture")
+    return bytes(content)
+
+
+def _write_stdin_snapshot(path: Path, content: bytes) -> None:
+    """Retain the complete input before granting a child any execution time."""
+    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as output:
+        output.write(content)
+        output.flush()
+        os.fsync(output.fileno())
+
+
+class _InputFeed:
+    """Bounded nonblocking pipe delivery; bytes queued are not bytes consumed."""
+
+    def __init__(self, content: bytes, selector: selectors.BaseSelector) -> None:
+        self.content = memoryview(content)
+        self.selector = selector
+        self.pipe: BinaryIO | None = None
+        self.delivered = 0
+        self.state = "not_started"
+        self.error: str | None = None
+
+    def attach(self, pipe: BinaryIO | None) -> None:
+        if pipe is None:
+            raise ValueError("missing stdin pipe")
+        self.pipe = pipe
+        os.set_blocking(pipe.fileno(), False)
+        self.state = "sending"
+        if self.content:
+            self.selector.register(pipe, selectors.EVENT_WRITE, "stdin")
+        else:
+            self.stop("delivered")
+
+    def write_ready(self) -> None:
+        if self.pipe is None:
+            return
+        try:
+            written = os.write(self.pipe.fileno(),
+                               self.content[self.delivered:self.delivered + IO_CHUNK_BYTES])
+        except BlockingIOError:
+            return
+        except BrokenPipeError:
+            self.stop("closed_early")
+            return
+        if written <= 0:
+            raise OSError("stdin pipe made no progress")
+        self.delivered += written
+        if self.delivered == len(self.content):
+            self.stop("delivered")
+
+    def stop(self, reason: str = "stopped") -> None:
+        if self.pipe is not None:
+            try:
+                self.selector.unregister(self.pipe)
+            except KeyError:
+                pass
+            self.pipe.close()
+            self.pipe = None
+            self.state = reason
+
+    def record(self, receipt: dict[str, Any]) -> None:
+        receipt["stdin_delivered_bytes"] = self.delivered
+        receipt["stdin_delivery_state"] = self.state
+        receipt["stdin_delivery_complete"] = self.state == "delivered" and self.error is None
+        if self.error is not None:
+            receipt["stdin_error"] = self.error
+
+
 class _OutputCapture:
     """Drain both pipes fairly, retaining only a bounded prefix of each stream.
 
@@ -95,8 +201,10 @@ class _OutputCapture:
     actually read, not an estimate of everything a terminated guest generated.
     """
 
-    def __init__(self, stdout: BinaryIO, stderr: BinaryIO, limit: int) -> None:
+    def __init__(self, stdout: BinaryIO, stderr: BinaryIO, limit: int,
+                 stdin_data: bytes | None = None) -> None:
         self.selector = selectors.DefaultSelector()
+        self.input = _InputFeed(stdin_data, self.selector) if stdin_data is not None else None
         self.sinks = {"stdout": stdout, "stderr": stderr}
         self.limit = limit
         self.observed = {name: 0 for name in self.sinks}
@@ -114,9 +222,11 @@ class _OutputCapture:
                     raise ValueError(f"missing {name} pipe")
                 os.set_blocking(pipe.fileno(), False)
                 self.selector.register(pipe, selectors.EVENT_READ, name)
+            if self.input is not None:
+                self.input.attach(process.stdin)
         except BaseException:
             self.close()
-            for pipe in (process.stdout, process.stderr):
+            for pipe in (process.stdin, process.stdout, process.stderr):
                 if pipe is not None:
                     pipe.close()
             raise
@@ -125,11 +235,16 @@ class _OutputCapture:
         if self.closed or not self.selector.get_map():
             time.sleep(max(0, timeout))
             return
+        name = None
         try:
             # One bounded read per ready stream prevents a stdout flood from
             # starving stderr, deadline checks, or cancellation handling.
             for key, _ in self.selector.select(max(0, timeout)):
                 name = key.data
+                if name == "stdin":
+                    assert self.input is not None
+                    self.input.write_ready()
+                    continue
                 try:
                     data = os.read(key.fd, IO_CHUNK_BYTES)
                 except BlockingIOError:
@@ -151,12 +266,20 @@ class _OutputCapture:
                     self.retained[name] += written
                     pending = pending[written:]
         except (OSError, ValueError) as error:
-            self.error = f"{type(error).__name__}: {error}"
+            if name == "stdin" and self.input is not None:
+                self.input.error = f"{type(error).__name__}: {error}"
+            else:
+                self.error = f"{type(error).__name__}: {error}"
             self.close()
             raise
 
+    def stop_input(self) -> None:
+        if self.input is not None:
+            self.input.stop()
+
     def close(self) -> None:
         if not self.closed:
+            self.stop_input()
             for key in list(self.selector.get_map().values()):
                 self.selector.unregister(key.fileobj)
                 key.fileobj.close()
@@ -164,6 +287,8 @@ class _OutputCapture:
             self.closed = True
 
     def record(self, receipt: dict[str, Any]) -> None:
+        if self.input is not None:
+            self.input.record(receipt)
         receipt["output_limit_exceeded"] = bool(self.exceeded)
         receipt["output_limit_streams"] = sorted(self.exceeded)
         for name in self.sinks:
@@ -208,6 +333,10 @@ def _stop_process(process: subprocess.Popen[bytes], grace_ms: int,
     """Terminate the whole invocation scope, even after its leader exits."""
     cleanup: dict[str, Any] = {"scope": "process_group", "term_sent": False,
                               "kill_sent": False, "leader_reaped": False}
+    if capture is not None:
+        # Cancellation/timeout begins drain-only cleanup. Never deliver more
+        # application input to descendants after the invocation has stopped.
+        capture.stop_input()
 
     def drain_until(deadline: float, *, stop_at_eof: bool = False) -> None:
         while (remaining := deadline - time.monotonic()) > 0:
@@ -243,6 +372,8 @@ def _stop_process(process: subprocess.Popen[bytes], grace_ms: int,
 def supervise(command: Sequence[str], artifacts_dir: Path, *, wall_time_ms: int = 30000,
               kill_grace_ms: int = 250, cwd: Path | None = None,
               max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
+              stdin_data: bytes | None = None,
+              max_stdin_bytes: int = DEFAULT_MAX_STDIN_BYTES,
               cancellation: Cancellation | None = None) -> dict[str, Any]:
     """Supervise a native invocation. Never parse logs to guess timeout origin.
 
@@ -254,6 +385,11 @@ def supervise(command: Sequence[str], artifacts_dir: Path, *, wall_time_ms: int 
     positive_ms(str(wall_time_ms))
     positive_ms(str(kill_grace_ms))
     positive_bytes(str(max_output_bytes))
+    positive_bytes(str(max_stdin_bytes))
+    if stdin_data is not None and not isinstance(stdin_data, bytes):
+        raise ValueError("stdin_data must be immutable bytes or None")
+    if stdin_data is not None and len(stdin_data) > max_stdin_bytes:
+        raise ValueError(f"stdin data exceeds {max_stdin_bytes} bytes")
     if os.name != "posix":
         raise ValueError("watchdog requires POSIX process-group termination")
     if isinstance(command, (str, bytes)) or not command or any(
@@ -274,6 +410,14 @@ def supervise(command: Sequence[str], artifacts_dir: Path, *, wall_time_ms: int 
         "max_output_bytes_per_stream": max_output_bytes,
         "output_limit_exceeded": False, "output_limit_streams": [],
         "output_complete": False,
+        "stdin_mode": "null" if stdin_data is None else "pipe",
+        "stdin_path": None if stdin_data is None else str(artifacts_dir / "stdin.bin"),
+        "stdin_bytes": 0 if stdin_data is None else len(stdin_data),
+        "stdin_sha256": None if stdin_data is None else hashlib.sha256(stdin_data).hexdigest(),
+        "max_stdin_bytes": max_stdin_bytes, "stdin_captured": False,
+        "stdin_delivered_bytes": 0,
+        "stdin_delivery_state": "not_requested" if stdin_data is None else "not_started",
+        "stdin_delivery_complete": stdin_data is None,
         "stdout_path": str(artifacts_dir / "stdout.log"),
         "stderr_path": str(artifacts_dir / "stderr.log"),
         "native_receipts_dir": str(artifacts_dir / "runtime"),
@@ -289,14 +433,25 @@ def supervise(command: Sequence[str], artifacts_dir: Path, *, wall_time_ms: int 
     capture: _OutputCapture | None = None
     cleanup_done = False
     try:
+        if stdin_data is not None:
+            _write_stdin_snapshot(Path(receipt["stdin_path"]), stdin_data)
+            receipt["stdin_captured"] = True
+            event("stdin_captured")
+            _write_receipt(receipt_path, receipt)
         with open(receipt["stdout_path"], "xb", buffering=0) as stdout, \
                 open(receipt["stderr_path"], "xb", buffering=0) as stderr:
-            capture = _OutputCapture(stdout, stderr, max_output_bytes)
+            capture = _OutputCapture(stdout, stderr, max_output_bytes, stdin_data)
             if cancellation.signum is not None:
+                return receipt
+            if time.monotonic() >= started + wall_time_ms / 1000:
+                receipt.update(outcome="wrapper_timeout", wrapper_exit_code=124,
+                               wrapper_deadline_exceeded=True, timeout_layer="wrapper")
+                event("wrapper_deadline_exceeded")
                 return receipt
             try:
                 process = subprocess.Popen(list(command), cwd=receipt["cwd"],
-                                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                           stdin=subprocess.DEVNULL if stdin_data is None else subprocess.PIPE,
+                                           stdout=subprocess.PIPE,
                                            stderr=subprocess.PIPE, bufsize=0, start_new_session=True)
             except OSError as error:
                 receipt.update(outcome="spawn_error", error=str(error))
@@ -368,6 +523,9 @@ def supervise(command: Sequence[str], artifacts_dir: Path, *, wall_time_ms: int 
                 elif process is not None and not receipt["output_complete"]:
                     receipt.update(outcome="output_incomplete", fail_closed=True, wrapper_exit_code=125)
                     event("wrapper_output_incomplete")
+            if receipt["outcome"] == "completed" and not receipt["stdin_delivery_complete"]:
+                receipt.update(outcome="input_incomplete", fail_closed=True, wrapper_exit_code=125)
+                event("wrapper_input_incomplete")
         if cancellation.signum is not None:
             receipt["cancellation_signal"] = cancellation.signum
             event("wrapper_cancelled")
@@ -392,6 +550,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--kill-grace-ms", default=250, type=positive_ms)
     parser.add_argument("--max-output-bytes", default=DEFAULT_MAX_OUTPUT_BYTES, type=positive_bytes,
                         help="maximum retained bytes per output stream (default: 16777216)")
+    parser.add_argument("--stdin-file", type=Path,
+                        help="capture a bounded regular file and deliver its binary bytes through stdin")
+    parser.add_argument("--max-stdin-bytes", default=DEFAULT_MAX_STDIN_BYTES, type=positive_bytes,
+                        help="maximum captured stdin size (default: 16777216)")
     parser.add_argument("--cwd", type=Path)
     parser.add_argument("runtime_args", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
@@ -409,9 +571,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                str(args.artifacts_dir.resolve() / "runtime"), *runtime_args]
     try:
         with cancellation_signals() as cancellation:
+            stdin_data = (read_stdin_file(args.stdin_file, args.max_stdin_bytes)
+                          if args.stdin_file is not None else None)
             receipt = supervise(command, args.artifacts_dir, wall_time_ms=args.wall_time_ms,
                                 kill_grace_ms=args.kill_grace_ms, cwd=args.cwd,
                                 max_output_bytes=args.max_output_bytes,
+                                stdin_data=stdin_data, max_stdin_bytes=args.max_stdin_bytes,
                                 cancellation=cancellation)
     except (OSError, ValueError) as error:
         print(f"runtime watchdog: {error}", file=sys.stderr)

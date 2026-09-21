@@ -27,6 +27,46 @@ Cleanup has its own termination grace period and bounded leader-reaping wait, so
 elapsed time may exceed the execution deadline by cleanup and scheduling time.
 This is not a real-time scheduling guarantee.
 
+## Captured binary stdin
+
+`--stdin-file request.bin` supplies an explicit binary request instead of the
+default `/dev/null`. `--max-stdin-bytes` bounds the source (16 MiB by default;
+1 byte through 1 GiB accepted). Empty files are valid. Source loading happens
+before changing the child's working directory and before the invocation budget
+starts. It requires a regular file, rejects a symlink at the supplied file path,
+and uses nonblocking, no-follow opening plus before/after identity checks to
+reject ordinary concurrent replacement or mutation. FIFOs, devices, directories,
+and oversized sources are rejected before an invocation is launched. This is not
+a guarantee against a hostile filesystem server or blocking filesystem I/O.
+
+The exact immutable request is saved as private `stdin.bin` (mode `0600`) and
+flushed before launch; the receipt records its byte length and SHA-256 digest.
+Failure to retain that snapshot prevents execution. Replacing the original file
+after capture cannot substitute the bytes subsequently delivered to the guest.
+An execution budget exhausted during snapshot persistence also prevents launch.
+
+Input is fed through a nonblocking **pipe**, not a regular-file descriptor, while
+both output streams are drained. Large requests cannot deadlock a guest that
+writes output before reading input. The supervisor closes the pipe to deliver
+EOF after the last byte, and stops further input delivery before termination
+cleanup on timeout, cancellation, or output-limit failure.
+
+`stdin_captured`, `stdin_delivered_bytes`, `stdin_delivery_state`, and
+`stdin_delivery_complete` separate preserved input from transport progress.
+Delivered means accepted into the OS pipe, **not proven consumed by the guest**.
+When a guest exits zero before the whole supplied request is queued, the strict
+supervisor result is `input_incomplete`; the original zero exit is retained in
+`runtime_exit_code`. Native nonzero exits, timeout, and cancellation keep their
+own outcome even when delivery is partial. A program intentionally accepting
+only a request prefix should be given that prefix as its explicit input.
+
+For another run with the captured request, pass the previous `stdin.bin` as
+`--stdin-file` and choose a new artifact directory. The digest is input identity,
+not authentication or a claim of deterministic ambient-effect replay. Input may
+contain credentials or other sensitive data; protect and retain the artifact
+directory accordingly. Library callers use immutable `stdin_data: bytes` and
+`max_stdin_bytes`; omitting `stdin_data` preserves the original null-input mode.
+
 ## Bounded output capture
 
 `--max-output-bytes` caps each captured stream independently (16 MiB by default;
@@ -63,12 +103,13 @@ continuing without evidence.
 
 | `outcome` | Meaning | Wrapper exit |
 | --- | --- | --- |
-| `completed` | Native process exited zero with complete captured streams; inspect native receipts for workload semantics. | 0 |
+| `completed` | Native process exited zero with complete captured streams and supplied input queued; inspect native receipts for workload semantics. | 0 |
 | `runtime_failed` | Native process failed or was signalled; not inferred to be a wrapper timeout. | Native exit, or 128 + signal |
 | `wrapper_timeout` | The external supervisor observed its own deadline expire. | 124 |
 | `cancelled` | Supervisor received SIGINT or SIGTERM and stopped the invocation. | 128 + first cancellation signal |
 | `output_limit_exceeded` | At least one captured stream exceeded its byte limit. | 125 |
 | `output_incomplete` | Pipe EOF could not be established during bounded cleanup. | 125 |
+| `input_incomplete` | Native process exited zero before the complete captured request was queued. | 125 |
 | `spawn_error` | Native process could not be launched. | 125 |
 | `supervisor_error` / `cleanup_failed` | Evidence or cleanup could not complete normally. | 125 |
 
@@ -114,6 +155,9 @@ Tests use real OS subprocesses and a fake native CLI, including hangs, crashes,
 large binary output, exact quota boundaries, post-exit overflow, failed capture,
 exit-code provenance, cancelled launches, repeated signals, partial evidence,
 receipt-write failures and orphaned or detached pipe holders. They do not require
-Rust or the sibling engine checkout, and do not substitute for an actual
-FrankenEngine integration run. Two process-state assertions require Linux procfs;
-the remaining process-group tests run on POSIX.
+Rust or the sibling engine checkout. Input tests cover exact binary bytes,
+backpressure, early closure, non-reading guests, cancellation, file replacement,
+capture failures, and CLI wiring. An additional real Node stdin oracle runs when
+`node` is available; it does not substitute for an actual FrankenEngine
+integration run. Two process-state assertions require Linux procfs; the remaining
+process-group tests run on POSIX.
