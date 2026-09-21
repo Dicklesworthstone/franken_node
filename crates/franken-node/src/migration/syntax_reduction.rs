@@ -4,7 +4,9 @@
 //!
 //! Edits use original byte ranges, not source regeneration. Statements, nested
 //! bodies, declarators, call arguments and collection members can be removed;
-//! literals can shrink. Every proposal is parsed before behavioral execution.
+//! literals can shrink and expressions can be replaced by their subexpressions.
+//! Every proposal is parsed before behavioral execution. Expression proposals
+//! are not claims that a discarded call or assignment is free of side effects.
 //! Unsupported grammar (including typed TypeScript) is reported as incomplete
 //! syntax coverage, not silently declared syntactically minimal.
 
@@ -63,8 +65,25 @@ impl Progress {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Replacement {
+    Literal(&'static str),
+    // Retain coordinates, not copied expression strings. A 1 MiB expression
+    // must not be cloned into each of the 4,096 possible proposals.
+    Source { start: usize, end: usize, parenthesized: bool },
+}
+
+impl Replacement {
+    fn len(&self) -> usize {
+        match self {
+            Self::Literal(text) => text.len(),
+            Self::Source { start, end, parenthesized } => end - start + if *parenthesized { 2 } else { 0 },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct Edit { start: usize, end: usize, replacement: &'static str }
+struct Edit { start: usize, end: usize, replacement: Replacement }
 
 impl Edit {
     fn saving(&self) -> usize { self.end - self.start - self.replacement.len() }
@@ -72,7 +91,14 @@ impl Edit {
     fn apply(&self, source: &[u8]) -> Vec<u8> {
         let mut output = Vec::with_capacity(source.len() - self.saving());
         output.extend_from_slice(&source[..self.start]);
-        output.extend_from_slice(self.replacement.as_bytes());
+        match &self.replacement {
+            Replacement::Literal(text) => output.extend_from_slice(text.as_bytes()),
+            Replacement::Source { start, end, parenthesized } => {
+                if *parenthesized { output.push(b'('); }
+                output.extend_from_slice(&source[*start..*end]);
+                if *parenthesized { output.push(b')'); }
+            }
+        }
         output.extend_from_slice(&source[self.end..]);
         output
     }
@@ -106,6 +132,10 @@ fn parse(parser: &mut Parser, source: &[u8], deadline: Instant) -> Result<Option
 }
 
 fn insert(edits: &mut BTreeSet<Edit>, range: Range<usize>, replacement: &'static str) -> bool {
+    insert_replacement(edits, range, Replacement::Literal(replacement))
+}
+
+fn insert_replacement(edits: &mut BTreeSet<Edit>, range: Range<usize>, replacement: Replacement) -> bool {
     if range.len() <= replacement.len() { return true; }
     let edit = Edit { start: range.start, end: range.end, replacement };
     if edits.contains(&edit) { return true; }
@@ -153,7 +183,8 @@ fn siblings(node: Node<'_>, bindings: bool, edits: &mut BTreeSet<Edit>) -> bool 
 // whether deleting an argument, accessor, spread or array hole is admissible.
 fn list_elements(node: Node<'_>, edits: &mut BTreeSet<Edit>) -> bool {
     let Some(open) = node.child(0) else { return true; };
-    let Some(close) = node.child(node.child_count().saturating_sub(1)) else { return true; };
+    let Ok(last) = u32::try_from(node.child_count().saturating_sub(1)) else { return false; };
+    let Some(close) = node.child(last) else { return false; };
     if !matches!((open.kind(), close.kind()), ("(", ")") | ("[", "]") | ("{", "}")) {
         return true;
     }
@@ -191,6 +222,66 @@ fn list_elements(node: Node<'_>, edits: &mut BTreeSet<Edit>) -> bool {
     true
 }
 
+fn lift_expression(outer: Node<'_>, inner: Node<'_>, edits: &mut BTreeSet<Edit>) -> bool {
+    // Primary expressions already bind tightly. Compound expressions need
+    // parentheses so lifting a+b out of a larger operand does not turn its
+    // surrounding multiplication into a+b*c. Object/function/class literals
+    // also need parentheses when moved into statement position.
+    let parenthesized = !matches!(inner.kind(),
+        "identifier" | "number" | "string" | "regex" | "true" | "false"
+        | "null" | "this" | "array" | "parenthesized_expression");
+    let retained = inner.byte_range();
+    let replaced = outer.byte_range();
+    if retained.start < replaced.start || retained.end > replaced.end
+        || retained.start >= retained.end { return true; }
+    insert_replacement(edits, replaced, Replacement::Source {
+        start: retained.start, end: retained.end, parenthesized,
+    })
+}
+
+// These are reduction proposals, not optimizer identities. Removing a call,
+// short-circuit branch, getter, await or assignment can change observable work;
+// only the existing process-backed full-suite predicate can authorize it.
+fn expressions(node: Node<'_>, edits: &mut BTreeSet<Edit>) -> bool {
+    let fields: &[&str] = match node.kind() {
+        "binary_expression" => &["left", "right"],
+        "ternary_expression" => &["condition", "consequence", "alternative"],
+        "assignment_expression" | "augmented_assignment_expression" => &["right"],
+        "member_expression" => &["object"],
+        "subscript_expression" => &["object", "index"],
+        "unary_expression" | "update_expression" => &["argument"],
+        "call_expression" | "new_expression" => {
+            let Some(arguments) = node.child_by_field_name("arguments") else { return true; };
+            // Tagged templates are not a parenthesized argument list.
+            if arguments.kind() != "arguments" { return true; }
+            let mut cursor = arguments.walk();
+            let mut count = 0;
+            for argument in arguments.named_children(&mut cursor) {
+                if matches!(argument.kind(), "comment" | "spread_element") { continue; }
+                count += 1;
+                if count > MAX_SIBLINGS || !lift_expression(node, argument, edits) { return false; }
+            }
+            return true;
+        }
+        "parenthesized_expression" | "sequence_expression" | "await_expression" => {
+            let mut cursor = node.walk();
+            let mut count = 0;
+            for child in node.named_children(&mut cursor) {
+                if child.kind() == "comment" { continue; }
+                count += 1;
+                if count > MAX_SIBLINGS || !lift_expression(node, child, edits) { return false; }
+            }
+            return true;
+        }
+        _ => return true,
+    };
+    for field in fields {
+        if let Some(child) = node.child_by_field_name(*field)
+            && !lift_expression(node, child, edits) { return false; }
+    }
+    true
+}
+
 fn plan(tree: &Tree, deadline: Instant) -> Result<Plan> {
     let mut edits = BTreeSet::new();
     let mut cursor = tree.walk();
@@ -214,7 +305,7 @@ fn plan(tree: &Tree, deadline: Instant) -> Result<Plan> {
                 && list_elements(node, &mut edits),
             _ => true,
         };
-        if !within_limit { complete = false; break; }
+        if !within_limit || !expressions(node, &mut edits) { complete = false; break; }
         if cursor.goto_first_child() { continue; }
         loop {
             if cursor.goto_next_sibling() { break; }
@@ -473,5 +564,98 @@ mod tests {
         assert!(result.statistics.accepted > 0);
         assert!(!best.contains(&b','), "{}", String::from_utf8_lossy(&best));
         assert_eq!(run(&best).stdout, expected.stdout);
+    }
+
+    #[test]
+    fn expression_lifting_keeps_compound_grouping_and_literal_bytes() {
+        for (source, expected) in [
+            ("const x=a+b+unused;", "const x=(a+b);"),
+            ("const x=(a+b)+unused;", "const x=(a+b);"),
+            ("const x=choose?leftValue:rightValue;", "const x=leftValue;"),
+            ("const x=choose?leftValue:rightValue;", "const x=rightValue;"),
+            ("const x=identity('🦀,\\u03c0');", "const x='🦀,\\u03c0';"),
+            ("const x=identity({live:42});", "const x=({live:42});"),
+            ("const x=new Box(value);", "const x=value;"),
+        ] {
+            assert!(includes_edit(source, expected), "{source} -> {expected}");
+            assert!(parse(&mut parser().unwrap(), expected.as_bytes(), deadline()).unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn assignments_sequences_accesses_and_await_have_retained_expression_candidates() {
+        for (source, expected) in [
+            ("let n;const x=(n=42);", "let n;const x=(42);"),
+            ("const x=(first,second);", "const x=(second);"),
+            ("const x=object.property;", "const x=object;"),
+            ("const x=object[index];", "const x=index;"),
+            ("const x=void payload;", "const x=payload;"),
+            ("async function f(){return await value;}", "async function f(){return value;}"),
+            ("const x=(42);", "const x=42;"),
+        ] {
+            assert!(includes_edit(source, expected), "{source} -> {expected}");
+        }
+    }
+
+    #[test]
+    fn lifted_source_is_not_regenerated_and_cannot_escape_its_parent_span() {
+        let source = "#!/usr/bin/env node\r\nconst x=call(/*keep*/'π\\n🦀');";
+        assert!(includes_edit(source, "#!/usr/bin/env node\r\nconst x='π\\n🦀';"));
+        let plan = proposals(source);
+        assert!(plan.edits.iter().any(|edit| matches!(edit.replacement, Replacement::Source { .. })));
+        for edit in &plan.edits {
+            if let Replacement::Source { start, end, .. } = edit.replacement {
+                assert!(edit.start <= start && start < end && end <= edit.end);
+            }
+            let candidate = edit.apply(source.as_bytes());
+            assert!(candidate.len() < source.len());
+            assert!(std::str::from_utf8(&candidate).is_ok());
+            assert!(candidate.starts_with(b"#!/usr/bin/env node\r\n"));
+        }
+        assert_eq!(plan.edits, proposals(source).edits);
+    }
+
+    #[test]
+    fn lifted_expressions_store_ranges_instead_of_copies_of_large_inputs() {
+        let source = format!("consume({},{});", "name".repeat(40_000), "value".repeat(40_000));
+        let plan = proposals(&source);
+        assert!(plan.complete);
+        assert!(std::mem::size_of::<Edit>() <= 128);
+        assert!(plan.edits.iter().any(|edit| matches!(edit.replacement, Replacement::Source { .. })));
+        for edit in plan.edits { assert!(edit.apply(source.as_bytes()).len() < source.len()); }
+    }
+
+    #[test]
+    fn real_execution_reduces_nested_expressions_but_rejects_lost_side_effects() {
+        let run = |source: &[u8]| std::process::Command::new("node")
+            .args(["--input-type=commonjs", "-e", std::str::from_utf8(source).unwrap()])
+            .output().expect("Node is required for the process-backed reducer test");
+        for source in [
+            b"console.log((false?300:42)+0);".as_slice(),
+            b"let n=0;console.log((n=7,42),n);".as_slice(),
+        ] {
+            let expected = run(source);
+            assert!(expected.status.success());
+            let mut best = source.to_vec();
+            let result = reduce(best.clone(), Instant::now() + Duration::from_secs(30), |candidate| {
+                let observed = run(&candidate);
+                if observed.status == expected.status && observed.stdout == expected.stdout
+                    && observed.stderr == expected.stderr {
+                    best = candidate;
+                    Ok(Trial::Accept)
+                } else { Ok(Trial::Reject) }
+            }).unwrap();
+            assert!(result.complete && !result.stopped);
+            if expected.stdout == b"42\n" {
+                assert_eq!(best, b"console.log(42);");
+            } else {
+                assert_eq!(expected.stdout, b"42 7\n");
+                assert!(String::from_utf8_lossy(&best).contains("n=7"));
+            }
+            let observed = run(&best);
+            assert_eq!(observed.stdout, expected.stdout);
+            assert_eq!(observed.stderr, expected.stderr);
+            assert_eq!(observed.status, expected.status);
+        }
     }
 }
