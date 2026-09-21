@@ -159,6 +159,41 @@ fn array_fallback_and_nested_condition_failures_match_node() {
 }
 
 #[test]
+fn array_unmatched_null_and_error_provenance_agree_with_both_node_resolvers() {
+    let root = tempfile::tempdir().unwrap();
+    for (array, expected_error) in [
+        (r#"[{"browser":"./custom.cjs"}]"#, None),
+        (r#"[[{"browser":"./custom.cjs"}],{}]"#, None),
+        ("[]", Some("ERR_PACKAGE_PATH_NOT_EXPORTED")),
+        (r#"[null,{"browser":"./custom.cjs"}]"#, Some("ERR_PACKAGE_PATH_NOT_EXPORTED")),
+        (r#"[[],{"browser":"./custom.cjs"}]"#, Some("ERR_PACKAGE_PATH_NOT_EXPORTED")),
+        (r#"["../bad",{"browser":"./custom.cjs"}]"#, Some("ERR_INVALID_PACKAGE_TARGET")),
+        (r#"["../bad",null,{"browser":"./custom.cjs"}]"#, Some("ERR_PACKAGE_PATH_NOT_EXPORTED")),
+    ] {
+        let manifest = format!(r#"{{"exports":{{"node":{array},"default":"./default.cjs"}}}}"#);
+        let pkg = package(root.path(), &manifest);
+        for esm in [false, true] {
+            let (code, report) = run(&pkg, &["--resolve-export", ".", "--condition", "node",
+                "--condition", if esm { "import" } else { "require" }]);
+            let reference = node(root.path(), "map-package", esm, &[]);
+            match expected_error {
+                Some(error) => {
+                    assert_ne!(code, 0, "{manifest}: {report}");
+                    assert_eq!(report["error_code"], error);
+                    assert_eq!(reference["code"], error);
+                }
+                None => {
+                    assert_eq!(code, 0, "{manifest}: {report}");
+                    assert_eq!(report["selection"]["target"], "./default.cjs");
+                    assert_eq!(report["selection"]["branch"], json!([{"kind":"condition","value":"default"}]));
+                    assert_eq!(reference["target"], pkg.join("default.cjs").to_str().unwrap());
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn custom_conditions_and_internal_imports_match_the_independent_resolver() {
     let root = tempfile::tempdir().unwrap();
     let pkg = package(root.path(), r##"{"name":"map-package","imports":{"#local":{"development":"./custom.cjs","default":"./default.cjs"},"#hidden":null}}"##);

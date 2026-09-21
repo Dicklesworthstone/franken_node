@@ -330,20 +330,25 @@ fn select_target(target: &OrderedValue, pattern: Option<&str>, kind: MapKind,
             Ok(Resolved::Unmatched)
         }
         OrderedValue::Array(values) => {
-            let mut last_error = None;
+            // An empty array is an explicit block. A nonempty array whose
+            // branches are all inactive is instead unmatched, allowing the
+            // enclosing condition object to try its next eligible property.
+            // Later unmatched branches must not erase an earlier null/error.
+            let mut fallback = Ok(if values.is_empty() { Resolved::Blocked }
+                else { Resolved::Unmatched });
             for (index, value) in values.iter().enumerate() {
                 branch.push(BranchStep::ArrayIndex(index));
                 let result = select_target(value, pattern, kind, active, branch);
                 branch.pop();
                 match result {
                     Ok(Resolved::Target(target, kind, path)) => return Ok(Resolved::Target(target, kind, path)),
-                    Ok(Resolved::Blocked) => last_error = None,
+                    Ok(Resolved::Blocked) => fallback = Ok(Resolved::Blocked),
                     Ok(Resolved::Unmatched) => {}
-                    Err(e) if e.code == "ERR_INVALID_PACKAGE_TARGET" => last_error = Some(e),
+                    Err(e) if e.code == "ERR_INVALID_PACKAGE_TARGET" => fallback = Err(e),
                     Err(e) => return Err(e),
                 }
             }
-            match last_error { Some(e) => Err(e), None => Ok(Resolved::Blocked) }
+            fallback
         }
     }
 }
@@ -433,6 +438,36 @@ mod tests {
     #[test]
     fn selected_missing_file_is_not_an_array_fallback_or_a_filesystem_probe() {
         assert_eq!(select(r#"{"exports":["./missing.js","./existing.js"]}"#, MapKind::Exports, ".", &[]).unwrap().target, "./missing.js");
+    }
+
+    #[test]
+    fn inactive_arrays_allow_enclosing_conditions_to_continue_without_stale_witnesses() {
+        for array in [r#"[{"browser":"./browser.js"}]"#,
+            r#"[[{"browser":"./browser.js"}],{"custom":"./custom.js"}]"#,
+            r#"[{},{}]"#] {
+            for (kind, field, request) in [(MapKind::Exports, "exports", "."),
+                (MapKind::Imports, "imports", "#local")] {
+                let target = format!(r#"{{"node":{array},"default":"./fallback.js"}}"#);
+                let target = if kind == MapKind::Imports { format!(r##"{{"#local":{target}}}"##) }
+                    else { target };
+                let source = format!(r#"{{"{field}":{target}}}"#);
+                let result = select(&source, kind, request, &["node"]).unwrap();
+                assert_eq!(result.target, "./fallback.js", "{source}");
+                assert_eq!(result.branch, [BranchStep::Condition("default".into())]);
+            }
+        }
+    }
+
+    #[test]
+    fn inactive_array_branches_do_not_erase_explicit_blocks_or_invalid_targets() {
+        for (array, code) in [("[]", "ERR_PACKAGE_PATH_NOT_EXPORTED"),
+            (r#"[null,{"browser":"./b.js"}]"#, "ERR_PACKAGE_PATH_NOT_EXPORTED"),
+            (r#"[[],{"browser":"./b.js"}]"#, "ERR_PACKAGE_PATH_NOT_EXPORTED"),
+            (r#"["../bad",{"browser":"./b.js"}]"#, "ERR_INVALID_PACKAGE_TARGET"),
+            (r#"["../bad",null,{"browser":"./b.js"}]"#, "ERR_PACKAGE_PATH_NOT_EXPORTED")] {
+            let source = format!(r#"{{"exports":{{"node":{array},"default":"./fallback.js"}}}}"#);
+            assert_eq!(select(&source, MapKind::Exports, ".", &["node"]).unwrap_err().code, code, "{source}");
+        }
     }
 
     #[test]
