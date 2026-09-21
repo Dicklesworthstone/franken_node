@@ -192,6 +192,63 @@ impl<R: Read> PipeCapture<R> {
     }
 }
 
+/// The input transport is part of the captured request, not an implementation
+/// detail: a regular file is seekable, whereas a pipe is not. Keep both modes
+/// explicit and share the same child owner, deadlines and output drain.
+enum InputTransport<'a> {
+    Redirected(Stdio),
+    Pipe(&'a [u8]),
+}
+
+struct PipeInput<'a, W> {
+    pipe: Option<W>,
+    bytes: &'a [u8],
+    queued: usize,
+}
+
+impl<'a, W: Write> PipeInput<'a, W> {
+    fn new(pipe: W, bytes: &'a [u8]) -> Self {
+        Self {
+            // An explicitly empty request still uses a pipe, immediately
+            // closed to deliver EOF rather than retaining a writer forever.
+            pipe: if bytes.is_empty() { None } else { Some(pipe) },
+            bytes,
+            queued: 0,
+        }
+    }
+
+    /// Attempt only one bounded write per polling round. In particular, never
+    /// write_all() to a guest that may fill stdout before it reads stdin.
+    fn pump(&mut self) -> io::Result<bool> {
+        let Some(pipe) = self.pipe.as_mut() else {
+            return Ok(false);
+        };
+        let end = self.bytes.len().min(self.queued.saturating_add(64 * 1024));
+        match pipe.write(&self.bytes[self.queued..end]) {
+            Ok(0) => Err(io::Error::new(io::ErrorKind::WriteZero, "runtime stdin made no progress")),
+            Ok(count) => {
+                self.queued += count;
+                if self.queued == self.bytes.len() {
+                    self.close();
+                }
+                Ok(true)
+            }
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+                // Preserve the native exit and diagnostic streams. A zero
+                // exit with an incomplete request is rejected by the caller.
+                self.close();
+                Ok(true)
+            }
+            Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn close(&mut self) {
+        drop(self.pipe.take());
+    }
+}
+
 struct BoundedBytes {
     bytes: Vec<u8>,
     limit: usize,
@@ -256,6 +313,19 @@ pub(super) fn run_command_with_input(
     run_bounded_input(command, timeout, pipe_drain_timeout, MAX_STREAM_BYTES, input)
 }
 
+/// Supply a bounded immutable request through a real pipe, multiplexed with
+/// stdout/stderr on the supervisor thread. Queued bytes are transport progress,
+/// not proof of guest consumption. A zero exit before the whole request is
+/// queued is an error; native failures retain their original exit status.
+pub(super) fn run_command_with_pipe_input(
+    command: &mut Command,
+    timeout: Duration,
+    pipe_drain_timeout: Duration,
+    input: &[u8],
+) -> Result<Output> {
+    capture_command(command, timeout, pipe_drain_timeout, MAX_STREAM_BYTES, InputTransport::Pipe(input))
+}
+
 #[cfg(test)]
 fn run_bounded(command: &mut Command, timeout: Duration, drain_timeout: Duration, limit: usize) -> Result<Output> {
     run_bounded_input(command, timeout, drain_timeout, limit, None)
@@ -281,17 +351,30 @@ fn run_bounded_input(
     } else { Stdio::null() };
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() { bail!("runtime smoke timed out preparing captured stdin"); }
+    capture_command(command, remaining, drain_timeout, limit, InputTransport::Redirected(stdin))
+}
+
+fn capture_command(
+    command: &mut Command,
+    timeout: Duration,
+    drain_timeout: Duration,
+    limit: usize,
+    input: InputTransport<'_>,
+) -> Result<Output> {
+    if timeout.is_zero() || drain_timeout.is_zero() || limit == 0 || limit > MAX_STREAM_BYTES {
+        bail!("runtime smoke requires positive bounded time and output limits");
+    }
+    let requested = match &input {
+        InputTransport::Pipe(bytes) => Some(bytes.len()),
+        InputTransport::Redirected(_) => None,
+    };
     let mut stdout = BoundedBytes { bytes: Vec::new(), limit, label: "stdout" };
     let mut stderr = BoundedBytes { bytes: Vec::new(), limit, label: "stderr" };
     let observer = |stream, bytes: &[u8]| match stream {
         Stream::Stdout => stdout.receive(bytes),
         Stream::Stderr => stderr.receive(bytes),
     };
-    let completion = if input.is_some() {
-        supervise_with_input(command, remaining, drain_timeout, stdin, |_| Ok(()), observer)
-    } else {
-        supervise_with_observer(command, remaining, drain_timeout, |_| Ok(()), observer)
-    }?;
+    let (completion, queued) = supervise_with_input(command, timeout, drain_timeout, input, |_| Ok(()), observer)?;
     match completion.reason {
         StopReason::RuntimeTimeout => bail!(
             "runtime smoke command timed out after {}ms",
@@ -301,11 +384,19 @@ fn run_bounded_input(
             "runtime smoke command exited but output pipes remained open beyond {}ms",
             drain_timeout.as_millis()
         ),
-        StopReason::Exited => Ok(Output {
-            status: completion.status,
-            stdout: stdout.bytes,
-            stderr: stderr.bytes,
-        }),
+        StopReason::Exited => {
+            if let Some(requested) = requested
+                && completion.status.success()
+                && queued != requested
+            {
+                bail!("runtime exited zero before complete stdin delivery: queued {queued} of {requested} bytes");
+            }
+            Ok(Output {
+                status: completion.status,
+                stdout: stdout.bytes,
+                stderr: stderr.bytes,
+            })
+        }
     }
 }
 
@@ -325,24 +416,35 @@ pub(crate) fn supervise_with_observer(
     after_spawn: impl FnOnce(u32) -> Result<()>,
     observe: impl FnMut(Stream, &[u8]) -> io::Result<()>,
 ) -> Result<Completion> {
-    supervise_with_input(command, timeout, drain_timeout, Stdio::null(), after_spawn, observe)
+    supervise_with_input(command, timeout, drain_timeout, InputTransport::Redirected(Stdio::null()), after_spawn, observe)
+        .map(|(completion, _)| completion)
 }
 
 fn supervise_with_input(
     command: &mut Command,
     timeout: Duration,
     drain_timeout: Duration,
-    input: Stdio,
+    input: InputTransport<'_>,
     after_spawn: impl FnOnce(u32) -> Result<()>,
     mut observe: impl FnMut(Stream, &[u8]) -> io::Result<()>,
-) -> Result<Completion> {
+) -> Result<(Completion, usize)> {
     if timeout.is_zero() || drain_timeout.is_zero() {
         bail!("runtime smoke requires positive bounded time and output limits");
     }
     let deadline = Instant::now()
         .checked_add(timeout)
         .context("runtime smoke deadline overflow")?;
-    let mut owned = OwnedSmokeChild::spawn(command, input)?;
+    let (stdin, pipe_bytes) = match input {
+        InputTransport::Redirected(stdin) => (stdin, None),
+        InputTransport::Pipe(bytes) => {
+            if bytes.len() > MAX_INPUT_BYTES {
+                bail!("captured stdin exceeds 1 MiB");
+            }
+            (Stdio::piped(), Some(bytes))
+        }
+    };
+    let mut owned = OwnedSmokeChild::spawn(command, stdin)?;
+    let mut queued = 0;
     let result = (|| -> Result<StopReason> {
         let stdout = owned
             .child
@@ -358,6 +460,13 @@ fn supervise_with_input(
         nonblocking(&stderr).context("configure runtime smoke stderr")?;
         let mut stdout = PipeCapture::new(stdout);
         let mut stderr = PipeCapture::new(stderr);
+        let mut input = if let Some(bytes) = pipe_bytes {
+            let pipe = owned.child.stdin.take().context("runtime smoke stdin pipe unavailable")?;
+            nonblocking(&pipe).context("configure runtime smoke stdin")?;
+            Some(PipeInput::new(pipe, bytes))
+        } else {
+            None
+        };
         if let Err(error) = after_spawn(owned.child.id()) {
             // Retain available diagnostics without waiting for inherited pipes.
             let _ = stdout.pump(&mut |bytes| observe(Stream::Stdout, bytes));
@@ -370,13 +479,19 @@ fn supervise_with_input(
             if now >= deadline {
                 return Ok(StopReason::RuntimeTimeout);
             }
+            // Pin the leader through cleanup as before, but stop delivering
+            // application input as soon as its exit has been observed.
+            let exited = owned.exited_without_reaping()?;
+            if exited && let Some(input) = input.as_mut() {
+                input.close();
+            }
             let out_progress = stdout
                 .pump(&mut |bytes| observe(Stream::Stdout, bytes))
                 .context("failed reading runtime smoke stdout")?;
             let err_progress = stderr
                 .pump(&mut |bytes| observe(Stream::Stderr, bytes))
                 .context("failed reading runtime smoke stderr")?;
-            if owned.exited_without_reaping()? {
+            if exited {
                 if stdout.eof && stderr.eof {
                     return Ok(StopReason::Exited);
                 }
@@ -385,7 +500,17 @@ fn supervise_with_input(
                     return Ok(StopReason::PipeTimeout);
                 }
             }
-            if !out_progress && !err_progress {
+            if Instant::now() >= deadline {
+                return Ok(StopReason::RuntimeTimeout);
+            }
+            let input_progress = if let Some(input) = input.as_mut() {
+                let progress = input.pump().context("failed writing runtime smoke stdin")?;
+                queued = input.queued;
+                progress
+            } else {
+                false
+            };
+            if !out_progress && !err_progress && !input_progress {
                 thread::sleep(
                     POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
                 );
@@ -396,7 +521,7 @@ fn supervise_with_input(
     // still holds a write end. No blocked reader thread survives this function.
     let cleanup = owned.finish();
     match (result, cleanup) {
-        (Ok(reason), Ok(status)) => Ok(Completion { status, reason }),
+        (Ok(reason), Ok(status)) => Ok((Completion { status, reason }, queued)),
         (Err(error), Ok(_)) => Err(error),
         (Ok(_), Err(error)) => Err(error).context("runtime smoke cleanup failed"),
         (Err(error), Err(cleanup)) => {
@@ -664,5 +789,228 @@ mod tests {
         let error = run_command_with_input(&mut shell("/bin/cat; /bin/sleep 60 & exit 0"),
             Duration::from_secs(3), Duration::from_millis(100), Some(b"input")).unwrap_err();
         assert!(error.to_string().contains("output pipes remained open"));
+    }
+
+    fn pipe_run(source: &str, input: &[u8]) -> Result<Output> {
+        run_command_with_pipe_input(
+            &mut shell(source), Duration::from_secs(5), Duration::from_millis(100), input,
+        )
+    }
+
+    #[test]
+    fn pipe_input_preserves_transport_binary_bytes_and_empty_eof() {
+        for input in [&[0, 255, b'x', b'\n', b'\n'][..], &[][..]] {
+            let output = pipe_run("test -p /proc/self/fd/0 || exit 9; exec /bin/cat", input).unwrap();
+            assert!(output.status.success());
+            assert_eq!(output.stdout, input);
+            assert!(output.stderr.is_empty());
+        }
+        let file = run_command_with_input(
+            &mut shell("test -f /proc/self/fd/0 || exit 9; exec /bin/cat"),
+            Duration::from_secs(3), Duration::from_secs(1), Some(b"file mode"),
+        ).unwrap();
+        assert!(file.status.success());
+        assert_eq!(file.stdout, b"file mode");
+    }
+
+    #[test]
+    fn pipe_input_round_trips_the_exact_limit_and_rejects_oversize_before_spawn() {
+        let input: Vec<u8> = (0..=255).cycle().take(MAX_INPUT_BYTES).collect();
+        let output = pipe_run("exec /bin/cat", &input).unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, input);
+        let error = run_command_with_pipe_input(
+            &mut Command::new("/definitely/missing-pipe-input-executable"),
+            Duration::from_secs(3), Duration::from_secs(1), &vec![0; MAX_INPUT_BYTES + 1],
+        ).unwrap_err();
+        assert!(error.to_string().contains("stdin exceeds"));
+    }
+
+    #[test]
+    fn pipe_input_multiplexes_both_large_outputs_before_the_guest_reads() {
+        let input = vec![b'r'; MAX_INPUT_BYTES];
+        let output = pipe_run(
+            "/bin/dd if=/dev/zero bs=65536 count=8 2>/dev/null; \
+             /bin/dd if=/dev/zero bs=65536 count=8 >&2 2>/dev/null; exec /bin/cat",
+            &input,
+        ).unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, [vec![0; 512 * 1024], input].concat());
+        assert_eq!(output.stderr, vec![0; 512 * 1024]);
+    }
+
+    #[test]
+    fn pipe_input_nonreading_guest_cannot_disable_timeout_or_reaping() {
+        let input = vec![0; MAX_INPUT_BYTES];
+        let mut pid = None;
+        let started = Instant::now();
+        let (completion, queued) = supervise_with_input(
+            &mut shell("exec /bin/sleep 60"), Duration::from_millis(150),
+            Duration::from_millis(100), InputTransport::Pipe(&input),
+            |raw| { pid = Pid::from_raw(i32::try_from(raw).unwrap()); Ok(()) },
+            |_, _| Ok(()),
+        ).unwrap();
+        assert_eq!(completion.reason, StopReason::RuntimeTimeout);
+        assert!(queued < input.len());
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(matches!(waitid(WaitId::Pid(pid.unwrap()), WaitIdOptions::EXITED | WaitIdOptions::NOHANG), Err(Errno::CHILD)));
+    }
+
+    #[test]
+    fn pipe_input_early_close_rejects_zero_but_preserves_native_failure() {
+        let input = vec![0; MAX_INPUT_BYTES];
+        let error = pipe_run("exec 0<&-; printf early; /bin/sleep 0.05; exit 0", &input).unwrap_err();
+        assert!(error.to_string().contains("before complete stdin delivery"));
+        let output = pipe_run("exec 0<&-; printf failed >&2; exit 7", &input).unwrap();
+        assert_eq!(output.status.code(), Some(7));
+        assert_eq!(output.stderr, b"failed");
+    }
+
+    #[test]
+    fn pipe_input_timeout_is_not_relabelled_as_incomplete_input() {
+        let error = run_command_with_pipe_input(
+            &mut shell("exec 0<&-; exec /bin/sleep 60"), Duration::from_millis(150),
+            Duration::from_millis(100), &vec![0; MAX_INPUT_BYTES],
+        ).unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        assert!(!error.to_string().contains("complete stdin delivery"));
+    }
+
+    #[test]
+    fn pipe_input_keeps_stream_quotas_and_inherited_pipe_deadlines() {
+        let error = capture_command(
+            &mut Command::new("/bin/cat"), Duration::from_secs(3),
+            Duration::from_millis(100), 4, InputTransport::Pipe(b"12345"),
+        ).unwrap_err();
+        assert!(format!("{error:#}").contains("exceeds 4 bytes"));
+        let error = pipe_run("/bin/cat; /bin/sleep 60 & exit 0", b"input").unwrap_err();
+        assert!(error.to_string().contains("output pipes remained open"));
+    }
+
+    #[test]
+    fn pipe_input_startup_rejection_never_feeds_request_and_reaps_child() {
+        let mut pid = None;
+        let error = supervise_with_input(
+            &mut shell("exec /bin/cat"), Duration::from_secs(3), Duration::from_millis(100),
+            InputTransport::Pipe(b"request must not be delivered"),
+            |raw| { pid = Pid::from_raw(i32::try_from(raw).unwrap()); bail!("admission refused") },
+            |_, bytes| { assert!(bytes.is_empty()); Ok(()) },
+        ).unwrap_err();
+        assert!(format!("{error:#}").contains("admission refused"));
+        assert!(matches!(waitid(WaitId::Pid(pid.unwrap()), WaitIdOptions::EXITED | WaitIdOptions::NOHANG), Err(Errno::CHILD)));
+    }
+
+    #[test]
+    fn pipe_input_observer_failure_still_reaps_the_owned_scope() {
+        let mut pid = None;
+        let error = supervise_with_input(
+            &mut shell("printf output; exec /bin/sleep 60"), Duration::from_secs(3),
+            Duration::from_millis(100), InputTransport::Pipe(b"request"),
+            |raw| { pid = Pid::from_raw(i32::try_from(raw).unwrap()); Ok(()) },
+            |_, _| Err(io::Error::other("observer refused pipe run")),
+        ).unwrap_err();
+        assert!(format!("{error:#}").contains("observer refused pipe run"));
+        assert!(matches!(waitid(WaitId::Pid(pid.unwrap()), WaitIdOptions::EXITED | WaitIdOptions::NOHANG), Err(Errno::CHILD)));
+    }
+
+    #[derive(Default)]
+    struct WriteProbe {
+        actions: std::collections::VecDeque<io::Result<usize>>,
+        received: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
+        dropped: std::rc::Rc<std::cell::Cell<bool>>,
+        largest_request: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    impl WriteProbe {
+        fn with_actions(actions: impl Into<std::collections::VecDeque<io::Result<usize>>>) -> Self {
+            Self {
+                actions: actions.into(),
+                received: Default::default(),
+                dropped: Default::default(),
+                largest_request: Default::default(),
+            }
+        }
+    }
+
+    impl Write for WriteProbe {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.largest_request.set(self.largest_request.get().max(bytes.len()));
+            let count = self.actions.pop_front().unwrap_or(Ok(bytes.len()))?;
+            assert!(count <= bytes.len());
+            self.received.borrow_mut().extend_from_slice(&bytes[..count]);
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    }
+
+    impl Drop for WriteProbe {
+        fn drop(&mut self) { self.dropped.set(true); }
+    }
+
+    #[test]
+    fn pipe_input_short_writes_and_retryable_errors_preserve_every_byte() {
+        let probe = WriteProbe::with_actions([Ok(2), Err(io::ErrorKind::WouldBlock.into()),
+            Err(io::ErrorKind::Interrupted.into()), Ok(1)]);
+        let received = probe.received.clone();
+        let dropped = probe.dropped.clone();
+        let mut input = PipeInput::new(probe, b"abcdef");
+        assert!(input.pump().unwrap());
+        assert!(!input.pump().unwrap());
+        assert!(!input.pump().unwrap());
+        assert_eq!(input.queued, 2);
+        assert!(input.pump().unwrap());
+        assert!(input.pump().unwrap());
+        assert_eq!(*received.borrow(), b"abcdef");
+        assert_eq!(input.queued, 6);
+        assert!(dropped.get());
+        assert!(!input.pump().unwrap());
+    }
+
+    #[test]
+    fn pipe_input_empty_request_closes_the_writer_without_a_write() {
+        let probe = WriteProbe::default();
+        let dropped = probe.dropped.clone();
+        let mut input = PipeInput::new(probe, b"");
+        assert!(dropped.get());
+        assert!(!input.pump().unwrap());
+        assert_eq!(input.queued, 0);
+    }
+
+    #[test]
+    fn pipe_input_broken_pipe_records_partial_progress_and_closes_writer() {
+        let probe = WriteProbe::with_actions([Ok(2), Err(io::ErrorKind::BrokenPipe.into())]);
+        let dropped = probe.dropped.clone();
+        let mut input = PipeInput::new(probe, b"request");
+        assert!(input.pump().unwrap());
+        assert!(input.pump().unwrap());
+        assert_eq!(input.queued, 2);
+        assert!(dropped.get());
+        assert!(!input.pump().unwrap());
+    }
+
+    #[test]
+    fn pipe_input_zero_and_hard_write_errors_are_not_successful_progress() {
+        for action in [Ok(0), Err(io::ErrorKind::Other.into())] {
+            let probe = WriteProbe::with_actions([action]);
+            let dropped = probe.dropped.clone();
+            let mut input = PipeInput::new(probe, b"request");
+            assert!(input.pump().is_err());
+            assert_eq!(input.queued, 0);
+            drop(input);
+            assert!(dropped.get());
+        }
+    }
+
+    #[test]
+    fn pipe_input_never_writes_more_than_one_chunk_per_poll() {
+        let bytes = vec![0; MAX_INPUT_BYTES];
+        let probe = WriteProbe::default();
+        let largest = probe.largest_request.clone();
+        let mut input = PipeInput::new(probe, &bytes);
+        assert!(input.pump().unwrap());
+        assert_eq!(input.queued, 64 * 1024);
+        assert_eq!(largest.get(), 64 * 1024);
+        assert!(input.pipe.is_some());
     }
 }
