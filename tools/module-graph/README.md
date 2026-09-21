@@ -48,17 +48,17 @@ This is **lockfile-metadata inspection**, not a semver solver, installer, trust
 verifier, or proof that live `node_modules` matches the lock. The selected version
 is the nearest *recorded* installation, not an inferred preferred version. A
 workspace intent is not proof of an installed link. In direct mode, `--require-resolved` checks
-for pins or explicit workspace intent, not execution readiness. Conditional
-exports evaluation, actual module-file loading and native runtime parity remain
-outside this command. A graph hash is content identity, not authentication;
+for pins or explicit workspace intent, not execution readiness. Direct inspection
+does not evaluate conditional exports; the target queries below do. Actual
+module-file loading and native runtime parity remain outside this command.
+A graph hash is content identity, not authentication;
 `--expected-hash` must come from an independently trusted source. No receipt or
 security approval is fabricated, and `franken-node run` is unchanged.
 
 ## Executed tests
 
 ```sh
-cargo test --manifest-path tools/module-graph/Cargo.toml \
-  --bin franken-module-graph --test cli --test topology
+cargo test --manifest-path tools/module-graph/Cargo.toml --all-targets
 ```
 
 The graph builder's own unit tests run alongside executable CLI regressions.
@@ -182,3 +182,75 @@ locations, legacy uncertainty, hash changes and binary CLI behavior; a real Node
 resolver checks transitive scoped/aliased/nested selections without loading the
 package's deliberately throwing source. These checks do not establish full
 Node/Bun module-loader equivalence.
+
+## Select conditional exports and internal imports
+
+Select a target from one captured package manifest using the native ordered
+package-map evaluator:
+
+```sh
+franken-module-graph ./project --resolve-export .
+franken-module-graph ./project --resolve-export ./feature \
+  --package-manifest node_modules/example/package.json \
+  --condition node --condition require
+franken-module-graph ./project --resolve-import '#local' \
+  --package-manifest packages/api/package.json
+```
+
+`--condition` supplies the **complete** active condition set, not additions to
+ambient runtime configuration. With no flags, the set is `node, import`.
+`default` is always eligible at its source position. Specify `node-addons`,
+`module-sync`, or custom conditions explicitly when they belong to the desired
+runtime context. Condition-object insertion order is preserved even when other
+Rust consumers compile serde_json without its preserve-order feature.
+
+Selection handles main-export shorthand, explicit subpaths, exact-key precedence,
+single-star patterns with longest-prefix/longest-key precedence, nested condition
+fallback, null exclusions, and ordered array fallback. Invalid array targets may
+be skipped, but an invalid configuration is not a fallback. A valid target whose
+file is missing is still selected: the selector never searches later array entries
+based on file existence. Reports include the matched key and successful condition
+and array-index branch, including a distinct `external_package` target kind for
+an imports mapping that still needs dependency lookup.
+
+These queries have scope `package-map-target-selection`. `SELECTED` exits 0;
+blocked, absent or unmatched mappings return `UNRESOLVED` and exit 1; malformed
+metadata, unsafe targets and resource-limit violations return `ERROR` and exit 2.
+No absent exports map is silently converted to a legacy `main`/index lookup.
+Stable error codes distinguish blocked exports, undefined imports, invalid targets,
+invalid configurations and invalid requests. Duplicate JSON keys are deliberately
+rejected rather than following Node's last-key-wins parsing; backslashes, encoded
+path separators, NUL and traversal segments are also refused. This stricter
+admission boundary is not a claim of complete loader equivalence.
+
+`--package-manifest` is an exact canonical project-relative `package.json` path,
+not a package name, glob or importer-based search. Capture uses Unix directory
+file descriptors and no-follow opening at every component. Symlinked manifests,
+symlinked parent directories and nonregular files are rejected; a FIFO cannot
+block the final open. Manifest bytes are bounded to 512 KiB and checked for ordinary
+in-place mutation during reading. The evaluator uses those captured bytes once,
+not a second pathname read. This does not promise an atomic snapshot of a hostile
+filesystem or authenticate the selected package.
+
+The `input_hash` binds the **exact manifest bytes**, including order and whitespace,
+with a separate domain. Requiring that value rejects changed metadata before target
+selection:
+
+```sh
+franken-module-graph ./project --resolve-export . \
+  --expected-hash "$REVIEWED_PACKAGE_MAP_INPUT_HASH"
+```
+
+The old graph or topology hash cannot approve a target query. Conditions and the
+requested subpath are explicit query inputs, not part of this manifest-only pin.
+Target-query flags cannot be mixed with dependency/topology queries or
+`--require-resolved`; they do not imply dependency closure completeness.
+
+The module follows the package-map boundary in Node's published ESM resolution
+specification, with public `require.resolve` and `import.meta.resolve` differential
+fixtures. **Selection is not file resolution or permission to execute.** Local
+results retain their package-relative URL spelling; external results retain a
+package request. Existence, URL finalization, realpath, module format, full package
+lookup, engine integration, policy admission and actual loading remain separate.
+`filesystem_verified`, `execution_performed` and `release_certification` remain
+false. No project lifecycle script or selected JavaScript module is executed.

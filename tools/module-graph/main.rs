@@ -6,7 +6,6 @@ use franken_module_graph_schema as schema_versions;
 #[path = "../../crates/franken-node/src/supply_chain/module_resolution_graph.rs"]
 mod module_resolution_graph;
 
-#[allow(dead_code)]
 #[path = "../../crates/franken-node/src/supply_chain/package_target_resolution.rs"]
 mod package_target_resolution;
 
@@ -42,6 +41,18 @@ struct Args {
     /// Require resolved edges. Transitive queries also reject incomplete kind metadata or workspace intent.
     #[arg(long)]
     require_resolved: bool,
+    /// Select a package's export target for . or an exact ./ subpath.
+    #[arg(long, group = "target_query", conflicts_with_all = ["importer_query", "impact", "importer", "require_resolved"])]
+    resolve_export: Option<String>,
+    /// Select an internal # import target from a package manifest.
+    #[arg(long, group = "target_query", conflicts_with_all = ["importer_query", "impact", "importer", "require_resolved"])]
+    resolve_import: Option<String>,
+    /// Exact project-relative package.json to inspect; default: package.json.
+    #[arg(long, requires = "target_query")]
+    package_manifest: Option<String>,
+    /// Complete active condition set, repeatable. Default when omitted: node, import.
+    #[arg(long = "condition", requires = "target_query")]
+    conditions: Vec<String>,
 }
 
 // The standalone host supplies the same bounded-read interface used by the
@@ -67,6 +78,7 @@ fn inspect(args: Args) -> Result<(Value, u8), Box<dyn std::error::Error>> {
             return Err("expected hash requires exactly 64 lowercase hexadecimal digits".into());
         }
     }
+    if args.resolve_export.is_some() || args.resolve_import.is_some() { return inspect_targets(&args); }
     if args.transitive || args.impact.is_some() { return inspect_topology(&args); }
     let graph = build_canonical_module_resolution_graph(&args.project)?;
     if graph.canonical_hash != recompute_module_resolution_graph_hash(&graph)? {
@@ -142,15 +154,103 @@ fn inspect_topology(args: &Args) -> Result<(Value, u8), Box<dyn std::error::Erro
     Ok((report, if verdict == "INSPECTED" { 0 } else { 1 }))
 }
 
+fn inspect_targets(args: &Args) -> Result<(Value, u8), Box<dyn std::error::Error>> {
+    use package_target_resolution::{MapKind, PackageMap};
+    let manifest = args.package_manifest.as_deref().unwrap_or("package.json");
+    let source = capture_manifest(&args.project, manifest)?;
+    let maps = PackageMap::parse(&source)?;
+    let (kind, request) = match (&args.resolve_export, &args.resolve_import) {
+        (Some(request), None) => (MapKind::Exports, request),
+        (None, Some(request)) => (MapKind::Imports, request),
+        _ => return Err("select exactly one package-map query".into()),
+    };
+    let conditions = if args.conditions.is_empty() { vec!["node".into(), "import".into()] }
+        else { args.conditions.clone() };
+    let matched = args.expected_hash.as_ref().map(|pin| pin == maps.input_hash());
+    let mut report = json!({
+        "schema_version": "franken-node/module-graph-inspection/v1",
+        "scope": "package-map-target-selection", "query": kind, "request": request,
+        "manifest": manifest, "input_hash": maps.input_hash(), "conditions": conditions,
+        "expected_hash_matched": matched, "execution_performed": false,
+        "release_certification": false, "filesystem_verified": false, "selection": null,
+    });
+    // Do not select from changed metadata under an independently reviewed pin.
+    if matched == Some(false) {
+        report["verdict"] = json!("HASH_MISMATCH");
+        return Ok((report, 1));
+    }
+    match maps.select(kind, request, &conditions) {
+        Ok(selection) => {
+            report["verdict"] = json!("SELECTED");
+            report["selection"] = serde_json::to_value(selection)?;
+            Ok((report, 0))
+        }
+        Err(error) => {
+            let missing = matches!(error.code, "ERR_PACKAGE_MAP_ABSENT"
+                | "ERR_PACKAGE_PATH_NOT_EXPORTED" | "ERR_PACKAGE_IMPORT_NOT_DEFINED");
+            report["verdict"] = json!(if missing { "UNRESOLVED" } else { "ERROR" });
+            report["error_code"] = json!(error.code);
+            report["error"] = json!(error.detail);
+            Ok((report, if missing { 1 } else { 2 }))
+        }
+    }
+}
+
+/// Anchor every path component to an opened directory, never a symlink-following
+/// joined path. Nonblocking final open rejects FIFOs/devices without hanging.
+/// The opened regular file, not a later reread by pathname, supplies the pin and
+/// ordered maps. This is bounded metadata capture, not a filesystem sandbox.
+#[cfg(unix)]
+fn capture_manifest(project: &Path, name: &str) -> Result<String, Box<dyn std::error::Error>> {
+    use rustix::fs::{Mode, OFlags, open, openat};
+    use std::fs::{File, Metadata};
+    use std::os::unix::fs::MetadataExt;
+
+    let parts: Vec<_> = name.split('/').collect();
+    if name.len() > 4096 || parts.len() > 64 || name.contains(['\\', ':'])
+        || name.chars().any(char::is_control)
+        || parts.iter().any(|p| p.is_empty() || matches!(*p, "." | ".." | ".git" | ".beads"))
+        || parts.last() != Some(&"package.json") {
+        return Err("package manifest must be a canonical project-relative package.json path".into());
+    }
+    let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut directory = File::from(open(project, directory_flags, Mode::empty())?);
+    for component in &parts[..parts.len() - 1] {
+        directory = File::from(openat(&directory, *component, directory_flags, Mode::empty())?);
+    }
+    let file = File::from(openat(&directory, "package.json",
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC, Mode::empty())?);
+    let before = file.metadata()?;
+    let limit = package_target_resolution::MAX_MANIFEST_BYTES as u64;
+    if !before.is_file() || before.len() > limit {
+        return Err("package manifest must be an ordinary file no larger than 512 KiB".into());
+    }
+    let identity = |m: &Metadata| (m.dev(), m.ino(), m.size(), m.mode(), m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec());
+    let mut text = String::new();
+    (&file).take(limit + 1).read_to_string(&mut text)?;
+    if text.len() as u64 > limit || text.len() as u64 != before.len()
+        || identity(&before) != identity(&file.metadata()?) {
+        return Err("package manifest changed or exceeded its byte limit during capture".into());
+    }
+    Ok(text)
+}
+
+#[cfg(not(unix))]
+fn capture_manifest(_: &Path, _: &str) -> Result<String, Box<dyn std::error::Error>> {
+    Err("package-map file capture requires Unix descriptor-relative no-follow opening".into())
+}
+
 fn main() -> ExitCode {
     let args = Args::parse();
-    let scope = if args.transitive || args.impact.is_some() { "declared-dependency-topology" }
+    let scope = if args.resolve_export.is_some() || args.resolve_import.is_some() { "package-map-target-selection" }
+        else if args.transitive || args.impact.is_some() { "declared-dependency-topology" }
         else { "lockfile-metadata-only" };
     let (report, code) = match inspect(args) {
         Ok(result) => result,
         Err(error) => (json!({"schema_version": "franken-node/module-graph-inspection/v1",
             "scope": scope, "execution_performed": false,
-            "release_certification": false, "verdict": "ERROR", "error": error.to_string()}), 2),
+            "release_certification": false, "verdict": "ERROR", "error": error.to_string(),
+            "error_code": error.downcast_ref::<package_target_resolution::ResolutionError>().map(|e| e.code)}), 2),
     };
     let mut stdout = io::stdout().lock();
     if serde_json::to_writer_pretty(&mut stdout, &report).is_err()
