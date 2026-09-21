@@ -108,18 +108,19 @@ class WatchdogTests(unittest.TestCase):
         self.assertEqual(result["stdout_bytes"], 2000000)
         self.assertEqual(result["stderr_bytes"], 2000000)
 
-    def test_cli_invokes_native_runtime_and_owns_receipts(self):
+    def test_cli_invokes_real_run_command_and_preserves_policy_options(self):
         binary = self.root / "fake node"
         binary.write_text(f"#!{sys.executable}\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\n")
         binary.chmod(0o700)
         completed = subprocess.run([sys.executable, str(SCRIPT), "--franken-node-bin", str(binary),
                                     "--artifacts-dir", str(self.artifacts), "--", "entry point.js",
-                                    "--execution-budget-ms", "10"], capture_output=True, text=True, timeout=5)
+                                    "--policy", "strict", "--console-only"], capture_output=True, text=True, timeout=5)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         result = json.loads(completed.stdout)
         received = json.loads((self.artifacts / "stdout.log").read_text())
-        self.assertEqual(received[:4], ["runtime", "invoke", "--output-dir", str(self.artifacts / "runtime")])
-        self.assertEqual(received[4:], ["entry point.js", "--execution-budget-ms", "10"])
+        self.assertEqual(received, ["run", "entry point.js", "--policy", "strict", "--console-only"])
+        self.assertIsNone(result["native_receipts_dir"])
+        self.assertFalse((self.artifacts / "runtime").exists())
         self.assertEqual(result["outcome"], "completed")
 
     def test_cli_rejects_output_override(self):

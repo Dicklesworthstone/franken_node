@@ -1,0 +1,74 @@
+name: Runtime watchdog native CLI contract
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/runtime-watchdog.yml'
+      - 'scripts/runtime_invoke_watchdog.py'
+      - 'tests/test_runtime*watchdog*.py'
+      - 'tests/runtime_watchdog_cli_probe.rs'
+      - 'crates/franken-node/src/cli.rs'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-cli-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Compile the actual product CLI parser
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal
+          harness="$RUNNER_TEMP/watchdog-cli-check"
+          mkdir -p "$harness" evidence
+          cat > "$harness/Cargo.toml" <<TOML
+          [package]
+          name = "watchdog-cli-check"
+          version = "0.0.0"
+          edition = "2024"
+          [workspace]
+          [[bin]]
+          name = "watchdog-cli-probe"
+          path = "$GITHUB_WORKSPACE/tests/runtime_watchdog_cli_probe.rs"
+          [dependencies]
+          anyhow = "1.0"
+          clap = { version = "4.5", features = ["derive", "env"] }
+          serde = { version = "1.0", features = ["derive"] }
+          serde_json = "1.0"
+          TOML
+          cargo +stable build --manifest-path "$harness/Cargo.toml" 2>&1 | tee evidence/cli-build.log
+          cp "$harness/Cargo.lock" evidence/cli-Cargo.lock
+          echo "FRANKEN_NODE_WATCHDOG_CLI_PROBE=$harness/target/debug/watchdog-cli-probe" >> "$GITHUB_ENV"
+      - name: Exercise process supervision and the production CLI grammar
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x "$FRANKEN_NODE_WATCHDOG_CLI_PROBE"
+          node --version | tee evidence/node-version.txt
+          python3 -W error::ResourceWarning -m unittest discover -s tests -p 'test_runtime*watchdog*.py' -v 2>&1 | tee evidence/watchdog-tests.log
+      - name: Preserve source identities and inspection snapshot
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p evidence
+          git rev-parse HEAD > evidence/revision.txt
+          git ls-tree HEAD scripts/runtime_invoke_watchdog.py tests/runtime_watchdog_cli_probe.rs tests/test_runtime_invoke_watchdog.py tests/test_runtime_watchdog_native_cli.py crates/franken-node/src/cli.rs > evidence/executed-source-blobs.txt
+          # This source archive supports boundary inspection/reproduction. Only
+          # the parser probe and subprocess tests above are executed evidence.
+          git archive HEAD crates/franken-node/src .beads docs/plans Cargo.toml Cargo.lock tools/migration-validator scripts/runtime_invoke_watchdog.py tests/test_runtime_invoke_watchdog.py | gzip > evidence/native-boundary-source.tar.gz
+      - name: Retain executed evidence and exact source
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-watchdog-cli-evidence
+          retention-days: 7
+          if-no-files-found: error
+          path: evidence/

@@ -3,12 +3,13 @@
 
 The supervisor is deliberately outside the engine process. Engine execution
 budgets remain unchanged; only an observed supervisor deadline is classified as
-``wrapper_timeout``. Raw output and native receipts remain separate evidence.
+``wrapper_timeout``. The native command is ``franken-node run``; raw native
+stdout/stderr and the supervisor receipt remain separate evidence.
 
 Example:
     python3 scripts/runtime_invoke_watchdog.py --artifacts-dir /tmp/invoke-001 \\
         --wall-time-ms 5000 --franken-node-bin target/debug/franken-node \\
-        -- example.js --execution-budget-ms 1000
+        -- example.js --policy strict --console-only
 
 Requires POSIX process groups. The artifact directory must not already exist.
 Exit 124 means a wrapper deadline *or* a forwarded native exit 124; consumers must
@@ -420,7 +421,9 @@ def supervise(command: Sequence[str], artifacts_dir: Path, *, wall_time_ms: int 
         "stdin_delivery_complete": stdin_data is None,
         "stdout_path": str(artifacts_dir / "stdout.log"),
         "stderr_path": str(artifacts_dir / "stderr.log"),
-        "native_receipts_dir": str(artifacts_dir / "runtime"),
+        # `run` has no --output-dir contract. Never invent an unpopulated
+        # native-receipt location, including for generic library commands.
+        "native_receipts_dir": None,
         "events": [{"event": "wrapper_started", "elapsed_ms": 0}],
     }
 
@@ -542,6 +545,27 @@ def supervise(command: Sequence[str], artifacts_dir: Path, *, wall_time_ms: int 
     return receipt
 
 
+def native_run_command(binary: str, runtime_args: Sequence[str]) -> list[str]:
+    """Build the real product CLI invocation without changing its policy.
+
+    Native Clap and the run handler own argument and capability validation.
+    This layer only rejects obsolete wrapper-specific flags with an actionable
+    diagnostic. No shell, degraded-runtime override, or policy downgrade is used.
+    """
+    if isinstance(runtime_args, (str, bytes)) or not runtime_args:
+        raise ValueError("supply run arguments after -- (including an entrypoint)")
+    if any(not isinstance(arg, str) or "\x00" in arg for arg in runtime_args):
+        raise ValueError("run arguments must be NUL-free strings")
+    obsolete = {"--output-dir", "--execution-budget-ms", "--execution-budget-ticks"}
+    for arg in runtime_args:
+        if arg.partition("=")[0] in obsolete:
+            raise ValueError(
+                f"{arg.partition('=')[0]} is not a franken-node run option; "
+                "use --artifacts-dir and --wall-time-ms before -- for supervision; "
+                "native engine limits remain controlled by the runtime configuration")
+    return [binary, "run", *runtime_args]
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--franken-node-bin", default="franken-node")
@@ -560,15 +584,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     runtime_args = args.runtime_args
     if runtime_args[:1] == ["--"]:
         runtime_args = runtime_args[1:]
-    if not runtime_args:
-        parser.error("supply runtime invoke arguments after -- (including an entrypoint)")
-    if any(arg == "--output-dir" or arg.startswith("--output-dir=") for arg in runtime_args):
-        parser.error("the watchdog owns --output-dir; use --artifacts-dir instead")
     # Resolve before changing the child's cwd, including relative binary paths.
     executable = shutil.which(args.franken_node_bin)
     binary = str(Path(executable).resolve()) if executable else str(Path(args.franken_node_bin).resolve())
-    command = [binary, "runtime", "invoke", "--output-dir",
-               str(args.artifacts_dir.resolve() / "runtime"), *runtime_args]
+    try:
+        command = native_run_command(binary, runtime_args)
+    except ValueError as error:
+        parser.error(str(error))
     try:
         with cancellation_signals() as cancellation:
             stdin_data = (read_stdin_file(args.stdin_file, args.max_stdin_bytes)

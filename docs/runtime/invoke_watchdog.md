@@ -1,163 +1,133 @@
-# Runtime invocation watchdog
+# Policy-governed run watchdog
 
-`runtime_invoke_watchdog.py` is an opt-in external supervisor for the native
-`franken-node runtime invoke` command. Unlike a cooperative engine execution
-budget, its wall-clock deadline can stop an engine that never returns.
+`runtime_invoke_watchdog.py` supervises the actual **`franken-node run`** command
+with an independent wall-clock deadline, bounded process I/O, and a fail-closed
+supervisor receipt. It does not replace the native engine or its policy checks.
 
 ```sh
 python3 scripts/runtime_invoke_watchdog.py \
   --franken-node-bin target/debug/franken-node \
-  --artifacts-dir /tmp/franken-invoke-001 \
+  --artifacts-dir /tmp/franken-run-001 \
   --wall-time-ms 5000 \
   --kill-grace-ms 250 \
   --max-output-bytes 16777216 \
-  -- example.js --execution-budget-ms 1000 --execution-budget-ticks 1000
+  -- example.js --policy strict --console-only
 ```
 
-The artifact directory must be new. The supervisor refuses to reuse it, so a
-failed launch cannot accidentally inherit evidence from an earlier successful
-run. It owns the native `--output-dir`; do not supply that flag after `--`.
-`--cwd` changes the native process working directory. Relative binary paths and
-artifact paths are resolved before changing that directory. Argument boundaries
-are preserved; commands are never interpreted by a shell.
+The part after `--` is passed to `franken-node run` unchanged. Use `--json` there
+instead of `--console-only` to capture the native run report. Without either
+flag, the native human-readable output is retained. Native configuration,
+capability gates, runtime selection and validation remain authoritative. The
+watchdog does not enable degraded fallback or downgrade policy.
 
-The default wall deadline is 30 seconds, independently of native execution
-budgets. Both time arguments accept positive whole milliseconds, up to one day.
-Cleanup has its own termination grace period and bounded leader-reaping wait, so
-elapsed time may exceed the execution deadline by cleanup and scheduling time.
-This is not a real-time scheduling guarantee.
+**Earlier versions incorrectly invoked `runtime invoke --output-dir ...`. That
+command does not exist in the product CLI.** The actual `runtime` family only
+exposes lane and epoch inspection. `run` also does not support the previously
+shown `--execution-budget-ms` / `--execution-budget-ticks` flags. Configure native
+limits through the runtime's configuration; use the watchdog's `--wall-time-ms`
+before `--` for the independent supervisor deadline.
 
-## Captured binary stdin
+The artifact directory must be new. Existing evidence is never reused.
+`--cwd` changes the native working directory. Binary and artifact paths are
+resolved before that change; native application/config paths remain relative to
+the selected working directory and retain native path validation. Argument
+boundaries are preserved and no shell is used.
 
-`--stdin-file request.bin` supplies an explicit binary request instead of the
-default `/dev/null`. `--max-stdin-bytes` bounds the source (16 MiB by default;
-1 byte through 1 GiB accepted). Empty files are valid. Source loading happens
-before changing the child's working directory and before the invocation budget
-starts. It requires a regular file, rejects a symlink at the supplied file path,
-and uses nonblocking, no-follow opening plus before/after identity checks to
-reject ordinary concurrent replacement or mutation. FIFOs, devices, directories,
-and oversized sources are rejected before an invocation is launched. This is not
-a guarantee against a hostile filesystem server or blocking filesystem I/O.
+## Captured input and output
 
-The exact immutable request is saved as private `stdin.bin` (mode `0600`) and
-flushed before launch; the receipt records its byte length and SHA-256 digest.
-Failure to retain that snapshot prevents execution. Replacing the original file
-after capture cannot substitute the bytes subsequently delivered to the guest.
-An execution budget exhausted during snapshot persistence also prevents launch.
+`--stdin-file request.bin` replaces the default `/dev/null` with explicit binary
+input. `--max-stdin-bytes` bounds it (16 MiB default, 1 byte through 1 GiB; an empty
+file is valid). The source must be a regular file, not a symlink, FIFO or device.
+Before/after file-identity checks reject ordinary concurrent changes. Loading the
+source precedes the invocation budget; blocking filesystem I/O is not subject to
+a hard real-time guarantee.
 
-Input is fed through a nonblocking **pipe**, not a regular-file descriptor, while
-both output streams are drained. Large requests cannot deadlock a guest that
-writes output before reading input. The supervisor closes the pipe to deliver
-EOF after the last byte, and stops further input delivery before termination
-cleanup on timeout, cancellation, or output-limit failure.
+The exact immutable input is persisted as private `stdin.bin` (mode `0600`) and
+flushed before launch. Its size and SHA-256 are recorded. Failed persistence or a
+budget exhausted during persistence prevents launch. The supervisor multiplexes
+nonblocking stdin delivery with both output streams, so a process writing output
+before reading a large request does not deadlock. Cleanup stops further input.
 
-`stdin_captured`, `stdin_delivered_bytes`, `stdin_delivery_state`, and
-`stdin_delivery_complete` separate preserved input from transport progress.
-Delivered means accepted into the OS pipe, **not proven consumed by the guest**.
-When a guest exits zero before the whole supplied request is queued, the strict
-supervisor result is `input_incomplete`; the original zero exit is retained in
-`runtime_exit_code`. Native nonzero exits, timeout, and cancellation keep their
-own outcome even when delivery is partial. A program intentionally accepting
-only a request prefix should be given that prefix as its explicit input.
+`stdin_delivered_bytes` means bytes accepted into the OS pipe, **not proof that
+the native engine or guest consumed them**. This feature supplies the native
+process's stdin; it does not implement missing guest `process.stdin` semantics.
+A zero-exiting process that did not accept the entire request produces
+`input_incomplete`. Native nonzero exits, timeout and cancellation retain their
+own attribution even when input delivery is partial. A captured request can be
+reused with `--stdin-file previous/stdin.bin` and a new artifact directory; this
+is not deterministic ambient-effect replay.
 
-For another run with the captured request, pass the previous `stdin.bin` as
-`--stdin-file` and choose a new artifact directory. The digest is input identity,
-not authentication or a claim of deterministic ambient-effect replay. Input may
-contain credentials or other sensitive data; protect and retain the artifact
-directory accordingly. Library callers use immutable `stdin_data: bytes` and
-`max_stdin_bytes`; omitting `stdin_data` preserves the original null-input mode.
+`--max-output-bytes` caps each native stdout/stderr stream independently (16 MiB
+default, 1 byte through 1 GiB). Exactly the limit is allowed; the next observed
+byte stops execution. Logs retain exact binary prefixes, never beyond the limit.
+Fair bounded reads preserve deadline/cancellation checks and prevent one stream
+from starving the other. Draining continues during TERM/KILL cleanup without
+increasing logs beyond the quota. Buffered overflow discovered after exit zero
+still invalidates success. A pipe that does not reach EOF during bounded cleanup
+produces `output_incomplete`, not an unbounded wait.
 
-## Bounded output capture
+Receipts distinguish retained `stdout_bytes` / `stderr_bytes` from actual read
+`*_observed_bytes`, and record `*_eof`, `*_complete`, `output_complete`, and
+`output_limit_streams`. Observed counts do not estimate all output generated by
+a terminated process. These are native-process streams; only native
+`--console-only` requests guest-console output without appended metadata.
 
-`--max-output-bytes` caps each captured stream independently (16 MiB by default;
-1 byte through 1 GiB accepted). There is no unlimited setting. Exactly the limit
-is allowed; observing another byte stops the invocation with an output-limit
-failure. Each log retains the exact binary prefix, never more than its limit.
+## Receipts and outcomes
 
-The supervisor multiplexes nonblocking stdout and stderr pipes with bounded,
-fair reads. Neither a flood nor a descendant retaining a pipe disables the
-wall deadline or cancellation. Pipes continue draining during TERM/KILL cleanup
-without increasing retained files beyond their limits. Buffered overflow found
-after the leader exits zero still invalidates success. An inherited pipe that
-never reaches EOF within bounded cleanup produces `output_incomplete`, not an
-unbounded wait or an apparently complete successful invocation.
+Every run retains `watchdog.json`, `stdout.log`, `stderr.log`, and optional
+`stdin.bin`. `watchdog.json` starts in a fail-closed `running` state, records the
+native PID after launch and is atomically replaced at completion. A nonterminal
+receipt never means success. Evidence-storage failure stops the native scope.
 
-Receipts distinguish retained `stdout_bytes` / `stderr_bytes` from
-`stdout_observed_bytes` / `stderr_observed_bytes` actually read from pipes.
-Observed counts are not estimates of all bytes generated by a terminated guest.
-Per-stream `*_eof` and `*_complete`, `output_complete`, and
-`output_limit_streams` describe evidence completeness. Complete stream capture
-alone does not establish workload success or native receipt validity. An earlier
-timeout or cancellation remains the primary outcome even if cleanup also
-observes excessive output.
+There is **no supervisor-selected native receipt directory**: `run` has no such
+CLI contract. `native_receipts_dir` is `null`. Native `--json` output is retained
+unchanged in `stdout.log`; native durable receipts remain under native runtime
+configuration. The wrapper neither invents native receipts nor asserts their
+validity. A completed process, even a native `--help` request, is not proof of
+successful guest execution or of security/compatibility claims.
 
-## Evidence and exit semantics
-
-Every run records `watchdog.json`, raw `stdout.log` and `stderr.log`, and the
-native receipt location `runtime/`. Native receipts are neither rewritten nor
-fabricated when an engine hangs. `watchdog.json` starts in a fail-closed `running`
-state, is updated with the native PID after launch, and is replaced atomically at
-completion. A nonterminal receipt is never evidence of success. If storage is
-unavailable, the wrapper fails and stops its native process rather than
-continuing without evidence.
-
-| `outcome` | Meaning | Wrapper exit |
+| Outcome | Meaning | Exit |
 | --- | --- | --- |
-| `completed` | Native process exited zero with complete captured streams and supplied input queued; inspect native receipts for workload semantics. | 0 |
-| `runtime_failed` | Native process failed or was signalled; not inferred to be a wrapper timeout. | Native exit, or 128 + signal |
-| `wrapper_timeout` | The external supervisor observed its own deadline expire. | 124 |
-| `cancelled` | Supervisor received SIGINT or SIGTERM and stopped the invocation. | 128 + first cancellation signal |
-| `output_limit_exceeded` | At least one captured stream exceeded its byte limit. | 125 |
-| `output_incomplete` | Pipe EOF could not be established during bounded cleanup. | 125 |
-| `input_incomplete` | Native process exited zero before the complete captured request was queued. | 125 |
-| `spawn_error` | Native process could not be launched. | 125 |
-| `supervisor_error` / `cleanup_failed` | Evidence or cleanup could not complete normally. | 125 |
+| `completed` | Process exited zero, streams complete, supplied input queued. | 0 |
+| `runtime_failed` | Native failure or signal; no guessed timeout origin. | Native exit, or 128 + signal |
+| `wrapper_timeout` | Supervisor observed its own deadline expire. | 124 |
+| `cancelled` | SIGINT/SIGTERM latched; invocation stopped. | 128 + first signal |
+| `output_limit_exceeded` | A stream exceeded its byte limit. | 125 |
+| `output_incomplete` | Bounded cleanup did not establish pipe EOF. | 125 |
+| `input_incomplete` | Native exit zero before the full request was queued. | 125 |
+| `spawn_error` | Native process could not launch. | 125 |
+| `supervisor_error` / `cleanup_failed` | Evidence or cleanup failed. | 125 |
 
-Only an actual supervisor deadline sets `wrapper_deadline_exceeded: true` and
-`timeout_layer: "wrapper"`. Native exit 124 remains `runtime_failed`, not
-`wrapper_timeout`. Likewise, a native engine/kernel budget error is preserved as
-native evidence, not relabelled based on its stderr text. If timeout termination
-makes the engine exit zero, the wrapper still fails with `wrapper_timeout`.
-Cancellation cannot overwrite an already observed deadline or cleanup failure.
+Only an observed supervisor deadline sets `wrapper_deadline_exceeded: true` and
+`timeout_layer: "wrapper"`. Native exit 124 remains `runtime_failed`. Neither
+stderr text nor a TERM handler exiting zero rewrites timeout provenance. An
+already observed timeout/cancellation is retained through excessive cleanup
+output; cleanup/storage failures remain fail closed.
 
-Events carry monotonic elapsed milliseconds. The receipt records the exact
-argument vector, working directory, runtime exit status, output byte counts,
-artifact locations, and TERM/KILL cleanup actions. It does not copy environment
-variables. Arguments and runtime output may themselves contain sensitive values;
-keep the private artifact directory appropriately protected.
+## Limits and verification
 
-## Scope and limits
+POSIX process groups are required. TERM is followed by a bounded grace period,
+KILL and leader reaping, including descendants outliving the leader. Repeated
+SIGINT/SIGTERM cannot interrupt cleanup. The default deadline is 30 seconds;
+time limits accept whole milliseconds through one day. Cleanup and scheduling
+can extend elapsed time beyond the execution budget.
 
-This supervisor requires POSIX process groups. It terminates the invocation's
-process group, including descendants that outlive the leader or ignore TERM,
-and escalates to KILL after the grace period. Repeated SIGINT/SIGTERM signals do
-not interrupt that cleanup or receipt publication.
-
-It is a liveness supervisor, **not a security sandbox**: a deliberately detached
-child that creates a new session can escape the group. SIGKILL directed at the
-supervisor cannot be handled; host-level process containment is still needed for
-that failure mode. The output quota bounds writes by the supervisor to its two
-captured logs, not arbitrary guest filesystem writes or the native receipt
-directory. Untrusted guests still require filesystem/process isolation. Native
-receipts may be absent or partial after an interrupted invocation.
-
-Direct `franken-node runtime invoke` calls are unchanged and are **not** protected
-unless launched through this supervisor. This implements the external watchdog
-portion of bead `bd-xzig5`; native CLI flag integration remains separate work.
-
-## Regression tests
+This is **not a security sandbox**. Deliberately detached descendants may escape
+the group; supervisor SIGKILL cannot be handled. The log quota does not constrain
+arbitrary guest writes or native receipts. Filesystem/process isolation remains
+necessary for untrusted guests. Arguments, logs and captured input can contain
+secrets; protect the private artifacts accordingly. Direct unsupervised `run`
+commands do not acquire this external watchdog.
 
 ```sh
-python3 -m unittest discover -s tests -p 'test_runtime_invoke_watchdog.py' -v
+python3 -W error::ResourceWarning -m unittest discover \
+  -s tests -p 'test_runtime*watchdog*.py' -v
 ```
 
-Tests use real OS subprocesses and a fake native CLI, including hangs, crashes,
-large binary output, exact quota boundaries, post-exit overflow, failed capture,
-exit-code provenance, cancelled launches, repeated signals, partial evidence,
-receipt-write failures and orphaned or detached pipe holders. They do not require
-Rust or the sibling engine checkout. Input tests cover exact binary bytes,
-backpressure, early closure, non-reading guests, cancellation, file replacement,
-capture failures, and CLI wiring. An additional real Node stdin oracle runs when
-`node` is available; it does not substitute for an actual FrankenEngine
-integration run. Two process-state assertions require Linux procfs; the remaining
-process-group tests run on POSIX.
+The original process suite exercises real POSIX processes, signals, backpressure,
+quota boundaries and failure cleanup. The native CLI contract workflow also
+compiles the actual `cli.rs` and tests wrapper arguments against its Clap parser.
+That probe explicitly labels itself `product_cli_parser_only`; it is not engine
+execution evidence. The optional real Node stdin test is also not native-engine
+compatibility evidence. This work does not close the wider `bd-xzig5` scope or
+claim native runtime parity.
