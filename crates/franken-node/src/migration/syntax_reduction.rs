@@ -3,7 +3,8 @@
 //! accepted edit must still be admitted by the parent's full-suite executor.
 //!
 //! Edits use original byte ranges, not source regeneration. Statements, nested
-//! bodies and comma-separated declarators can be removed; literals can shrink.
+//! bodies, declarators, call arguments and collection members can be removed;
+//! literals can shrink. Every proposal is parsed before behavioral execution.
 //! Unsupported grammar (including typed TypeScript) is reported as incomplete
 //! syntax coverage, not silently declared syntactically minimal.
 
@@ -144,6 +145,52 @@ fn siblings(node: Node<'_>, bindings: bool, edits: &mut BTreeSet<Edit>) -> bool 
     true
 }
 
+// Remove whole elements, never commas found by scanning raw source. The
+// parser's direct children distinguish a separator from commas inside strings,
+// regular expressions, nested calls, computed properties or spread operands.
+// Keep the delimiters so a call cannot accidentally become a bare expression.
+// Empty lists are useful proposals too, but the full-suite oracle still decides
+// whether deleting an argument, accessor, spread or array hole is admissible.
+fn list_elements(node: Node<'_>, edits: &mut BTreeSet<Edit>) -> bool {
+    let Some(open) = node.child(0) else { return true; };
+    let Some(close) = node.child(node.child_count().saturating_sub(1)) else { return true; };
+    if !matches!((open.kind(), close.kind()), ("(", ")") | ("[", "]") | ("{", "}")) {
+        return true;
+    }
+    if !insert(edits, open.end_byte()..close.start_byte(), "") { return false; }
+
+    let mut cursor = node.walk();
+    let mut ranges = Vec::new();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() == "comment" { continue; }
+        if ranges.len() == MAX_SIBLINGS { return false; }
+        ranges.push(child.byte_range());
+    }
+    if ranges.is_empty() { return true; }
+
+    // As with statements, attempt groups before individual elements. Keeping
+    // every non-selected element allows reductions when emptying the entire
+    // collection would lose the failure's essential data.
+    let mut granularity = 2_usize.min(ranges.len());
+    loop {
+        for part in 0..granularity {
+            let first = part * ranges.len() / granularity;
+            let last = (part + 1) * ranges.len() / granularity;
+            let range = if last < ranges.len() {
+                ranges[first].start..ranges[last].start
+            } else if first > 0 {
+                ranges[first - 1].end..ranges[last - 1].end
+            } else {
+                ranges[first].start..ranges[last - 1].end
+            };
+            if !insert(edits, range, "") { return false; }
+        }
+        if granularity == ranges.len() { break; }
+        granularity = (granularity * 2).min(ranges.len());
+    }
+    true
+}
+
 fn plan(tree: &Tree, deadline: Instant) -> Result<Plan> {
     let mut edits = BTreeSet::new();
     let mut cursor = tree.walk();
@@ -160,8 +207,11 @@ fn plan(tree: &Tree, deadline: Instant) -> Result<Plan> {
             "string" => insert(&mut edits, node.byte_range(), "''"),
             "template_string" => insert(&mut edits, node.byte_range(), "``"),
             "number" => insert(&mut edits, node.byte_range(), "0"),
-            "array" => insert(&mut edits, node.byte_range(), "[]"),
-            "object" => insert(&mut edits, node.byte_range(), "{}"),
+            "arguments" => list_elements(node, &mut edits),
+            "array" => insert(&mut edits, node.byte_range(), "[]")
+                && list_elements(node, &mut edits),
+            "object" => insert(&mut edits, node.byte_range(), "{}")
+                && list_elements(node, &mut edits),
             _ => true,
         };
         if !within_limit { complete = false; break; }
@@ -342,5 +392,86 @@ mod tests {
         assert_eq!(result.statistics.accepted, 0);
         assert!(reduce(source, deadline(), |_| anyhow::bail!("runtime identity changed"))
             .err().unwrap().to_string().contains("runtime identity changed"));
+    }
+
+    #[test]
+    fn argument_reduction_keeps_the_call_and_each_surviving_argument() {
+        for expected in ["work();", "work(b,c);", "work(a,c);", "work(a,b);"] {
+            assert!(includes_edit("work(a,b,c);", expected), "{expected}");
+        }
+        assert!(includes_edit("new Worker(a,b);", "new Worker(a);"));
+        assert!(includes_edit("obj?.work?.(a,b);", "obj?.work?.(b);"));
+    }
+
+    #[test]
+    fn collection_reduction_can_retain_the_one_member_needed_by_the_failure() {
+        for (source, expected) in [
+            ("const xs=[first,second,third];", "const xs=[second,third];"),
+            ("const xs=[first,second,third];", "const xs=[first,third];"),
+            ("const xs=[first,second,third];", "const xs=[first,second];"),
+            ("const xs={dead:1,live:42};", "const xs={live:42};"),
+            ("const xs={live:42,dead:1};", "const xs={live:42};"),
+            ("const xs={get live(){return 42},dead:1};", "const xs={get live(){return 42}};"),
+        ] {
+            assert!(includes_edit(source, expected), "{source} -> {expected}");
+        }
+    }
+
+    #[test]
+    fn list_edits_understand_nested_commas_comments_spreads_and_trailing_commas() {
+        for (source, expected) in [
+            ("work('a,b',nested(x,y),tail);", "work('a,b',tail);"),
+            ("work(/a,b/,tail);", "work(/a,b/);"),
+            ("work(head, /* comma , */ ...tail,);", "work(head,);"),
+            ("work(head,// comment ,\n tail);", "work(head);"),
+            ("const xs=[first,,second,,third,];", "const xs=[first,,third,];"),
+            ("const xs=[,,];", "const xs=[];"),
+            ("const xs={['a,b']:1,...tail,};", "const xs={['a,b']:1,};"),
+            ("work(/* before */ only /* after */);", "work();"),
+        ] {
+            assert!(includes_edit(source, expected), "{source} -> {expected}");
+            assert!(parse(&mut parser().unwrap(), expected.as_bytes(), deadline()).unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn list_reduction_does_not_treat_patterns_as_collection_literals() {
+        let source = "const [first,second]=input;const {a,b}=object;";
+        assert!(!includes_edit(source, "const [second]=input;const {a,b}=object;"));
+        assert!(!includes_edit(source, "const [first,second]=input;const {b}=object;"));
+    }
+
+    #[test]
+    fn oversized_lists_mark_the_search_incomplete_without_exceeding_the_edit_cap() {
+        let source = format!("work({});", vec!["value"; MAX_SIBLINGS + 1].join(","));
+        let result = proposals(&source);
+        assert!(!result.complete);
+        assert!(result.edits.len() <= MAX_PROPOSALS);
+    }
+
+    #[test]
+    fn list_reductions_are_only_adopted_after_real_node_execution() {
+        // Execute pure, finite programs with no filesystem/network effects.
+        // This is the actual Rust reducer with a process-backed test oracle,
+        // not a claim about Franken/Node parity or the product's full oracle.
+        let run = |source: &[u8]| std::process::Command::new("node")
+            .args(["--input-type=commonjs", "-e", std::str::from_utf8(source).unwrap()])
+            .output().expect("Node is required for the process-backed reducer test");
+        let mut best = b"function keep(value){console.log(value)}keep(42,400,500);".to_vec();
+        let expected = run(&best);
+        assert!(expected.status.success());
+        assert_eq!(expected.stdout, b"42\n");
+        let result = reduce(best.clone(), Instant::now() + Duration::from_secs(30), |candidate| {
+            let observed = run(&candidate);
+            if observed.status == expected.status && observed.stdout == expected.stdout
+                && observed.stderr == expected.stderr {
+                best = candidate;
+                Ok(Trial::Accept)
+            } else { Ok(Trial::Reject) }
+        }).unwrap();
+        assert!(result.complete && !result.stopped);
+        assert!(result.statistics.accepted > 0);
+        assert!(!best.contains(&b','), "{}", String::from_utf8_lossy(&best));
+        assert_eq!(run(&best).stdout, expected.stdout);
     }
 }
