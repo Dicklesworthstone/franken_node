@@ -59,7 +59,7 @@ security approval is fabricated, and `franken-node run` is unchanged.
 
 ```sh
 cargo test --manifest-path tools/module-graph/Cargo.toml \
-  --bin franken-module-graph --test cli --test topology --test package_targets --test module_files
+  --bin franken-module-graph --test cli --test topology --test package_targets
 ```
 
 The graph builder's own unit tests run alongside executable CLI regressions.
@@ -255,86 +255,3 @@ package request. Existence, URL finalization, realpath, module format, full pack
 lookup, engine integration, policy admission and actual loading remain separate.
 `filesystem_verified`, `execution_performed` and `release_certification` remain
 false. No project lifecycle script or selected JavaScript module is executed.
-
-## Resolve an importer to a captured module file
-
-Resolve a concrete request from an existing project-relative importing file:
-
-```sh
-franken-module-graph ./project --resolve-module example/feature \
-  --from packages/api/app.mjs --resolution-mode import
-franken-module-graph ./project --resolve-module ./helpers \
-  --from packages/api/app.cjs --resolution-mode require
-franken-module-graph ./project --resolve-module '#internal' --from src/app.mjs
-```
-
-The production `supply_chain::module_resolution_graph::file_resolution` API now
-composes ordered package maps with real importer-relative package search and
-ordinary-file capture. It supports nearest nested, hoisted, scoped and aliased
-packages; self references; internal imports including external-package targets;
-CommonJS file-extension/main/index lookup; and strict ESM relative/subpath lookup.
-ESM package roots without exports use legacy main/index resolution. Modern maps
-remain encapsulation boundaries: blocked exports and selected-but-missing targets
-never fall through to a package's main, inferred extension, later array target,
-or a different installed version.
-
-Resolution defaults to `import`. Conditions default to `node` plus the selected
-mode; explicit `--condition` flags replace the complete set. ESM path percent
-encoding is decoded, while query/fragment suffixes remain separate module-identity
-evidence. CommonJS direct paths retain literal filename spelling. Resolution does
-not load any JavaScript, parse its syntax, invoke hooks, install dependencies,
-read `NODE_PATH`, or search outside the selected project. This is not the engine's
-module loader and does not change `franken-node run`.
-
-Successful output has scope `project-contained-module-resolution`, verdict
-`RESOLVED`, exit 0, and a `resolution` object with the captured path, byte count,
-SHA-256, format hint, package-map branches, and sorted positive/negative probes.
-`filesystem_verified: true` means the returned file bytes were captured, not
-that its package matches a lockfile or has passed trust admission. Unmarked
-JavaScript reports `javascript_unspecified`; engine syntax detection is still
-required. Native addons, Wasm and unknown extensions are only format hints, not
-claims that execution is supported. Bare Node 22 core names and all `node:`
-requests return `RUNTIME_REQUIRED`, exit 1, rather than allowing project packages
-to shadow a runtime module. The engine's registry must establish availability
-and capability authority independently.
-
-The API returns a `CapturedResolution` with `source_bytes()`: consumers can use
-the exact captured bytes rather than reopen a subsequently mutable pathname.
-Source bytes are never serialized by this command. Only consulted files and
-lookup gaps are captured; unused files and unrelated lockfile metadata are not
-evidence. Directory descriptors remain owned throughout capture, and both
-positive and negative probes are cached. Symlinks, nonregular files, path escapes,
-reserved repository state, changed reads and exceeded bounds fail closed.
-The supplied project root is trusted; this is not an atomic tree snapshot or
-containment against a hostile filesystem. Input bounds are 1,024 probes, 64 path
-components/recursive package transitions, 16 MiB per source file, 512 KiB per
-manifest and 32 MiB total retained file bytes. It is not a real-time I/O deadline.
-
-Pin the complete resolution context and evidence, not just its manifest:
-
-```sh
-franken-module-graph ./project --resolve-module example/feature \
-  --from packages/api/app.mjs --expected-hash "$REVIEWED_RESOLUTION_HASH"
-```
-
-This separate domain-separated `input_hash` binds importer bytes, request, mode,
-conditions, consulted manifests/source bytes, lookup gaps and selected result.
-Moving identical inputs to a different root does not change it. A changed source
-or newly introduced nearer candidate does. The command must capture and resolve
-to compute this hash; a mismatch then returns `HASH_MISMATCH`, exit 1, with no
-successful `resolution` payload. No execution occurs before or after the check.
-Older graph, topology and manifest-only hashes cannot approve this scope.
-Pins are consistency checks, not signatures or policy approvals.
-
-Missing files, blocked mappings and unsupported directory imports return
-`UNRESOLVED`, exit 1. Malformed inputs and unsafe capture return `ERROR`, exit 2.
-All failure paths refuse successful file evidence. File resolution flags cannot
-be combined with direct, topology or package-map-only queries. `--from` is an
-existing module file, not the older manifest-oriented `--importer` option.
-
-Unit and executable tests compare supported selections with Node's public
-`require.resolve` and `import.meta.resolve`, without loading the selected source.
-The latter deliberately permits missing file URLs; this resolver additionally
-requires ordinary-file existence. Tests also exercise unchanged captured bytes,
-hash/context drift, package encapsulation, aliases, root boundaries and FIFO/link
-refusal. These tests do not establish full Node/Bun or engine loader parity.

@@ -9,7 +9,6 @@ on:
       - 'crates/franken-node/src/supply_chain/module_resolution_graph.rs'
       - 'crates/franken-node/src/supply_chain/module_dependency_topology.rs'
       - 'crates/franken-node/src/supply_chain/package_target_resolution.rs'
-      - 'crates/franken-node/src/supply_chain/module_file_resolution.rs'
       - 'crates/franken-node/src/schema_versions.rs'
   workflow_dispatch:
 
@@ -35,7 +34,7 @@ jobs:
           # The schema registry is a production dependency, not a standalone
           # test crate. --all-targets overrides its test=false and compiles
           # cross-product unit tests requiring the full engine workspace.
-          cargo +stable test --manifest-path tools/module-graph/Cargo.toml --bin franken-module-graph --test cli --test topology --test package_targets --test module_files 2>&1 | tee evidence/native-tests.log
+          cargo +stable test --manifest-path tools/module-graph/Cargo.toml --bin franken-module-graph --test cli --test topology --test package_targets 2>&1 | tee evidence/native-tests.log
       - name: Preserve reproducible sources and native executable
         if: always()
         shell: bash
@@ -46,7 +45,7 @@ jobs:
           git ls-tree HEAD crates/franken-node/src/supply_chain/module_resolution_graph.rs crates/franken-node/src/schema_versions.rs tools/module-graph/main.rs tools/module-graph/tests/cli.rs > evidence/executed-source-blobs.txt
           if test -f tools/module-graph/Cargo.lock; then cp tools/module-graph/Cargo.lock evidence/Cargo.lock; fi
           if test -f tools/module-graph/target/debug/franken-module-graph; then cp tools/module-graph/target/debug/franken-module-graph evidence/; fi
-          git archive HEAD crates/franken-node/src/supply_chain/module_resolution_graph.rs crates/franken-node/src/supply_chain/module_dependency_topology.rs crates/franken-node/src/supply_chain/package_target_resolution.rs crates/franken-node/src/supply_chain/module_file_resolution.rs crates/franken-node/src/schema_versions.rs tools/module-graph .github/workflows/module-graph.yml | gzip > evidence/native-module-graph-source.tar.gz
+          git archive HEAD crates/franken-node/src/supply_chain/module_resolution_graph.rs crates/franken-node/src/supply_chain/module_dependency_topology.rs crates/franken-node/src/supply_chain/package_target_resolution.rs crates/franken-node/src/schema_versions.rs tools/module-graph .github/workflows/module-graph.yml | gzip > evidence/native-module-graph-source.tar.gz
       - uses: actions/upload-artifact@v4
         if: always()
         with:
