@@ -1,0 +1,30 @@
+[package]
+name = "franken-module-graph"
+version = "0.1.0"
+edition = "2024"
+license = "LicenseRef-MIT-OpenAI-Anthropic-Rider"
+publish = false
+
+# This executable uses the product's real graph builder without pulling in the
+# optional sibling engine. No JavaScript or package-manager command is executed.
+[workspace]
+
+[lib]
+name = "franken_module_graph_schema"
+path = "../../crates/franken-node/src/schema_versions.rs"
+test = false
+doctest = false
+
+[[bin]]
+name = "franken-module-graph"
+path = "main.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.11"
+hex = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

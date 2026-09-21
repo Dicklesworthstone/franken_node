@@ -5,6 +5,10 @@
 //! of the lockstep oracle; this graph gives admission and receipt layers stable
 //! bytes for package manifests, workspace edges, dependency ranges, conditional
 //! exports/imports, and npm package-lock pins.
+//!
+//! Installed dependency lookup is importer-relative and bounded to the project:
+//! the closest recorded `node_modules` entry wins. It is not a semver solver,
+//! exports evaluator, installation verifier, or substitute for the live loader.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -41,6 +45,9 @@ pub enum ModuleResolutionGraphError {
     InvalidWorkspacePattern {
         pattern: String,
     },
+    InvalidMetadata {
+        detail: String,
+    },
     BoundExceeded {
         bound: &'static str,
         limit: usize,
@@ -70,6 +77,7 @@ impl fmt::Display for ModuleResolutionGraphError {
             Self::InvalidWorkspacePattern { pattern } => {
                 write!(formatter, "unsupported workspace pattern `{pattern}`")
             }
+            Self::InvalidMetadata { detail } => write!(formatter, "invalid package metadata: {detail}"),
             Self::BoundExceeded { bound, limit } => {
                 write!(formatter, "{bound} exceeds deterministic bound of {limit}")
             }
@@ -84,6 +92,7 @@ impl std::error::Error for ModuleResolutionGraphError {
             Self::Json { source, .. } => Some(source),
             Self::MissingRootManifest { .. }
             | Self::InvalidWorkspacePattern { .. }
+            | Self::InvalidMetadata { .. }
             | Self::BoundExceeded { .. } => None,
         }
     }
@@ -223,32 +232,56 @@ pub fn build_canonical_module_resolution_graph(
         .find(|package| !package.workspace)
         .map(|package| package.package_id.clone())
         .unwrap_or_default();
-    let workspace_by_name = packages
-        .iter()
-        .filter_map(|package| {
-            package
-                .name
-                .as_ref()
-                .map(|name| (name.clone(), package.package_id.clone()))
-        })
-        .collect::<BTreeMap<_, _>>();
+    let mut workspace_by_name = BTreeMap::new();
+    let mut workspace_by_path = BTreeMap::new();
+    for package in packages.iter().filter(|package| package.workspace) {
+        if let Some(name) = &package.name {
+            if workspace_by_name.insert(name.clone(), package.package_id.clone()).is_some() {
+                return invalid_metadata(format!("duplicate workspace package name {name:?}"));
+            }
+        }
+        workspace_by_path.insert(manifest_directory(&package.relative_manifest_path), package);
+    }
 
-    let lockfile_pins = read_package_lock(project_root)?;
-    let lockfile_path_by_name = lockfile_pins
+    let lockfile = read_package_lock(project_root)?;
+    for (path, target) in &lockfile.links {
+        if !workspace_by_path.contains_key(target.as_str()) {
+            return invalid_metadata(format!("lockfile link {path:?} targets an uncaptured workspace {target:?}"));
+        }
+    }
+    let lockfile_pins = lockfile.pins;
+    let lockfile_by_path = lockfile_pins
         .iter()
-        .map(|pin| (pin.package_name.clone(), pin.package_path.clone()))
+        .map(|pin| (pin.package_path.as_str(), pin))
         .collect::<BTreeMap<_, _>>();
 
     let mut dependency_edges = Vec::new();
     for manifest in &manifests {
         for dependency in &manifest.dependencies {
+            let selected = nearest_lockfile_pin(
+                manifest_directory(&manifest.relative_manifest_path),
+                &dependency.name,
+                &lockfile_by_path,
+            );
+            // A matching name alone is NOT evidence of an installed workspace.
+            // Explicit workspace: requests express workspace intent; ordinary
+            // version ranges bind only through a captured lockfile link.
+            let target_package_id = if let Some(pin) = selected {
+                lockfile.links.get(&pin.package_path)
+                    .and_then(|target| workspace_by_path.get(target.as_str()))
+                    .map(|package| package.package_id.clone())
+            } else if dependency.requested_range.starts_with("workspace:") {
+                workspace_by_name.get(&dependency.name).cloned()
+            } else {
+                None
+            };
             dependency_edges.push(DependencyEdge {
                 from_package_id: manifest.package.package_id.clone(),
                 dependency_name: dependency.name.clone(),
                 requested_range: dependency.requested_range.clone(),
                 dependency_kind: dependency.kind,
-                target_package_id: workspace_by_name.get(&dependency.name).cloned(),
-                lockfile_package_path: lockfile_path_by_name.get(&dependency.name).cloned(),
+                target_package_id,
+                lockfile_package_path: selected.map(|pin| pin.package_path.clone()),
                 optional: dependency.optional,
             });
             enforce_len(
@@ -330,6 +363,8 @@ fn parse_manifest(
             source,
         })?;
 
+    if !value.is_object() { return invalid_metadata("package manifest must contain an object"); }
+
     let relative_manifest_path = relative_display(project_root, manifest_path);
     let manifest_dir = manifest_path.parent().unwrap_or(project_root);
     let relative_package_dir = relative_display(project_root, manifest_dir);
@@ -410,13 +445,15 @@ fn collect_dependencies(
     optional: bool,
     dependencies: &mut Vec<DependencySpec>,
 ) -> ModuleResolutionGraphResult<()> {
-    let Some(entries) = manifest.get(field).and_then(Value::as_object) else {
-        return Ok(());
-    };
+    let Some(value) = manifest.get(field) else { return Ok(()); };
+    let entries = value.as_object().ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
+        detail: format!("manifest {field} must be an object"),
+    })?;
     for (name, range) in entries {
-        let Some(requested_range) = range.as_str() else {
-            continue;
-        };
+        validate_package_name(name)?;
+        let requested_range = range.as_str().ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
+            detail: format!("{field} range for {name:?} must be a string"),
+        })?;
         dependencies.push(DependencySpec {
             name: name.clone(),
             requested_range: requested_range.to_string(),
@@ -618,10 +655,80 @@ fn flatten_targets_inner(
     Ok(())
 }
 
-fn read_package_lock(project_root: &Path) -> ModuleResolutionGraphResult<Vec<LockfilePin>> {
+#[derive(Default)]
+struct Lockfile {
+    pins: Vec<LockfilePin>,
+    links: BTreeMap<String, String>,
+}
+
+fn invalid_metadata<T>(detail: impl Into<String>) -> ModuleResolutionGraphResult<T> {
+    Err(ModuleResolutionGraphError::InvalidMetadata { detail: detail.into() })
+}
+
+fn manifest_directory(path: &str) -> &str {
+    path.rsplit_once('/').map_or("", |(directory, _)| directory)
+}
+
+fn validate_package_name(name: &str) -> ModuleResolutionGraphResult<()> {
+    let components: Vec<_> = name.split('/').collect();
+    let scoped = name.starts_with('@');
+    let valid = name.len() <= 214
+        && components.len() == if scoped { 2 } else { 1 }
+        && components.iter().enumerate().all(|(index, part)| {
+            let part: &str = if scoped && index == 0 { &part[1..] } else { part };
+            !part.is_empty() && part != "." && part != ".." && part != "node_modules"
+                && part.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.~".contains(&byte))
+        });
+    if !valid {
+        return invalid_metadata(format!("unsupported or unsafe dependency name {name:?}"));
+    }
+    Ok(())
+}
+
+fn validate_lock_path(path: &str) -> ModuleResolutionGraphResult<()> {
+    if path.len() > 4096 || path.contains(['\\', ':']) || path.chars().any(char::is_control)
+        || (!path.is_empty() && path.split('/').any(|part| part.is_empty() || part == "." || part == ".."))
+    {
+        return invalid_metadata(format!("lockfile location must be canonical and project-relative: {path:?}"));
+    }
+    Ok(())
+}
+
+fn nearest_lockfile_pin<'a>(
+    importer: &str,
+    dependency: &str,
+    pins: &BTreeMap<&str, &'a LockfilePin>,
+) -> Option<&'a LockfilePin> {
+    let mut directory = importer;
+    loop {
+        // Node does not probe node_modules/node_modules while ascending.
+        if directory.rsplit('/').next() != Some("node_modules") {
+            let candidate = if directory.is_empty() {
+                format!("node_modules/{dependency}")
+            } else {
+                format!("{directory}/node_modules/{dependency}")
+            };
+            if let Some(pin) = pins.get(candidate.as_str()) {
+                return Some(*pin);
+            }
+        }
+        if directory.is_empty() { return None; }
+        directory = directory.rsplit_once('/').map_or("", |(parent, _)| parent);
+    }
+}
+
+fn optional_string(package: &Value, field: &str) -> ModuleResolutionGraphResult<Option<String>> {
+    match package.get(field) {
+        None => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => invalid_metadata(format!("lockfile {field} must be a string")),
+    }
+}
+
+fn read_package_lock(project_root: &Path) -> ModuleResolutionGraphResult<Lockfile> {
     let lockfile_path = project_root.join("package-lock.json");
     if !lockfile_path.exists() {
-        return Ok(Vec::new());
+        return Ok(Lockfile::default());
     }
     let raw =
         crate::bounded_read_to_string(&lockfile_path, MAX_LOCKFILE_BYTES).map_err(|source| {
@@ -636,48 +743,113 @@ fn read_package_lock(project_root: &Path) -> ModuleResolutionGraphResult<Vec<Loc
             source,
         })?;
 
-    let mut pins = Vec::new();
-    if let Some(packages) = value.get("packages").and_then(Value::as_object) {
+    if !value.is_object() {
+        return invalid_metadata("package-lock.json must contain an object");
+    }
+    if let Some(version) = value.get("lockfileVersion") {
+        if !matches!(version.as_u64(), Some(1..=3)) {
+            return invalid_metadata("unsupported lockfileVersion; supported versions are 1, 2 and 3");
+        }
+    }
+    let mut lockfile = Lockfile::default();
+    if let Some(packages_value) = value.get("packages") {
+        let packages = packages_value.as_object().ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
+            detail: "lockfile packages must be an object".into(),
+        })?;
+        enforce_len("lockfile package records", packages.len(), MAX_LOCKFILE_PACKAGES + 1)?;
         for (package_path, package) in packages {
+            validate_lock_path(package_path)?;
+            if !package.is_object() {
+                return invalid_metadata(format!("lockfile record {package_path:?} must be an object"));
+            }
             if package_path.is_empty() {
                 continue;
             }
             let Some(package_name) = package_name_from_lock_path(package_path) else {
+                if package_path.split('/').any(|part| part == "node_modules") {
+                    return invalid_metadata(format!("invalid installed package location {package_path:?}"));
+                }
                 continue;
             };
-            pins.push(LockfilePin {
+            validate_package_name(&package_name)?;
+            let package_name = optional_string(package, "name")?.unwrap_or(package_name);
+            validate_package_name(&package_name)?;
+            let resolved = optional_string(package, "resolved")?;
+            match package.get("link") {
+                Some(Value::Bool(true)) => {
+                    let target = resolved.as_ref().ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
+                        detail: format!("lockfile link {package_path:?} has no target"),
+                    })?;
+                    validate_lock_path(target)?;
+                    lockfile.links.insert(package_path.clone(), target.clone());
+                }
+                None | Some(Value::Bool(false)) => {}
+                Some(_) => return invalid_metadata("lockfile link must be a boolean"),
+            }
+            lockfile.pins.push(LockfilePin {
                 package_path: package_path.clone(),
                 package_name,
-                version: package
-                    .get("version")
-                    .and_then(Value::as_str)
-                    .map(ToString::to_string),
-                resolved: package
-                    .get("resolved")
-                    .and_then(Value::as_str)
-                    .map(ToString::to_string),
-                integrity: package
-                    .get("integrity")
-                    .and_then(Value::as_str)
-                    .map(ToString::to_string),
+                version: optional_string(package, "version")?,
+                resolved,
+                integrity: optional_string(package, "integrity")?,
                 dependencies: lockfile_dependencies(package.get("dependencies"))?,
             });
-            enforce_len("lockfile packages", pins.len(), MAX_LOCKFILE_PACKAGES)?;
+            enforce_len("lockfile packages", lockfile.pins.len(), MAX_LOCKFILE_PACKAGES)?;
         }
+    } else if value.get("lockfileVersion").and_then(Value::as_u64).is_some_and(|version| version >= 2) {
+        return invalid_metadata("modern lockfile is missing its authoritative packages object");
+    } else {
+        // npm v1 records an installation hierarchy, not a global version map.
+        // A modern packages map wins over its redundant legacy dependencies.
+        read_legacy_packages(value.get("dependencies"), "", 0, &mut lockfile.pins)?;
     }
-    pins.sort_by(|left, right| left.package_path.cmp(&right.package_path));
-    Ok(pins)
+    lockfile.pins.sort_by(|left, right| left.package_path.cmp(&right.package_path));
+    Ok(lockfile)
+}
+
+fn read_legacy_packages(
+    dependencies: Option<&Value>,
+    parent: &str,
+    depth: usize,
+    pins: &mut Vec<LockfilePin>,
+) -> ModuleResolutionGraphResult<()> {
+    enforce_len("legacy lockfile nesting", depth, 64)?;
+    let Some(dependencies) = dependencies else { return Ok(()); };
+    let entries = dependencies.as_object().ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
+        detail: "legacy lockfile dependencies must be an object".into(),
+    })?;
+    for (name, package) in entries {
+        validate_package_name(name)?;
+        if !package.is_object() { return invalid_metadata("legacy package record must be an object"); }
+        let path = if parent.is_empty() { format!("node_modules/{name}") }
+            else { format!("{parent}/node_modules/{name}") };
+        validate_lock_path(&path)?;
+        pins.push(LockfilePin {
+            package_path: path.clone(), package_name: name.clone(),
+            version: optional_string(package, "version")?,
+            resolved: optional_string(package, "resolved")?,
+            integrity: optional_string(package, "integrity")?,
+            dependencies: lockfile_dependencies(package.get("requires"))?,
+        });
+        enforce_len("lockfile packages", pins.len(), MAX_LOCKFILE_PACKAGES)?;
+        read_legacy_packages(package.get("dependencies"), &path, depth + 1, pins)?;
+    }
+    Ok(())
 }
 
 fn lockfile_dependencies(
     value: Option<&Value>,
 ) -> ModuleResolutionGraphResult<Vec<LockfileDependency>> {
     let mut dependencies = Vec::new();
-    if let Some(object) = value.and_then(Value::as_object) {
+    if let Some(value) = value {
+        let object = value.as_object().ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
+            detail: "lockfile dependency requirements must be an object".into(),
+        })?;
         for (name, range) in object {
-            let Some(requested_range) = range.as_str() else {
-                continue;
-            };
+            validate_package_name(name)?;
+            let requested_range = range.as_str().ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
+                detail: format!("lockfile dependency requirement for {name:?} must be a string"),
+            })?;
             dependencies.push(LockfileDependency {
                 name: name.clone(),
                 requested_range: requested_range.to_string(),
@@ -694,19 +866,13 @@ fn lockfile_dependencies(
 }
 
 fn package_name_from_lock_path(package_path: &str) -> Option<String> {
-    let marker = "node_modules/";
-    let offset = package_path.rfind(marker)?;
-    let suffix = &package_path[offset + marker.len()..];
-    let mut parts = suffix.split('/');
-    let first = parts.next()?;
-    if first.is_empty() {
-        return None;
-    }
-    if first.starts_with('@') {
-        let second = parts.next()?;
-        Some(format!("{first}/{second}"))
-    } else {
-        Some(first.to_string())
+    let parts: Vec<_> = package_path.split('/').collect();
+    let offset = parts.iter().rposition(|part| *part == "node_modules")?;
+    let suffix = &parts[offset + 1..];
+    match suffix {
+        [scope, name] if scope.starts_with('@') => Some(format!("{scope}/{name}")),
+        [name] if !name.starts_with('@') && !name.is_empty() => Some((*name).to_owned()),
+        _ => None,
     }
 }
 
