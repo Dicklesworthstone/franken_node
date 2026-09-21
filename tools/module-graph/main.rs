@@ -6,6 +6,10 @@ use franken_module_graph_schema as schema_versions;
 #[path = "../../crates/franken-node/src/supply_chain/module_resolution_graph.rs"]
 mod module_resolution_graph;
 
+#[allow(dead_code)]
+#[path = "../../crates/franken-node/src/supply_chain/package_target_resolution.rs"]
+mod package_target_resolution;
+
 use clap::Parser;
 use module_resolution_graph::{build_canonical_module_resolution_graph, recompute_module_resolution_graph_hash};
 use module_resolution_graph::dependency_topology;
