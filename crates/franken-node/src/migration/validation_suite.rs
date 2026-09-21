@@ -478,6 +478,62 @@ pub fn run_project_comparison(project: &Path, migrated_project: Option<&Path>,
         .execute(native_executable, deadline, compare_filesystem)
 }
 
+/// A one-use comparison of exactly the two project inventories approved by a
+/// trusted caller. No runtime is resolved or executed while constructing it.
+///
+/// Pins use the same full-input identity as `--list-tests`: source, dependencies,
+/// modes, links and the captured test manifest/settings. They do not approve
+/// ambient environment, external effects, runtime binaries or a policy change.
+/// The caller must obtain both digests independently of the untrusted project.
+/// No Debug/Serialize/Clone: captured private bytes must not be logged or copied
+/// into a reusable, indefinitely valid execution grant.
+pub struct ApprovedInputs {
+    inputs: CapturedInputs,
+    deadline: Instant,
+}
+
+impl ApprovedInputs {
+    /// Capture once, check both reviewed identities, and retain those exact
+    /// immutable inputs for execution. For a same-tree comparison supply the
+    /// same independently trusted digest for both roles. A missing or partial
+    /// approval is never inferred from the project being measured.
+    pub fn capture(project: &Path, migrated_project: Option<&Path>,
+        expected_input_sha256: &str, expected_candidate_input_sha256: &str) -> Result<Self> {
+        for (role, pin) in [("original", expected_input_sha256),
+            ("candidate", expected_candidate_input_sha256)] {
+            ensure!(pin.len() == 64 && pin.bytes().all(|byte|
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+                "{role} input approval must be 64 lowercase hexadecimal characters");
+        }
+        let deadline = Instant::now() + TOTAL_TIMEOUT;
+        let inputs = CapturedInputs::capture(project, migrated_project, deadline)?;
+        ensure!(inputs.reference.digest == expected_input_sha256,
+            "original captured input does not match the independently approved SHA-256; no runtime was resolved or executed");
+        ensure!(inputs.candidate_snapshot().digest == expected_candidate_input_sha256,
+            "candidate captured input does not match the independently approved SHA-256; no runtime was resolved or executed");
+        budget(deadline)?;
+        Ok(Self { inputs, deadline })
+    }
+
+    /// Run the already-approved original/candidate pair, never a second capture
+    /// of live project paths. The original total deadline includes time spent
+    /// holding this value; approval does not start a fresh execution allowance.
+    pub fn run_pair(self, native_executable: &Path, compare_filesystem: bool) -> Result<SuiteReport> {
+        budget(self.deadline)?;
+        self.inputs.execute(native_executable, self.deadline, compare_filesystem)
+    }
+
+    /// Require both references on the same approved original inputs. Missing
+    /// or aliased Bun still fails closed; no pairwise downgrade is available.
+    pub fn run_product(self, native_executable: &Path, bun_executable: &Path,
+        compare_filesystem: bool) -> Result<product_oracle::ProductReport> {
+        budget(self.deadline)?;
+        product_oracle::run_captured([&self.inputs.reference_root, &self.inputs.candidate_root],
+            [&self.inputs.reference, self.inputs.candidate_snapshot()],
+            native_executable, bun_executable, self.deadline, compare_filesystem)
+    }
+}
+
 // Live validation and replay capture must execute exactly the same snapshots;
 // do not recapture the source tree after execution to manufacture an archive.
 struct CapturedInputs {
@@ -929,5 +985,157 @@ mod tests {
         let report = measured(project.path());
         assert_eq!(report.verdict, "PASS");
         assert_eq!(report.cases[0].reference.as_ref().unwrap().stdout.sha256, hex::encode(Sha256::digest(b"0\n")));
+    }
+
+    fn reviewed_hash(root: &Path) -> String {
+        Snapshot::capture(root, Instant::now() + Duration::from_secs(30)).unwrap().digest
+    }
+
+    #[test]
+    fn input_approval_rejects_noncanonical_pins_before_project_access() {
+        let valid = "a".repeat(64);
+        for invalid in [String::new(), "a".repeat(63), "a".repeat(65), "A".repeat(64),
+            "g".repeat(64), format!("sha256:{valid}"), format!(" {valid}")] {
+            for (original, candidate) in [(&invalid, &valid), (&valid, &invalid)] {
+                let error = ApprovedInputs::capture(Path::new("/definitely/absent-approved-project"),
+                    None, original, candidate).err().expect("invalid approval");
+                assert!(error.to_string().contains("64 lowercase hexadecimal"), "{error:#}");
+            }
+        }
+    }
+
+    #[test]
+    fn input_approval_requires_each_role_even_for_a_same_tree_comparison() {
+        let project = fixture();
+        write(project.path(), "case.test.js", "console.log('approved');");
+        let pin = reviewed_hash(project.path());
+        let wrong = "0".repeat(64);
+        for (original, candidate, role) in [(&wrong, &pin, "original"), (&pin, &wrong, "candidate")] {
+            let error = ApprovedInputs::capture(project.path(), None, original, candidate)
+                .err().expect("mismatched approval");
+            assert!(error.to_string().starts_with(role));
+            assert!(error.to_string().contains("no runtime was resolved or executed"));
+        }
+        ApprovedInputs::capture(project.path(), None, &pin, &pin).unwrap();
+    }
+
+    #[test]
+    fn input_approval_detects_dependency_bytes_and_modes_not_only_entrypoints() {
+        let project = fixture();
+        write(project.path(), "case.test.js", "console.log('approved');");
+        write(project.path(), "node_modules/vendor/index.js", "module.exports=1;");
+        let pin = reviewed_hash(project.path());
+        write(project.path(), "node_modules/vendor/index.js", "module.exports=2;");
+        assert!(ApprovedInputs::capture(project.path(), None, &pin, &pin).is_err());
+        let pin = reviewed_hash(project.path());
+        let path = project.path().join("case.test.js");
+        let mode = fs::metadata(&path).unwrap().mode() & 0o777;
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode ^ 0o100)).unwrap();
+        assert!(ApprovedInputs::capture(project.path(), None, &pin, &pin).is_err());
+    }
+
+    #[test]
+    fn input_approval_detects_original_and_candidate_changes_independently() {
+        let original = fixture();
+        let candidate = fixture();
+        write(original.path(), "case.test.js", "console.log('original');");
+        write(candidate.path(), "case.test.js", "console.log('candidate');");
+        let original_pin = reviewed_hash(original.path());
+        let candidate_pin = reviewed_hash(candidate.path());
+        assert_ne!(original_pin, candidate_pin);
+        ApprovedInputs::capture(original.path(), Some(candidate.path()), &original_pin, &candidate_pin).unwrap();
+        write(candidate.path(), "case.test.js", "console.log('replacement');");
+        let error = ApprovedInputs::capture(original.path(), Some(candidate.path()), &original_pin, &candidate_pin)
+            .err().expect("candidate changed");
+        assert!(error.to_string().starts_with("candidate"));
+        let candidate_pin = reviewed_hash(candidate.path());
+        write(original.path(), "case.test.js", "console.log('later-original');");
+        let error = ApprovedInputs::capture(original.path(), Some(candidate.path()), &original_pin, &candidate_pin)
+            .err().expect("original changed");
+        assert!(error.to_string().starts_with("original"));
+    }
+
+    #[test]
+    fn input_approval_does_not_waive_inventory_or_execution_settings_checks() {
+        let original = fixture();
+        let candidate = fixture();
+        for root in [original.path(), candidate.path()] {
+            write(root, "case.test.js", "console.log('approved');");
+            write(root, "request.bin", "request");
+        }
+        write(original.path(), ".franken-node/migration-tests.json",
+            r#"{"schema_version":"franken-node/migration-tests/v1","tests":["case.test.js"],"execution":{"case.test.js":{"stdin":"request.bin","stdin_mode":"pipe"}}}"#);
+        // Even independently pinned inputs must represent the SAME request.
+        let error = ApprovedInputs::capture(original.path(), Some(candidate.path()),
+            &reviewed_hash(original.path()), &reviewed_hash(candidate.path())).err().expect("settings differ");
+        assert!(error.to_string().contains("execution settings differ"));
+        let empty = fixture();
+        let pin = reviewed_hash(empty.path());
+        assert!(ApprovedInputs::capture(empty.path(), None, &pin, &pin).is_err());
+    }
+
+    #[test]
+    fn approved_pair_executes_immutable_bytes_after_both_live_trees_change() {
+        let original = fixture();
+        let candidate = fixture();
+        write(original.path(), "case.test.js", "console.log('reviewed');require('fs').writeFileSync('artifact','reviewed');");
+        write(candidate.path(), "case.test.js", "console.log('candidate');");
+        let original_pin = reviewed_hash(original.path());
+        let candidate_pin = reviewed_hash(candidate.path());
+        let approved = ApprovedInputs::capture(original.path(), Some(candidate.path()), &original_pin, &candidate_pin).unwrap();
+        write(original.path(), "case.test.js", "throw new Error('later original must not run');");
+        write(candidate.path(), "case.test.js", "throw new Error('later candidate must not run');");
+        // Deliberately failing native executable proves admission/retention,
+        // not successful native FrankenEngine semantics.
+        let report = approved.run_pair(Path::new("/bin/false"), true).unwrap();
+        assert_eq!(report.verdict, "FAIL", "{report:#?}");
+        assert_eq!(report.input_sha256, original_pin);
+        assert_eq!(report.candidate_input_sha256, candidate_pin);
+        let reference = report.cases[0].reference.as_ref().unwrap();
+        assert_eq!(reference.exit_code, Some(0));
+        assert_eq!(reference.stdout.sha256, hex::encode(Sha256::digest(b"reviewed\n")));
+        assert_eq!(reference.workspace_delta.as_ref().unwrap().changed_paths, 1);
+        assert_eq!(report.cases[0].native.as_ref().unwrap().exit_code, Some(1));
+        assert!(!original.path().join("artifact").exists());
+        assert!(!candidate.path().join("artifact").exists());
+        assert!(!report.release_certification);
+    }
+
+    #[test]
+    fn approved_product_uses_the_frozen_input_and_keeps_reference_failure_inconclusive() {
+        let project = fixture();
+        write(project.path(), "case.test.js", "console.log('reviewed');");
+        let pin = reviewed_hash(project.path());
+        let approved = ApprovedInputs::capture(project.path(), None, &pin, &pin).unwrap();
+        write(project.path(), "case.test.js", "process.exit(99);");
+        // /bin/false is an explicitly failing role, never an independent
+        // reference brand or successful native implementation claim.
+        let report = approved.run_product(Path::new("/bin/false"), Path::new("/bin/false"), false).unwrap();
+        assert_eq!(report.verdict, "INCONCLUSIVE", "{report:#?}");
+        assert_eq!(report.input_sha256, pin);
+        assert_eq!(report.candidate_input_sha256, pin);
+        assert_eq!(report.cases[0].node.as_ref().unwrap().exit_code, Some(0));
+        assert_eq!(report.cases[0].node.as_ref().unwrap().stdout.sha256,
+            hex::encode(Sha256::digest(b"reviewed\n")));
+        assert_eq!(report.cases[0].bun.as_ref().unwrap().exit_code, Some(1));
+        assert!(!report.release_certification);
+    }
+
+    #[test]
+    fn approved_inputs_expire_before_runtime_resolution_without_a_fresh_deadline() {
+        let project = fixture();
+        write(project.path(), "case.test.js", "console.log('reviewed');");
+        let pin = reviewed_hash(project.path());
+        for product in [false, true] {
+            let mut approved = ApprovedInputs::capture(project.path(), None, &pin, &pin).unwrap();
+            approved.deadline = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+            let missing = Path::new("/definitely/missing-approved-runtime");
+            let error = if product {
+                approved.run_product(missing, missing, false).err().expect("expired")
+            } else {
+                approved.run_pair(missing, false).err().expect("expired")
+            };
+            assert!(error.to_string().contains("total budget exhausted"));
+        }
     }
 }
