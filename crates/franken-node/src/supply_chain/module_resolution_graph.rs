@@ -17,12 +17,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+#[path = "module_dependency_topology.rs"]
+pub mod dependency_topology;
+
 const MAX_PACKAGE_JSON_BYTES: u64 = 512 * 1024;
 const MAX_PACKAGE_MANIFESTS: usize = 256;
 const MAX_WORKSPACE_PATTERNS: usize = 128;
 const MAX_DEPENDENCY_EDGES: usize = 16_384;
 const MAX_LOCKFILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_LOCKFILE_PACKAGES: usize = 16_384;
+const MAX_LOCKFILE_DEPENDENCY_EDGES: usize = 65_536;
 const MAX_CONDITIONAL_TARGETS: usize = 4_096;
 const MODULE_RESOLUTION_GRAPH_HASH_DOMAIN: &[u8] =
     b"franken-node/module-resolution-graph/canonical-hash/v1:";
@@ -199,7 +203,14 @@ pub type ModuleResolutionGraphResult<T> = Result<T, ModuleResolutionGraphError>;
 pub fn build_canonical_module_resolution_graph(
     project_root: impl AsRef<Path>,
 ) -> ModuleResolutionGraphResult<ModuleResolutionGraph> {
-    let project_root = project_root.as_ref();
+    build_graph_parts(project_root.as_ref()).map(|(graph, _)| graph)
+}
+
+// Both public views consume this one parse. In particular, topology must not
+// read a second lockfile after binding itself to the first graph's hash.
+fn build_graph_parts(
+    project_root: &Path,
+) -> ModuleResolutionGraphResult<(ModuleResolutionGraph, LockfileDetails)> {
     let root_manifest_path = project_root.join("package.json");
     if !root_manifest_path.exists() {
         return Err(ModuleResolutionGraphError::MissingRootManifest {
@@ -243,13 +254,12 @@ pub fn build_canonical_module_resolution_graph(
         workspace_by_path.insert(manifest_directory(&package.relative_manifest_path), package);
     }
 
-    let lockfile = read_package_lock(project_root)?;
-    for (path, target) in &lockfile.links {
+    let Lockfile { pins: lockfile_pins, details } = read_package_lock(project_root)?;
+    for (path, target) in &details.links {
         if !workspace_by_path.contains_key(target.as_str()) {
             return invalid_metadata(format!("lockfile link {path:?} targets an uncaptured workspace {target:?}"));
         }
     }
-    let lockfile_pins = lockfile.pins;
     let lockfile_by_path = lockfile_pins
         .iter()
         .map(|pin| (pin.package_path.as_str(), pin))
@@ -267,7 +277,7 @@ pub fn build_canonical_module_resolution_graph(
             // Explicit workspace: requests express workspace intent; ordinary
             // version ranges bind only through a captured lockfile link.
             let target_package_id = if let Some(pin) = selected {
-                lockfile.links.get(&pin.package_path)
+                details.links.get(&pin.package_path)
                     .and_then(|target| workspace_by_path.get(target.as_str()))
                     .map(|package| package.package_id.clone())
             } else if dependency.requested_range.starts_with("workspace:") {
@@ -315,7 +325,7 @@ pub fn build_canonical_module_resolution_graph(
     let bytes = serialize_payload(&payload)?;
     let canonical_hash = canonical_hash(&bytes);
 
-    Ok(ModuleResolutionGraph {
+    Ok((ModuleResolutionGraph {
         schema_version: payload.schema_version,
         project_root: payload.project_root,
         root_package_id: payload.root_package_id,
@@ -323,7 +333,7 @@ pub fn build_canonical_module_resolution_graph(
         dependency_edges: payload.dependency_edges,
         lockfile_pins: payload.lockfile_pins,
         canonical_hash,
-    })
+    }, details))
 }
 
 pub fn canonical_module_resolution_graph_bytes(
@@ -385,42 +395,7 @@ fn parse_manifest(
         workspace_patterns(&value)?
     };
 
-    let mut dependencies = Vec::new();
-    collect_dependencies(
-        &value,
-        "dependencies",
-        DependencyKind::Production,
-        false,
-        &mut dependencies,
-    )?;
-    collect_dependencies(
-        &value,
-        "devDependencies",
-        DependencyKind::Development,
-        false,
-        &mut dependencies,
-    )?;
-    collect_dependencies(
-        &value,
-        "peerDependencies",
-        DependencyKind::Peer,
-        false,
-        &mut dependencies,
-    )?;
-    collect_dependencies(
-        &value,
-        "optionalDependencies",
-        DependencyKind::Optional,
-        true,
-        &mut dependencies,
-    )?;
-    dependencies.sort_by(|left, right| {
-        (&left.kind, &left.name, &left.requested_range).cmp(&(
-            &right.kind,
-            &right.name,
-            &right.requested_range,
-        ))
-    });
+    let dependencies = effective_dependencies(&value, true)?;
 
     Ok(ParsedManifest {
         relative_manifest_path: relative_manifest_path.clone(),
@@ -436,6 +411,72 @@ fn parse_manifest(
         },
         dependencies,
     })
+}
+
+fn effective_dependencies(value: &Value, development: bool) -> ModuleResolutionGraphResult<Vec<DependencySpec>> {
+    let mut dependencies = Vec::new();
+    collect_dependencies(
+        value,
+        "dependencies",
+        DependencyKind::Production,
+        false,
+        &mut dependencies,
+    )?;
+    if development { collect_dependencies(
+        value,
+        "devDependencies",
+        DependencyKind::Development,
+        false,
+        &mut dependencies,
+    )?; }
+    collect_dependencies(
+        value,
+        "peerDependencies",
+        DependencyKind::Peer,
+        false,
+        &mut dependencies,
+    )?;
+    collect_dependencies(
+        value,
+        "optionalDependencies",
+        DependencyKind::Optional,
+        true,
+        &mut dependencies,
+    )?;
+    // npm optionalDependencies override same-name production requirements.
+    // Installed development requirements are not part of the consumer graph.
+    let optional: BTreeSet<_> = dependencies.iter()
+        .filter(|dependency| dependency.kind == DependencyKind::Optional)
+        .map(|dependency| dependency.name.clone()).collect();
+    dependencies.retain(|dependency| dependency.kind != DependencyKind::Production
+        || !optional.contains(&dependency.name));
+    if let Some(meta) = value.get("peerDependenciesMeta") {
+        let meta = meta.as_object().ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
+            detail: "peerDependenciesMeta must be an object".into(),
+        })?;
+        for (name, attributes) in meta {
+            validate_package_name(name)?;
+            if !attributes.is_object() { return invalid_metadata("peer dependency metadata must be an object"); }
+            let optional = match attributes.get("optional") {
+                Some(Value::Bool(value)) => *value,
+                None => false,
+                Some(_) => return invalid_metadata("peer dependency optional must be a boolean"),
+            };
+            for dependency in dependencies.iter_mut().filter(|dependency|
+                dependency.kind == DependencyKind::Peer && dependency.name == *name) {
+                dependency.optional = optional;
+            }
+        }
+    }
+    dependencies.sort_by(|left, right| {
+        (&left.kind, &left.name, &left.requested_range).cmp(&(
+            &right.kind,
+            &right.name,
+            &right.requested_range,
+        ))
+    });
+
+    Ok(dependencies)
 }
 
 fn collect_dependencies(
@@ -658,7 +699,24 @@ fn flatten_targets_inner(
 #[derive(Default)]
 struct Lockfile {
     pins: Vec<LockfilePin>,
+    details: LockfileDetails,
+}
+
+#[derive(Default)]
+struct LockfileDetails {
     links: BTreeMap<String, String>,
+    requirements: BTreeMap<String, Vec<DependencySpec>>,
+    dependency_kinds_complete: bool,
+    edges: usize,
+}
+
+impl LockfileDetails {
+    fn record(&mut self, path: &str, requirements: Vec<DependencySpec>) -> ModuleResolutionGraphResult<()> {
+        self.edges = self.edges.saturating_add(requirements.len());
+        enforce_len("lockfile dependency edges", self.edges, MAX_LOCKFILE_DEPENDENCY_EDGES)?;
+        self.requirements.insert(path.to_owned(), requirements);
+        Ok(())
+    }
 }
 
 fn invalid_metadata<T>(detail: impl Into<String>) -> ModuleResolutionGraphResult<T> {
@@ -753,6 +811,7 @@ fn read_package_lock(project_root: &Path) -> ModuleResolutionGraphResult<Lockfil
     }
     let mut lockfile = Lockfile::default();
     if let Some(packages_value) = value.get("packages") {
+        lockfile.details.dependency_kinds_complete = true;
         let packages = packages_value.as_object().ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
             detail: "lockfile packages must be an object".into(),
         })?;
@@ -781,11 +840,12 @@ fn read_package_lock(project_root: &Path) -> ModuleResolutionGraphResult<Lockfil
                         detail: format!("lockfile link {package_path:?} has no target"),
                     })?;
                     validate_lock_path(target)?;
-                    lockfile.links.insert(package_path.clone(), target.clone());
+                    lockfile.details.links.insert(package_path.clone(), target.clone());
                 }
                 None | Some(Value::Bool(false)) => {}
                 Some(_) => return invalid_metadata("lockfile link must be a boolean"),
             }
+            lockfile.details.record(package_path, effective_dependencies(package, false)?)?;
             lockfile.pins.push(LockfilePin {
                 package_path: package_path.clone(),
                 package_name,
@@ -801,7 +861,7 @@ fn read_package_lock(project_root: &Path) -> ModuleResolutionGraphResult<Lockfil
     } else {
         // npm v1 records an installation hierarchy, not a global version map.
         // A modern packages map wins over its redundant legacy dependencies.
-        read_legacy_packages(value.get("dependencies"), "", 0, &mut lockfile.pins)?;
+        read_legacy_packages(value.get("dependencies"), "", 0, &mut lockfile)?;
     }
     lockfile.pins.sort_by(|left, right| left.package_path.cmp(&right.package_path));
     Ok(lockfile)
@@ -811,7 +871,7 @@ fn read_legacy_packages(
     dependencies: Option<&Value>,
     parent: &str,
     depth: usize,
-    pins: &mut Vec<LockfilePin>,
+    lockfile: &mut Lockfile,
 ) -> ModuleResolutionGraphResult<()> {
     enforce_len("legacy lockfile nesting", depth, 64)?;
     let Some(dependencies) = dependencies else { return Ok(()); };
@@ -824,15 +884,20 @@ fn read_legacy_packages(
         let path = if parent.is_empty() { format!("node_modules/{name}") }
             else { format!("{parent}/node_modules/{name}") };
         validate_lock_path(&path)?;
-        pins.push(LockfilePin {
+        let requirements = lockfile_dependencies(package.get("requires"))?;
+        lockfile.details.record(&path, requirements.iter().map(|dependency| DependencySpec {
+            name: dependency.name.clone(), requested_range: dependency.requested_range.clone(),
+            kind: DependencyKind::Production, optional: false,
+        }).collect())?;
+        lockfile.pins.push(LockfilePin {
             package_path: path.clone(), package_name: name.clone(),
             version: optional_string(package, "version")?,
             resolved: optional_string(package, "resolved")?,
             integrity: optional_string(package, "integrity")?,
-            dependencies: lockfile_dependencies(package.get("requires"))?,
+            dependencies: requirements,
         });
-        enforce_len("lockfile packages", pins.len(), MAX_LOCKFILE_PACKAGES)?;
-        read_legacy_packages(package.get("dependencies"), &path, depth + 1, pins)?;
+        enforce_len("lockfile packages", lockfile.pins.len(), MAX_LOCKFILE_PACKAGES)?;
+        read_legacy_packages(package.get("dependencies"), &path, depth + 1, lockfile)?;
     }
     Ok(())
 }
