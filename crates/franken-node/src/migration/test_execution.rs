@@ -4,6 +4,13 @@
 //! They cannot select runtimes, enable fallback, or alter comparison limits.
 //! Only declared application-environment overrides are captured: the remaining
 //! ambient environment and external effects are NOT reproduced or sandboxed.
+//!
+//! For example, an execution entry may select
+//! `{"stdin":"fixtures/request.bin","stdin_mode":"pipe"}`. The captured
+//! fixture still has the same 1 MiB limit and regular-file admission rules;
+//! only its delivery transport changes. Omitted mode is `file`. Pipe input
+//! supports EOF-terminated byte requests, not an interactive terminal or a
+//! conversation protocol. Queuing all bytes does not prove guest consumption.
 
 use super::super::{Entry, EntryData, Invocation, MAX_PATH_BYTES, Snapshot, excluded_from_discovery, smoke_supervisor};
 use anyhow::{Context, Result, ensure};
@@ -16,6 +23,17 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Output;
 use std::time::{Duration, Instant};
 
+/// Transport is observable to the guest and therefore part of the captured
+/// execution contract. Missing mode retains the historical redirected file;
+/// pipe mode must be explicitly selected, even for an empty input fixture.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum StdinMode {
+    #[default]
+    File,
+    Pipe,
+}
+
 /// Environment values can be sensitive; Debug deliberately excludes them.
 #[derive(Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -24,6 +42,8 @@ pub(super) struct Settings {
     pub(super) cwd: Option<String>,
     #[serde(default)]
     pub(super) stdin: Option<String>,
+    #[serde(default)]
+    pub(super) stdin_mode: StdinMode,
     #[serde(default, deserialize_with = "unique_map")]
     pub(super) environment: BTreeMap<String, Option<String>>,
 }
@@ -31,6 +51,7 @@ pub(super) struct Settings {
 impl fmt::Debug for Settings {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Settings").field("cwd", &self.cwd).field("stdin", &self.stdin)
+            .field("stdin_mode", &self.stdin_mode)
             .field("environment_count", &self.environment.len()).finish_non_exhaustive()
     }
 }
@@ -90,6 +111,8 @@ fn application_variable(name: &str) -> bool {
 }
 
 pub(super) fn validate(settings: &mut Settings, entries: &BTreeMap<PathBuf, Entry>, test: &Path) -> Result<()> {
+    ensure!(settings.stdin_mode != StdinMode::Pipe || settings.stdin.is_some(),
+        "pipe stdin mode requires an explicit captured stdin file");
     if settings.cwd.as_deref() == Some(".") { settings.cwd = None; }
     if let Some(name) = &settings.cwd {
         let path = captured_path(entries, name)?;
@@ -146,11 +169,14 @@ pub(super) fn run(snapshot: &Snapshot, settings: &Settings, test: &Path, invocat
     let bytes = input(settings, snapshot)?;
     let remaining = timing.0.saturating_duration_since(Instant::now());
     ensure!(!remaining.is_zero(), "test execution setup exhausted the runtime budget");
-    // Keep ordinary EOF-only execution on the existing supervisor entrypoint;
-    // configured input uses the same owner/drain/cleanup implementation.
-    match bytes {
-        Some(bytes) => smoke_supervisor::run_command_with_input(&mut command, remaining, timing.1, Some(bytes)),
-        None => smoke_supervisor::run_command_with_timeout(&mut command, remaining, timing.1),
+    // Mode participates in Settings equality, so paired validation, checked
+    // rewrites and capsule replay cannot substitute file input for pipe input.
+    // Both transports use the same exclusive child owner and output checks.
+    match (settings.stdin_mode, bytes) {
+        (StdinMode::File, Some(bytes)) => smoke_supervisor::run_command_with_input(&mut command, remaining, timing.1, Some(bytes)),
+        (StdinMode::File, None) => smoke_supervisor::run_command_with_timeout(&mut command, remaining, timing.1),
+        (StdinMode::Pipe, Some(bytes)) => smoke_supervisor::run_command_with_pipe_input(&mut command, remaining, timing.1, bytes),
+        (StdinMode::Pipe, None) => anyhow::bail!("pipe stdin mode requires an explicit captured stdin file"),
     }.context("execute captured test settings")
 }
 
@@ -392,6 +418,176 @@ mod tests {
             assert_eq!(replay["validation"]["cases"], cases);
             assert!(!root.path().join("packages/api/artifact").exists());
             assert_eq!(fs::read(root.path().join("fixtures/input.bin")).unwrap(), b"changed request");
+        }
+    }
+
+    fn pipe_fixture() -> tempfile::TempDir {
+        let root = fixture();
+        put(root.path(), TEST, br#"
+const fs = require('fs');
+if (!fs.fstatSync(0).isFIFO()) throw new Error('pipe transport required');
+const chunks = [];
+process.stdin.on('data', chunk => chunks.push(chunk));
+process.stdin.on('end', () => {
+    process.stdout.write(Buffer.concat(chunks));
+    fs.writeFileSync('artifact', 'pipe');
+});
+"#);
+        manifest(root.path(), serde_json::json!({(TEST):{
+            "cwd":"packages/api", "stdin":"fixtures/input.bin", "stdin_mode":"pipe"
+        }}));
+        root
+    }
+
+    fn execute_captured(captured: &Snapshot) -> Output {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        captured.stage(&workspace, Instant::now() + Duration::from_secs(30)).unwrap();
+        run_test(captured, &node(), Path::new(TEST), &workspace, &BTreeMap::new(),
+            (Duration::from_secs(5), Duration::from_secs(1))).unwrap()
+    }
+
+    #[test]
+    fn pipe_manifest_runs_async_stdin_from_the_snapshot_not_the_mutable_source() {
+        let root = pipe_fixture();
+        let captured = snapshot(root.path());
+        put(root.path(), "fixtures/input.bin", b"substituted after capture");
+        manifest(root.path(), serde_json::json!({(TEST):{
+            "cwd":"packages/api", "stdin":"fixtures/input.bin", "stdin_mode":"file"
+        }}));
+        let output = execute_captured(&captured);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, [0, 255, b'x', b'\n']);
+        assert!(output.stderr.is_empty());
+        assert!(!root.path().join("packages/api/artifact").exists());
+    }
+
+    #[test]
+    fn pipe_mode_rejects_missing_input_unknown_types_and_duplicate_declarations() {
+        let root = fixture();
+        for settings in [
+            serde_json::json!({"stdin_mode":"pipe"}),
+            serde_json::json!({"stdin_mode":"pipe", "stdin":null}),
+            serde_json::json!({"stdin_mode":"terminal", "stdin":"fixtures/input.bin"}),
+            serde_json::json!({"stdin_mode":null, "stdin":"fixtures/input.bin"}),
+            serde_json::json!({"stdin_mode":true, "stdin":"fixtures/input.bin"}),
+            serde_json::json!({"stdin_mode":[], "stdin":"fixtures/input.bin"}),
+        ] {
+            manifest(root.path(), serde_json::json!({(TEST):settings}));
+            assert!(inventory(&snapshot(root.path()).entries).is_err());
+        }
+        let raw = format!(r#"{{"schema_version":"franken-node/migration-tests/v1","tests":["{TEST}"],"execution":{{"{TEST}":{{"stdin":"fixtures/input.bin","stdin_mode":"file","stdin_mode":"pipe"}}}}}}"#);
+        put(root.path(), ".franken-node/migration-tests.json", raw.as_bytes());
+        assert!(inventory(&snapshot(root.path()).entries).is_err());
+    }
+
+    #[test]
+    fn candidate_cannot_substitute_input_transport_but_explicit_file_matches_default() {
+        let original = pipe_fixture();
+        let candidate = pipe_fixture();
+        let before = snapshot(original.path());
+        matched_tests(&before, &snapshot(candidate.path())).unwrap();
+        for mode in [None, Some("file")] {
+            let mut settings = serde_json::json!({"cwd":"packages/api", "stdin":"fixtures/input.bin"});
+            if let Some(mode) = mode { settings["stdin_mode"] = mode.into(); }
+            manifest(candidate.path(), serde_json::json!({(TEST):settings}));
+            let error = matched_execution(&before, &snapshot(candidate.path())).unwrap_err();
+            assert!(error.to_string().contains("execution settings differ"));
+        }
+        manifest(original.path(), serde_json::json!({(TEST):{
+            "cwd":"packages/api", "stdin":"fixtures/input.bin"
+        }}));
+        matched_execution(&snapshot(original.path()), &snapshot(candidate.path())).unwrap();
+    }
+
+    #[test]
+    fn default_file_explicit_file_and_pipe_keep_distinct_descriptor_semantics() {
+        let root = fixture();
+        put(root.path(), TEST, b"const fs=require('fs');const st=fs.fstatSync(0);process.stdout.write(st.isFIFO()?'pipe':st.isFile()?'file':'other');");
+        // Empty requests distinguish descriptors without asserting that a
+        // program which never reads consumed any supplied application bytes.
+        put(root.path(), "fixtures/input.bin", b"");
+        for (mode, expected) in [(None, "file"), (Some("file"), "file"), (Some("pipe"), "pipe")] {
+            let mut settings = serde_json::json!({"stdin":"fixtures/input.bin"});
+            if let Some(mode) = mode { settings["stdin_mode"] = mode.into(); }
+            manifest(root.path(), serde_json::json!({(TEST):settings}));
+            let output = execute_captured(&snapshot(root.path()));
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(output.stdout, expected.as_bytes());
+        }
+    }
+
+    #[test]
+    fn explicit_empty_pipe_request_delivers_end_to_the_async_harness() {
+        let root = pipe_fixture();
+        put(root.path(), "fixtures/input.bin", b"");
+        let output = execute_captured(&snapshot(root.path()));
+        assert!(output.status.success(), "{output:?}");
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn pipe_mode_works_in_pair_and_three_role_validation_with_workspace_effects() {
+        let root = pipe_fixture();
+        let captured = snapshot(root.path());
+        let runtime = node();
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let pair = execute_suite_pair(&captured, &captured, &runtime, &runtime,
+            deadline, Duration::from_secs(5), true).unwrap();
+        assert_eq!(pair.verdict, "PASS", "{pair:#?}");
+        assert_eq!(pair.cases[0].reference, pair.cases[0].native);
+        assert_eq!(pair.cases[0].reference.as_ref().unwrap().workspace_delta.as_ref().unwrap().changed_paths, 1);
+        let identity = runtime.identity(deadline).unwrap();
+        // All roles deliberately use Node: this proves the native Rust
+        // orchestration, NOT independent runtime brands or Franken parity.
+        let product = product_oracle::execute(&captured, &captured, [&runtime, &runtime, &runtime],
+            [identity.clone(), identity.clone(), identity], deadline, Duration::from_secs(5), true).unwrap();
+        assert_eq!(product.verdict, "PASS", "{product:#?}");
+        assert_eq!(product.cases[0].node, product.cases[0].bun);
+        assert_eq!(product.cases[0].node, product.cases[0].native);
+        assert!(!product.distinct_reference_binaries);
+        assert!(!product.release_certification);
+    }
+
+    #[test]
+    fn pipe_mode_capsules_preserve_transport_and_request_across_pair_and_product_replay() {
+        use native_replay::failure_capture::product;
+        for three in [false, true] {
+            let root = pipe_fixture();
+            let output = tempfile::tempdir().unwrap();
+            let capsule = output.path().join("pipe-input-capsule.json");
+            let (pin, cases) = if three {
+                // /bin/false is an explicitly failing leg, never a Bun or
+                // Franken substitute claimed to pass compatibility. Nonzero
+                // native failures stay observable even with partial input.
+                let captured = product::capture_project(root.path(), None,
+                    Path::new("/bin/false"), Path::new("/bin/false"), true).unwrap();
+                assert_eq!(captured.report.verdict, "INCONCLUSIVE");
+                (captured.write_capsule(&capsule).unwrap().content_sha256,
+                    serde_json::to_value(&captured.report.cases).unwrap())
+            } else {
+                let captured = native_replay::capture_project(root.path(), None, Path::new("/bin/false"), true).unwrap();
+                assert_eq!(captured.report.verdict, "FAIL");
+                (captured.write_capsule(&capsule).unwrap().content_sha256,
+                    serde_json::to_value(&captured.report.cases).unwrap())
+            };
+            let capsule_bytes = fs::read(&capsule).unwrap();
+            put(root.path(), "fixtures/input.bin", b"later request");
+            manifest(root.path(), serde_json::json!({(TEST):{
+                "cwd":"packages/api", "stdin":"fixtures/input.bin", "stdin_mode":"file"
+            }}));
+            let replay = if three {
+                serde_json::to_value(product::replay(&capsule, &pin,
+                    Path::new("/bin/false"), Path::new("/bin/false"), false).unwrap()).unwrap()
+            } else {
+                serde_json::to_value(native_replay::replay(&capsule, &pin, Path::new("/bin/false"), false).unwrap()).unwrap()
+            };
+            assert_eq!(replay["verdict"], "REPRODUCED");
+            assert_eq!(replay["validation"]["cases"], cases);
+            assert_eq!(fs::read(&capsule).unwrap(), capsule_bytes);
+            assert_eq!(fs::read(root.path().join("fixtures/input.bin")).unwrap(), b"later request");
+            assert!(!root.path().join("packages/api/artifact").exists());
         }
     }
 }
