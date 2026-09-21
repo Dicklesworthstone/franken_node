@@ -8,6 +8,7 @@ mod module_resolution_graph;
 
 use clap::Parser;
 use module_resolution_graph::{build_canonical_module_resolution_graph, recompute_module_resolution_graph_hash};
+use module_resolution_graph::dependency_topology;
 use serde_json::{Value, json};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -20,15 +21,21 @@ use std::process::ExitCode;
 struct Args {
     project: PathBuf,
     /// Inspect declared edges for this dependency instead of exporting the whole graph.
-    #[arg(long)]
+    #[arg(long, group = "importer_query")]
     dependency: Option<String>,
+    /// Traverse all declared transitive requirements from the selected importer.
+    #[arg(long, group = "importer_query")]
+    transitive: bool,
+    /// Find known dependents of one exact locked/workspace package location.
+    #[arg(long, conflicts_with_all = ["importer_query", "importer"])]
+    impact: Option<String>,
     /// Exact project-relative manifest path; defaults to package.json.
-    #[arg(long, requires = "dependency")]
+    #[arg(long, requires = "importer_query")]
     importer: Option<String>,
-    /// Require equality with an independently trusted sha256:<hex> graph hash.
+    /// Require an independently trusted sha256:<hex> hash for this query scope.
     #[arg(long)]
     expected_hash: Option<String>,
-    /// Exit nonzero if any selected edge has neither a lockfile pin nor workspace intent.
+    /// Require resolved edges. Transitive queries also reject incomplete kind metadata or workspace intent.
     #[arg(long)]
     require_resolved: bool,
 }
@@ -56,6 +63,7 @@ fn inspect(args: Args) -> Result<(Value, u8), Box<dyn std::error::Error>> {
             return Err("expected hash requires exactly 64 lowercase hexadecimal digits".into());
         }
     }
+    if args.transitive || args.impact.is_some() { return inspect_topology(&args); }
     let graph = build_canonical_module_resolution_graph(&args.project)?;
     if graph.canonical_hash != recompute_module_resolution_graph_hash(&graph)? {
         return Err("internal graph hash disagreement".into());
@@ -99,11 +107,45 @@ fn inspect(args: Args) -> Result<(Value, u8), Box<dyn std::error::Error>> {
     Ok((report, if verdict == "INSPECTED" { 0 } else { 1 }))
 }
 
+fn inspect_topology(args: &Args) -> Result<(Value, u8), Box<dyn std::error::Error>> {
+    let topology = dependency_topology::build(&args.project)?;
+    let (query, result, fully_resolved, unresolved, selected_edges) = if let Some(target) = &args.impact {
+        let result = topology.impact(target)?;
+        ("impact", serde_json::to_value(&result)?, result.fully_resolved,
+            result.unresolved_edges.len(), topology.edges().len())
+    } else {
+        let manifest = args.importer.as_deref().unwrap_or("package.json");
+        let importer = topology.nodes().iter().find(|node| node.manifest_path == manifest)
+            .ok_or("importer is not an exact captured manifest or locked package manifest path")?;
+        let result = topology.closure(&importer.location)?;
+        let reachable: std::collections::BTreeSet<_> = result.reachable.iter().collect();
+        let selected = topology.edges().iter().filter(|edge| reachable.contains(&edge.importer)).count();
+        ("closure", serde_json::to_value(&result)?, result.fully_resolved, result.unresolved_edges.len(), selected)
+    };
+    let matched = args.expected_hash.as_ref().map(|expected| expected == topology.canonical_hash());
+    let verdict = if matched == Some(false) { "HASH_MISMATCH" }
+        else if args.require_resolved && !fully_resolved { "UNRESOLVED" } else { "INSPECTED" };
+    let mut report = json!({
+        "schema_version": "franken-node/module-graph-inspection/v1",
+        "scope": "declared-dependency-topology", "query": query,
+        "execution_performed": false, "release_certification": false,
+        "verdict": verdict, "canonical_hash": topology.canonical_hash(),
+        "expected_hash_matched": matched, "fully_resolved": fully_resolved,
+        "selected_edges": selected_edges, "unresolved_edges": unresolved,
+        "topology": topology,
+    });
+    report[query] = result;
+    Ok((report, if verdict == "INSPECTED" { 0 } else { 1 }))
+}
+
 fn main() -> ExitCode {
-    let (report, code) = match inspect(Args::parse()) {
+    let args = Args::parse();
+    let scope = if args.transitive || args.impact.is_some() { "declared-dependency-topology" }
+        else { "lockfile-metadata-only" };
+    let (report, code) = match inspect(args) {
         Ok(result) => result,
         Err(error) => (json!({"schema_version": "franken-node/module-graph-inspection/v1",
-            "scope": "lockfile-metadata-only", "execution_performed": false,
+            "scope": scope, "execution_performed": false,
             "release_certification": false, "verdict": "ERROR", "error": error.to_string()}), 2),
     };
     let mut stdout = io::stdout().lock();

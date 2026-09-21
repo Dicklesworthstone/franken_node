@@ -30,7 +30,7 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustc +stable --version | tee evidence/rust-version.txt
           node --version | tee evidence/node-version.txt
-          cargo +stable test --manifest-path tools/module-graph/Cargo.toml --bin franken-module-graph --test cli 2>&1 | tee evidence/native-tests.log
+          cargo +stable test --manifest-path tools/module-graph/Cargo.toml --bin franken-module-graph --test cli --test topology 2>&1 | tee evidence/native-tests.log
       - name: Preserve reproducible sources and native executable
         if: always()
         shell: bash
