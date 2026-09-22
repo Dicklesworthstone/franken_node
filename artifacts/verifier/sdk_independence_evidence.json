@@ -1,16 +1,15 @@
 {
   "schema_version": "franken-node/verifier-sdk-independence-evidence/v1",
   "bead_id": "bd-tenx3.5",
-  "timestamp_utc": "2026-09-22T17:35:21.324868+00:00",
+  "timestamp_utc": "2026-09-22T18:05:15.645896+00:00",
   "all_passed": true,
   "verdict": "PASS",
   "checks": [
     {
       "name": "cargo_toml_independence",
       "passed": true,
-      "detail": "sdk/verifier isolates frankenengine-node behind optional differential feature",
-      "has_differential_feature": true,
-      "has_optional_dep": true
+      "detail": "sdk/verifier has zero dependencies on frankenengine-node (100% independent verifier SDK)",
+      "no_product_dep": true
     },
     {
       "name": "independent_test_suite",

@@ -41,25 +41,21 @@ def check_cargo_toml_independence() -> dict:
 
     content = SDK_CARGO_TOML.read_text(encoding="utf-8")
 
-    # Check for differential feature
-    has_differential_feature = 'differential = ["dep:frankenengine-node"]' in content
-    # Check that frankenengine-node is optional
-    has_optional_dep = "frankenengine-node" in content and "optional = true" in content
-    # Check that dev-dependencies does not mandate frankenengine-node
+    # Assert frankenengine-node is completely absent to ensure 100% independence and prevent cyclic package dependency
+    no_product_dep = "frankenengine-node" not in content
     no_mandatory_dev_dep = "[dev-dependencies]\nfrankenengine-node" not in content
 
-    passed = has_differential_feature and has_optional_dep and no_mandatory_dev_dep
+    passed = no_product_dep and no_mandatory_dev_dep
     detail = (
-        "sdk/verifier isolates frankenengine-node behind optional differential feature"
+        "sdk/verifier has zero dependencies on frankenengine-node (100% independent verifier SDK)"
         if passed
-        else "sdk/verifier does not properly isolate product dependency"
+        else "sdk/verifier must not depend on frankenengine-node (causes cyclic dependency)"
     )
     return {
         "name": "cargo_toml_independence",
         "passed": passed,
         "detail": detail,
-        "has_differential_feature": has_differential_feature,
-        "has_optional_dep": has_optional_dep,
+        "no_product_dep": no_product_dep,
     }
 
 

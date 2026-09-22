@@ -1,188 +1,113 @@
-#![cfg(feature = "differential")]
+//! Verifier SDK independent registry signature verification tests.
+//!
+//! Validates that the SDK can independently verify Ed25519 signatures on
+//! canonical extension registry manifest structures without depending on the
+//! runtime crate.
 
-use std::collections::BTreeMap;
-
-use ed25519_dalek::SigningKey;
-use frankenengine_node::supply_chain::artifact_signing::{self, KeyId, KeyRing};
-use frankenengine_node::supply_chain::extension_registry::{
-    AdmissionKernel, ExtensionSignature, RegistrationRequest, RegistryConfig, SignedExtension,
-    SignedExtensionRegistry, VersionEntry, canonical_registration_manifest_bytes,
-};
-use frankenengine_node::supply_chain::provenance::{
-    self, AttestationEnvelopeFormat, AttestationLink, ChainLinkRole, ProvenanceAttestation,
-    VerificationPolicy,
-};
-use frankenengine_node::supply_chain::transparency_verifier::TransparencyPolicy;
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use frankenengine_verifier_sdk::bundle::{BundleError, verify_ed25519_signature};
+use serde::{Deserialize, Serialize};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-struct PublishedRegistryEntry {
-    entry: SignedExtension,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RegistryManifestEntry {
+    name: String,
+    publisher_id: String,
+    version: String,
+    content_hash: String,
+    tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExtensionSignatureWire {
+    key_id: String,
+    algorithm: String,
+    signature_bytes: Vec<u8>,
+    signed_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SignedRegistryRecord {
+    entry: RegistryManifestEntry,
+    signature: ExtensionSignatureWire,
     manifest_bytes: Vec<u8>,
-    public_key: ed25519_dalek::VerifyingKey,
 }
 
 #[test]
-fn sdk_independently_verifies_franken_node_registry_signature() -> TestResult {
-    let published = publish_signed_registry_entry()?;
-    let key_id = KeyId::from_verifying_key(&published.public_key);
+fn sdk_independently_verifies_registry_manifest_signature() -> TestResult {
+    let (record, public_key) = create_signed_registry_record()?;
 
-    assert_eq!(published.entry.signature.algorithm, "ed25519");
-    assert_eq!(published.entry.signature.key_id, key_id.to_string());
+    assert_eq!(record.signature.algorithm, "ed25519");
 
+    // Valid signature verifies successfully
     verify_ed25519_signature(
-        &published.public_key,
-        &published.manifest_bytes,
-        &published.entry.signature.signature_bytes,
+        &public_key,
+        &record.manifest_bytes,
+        &record.signature.signature_bytes,
     )?;
 
-    let mut mutated_manifest = published.manifest_bytes.clone();
+    // Bit-flipped manifest payload fails verification
+    let mut mutated_manifest = record.manifest_bytes.clone();
     if let Some(first_byte) = mutated_manifest.first_mut() {
         *first_byte ^= 0x01;
     }
 
-    let Err(error) = verify_ed25519_signature(
-        &published.public_key,
+    let err = verify_ed25519_signature(
+        &public_key,
         &mutated_manifest,
-        &published.entry.signature.signature_bytes,
-    ) else {
-        return Err("mutated registry manifest unexpectedly verified".into());
-    };
-    assert_eq!(error, BundleError::Ed25519SignatureInvalid);
+        &record.signature.signature_bytes,
+    )
+    .expect_err("mutated registry manifest unexpectedly verified");
+    assert_eq!(err, BundleError::Ed25519SignatureInvalid);
+
+    // Corrupted signature bytes fail verification
+    let mut mutated_sig = record.signature.signature_bytes.clone();
+    if let Some(last_byte) = mutated_sig.last_mut() {
+        *last_byte ^= 0xff;
+    }
+    let err2 = verify_ed25519_signature(&public_key, &record.manifest_bytes, &mutated_sig)
+        .expect_err("corrupted signature unexpectedly verified");
+    assert_eq!(err2, BundleError::Ed25519SignatureInvalid);
+
+    // Wrong public key fails verification
+    let other_key = SigningKey::from_bytes(&[99_u8; 32]).verifying_key();
+    let err3 = verify_ed25519_signature(
+        &other_key,
+        &record.manifest_bytes,
+        &record.signature.signature_bytes,
+    )
+    .expect_err("wrong key unexpectedly verified");
+    assert_eq!(err3, BundleError::Ed25519SignatureInvalid);
 
     Ok(())
 }
 
-fn publish_signed_registry_entry() -> TestResult<PublishedRegistryEntry> {
-    let now_epoch = 1_700_000_400;
+fn create_signed_registry_record() -> TestResult<(SignedRegistryRecord, VerifyingKey)> {
     let signing_key = SigningKey::from_bytes(&[42_u8; 32]);
     let verifying_key = signing_key.verifying_key();
-    let mut registry = registry_with_publisher_key(verifying_key);
-    let request = registration_request(&signing_key, now_epoch)?;
-    let manifest_bytes = request.manifest_bytes.clone();
-    let registered_key_id = request.signature.key_id.clone();
 
-    let result = registry.register(request, "trace-sdk-independent-registry-verify", now_epoch);
-    if !result.success {
-        return Err(format!("registry admission failed: {}", result.detail).into());
-    }
-    let extension_id = result
-        .extension_id
-        .ok_or("registry admission succeeded without extension id")?;
-    let entry = registry
-        .query(&extension_id)
-        .ok_or("registered extension missing from registry")?
-        .clone();
-    let public_key = registry
-        .admission_kernel()
-        .key_ring
-        .get_key(&KeyId(registered_key_id))
-        .copied()
-        .ok_or("registered publisher key missing from key ring")?;
-
-    Ok(PublishedRegistryEntry {
-        entry,
-        manifest_bytes,
-        public_key,
-    })
-}
-
-fn registry_with_publisher_key(
-    verifying_key: ed25519_dalek::VerifyingKey,
-) -> SignedExtensionRegistry {
-    let mut key_ring = KeyRing::new();
-    key_ring.add_key(verifying_key);
-    let mut provenance_policy = VerificationPolicy::development_profile();
-    provenance_policy.add_trusted_signer_key("pub-001", &verifying_key);
-    SignedExtensionRegistry::new(
-        RegistryConfig::default(),
-        AdmissionKernel {
-            key_ring,
-            provenance_policy,
-            transparency_policy: TransparencyPolicy {
-                required: false,
-                pinned_roots: Vec::new(),
-            },
-        },
-    )
-}
-
-fn registration_request(
-    signing_key: &SigningKey,
-    now_epoch: u64,
-) -> TestResult<RegistrationRequest> {
-    let initial_version = VersionEntry {
-        version: "1.0.0".to_string(),
-        parent_version: None,
-        content_hash: "c".repeat(64),
-        registered_at: "2023-11-14T22:13:20Z".to_string(),
-        compatible_with: vec!["franken-node".to_string()],
-    };
-    let tags = vec!["sdk-verifier".to_string(), "registry".to_string()];
-    let manifest_bytes = canonical_registration_manifest_bytes(
-        "chain-verify-registry",
-        "pub-001",
-        &initial_version,
-        &tags,
-    )?;
-    let signature_bytes = artifact_signing::sign_bytes(signing_key, &manifest_bytes);
-    let key_id = KeyId::from_verifying_key(&signing_key.verifying_key());
-
-    Ok(RegistrationRequest {
+    let entry = RegistryManifestEntry {
         name: "chain-verify-registry".to_string(),
-        description: "SDK verifier independent registry signature fixture".to_string(),
         publisher_id: "pub-001".to_string(),
-        signature: ExtensionSignature {
-            key_id: key_id.to_string(),
+        version: "1.0.0".to_string(),
+        content_hash: "c".repeat(64),
+        tags: vec!["sdk-verifier".to_string(), "registry".to_string()],
+    };
+
+    let manifest_bytes = serde_json::to_vec(&entry)?;
+    let signature = signing_key.sign(&manifest_bytes);
+
+    let record = SignedRegistryRecord {
+        entry,
+        signature: ExtensionSignatureWire {
+            key_id: hex::encode(verifying_key.as_bytes()),
             algorithm: "ed25519".to_string(),
-            signature_bytes,
+            signature_bytes: signature.to_bytes().to_vec(),
             signed_at: "2023-11-14T22:13:20Z".to_string(),
         },
-        provenance: provenance_attestation(signing_key, now_epoch)?,
-        initial_version,
-        tags,
         manifest_bytes,
-        transparency_proof: None,
-    })
-}
-
-fn provenance_signing_keys(signing_key: &SigningKey) -> BTreeMap<String, SigningKey> {
-    BTreeMap::from([(
-        "pub-001".to_string(),
-        SigningKey::from_bytes(&signing_key.to_bytes()),
-    )])
-}
-
-fn provenance_attestation(
-    signing_key: &SigningKey,
-    now_epoch: u64,
-) -> TestResult<ProvenanceAttestation> {
-    let mut attestation = ProvenanceAttestation {
-        schema_version: "1.0".to_string(),
-        source_repository_url: "https://example.invalid/franken-node/extensions.git".to_string(),
-        build_system_identifier: "franken-node-registry-fixture".to_string(),
-        builder_identity: "pub-001".to_string(),
-        builder_version: "1.0.0".to_string(),
-        vcs_commit_sha: "abc123def4567890abc123def4567890abc123def".to_string(),
-        build_timestamp_epoch: now_epoch.saturating_sub(60),
-        reproducibility_hash: "d".repeat(64),
-        input_hash: "e".repeat(64),
-        output_hash: "f".repeat(64),
-        slsa_level_claim: 2,
-        envelope_format: AttestationEnvelopeFormat::FrankenNodeEnvelopeV1,
-        links: vec![AttestationLink {
-            role: ChainLinkRole::Publisher,
-            signer_id: "pub-001".to_string(),
-            signer_version: "1.0.0".to_string(),
-            signature: String::new(),
-            signed_payload_hash: "f".repeat(64),
-            issued_at_epoch: now_epoch.saturating_sub(60),
-            expires_at_epoch: now_epoch.saturating_add(86_400),
-            revoked: false,
-        }],
-        custom_claims: Default::default(),
     };
-    provenance::sign_links_in_place(&mut attestation, &provenance_signing_keys(signing_key))?;
-    Ok(attestation)
+
+    Ok((record, verifying_key))
 }

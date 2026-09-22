@@ -10,13 +10,13 @@
 //! - Counterfactual receipt canonical verification
 //! - Fail-closed error handling
 
-use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+use std::collections::BTreeMap;
+
+use ed25519_dalek::{Signer, SigningKey};
 use serde_json::json;
 
-use frankenengine_verifier_sdk::bundle::{
-    BundleError, verify_ed25519_signature, verify_bundle_envelope,
-};
-use frankenengine_verifier_sdk::capsule::{Capsule, ReplayEvent};
+use frankenengine_verifier_sdk::bundle::{BundleError, verify_ed25519_signature};
+use frankenengine_verifier_sdk::capsule::{CapsuleError, CapsuleManifest, validate_manifest};
 use frankenengine_verifier_sdk::counterfactual::{
     CounterfactualReceiptError, verify_counterfactual_receipt,
 };
@@ -84,14 +84,23 @@ fn independent_sdk_rejects_wrong_key() -> TestResult {
 
 #[test]
 fn independent_sdk_rejects_unknown_schema_version() {
-    let payload = json!({
-        "schema_version": "vsdk-v99.0-unsupported",
-        "capsule_id": "cap-001",
-        "timestamp_utc": "2026-09-22T00:00:00Z"
-    });
+    let manifest = CapsuleManifest {
+        schema_version: "vsdk-v99.0-unsupported".to_string(),
+        capsule_id: "cap-001".to_string(),
+        description: "Unsupported schema fixture".to_string(),
+        claim_type: "execution".to_string(),
+        input_refs: vec![],
+        expected_output_hash: "0".repeat(64),
+        created_at: "2026-09-22T00:00:00Z".to_string(),
+        creator_identity: "verifier-tester".to_string(),
+        metadata: BTreeMap::new(),
+    };
 
-    let res = verify_bundle_envelope(&payload);
-    assert!(res.is_err(), "unknown schema version must fail closed");
+    let res = validate_manifest(&manifest);
+    assert!(
+        matches!(res, Err(CapsuleError::SchemaMismatch { .. })),
+        "unknown schema version must fail closed with SchemaMismatch"
+    );
 }
 
 #[test]
@@ -105,46 +114,53 @@ fn independent_sdk_verifies_counterfactual_receipt_pass_and_fail_closed() -> Tes
     let verifying_key = signing_key.verifying_key();
 
     let baseline_hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    let bundle_hash = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
 
-    let mut receipt_json = json!({
-        "schema_version": "franken-node/counterfactual-receipt-v1",
-        "receipt_id": "rcpt-001",
-        "timestamp_utc": "2026-09-22T00:00:00Z",
+    let baseline_bundle = json!({
+        "schema_version": "v1.0",
+        "bundle_id": "INC-001",
+        "integrity_hash": baseline_hash,
+    });
+
+    let counterfactual_output = json!({
         "metadata": {
-            "baseline_integrity_hash": baseline_hash,
-            "bundle_hash": bundle_hash,
-            "policy_profile": "strict"
+            "bundle_hash": baseline_hash,
+            "policy": "strict"
         },
         "results": [
             {
-                "counterfactual_bundle_hash": bundle_hash,
-                "divergence_count": 0,
+                "metadata": {
+                    "bundle_hash": baseline_hash
+                },
                 "verdict": "pass"
             }
         ]
     });
 
-    // Compute canonical bytes for receipt and sign
-    let canonical = frankenengine_verifier_sdk::counterfactual::to_canonical_counterfactual_json(&receipt_json)?;
-    let sig = signing_key.sign(canonical.as_bytes());
-
-    receipt_json["signature"] = json!({
-        "algorithm": "ed25519",
-        "public_key": hex::encode(verifying_key.as_bytes()),
-        "signature_bytes": hex::encode(sig.to_bytes())
-    });
+    let canonical =
+        frankenengine_verifier_sdk::counterfactual::canonical_json_bytes(&counterfactual_output)?;
+    let sig = signing_key.sign(&canonical);
+    let signature_bytes = sig.to_bytes();
 
     // Valid verification passes
-    verify_counterfactual_receipt(&receipt_json, &verifying_key)?;
+    verify_counterfactual_receipt(
+        &baseline_bundle,
+        &counterfactual_output,
+        &verifying_key,
+        &signature_bytes,
+    )?;
 
-    // Tampering metadata bundle_hash fails closed
-    let mut tampered = receipt_json.clone();
-    tampered["metadata"]["bundle_hash"] = json!("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
-    let err = verify_counterfactual_receipt(&tampered, &verifying_key)
-        .expect_err("tampered counterfactual receipt must fail closed");
+    // Tampering output fails closed
+    let mut tampered = counterfactual_output.clone();
+    tampered["metadata"]["bundle_hash"] =
+        json!("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    let err = verify_counterfactual_receipt(
+        &baseline_bundle,
+        &tampered,
+        &verifying_key,
+        &signature_bytes,
+    )
+    .expect_err("tampered counterfactual receipt must fail closed");
 
-    // The signature check or hash mismatch triggers failure
     assert!(
         matches!(
             err,

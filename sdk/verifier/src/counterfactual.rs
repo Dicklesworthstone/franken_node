@@ -440,13 +440,13 @@ fn validate_bundle_hash(value: &str) -> Result<(), String> {
     }
 }
 
-fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, CounterfactualReceiptError> {
+pub fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, CounterfactualReceiptError> {
     let canonical = canonicalize_json(value);
     serde_json::to_vec(&canonical)
         .map_err(|source| CounterfactualReceiptError::Json(source.to_string()))
 }
 
-fn canonicalize_json(value: &Value) -> Value {
+pub fn canonicalize_json(value: &Value) -> Value {
     match value {
         Value::Object(map) => {
             let mut keys: Vec<&str> = map.keys().map(String::as_str).collect();
