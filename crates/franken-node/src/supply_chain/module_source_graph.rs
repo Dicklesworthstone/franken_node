@@ -11,12 +11,15 @@
 
 use super::{Entry, Mapping, Probe, ResolutionError, ResolutionMode, Resolver,
     SymlinkPolicy, error, io_error, parent, validate_path};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
 use std::rc::Rc;
 use tree_sitter::{Node, Parser};
+
+#[path = "module_graph_capsule.rs"]
+pub mod capsule;
 
 const MAX_MODULES: usize = 256;
 const MAX_SITES: usize = 4096;
@@ -121,7 +124,8 @@ pub struct SourceDiagnostic {
     pub message: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GraphOptions {
     pub symlink_policy: SymlinkPolicy,
     /// None uses node+import or node+require per load site. Some replaces the
@@ -159,6 +163,9 @@ pub struct SourceGraphReport {
 pub struct CapturedModuleGraph {
     report: SourceGraphReport,
     sources: BTreeMap<ModuleId, Rc<Entry>>,
+    // Retain every consulted byte and negative observation for durable replay.
+    // Directory descriptors are released when capture finishes.
+    inputs: BTreeMap<String, Rc<Entry>>,
 }
 
 impl CapturedModuleGraph {
@@ -289,13 +296,17 @@ fn build(mut resolver: Resolver, entrypoint: &str, options: GraphOptions) -> Res
     if encoded.len() > MAX_EVIDENCE_BYTES { return Err(limit()); }
     let mut hash = Sha256::new(); hash.update(HASH_DOMAIN); hash.update(encoded);
     report.input_hash = format!("sha256:{}", hex::encode(hash.finalize()));
-    Ok(CapturedModuleGraph { report, sources })
+    let inputs = resolver.entries.into_iter().map(|(path, entry)| {
+        let entry = if entry.is_dir() { Rc::new(Entry::Directory(None)) } else { entry };
+        (path, entry)
+    }).collect();
+    Ok(CapturedModuleGraph { report, sources, inputs })
 }
 
 fn fatal(e: &ResolutionError) -> bool {
     matches!(e.code, "ERR_MODULE_CAPTURE" | "ERR_MODULE_INPUT_CHANGED" | "ERR_MODULE_OUTSIDE_PROJECT"
         | "ERR_MODULE_RESOLUTION_LIMIT" | "ERR_MODULE_SYMLINK_LOOP" | "ERR_INVALID_MODULE_SYMLINK"
-        | "ERR_UNSUPPORTED_MODULE_FILE" | "ERR_PACKAGE_MAP_LIMIT")
+        | "ERR_UNSUPPORTED_MODULE_FILE" | "ERR_PACKAGE_MAP_LIMIT" | "ERR_MODULE_CAPSULE_INPUT_MISSING")
 }
 
 struct Load { site: SourceSite, kind: LoadKind, specifier: Option<String>, type_only: bool }

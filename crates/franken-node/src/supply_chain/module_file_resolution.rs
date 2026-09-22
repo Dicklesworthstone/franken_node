@@ -13,7 +13,7 @@
 use super::package_targets::{MapKind, PackageMap, ResolutionError, Selection, TargetKind};
 use rustix::fs::{AtFlags, FileType, Mode, OFlags, open, openat, readlinkat_raw, statat};
 use rustix::io::Errno;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{File, Metadata};
@@ -48,7 +48,7 @@ pub enum ResolutionMode { Import, Require }
 
 /// Contained follows only bounded relative links, using captured link text and
 /// retained directory descriptors. It never delegates link following to open().
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SymlinkPolicy { Reject, Contained }
 
@@ -123,7 +123,8 @@ impl CapturedResolution {
 
 enum Entry {
     Missing,
-    Directory(File),
+    // None is a recorded directory in an offline capsule, never a host path.
+    Directory(Option<File>),
     File { bytes: Vec<u8>, sha256: String },
     Symlink { target: String, sha256: String },
 }
@@ -142,6 +143,8 @@ struct Resolver {
     conditions: Vec<String>,
     mappings: Vec<Mapping>,
     symlink_policy: SymlinkPolicy,
+    sealed: bool,
+    observed: BTreeSet<String>,
 }
 
 /// Resolve with the complete caller-selected condition set. No environment
@@ -184,19 +187,23 @@ pub fn resolve_with_policy(project: &Path, importer: &str, specifier: &str,
 }
 
 impl Resolver {
-    fn new(project: &Path, conditions: &[String], symlink_policy: SymlinkPolicy) -> Result<Self> {
+    fn canonical_conditions(conditions: &[String]) -> Result<Vec<String>> {
         if conditions.len() > 64 || conditions.iter().any(|s| s.is_empty() || s.len() > 128 || s.chars().any(char::is_control)) {
             return Err(error("ERR_INVALID_PACKAGE_CONDITIONS", "invalid complete condition set"));
         }
-        let conditions = conditions.iter().cloned().collect::<BTreeSet<_>>().into_iter().collect();
+        Ok(conditions.iter().cloned().collect::<BTreeSet<_>>().into_iter().collect())
+    }
+    fn new(project: &Path, conditions: &[String], symlink_policy: SymlinkPolicy) -> Result<Self> {
+        let conditions = Self::canonical_conditions(conditions)?;
         let root = File::from(open(project, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty()).map_err(|e| io_error("<project>", e))?);
-        Ok(Self { entries: BTreeMap::from([("".into(), Rc::new(Entry::Directory(root)))]),
-            manifests: BTreeMap::new(), captured: 0, conditions, mappings: Vec::new(), symlink_policy })
+        Ok(Self { entries: BTreeMap::from([("".into(), Rc::new(Entry::Directory(Some(root))))]),
+            manifests: BTreeMap::new(), captured: 0, conditions, mappings: Vec::new(), symlink_policy,
+            sealed: false, observed: BTreeSet::new() })
     }
 
     fn probes(&self) -> Vec<Probe> {
-        self.entries.iter().map(|(path, entry)| {
+        self.entries.iter().filter(|(path, _)| !self.sealed || self.observed.contains(*path)).map(|(path, entry)| {
         let (kind, bytes, sha256) = match entry.as_ref() {
             Entry::Missing => (ProbeKind::Missing, None, None),
             Entry::Directory(_) => (ProbeKind::Directory, None, None),
@@ -258,11 +265,17 @@ impl Resolver {
     /// are opened against its retained descriptor, not a re-resolved pathname.
     /// This private method accepts ONLY physical paths produced by locate().
     fn raw_probe(&mut self, path: &str) -> Result<Rc<Entry>> {
+        if self.sealed { self.observed.insert(path.to_owned()); }
         if let Some(entry) = self.entries.get(path) { return Ok(Rc::clone(entry)); }
+        // An omitted observation is NOT evidence that the path was missing.
+        // Sealed replay has no host descriptors and must never consult the host.
+        if self.sealed {
+            return Err(error("ERR_MODULE_CAPSULE_INPUT_MISSING", "replay requested an uncaptured filesystem observation"));
+        }
         validate_path(path)?;
         let directory = self.raw_probe(parent(path))?;
         if self.entries.len() >= MAX_PROBES { return Err(limit()); }
-        let entry = if let Entry::Directory(directory) = directory.as_ref() {
+        let entry = if let Entry::Directory(Some(directory)) = directory.as_ref() {
             let name = path.rsplit('/').next().unwrap_or(path);
             match statat(directory, name, AtFlags::SYMLINK_NOFOLLOW) {
                 Err(Errno::NOENT) => Entry::Missing,
@@ -299,7 +312,7 @@ impl Resolver {
                         || before.is_dir() != (kind == FileType::Directory) || (!before.is_file() && !before.is_dir()) {
                         return Err(error("ERR_MODULE_INPUT_CHANGED", "resolution input changed while opening"));
                     }
-                    if before.is_dir() { Entry::Directory(file) }
+                    if before.is_dir() { Entry::Directory(Some(file)) }
                     else {
                         let cap = if name == "package.json" { super::package_targets::MAX_MANIFEST_BYTES } else { MAX_FILE };
                         if before.len() > cap as u64 || self.captured.saturating_add(before.len() as usize) > MAX_CAPTURE { return Err(limit()); }
@@ -780,8 +793,9 @@ mod tests {
         put(root.path(), "new/value.mjs", b"new");
         link(root.path(), "alias", "old");
         let directory = File::open(root.path()).unwrap();
-        let mut resolver = Resolver { entries: BTreeMap::from([("".into(), Rc::new(Entry::Directory(directory)))]),
-            manifests: BTreeMap::new(), captured: 0, conditions: Vec::new(), mappings: Vec::new(), symlink_policy: SymlinkPolicy::Contained };
+        let mut resolver = Resolver { entries: BTreeMap::from([("".into(), Rc::new(Entry::Directory(Some(directory))))]),
+            manifests: BTreeMap::new(), captured: 0, conditions: Vec::new(), mappings: Vec::new(), symlink_policy: SymlinkPolicy::Contained,
+            sealed: false, observed: BTreeSet::new() };
         assert!(matches!(resolver.probe("alias/absent.mjs").unwrap().as_ref(), Entry::Missing));
         link(root.path(), "replacement", "new");
         fs::rename(root.path().join("replacement"), root.path().join("alias")).unwrap();
@@ -800,8 +814,9 @@ mod tests {
         let root = fixture();
         link(root.path(), "expanding", "expanding/expanding");
         assert_eq!(linked_error(root.path(), "app.js", "./expanding"), "ERR_MODULE_SYMLINK_LOOP");
-        let mut resolver = Resolver { entries: BTreeMap::from([("".into(), Rc::new(Entry::Directory(File::open(root.path()).unwrap())))]),
-            manifests: BTreeMap::new(), captured: MAX_CAPTURE, conditions: Vec::new(), mappings: Vec::new(), symlink_policy: SymlinkPolicy::Contained };
+        let mut resolver = Resolver { entries: BTreeMap::from([("".into(), Rc::new(Entry::Directory(Some(File::open(root.path()).unwrap()))))]),
+            manifests: BTreeMap::new(), captured: MAX_CAPTURE, conditions: Vec::new(), mappings: Vec::new(), symlink_policy: SymlinkPolicy::Contained,
+            sealed: false, observed: BTreeSet::new() };
         assert!(resolver.probe("expanding").is_err());
         assert!(!resolver.entries.contains_key("expanding"));
     }
