@@ -64,7 +64,13 @@ pub enum EdgeState { Resolved, Unresolved, RuntimeRequired, NonLiteral, TypeOnly
 /// Recognizing TypeScript is not a claim that the engine can execute it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SourceLanguage { JavaScript, TypeScript, Tsx, Declaration, Json, Unsupported }
+pub enum SourceLanguage {
+    #[serde(rename = "javascript")]
+    JavaScript,
+    #[serde(rename = "typescript")]
+    TypeScript,
+    Tsx, Declaration, Json, Unsupported,
+}
 
 impl SourceLanguage {
     fn for_module(path: &str, format: &str) -> Self {
@@ -428,7 +434,8 @@ fn erased_region(node: Node<'_>) -> bool {
 
 fn requires_typescript_transform(node: Node<'_>) -> bool {
     match node.kind() {
-        "enum_declaration" | "internal_module" | "module" | "import_alias" | "decorator" => true,
+        "enum_declaration" | "internal_module" | "module" | "import_alias" | "decorator"
+        | "type_assertion" => true,
         "export_statement" => keyword(node, "="),
         "required_parameter" | "optional_parameter" => {
             let mut cursor = node.walk();
@@ -439,15 +446,38 @@ fn requires_typescript_transform(node: Node<'_>) -> bool {
     }
 }
 
-fn direct_callee(node: Node<'_>) -> bool {
-    node.parent().is_some_and(|p| p.kind() == "call_expression"
-        && p.child_by_field_name("function").is_some_and(|f| f.id() == node.id()))
+/// These wrappers preserve the callable after erasure. Do not unwrap sequence,
+/// conditional, assignment or other executable expressions and guess a loader.
+fn wrapper_operand(node: Node<'_>) -> Option<Node<'_>> {
+    if !matches!(node.kind(), "parenthesized_expression" | "as_expression"
+        | "satisfies_expression" | "non_null_expression" | "instantiation_expression" | "type_assertion") {
+        return None;
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor).find(|n| !matches!(n.kind(), "comment" | "type_arguments"))
+}
+
+fn runtime_operand(mut node: Node<'_>) -> Node<'_> {
+    while let Some(inner) = wrapper_operand(node) { node = inner; }
+    node
+}
+
+fn direct_callee(mut node: Node<'_>) -> bool {
+    while let Some(p) = node.parent() {
+        if p.kind() == "call_expression" {
+            return p.child_by_field_name("function").is_some_and(|f| f.id() == node.id());
+        }
+        if wrapper_operand(p).is_some_and(|operand| operand.id() == node.id()) { node = p; }
+        else { return false; }
+    }
+    false
 }
 
 fn is_require(node: Node<'_>, bytes: &[u8]) -> bool {
+    let node = runtime_operand(node);
     (node.kind() == "identifier" && node.utf8_text(bytes) == Ok("require"))
         || (node.kind() == "member_expression"
-            && node.child_by_field_name("object").is_some_and(|n| n.utf8_text(bytes) == Ok("module"))
+            && node.child_by_field_name("object").is_some_and(|n| runtime_operand(n).utf8_text(bytes) == Ok("module"))
             && node.child_by_field_name("property").is_some_and(|n| n.utf8_text(bytes) == Ok("require")))
 }
 
@@ -877,5 +907,55 @@ interface Names { eval: Function; }
         assert_ne!(first.report.input_hash, typed_graph(root.path(), "app.ts").report.input_hash);
         assert!(std::str::from_utf8(first.source_bytes(&first.report.resolved_entrypoint).unwrap()).unwrap().contains("private_value"));
         assert!(!serde_json::to_string(first.report()).unwrap().contains("private_value"));
+    }
+
+    #[test]
+    fn transparent_typed_loader_calls_preserve_all_explicit_runtime_dependencies() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.cts", r#"
+(require as Loader)('./dep.cjs');
+(require satisfies Loader)('./dep.cjs');
+require!('./dep.cjs');
+(module.require as Loader)('./dep.cjs');
+((module as Module).require)('./dep.cjs');
+(/* before */ require /* after */)('./dep.cjs');
+"#);
+        put(root.path(), "dep.cjs", "module.exports=1;");
+        let g = typed_graph(root.path(), "app.cts");
+        assert!(g.report.fully_resolved, "{:?}", g.report.diagnostics);
+        assert_eq!(g.report.edges.len(), 6);
+        assert!(g.report.edges.iter().all(|e| e.kind == LoadKind::Require && e.state == EdgeState::Resolved));
+    }
+
+    #[test]
+    fn typed_call_operand_and_type_query_have_separate_lookup_authority() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.ts", "(require as typeof import('../type-only').load)('./dep.cjs');");
+        put(root.path(), "dep.cjs", "module.exports=1;");
+        let g = typed_graph(root.path(), "app.ts");
+        assert!(g.report.fully_resolved, "{:?}", g.report.diagnostics);
+        assert_eq!(g.report.edges.iter().filter(|e| e.state == EdgeState::Resolved).count(), 1);
+        assert_eq!(g.report.edges.iter().filter(|e| e.state == EdgeState::TypeOnly).count(), 1);
+    }
+
+    #[test]
+    fn executable_loader_wrappers_and_stored_aliases_are_not_treated_as_direct_calls() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.ts", "const load = require as Loader; load('hidden'); (other, require)('hidden');");
+        let g = typed_graph(root.path(), "app.ts");
+        assert!(!g.report.fully_resolved);
+        assert!(g.report.edges.is_empty());
+        assert!(g.report.diagnostics.iter().any(|d| d.code == "INDIRECT_REQUIRE"));
+    }
+
+    #[test]
+    fn angle_assertions_keep_explicit_calls_but_require_non_strip_transform() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.ts", "(<Loader>require)('./dep.cjs');");
+        put(root.path(), "dep.cjs", "module.exports=1;");
+        let g = typed_graph(root.path(), "app.ts");
+        assert!(!g.report.fully_resolved);
+        assert_eq!(g.report.edges[0].state, EdgeState::Resolved);
+        assert!(g.report.diagnostics.iter().any(|d| d.code == "TYPESCRIPT_TRANSFORM_REQUIRED"));
     }
 }

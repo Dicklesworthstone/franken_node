@@ -219,3 +219,196 @@ fn errors_and_module_limits_never_expose_a_partial_successful_graph() {
     assert_eq!(report["error_code"], "ERR_MODULE_GRAPH_LIMIT");
     assert!(report["source_graph"].is_null());
 }
+
+// Independent erasure oracle: transform only fixture text through Node's public
+// API, never evaluate the input or the resulting JavaScript.
+fn node_strip(source: &str) -> Value {
+    let script = r#"
+const {stripTypeScriptTypes} = require('node:module');
+try { console.log(JSON.stringify({source:stripTypeScriptTypes(process.argv[1])})); }
+catch (e) { console.log(JSON.stringify({error:e.code})); }
+"#;
+    let output = Command::new("node").env_remove("NODE_OPTIONS").env_remove("NODE_PATH")
+        .args(["--no-warnings", "-e", script, source]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+fn runtime_edges(report: &Value, entry: &str) -> Vec<Value> {
+    report["source_graph"]["edges"].as_array().unwrap().iter()
+        .filter(|e| e["importer"]["path"] == entry && e["state"] != "type_only")
+        .map(|e| serde_json::json!([e["kind"], e["specifier"], e["state"], e["target"]])).collect()
+}
+
+#[test]
+fn typescript_runtime_edges_agree_with_independent_node_type_erasure() {
+    let root = tempfile::tempdir().unwrap();
+    put(root.path(), "dep.mts", "export type T = string; export default 1;");
+    put(root.path(), "dep.cjs", "throw Error('selected code must not run');");
+    for source in [
+        "import type {T} from '../outside'; import {type T} from './dep.mts'; export {type T} from './dep.mts';",
+        "let p: typeof import('types') = import('./dep.mts'); const x = p as typeof import('more-types');",
+        "(require as Loader)('./dep.cjs'); require!('./dep.cjs'); (module.require satisfies Loader)('./dep.cjs');",
+        "import type X = require('types'); const value: number = 1;",
+        "function load(x = require('./dep.cjs')): typeof import('types') { return x; }",
+        "import type from './dep.mts'; import {type require, type Function} from './dep.mts';",
+        "declare module 'virtual' { import X from '../outside'; } import './dep.mts';",
+    ] {
+        let stripped = node_strip(source);
+        assert!(stripped["error"].is_null(), "{stripped}");
+        put(root.path(), "app.ts", source);
+        put(root.path(), "stripped.mjs", stripped["source"].as_str().unwrap());
+        let (code, native) = run(root.path(), "app.ts", &[]);
+        let (stripped_code, reference) = run(root.path(), "stripped.mjs", &[]);
+        assert_eq!(code, 0, "{source}: {native}");
+        assert_eq!(stripped_code, 0, "{reference}");
+        assert_eq!(runtime_edges(&native, "app.ts"), runtime_edges(&reference, "stripped.mjs"));
+        assert_eq!(native["source_graph"]["type_resolution_performed"], false);
+        assert_node_edges(root.path(), &native);
+    }
+}
+
+#[test]
+fn type_only_files_are_not_opened_even_when_fifo_or_escaping_symlink() {
+    let root = tempfile::tempdir().unwrap();
+    rustix::fs::mkfifoat(rustix::fs::CWD, root.path().join("types.d.ts"),
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR).unwrap();
+    std::os::unix::fs::symlink("../outside", root.path().join("escape.d.ts")).unwrap();
+    put(root.path(), "app.ts", "import type {A} from './types.d.ts'; export type {B} from './escape.d.ts';");
+    let (code, report) = run(root.path(), "app.ts", &[]);
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(paths(&report), ["app.ts"]);
+    assert!(report["source_graph"]["probes"].as_array().unwrap().iter()
+        .all(|p| !["types.d.ts", "escape.d.ts"].contains(&p["path"].as_str().unwrap())));
+    put(root.path(), "app.ts", "import './types.d.ts';");
+    let (code, rejected) = run(root.path(), "app.ts", &[]);
+    assert_eq!(code, 2, "{rejected}");
+    assert!(rejected["source_graph"].is_null());
+}
+
+#[test]
+fn typed_import_equals_selects_require_target_without_claiming_strip_only_execution() {
+    let root = tempfile::tempdir().unwrap();
+    put(root.path(), "app.cts", "import dep = require('dual'); export = dep;");
+    put(root.path(), "node_modules/dual/package.json", r#"{"exports":{"import":"./esm.mts","require":"./cjs.cts"}}"#);
+    put(root.path(), "node_modules/dual/esm.mts", "export default 1;");
+    put(root.path(), "node_modules/dual/cjs.cts", "const value: number = 1; module.exports=value;");
+    let (code, report) = run(root.path(), "app.cts", &[]);
+    assert_eq!(code, 1, "{report}");
+    assert_eq!(report["verdict"], "INCOMPLETE");
+    assert!(paths(&report).contains(&"node_modules/dual/cjs.cts"));
+    assert!(!paths(&report).contains(&"node_modules/dual/esm.mts"));
+    assert_eq!(node_strip("import dep = require('dual');")["error"], "ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX");
+    assert_node_edges(root.path(), &report);
+}
+
+#[test]
+fn typescript_transforms_and_tsx_keep_explicit_edges_and_expose_missing_analysis() {
+    let root = tempfile::tempdir().unwrap();
+    put(root.path(), "dependency.ts", "export default 1;");
+    for (entry, source, diagnostic) in [
+        ("app.ts", "enum E { A = 1 }; import './dependency.ts';", "TYPESCRIPT_TRANSFORM_REQUIRED"),
+        ("app.ts", "class C { constructor(public value: number) {} } import './dependency.ts';", "TYPESCRIPT_TRANSFORM_REQUIRED"),
+        ("app.tsx", "import X from './dependency.ts'; const view = <X/>;", "UNSUPPORTED_JAVASCRIPT_SURFACE"),
+    ] {
+        put(root.path(), entry, source);
+        let (code, report) = run(root.path(), entry, &[]);
+        assert_eq!(code, 1, "{report}");
+        assert!(paths(&report).contains(&"dependency.ts"));
+        assert!(report["source_graph"]["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == diagnostic));
+        assert_eq!(report["runtime_completeness"], false);
+        assert_eq!(report["execution_performed"], false);
+    }
+}
+
+#[test]
+fn typescript_graph_pins_bind_runtime_sources_and_erased_spelling_but_not_unread_types() {
+    let root = tempfile::tempdir().unwrap();
+    let source = "import type {T} from './types.d.ts'; import './dep.mts';";
+    put(root.path(), "app.ts", source);
+    put(root.path(), "types.d.ts", "export interface T {}");
+    put(root.path(), "dep.mts", "export const n: number = 1;");
+    let (code, initial) = run(root.path(), "app.ts", &[]);
+    assert_eq!(code, 0, "{initial}");
+    let hash = initial["input_hash"].as_str().unwrap();
+    put(root.path(), "types.d.ts", "export interface T { changed: true }");
+    let (code, same) = run(root.path(), "app.ts", &["--expected-hash", hash]);
+    assert_eq!(code, 0, "{same}");
+    put(root.path(), "dep.mts", "export const n: number = 2;");
+    let (code, changed) = run(root.path(), "app.ts", &["--expected-hash", hash]);
+    assert_eq!(code, 1, "{changed}");
+    assert_eq!(changed["verdict"], "HASH_MISMATCH");
+    assert!(changed["source_graph"].is_null());
+    put(root.path(), "dep.mts", "export const n: number = 1;");
+    put(root.path(), "app.ts", "import type {T} from './different.d.ts'; import './dep.mts';");
+    assert_ne!(run(root.path(), "app.ts", &[]).1["input_hash"], initial["input_hash"]);
+}
+
+#[test]
+fn typescript_workspace_graph_remains_contained_physical_and_relocation_stable() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    for root in [a.path(), b.path()] {
+        put(root, "app.mts", "import 'workspace';");
+        put(root, "packages/workspace/package.json", r#"{"exports":"./main.ts"}"#);
+        put(root, "packages/workspace/main.ts", "import type {T} from 'types'; import './dep.mts';");
+        put(root, "packages/workspace/dep.mts", "export const n: number = 1;");
+        std::fs::create_dir_all(root.join("node_modules")).unwrap();
+        std::os::unix::fs::symlink("../packages/workspace", root.join("node_modules/workspace")).unwrap();
+    }
+    let flags = ["--allow-contained-symlinks"];
+    let (code, report) = run(a.path(), "app.mts", &flags);
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report, run(b.path(), "app.mts", &flags).1);
+    assert_eq!(paths(&report), ["app.mts", "packages/workspace/dep.mts", "packages/workspace/main.ts"]);
+    assert_eq!(run(a.path(), "app.mts", &[]).0, 2);
+    assert_node_edges(a.path(), &report);
+}
+
+#[test]
+fn runtime_declaration_import_is_incomplete_and_does_not_become_an_empty_implementation() {
+    let root = tempfile::tempdir().unwrap();
+    put(root.path(), "app.ts", "import './types.d.ts';");
+    put(root.path(), "types.d.ts", "export interface T {}");
+    let (code, report) = run(root.path(), "app.ts", &[]);
+    assert_eq!(code, 1, "{report}");
+    assert!(paths(&report).contains(&"types.d.ts"));
+    assert!(report["source_graph"]["diagnostics"].as_array().unwrap().iter()
+        .any(|d| d["code"] == "DECLARATION_FILE_NOT_RUNTIME"));
+    assert!(report["source_graph"]["modules"].as_array().unwrap().iter()
+        .any(|m| m["source_language"] == "declaration" && m["analyzed"] == false));
+}
+
+#[test]
+fn typed_graph_has_no_implicit_tsconfig_alias_or_emitted_extension_fallback() {
+    let root = tempfile::tempdir().unwrap();
+    put(root.path(), "app.mts", "import './lib.js'; import './lib'; import '@src/lib';");
+    put(root.path(), "lib.ts", "export default 1;");
+    put(root.path(), "tsconfig.json", r#"{"compilerOptions":{"paths":{"@src/*":["./*"]}}}"#);
+    let (code, report) = run(root.path(), "app.mts", &[]);
+    assert_eq!(code, 1, "{report}");
+    assert_eq!(paths(&report), ["app.mts"]);
+    assert!(report["source_graph"]["edges"].as_array().unwrap().iter().all(|e| e["state"] == "unresolved"));
+}
+
+#[test]
+fn typed_parse_failures_preserve_capture_without_asserting_dependency_completeness() {
+    let root = tempfile::tempdir().unwrap();
+    put(root.path(), "app.ts", "const value: = 1;");
+    let (code, report) = run(root.path(), "app.ts", &[]);
+    assert_eq!(code, 1, "{report}");
+    assert_eq!(report["source_graph"]["diagnostics"][0]["code"], "TYPESCRIPT_PARSE_ERROR");
+    assert_eq!(report["source_graph"]["modules"][0]["source_language"], "typescript");
+    assert_eq!(report["source_graph"]["modules"][0]["analyzed"], false);
+    assert!(!report.to_string().contains("const value"));
+}
+
+#[test]
+fn typed_computed_loads_and_asserted_loader_aliases_remain_incomplete() {
+    let root = tempfile::tempdir().unwrap();
+    put(root.path(), "app.ts", "const load = require as Loader; load('hidden'); import(name as string);");
+    let (code, report) = run(root.path(), "app.ts", &[]);
+    assert_eq!(code, 1, "{report}");
+    assert!(report["source_graph"]["edges"].as_array().unwrap().iter().any(|e| e["state"] == "non_literal"));
+    assert!(report["source_graph"]["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == "INDIRECT_REQUIRE"));
+}

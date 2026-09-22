@@ -414,8 +414,9 @@ calls are conservatively included even inside deferred functions or dead
 branches: this is not a control-flow trace. Cycles and diamonds visit each
 physical file plus ESM query/fragment identity once. Contained workspace links
 retain physical package context. JSON modules are parsed as data, not scanned as
-JavaScript. TypeScript, native addons, Wasm and unknown source formats require
-separate analysis and produce explicit diagnostics.
+JavaScript. TypeScript and TSX use their own grammars and the explicit erasure
+contract below. Native addons, Wasm and unknown source formats require separate
+analysis and produce explicit diagnostics.
 
 One resolver owns the entire graph capture. Sources, manifests, link text and
 negative probes are cached once across all edges, not captured independently
@@ -457,3 +458,64 @@ Graph capture is mutually exclusive with the other query modes and with
 `--from`, `--resolution-mode` and `--require-resolved`. Its own entrypoint and
 per-edge load kinds establish the resolution contexts, and its result always
 reports incomplete evidence without an additional strictness flag.
+
+### TypeScript runtime dependencies and erased references
+
+The same command accepts `.ts`, `.mts`, `.cts` and `.tsx` entrypoints and follows
+mixed JavaScript/TypeScript graphs without executing or transpiling them:
+
+```sh
+franken-module-graph ./project --capture-source-graph src/app.ts
+franken-module-graph ./project --capture-source-graph src/view.tsx \
+  --allow-contained-symlinks
+```
+
+Each module records `source_language`, independently of the file resolver's
+runtime `format_hint`. Parser selection follows the captured physical filename;
+TypeScript syntax is not silently accepted in JavaScript files. The parser is
+not a type checker or a claim that the engine can execute the selected syntax.
+
+This analysis follows **explicit runtime syntax**, not a guessed `tsconfig`
+emit strategy. Whole-declaration `import type` / `export type` references,
+`import()` in type positions, and references in ambient declarations are retained
+as `type_only` edges. They have no runtime conditions, target, or filesystem
+lookup. Missing type packages, declaration files, symlinks and even outside-root
+type specifiers do not grant the scanner authority to open those paths.
+`type_resolution_performed` remains false. A valid erased edge does not make the
+runtime-syntax capture incomplete; it does not certify type availability either.
+
+Inline type specifiers have different semantics: `import { type T } from './x'`
+and `export { type T } from './x'` retain the side-effect dependency on `./x`.
+A default binding named `type` is also a value import. No use-based elision,
+compiler option, implicit extension substitution, or `paths` alias is inferred.
+Unmarked imports used only as types remain conservative runtime edges. All
+erased sites still count against the global syntax and site limits.
+
+Literal calls through transparent assertions/non-null wrappers, such as
+`(require as Loader)('./dep.cjs')` and `require!('./dep.cjs')`, are followed using
+require conditions. The erased operand's import types remain separate type-only
+edges. Arbitrary stored aliases, sequence/conditional expressions, computed
+requests and generated code still require additional analysis; wrappers are not
+used to guess their targets.
+
+`import X = require('pkg')` preserves its explicit require dependency but emits
+`TYPESCRIPT_TRANSFORM_REQUIRED`. So do non-ambient enums/namespaces, parameter
+properties, decorators, export assignments and angle-bracket assertions. JSX
+keeps explicit dependencies and reports its existing unsupported-surface
+diagnostic; no configured JSX-runtime or helper import is invented. These cases
+return `INCOMPLETE` while retaining their explicit edges. Declaration files
+(`.d.ts`, `.d.mts`, `.d.cts`) selected as runtime sources are not accepted as empty
+implementations. Syntax failures retain source identity without claiming analysis.
+
+The graph schema/hash domain is v2, binding language classification, erased-edge
+decisions, source spellings and all runtime evidence. v1 pins must be reviewed
+again. Changing an unread type dependency does not change this runtime-syntax
+pin; changing its reference in captured source does. This remains neither a type
+dependency graph nor a complete emitted-program or runtime execution graph.
+
+Regression tests compare the runtime-edge subset against JavaScript produced by
+Node's public `module.stripTypeScriptTypes` API, and resolve supported edges with
+Node's public resolvers. Neither the fixture text nor the stripped output is
+executed. The erasure contract follows TypeScript's `verbatimModuleSyntax`
+documentation; it does not claim support for all valid TypeScript, bundler
+resolution, Node's TypeScript execution restrictions, or engine integration.
