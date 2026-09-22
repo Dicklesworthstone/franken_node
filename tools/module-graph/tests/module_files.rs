@@ -242,3 +242,197 @@ fn ambiguous_modes_invalid_pins_and_noncanonical_importers_never_produce_resolut
     let (code,report)=run(root.path(),"app.js","./app.js","import",&["--expected-hash","not-a-pin"]);
     assert_eq!(code,2); assert_eq!(report["verdict"],"ERROR");
 }
+
+fn link(root: &Path, name: &str, target: &str) {
+    fs::create_dir_all(root.join(name).parent().unwrap()).unwrap();
+    symlink(target, root.join(name)).unwrap();
+}
+fn linked_selection(root: &Path, from: &str, request: &str, mode: &str) -> Value {
+    let (code, report) = run(root, from, request, mode, &["--allow-contained-symlinks"]);
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["symlink_policy"], "contained");
+    assert_eq!(report["resolution"]["symlink_policy"], "contained");
+    assert_eq!(report["resolution"]["schema_version"], "franken-node/module-file-resolution/v2");
+    // Ordinary loaded Node modules use their physical filename as context. A
+    // synthetic createRequire(alias) is a different, explicitly lexical API.
+    let physical_from = fs::canonicalize(root.join(from)).unwrap();
+    let physical_from = physical_from.strip_prefix(fs::canonicalize(root).unwrap()).unwrap().to_str().unwrap();
+    let reference = node(root, physical_from, request, mode);
+    assert_eq!(root.join(report["resolution"]["path"].as_str().unwrap()).to_str().unwrap(), reference["path"], "{report}");
+    assert_eq!(report["resolution"]["url_suffix"], reference["suffix"]);
+    report
+}
+
+#[test]
+fn workspace_package_links_are_opt_in_and_match_node_in_both_modes() {
+    let root = fixture();
+    put(root.path(), "packages/pkg/package.json", br#"{"name":"pkg","exports":{"import":"./main.mjs","require":"./main.cjs"}}"#);
+    source(root.path(), "packages/pkg/main.mjs");
+    source(root.path(), "packages/pkg/main.cjs");
+    link(root.path(), "node_modules/pkg", "../packages/pkg");
+    let (code, rejected) = run(root.path(), "app.js", "pkg", "import", &[]);
+    assert_eq!(code, 2);
+    assert_eq!(rejected["error_code"], "ERR_UNSUPPORTED_MODULE_FILE");
+    assert_eq!(rejected["symlink_policy"], "reject");
+    for mode in ["import", "require"] {
+        let report = linked_selection(root.path(), "app.js", "pkg", mode);
+        assert_eq!(report["resolution"]["resolved_importer"], "app.js");
+        let probe = report["resolution"]["probes"].as_array().unwrap().iter().find(|p| p["path"] == "node_modules/pkg").unwrap();
+        assert_eq!(probe["kind"], "symlink");
+        assert_eq!(probe["link_target"], "../packages/pkg");
+        assert_eq!(probe["sha256"], hex::encode(Sha256::digest(b"../packages/pkg")));
+    }
+}
+
+#[test]
+fn pnpm_linked_importers_select_physical_nested_versions_not_hoisted_names() {
+    let root = fixture();
+    source(root.path(), "node_modules/.pnpm/pkg@1/node_modules/pkg/app.cjs");
+    for version in ["1", "2"] {
+        let base = format!("node_modules/.pnpm/dep@{version}/node_modules/dep");
+        put(root.path(), &format!("{base}/package.json"), br#"{"exports":"./index.cjs"}"#);
+        source(root.path(), &format!("{base}/index.cjs"));
+    }
+    link(root.path(), "node_modules/pkg", ".pnpm/pkg@1/node_modules/pkg");
+    link(root.path(), "node_modules/dep", ".pnpm/dep@2/node_modules/dep");
+    link(root.path(), "node_modules/.pnpm/pkg@1/node_modules/dep", "../../dep@1/node_modules/dep");
+    for mode in ["import", "require"] {
+        let nested = linked_selection(root.path(), "node_modules/pkg/app.cjs", "dep", mode);
+        assert_eq!(nested["resolution"]["path"], "node_modules/.pnpm/dep@1/node_modules/dep/index.cjs");
+        assert_eq!(nested["resolution"]["resolved_importer"], "node_modules/.pnpm/pkg@1/node_modules/pkg/app.cjs");
+        let root_report = linked_selection(root.path(), "app.js", "dep", mode);
+        assert_eq!(root_report["resolution"]["path"], "node_modules/.pnpm/dep@2/node_modules/dep/index.cjs");
+    }
+}
+
+#[test]
+fn linked_self_internal_and_external_imports_keep_the_real_package_scope() {
+    let root = fixture();
+    put(root.path(), "packages/pkg/package.json", br##"{"name":"pkg","type":"module","exports":{"./self":"./local.js"},"imports":{"#local":"./local.js","#dep":"dep"}}"##);
+    source(root.path(), "packages/pkg/app.js");
+    source(root.path(), "packages/pkg/local.js");
+    source(root.path(), "packages/pkg/node_modules/dep/index.cjs");
+    put(root.path(), "packages/pkg/node_modules/dep/package.json", br#"{"exports":"./index.cjs"}"#);
+    link(root.path(), "node_modules/pkg", "../packages/pkg");
+    for mode in ["import", "require"] {
+        for request in ["pkg/self", "#local"] {
+            let report = linked_selection(root.path(), "node_modules/pkg/app.js", request, mode);
+            assert_eq!(report["resolution"]["format_hint"], "module");
+            assert_eq!(report["resolution"]["path"], "packages/pkg/local.js");
+        }
+        let report = linked_selection(root.path(), "node_modules/pkg/app.js", "#dep", mode);
+        assert_eq!(report["resolution"]["path"], "packages/pkg/node_modules/dep/index.cjs");
+    }
+}
+
+#[test]
+fn linked_files_keep_physical_format_and_query_fragment_identity() {
+    let root = fixture();
+    source(root.path(), "real/value.mjs");
+    link(root.path(), "alias.cjs", "real/value.mjs");
+    let report = linked_selection(root.path(), "app.js", "./alias.cjs?one#two", "import");
+    assert_eq!(report["resolution"]["format_hint"], "module");
+    assert_eq!(report["resolution"]["url_suffix"], "?one#two");
+    assert_eq!(linked_selection(root.path(), "app.js", "./alias.cjs", "require")["resolution"]["path"], "real/value.mjs");
+}
+
+#[test]
+fn link_target_spelling_policy_and_retargeting_invalidate_reviewed_pins() {
+    let root = fixture();
+    source(root.path(), "value.mjs");
+    let strict = selected(root.path(), "app.js", "./value.mjs", "import");
+    let (code, policy_mismatch) = run(root.path(), "app.js", "./value.mjs", "import",
+        &["--allow-contained-symlinks", "--expected-hash", strict["input_hash"].as_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert_eq!(policy_mismatch["verdict"], "HASH_MISMATCH");
+    assert!(policy_mismatch["resolution"].is_null());
+    link(root.path(), "alias", "value.mjs");
+    let first = linked_selection(root.path(), "app.js", "./alias", "import");
+    let pin = first["input_hash"].as_str().unwrap();
+    let (code, same) = run(root.path(), "app.js", "./alias", "import", &["--allow-contained-symlinks", "--expected-hash", pin]);
+    assert_eq!(code, 0, "{same}");
+    link(root.path(), "replacement", "./value.mjs");
+    fs::rename(root.path().join("replacement"), root.path().join("alias")).unwrap();
+    let (code, mismatch) = run(root.path(), "app.js", "./alias", "import", &["--allow-contained-symlinks", "--expected-hash", pin]);
+    assert_eq!(code, 1);
+    assert_eq!(mismatch["verdict"], "HASH_MISMATCH");
+    assert_eq!(mismatch["filesystem_verified"], false);
+    assert!(mismatch["resolution"].is_null());
+}
+
+#[test]
+fn relative_linked_projects_keep_the_same_pin_after_relocation() {
+    let first = fixture();
+    let second = fixture();
+    for root in [first.path(), second.path()] {
+        source(root, "packages/pkg/index.cjs");
+        put(root, "packages/pkg/package.json", br#"{"exports":"./index.cjs"}"#);
+        link(root, "node_modules/pkg", "../packages/pkg");
+    }
+    let original = linked_selection(first.path(), "app.js", "pkg", "require");
+    let moved = linked_selection(second.path(), "app.js", "pkg", "require");
+    assert_eq!(original, moved);
+}
+
+#[test]
+fn contained_links_never_allow_escape_cycles_fifo_or_reserved_state() {
+    let root = fixture();
+    for (name, target, expected) in [
+        ("escape", "../outside.js", "ERR_MODULE_OUTSIDE_PROJECT"),
+        ("absolute", "/etc/passwd", "ERR_INVALID_MODULE_SYMLINK"),
+        ("reserved", ".git/HEAD", "ERR_INVALID_MODULE_SYMLINK"),
+        ("cycle", "cycle", "ERR_MODULE_SYMLINK_LOOP"),
+    ] {
+        link(root.path(), name, target);
+        let (code, report) = run(root.path(), "app.js", &format!("./{name}"), "import", &["--allow-contained-symlinks"]);
+        assert_eq!(code, 2, "{report}");
+        assert_eq!(report["error_code"], expected);
+        assert_eq!(report["filesystem_verified"], false);
+        assert!(report["resolution"].is_null());
+    }
+    let directory = fs::File::open(root.path()).unwrap();
+    rustix::fs::mkfifoat(&directory, "fifo", rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR).unwrap();
+    link(root.path(), "fifo-alias", "fifo");
+    let (code, report) = run(root.path(), "app.js", "./fifo-alias", "import", &["--allow-contained-symlinks"]);
+    assert_eq!(code, 2);
+    assert_eq!(report["error_code"], "ERR_UNSUPPORTED_MODULE_FILE");
+}
+
+#[test]
+fn linked_export_blocks_and_missing_selected_targets_never_fall_back() {
+    let root = fixture();
+    put(root.path(), "packages/pkg/package.json", br#"{"exports":{".":["./missing","./fallback.js"],"./blocked":null},"main":"fallback.js"}"#);
+    source(root.path(), "packages/pkg/fallback.js");
+    source(root.path(), "packages/pkg/missing.js");
+    link(root.path(), "node_modules/pkg", "../packages/pkg");
+    for mode in ["import", "require"] {
+        for request in ["pkg", "pkg/blocked"] {
+            let (code, report) = run(root.path(), "app.js", request, mode, &["--allow-contained-symlinks"]);
+            assert_eq!(code, 1, "{report}");
+            assert_eq!(report["verdict"], "UNRESOLVED");
+            assert!(report["resolution"].is_null());
+            let reference = node(root.path(), "app.js", request, mode);
+            if mode == "import" && request == "pkg" {
+                // import.meta.resolve returns even missing file URLs; our file
+                // capture additionally requires existence, never a fallback.
+                assert_eq!(report["error_code"], "ERR_MODULE_NOT_FOUND");
+                assert!(reference["path"].as_str().unwrap().ends_with("/missing"));
+            } else {
+                assert_eq!(report["error_code"], reference["code"]);
+            }
+        }
+    }
+}
+
+#[test]
+fn link_policy_flag_is_rejected_outside_file_resolution() {
+    for flags in [vec!["--allow-contained-symlinks"],
+        vec!["--transitive", "--allow-contained-symlinks"],
+        vec!["--resolve-export", ".", "--allow-contained-symlinks"]] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_franken-module-graph"));
+        command.arg("/must-not-be-inspected").args(flags);
+        let output = bounded(command);
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert!(output.stdout.is_empty());
+    }
+}

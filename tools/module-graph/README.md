@@ -303,8 +303,9 @@ the exact captured bytes rather than reopen a subsequently mutable pathname.
 Source bytes are never serialized by this command. Only consulted files and
 lookup gaps are captured; unused files and unrelated lockfile metadata are not
 evidence. Directory descriptors remain owned throughout capture, and both
-positive and negative probes are cached. Symlinks, nonregular files, path escapes,
-reserved repository state, changed reads and exceeded bounds fail closed.
+positive and negative probes are cached. Symlinks are rejected by default;
+the explicit contained-link mode is described below. Nonregular files, path
+escapes, reserved repository state, changed reads and exceeded bounds fail closed.
 The supplied project root is trusted; this is not an atomic tree snapshot or
 containment against a hostile filesystem. Input bounds are 1,024 probes, 64 path
 components/recursive package transitions, 16 MiB per source file, 512 KiB per
@@ -338,3 +339,51 @@ The latter deliberately permits missing file URLs; this resolver additionally
 requires ordinary-file existence. Tests also exercise unchanged captured bytes,
 hash/context drift, package encapsulation, aliases, root boundaries and FIFO/link
 refusal. These tests do not establish full Node/Bun or engine loader parity.
+
+### Workspace and pnpm-style package links
+
+Opt in to project-contained symlinks when resolving an installed workspace or
+a dependency in a pnpm-style virtual store:
+
+```sh
+franken-module-graph ./project --resolve-module workspace-package \
+  --from src/app.mjs --allow-contained-symlinks
+franken-module-graph ./project --resolve-module dependency \
+  --from node_modules/workspace-package/main.cjs --resolution-mode require \
+  --allow-contained-symlinks
+```
+
+This mode follows **relative links whose entire traversal stays inside the
+selected project**. It captures link text with a bounded descriptor-relative
+read and checks metadata before and after that read. Link components are then
+expanded against retained directory descriptors; kernel opens still use
+no-follow flags. Absolute link targets (even ones currently pointing inside the
+project), outside-root targets, reserved repository state and nonregular targets
+remain errors. Symlink cycles or more than 40 hops per lookup fail closed, as do
+path/expansion/capture limits. Missing targets remain unresolved. The option is
+specific to `--resolve-module`; it does not change graph capture or standalone
+package-manifest inspection.
+
+The importing file is finalized to its physical location **before** dependency
+lookup, matching ordinary loaded-module context rather than lexical
+`createRequire(alias)` or Node's preserve-symlinks modes. Package scope, self
+references and subsequent dependency lookup therefore use the workspace or
+virtual-store location, not the `node_modules` alias. The final source path and
+format hint also use the physical file; ESM query/fragment identity is preserved.
+Export encapsulation, condition selection and no-fallback behavior are unchanged.
+
+Resolution reports and their hash domain are now v2. `importer` retains the
+operator's input; `resolved_importer` records its physical location, and
+`symlink_policy` records `reject` or `contained`. A `symlink` probe includes the
+exact `link_target`, its byte count and SHA-256. The input pin binds these facts
+alongside source bytes and all other consulted inputs. Changing a link's spelling
+or the policy invalidates a reviewed pin even when the selected file bytes are
+identical. Relative-link projects remain relocation-stable. Prior v1 resolution
+hashes must be reviewed again; there is no silent legacy-hash acceptance.
+
+Library callers use `resolve_with_policy(..., SymlinkPolicy::Contained)`;
+`resolve(...)` retains strict rejection. Captured link text, missing probes and
+source bytes are not reopened after capture. This is still not an atomic snapshot
+of a hostile filesystem, lockfile verification, runtime permission, or execution
+loader integration. The selected root is trusted and every allowed link must
+remain within it; external development workspaces are deliberately unsupported.

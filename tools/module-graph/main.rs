@@ -61,6 +61,9 @@ struct Args {
     /// Resolution algorithm; defaults to import. Does not execute either runtime.
     #[arg(long, requires = "resolve_module", value_parser = ["import", "require"])]
     resolution_mode: Option<String>,
+    /// Follow bounded relative symlinks only while every component stays inside the project.
+    #[arg(long, requires = "resolve_module")]
+    allow_contained_symlinks: bool,
 }
 
 // The standalone host supplies the same bounded-read interface used by the
@@ -165,7 +168,7 @@ fn inspect_topology(args: &Args) -> Result<(Value, u8), Box<dyn std::error::Erro
 
 #[cfg(unix)]
 fn inspect_module_file(args: &Args) -> Result<(Value, u8), Box<dyn std::error::Error>> {
-    use module_resolution_graph::file_resolution::{self, ResolutionMode};
+    use module_resolution_graph::file_resolution::{self, ResolutionMode, SymlinkPolicy};
     let mode = match args.resolution_mode.as_deref().unwrap_or("import") {
         "import" => ResolutionMode::Import, "require" => ResolutionMode::Require,
         _ => return Err("invalid module resolution mode".into()),
@@ -173,10 +176,12 @@ fn inspect_module_file(args: &Args) -> Result<(Value, u8), Box<dyn std::error::E
     let conditions = if args.conditions.is_empty() { mode.default_conditions() } else { args.conditions.clone() };
     let importer = args.from.as_deref().ok_or("module resolution requires --from")?;
     let request = args.resolve_module.as_deref().ok_or("missing module request")?;
+    let symlink_policy = if args.allow_contained_symlinks { SymlinkPolicy::Contained } else { SymlinkPolicy::Reject };
     let mut report = json!({"schema_version":"franken-node/module-graph-inspection/v1",
         "scope":"project-contained-module-resolution", "execution_performed":false,
-        "release_certification":false, "filesystem_verified":false, "resolution":null});
-    match file_resolution::resolve(&args.project, importer, request, mode, &conditions) {
+        "release_certification":false, "filesystem_verified":false, "resolution":null,
+        "symlink_policy":symlink_policy});
+    match file_resolution::resolve_with_policy(&args.project, importer, request, mode, &conditions, symlink_policy) {
         Ok(captured) => {
             let matched = args.expected_hash.as_ref().map(|pin| pin == &captured.report.input_hash);
             report["input_hash"] = json!(captured.report.input_hash);

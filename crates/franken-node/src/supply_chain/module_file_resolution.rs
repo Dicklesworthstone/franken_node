@@ -716,7 +716,8 @@ mod tests {
         // Even absolute links pointing within the root are outside this portable contract.
         symlink(root.path().join("app.js"), root.path().join("absolute-inside")).unwrap();
         assert_eq!(linked_error(root.path(), "app.js", "./absolute-inside"), "ERR_INVALID_MODULE_SYMLINK");
-        rustix::fs::mkfifo(root.path().join("fifo"), Mode::RUSR | Mode::WUSR).unwrap();
+        let directory = File::open(root.path()).unwrap();
+        rustix::fs::mkfifoat(&directory, "fifo", Mode::RUSR | Mode::WUSR).unwrap();
         link(root.path(), "fifo-alias", "fifo");
         assert_eq!(linked_error(root.path(), "app.js", "./fifo-alias"), "ERR_UNSUPPORTED_MODULE_FILE");
     }
