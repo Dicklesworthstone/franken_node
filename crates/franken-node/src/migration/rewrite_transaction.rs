@@ -119,7 +119,7 @@ fn directory(parent: &File, path: &Path, create: bool) -> Result<File> {
         let Component::Normal(name) = component else { bail!("invalid directory component"); };
         if create {
             match mkdirat(&current, name, Mode::from_raw_mode(0o700)) {
-                Ok(()) => current.sync_all()?,
+                Ok(()) => {},
                 Err(Errno::EXIST) => {},
                 Err(error) => return Err(error.into()),
             }
@@ -182,15 +182,19 @@ fn stage<'a>(parent: &'a File, bytes: &[u8], mode: u32) -> Result<StagedFile<'a>
     let staged = StagedFile { parent, name, installed: false };
     file.write_all(bytes)?;
     file.set_permissions(Permissions::from_mode(mode))?;
-    file.sync_all()?;
     Ok(staged)
 }
 
-fn publish(parent: &File, name: &OsStr, bytes: &[u8], mode: u32, create_only: bool) -> Result<()> {
+fn publish_staged(parent: &File, name: &OsStr, bytes: &[u8], mode: u32, create_only: bool) -> Result<()> {
     let mut staged = stage(parent, bytes, mode)?;
     renameat_with(parent, staged.name.as_str(), parent, name,
         if create_only { RenameFlags::NOREPLACE } else { RenameFlags::empty() })?;
     staged.installed = true;
+    Ok(())
+}
+
+fn publish(parent: &File, name: &OsStr, bytes: &[u8], mode: u32, create_only: bool) -> Result<()> {
+    publish_staged(parent, name, bytes, mode, create_only)?;
     parent.sync_all()?;
     Ok(())
 }
@@ -265,16 +269,15 @@ impl RewriteTransaction {
         }
         Self::validate_journal(&journal)?;
         mkdirat(&self.store, journal.session.as_str(), Mode::from_raw_mode(0o700))?;
-        self.store.sync_all()?;
         let session = directory(&self.store, Path::new(&journal.session), false)?;
         for (index, edit) in edits.iter().enumerate() {
             let (parent, name) = parent_and_name(&self.backups, edit.path, false)?;
             if let Some(backup) = read_optional(&parent, &name, MAX_FILE_BYTES)? {
                 ensure!(backup.bytes == edit.before, "immutable migration backup changed: {}", edit.path);
             } else {
-                publish(&parent, &name, edit.before, 0o600, true)?;
+                publish_staged(&parent, &name, edit.before, 0o600, true)?;
             }
-            publish(&session, OsStr::new(&format!("{index}.after")), edit.after, 0o600, true)?;
+            publish_staged(&session, OsStr::new(&format!("{index}.after")), edit.after, 0o600, true)?;
         }
         let encoded = serde_json::to_vec(&journal)?;
         ensure!(encoded.len() <= MAX_JOURNAL_BYTES, "rewrite journal exceeds metadata budget");
@@ -282,23 +285,34 @@ impl RewriteTransaction {
         Ok(journal)
     }
 
-    fn replace_image(&self, record: &Record, expected_hash: &str, expected_length: usize, bytes: &[u8]) -> Result<()> {
+    fn replace_image(
+        &self,
+        record: &Record,
+        expected_hash: &str,
+        expected_length: usize,
+        bytes: &[u8],
+    ) -> Result<()> {
         let (parent, name) = parent_and_name(&self.root, &record.path, false)?;
         let current = read_required(&parent, &name, MAX_FILE_BYTES)?;
-        ensure!(verify_image(&current, expected_hash, expected_length, Some(record.mode)),
-            "rewrite conflict; refusing to overwrite changed source: {}", record.path);
+        ensure!(
+            verify_image(&current, expected_hash, expected_length, Some(record.mode)),
+            "rewrite conflict; refusing to overwrite changed source: {}",
+            record.path
+        );
         let mut staged = stage(&parent, bytes, record.mode)?;
         // Recheck after potentially slow staging, immediately before rename.
         let checked = read_required(&parent, &name, MAX_FILE_BYTES)?;
-        ensure!(same_version(&current.metadata, &checked.metadata) && checked.bytes == current.bytes,
-            "rewrite source changed while staging: {}", record.path);
+        ensure!(
+            same_version(&current.metadata, &checked.metadata) && checked.bytes == current.bytes,
+            "rewrite source changed while staging: {}",
+            record.path
+        );
         renameat_with(&parent, staged.name.as_str(), &parent, &name, RenameFlags::empty())?;
         staged.installed = true;
-        parent.sync_all()?;
         Ok(())
     }
 
-    fn install(&self, journal: &Journal, index: usize) -> Result<()> {
+    pub fn install(&self, journal: &Journal, index: usize) -> Result<()> {
         let record = &journal.records[index];
         let session = directory(&self.store, Path::new(&journal.session), false)?;
         let after = read_required(&session, OsStr::new(&format!("{index}.after")), MAX_FILE_BYTES)?;
@@ -309,8 +323,6 @@ impl RewriteTransaction {
     fn archive(&self, journal: &Journal, name: &str) -> Result<()> {
         let session = directory(&self.store, Path::new(&journal.session), false)?;
         renameat_with(&self.store, PENDING, &session, name, RenameFlags::NOREPLACE)?;
-        session.sync_all()?;
-        self.store.sync_all()?;
         Ok(())
     }
 
@@ -326,12 +338,18 @@ impl RewriteTransaction {
                 let (parent, name) = parent_and_name(&self.root, &record.path, false)?;
                 let current = read_required(&parent, &name, MAX_FILE_BYTES)?;
                 if verify_image(&current, &record.before_sha256, record.before_bytes, Some(record.mode)) { return Ok(()); }
-                ensure!(verify_image(&current, &record.after_sha256, record.after_bytes, Some(record.mode)),
-                    "recovery conflict; preserve unrelated edits to {}", record.path);
+                ensure!(
+                    verify_image(&current, &record.after_sha256, record.after_bytes, Some(record.mode)),
+                    "recovery conflict; preserve unrelated edits to {}",
+                    record.path
+                );
                 let (parent, name) = parent_and_name(&self.backups, &record.path, false)?;
                 let before = read_required(&parent, &name, MAX_FILE_BYTES)?;
-                ensure!(verify_image(&before, &record.before_sha256, record.before_bytes, None),
-                    "recovery backup integrity failure: {}", record.path);
+                ensure!(
+                    verify_image(&before, &record.before_sha256, record.before_bytes, None),
+                    "recovery backup integrity failure: {}",
+                    record.path
+                );
                 self.replace_image(record, &record.after_sha256, record.after_bytes, &before.bytes)
             })();
             if let Err(error) = restored { errors.push(format!("{error:#}")); }
@@ -353,7 +371,9 @@ impl RewriteTransaction {
                 ensure!(verify_image(&current, &record.before_sha256, record.before_bytes, Some(record.mode)),
                     "source changed before rewrite commit: {}", record.path);
             }
-            for index in 0..journal.records.len() { self.install(&journal, index)?; }
+            for index in 0..journal.records.len() {
+                self.install(&journal, index)?;
+            }
             self.archive(&journal, "applied.json")
         })();
         if let Err(error) = result {

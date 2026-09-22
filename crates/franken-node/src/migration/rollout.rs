@@ -184,8 +184,8 @@ impl RolloutReport {
     pub fn render_human(&self) -> String {
         let mut out = String::new();
         let bar = match self.stage {
-            RolloutStage::Shadow => "[■□□□] 0% (Shadow)",
-            RolloutStage::Canary => "[■■□□] 5% (Canary)",
+            RolloutStage::Shadow => "[■□□□] 0% (Shadow)".to_string(),
+            RolloutStage::Canary => "[■■□□] 5% (Canary)".to_string(),
             RolloutStage::Ramp => {
                 let filled = (self.ramp_pct / 25) as usize;
                 let mut b = String::from("[");
@@ -199,8 +199,8 @@ impl RolloutReport {
                 b.push_str(&format!("] {}% (Ramp)", self.ramp_pct));
                 b
             }
-            RolloutStage::Default => "[■■■■] 100% (Default - Production Active)",
-            RolloutStage::Aborted => "[XXXX] Aborted / Rolled Back",
+            RolloutStage::Default => "[■■■■] 100% (Default - Production Active)".to_string(),
+            RolloutStage::Aborted => "[XXXX] Aborted / Rolled Back".to_string(),
         };
 
         writeln!(out, "Migration Rollout Status").unwrap();

@@ -6550,7 +6550,7 @@ fn emit_migrate_error_json(command: &str, message: &str) -> Result<()> {
 }
 
 fn migrate_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Result<()> {
-    let message = error.to_string();
+    let message = format!("{error:#}");
     if json {
         emit_migrate_error_json(command, &message)?;
         fail_closed_after_json();
