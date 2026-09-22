@@ -22,6 +22,9 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::rc::Rc;
 
+#[path = "module_source_graph.rs"]
+pub mod source_graph;
+
 const MAX_PATH: usize = 4096;
 const MAX_DEPTH: usize = 64;
 const MAX_PROBES: usize = 1024;
@@ -157,30 +160,14 @@ pub fn resolve_with_policy(project: &Path, importer: &str, specifier: &str,
     mode: ResolutionMode, conditions: &[String], symlink_policy: SymlinkPolicy) -> Result<CapturedResolution> {
     validate_path(importer)?;
     validate_request(specifier)?;
-    if conditions.len() > 64 || conditions.iter().any(|s| s.is_empty() || s.len() > 128 || s.chars().any(char::is_control)) {
-        return Err(error("ERR_INVALID_PACKAGE_CONDITIONS", "invalid complete condition set"));
-    }
-    let conditions: Vec<_> = conditions.iter().cloned().collect::<BTreeSet<_>>().into_iter().collect();
-    let root = File::from(open(project, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty()).map_err(|e| io_error("<project>", e))?);
-    let mut resolver = Resolver { entries: BTreeMap::from([("".into(), Rc::new(Entry::Directory(root)))]),
-        manifests: BTreeMap::new(), captured: 0, conditions, mappings: Vec::new(), symlink_policy };
+    let mut resolver = Resolver::new(project, conditions, symlink_policy)?;
     let (resolved_importer, importer_source) = resolver.locate(importer)?;
     if !importer_source.is_file() { return Err(mode.missing(importer)); }
     let (path, suffix) = resolver.request(parent(&resolved_importer), specifier, mode, 0)?;
     let (path, source) = resolver.locate(&path)?;
     let Entry::File { bytes, sha256 } = source.as_ref() else { return Err(mode.missing(&path)); };
     let format_hint = resolver.format(&path)?;
-    let probes = resolver.entries.iter().map(|(path, entry)| {
-        let (kind, bytes, sha256) = match entry.as_ref() {
-            Entry::Missing => (ProbeKind::Missing, None, None),
-            Entry::Directory(_) => (ProbeKind::Directory, None, None),
-            Entry::File { bytes, sha256 } => (ProbeKind::File, Some(bytes.len()), Some(sha256.clone())),
-            Entry::Symlink { target, sha256 } => (ProbeKind::Symlink, Some(target.len()), Some(sha256.clone())),
-        };
-        let link_target = match entry.as_ref() { Entry::Symlink { target, .. } => Some(target.clone()), _ => None };
-        Probe { path: if path.is_empty() { ".".into() } else { path.clone() }, kind, bytes, sha256, link_target }
-    }).collect();
+    let probes = resolver.probes();
     let mut report = ResolutionReport {
         schema_version: "franken-node/module-file-resolution/v2".into(), importer: importer.into(), resolved_importer,
         symlink_policy, specifier: specifier.into(),
@@ -197,6 +184,29 @@ pub fn resolve_with_policy(project: &Path, importer: &str, specifier: &str,
 }
 
 impl Resolver {
+    fn new(project: &Path, conditions: &[String], symlink_policy: SymlinkPolicy) -> Result<Self> {
+        if conditions.len() > 64 || conditions.iter().any(|s| s.is_empty() || s.len() > 128 || s.chars().any(char::is_control)) {
+            return Err(error("ERR_INVALID_PACKAGE_CONDITIONS", "invalid complete condition set"));
+        }
+        let conditions = conditions.iter().cloned().collect::<BTreeSet<_>>().into_iter().collect();
+        let root = File::from(open(project, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty()).map_err(|e| io_error("<project>", e))?);
+        Ok(Self { entries: BTreeMap::from([("".into(), Rc::new(Entry::Directory(root)))]),
+            manifests: BTreeMap::new(), captured: 0, conditions, mappings: Vec::new(), symlink_policy })
+    }
+
+    fn probes(&self) -> Vec<Probe> {
+        self.entries.iter().map(|(path, entry)| {
+        let (kind, bytes, sha256) = match entry.as_ref() {
+            Entry::Missing => (ProbeKind::Missing, None, None),
+            Entry::Directory(_) => (ProbeKind::Directory, None, None),
+            Entry::File { bytes, sha256 } => (ProbeKind::File, Some(bytes.len()), Some(sha256.clone())),
+            Entry::Symlink { target, sha256 } => (ProbeKind::Symlink, Some(target.len()), Some(sha256.clone())),
+        };
+        let link_target = match entry.as_ref() { Entry::Symlink { target, .. } => Some(target.clone()), _ => None };
+        Probe { path: if path.is_empty() { ".".into() } else { path.clone() }, kind, bytes, sha256, link_target }
+        }).collect()
+    }
     fn probe(&mut self, path: &str) -> Result<Rc<Entry>> {
         self.locate(path).map(|(_, entry)| entry)
     }
