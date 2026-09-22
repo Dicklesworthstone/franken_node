@@ -45,6 +45,11 @@ struct Args {
     #[arg(long, requires_all = ["execute", "expected_input_sha256"],
         conflicts_with_all = ["list_tests", "inspect_capsule", "replay", "export_inputs", "capture_capsule"])]
     expected_candidate_input_sha256: Option<String>,
+    /// Retain failed reviewed-input runs in a private child of this existing absolute directory.
+    /// Contains sensitive source bytes. Retention failure does not replace the measured verdict.
+    #[arg(long, requires_all = ["execute", "expected_input_sha256", "expected_candidate_input_sha256"],
+        conflicts_with_all = ["capture_capsule", "list_tests", "inspect_capsule", "replay", "export_inputs"])]
+    retain_failures: Option<PathBuf>,
     /// Inspect the captured test inventory without resolving runtimes or executing project code.
     #[arg(long, conflicts_with_all = ["execute", "native_bin", "migrated_project", "compare_filesystem", "capture_capsule", "replay", "inspect_capsule"])]
     list_tests: bool,
@@ -110,6 +115,9 @@ fn run(args: &Args) -> anyhow::Result<serde_json::Value> {
         && args.expected_candidate_input_sha256.is_some() && args.execute && !no_execution
         && !args.replay && args.capture_capsule.is_none()),
         "reviewed input execution requires --execute and both --expected-input-sha256 and --expected-candidate-input-sha256; it cannot be combined with offline or capsule modes");
+    ensure!(args.retain_failures.is_none() || (approved_live && !no_execution && !args.replay
+        && args.capture_capsule.is_none()),
+        "--retain-failures requires reviewed input execution, not unpinned, replay or explicit capsule-capture modes");
     ensure!(!no_execution || (!args.execute && args.native_bin.is_none() && args.migrated_project.is_none()
         && !args.compare_filesystem && args.capture_capsule.is_none()),
         "--list-tests, --inspect-capsule and --export-inputs cannot be combined with execution or runtime-comparison options");
@@ -222,6 +230,13 @@ fn run(args: &Args) -> anyhow::Result<serde_json::Value> {
         let approved = validation_suite::ApprovedInputs::capture(
             project.as_deref().context("project missing")?, migrated_project.as_deref(),
             original_pin, candidate_pin)?;
+        // Verify BOTH input pins before reserving storage, and reserve before
+        // resolving any executable. The archive remains attached to this
+        // one-use approval; no live-path recapture or second run is permitted.
+        let approved = match args.retain_failures.as_deref() {
+            Some(directory) => approved.retain_failures(directory)?,
+            None => approved,
+        };
         let native = args.native_bin.as_deref().context("native runtime missing")?;
         let mut value = if let Some(bun) = args.bun_bin.as_deref() {
             serde_json::to_value(approved.run_product(native, bun, args.compare_filesystem)?)?
@@ -236,6 +251,7 @@ fn run(args: &Args) -> anyhow::Result<serde_json::Value> {
             "expected_candidate_input_sha256": candidate_pin,
             "matched_before_execution": true,
             "scope": "captured-project-inputs-only",
+            "failure_retention_requested": args.retain_failures.is_some(),
         });
         value
     } else if let Some(bun) = args.bun_bin.as_deref() {
@@ -335,6 +351,7 @@ mod tests {
         Args { project, migrated_project: None, compare_filesystem: false,
             native_bin: Some("missing-runtime".into()), bun_bin: None, execute: true, list_tests: false,
             expected_input_sha256: None, expected_candidate_input_sha256: None,
+            retain_failures: None,
             capture_capsule: None, inspect_capsule: false, replay: false,
             expected_sha256: None, export_inputs: None, verify_fix: false, minimize_capsule: None,
             source_file: Vec::new(), max_executions: None, minimize_seconds: None,
@@ -454,6 +471,211 @@ mod tests {
             ..arguments(project.path().into()) }).unwrap_err();
         assert!(error.to_string().contains("cannot be combined"));
         assert!(!capsule.exists());
+    }
+
+    #[test]
+    fn reviewed_retention_cli_requires_explicit_consent_and_both_role_pins() {
+        let pin = "a".repeat(64);
+        let base = ["suite", "project", "--native-bin", "/bin/false", "--execute",
+            "--expected-input-sha256", &pin, "--expected-candidate-input-sha256", &pin,
+            "--retain-failures", "/private/failures"];
+        let parsed = Args::try_parse_from(base).unwrap();
+        assert_eq!(parsed.retain_failures.as_deref(), Some(std::path::Path::new("/private/failures")));
+        for flags in [vec!["--list-tests"], vec!["--inspect-capsule"],
+            vec!["--capture-capsule", "capsule.json"],
+            vec!["--replay", "--expected-sha256", &pin],
+            vec!["--export-inputs", "output", "--expected-sha256", &pin]] {
+            let mut argv = base.to_vec();
+            argv.extend(flags);
+            assert!(Args::try_parse_from(argv).is_err());
+        }
+        assert!(Args::try_parse_from(["suite", "project", "--native-bin", "/bin/false",
+            "--execute", "--retain-failures", "/private/failures"]).is_err());
+        let no_consent: Vec<_> = base.into_iter().filter(|arg| *arg != "--execute").collect();
+        assert!(Args::try_parse_from(no_consent).is_err());
+    }
+
+    #[test]
+    fn reviewed_retention_programmatic_checks_precede_any_filesystem_access() {
+        let pin = "a".repeat(64);
+        let base = || Args { expected_input_sha256: Some(pin.clone()),
+            expected_candidate_input_sha256: Some(pin.clone()),
+            retain_failures: Some("/missing-retention-directory".into()),
+            ..arguments("/missing-retention-project".into()) };
+        for args in [Args { execute: false, ..base() },
+            Args { expected_input_sha256: None, ..base() },
+            Args { expected_candidate_input_sha256: None, ..base() },
+            Args { expected_input_sha256: None, expected_candidate_input_sha256: None, ..base() },
+            Args { capture_capsule: Some("capture.json".into()), ..base() },
+            Args { replay: true, expected_sha256: Some(pin.clone()), ..base() },
+            Args { list_tests: true, ..base() }] {
+            let error = run(&args).unwrap_err();
+            assert!(error.to_string().contains("reviewed input execution"), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn reviewed_retention_checks_both_pins_before_reserving_private_storage() {
+        let project = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let marker = output.path().join("must-not-run");
+        std::fs::write(project.path().join("case.test.js"), format!(
+            "require('fs').writeFileSync({},'bad');", serde_json::to_string(&marker).unwrap())).unwrap();
+        let pin = reviewed_pin(project.path());
+        for (original, candidate, role) in [("0".repeat(64), pin.clone(), "original"),
+            (pin.clone(), "0".repeat(64), "candidate")] {
+            let error = run(&Args { expected_input_sha256: Some(original),
+                expected_candidate_input_sha256: Some(candidate), retain_failures: Some(output.path().into()),
+                ..arguments(project.path().into()) }).unwrap_err();
+            assert!(error.to_string().starts_with(role), "{error:#}");
+            assert!(!marker.exists());
+            assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn reviewed_retention_directory_errors_precede_runtime_resolution() {
+        let original = tempfile::tempdir().unwrap();
+        let candidate = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        for root in [original.path(), candidate.path()] {
+            std::fs::write(root.join("case.test.js"), "void 0;").unwrap();
+        }
+        let pins = [reviewed_pin(original.path()), reviewed_pin(candidate.path())];
+        let alias = output.path().join("alias");
+        std::os::unix::fs::symlink(output.path(), &alias).unwrap();
+        for directory in [PathBuf::from("relative"), original.path().into(), candidate.path().into(), alias] {
+            let error = run(&Args { migrated_project: Some(candidate.path().into()),
+                expected_input_sha256: Some(pins[0].clone()), expected_candidate_input_sha256: Some(pins[1].clone()),
+                retain_failures: Some(directory), ..arguments(original.path().into()) }).unwrap_err();
+            assert!(error.to_string().contains("failure archive"), "{error:#}");
+        }
+        assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn reviewed_retention_pair_and_product_outputs_are_directly_replayable() {
+        let project = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let source = "console.log('approved fixture');";
+        std::fs::write(project.path().join("case.test.js"), source).unwrap();
+        let pin = reviewed_pin(project.path());
+        for (bun, expected) in [(None, "FAIL"), (Some(PathBuf::from("/bin/false")), "INCONCLUSIVE")] {
+            std::fs::write(project.path().join("case.test.js"), source).unwrap();
+            // /bin/false deliberately fails its role; no successful native or
+            // real Bun semantics are asserted by this orchestration fixture.
+            let report = run(&Args { native_bin: Some("/bin/false".into()), bun_bin: bun.clone(),
+                expected_input_sha256: Some(pin.clone()), expected_candidate_input_sha256: Some(pin.clone()),
+                retain_failures: Some(output.path().into()), ..arguments(project.path().into()) }).unwrap();
+            assert_eq!(report["verdict"], expected);
+            assert_ne!(result_exit_code(&report), 0);
+            assert_eq!(report["input_approval"]["matched_before_execution"], true);
+            assert_eq!(report["input_approval"]["failure_retention_requested"], true);
+            assert_eq!(report["failure_capture"]["status"], "SAVED");
+            assert_eq!(report["release_certification"], false);
+            let path = PathBuf::from(report["failure_capture"]["capsule_path"].as_str().unwrap());
+            let capsule_pin = report["failure_capture"]["content_sha256"].as_str().unwrap().to_owned();
+            std::fs::write(project.path().join("case.test.js"), "throw Error('live checkout changed');").unwrap();
+            let replayed = run(&Args { native_bin: Some("/bin/false".into()), bun_bin: bun,
+                replay: true, expected_sha256: Some(capsule_pin), ..arguments(path) }).unwrap();
+            assert_eq!(replayed["verdict"], "REPRODUCED");
+            assert_eq!(replayed["validation"]["verdict"], expected);
+            assert_eq!(replayed["validation"]["cases"], report["cases"]);
+            assert_eq!(result_exit_code(&replayed), 0);
+        }
+    }
+
+    #[test]
+    fn reviewed_retention_preserves_captured_pipe_input_and_execution_settings() {
+        use sha2::{Digest, Sha256};
+        let project = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".franken-node")).unwrap();
+        std::fs::write(project.path().join("case.test.cjs"),
+            "process.stdout.write(require('fs').readFileSync(0));").unwrap();
+        let request = [0_u8, 255, 13, 10];
+        std::fs::write(project.path().join("request.bin"), request).unwrap();
+        let settings = r#"{"schema_version":"franken-node/migration-tests/v1","tests":["case.test.cjs"],"execution":{"case.test.cjs":{"stdin":"request.bin","stdin_mode":"pipe"}}}"#;
+        std::fs::write(project.path().join(".franken-node/migration-tests.json"), settings).unwrap();
+        let pin = reviewed_pin(project.path());
+        let report = run(&Args { native_bin: Some("/bin/false".into()),
+            expected_input_sha256: Some(pin.clone()), expected_candidate_input_sha256: Some(pin),
+            retain_failures: Some(output.path().into()), ..arguments(project.path().into()) }).unwrap();
+        assert_eq!(report["verdict"], "FAIL");
+        assert_eq!(report["cases"][0]["reference"]["stdout"]["sha256"], hex::encode(Sha256::digest(request)));
+        let path = PathBuf::from(report["failure_capture"]["capsule_path"].as_str().unwrap());
+        let capsule_pin = report["failure_capture"]["content_sha256"].as_str().unwrap().to_owned();
+        std::fs::write(project.path().join("request.bin"), b"changed input").unwrap();
+        let replayed = run(&Args { native_bin: Some("/bin/false".into()), replay: true,
+            expected_sha256: Some(capsule_pin.clone()), ..arguments(path.clone()) }).unwrap();
+        assert_eq!(replayed["verdict"], "REPRODUCED");
+        assert_eq!(replayed["validation"]["cases"], report["cases"]);
+        let exported = output.path().join("exported");
+        run(&Args { native_bin: None, execute: false, export_inputs: Some(exported.clone()),
+            expected_sha256: Some(capsule_pin), ..arguments(path) }).unwrap();
+        assert_eq!(std::fs::read(exported.join("original/request.bin")).unwrap(), request);
+        assert_eq!(std::fs::read_to_string(exported.join("original/.franken-node/migration-tests.json")).unwrap(), settings);
+    }
+
+    #[test]
+    fn reviewed_retention_storage_failure_does_not_promote_or_erase_measurement() {
+        let project = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let source = format!("const fs=require('fs'),p=require('path'),dir={};\n\
+            const reservation=fs.readdirSync(dir).find(n=>n.startsWith('franken-migration-failure-'));\n\
+            fs.mkdirSync(p.join(dir,reservation,'failure.json'));console.log('measured');",
+            serde_json::to_string(output.path()).unwrap());
+        std::fs::write(project.path().join("case.test.js"), source).unwrap();
+        let pin = reviewed_pin(project.path());
+        let report = run(&Args { native_bin: Some("/bin/false".into()),
+            expected_input_sha256: Some(pin.clone()), expected_candidate_input_sha256: Some(pin),
+            retain_failures: Some(output.path().into()), ..arguments(project.path().into()) }).unwrap();
+        assert_eq!(report["verdict"], "FAIL");
+        assert_eq!(result_exit_code(&report), 1);
+        assert_eq!(report["failure_capture"]["status"], "UNAVAILABLE");
+        assert_eq!(report["cases"][0]["reference"]["exit_code"], 0);
+        assert_eq!(report["cases"][0]["native"]["exit_code"], 1);
+        assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn reviewed_retention_success_and_missing_runtime_release_reservations() {
+        let project = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("case.test.js"), "void 0;").unwrap();
+        let pin = reviewed_pin(project.path());
+        let base = || Args { expected_input_sha256: Some(pin.clone()),
+            expected_candidate_input_sha256: Some(pin.clone()), retain_failures: Some(output.path().into()),
+            ..arguments(project.path().into()) };
+        assert!(run(&base()).is_err());
+        assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 0);
+        // A no-op process can match an empty fixture; this tests retention
+        // lifecycle, not a functioning JavaScript implementation.
+        let report = run(&Args { native_bin: Some("/bin/true".into()), ..base() }).unwrap();
+        assert_eq!(report["verdict"], "PASS");
+        assert_eq!(report["input_approval"]["failure_retention_requested"], true);
+        assert!(report["failure_capture"].is_null());
+        assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn reviewed_retention_does_not_waive_distinct_reference_runtime_checks() {
+        let project = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let marker = output.path().join("must-not-run");
+        std::fs::write(project.path().join("case.test.js"), format!(
+            "require('fs').writeFileSync({},'bad');", serde_json::to_string(&marker).unwrap())).unwrap();
+        let identity = std::process::Command::new("node").env_remove("NODE_OPTIONS").env_remove("NODE_PATH")
+            .args(["-p", "process.execPath"]).output().unwrap();
+        assert!(identity.status.success());
+        let node = PathBuf::from(std::str::from_utf8(&identity.stdout).unwrap().trim());
+        let pin = reviewed_pin(project.path());
+        let error = run(&Args { native_bin: Some("/bin/false".into()), bun_bin: Some(node),
+            expected_input_sha256: Some(pin.clone()), expected_candidate_input_sha256: Some(pin),
+            retain_failures: Some(output.path().into()), ..arguments(project.path().into()) }).unwrap_err();
+        assert!(error.to_string().contains("distinct executable hashes"), "{error:#}");
+        assert!(!marker.exists());
+        assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 0);
     }
 
     #[test]
