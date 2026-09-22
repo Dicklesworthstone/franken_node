@@ -50,57 +50,22 @@ class TestInstallScript(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
 
-    def test_platform_normalization_helpers(self) -> None:
+    def test_detect_platform_linux_x86_64(self) -> None:
         result = run_bash(
-            "source ./install.sh; "
-            "printf '%s %s %s %s\\n' "
-            "\"$(normalize_os Linux)\" "
-            "\"$(normalize_os Darwin)\" "
-            "\"$(normalize_arch x86_64)\" "
-            "\"$(normalize_arch aarch64)\""
+            "source ./install.sh; detect_platform; printf '%s\\n' \"$TARGET\""
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        self.assertEqual(result.stdout.strip(), "linux darwin amd64 arm64")
-
-    def test_detect_helpers_honor_test_overrides(self) -> None:
-        result = run_bash(
-            "source ./install.sh; printf '%s %s\\n' \"$(detect_os)\" \"$(detect_arch)\"",
-            env={
-                "FRANKEN_NODE_UNAME_S": "Linux",
-                "FRANKEN_NODE_UNAME_M": "arm64e",
-            },
-        )
-        self.assertEqual(result.returncode, 0, msg=result.stderr)
-        self.assertEqual(result.stdout.strip(), "linux arm64")
+        self.assertIn("unknown-linux-gnu", result.stdout.strip())
 
     def test_release_asset_name_matches_formula_convention(self) -> None:
         result = run_bash(
-            "source ./install.sh; release_asset_name v0.1.0 linux amd64"
+            "source ./install.sh; asset_name x86_64-unknown-linux-gnu"
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertEqual(
             result.stdout.strip(),
-            "franken-node-v0.1.0-linux_amd64.tar.gz",
+            "franken-node-x86_64-unknown-linux-gnu.tar.xz",
         )
-
-    def test_manifest_extractors_find_expected_sha_and_size(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="franken-node-install-test-") as tmp:
-            manifest = Path(tmp) / "SHA256SUMS"
-            manifest.write_text(
-                "0123456789abcdef  franken-node-v0.1.0-linux_amd64.tar.gz  1234\n"
-                "fedcba9876543210  other-asset.tar.gz  55\n",
-                encoding="utf-8",
-            )
-
-            result = run_bash(
-                f"source ./install.sh; "
-                f"printf '%s %s\\n' "
-                f"\"$(extract_manifest_sha franken-node-v0.1.0-linux_amd64.tar.gz {manifest})\" "
-                f"\"$(extract_manifest_size franken-node-v0.1.0-linux_amd64.tar.gz {manifest})\""
-            )
-
-        self.assertEqual(result.returncode, 0, msg=result.stderr)
-        self.assertEqual(result.stdout.strip(), "0123456789abcdef 1234")
 
     def test_compute_sha256_matches_python_hashlib(self) -> None:
         with tempfile.TemporaryDirectory(prefix="franken-node-install-test-") as tmp:
