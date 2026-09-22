@@ -194,9 +194,7 @@ fn publish_staged(parent: &File, name: &OsStr, bytes: &[u8], mode: u32, create_o
 }
 
 fn publish(parent: &File, name: &OsStr, bytes: &[u8], mode: u32, create_only: bool) -> Result<()> {
-    publish_staged(parent, name, bytes, mode, create_only)?;
-    parent.sync_all()?;
-    Ok(())
+    publish_staged(parent, name, bytes, mode, create_only)
 }
 
 fn verify_image(contents: &Contents, sha256: &str, length: usize, mode: Option<u32>) -> bool {
