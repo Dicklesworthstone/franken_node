@@ -716,7 +716,9 @@ every leaf command available in the current build.
 |---|---|
 | `franken-node migrate audit <path>` | Inventory migration risk. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--format` (json\|text\|sarif), `--json` (alias for `--format json`), `--out`. |
 | `franken-node migrate rewrite <path>` | Apply migration transforms. `--emit-rollback` writes an unsigned JSON `MigrationRollbackPlan` (not Ed25519-signed) plus `.migrate-backup/` snapshots. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--apply`, `--emit-rollback`, `--json`. |
+| `franken-node migrate rollback <path>` | Inspect retained native rewrite transactions or restore one by its explicit identity. `--transaction <ID>` selects the transaction; without `--apply` the command is preview-only, and there is no latest-ID inference. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--transaction`, `--apply`, `--json`. |
 | `franken-node migrate validate <path>` | Rerun static migration audit checks and, unless `--static-only`, a transformed-runtime smoke test. Does **not** run `verify lockstep`. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--format` (json\|text), `--json`, `--static-only`. |
+| `franken-node migrate rollout <path>` | Drive the progressive rollout state machine (shadow → canary → ramp → default) with fail-closed gates. `--action` is `promote` (default), `rollback`, or `status`; `--stage` overrides the target stage; `--ramp-pct` applies in ramp stage; `--canary-instances` defaults to 1. `--force` bypasses confidence-score checks; `--no-auto-rollback` disables automatic rollback on verification failure. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--migration-id`, `--action`, `--stage`, `--ramp-pct`, `--canary-instances`, `--force`, `--no-auto-rollback`, `--json`. |
 | `franken-node migrate-report <path>` | Export one-command migration assessment. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--format` (json\|html), `--json` (alias for `--format json`), `--output`. |
 
 ### Verification
@@ -812,6 +814,7 @@ every leaf command available in the current build.
 | `franken-node doctor workspace-pressure` | Probe local disk, memory, RCH slots, and build counts; apply balanced/conservative/permissive pressure policy. Default human report is stdout. `--human-output <path>` writes that report to a file (not a boolean flag). Flags: `--json`, `--output`, `--human-output`, `--conservative`, `--permissive` (failures `franken-node/doctor-error-cli/v1`). |
 | `franken-node doctor close-condition` | Emit dual-oracle close-condition receipt. Human output names declared L1 `pass_rate`, `node_canonical_observation_passes`, `node_canonical_unscored_fail_ids`, and `child_process_native_eval_aborts` (those remain fail; not recategorized as pass). Flags: `--json` (failures `franken-node/doctor-error-cli/v1`). |
 | `franken-node doctor evidence-readiness` | Report evidence readiness from an `--input` snapshot (not a live broker). `--input` is handler-required so `--json` failures emit `franken-node/doctor-error-cli/v1` instead of a human clap error. Flags: `--json`. |
+| `franken-node doctor process-spawn-readiness` | Securely resolve (or accept `--bubblewrap-path` for) a root-owned, non-setuid, non-writable Bubblewrap binary and run a bounded functional user/PID/cgroup/IPC/UTS namespace probe. Returns non-zero with `unavailable` or `unsupported`; readiness by itself does not grant `process_spawn` or replace the signed opt-in. Flags: `--bubblewrap-path`, `--json` (failures `franken-node/doctor-error-cli/v1`). |
 
 ### Registry, bench, debug
 
@@ -2553,11 +2556,17 @@ and across the test surface:
 
 ## Testing and Verification
 
-- ~3,800 `#[test]` cases in the workspace test trees (`tests/integration`,
+- ~4,100 `#[test]` cases in the workspace test trees (`tests/integration`,
   `tests/conformance`, `tests/contract`, `tests/e2e`, `tests/golden`,
-  `tests/security`, `tests/perf`) run by a default `cargo test
-  -p frankenengine-node`, plus ~21,000 inline `#[cfg(test)]` unit tests that
-  are **compiled out of a default `cargo test`** by the crate-level
+  `tests/security`, `tests/perf`) are registered on the default
+  `cargo test -p frankenengine-node` target, but the suites are
+  **feature-gated**: the flagship CLI e2e families (`fleet_cli_e2e`,
+  `trust_cli_e2e`, `migrate_cli_e2e`) require `--features test-support`
+  and most `bd_*` conformance families require `--features
+  advanced-features`, so a truly default-feature run executes only the
+  ungated subset. CI and the verification lanes run with those features
+  enabled. Another ~22,000 inline `#[cfg(test)]` unit tests are
+  **compiled out of a default `cargo test`** by the crate-level
   `#![cfg(any(not(test), franken_node_inline_tests))]` gate and only run on
   the dedicated inline lane (see below).
   The inline library-test portion is guarded by
@@ -2592,7 +2601,7 @@ and across the test surface:
 Run focused suites:
 
 ```bash
-cargo test -p frankenengine-node                       # ~3.8k integration tests (inline unit tests need the inline lane)
+cargo test -p frankenengine-node                       # ~4.1k integration tests registered; ungated subset runs on default features (CLI e2e need --features test-support; inline unit tests need the inline lane)
 cargo test -p frankenengine-node fleet_cli_e2e         # CLI/integration
 cargo test -p frankenengine-node verify_release_cli_e2e
 cargo test -p frankenengine-node doctor_policy_activation_e2e
@@ -2872,7 +2881,9 @@ A raw test *count* is Goodhart-bait, so the honest "tests" signal is
 single token count:
 
 1. **Tests actually run** by a default `cargo test -p frankenengine-node`
-   (~3,800; the ~21k inline unit tests run only on the dedicated inline lane).
+   (~4,100 registered; the flagship CLI e2e suites require `--features
+   test-support`, most conformance families `--features advanced-features`,
+   and the ~22k inline unit tests run only on the dedicated inline lane).
    This count is recomputed from the committed tree by the Honesty Manifest
    ([Honesty Manifest](#honesty-manifest)).
 2. **Mutation adequacy** — the fraction of seeded mutants the suite catches,

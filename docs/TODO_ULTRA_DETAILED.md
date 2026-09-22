@@ -1,5 +1,26 @@
 # Ultra Detailed TODO
 
+> **STATUS (2026-09-22, reality-check truth pass):** Sections 1–5 below are
+> **historical pre-engine-split planning notes**, preserved for provenance only.
+> They do NOT reflect current reality and several items contradict adopted
+> doctrine:
+> - Section 2's "QuickJS/V8 backend lane" items violate the charter's
+>   no-bindings rule (`docs/PRODUCT_CHARTER.md` §1: "Not a binding/wrapper
+>   around V8, QuickJS, or any existing engine"). The engine executes native
+>   Rust (IR0→IR3 lowering + baseline interpreter); no QuickJS/V8 evaluator
+>   will be implemented.
+> - Section 5's "command-line interface", "structured logging", and "release
+>   pipeline" items are delivered (72-leaf CLI, `--structured-logs-jsonl`,
+>   packaging/release surfaces) — the unchecked boxes are stale, not open work.
+> - Sections 3/4 (Node/Bun parity, conformance) are now owned by the
+>   compatibility-corpus program (section 13 of the master plan; gate bead
+>   `bd-28sz`), not this list.
+>
+> The authoritative work surfaces are `.beads` (via `br`/`bv`),
+> `docs/progress/REALITY_CHECK_AND_BRIDGE_PLAN.md`, `docs/CLAIMS_REGISTRY.md`,
+> and `docs/TODO_ULTRA_DETAILED.md` section 6+ where marked current. Do not
+> pick up unchecked items from sections 1–5 as real work.
+
 ## 0. Transplant Integrity
 - [x] Create standalone workspace in `/dp/franken_node`.
 - [x] Create dedicated extension-host crate in `/dp/franken_engine/crates/franken-extension-host`.

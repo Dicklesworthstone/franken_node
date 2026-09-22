@@ -2597,6 +2597,70 @@ mod contract_tests {
         assert_eq!(content_type, "application/problem+json");
         assert!(body.contains("Not Found"));
     }
+
+    #[test]
+    fn http_server_fleet_status_reports_file_transport_not_live() {
+        let (status, content_type, body) =
+            http_server::dispatch_http_request("GET", "/v1/fleet/status", "test-trace-fleet-1");
+        assert_eq!(status, 200);
+        assert_eq!(content_type, "application/json");
+        // Must match the fleet CLI contract vocabulary exactly.
+        assert!(body.contains("\"transport\":\"file\""));
+        assert!(body.contains("\"live_control_plane\":false"));
+        assert!(body.contains("\"activated_source\":\"file_transport_not_live\""));
+        assert!(!body.contains("\"live_control_plane\":true"));
+    }
+
+    #[test]
+    fn http_server_trust_cards_fail_closed_without_registry() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let (status, content_type, body) = http_server::trust_cards_catalog_response_for_base(
+            tmp.path(),
+            "test-trust-cards-missing",
+        );
+        assert_eq!(status, 503);
+        assert_eq!(content_type, "application/problem+json");
+        assert!(body.contains("urn:franken-node:error:trust-registry-unavailable"));
+        assert!(body.contains("franken-node trust scan"));
+    }
+
+    #[test]
+    fn http_server_trust_cards_read_real_registry_store() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let snapshot = tmp
+            .path()
+            .join(http_server::TRUST_CARD_REGISTRY_CATALOG_RELATIVE_PATH);
+        let trust_config = crate::config::TrustConfig {
+            risky_requires_fresh_revocation: false,
+            dangerous_requires_fresh_revocation: false,
+            quarantine_on_high_risk: false,
+            card_cache_ttl_secs: None,
+            freshness_window_secs: None,
+            min_trust_score: None,
+            decay_factor: None,
+            registry_signing_key: None,
+            reputation_tier_thresholds: None,
+            test_coverage_threshold_pct: None,
+        };
+        let mut registry =
+            crate::supply_chain::trust_card::TrustCardRegistry::from_config(&trust_config)
+                .expect("registry from default config");
+        registry
+            .persist_authoritative_state(&snapshot)
+            .expect("persist fresh registry store");
+
+        let (status, content_type, body) = http_server::trust_cards_catalog_response_for_base(
+            tmp.path(),
+            "test-trust-cards-empty",
+        );
+        assert_eq!(status, 200);
+        assert_eq!(content_type, "application/json");
+        // The response must trace to the real durable store, not a canned list.
+        assert!(body.contains("\"source\":\"durable_trust_card_registry\""));
+        assert!(body.contains("trust-card-registry.v1.db"));
+        assert!(body.contains("\"total_count\":0"));
+        assert!(body.contains("\"cards\":[]"));
+    }
 }
 
 pub mod http_server {
@@ -2660,22 +2724,25 @@ pub mod http_server {
                 )
             }
             ("GET", "/v1/fleet/status") | ("GET", "/api/v1/fleet/status") => {
+                // The in-process catalog never fronts a live multi-node plane.
+                // Report the same file-transport truth as the fleet CLI
+                // (`transport=file live_control_plane=false
+                // activated_source=file_transport_not_live`), never a
+                // fabricated live heartbeat.
                 let resp = json!({
                     "schema_version": "franken-node/fleet-status/v1",
-                    "status": "ready",
-                    "live_control_plane": true,
+                    "status": "catalog_only",
+                    "transport": "file",
+                    "live_control_plane": false,
+                    "activated_source": "file_transport_not_live",
                     "trace_id": trace_id,
                 });
                 (200, "application/json".to_string(), resp.to_string())
             }
             ("GET", "/v1/trust/cards") | ("GET", "/api/v1/trust/cards") => {
-                let resp = json!({
-                    "schema_version": "franken-node/trust-cards/v1",
-                    "cards": [],
-                    "total_count": 0,
-                    "trace_id": trace_id,
-                });
-                (200, "application/json".to_string(), resp.to_string())
+                let base_dir =
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                trust_cards_catalog_response_for_base(&base_dir, trace_id)
             }
             _ => {
                 let resp = json!({
@@ -2707,5 +2774,96 @@ pub mod http_server {
         );
 
         (status, content_type, body)
+    }
+
+    /// Default discovery path (relative to the workspace root) of the durable
+    /// trust-card registry snapshot, matching the trust-card CLI.
+    pub const TRUST_CARD_REGISTRY_CATALOG_RELATIVE_PATH: &str =
+        ".franken-node/state/trust-card-registry.v1.json";
+
+    fn now_unix_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| u64::try_from(duration.as_secs()).unwrap_or(u64::MAX))
+            .unwrap_or(0)
+    }
+
+    fn trust_registry_unavailable_response(
+        snapshot_path: &std::path::Path,
+        trace_id: &str,
+        detail: &str,
+    ) -> (u16, String, String) {
+        let resp = json!({
+            "type": "urn:franken-node:error:trust-registry-unavailable",
+            "title": "Trust Card Registry Unavailable",
+            "status": 503,
+            "detail": format!(
+                "no readable trust-card registry at {} ({}); \
+                 run `franken-node trust scan` to bootstrap one",
+                snapshot_path.display(),
+                detail
+            ),
+            "trace_id": trace_id,
+        });
+        (
+            503,
+            "application/problem+json".to_string(),
+            resp.to_string(),
+        )
+    }
+
+    /// Build the `/v1/trust/cards` catalog response from the workspace's
+    /// durable trust-card registry.
+    ///
+    /// The in-process catalog owns no registry of its own; it discovers the
+    /// workspace registry relative to `base_dir` exactly like the trust-card
+    /// CLI. When no registry can be loaded, the endpoint fails closed with a
+    /// typed `trust-registry-unavailable` problem document — it never
+    /// fabricates an empty card list.
+    pub(crate) fn trust_cards_catalog_response_for_base(
+        base_dir: &std::path::Path,
+        trace_id: &str,
+    ) -> (u16, String, String) {
+        use crate::supply_chain::trust_card::{
+            SnapshotSourceContext, TrustCardListFilter, TrustCardRegistry,
+        };
+
+        let snapshot_path = base_dir.join(TRUST_CARD_REGISTRY_CATALOG_RELATIVE_PATH);
+        let now_secs = now_unix_secs();
+        let unavailable =
+            |detail: String| trust_registry_unavailable_response(&snapshot_path, trace_id, &detail);
+        let Ok(mut registry) = TrustCardRegistry::load_authoritative_state(
+            &snapshot_path,
+            crate::config::timeouts::TRUST_CARD_CACHE_TTL_SECS,
+            now_secs,
+            SnapshotSourceContext::TrustedFile,
+        ) else {
+            return unavailable("registry snapshot not found or unreadable".to_string());
+        };
+        let Ok(cards) = registry.list(&TrustCardListFilter::empty(), trace_id, now_secs) else {
+            return unavailable("registry listing failed signature validation".to_string());
+        };
+        let summaries: Vec<serde_json::Value> = cards
+            .iter()
+            .map(|card| {
+                json!({
+                    "extension_id": card.extension.extension_id,
+                    "version": card.extension.version,
+                    "risk_level": card.user_facing_risk_assessment.level,
+                    "revocation_status": card.revocation_status,
+                    "active_quarantine": card.active_quarantine,
+                })
+            })
+            .collect();
+        let total_count = summaries.len();
+        let resp = json!({
+            "schema_version": "franken-node/trust-cards/v1",
+            "source": "durable_trust_card_registry",
+            "registry_path": snapshot_path.display().to_string(),
+            "cards": summaries,
+            "total_count": total_count,
+            "trace_id": trace_id,
+        });
+        (200, "application/json".to_string(), resp.to_string())
     }
 }
