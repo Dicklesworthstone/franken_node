@@ -6,8 +6,7 @@ use franken_module_graph_schema as schema_versions;
 #[path = "../../crates/franken-node/src/supply_chain/module_resolution_graph.rs"]
 mod module_resolution_graph;
 
-#[path = "../../crates/franken-node/src/supply_chain/package_target_resolution.rs"]
-mod package_target_resolution;
+use module_resolution_graph::package_targets as package_target_resolution;
 
 use clap::Parser;
 use module_resolution_graph::{build_canonical_module_resolution_graph, recompute_module_resolution_graph_hash};
@@ -42,17 +41,26 @@ struct Args {
     #[arg(long)]
     require_resolved: bool,
     /// Select a package's export target for . or an exact ./ subpath.
-    #[arg(long, group = "target_query", conflicts_with_all = ["importer_query", "impact", "importer", "require_resolved"])]
+    #[arg(long, groups = ["target_query", "condition_query"], conflicts_with_all = ["importer_query", "impact", "importer", "require_resolved"])]
     resolve_export: Option<String>,
     /// Select an internal # import target from a package manifest.
-    #[arg(long, group = "target_query", conflicts_with_all = ["importer_query", "impact", "importer", "require_resolved"])]
+    #[arg(long, groups = ["target_query", "condition_query"], conflicts_with_all = ["importer_query", "impact", "importer", "require_resolved"])]
     resolve_import: Option<String>,
     /// Exact project-relative package.json to inspect; default: package.json.
     #[arg(long, requires = "target_query")]
     package_manifest: Option<String>,
-    /// Complete active condition set, repeatable. Default when omitted: node, import.
-    #[arg(long = "condition", requires = "target_query")]
+    /// Complete active condition set, repeatable. Default: node plus import/require mode.
+    #[arg(long = "condition", requires = "condition_query")]
     conditions: Vec<String>,
+    /// Resolve a module request to an existing captured file without executing it.
+    #[arg(long, group = "condition_query", requires = "from", conflicts_with_all = ["importer_query", "impact", "importer", "require_resolved", "target_query", "package_manifest"])]
+    resolve_module: Option<String>,
+    /// Existing canonical project-relative importing file for --resolve-module.
+    #[arg(long, requires = "resolve_module")]
+    from: Option<String>,
+    /// Resolution algorithm; defaults to import. Does not execute either runtime.
+    #[arg(long, requires = "resolve_module", value_parser = ["import", "require"])]
+    resolution_mode: Option<String>,
 }
 
 // The standalone host supplies the same bounded-read interface used by the
@@ -78,6 +86,7 @@ fn inspect(args: Args) -> Result<(Value, u8), Box<dyn std::error::Error>> {
             return Err("expected hash requires exactly 64 lowercase hexadecimal digits".into());
         }
     }
+    if args.resolve_module.is_some() { return inspect_module_file(&args); }
     if args.resolve_export.is_some() || args.resolve_import.is_some() { return inspect_targets(&args); }
     if args.transitive || args.impact.is_some() { return inspect_topology(&args); }
     let graph = build_canonical_module_resolution_graph(&args.project)?;
@@ -152,6 +161,52 @@ fn inspect_topology(args: &Args) -> Result<(Value, u8), Box<dyn std::error::Erro
     });
     report[query] = result;
     Ok((report, if verdict == "INSPECTED" { 0 } else { 1 }))
+}
+
+#[cfg(unix)]
+fn inspect_module_file(args: &Args) -> Result<(Value, u8), Box<dyn std::error::Error>> {
+    use module_resolution_graph::file_resolution::{self, ResolutionMode};
+    let mode = match args.resolution_mode.as_deref().unwrap_or("import") {
+        "import" => ResolutionMode::Import, "require" => ResolutionMode::Require,
+        _ => return Err("invalid module resolution mode".into()),
+    };
+    let conditions = if args.conditions.is_empty() { mode.default_conditions() } else { args.conditions.clone() };
+    let importer = args.from.as_deref().ok_or("module resolution requires --from")?;
+    let request = args.resolve_module.as_deref().ok_or("missing module request")?;
+    let mut report = json!({"schema_version":"franken-node/module-graph-inspection/v1",
+        "scope":"project-contained-module-resolution", "execution_performed":false,
+        "release_certification":false, "filesystem_verified":false, "resolution":null});
+    match file_resolution::resolve(&args.project, importer, request, mode, &conditions) {
+        Ok(captured) => {
+            let matched = args.expected_hash.as_ref().map(|pin| pin == &captured.report.input_hash);
+            report["input_hash"] = json!(captured.report.input_hash);
+            report["expected_hash_matched"] = json!(matched);
+            if matched == Some(false) {
+                report["verdict"] = json!("HASH_MISMATCH");
+                return Ok((report, 1));
+            }
+            report["verdict"] = json!("RESOLVED");
+            report["filesystem_verified"] = json!(true);
+            report["resolution"] = serde_json::to_value(&captured.report)?;
+            // The captured source is intentionally never serialized to stdout.
+            Ok((report, 0))
+        }
+        Err(error) => {
+            let missing = matches!(error.code, "ERR_MODULE_NOT_FOUND" | "MODULE_NOT_FOUND"
+                | "ERR_UNSUPPORTED_DIR_IMPORT" | "ERR_PACKAGE_MAP_ABSENT"
+                | "ERR_PACKAGE_PATH_NOT_EXPORTED" | "ERR_PACKAGE_IMPORT_NOT_DEFINED");
+            let builtin = error.code == "ERR_RUNTIME_MODULE_REQUIRED";
+            report["verdict"] = json!(if builtin { "RUNTIME_REQUIRED" } else if missing { "UNRESOLVED" } else { "ERROR" });
+            report["error_code"] = json!(error.code);
+            report["error"] = json!(error.detail);
+            Ok((report, if missing || builtin { 1 } else { 2 }))
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn inspect_module_file(_: &Args) -> Result<(Value, u8), Box<dyn std::error::Error>> {
+    Err("module file resolution requires Unix descriptor-relative capture".into())
 }
 
 fn inspect_targets(args: &Args) -> Result<(Value, u8), Box<dyn std::error::Error>> {
@@ -242,7 +297,8 @@ fn capture_manifest(_: &Path, _: &str) -> Result<String, Box<dyn std::error::Err
 
 fn main() -> ExitCode {
     let args = Args::parse();
-    let scope = if args.resolve_export.is_some() || args.resolve_import.is_some() { "package-map-target-selection" }
+    let scope = if args.resolve_module.is_some() { "project-contained-module-resolution" }
+        else if args.resolve_export.is_some() || args.resolve_import.is_some() { "package-map-target-selection" }
         else if args.transitive || args.impact.is_some() { "declared-dependency-topology" }
         else { "lockfile-metadata-only" };
     let (report, code) = match inspect(args) {

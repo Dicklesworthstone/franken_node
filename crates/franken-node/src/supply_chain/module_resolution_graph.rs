@@ -17,6 +17,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+#[path = "package_target_resolution.rs"]
+pub mod package_targets;
+#[cfg(unix)]
+#[path = "module_file_resolution.rs"]
+pub mod file_resolution;
+
 #[path = "module_dependency_topology.rs"]
 pub mod dependency_topology;
 
