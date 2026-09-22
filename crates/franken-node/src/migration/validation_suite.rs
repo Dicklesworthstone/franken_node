@@ -490,6 +490,7 @@ pub fn run_project_comparison(project: &Path, migrated_project: Option<&Path>,
 pub struct ApprovedInputs {
     inputs: CapturedInputs,
     deadline: Instant,
+    failure_archive: Option<FailureArchive>,
 }
 
 impl ApprovedInputs {
@@ -512,7 +513,31 @@ impl ApprovedInputs {
         ensure!(inputs.candidate_snapshot().digest == expected_candidate_input_sha256,
             "candidate captured input does not match the independently approved SHA-256; no runtime was resolved or executed");
         budget(deadline)?;
-        Ok(Self { inputs, deadline })
+        Ok(Self { inputs, deadline, failure_archive: None })
+    }
+
+    /// Opt in to retaining an eligible failed measurement from these approved
+    /// inputs. Reserve an owner-only directory before any runtime is resolved;
+    /// never recapture a changed checkout or execute again to obtain evidence.
+    ///
+    /// The directory must be absolute, already exist, and be outside BOTH
+    /// projects. It is supplied by the trusted caller, never project metadata
+    /// or the ambient failure-retention environment variable. This capability
+    /// is consumed with the execution approval. Dropping it, failing before
+    /// measurement, or measuring PASS removes the unused reservation.
+    ///
+    /// Retention is best effort AFTER measurement: archive limits, incomplete
+    /// runs, expired deadlines or storage failures produce UNAVAILABLE in the
+    /// report's failure_capture without changing its measured verdict. A saved
+    /// capsule contains sensitive source bytes, including the rejected candidate.
+    pub fn retain_failures(mut self, directory: &Path) -> Result<Self> {
+        budget(self.deadline)?;
+        ensure!(self.failure_archive.is_none(), "failure retention was already configured");
+        let archive = FailureArchive::reserve(directory,
+            [&self.inputs.reference_root, &self.inputs.candidate_root])?;
+        budget(self.deadline)?;
+        self.failure_archive = Some(archive);
+        Ok(self)
     }
 
     /// Run the already-approved original/candidate pair, never a second capture
@@ -520,7 +545,10 @@ impl ApprovedInputs {
     /// holding this value; approval does not start a fresh execution allowance.
     pub fn run_pair(self, native_executable: &Path, compare_filesystem: bool) -> Result<SuiteReport> {
         budget(self.deadline)?;
-        self.inputs.execute(native_executable, self.deadline, compare_filesystem)
+        run_captured_with_archive(
+            (&self.inputs.reference_root, &self.inputs.candidate_root),
+            (&self.inputs.reference, self.inputs.candidate_snapshot()),
+            native_executable, self.deadline, compare_filesystem, self.failure_archive)
     }
 
     /// Require both references on the same approved original inputs. Missing
@@ -528,9 +556,14 @@ impl ApprovedInputs {
     pub fn run_product(self, native_executable: &Path, bun_executable: &Path,
         compare_filesystem: bool) -> Result<product_oracle::ProductReport> {
         budget(self.deadline)?;
-        product_oracle::run_captured([&self.inputs.reference_root, &self.inputs.candidate_root],
+        let mut report = product_oracle::run_captured([&self.inputs.reference_root, &self.inputs.candidate_root],
             [&self.inputs.reference, self.inputs.candidate_snapshot()],
-            native_executable, bun_executable, self.deadline, compare_filesystem)
+            native_executable, bun_executable, self.deadline, compare_filesystem)?;
+        if let Some(archive) = self.failure_archive {
+            report.failure_capture = archive.finish_product(&report, &self.inputs.reference,
+                self.inputs.candidate_snapshot(), self.deadline);
+        }
+        Ok(report)
     }
 }
 
@@ -1137,5 +1170,206 @@ mod tests {
             };
             assert!(error.to_string().contains("total budget exhausted"));
         }
+    }
+
+    fn saved_failure(report: &SuiteReport) -> (&Path, &str) {
+        match report.failure_capture.as_ref().expect("retention requested") {
+            FailureCapture::Saved { capsule_path, content_sha256 } => (capsule_path, content_sha256),
+            other => panic!("expected saved failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn approved_failure_retention_replays_the_reviewed_pair_without_recapture_or_rerun() {
+        let original = fixture();
+        let candidate = fixture();
+        let output = fixture();
+        let marker = output.path().join("executions");
+        let source = format!("require('fs').appendFileSync({},'once\\n');console.log('reviewed');",
+            serde_json::to_string(&marker).unwrap());
+        let replacement = "console.log('reviewed candidate');";
+        write(original.path(), "case.test.js", &source);
+        write(candidate.path(), "case.test.js", replacement);
+        let pins = [reviewed_hash(original.path()), reviewed_hash(candidate.path())];
+        let approved = ApprovedInputs::capture(original.path(), Some(candidate.path()), &pins[0], &pins[1]).unwrap();
+        write(original.path(), "case.test.js", "throw Error('unreviewed original');");
+        write(candidate.path(), "case.test.js", "throw Error('unreviewed candidate');");
+        let approved = approved.retain_failures(output.path()).unwrap();
+        // A real Node reference and deliberately failing native role exercise
+        // capture/reexecution, not successful FrankenEngine compatibility.
+        let report = approved.run_pair(Path::new("/bin/false"), true).unwrap();
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "once\n");
+        assert_eq!(report.input_sha256, pins[0]);
+        assert_eq!(report.candidate_input_sha256, pins[1]);
+        let (path, pin) = saved_failure(&report);
+        assert_eq!(fs::metadata(path).unwrap().mode() & 0o777, 0o600);
+        assert_eq!(fs::metadata(path.parent().unwrap()).unwrap().mode() & 0o777, 0o700);
+        let summary = native_replay::inspect(path).unwrap();
+        assert_eq!(summary.input_sha256, pins[0]);
+        assert_eq!(summary.candidate_input_sha256, pins[1]);
+        let exported = output.path().join("exported");
+        native_replay::failure_capture::product::export_any(path, pin, &exported).unwrap();
+        assert_eq!(fs::read_to_string(exported.join("original/case.test.js")).unwrap(), source);
+        assert_eq!(fs::read_to_string(exported.join("candidate/case.test.js")).unwrap(), replacement);
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "once\n");
+        let replayed = native_replay::replay(path, pin, Path::new("/bin/false"), false).unwrap();
+        assert_eq!(replayed.verdict, "REPRODUCED");
+        assert_eq!(replayed.validation.verdict, "FAIL");
+        assert_eq!(replayed.validation.cases, report.cases);
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "once\nonce\n");
+        assert_eq!(fs::read_to_string(original.path().join("case.test.js")).unwrap(), "throw Error('unreviewed original');");
+        assert!(!report.release_certification);
+    }
+
+    #[test]
+    fn approved_retention_is_private_before_execution_and_dropped_approval_releases_it() {
+        let project = fixture();
+        let output = fixture();
+        write(project.path(), "case.test.js", "console.log('not executed');");
+        let pin = reviewed_hash(project.path());
+        let approved = ApprovedInputs::capture(project.path(), None, &pin, &pin).unwrap()
+            .retain_failures(output.path()).unwrap();
+        let entries = fs::read_dir(output.path()).unwrap().collect::<std::io::Result<Vec<_>>>().unwrap();
+        assert_eq!(entries.len(), 1);
+        let reservation = entries[0].path();
+        assert_eq!(fs::metadata(&reservation).unwrap().mode() & 0o777, 0o700);
+        assert_eq!(fs::read_dir(&reservation).unwrap().count(), 0);
+        drop(approved);
+        assert!(!reservation.exists());
+        assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn approved_retention_rejects_unsafe_destinations_before_runtime_resolution() {
+        let original = fixture();
+        let candidate = fixture();
+        let output = fixture();
+        for root in [original.path(), candidate.path()] { write(root, "case.test.js", "void 0;"); }
+        let pins = [reviewed_hash(original.path()), reviewed_hash(candidate.path())];
+        let link = output.path().join("alias");
+        symlink(output.path(), &link).unwrap();
+        for path in [PathBuf::from("relative"), original.path().into(), candidate.path().into(),
+            output.path().join("absent"), original.path().join("case.test.js"), link] {
+            let approved = ApprovedInputs::capture(original.path(), Some(candidate.path()), &pins[0], &pins[1]).unwrap();
+            assert!(approved.retain_failures(&path).is_err(), "{path:?}");
+        }
+        assert_eq!(fs::read_dir(output.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn retention_cannot_reset_the_approval_clock_or_be_configured_twice() {
+        let project = fixture();
+        let first = fixture();
+        let second = fixture();
+        write(project.path(), "case.test.js", "void 0;");
+        let pin = reviewed_hash(project.path());
+        let mut expired = ApprovedInputs::capture(project.path(), None, &pin, &pin).unwrap();
+        expired.deadline = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        assert!(expired.retain_failures(first.path()).err().unwrap().to_string().contains("total budget exhausted"));
+        assert_eq!(fs::read_dir(first.path()).unwrap().count(), 0);
+        let approved = ApprovedInputs::capture(project.path(), None, &pin, &pin).unwrap();
+        let deadline = approved.deadline;
+        let retained = approved.retain_failures(first.path()).unwrap();
+        assert_eq!(retained.deadline, deadline);
+        assert!(retained.retain_failures(second.path()).err().unwrap().to_string().contains("already configured"));
+        assert_eq!(fs::read_dir(first.path()).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(second.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn retained_approval_cleans_up_on_missing_runtime_and_expiration() {
+        let project = fixture();
+        let output = fixture();
+        write(project.path(), "case.test.js", "void 0;");
+        let pin = reviewed_hash(project.path());
+        for product in [false, true] {
+            for expire in [false, true] {
+                let mut approved = ApprovedInputs::capture(project.path(), None, &pin, &pin).unwrap()
+                    .retain_failures(output.path()).unwrap();
+                if expire { approved.deadline = Instant::now().checked_sub(Duration::from_secs(1)).unwrap(); }
+                let missing = Path::new("/definitely/missing-retained-runtime");
+                let error = if product { approved.run_product(missing, missing, false).unwrap_err() }
+                    else { approved.run_pair(missing, false).unwrap_err() };
+                if expire { assert!(error.to_string().contains("total budget exhausted")); }
+                assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn successful_approved_comparisons_leave_no_failure_archive() {
+        let project = fixture();
+        let output = fixture();
+        write(project.path(), "case.test.js", "void 0;");
+        let pin = reviewed_hash(project.path());
+        for product in [false, true] {
+            let approved = ApprovedInputs::capture(project.path(), None, &pin, &pin).unwrap()
+                .retain_failures(output.path()).unwrap();
+            // No-op process roles prove storage lifecycle only. They do not
+            // stand in for genuine Bun/Franken semantic implementations.
+            if product {
+                let report = approved.run_product(Path::new("/bin/true"), Path::new("/bin/true"), false).unwrap();
+                assert_eq!(report.verdict, "PASS");
+                assert!(report.failure_capture.is_none());
+            } else {
+                let report = approved.run_pair(Path::new("/bin/true"), false).unwrap();
+                assert_eq!(report.verdict, "PASS");
+                assert!(report.failure_capture.is_none());
+            }
+            assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn approved_product_retention_keeps_all_three_roles_and_reference_failure() {
+        let project = fixture();
+        let output = fixture();
+        write(project.path(), "case.test.js", "console.log('reviewed reference');");
+        let pin = reviewed_hash(project.path());
+        let approved = ApprovedInputs::capture(project.path(), None, &pin, &pin).unwrap()
+            .retain_failures(output.path()).unwrap();
+        let report = approved.run_product(Path::new("/bin/false"), Path::new("/bin/false"), false).unwrap();
+        assert_eq!(report.verdict, "INCONCLUSIVE");
+        let FailureCapture::Saved { capsule_path, content_sha256 } = report.failure_capture.as_ref().unwrap()
+            else { panic!("{report:#?}") };
+        assert!(native_replay::inspect(capsule_path).is_err(), "product evidence must not become a pair capsule");
+        let replayed = native_replay::failure_capture::product::replay(capsule_path, content_sha256,
+            Path::new("/bin/false"), Path::new("/bin/false"), false).unwrap();
+        assert_eq!(replayed.verdict, "REPRODUCED");
+        assert_eq!(replayed.validation.verdict, "INCONCLUSIVE");
+        assert_eq!(replayed.validation.cases, report.cases);
+        assert!(!replayed.release_certification);
+    }
+
+    #[test]
+    fn post_execution_retention_failure_keeps_the_measured_native_failure() {
+        let project = fixture();
+        let output = fixture();
+        write(project.path(), "case.test.js", "console.log('evidence survives');");
+        let pin = reviewed_hash(project.path());
+        let approved = ApprovedInputs::capture(project.path(), None, &pin, &pin).unwrap()
+            .retain_failures(output.path()).unwrap();
+        let reservation = fs::read_dir(output.path()).unwrap().next().unwrap().unwrap().path();
+        fs::create_dir(reservation.join("failure.json")).unwrap();
+        let report = approved.run_pair(Path::new("/bin/false"), false).unwrap();
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(report.cases[0].reference.as_ref().unwrap().exit_code, Some(0));
+        assert_eq!(report.cases[0].native.as_ref().unwrap().exit_code, Some(1));
+        assert!(matches!(report.failure_capture, Some(FailureCapture::Unavailable { .. })));
+        assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn incomplete_approved_execution_is_not_published_as_replayable() {
+        let project = fixture();
+        let output = fixture();
+        write(project.path(), "case.test.js", "process.stdout.write('x'.repeat(17*1024*1024));");
+        let pin = reviewed_hash(project.path());
+        let report = ApprovedInputs::capture(project.path(), None, &pin, &pin).unwrap()
+            .retain_failures(output.path()).unwrap().run_pair(Path::new("/bin/false"), false).unwrap();
+        assert_eq!(report.verdict, "ERROR");
+        assert!(matches!(report.failure_capture, Some(FailureCapture::Unavailable { .. })));
+        assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0);
     }
 }
