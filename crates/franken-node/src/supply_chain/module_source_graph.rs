@@ -21,6 +21,13 @@ use tree_sitter::{Node, Parser};
 #[path = "module_graph_capsule.rs"]
 pub mod capsule;
 
+#[path = "module_source_registry.rs"]
+pub mod registry;
+
+#[cfg(feature = "engine")]
+#[path = "module_engine_resolver.rs"]
+pub mod engine_resolver;
+
 const MAX_MODULES: usize = 256;
 const MAX_SITES: usize = 4096;
 const MAX_AST_NODES: usize = 262_144;

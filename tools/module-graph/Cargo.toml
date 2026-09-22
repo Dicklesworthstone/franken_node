@@ -9,6 +9,11 @@ publish = false
 # optional sibling engine. No JavaScript or package-manager command is executed.
 [workspace]
 
+# Product modules share this crate's focused host. The engine-only adapter is
+# tested against the actual sibling engine in engine-bridge, not compiled here.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("engine"))'] }
+
 [lib]
 name = "franken_module_graph_schema"
 path = "../../crates/franken-node/src/schema_versions.rs"

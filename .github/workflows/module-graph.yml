@@ -12,6 +12,8 @@ on:
       - 'crates/franken-node/src/supply_chain/module_file_resolution.rs'
       - 'crates/franken-node/src/supply_chain/module_source_graph.rs'
       - 'crates/franken-node/src/supply_chain/module_graph_capsule.rs'
+      - 'crates/franken-node/src/supply_chain/module_source_registry.rs'
+      - 'crates/franken-node/src/supply_chain/module_engine_resolver.rs'
       - 'crates/franken-node/src/schema_versions.rs'
   workflow_dispatch:
 
@@ -49,10 +51,49 @@ jobs:
           if test -f tools/module-graph/Cargo.lock; then cp tools/module-graph/Cargo.lock evidence/Cargo.lock; fi
           if test -f tools/module-graph/target/debug/franken-module-graph; then cp tools/module-graph/target/debug/franken-module-graph evidence/; fi
           git archive HEAD crates/franken-node/src/supply_chain/module_resolution_graph.rs crates/franken-node/src/supply_chain/module_dependency_topology.rs crates/franken-node/src/supply_chain/package_target_resolution.rs crates/franken-node/src/supply_chain/module_file_resolution.rs crates/franken-node/src/supply_chain/module_source_graph.rs crates/franken-node/src/supply_chain/module_graph_capsule.rs crates/franken-node/src/schema_versions.rs tools/module-graph .github/workflows/module-graph.yml | gzip > evidence/native-module-graph-source.tar.gz
+          git show HEAD:crates/franken-node/src/supply_chain/module_source_registry.rs > evidence/module_source_registry.rs
+          git show HEAD:crates/franken-node/src/supply_chain/module_engine_resolver.rs > evidence/module_engine_resolver.rs
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: native-module-graph-evidence
           retention-days: 7
           path: evidence/
+          if-no-files-found: error
+
+  captured-engine-bridge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: franken_node
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: Dicklesworthstone/franken_engine
+          ref: bff9a4da7059717335926b4bacdbb03d96408a7f
+          path: franken_engine
+          persist-credentials: false
+      - name: Test the product resolver against the actual engine contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bridge-evidence
+          rustup toolchain install stable --profile minimal
+          rustc +stable --version | tee bridge-evidence/rust-version.txt
+          git -C franken_node rev-parse HEAD > bridge-evidence/product-revision.txt
+          git -C franken_engine rev-parse HEAD > bridge-evidence/engine-revision.txt
+          cargo +stable test --manifest-path franken_node/tools/module-graph/engine-bridge/Cargo.toml --lib engine_resolver::tests 2>&1 | tee bridge-evidence/native-tests.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: captured-engine-bridge-evidence
+          retention-days: 7
+          path: bridge-evidence/
           if-no-files-found: error
