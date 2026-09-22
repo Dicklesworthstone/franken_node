@@ -55,7 +55,7 @@ struct Record {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Journal {
+pub(crate) struct Journal {
     schema_version: String,
     session: String,
     records: Vec<Record>,
@@ -310,7 +310,7 @@ impl RewriteTransaction {
         Ok(())
     }
 
-    pub fn install(&self, journal: &Journal, index: usize) -> Result<()> {
+    pub(crate) fn install(&self, journal: &Journal, index: usize) -> Result<()> {
         let record = &journal.records[index];
         let session = directory(&self.store, Path::new(&journal.session), false)?;
         let after = read_required(&session, OsStr::new(&format!("{index}.after")), MAX_FILE_BYTES)?;
