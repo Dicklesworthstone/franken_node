@@ -2638,7 +2638,7 @@ mod contract_tests {
             freshness_window_secs: None,
             min_trust_score: None,
             decay_factor: None,
-            registry_signing_key: None,
+            registry_signing_key: Some("x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c=".to_string()),
             reputation_tier_thresholds: None,
             test_coverage_threshold_pct: None,
         };
@@ -2820,7 +2820,7 @@ pub mod http_server {
     /// CLI. When no registry can be loaded, the endpoint fails closed with a
     /// typed `trust-registry-unavailable` problem document — it never
     /// fabricates an empty card list.
-    pub(crate) fn trust_cards_catalog_response_for_base(
+    pub fn trust_cards_catalog_response_for_base(
         base_dir: &std::path::Path,
         trace_id: &str,
     ) -> (u16, String, String) {

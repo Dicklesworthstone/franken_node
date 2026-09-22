@@ -862,3 +862,72 @@ fn control_plane_fastapi_reconcile_route_reports_conflict_when_manager_inactive(
             .is_some_and(|detail| detail.contains(FLEET_NOT_ACTIVATED))
     );
 }
+
+#[test]
+fn http_server_fleet_status_reports_file_transport_not_live() {
+    use frankenengine_node::api::service::http_server;
+    let (status, content_type, body) =
+        http_server::dispatch_http_request("GET", "/v1/fleet/status", "test-trace-fleet-1");
+    assert_eq!(status, 200);
+    assert_eq!(content_type, "application/json");
+    // Must match the fleet CLI contract vocabulary exactly.
+    assert!(body.contains("\"transport\":\"file\""));
+    assert!(body.contains("\"live_control_plane\":false"));
+    assert!(body.contains("\"activated_source\":\"file_transport_not_live\""));
+    assert!(!body.contains("\"live_control_plane\":true"));
+}
+
+#[test]
+fn http_server_trust_cards_fail_closed_without_registry() {
+    use frankenengine_node::api::service::http_server;
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (status, content_type, body) = http_server::trust_cards_catalog_response_for_base(
+        tmp.path(),
+        "test-trust-cards-missing",
+    );
+    assert_eq!(status, 503);
+    assert_eq!(content_type, "application/problem+json");
+    assert!(body.contains("urn:franken-node:error:trust-registry-unavailable"));
+    assert!(body.contains("franken-node trust scan"));
+}
+
+#[test]
+fn http_server_trust_cards_read_real_registry_store() {
+    use frankenengine_node::api::service::http_server;
+    use frankenengine_node::config::TrustConfig;
+    use frankenengine_node::supply_chain::trust_card::TrustCardRegistry;
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let snapshot = tmp
+        .path()
+        .join(http_server::TRUST_CARD_REGISTRY_CATALOG_RELATIVE_PATH);
+    let trust_config = TrustConfig {
+        risky_requires_fresh_revocation: false,
+        dangerous_requires_fresh_revocation: false,
+        quarantine_on_high_risk: false,
+        card_cache_ttl_secs: None,
+        freshness_window_secs: None,
+        min_trust_score: None,
+        decay_factor: None,
+        registry_signing_key: Some("x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c=".to_string()),
+        reputation_tier_thresholds: None,
+        test_coverage_threshold_pct: None,
+    };
+    let mut registry =
+        TrustCardRegistry::from_config(&trust_config).expect("registry from default config");
+    registry
+        .persist_authoritative_state(&snapshot)
+        .expect("persist fresh registry store");
+
+    let (status, content_type, body) = http_server::trust_cards_catalog_response_for_base(
+        tmp.path(),
+        "test-trust-cards-empty",
+    );
+    assert_eq!(status, 200);
+    assert_eq!(content_type, "application/json");
+    // The response must trace to the real durable store, not a canned list.
+    assert!(body.contains("\"source\":\"durable_trust_card_registry\""));
+    assert!(body.contains("trust-card-registry.v1.db"));
+    assert!(body.contains("\"total_count\":0"));
+    assert!(body.contains("\"cards\":[]"));
+}
