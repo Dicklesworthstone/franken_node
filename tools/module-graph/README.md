@@ -519,3 +519,97 @@ Node's public resolvers. Neither the fixture text nor the stripped output is
 executed. The erasure contract follows TypeScript's `verbatimModuleSyntax`
 documentation; it does not claim support for all valid TypeScript, bundler
 resolution, Node's TypeScript execution restrictions, or engine integration.
+
+## Retain and replay source-graph capsules
+
+Save the observed inputs alongside an entrypoint-wide capture:
+
+```sh
+franken-module-graph ./project --capture-source-graph src/app.ts \
+  --write-source-capsule /trusted/evidence/app.fnsc
+```
+
+The destination must be a **new file in an existing trusted directory**. Capsule
+publication stages complete bytes, flushes and syncs them, then publishes without
+overwriting an existing file, directory or symlink. The resulting file has mode
+`0600`; source and manifest contents can contain credentials and private code.
+Protect the artifact as source material, not merely as a public JSON report.
+No source bytes are printed to stdout. The usual report gains `capsule_hash`,
+`capsule_bytes` and `capsule_path` only after publication succeeds.
+
+An optional `--expected-hash` on this capture command still means the reviewed
+**source-graph input hash**. A mismatch prevents capsule publication. Captures
+with unresolved imports or analysis diagnostics can be retained too, but the
+command still returns `INCOMPLETE` and exit 1. A storage/publication failure
+returns `ERROR`, exit 2, not a successful capture report. Directory changes by a
+hostile actor or a crash during filesystem publication are outside the trusted
+destination assumption; an unsuccessful command is not a publication receipt.
+
+Replay elsewhere, without the original project or any live query options:
+
+```sh
+franken-module-graph --replay-source-capsule /trusted/evidence/app.fnsc \
+  --expected-hash "$REVIEWED_CAPSULE_HASH"
+```
+
+Here `--expected-hash` is the independently obtained **capsule hash**, not its
+source-graph hash or a hash taken from an untrusted artifact's own metadata. It
+is mandatory and checked before decoding the capsule header. The domains are
+distinct: a graph, manifest or single-resolution pin cannot approve capsule
+bytes. A content pin establishes consistency with the reviewed bytes, not
+producer authentication, trust, vulnerability status or permission to execute.
+
+### Recompute from sealed observations, not from today's checkout
+
+Replay uses the same production source parser and file resolver as capture. It
+reconstructs an in-memory observation map containing captured source and manifest
+bytes, directory facts, relative symlink text and absent-path observations. It
+does **not** deserialize a saved graph and simply trust its success fields.
+No original root path is accepted, no project files are opened, no package is
+installed and no JavaScript is evaluated. Capsule paths are never extracted to
+the filesystem. An observation omitted from the capsule is an error, never
+silently interpreted as absent or filled in from the current machine.
+
+The recomputed graph hash must equal the captured hash, and every retained
+observation must be consulted. Altered payload digests, invalid paths or parent
+relationships, duplicate/unused observations, unsupported schemas and truncated
+or trailing payload bytes fail closed. Source identity, missing imports,
+runtime-required builtins, TypeScript type-only edges, URL instances and all
+analysis diagnostics are recomputed. Adding a formerly missing file on the
+replay host cannot upgrade an incomplete result.
+
+Successful verification reports `scope: "captured-source-graph-replay"` and
+`replay_verified: true`. A fully resolved supported graph returns `REPLAYED`,
+exit 0; a correctly reproduced incomplete graph returns `INCOMPLETE`, exit 1.
+A capsule-pin mismatch returns `HASH_MISMATCH`, exit 1; malformed input or a
+recomputation mismatch returns `ERROR`, exit 2. Rejected input has no successful
+`source_graph` payload. `filesystem_verified`, `runtime_completeness`,
+`execution_performed` and `release_certification` remain false in replay output.
+The graph report itself retains its original scope and input hash.
+
+### Portable format and limits
+
+Capsules use the eight-byte magic `FNSGCAP1`, a four-byte little-endian header
+length, canonical JSON metadata, and exact binary file payloads in sorted
+physical-path order. Files are stored once even when multiple URL module
+identities share them. The capsule identity is SHA-256 over the domain
+`franken-node/module-source-capsule/v1` followed by a NUL byte, the eight-byte
+little-endian encoded capsule length, and the complete capsule bytes. The
+output spelling is `sha256:` followed by lowercase hexadecimal digits.
+
+Headers are bounded to 8 MiB, retained file/link bytes to 32 MiB, inputs to 1,024,
+ordinary files to 16 MiB and manifests to 512 KiB. The total encoded bound is
+40 MiB plus 12 bytes. No archive decompression or filesystem materialization is
+performed. All existing graph syntax/module/site budgets apply during replay.
+The CLI additionally refuses nonregular, oversized or final-symlink capsule
+inputs and detects ordinary mutation while reading; FIFOs cannot block admission.
+
+The library APIs are `source_graph::capsule::encode(&captured)` and
+`source_graph::capsule::replay(bytes, independent_pin)`. Replay returns the same
+read-only `CapturedModuleGraph` owner and exact retained `source_bytes` as live
+capture, without live directory handles. Re-encoding a replay is byte-identical.
+This is replay of the supported **dependency analysis**, not execution, ambient
+effects, a type-checking environment, or a hostile filesystem's atomic state.
+Parser/resolver changes that alter the reconstructed graph are reported as a
+replay mismatch rather than silently accepted. This build exposes the graph
+analysis and capsule API on Unix; the encoded artifact itself has no host paths.

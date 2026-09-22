@@ -21,7 +21,8 @@ use std::process::ExitCode;
 #[derive(Parser)]
 #[command(version)]
 struct Args {
-    project: PathBuf,
+    #[arg(required_unless_present = "replay_source_capsule", conflicts_with = "replay_source_capsule")]
+    project: Option<PathBuf>,
     /// Inspect declared edges for this dependency instead of exporting the whole graph.
     #[arg(long, group = "importer_query")]
     dependency: Option<String>,
@@ -58,6 +59,12 @@ struct Args {
     /// Capture static and literal dependency sources reachable from this entrypoint.
     #[arg(long, groups = ["condition_query", "file_query"], conflicts_with_all = ["importer_query", "impact", "importer", "require_resolved", "target_query", "package_manifest", "from", "resolution_mode"])]
     capture_source_graph: Option<String>,
+    /// Persist captured source/manifest bytes and lookup observations privately to a NEW file.
+    #[arg(long, requires = "capture_source_graph")]
+    write_source_capsule: Option<PathBuf>,
+    /// Recompute source-graph analysis from a pinned capsule without an original project.
+    #[arg(long, requires = "expected_hash", conflicts_with_all = ["project", "importer_query", "impact", "importer", "require_resolved", "target_query", "package_manifest", "file_query", "from", "resolution_mode", "conditions", "allow_contained_symlinks", "write_source_capsule"])]
+    replay_source_capsule: Option<PathBuf>,
     /// Existing canonical project-relative importing file for --resolve-module.
     #[arg(long, requires = "resolve_module")]
     from: Option<String>,
@@ -67,6 +74,12 @@ struct Args {
     /// Follow bounded relative symlinks only while every component stays inside the project.
     #[arg(long, requires = "file_query")]
     allow_contained_symlinks: bool,
+}
+
+impl Args {
+    fn project(&self) -> Result<&Path, &'static str> {
+        self.project.as_deref().ok_or("live inspection requires a project path")
+    }
 }
 
 // The standalone host supplies the same bounded-read interface used by the
@@ -92,11 +105,12 @@ fn inspect(args: Args) -> Result<(Value, u8), Box<dyn std::error::Error>> {
             return Err("expected hash requires exactly 64 lowercase hexadecimal digits".into());
         }
     }
+    if args.replay_source_capsule.is_some() { return inspect_capsule_replay(&args); }
     if args.capture_source_graph.is_some() { return inspect_source_graph(&args); }
     if args.resolve_module.is_some() { return inspect_module_file(&args); }
     if args.resolve_export.is_some() || args.resolve_import.is_some() { return inspect_targets(&args); }
     if args.transitive || args.impact.is_some() { return inspect_topology(&args); }
-    let graph = build_canonical_module_resolution_graph(&args.project)?;
+    let graph = build_canonical_module_resolution_graph(args.project()?)?;
     if graph.canonical_hash != recompute_module_resolution_graph_hash(&graph)? {
         return Err("internal graph hash disagreement".into());
     }
@@ -140,7 +154,7 @@ fn inspect(args: Args) -> Result<(Value, u8), Box<dyn std::error::Error>> {
 }
 
 fn inspect_topology(args: &Args) -> Result<(Value, u8), Box<dyn std::error::Error>> {
-    let topology = dependency_topology::build(&args.project)?;
+    let topology = dependency_topology::build(args.project()?)?;
     let (query, result, fully_resolved, unresolved, selected_edges) = if let Some(target) = &args.impact {
         let result = topology.impact(target)?;
         ("impact", serde_json::to_value(&result)?, result.fully_resolved,
@@ -181,7 +195,7 @@ fn inspect_source_graph(args: &Args) -> Result<(Value, u8), Box<dyn std::error::
     let mut report = json!({"schema_version":"franken-node/module-graph-inspection/v1",
         "scope":"static-and-literal-module-requests", "execution_performed":false,
         "release_certification":false, "runtime_completeness":false, "source_graph":null});
-    match source_graph::capture(&args.project, entrypoint, options) {
+    match source_graph::capture(args.project()?, entrypoint, options) {
         Ok(captured) => {
             let graph = captured.report();
             let matched = args.expected_hash.as_ref().map(|pin| pin == &graph.input_hash);
@@ -190,6 +204,13 @@ fn inspect_source_graph(args: &Args) -> Result<(Value, u8), Box<dyn std::error::
             if matched == Some(false) {
                 report["verdict"] = json!("HASH_MISMATCH");
                 return Ok((report, 1));
+            }
+            if let Some(path) = &args.write_source_capsule {
+                let capsule = source_graph::capsule::encode(&captured)?;
+                publish_capsule(path, capsule.bytes())?;
+                report["capsule_path"] = json!(path);
+                report["capsule_hash"] = json!(capsule.digest());
+                report["capsule_bytes"] = json!(capsule.bytes().len());
             }
             report["verdict"] = json!(if graph.fully_resolved { "CAPTURED" } else { "INCOMPLETE" });
             report["source_graph"] = serde_json::to_value(graph)?;
@@ -210,6 +231,86 @@ fn inspect_source_graph(_: &Args) -> Result<(Value, u8), Box<dyn std::error::Err
     Err("source graph capture requires Unix descriptor-relative capture".into())
 }
 
+/// Stage complete private bytes before no-clobber publication. A saved capsule
+/// is not evidence of successful analysis; incomplete graphs are retained too.
+#[cfg(unix)]
+fn publish_capsule(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    // This operator-supplied directory is trusted, not part of the guest tree.
+    // A same-directory staging file avoids cross-filesystem publication.
+    let directory = std::fs::File::open(parent)?;
+    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+    staged.as_file().set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    staged.write_all(bytes)?;
+    staged.flush()?;
+    staged.as_file().sync_all()?;
+    staged.persist_noclobber(path).map_err(|e| e.error)?;
+    directory.sync_all()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_capsule(path: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    use module_resolution_graph::file_resolution::source_graph::capsule::MAX_CAPSULE_BYTES;
+    use rustix::fs::{Mode, OFlags, open};
+    use std::fs::{File, Metadata};
+    use std::os::unix::fs::MetadataExt;
+    // Do not hang on a FIFO or follow a substituted final symlink. The
+    // operator selects the containing directory; payload paths are never opened.
+    let file = File::from(open(path, OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC, Mode::empty())?);
+    let before = file.metadata()?;
+    if !before.is_file() || before.len() > MAX_CAPSULE_BYTES as u64 {
+        return Err("source capsule must be a bounded regular file".into());
+    }
+    let identity = |m: &Metadata| (m.dev(), m.ino(), m.len(), m.mode(), m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec());
+    let mut bytes = Vec::new();
+    (&file).take(MAX_CAPSULE_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_CAPSULE_BYTES || bytes.len() as u64 != before.len()
+        || identity(&before) != identity(&file.metadata()?) {
+        return Err("source capsule changed or exceeded its byte limit during capture".into());
+    }
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn inspect_capsule_replay(args: &Args) -> Result<(Value, u8), Box<dyn std::error::Error>> {
+    use module_resolution_graph::file_resolution::source_graph::capsule;
+    let path = args.replay_source_capsule.as_deref().ok_or("missing source capsule")?;
+    let pin = args.expected_hash.as_deref().ok_or("replay requires an independently obtained capsule hash")?;
+    let bytes = read_capsule(path)?;
+    let mut report = json!({"schema_version":"franken-node/module-graph-inspection/v1",
+        "scope":"captured-source-graph-replay", "execution_performed":false,
+        "release_certification":false, "runtime_completeness":false,
+        "filesystem_verified":false, "replay_verified":false, "source_graph":null});
+    match capsule::replay(&bytes, pin) {
+        Ok(captured) => {
+            let graph = captured.report();
+            report["verdict"] = json!(if graph.fully_resolved { "REPLAYED" } else { "INCOMPLETE" });
+            report["capsule_hash"] = json!(pin);
+            report["capsule_bytes"] = json!(bytes.len());
+            report["expected_hash_matched"] = json!(true);
+            report["input_hash"] = json!(graph.input_hash);
+            report["replay_verified"] = json!(true);
+            report["source_graph"] = serde_json::to_value(graph)?;
+            Ok((report, if graph.fully_resolved { 0 } else { 1 }))
+        }
+        Err(error) => {
+            let mismatch = error.code == "ERR_MODULE_CAPSULE_PIN_MISMATCH";
+            report["verdict"] = json!(if mismatch { "HASH_MISMATCH" } else { "ERROR" });
+            if mismatch { report["expected_hash_matched"] = json!(false); }
+            report["error_code"] = json!(error.code);
+            report["error"] = json!(error.detail);
+            Ok((report, if mismatch { 1 } else { 2 }))
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn inspect_capsule_replay(_: &Args) -> Result<(Value, u8), Box<dyn std::error::Error>> {
+    Err("this build exposes source-graph analysis and capsule replay only on Unix".into())
+}
+
 #[cfg(unix)]
 fn inspect_module_file(args: &Args) -> Result<(Value, u8), Box<dyn std::error::Error>> {
     use module_resolution_graph::file_resolution::{self, ResolutionMode, SymlinkPolicy};
@@ -225,7 +326,7 @@ fn inspect_module_file(args: &Args) -> Result<(Value, u8), Box<dyn std::error::E
         "scope":"project-contained-module-resolution", "execution_performed":false,
         "release_certification":false, "filesystem_verified":false, "resolution":null,
         "symlink_policy":symlink_policy});
-    match file_resolution::resolve_with_policy(&args.project, importer, request, mode, &conditions, symlink_policy) {
+    match file_resolution::resolve_with_policy(args.project()?, importer, request, mode, &conditions, symlink_policy) {
         Ok(captured) => {
             let matched = args.expected_hash.as_ref().map(|pin| pin == &captured.report.input_hash);
             report["input_hash"] = json!(captured.report.input_hash);
@@ -261,7 +362,7 @@ fn inspect_module_file(_: &Args) -> Result<(Value, u8), Box<dyn std::error::Erro
 fn inspect_targets(args: &Args) -> Result<(Value, u8), Box<dyn std::error::Error>> {
     use package_target_resolution::{MapKind, PackageMap};
     let manifest = args.package_manifest.as_deref().unwrap_or("package.json");
-    let source = capture_manifest(&args.project, manifest)?;
+    let source = capture_manifest(args.project()?, manifest)?;
     let maps = PackageMap::parse(&source)?;
     let (kind, request) = match (&args.resolve_export, &args.resolve_import) {
         (Some(request), None) => (MapKind::Exports, request),
@@ -346,7 +447,8 @@ fn capture_manifest(_: &Path, _: &str) -> Result<String, Box<dyn std::error::Err
 
 fn main() -> ExitCode {
     let args = Args::parse();
-    let scope = if args.capture_source_graph.is_some() { "static-and-literal-module-requests" }
+    let scope = if args.replay_source_capsule.is_some() { "captured-source-graph-replay" }
+        else if args.capture_source_graph.is_some() { "static-and-literal-module-requests" }
         else if args.resolve_module.is_some() { "project-contained-module-resolution" }
         else if args.resolve_export.is_some() || args.resolve_import.is_some() { "package-map-target-selection" }
         else if args.transitive || args.impact.is_some() { "declared-dependency-topology" }
@@ -355,6 +457,7 @@ fn main() -> ExitCode {
         Ok(result) => result,
         Err(error) => (json!({"schema_version": "franken-node/module-graph-inspection/v1",
             "scope": scope, "execution_performed": false,
+            "replay_verified": false, "runtime_completeness": false,
             "release_certification": false, "verdict": "ERROR", "error": error.to_string(),
             "error_code": error.downcast_ref::<package_target_resolution::ResolutionError>().map(|e| e.code)}), 2),
     };
