@@ -91,16 +91,16 @@ const MAX_PENDING_DIRS: usize = 10_000;
 const MAX_TOTAL_FINDINGS: usize = 1_000;
 const MIGRATION_BACKUP_DIR: &str = ".migrate-backup";
 const MIGRATION_VALIDATE_RUNTIME_TIMEOUT: Duration =
-    frankenengine_node::config::timeouts::MIGRATION_VALIDATE_RUNTIME_TIMEOUT;
+    crate::config::timeouts::MIGRATION_VALIDATE_RUNTIME_TIMEOUT;
 const MIGRATION_RUNTIME_SMOKE_OUTPUT_HASH_DOMAIN: &[u8] =
     b"franken-node/migrate-validate-runtime-smoke/output-sha256/v1:";
 const MIGRATION_RUNTIME_SMOKE_STDOUT_FIELD: &[u8] = b"stdout";
 const MIGRATION_RUNTIME_SMOKE_STDERR_FIELD: &[u8] = b"stderr";
 const MIGRATION_RUNTIME_PIPE_DRAIN_TIMEOUT: Duration =
-    frankenengine_node::config::timeouts::MIGRATION_RUNTIME_PIPE_DRAIN_TIMEOUT;
+    crate::config::timeouts::MIGRATION_RUNTIME_PIPE_DRAIN_TIMEOUT;
 #[cfg(not(target_os = "linux"))]
 const MIGRATION_RUNTIME_PROCESS_KILL_GRACE: Duration =
-    frankenengine_node::config::timeouts::MIGRATION_RUNTIME_PROCESS_KILL_GRACE;
+    crate::config::timeouts::MIGRATION_RUNTIME_PROCESS_KILL_GRACE;
 
 /// Push item to vector with capacity bounds checking to prevent memory exhaustion.
 fn push_bounded<T>(vec: &mut Vec<T>, item: T, max_cap: usize) {
@@ -1639,7 +1639,7 @@ fn run_command_with_timeout(command: &mut Command, timeout: Duration) -> anyhow:
             );
         }
 
-        thread::sleep(frankenengine_node::config::timeouts::MIGRATION_RUNTIME_POLL_INTERVAL);
+        thread::sleep(crate::config::timeouts::MIGRATION_RUNTIME_POLL_INTERVAL);
     }
 }
 

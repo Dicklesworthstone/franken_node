@@ -1639,7 +1639,9 @@ pub mod encoding;
 pub mod extensions;
 #[cfg(feature = "advanced-features")]
 pub mod federation;
-#[cfg(any(test, feature = "admin-tools"))]
+// bd-compat: `migration` is compiled unconditionally so `ops::compat_corpus_run`
+// and its owned process supervisor (`corpus_process`) remain accessible in default
+// builds; administrative gates remain gated behind `admin-tools` inside `migration/mod.rs`.
 pub mod migration;
 pub mod observability;
 pub mod operator_json_contracts;
