@@ -576,3 +576,24 @@ The named regression e2e (`default_run_executes_fixture_js_through_embedded_engi
 - **IFC regression is PARTIALLY healed at HEAD.** Probing formerly-failing fixtures through the exact corpus franken-leg command (`run --console-only --policy legacy-risky --runtime franken-engine --engine-bin <self>`): buffer/0005, fs/0021, url/0003, zlib/0004 now PASS; **events/0017 and querystring/0002 still refuse** with `unauthorized flow detected at op N: TopSecret -> Internal (reason=no_lattice_or_declassification_path)` — confirmed live, residual class is real and owned by `bd-kx70h`/`bd-bwa93`. Both residual fixtures share the shape `require(<builtin>)` + method calls.
 - **Reproduction gap (measurement provenance):** `ops compat-corpus-run --require-node-reference` with real node v22.2.0 + bun 1.4.0 (same corpus hash `compat-corpus-v2-7b86e9d2…`) on this host measured **60.36% (338/560)**; dyad (bun-only) 60.0% — the committed 69.82% (Aug-26) does NOT reproduce. The artifact pins no host, engine build, node/bun versions, or fixture-tree revision, so cross-host reproduction is unverifiable. Probe evidence: `artifacts/13/compatibility_corpus_results.repro-probe-20260830.json` (untracked by the gate; canonical artifact unchanged). Until provenance is pinned (bd-kx70h), treat single-run corpus deltas of ~±10 points as measurement uncertainty, not engineering signal.
 - **bd-klpse delivered:** `scripts/check_compatibility_corpus_pass_gate.py` now fail-closes on `SUMMARY_OBSERVED_PCT_MISSING/_MISMATCH`, `SUMMARY_STALE_VS_RESULTS`, `SUMMARY_TIMESTAMP_UNPARSEABLE`, `SUMMARY_GREEN_BELOW_FLOOR`, `SUMMARY_VERDICT_INCONSISTENT` (self-test 6/6 incl. stale/mismatch/GREEN-below-floor vectors). `artifacts/compat/corpus_pass.json` synced to the measured 69.82 (honest RED, Aug-26 provenance); CLAIMS_REGISTRY CLAIM-001 synced with the reproduction caveat. Gate already wired into CI (`.github/workflows/dist.yml`) and imported by `scripts/check_oracle_close_condition.py` (which re-derives L1 from the results artifact, unaffected).
+
+## Refresh 2026-09-22 (fourth full reality check — delta pass)
+
+**Method:** same measuring stick (README + AGENTS.md + PRODUCT_CHARTER + CLAIMS_REGISTRY + prior sections of this file), fresh live probes and verification runs. HEAD `v0.1.0-1114-g08447a0aa` (branch `main`). Beads: 4,349 total issues — 4,314 closed (99.20%), 12 in_progress, 19 open, 4 blocked (35 active/non-closed). Honesty manifest recomputed this session: **9 ok, 0 drifted** (`scripts/check_claims_manifest.py --check-honesty`; integration census 3,756→live 4,106; inline census 21,621→live 22,421; fuzz targets 146/146; validators 437→438; `unsafe_blocks=0`; Ed25519 harness-key signature ok). Release drift reached **1,114 commits** past `v0.1.0`.
+
+### What moved since 2026-08-29 (past 254 commits)
+
+1. **Captured Migration Execution & Failure Reducer Landed:** Pinned manifest-selected test execution (`docs/MIGRATION_CAPTURED_EXECUTION.md`, `scripts/migration_validation_runner.py`), pipe transport binding, and execution-backed line reduction (`scripts/minimize_migration_failure.py`, 58/58 unit tests passing).
+2. **Supervised Invocation Watchdog:** External process execution supervision with fail-closed timeout evidence and bounded binary stdin/stdout streaming (`test_runtime_invoke_watchdog.py`).
+3. **Supply-Chain Dependency Graph Capture:** Entrypoint-wide JavaScript/TypeScript source dependency graphs, package-map target selection (`package.json` `exports`/`imports`), contained package symlink resolution, and TypeScript erasure verification without loading erased types.
+4. **Closed-World Offline Replay:** Pinned closed-world module source registry and private source capsules for replay exclusively from captured observations.
+
+### Standing Vision Gaps (Status at 2026-09-22)
+
+- **V6 (Targeted Compatibility Floor ≥95%): REGRESSED at 69.82%.** Canonical artifact records 391/560 (69.82%); 97 cases fail on engine IFC lowering refusals (`bd-kx70h`, P0). Cross-host reproduction measured 60.36%. Dual-oracle close condition is honestly RED (FAIL).
+- **V16 (Migration Velocity ≥3×): UNMET at 2.30×.** Live signed gate (`artifacts/migration/throughput_delta.json`) measures pooled median 2.30× (CI95 [1.90×, 3.30×]), holdout 1.90× (`bd-v0lgc`).
+- **V25 (Release Distribution Freshness): REGRESSED.** Latest tag `v0.1.0` is 1,114 commits behind HEAD. Promised Windows x86_64 prebuilt is not built in CI (`bd-tenx3.4`).
+- **V27 (Inline Test Hole): PARTIAL.** ~22,421 inline tests remain disabled from default `cargo test` (`[lib] test=false`, `bd-rjc2m.21`, P0); dedicated inline lane compiles but has behavior drift (`bd-o776s`).
+- **Charter Substrates (Charter §4): PARTIAL.** `asupersync` remains opt-in, `fastapi_rust` is an in-process catalog, `frankentui` is a Buffer copy-echo (`bd-tenx3.1`).
+- **V28 (Production IBD Adoption): NOT_STARTED.** 0 production operators (`artifacts/adoption/ibd_production_use.json`).
+
