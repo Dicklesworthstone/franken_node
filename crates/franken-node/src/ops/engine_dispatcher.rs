@@ -2271,6 +2271,91 @@ impl<P: HostIoProvider> HostIoProvider for WriteAheadHostIo<P> {
     }
 }
 
+#[cfg(feature = "engine")]
+impl<P: crate::ops::ssrf_gated_host_io::PinnedNetworkProvider>
+    crate::ops::ssrf_gated_host_io::PinnedNetworkProvider for WriteAheadHostIo<P>
+{
+    fn network_timeout(&self) -> std::time::Duration {
+        self.inner.network_timeout()
+    }
+
+    fn supports_pinned_tls(&self) -> bool {
+        self.inner.supports_pinned_tls()
+    }
+
+    fn perform_pinned_network(
+        &self,
+        request: &HostIoRequest,
+        granted: &[HostIoCapability],
+        destination: std::net::SocketAddr,
+        deadline: std::time::Instant,
+    ) -> HostIoOutcome {
+        let Some(emitter) = self.emitter.as_ref() else {
+            return self
+                .inner
+                .perform_pinned_network(request, granted, destination, deadline);
+        };
+        let sequence = match emitter.admit(request) {
+            Ok(sequence) => sequence,
+            Err(error) => {
+                return Err(HostIoError::Denied {
+                    reason: format!(
+                        "native host effect refused before execution because write-ahead admission failed: {error}"
+                    ),
+                });
+            }
+        };
+        let outcome = self
+            .inner
+            .perform_pinned_network(request, granted, destination, deadline);
+        if let Err(error) = emitter.complete(sequence) {
+            tracing::error!(
+                effect_sequence = sequence,
+                effect_kind = request.kind(),
+                error = %error,
+                "Native host effect returned but its WAL completion marker failed"
+            );
+        }
+        outcome
+    }
+
+    fn perform_pinned_network_candidates(
+        &self,
+        request: &HostIoRequest,
+        granted: &[HostIoCapability],
+        destinations: &[std::net::SocketAddr],
+        deadline: std::time::Instant,
+    ) -> HostIoOutcome {
+        let Some(emitter) = self.emitter.as_ref() else {
+            return self
+                .inner
+                .perform_pinned_network_candidates(request, granted, destinations, deadline);
+        };
+        let sequence = match emitter.admit(request) {
+            Ok(sequence) => sequence,
+            Err(error) => {
+                return Err(HostIoError::Denied {
+                    reason: format!(
+                        "native host effect refused before execution because write-ahead admission failed: {error}"
+                    ),
+                });
+            }
+        };
+        let outcome = self
+            .inner
+            .perform_pinned_network_candidates(request, granted, destinations, deadline);
+        if let Err(error) = emitter.complete(sequence) {
+            tracing::error!(
+                effect_sequence = sequence,
+                effect_kind = request.kind(),
+                error = %error,
+                "Native host effect returned but its WAL completion marker failed"
+            );
+        }
+        outcome
+    }
+}
+
 /// One worker's cooperative cancellation signal plus its host-effect admission
 /// barrier. Process isolation is the hard timeout boundary; this remains
 /// defense-in-depth for engine-internal cancellation and focused regressions.
@@ -6782,6 +6867,7 @@ impl EngineDispatcher {
         OrchestratorConfig {
             loss_matrix_preset,
             force_lane: None, // Allow dynamic lane selection based on code analysis
+            work_pool: None,
             drain_deadline_ticks: match config.profile {
                 Profile::Strict => 1000,       // Quick drain for strict safety
                 Profile::Balanced => 3000,     // Moderate drain timeout
