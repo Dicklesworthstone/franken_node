@@ -4,17 +4,18 @@
 //! CommonJS LOAD_AS_FILE / LOAD_AS_DIRECTORY algorithms. This composes the
 //! ordered package-map selector with actual, descriptor-relative file capture.
 //! It never executes source, trusts lockfile-only existence, or grants policy
-//! authority. Symlinks, ambient/global search and non-file URL loaders are out
-//! of scope. The caller receives the exact captured bytes, not a pathname to
+//! authority. Relative symlinks can be explicitly enabled, but every component
+//! must remain inside the project. Ambient/global search and non-file URL loaders
+//! are out of scope. The caller receives the captured bytes, not a pathname to
 //! reopen after checking evidence. Observations are bounded, not an atomic
 //! snapshot of a hostile filesystem. Builtin requests require the runtime.
 
 use super::package_targets::{MapKind, PackageMap, ResolutionError, Selection, TargetKind};
-use rustix::fs::{AtFlags, FileType, Mode, OFlags, open, openat, statat};
+use rustix::fs::{AtFlags, FileType, Mode, OFlags, open, openat, readlinkat_raw, statat};
 use rustix::io::Errno;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{File, Metadata};
 use std::io::Read;
 use std::os::unix::fs::MetadataExt;
@@ -26,7 +27,8 @@ const MAX_DEPTH: usize = 64;
 const MAX_PROBES: usize = 1024;
 const MAX_FILE: usize = 16 * 1024 * 1024;
 const MAX_CAPTURE: usize = 32 * 1024 * 1024;
-const HASH_DOMAIN: &[u8] = b"franken-node/module-file-resolution/v1\0";
+const MAX_LINK_HOPS: usize = 40;
+const HASH_DOMAIN: &[u8] = b"franken-node/module-file-resolution/v2\0";
 type Result<T> = std::result::Result<T, ResolutionError>;
 
 fn error(code: &'static str, detail: impl Into<String>) -> ResolutionError {
@@ -41,6 +43,12 @@ fn limit() -> ResolutionError { error("ERR_MODULE_RESOLUTION_LIMIT", "module res
 #[serde(rename_all = "snake_case")]
 pub enum ResolutionMode { Import, Require }
 
+/// Contained follows only bounded relative links, using captured link text and
+/// retained directory descriptors. It never delegates link following to open().
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SymlinkPolicy { Reject, Contained }
+
 impl ResolutionMode {
     pub fn default_conditions(self) -> Vec<String> {
         vec!["node".into(), match self { Self::Import => "import", Self::Require => "require" }.into()]
@@ -53,7 +61,7 @@ impl ResolutionMode {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ProbeKind { Missing, Directory, File }
+pub enum ProbeKind { Missing, Directory, File, Symlink }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Probe {
@@ -61,6 +69,8 @@ pub struct Probe {
     pub kind: ProbeKind,
     pub bytes: Option<usize>,
     pub sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link_target: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -76,6 +86,8 @@ pub struct Mapping {
 pub struct ResolutionReport {
     pub schema_version: String,
     pub importer: String,
+    pub resolved_importer: String,
+    pub symlink_policy: SymlinkPolicy,
     pub specifier: String,
     pub mode: ResolutionMode,
     pub conditions: Vec<String>,
@@ -106,7 +118,12 @@ impl CapturedResolution {
     }
 }
 
-enum Entry { Missing, Directory(File), File { bytes: Vec<u8>, sha256: String } }
+enum Entry {
+    Missing,
+    Directory(File),
+    File { bytes: Vec<u8>, sha256: String },
+    Symlink { target: String, sha256: String },
+}
 impl Entry {
     fn is_file(&self) -> bool { matches!(self, Self::File { .. }) }
     fn is_dir(&self) -> bool { matches!(self, Self::Directory(_)) }
@@ -121,6 +138,7 @@ struct Resolver {
     captured: usize,
     conditions: Vec<String>,
     mappings: Vec<Mapping>,
+    symlink_policy: SymlinkPolicy,
 }
 
 /// Resolve with the complete caller-selected condition set. No environment
@@ -128,6 +146,15 @@ struct Resolver {
 /// An importer must be an existing canonical project-relative ordinary file.
 pub fn resolve(project: &Path, importer: &str, specifier: &str,
     mode: ResolutionMode, conditions: &[String]) -> Result<CapturedResolution> {
+    resolve_with_policy(project, importer, specifier, mode, conditions, SymlinkPolicy::Reject)
+}
+
+/// Resolve ordinary loaded-module semantics with explicit symlink admission.
+/// Both the importer and selected file are finalized to their captured real
+/// locations. This does not implement Node's preserve-symlinks options or permit
+/// external workspace roots, absolute symlink targets, or host-global lookup.
+pub fn resolve_with_policy(project: &Path, importer: &str, specifier: &str,
+    mode: ResolutionMode, conditions: &[String], symlink_policy: SymlinkPolicy) -> Result<CapturedResolution> {
     validate_path(importer)?;
     validate_request(specifier)?;
     if conditions.len() > 64 || conditions.iter().any(|s| s.is_empty() || s.len() > 128 || s.chars().any(char::is_control)) {
@@ -137,10 +164,11 @@ pub fn resolve(project: &Path, importer: &str, specifier: &str,
     let root = File::from(open(project, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty()).map_err(|e| io_error("<project>", e))?);
     let mut resolver = Resolver { entries: BTreeMap::from([("".into(), Rc::new(Entry::Directory(root)))]),
-        manifests: BTreeMap::new(), captured: 0, conditions, mappings: Vec::new() };
-    if !resolver.probe(importer)?.is_file() { return Err(mode.missing(importer)); }
-    let (path, suffix) = resolver.request(parent(importer), specifier, mode, 0)?;
-    let source = resolver.probe(&path)?;
+        manifests: BTreeMap::new(), captured: 0, conditions, mappings: Vec::new(), symlink_policy };
+    let (resolved_importer, importer_source) = resolver.locate(importer)?;
+    if !importer_source.is_file() { return Err(mode.missing(importer)); }
+    let (path, suffix) = resolver.request(parent(&resolved_importer), specifier, mode, 0)?;
+    let (path, source) = resolver.locate(&path)?;
     let Entry::File { bytes, sha256 } = source.as_ref() else { return Err(mode.missing(&path)); };
     let format_hint = resolver.format(&path)?;
     let probes = resolver.entries.iter().map(|(path, entry)| {
@@ -148,11 +176,14 @@ pub fn resolve(project: &Path, importer: &str, specifier: &str,
             Entry::Missing => (ProbeKind::Missing, None, None),
             Entry::Directory(_) => (ProbeKind::Directory, None, None),
             Entry::File { bytes, sha256 } => (ProbeKind::File, Some(bytes.len()), Some(sha256.clone())),
+            Entry::Symlink { target, sha256 } => (ProbeKind::Symlink, Some(target.len()), Some(sha256.clone())),
         };
-        Probe { path: if path.is_empty() { ".".into() } else { path.clone() }, kind, bytes, sha256 }
+        let link_target = match entry.as_ref() { Entry::Symlink { target, .. } => Some(target.clone()), _ => None };
+        Probe { path: if path.is_empty() { ".".into() } else { path.clone() }, kind, bytes, sha256, link_target }
     }).collect();
     let mut report = ResolutionReport {
-        schema_version: "franken-node/module-file-resolution/v1".into(), importer: importer.into(), specifier: specifier.into(),
+        schema_version: "franken-node/module-file-resolution/v2".into(), importer: importer.into(), resolved_importer,
+        symlink_policy, specifier: specifier.into(),
         mode, conditions: resolver.conditions, path, url_suffix: suffix, format_hint,
         content_sha256: sha256.clone(), content_bytes: bytes.len(), input_hash: String::new(),
         probes, mappings: resolver.mappings, filesystem_verified: true, execution_performed: false, release_certification: false,
@@ -166,12 +197,60 @@ pub fn resolve(project: &Path, importer: &str, specifier: &str,
 }
 
 impl Resolver {
+    fn probe(&mut self, path: &str) -> Result<Rc<Entry>> {
+        self.locate(path).map(|(_, entry)| entry)
+    }
+
+    /// Resolve link components in order. In particular, a '..' inside link text
+    /// applies AFTER preceding links, not to the lexical spelling of their paths.
+    /// Raw positive/negative probes and link text are cached once per capture.
+    fn locate(&mut self, path: &str) -> Result<(String, Rc<Entry>)> {
+        if !path.is_empty() { validate_path(path)?; }
+        let mut pending: VecDeque<String> = path.split('/').map(str::to_owned).collect();
+        let mut resolved = Vec::<String>::new();
+        let mut links = 0;
+        let mut entry = self.raw_probe("")?;
+        while let Some(part) = pending.pop_front() {
+            // A missing or non-directory component cannot be bypassed with '..'.
+            if !entry.is_dir() { return Ok((path.into(), Rc::new(Entry::Missing))); }
+            match part.as_str() {
+                "" | "." => continue,
+                ".." => {
+                    if resolved.pop().is_none() {
+                        return Err(error("ERR_MODULE_OUTSIDE_PROJECT", "symlink escapes the captured project root"));
+                    }
+                    entry = self.raw_probe(&resolved.join("/"))?;
+                    continue;
+                }
+                _ => {}
+            }
+            let candidate = join(&resolved.join("/"), &part);
+            let next = self.raw_probe(&candidate)?;
+            if let Entry::Symlink { target, .. } = next.as_ref() {
+                links += 1;
+                if links > MAX_LINK_HOPS { return Err(error("ERR_MODULE_SYMLINK_LOOP", "more than 40 symlink hops in one lookup")); }
+                let components = target.split('/');
+                if resolved.len() + components.clone().count() + pending.len() > MAX_DEPTH
+                    || candidate.len() + target.len() + pending.iter().map(|p| p.len() + 1).sum::<usize>() > MAX_PATH {
+                    return Err(limit());
+                }
+                for part in components.rev() { pending.push_front(part.to_owned()); }
+                // Keep the captured physical parent; never open the link itself.
+            } else {
+                resolved.push(part);
+                entry = next;
+            }
+        }
+        Ok((resolved.join("/"), entry))
+    }
+
     /// Cache both successful and negative probes. All children of a directory
     /// are opened against its retained descriptor, not a re-resolved pathname.
-    fn probe(&mut self, path: &str) -> Result<Rc<Entry>> {
+    /// This private method accepts ONLY physical paths produced by locate().
+    fn raw_probe(&mut self, path: &str) -> Result<Rc<Entry>> {
         if let Some(entry) = self.entries.get(path) { return Ok(Rc::clone(entry)); }
         validate_path(path)?;
-        let directory = self.probe(parent(path))?;
+        let directory = self.raw_probe(parent(path))?;
         if self.entries.len() >= MAX_PROBES { return Err(limit()); }
         let entry = if let Entry::Directory(directory) = directory.as_ref() {
             let name = path.rsplit('/').next().unwrap_or(path);
@@ -180,6 +259,25 @@ impl Resolver {
                 Err(e) => return Err(io_error(path, e)),
                 Ok(info) => {
                     let kind = FileType::from_raw_mode(info.st_mode);
+                    if kind == FileType::Symlink && self.symlink_policy == SymlinkPolicy::Contained {
+                        let mut buffer = [0_u8; MAX_PATH + 1];
+                        let count = readlinkat_raw(directory, name, &mut buffer[..]).map_err(|e| io_error(path, e))?;
+                        if count > MAX_PATH { return Err(limit()); }
+                        let after = statat(directory, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|e| io_error(path, e))?;
+                        if info.st_dev != after.st_dev || info.st_ino != after.st_ino || info.st_mode != after.st_mode
+                            || info.st_size != after.st_size || info.st_size < 0 || info.st_size as usize != count
+                            || info.st_mtime != after.st_mtime || info.st_mtime_nsec != after.st_mtime_nsec
+                            || info.st_ctime != after.st_ctime || info.st_ctime_nsec != after.st_ctime_nsec {
+                            return Err(error("ERR_MODULE_INPUT_CHANGED", "symlink changed while reading"));
+                        }
+                        let target = std::str::from_utf8(&buffer[..count]).map_err(|_| error("ERR_INVALID_MODULE_SYMLINK", "non-UTF-8 symlink target"))?;
+                        validate_link_target(target)?;
+                        if self.captured.saturating_add(count) > MAX_CAPTURE { return Err(limit()); }
+                        self.captured += count;
+                        let entry = Rc::new(Entry::Symlink { target: target.into(), sha256: hex::encode(Sha256::digest(target.as_bytes())) });
+                        self.entries.insert(path.into(), Rc::clone(&entry));
+                        return Ok(entry);
+                    }
                     if !matches!(kind, FileType::RegularFile | FileType::Directory) {
                         return Err(error("ERR_UNSUPPORTED_MODULE_FILE", format!("symlink or nonregular resolution input: {path:?}")));
                     }
@@ -219,6 +317,7 @@ impl Resolver {
         let manifest = match entry.as_ref() {
             Entry::Missing => None,
             Entry::Directory(_) => return Err(error("ERR_INVALID_PACKAGE_CONFIG", "package.json is a directory")),
+            Entry::Symlink { .. } => unreachable!("probe finalizes links before reading manifests"),
             Entry::File { bytes, .. } => {
                 let text = std::str::from_utf8(bytes).map_err(|e| error("ERR_INVALID_PACKAGE_CONFIG", e.to_string()))?;
                 let maps = PackageMap::parse(text)?; // Also rejects ambiguous duplicate JSON keys.
@@ -381,6 +480,15 @@ impl Resolver {
     }
 }
 
+fn validate_link_target(target: &str) -> Result<()> {
+    if target.is_empty() || target.len() > MAX_PATH || target.split('/').count() > MAX_DEPTH
+        || target.starts_with('/') || target.contains(['\\', ':']) || target.chars().any(char::is_control)
+        || target.split('/').any(|p| matches!(p, ".git" | ".beads")) {
+        return Err(error("ERR_INVALID_MODULE_SYMLINK", "symlink target must be bounded, relative and outside reserved repository state"));
+    }
+    Ok(())
+}
+
 fn version(m: &Metadata) -> (u64, u64, u64, u32, i64, i64, i64, i64) {
     (m.dev(), m.ino(), m.len(), m.mode(), m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec())
 }
@@ -491,6 +599,200 @@ mod tests {
     fn rejected(root: &Path, from: &str, request: &str, mode: ResolutionMode) -> &'static str {
         let Err(error) = resolve(root, from, request, mode, &mode.default_conditions()) else { panic!("unexpected resolution of {request}"); };
         error.code
+    }
+
+    fn linked(root: &Path, from: &str, request: &str, mode: ResolutionMode) -> Result<CapturedResolution> {
+        resolve_with_policy(root, from, request, mode, &mode.default_conditions(), SymlinkPolicy::Contained)
+    }
+    fn link(root: &Path, name: &str, target: &str) {
+        fs::create_dir_all(root.join(name).parent().unwrap()).unwrap();
+        symlink(target, root.join(name)).unwrap();
+    }
+    fn linked_error(root: &Path, from: &str, request: &str) -> &'static str {
+        match linked(root, from, request, ResolutionMode::Import) {
+            Err(e) => e.code,
+            Ok(_) => panic!("unexpected linked resolution for {request}"),
+        }
+    }
+
+    #[test]
+    fn contained_workspace_links_require_explicit_policy_and_preserve_export_encapsulation() {
+        let root = fixture();
+        put(root.path(), "packages/pkg/package.json", br#"{"exports":{".":{"import":"./esm.mjs","require":"./cjs.cjs"},"./private":null}}"#);
+        put(root.path(), "packages/pkg/esm.mjs", b"esm");
+        put(root.path(), "packages/pkg/cjs.cjs", b"cjs");
+        link(root.path(), "node_modules/pkg", "../packages/pkg");
+        assert_eq!(rejected(root.path(), "app.js", "pkg", ResolutionMode::Import), "ERR_UNSUPPORTED_MODULE_FILE");
+        for (mode, name) in [(ResolutionMode::Import,"esm.mjs"),(ResolutionMode::Require,"cjs.cjs")] {
+            let result = linked(root.path(), "app.js", "pkg", mode).unwrap();
+            assert_eq!(result.report.path, format!("packages/pkg/{name}"));
+            assert_eq!(result.report.symlink_policy, SymlinkPolicy::Contained);
+            let probe = result.report.probes.iter().find(|p| p.path == "node_modules/pkg").unwrap();
+            assert_eq!(probe.kind, ProbeKind::Symlink);
+            assert_eq!(probe.link_target.as_deref(), Some("../packages/pkg"));
+            assert_eq!(probe.sha256.as_deref(), Some(hex::encode(Sha256::digest(b"../packages/pkg")).as_str()));
+        }
+        assert_eq!(linked_error(root.path(), "app.js", "pkg/private"), "ERR_PACKAGE_PATH_NOT_EXPORTED");
+    }
+
+    #[test]
+    fn linked_importer_uses_real_dependency_location_and_package_scope() {
+        let root = fixture();
+        put(root.path(), "store/pkg/package.json", br##"{"type":"module","imports":{"#local":"./local.js"}}"##);
+        put(root.path(), "store/pkg/app.js", b"importer");
+        put(root.path(), "store/pkg/local.js", b"local");
+        put(root.path(), "store/pkg/node_modules/dep/index.js", b"physical dependency");
+        put(root.path(), "node_modules/dep/index.js", b"wrong lexical dependency");
+        link(root.path(), "node_modules/pkg", "../store/pkg");
+        let result = linked(root.path(), "node_modules/pkg/app.js", "dep", ResolutionMode::Require).unwrap();
+        assert_eq!(result.report.resolved_importer, "store/pkg/app.js");
+        assert_eq!(result.report.importer, "node_modules/pkg/app.js");
+        assert_eq!(result.source_bytes(), b"physical dependency");
+        let result = linked(root.path(), "node_modules/pkg/app.js", "#local", ResolutionMode::Import).unwrap();
+        assert_eq!(result.report.path, "store/pkg/local.js");
+        assert_eq!(result.report.format_hint, "module");
+    }
+
+    #[test]
+    fn pnpm_style_store_links_preserve_nested_package_instances() {
+        let root = fixture();
+        for (version, data) in [("1", b"one"), ("2", b"two")] {
+            put(root.path(), &format!("node_modules/.pnpm/dep@{version}/node_modules/dep/index.js"), data);
+        }
+        put(root.path(), "node_modules/.pnpm/pkg@1/node_modules/pkg/app.js", b"importer");
+        link(root.path(), "node_modules/pkg", ".pnpm/pkg@1/node_modules/pkg");
+        link(root.path(), "node_modules/dep", ".pnpm/dep@2/node_modules/dep");
+        link(root.path(), "node_modules/.pnpm/pkg@1/node_modules/dep", "../../dep@1/node_modules/dep");
+        let nested = linked(root.path(), "node_modules/pkg/app.js", "dep", ResolutionMode::Require).unwrap();
+        assert_eq!(nested.source_bytes(), b"one");
+        assert_eq!(nested.report.path, "node_modules/.pnpm/dep@1/node_modules/dep/index.js");
+        assert_eq!(linked(root.path(), "app.js", "dep", ResolutionMode::Require).unwrap().source_bytes(), b"two");
+    }
+
+    #[test]
+    fn physical_target_controls_format_and_esm_suffix_without_reopening_source() {
+        let root = fixture();
+        put(root.path(), "real/value.mjs", &[0, 255, 10]);
+        link(root.path(), "value.cjs", "real/value.mjs");
+        let result = linked(root.path(), "app.js", "./value.cjs?copy#one", ResolutionMode::Import).unwrap();
+        assert_eq!(result.report.path, "real/value.mjs");
+        assert_eq!(result.report.format_hint, "module");
+        assert_eq!(result.report.url_suffix, "?copy#one");
+        put(root.path(), "other.mjs", b"changed");
+        link(root.path(), "replacement", "other.mjs");
+        fs::rename(root.path().join("replacement"), root.path().join("value.cjs")).unwrap();
+        assert_eq!(result.source_bytes(), &[0,255,10]);
+        assert_ne!(result.report.input_hash, linked(root.path(), "app.js", "./value.cjs?copy#one", ResolutionMode::Import).unwrap().report.input_hash);
+    }
+
+    #[test]
+    fn link_parent_traversal_follows_preceding_links_before_dotdot() {
+        let root = fixture();
+        fs::create_dir_all(root.path().join("right/nested")).unwrap();
+        put(root.path(), "right/value.mjs", b"physical parent");
+        put(root.path(), "left/value.mjs", b"wrong lexical parent");
+        link(root.path(), "left/junction", "../right/nested");
+        link(root.path(), "entry.mjs", "left/junction/../value.mjs");
+        assert_eq!(linked(root.path(), "app.js", "./entry.mjs", ResolutionMode::Import).unwrap().source_bytes(), b"physical parent");
+        link(root.path(), "missing.mjs", "absent/../right/value.mjs");
+        assert_eq!(linked_error(root.path(), "app.js", "./missing.mjs"), "ERR_MODULE_NOT_FOUND");
+        link(root.path(), "not-dir.mjs", "right/value.mjs/../value.mjs");
+        assert_eq!(linked_error(root.path(), "app.js", "./not-dir.mjs"), "ERR_MODULE_NOT_FOUND");
+    }
+
+    #[test]
+    fn escapes_absolute_links_reserved_state_and_nonregular_targets_are_refused() {
+        let root = fixture();
+        for (name, target, code) in [
+            ("escape", "../outside.mjs", "ERR_MODULE_OUTSIDE_PROJECT"),
+            ("absolute", "/etc/passwd", "ERR_INVALID_MODULE_SYMLINK"),
+            ("reserved", ".git/../app.js", "ERR_INVALID_MODULE_SYMLINK"),
+            ("beads", ".beads/config", "ERR_INVALID_MODULE_SYMLINK"),
+            ("windows", "C:\\outside", "ERR_INVALID_MODULE_SYMLINK"),
+        ] {
+            link(root.path(), name, target);
+            assert_eq!(linked_error(root.path(), "app.js", &format!("./{name}")), code);
+        }
+        // Even absolute links pointing within the root are outside this portable contract.
+        symlink(root.path().join("app.js"), root.path().join("absolute-inside")).unwrap();
+        assert_eq!(linked_error(root.path(), "app.js", "./absolute-inside"), "ERR_INVALID_MODULE_SYMLINK");
+        rustix::fs::mkfifo(root.path().join("fifo"), Mode::RUSR | Mode::WUSR).unwrap();
+        link(root.path(), "fifo-alias", "fifo");
+        assert_eq!(linked_error(root.path(), "app.js", "./fifo-alias"), "ERR_UNSUPPORTED_MODULE_FILE");
+    }
+
+    #[test]
+    fn nested_link_cannot_escape_then_reenter_the_root() {
+        let root = fixture();
+        put(root.path(), "inside/value.mjs", b"inside");
+        link(root.path(), "inside/up", "../..");
+        link(root.path(), "entry", "inside/up/anything/inside/value.mjs");
+        assert_eq!(linked_error(root.path(), "app.js", "./entry"), "ERR_MODULE_OUTSIDE_PROJECT");
+    }
+
+    #[test]
+    fn symlink_hop_bound_accepts_finite_repeated_links_but_rejects_cycles() {
+        let root = fixture();
+        put(root.path(), "value.mjs", b"value");
+        link(root.path(), "loop", ".");
+        assert_eq!(linked(root.path(), "app.js", "./loop/loop/value.mjs", ResolutionMode::Import).unwrap().source_bytes(), b"value");
+        link(root.path(), "cycle", "cycle");
+        assert_eq!(linked_error(root.path(), "app.js", "./cycle"), "ERR_MODULE_SYMLINK_LOOP");
+        for i in 0..MAX_LINK_HOPS {
+            link(root.path(), &format!("chain-{i}"), &if i + 1 == MAX_LINK_HOPS { "value.mjs".into() } else { format!("chain-{}", i + 1) });
+        }
+        assert_eq!(linked(root.path(), "app.js", "./chain-0", ResolutionMode::Import).unwrap().source_bytes(), b"value");
+        link(root.path(), "too-many", "chain-0");
+        assert_eq!(linked_error(root.path(), "app.js", "./too-many"), "ERR_MODULE_SYMLINK_LOOP");
+    }
+
+    #[test]
+    fn symlink_policy_and_link_spelling_are_part_of_the_input_pin() {
+        let root = fixture();
+        put(root.path(), "value.mjs", b"value");
+        assert_ne!(run(root.path(), "app.js", "./value.mjs", ResolutionMode::Import).report.input_hash,
+            linked(root.path(), "app.js", "./value.mjs", ResolutionMode::Import).unwrap().report.input_hash);
+        link(root.path(), "alias", "value.mjs");
+        let first = linked(root.path(), "app.js", "./alias", ResolutionMode::Import).unwrap();
+        link(root.path(), "new-alias", "./value.mjs");
+        fs::rename(root.path().join("new-alias"), root.path().join("alias")).unwrap();
+        let second = linked(root.path(), "app.js", "./alias", ResolutionMode::Import).unwrap();
+        assert_eq!(first.report.path, second.report.path);
+        assert_eq!(first.report.content_sha256, second.report.content_sha256);
+        assert_ne!(first.report.input_hash, second.report.input_hash);
+    }
+
+    #[test]
+    fn cached_links_and_negative_probes_are_not_recaptured_during_a_resolution() {
+        let root = fixture();
+        put(root.path(), "old/value.mjs", b"old");
+        put(root.path(), "new/value.mjs", b"new");
+        link(root.path(), "alias", "old");
+        let directory = File::open(root.path()).unwrap();
+        let mut resolver = Resolver { entries: BTreeMap::from([("".into(), Rc::new(Entry::Directory(directory)))]),
+            manifests: BTreeMap::new(), captured: 0, conditions: Vec::new(), mappings: Vec::new(), symlink_policy: SymlinkPolicy::Contained };
+        assert!(matches!(resolver.probe("alias/absent.mjs").unwrap().as_ref(), Entry::Missing));
+        link(root.path(), "replacement", "new");
+        fs::rename(root.path().join("replacement"), root.path().join("alias")).unwrap();
+        put(root.path(), "old/absent.mjs", b"later");
+        assert!(matches!(resolver.probe("alias/absent.mjs").unwrap().as_ref(), Entry::Missing));
+        let (path, entry) = resolver.locate("alias/value.mjs").unwrap();
+        assert_eq!(path, "old/value.mjs");
+        assert!(matches!(entry.as_ref(), Entry::File { bytes, .. } if bytes == b"old"));
+    }
+
+    #[test]
+    fn link_text_and_expansion_limits_never_return_partial_success() {
+        for target in ["x".repeat(MAX_PATH + 1), "a/".repeat(MAX_DEPTH + 1)] {
+            assert!(validate_link_target(&target).is_err());
+        }
+        let root = fixture();
+        link(root.path(), "expanding", "expanding/expanding");
+        assert_eq!(linked_error(root.path(), "app.js", "./expanding"), "ERR_MODULE_SYMLINK_LOOP");
+        let mut resolver = Resolver { entries: BTreeMap::from([("".into(), Rc::new(Entry::Directory(File::open(root.path()).unwrap())))]),
+            manifests: BTreeMap::new(), captured: MAX_CAPTURE, conditions: Vec::new(), mappings: Vec::new(), symlink_policy: SymlinkPolicy::Contained };
+        assert!(resolver.probe("expanding").is_err());
+        assert!(!resolver.entries.contains_key("expanding"));
     }
 
     #[test]
