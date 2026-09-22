@@ -31021,6 +31021,59 @@ fn main() -> Result<()> {
                     );
                 }
             }
+
+            MigrateCommand::Rollout(args) => {
+                if args.project_path.as_os_str().is_empty() {
+                    return migrate_fail(
+                        "migrate.rollout",
+                        args.json,
+                        "`migrate rollout` requires a project path",
+                    );
+                }
+
+                let manager = migration::rollout::RolloutManager::new(
+                    &args.project_path,
+                    args.migration_id.as_deref(),
+                );
+
+                let config = migration::rollout::RolloutConfig {
+                    canary_instances: args.canary_instances,
+                    auto_rollback_on_failure: !args.no_auto_rollback,
+                    force: args.force,
+                    ..Default::default()
+                };
+
+                let target_stage = args.stage.as_deref().and_then(migration::rollout::RolloutStage::parse);
+
+                let report = match args.action.as_str() {
+                    "status" => manager.status().map_err(|e| e.to_string()),
+                    "rollback" => manager.rollback("operator requested rollout rollback"),
+                    "promote" => manager.promote(&config, target_stage, args.ramp_pct),
+                    other => Err(format!("unknown rollout action: {other}")),
+                };
+
+                let report = match report {
+                    Ok(rep) => rep,
+                    Err(err) => return migrate_fail("migrate.rollout", args.json, err),
+                };
+
+                if args.json {
+                    let rendered = match serde_json::to_string_pretty(&report) {
+                        Ok(r) => r,
+                        Err(err) => return migrate_fail("migrate.rollout", true, err),
+                    };
+                    println!("{rendered}");
+                } else {
+                    println!("{}", report.render_human());
+                }
+
+                if !report.ok {
+                    if args.json {
+                        fail_closed_after_json();
+                    }
+                    anyhow::bail!("migration rollout failed: {}", report.message);
+                }
+            }
         },
 
         Command::MigrateReport(args) => {

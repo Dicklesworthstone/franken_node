@@ -45,6 +45,7 @@ __pycache__/
 # Per-machine br fsqlite probes, like -wal/-shm; never canonical tracker state.
 .beads/*.db-wal-cert
 .beads/*.db-wal-cert-head
+.beads/*.vacuum*
 
 # Agent coordination config
 .agent-mail.yaml

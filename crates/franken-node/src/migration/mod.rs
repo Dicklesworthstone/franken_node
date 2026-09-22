@@ -45,6 +45,8 @@ pub use rewrite_transaction::rollback;
 #[cfg(target_os = "linux")]
 pub mod verified_rewrite;
 
+pub mod rollout;
+
 /// Maximum allowed file size for migration operations to prevent DoS via parser bombs.
 /// External package.json, source files, etc. could be maliciously crafted as large files.
 /// 10MB should be more than sufficient for any reasonable package manifest or source file.

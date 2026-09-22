@@ -1,3 +1,5 @@
+#![cfg(feature = "differential")]
+
 use std::collections::BTreeMap;
 
 use ed25519_dalek::SigningKey;

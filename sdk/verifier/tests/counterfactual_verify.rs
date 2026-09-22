@@ -1,3 +1,5 @@
+#![cfg(feature = "differential")]
+
 use ed25519_dalek::{Signer, SigningKey};
 use frankenengine_node::tools::counterfactual_replay::{
     CounterfactualReplayEngine, PolicyConfig, to_canonical_json,

@@ -653,6 +653,9 @@ pub enum MigrateCommand {
 
     /// Static audit checks plus optional runtime smoke (not `verify lockstep`).
     Validate(MigrateValidateArgs),
+
+    /// Progressive rollout state machine (shadow -> canary -> ramp -> default) with fail-closed gates.
+    Rollout(MigrateRolloutArgs),
 }
 
 #[derive(Debug)]
@@ -943,6 +946,47 @@ pub struct MigrateValidateArgs {
     /// which runtime is installed).
     #[arg(long)]
     pub static_only: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct MigrateRolloutArgs {
+    /// Path to the project to roll out.
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/migrate-error-cli/v1` instead of a human clap error.
+    #[arg(default_value = "", value_parser = parse_handler_required_pathbuf)]
+    pub project_path: PathBuf,
+
+    /// Migration identifier. If omitted, discovered or derived from project path.
+    #[arg(long)]
+    pub migration_id: Option<String>,
+
+    /// Rollout action: promote, rollback, or status (default: promote).
+    #[arg(long, default_value = "promote", value_parser = ["promote", "rollback", "status"])]
+    pub action: String,
+
+    /// Target stage override: shadow, canary, ramp, or default.
+    #[arg(long)]
+    pub stage: Option<String>,
+
+    /// Target ramp percentage (0..=100) when in ramp stage.
+    #[arg(long)]
+    pub ramp_pct: Option<u8>,
+
+    /// Canary instance count.
+    #[arg(long, default_value = "1")]
+    pub canary_instances: u32,
+
+    /// Force stage progression bypassing confidence score checks.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Disable automatic rollback on verification failure.
+    #[arg(long)]
+    pub no_auto_rollback: bool,
+
+    /// Emit structured JSON output.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -4070,6 +4114,25 @@ mod tests {
                 assert!(args.project_path.as_os_str().is_empty());
             }
             other => panic!("expected migrate validate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn migrate_rollout_parses_without_project_path_so_json_can_fail_closed() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "franken-node",
+            "migrate",
+            "rollout",
+            "--json",
+        ])
+        .expect("missing project path must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Migrate(MigrateCommand::Rollout(args)) => {
+                assert!(args.json);
+                assert!(args.project_path.as_os_str().is_empty());
+                assert_eq!(args.action, "promote");
+            }
+            other => panic!("expected migrate rollout, got {other:?}"),
         }
     }
 
