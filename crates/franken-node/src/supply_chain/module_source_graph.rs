@@ -1,9 +1,13 @@
-//! Entrypoint-wide capture of static and literal JavaScript module requests.
+//! Entrypoint-wide capture of static and literal JavaScript/TypeScript requests.
 //!
 //! One resolver owns every source, manifest, link and negative probe for the
 //! whole graph. This is a conservative source graph, not execution or proof of
 //! all runtime dependencies: literal deferred loads are included even in dead
 //! branches; computed/indirect loaders and unsupported syntax stay explicit.
+//! TypeScript follows explicit runtime syntax, not tsconfig-dependent emit.
+//! Whole-declaration type imports and import types are recorded but never read;
+//! inline type specifiers retain their declaration's side-effect dependency.
+//! Spec: https://www.typescriptlang.org/tsconfig/verbatimModuleSyntax.html
 
 use super::{Entry, Mapping, Probe, ResolutionError, ResolutionMode, Resolver,
     SymlinkPolicy, error, io_error, parent, validate_path};
@@ -18,7 +22,7 @@ const MAX_MODULES: usize = 256;
 const MAX_SITES: usize = 4096;
 const MAX_AST_NODES: usize = 262_144;
 const MAX_EVIDENCE_BYTES: usize = 32 * 1024 * 1024;
-const HASH_DOMAIN: &[u8] = b"franken-node/module-source-graph/v1\0";
+const HASH_DOMAIN: &[u8] = b"franken-node/module-source-graph/v2\0";
 type Result<T> = std::result::Result<T, ResolutionError>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -54,7 +58,29 @@ impl LoadKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum EdgeState { Resolved, Unresolved, RuntimeRequired, NonLiteral }
+pub enum EdgeState { Resolved, Unresolved, RuntimeRequired, NonLiteral, TypeOnly }
+
+/// Source grammar is independent of the resolver's runtime format hint.
+/// Recognizing TypeScript is not a claim that the engine can execute it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceLanguage { JavaScript, TypeScript, Tsx, Declaration, Json, Unsupported }
+
+impl SourceLanguage {
+    fn for_module(path: &str, format: &str) -> Self {
+        if [".d.ts", ".d.mts", ".d.cts"].iter().any(|suffix| path.ends_with(suffix)) {
+            return Self::Declaration;
+        }
+        match Path::new(path).extension().and_then(|e| e.to_str()) {
+            Some("ts" | "mts" | "cts") => Self::TypeScript,
+            Some("tsx") => Self::Tsx,
+            _ if format == "json" => Self::Json,
+            _ if matches!(format, "module" | "commonjs" | "javascript_unspecified") => Self::JavaScript,
+            _ => Self::Unsupported,
+        }
+    }
+    fn is_typescript(self) -> bool { matches!(self, Self::TypeScript | Self::Tsx) }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SourceEdge {
@@ -77,6 +103,7 @@ pub struct SourceModule {
     pub content_sha256: String,
     pub content_bytes: usize,
     pub format_hint: String,
+    pub source_language: SourceLanguage,
     pub analyzed: bool,
 }
 
@@ -115,6 +142,8 @@ pub struct SourceGraphReport {
     /// True only for this scanner's declared static/literal-site scope.
     pub fully_resolved: bool,
     pub runtime_completeness: bool,
+    /// Erased references are inventoried, not resolved or type-checked.
+    pub type_resolution_performed: bool,
     pub execution_performed: bool,
     pub release_certification: bool,
 }
@@ -178,16 +207,15 @@ fn build(mut resolver: Resolver, entrypoint: &str, options: GraphOptions) -> Res
     let mut diagnostics = Vec::new();
     let mut budget = Budget::default();
     let mut parser = Parser::new();
-    parser.set_language(&tree_sitter_javascript::LANGUAGE.into())
-        .map_err(|e| error("ERR_MODULE_GRAPH_PARSER", e.to_string()))?;
 
     while let Some(id) = pending.pop_front() {
         let source = Rc::clone(sources.get(&id).expect("queued source is captured"));
         let Entry::File { bytes, sha256 } = source.as_ref() else { unreachable!("ordinary source") };
         let format_hint = resolver.format(&id.path)?;
-        let (loads, notices, analyzed) = scan(&mut parser, bytes, &format_hint, &mut budget)?;
+        let source_language = SourceLanguage::for_module(&id.path, &format_hint);
+        let (loads, notices, analyzed) = scan(&mut parser, bytes, source_language, &mut budget)?;
         let module = SourceModule { id: id.clone(), content_sha256: sha256.clone(),
-            content_bytes: bytes.len(), format_hint, analyzed };
+            content_bytes: bytes.len(), format_hint, source_language, analyzed };
         budget.retain(&module)?;
         modules.push(module);
         for notice in notices {
@@ -198,14 +226,18 @@ fn build(mut resolver: Resolver, entrypoint: &str, options: GraphOptions) -> Res
         }
         for load in loads {
             let mode = load.kind.mode();
-            let conditions = options.conditions.clone().unwrap_or_else(|| mode.default_conditions());
+            let conditions = if load.type_only { Vec::new() }
+                else { options.conditions.clone().unwrap_or_else(|| mode.default_conditions()) };
             resolver.conditions = conditions.clone();
             resolver.mappings.clear();
             let mut edge = SourceEdge { importer: id.clone(), site: load.site, kind: load.kind,
-                deferred_or_conditional: matches!(load.kind, LoadKind::Require | LoadKind::DynamicImport),
-                specifier: load.specifier, conditions, state: EdgeState::NonLiteral,
+                deferred_or_conditional: !load.type_only && matches!(load.kind, LoadKind::Require | LoadKind::DynamicImport),
+                specifier: load.specifier, conditions,
+                state: if load.type_only { EdgeState::TypeOnly } else { EdgeState::NonLiteral },
                 target: None, error: None, mappings: Vec::new() };
-            if let Some(request) = &edge.specifier {
+            // Type-only references grant no filesystem authority. In particular,
+            // an erased outside-root path or runtime name must not be resolved.
+            if let Some(request) = edge.specifier.as_ref().filter(|_| !load.type_only) {
                 match resolver.request(parent(&id.path), request, mode, 0) {
                     Ok((path, url_suffix)) => {
                         let (path, source) = resolver.locate(&path)?;
@@ -239,12 +271,13 @@ fn build(mut resolver: Resolver, entrypoint: &str, options: GraphOptions) -> Res
     let probes = resolver.probes();
     budget.retain(&probes)?;
     let mut report = SourceGraphReport {
-        schema_version: "franken-node/module-source-graph/v1".into(),
+        schema_version: "franken-node/module-source-graph/v2".into(),
         scope: "static-and-literal-module-requests".into(), entrypoint: entrypoint.into(),
         resolved_entrypoint: first, options, fully_resolved: diagnostics.is_empty()
-            && edges.iter().all(|e| e.state == EdgeState::Resolved),
+            && edges.iter().all(|e| matches!(e.state, EdgeState::Resolved | EdgeState::TypeOnly)),
         modules, edges, diagnostics, probes, input_hash: String::new(),
-        runtime_completeness: false, execution_performed: false, release_certification: false,
+        runtime_completeness: false, type_resolution_performed: false,
+        execution_performed: false, release_certification: false,
     };
     let encoded = serde_json::to_vec(&report).map_err(|e| io_error("<source graph>", e))?;
     if encoded.len() > MAX_EVIDENCE_BYTES { return Err(limit()); }
@@ -259,13 +292,13 @@ fn fatal(e: &ResolutionError) -> bool {
         | "ERR_UNSUPPORTED_MODULE_FILE" | "ERR_PACKAGE_MAP_LIMIT")
 }
 
-struct Load { site: SourceSite, kind: LoadKind, specifier: Option<String> }
+struct Load { site: SourceSite, kind: LoadKind, specifier: Option<String>, type_only: bool }
 struct Notice { site: Option<SourceSite>, code: &'static str, message: &'static str }
 type Scan = (Vec<Load>, Vec<Notice>, bool);
 
-fn scan(parser: &mut Parser, bytes: &[u8], format: &str, budget: &mut Budget) -> Result<Scan> {
+fn scan(parser: &mut Parser, bytes: &[u8], language: SourceLanguage, budget: &mut Budget) -> Result<Scan> {
     let notice = |code, message| Notice { site: None, code, message };
-    if format == "json" {
+    if language == SourceLanguage::Json {
         return if serde_json::from_slice::<serde_json::Value>(bytes).is_ok() {
             Ok((Vec::new(), Vec::new(), true))
         } else {
@@ -273,7 +306,11 @@ fn scan(parser: &mut Parser, bytes: &[u8], format: &str, budget: &mut Budget) ->
             Ok((Vec::new(), vec![notice("INVALID_JSON_MODULE", "captured JSON module could not be parsed")], false))
         };
     }
-    if !matches!(format, "module" | "commonjs" | "javascript_unspecified") {
+    if language == SourceLanguage::Declaration {
+        budget.site()?;
+        return Ok((Vec::new(), vec![notice("DECLARATION_FILE_NOT_RUNTIME", "a declaration file is not a runtime implementation")], false));
+    }
+    if language == SourceLanguage::Unsupported {
         budget.site()?;
         return Ok((Vec::new(), vec![notice("UNSUPPORTED_MODULE_FORMAT", "source extraction does not cover this format")], false));
     }
@@ -284,22 +321,40 @@ fn scan(parser: &mut Parser, bytes: &[u8], format: &str, budget: &mut Budget) ->
             return Ok((Vec::new(), vec![notice("NON_UTF8_JAVASCRIPT", "JavaScript source is not UTF-8")], false));
         }
     };
+    let grammar = match language {
+        SourceLanguage::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
+        SourceLanguage::Tsx => tree_sitter_typescript::LANGUAGE_TSX,
+        _ => tree_sitter_javascript::LANGUAGE,
+    };
+    parser.set_language(&grammar.into()).map_err(|e| error("ERR_MODULE_GRAPH_PARSER", e.to_string()))?;
     let tree = parser.parse(bytes, None).ok_or_else(|| error("ERR_MODULE_GRAPH_PARSER", "parser did not return a tree"))?;
     if tree.root_node().has_error() {
         budget.site()?;
-        return Ok((Vec::new(), vec![notice("JAVASCRIPT_PARSE_ERROR", "source has syntax errors; no dependency completeness asserted")], false));
+        let code = if language.is_typescript() { "TYPESCRIPT_PARSE_ERROR" } else { "JAVASCRIPT_PARSE_ERROR" };
+        return Ok((Vec::new(), vec![notice(code, "source has syntax errors; no dependency completeness asserted")], false));
     }
     let mut loads = Vec::new();
     let mut notices = Vec::new();
     let mut cursor = tree.walk();
+    // One inherited bit per cursor depth, not an ancestor scan at every node.
+    // All syntax still consumes the global budget, including erased subtrees.
+    let mut type_context = vec![false];
     loop {
         budget.ast_nodes += 1;
         if budget.ast_nodes > MAX_AST_NODES { return Err(limit()); }
         let node = cursor.node();
+        let erased = language.is_typescript() && (*type_context.last().expect("root context")
+            || erased_region(node));
         let mut issue = None;
         let request = match node.kind() {
             "import_statement" => node.child_by_field_name("source").map(|s| (LoadKind::StaticImport, s)),
             "export_statement" => node.child_by_field_name("source").map(|s| (LoadKind::Reexport, s)),
+            "import_require_clause" if language.is_typescript() => {
+                if !erased {
+                    issue = Some(("TYPESCRIPT_TRANSFORM_REQUIRED", "import-equals requires a configured TypeScript transform"));
+                }
+                node.child_by_field_name("source").map(|s| (LoadKind::Require, s))
+            }
             "call_expression" => {
                 let kind = node.child_by_field_name("function").and_then(|f| {
                     if f.kind() == "import" { Some(LoadKind::DynamicImport) }
@@ -313,7 +368,7 @@ fn scan(parser: &mut Parser, bytes: &[u8], format: &str, budget: &mut Budget) ->
                     (kind, arg)
                 })
             }
-            "identifier" => {
+            "identifier" if !erased => {
                 let spelling = node.utf8_text(bytes).unwrap_or("");
                 if spelling == "require" && !direct_callee(node) {
                     issue = Some(("INDIRECT_REQUIRE", "require is bound, passed or used indirectly; scope/alias analysis is not implemented"));
@@ -322,28 +377,65 @@ fn scan(parser: &mut Parser, bytes: &[u8], format: &str, budget: &mut Budget) ->
                 }
                 None
             }
-            "member_expression" if is_require(node, bytes) && !direct_callee(node) => {
+            "member_expression" if !erased && is_require(node, bytes) && !direct_callee(node) => {
                 issue = Some(("INDIRECT_REQUIRE", "module.require is used indirectly")); None
             }
-            "jsx_element" | "jsx_self_closing_element" | "with_statement" => {
+            "jsx_element" | "jsx_self_closing_element" | "with_statement" if !erased => {
                 issue = Some(("UNSUPPORTED_JAVASCRIPT_SURFACE", "JSX or dynamic scope requires a separate analysis")); None
             }
             _ => None,
         };
+        if language.is_typescript() && !erased && requires_typescript_transform(node) {
+            issue = Some(("TYPESCRIPT_TRANSFORM_REQUIRED", "non-erasable TypeScript or decorators require a configured transform; injected dependencies are not inferred"));
+        }
         if let Some((kind, argument)) = request {
             budget.site()?;
             loads.push(Load { site: SourceSite::of(node), kind,
-                specifier: literal(argument, text) });
+                specifier: literal(argument, text), type_only: erased });
         }
         if let Some((code, message)) = issue {
             budget.site()?;
             notices.push(Notice { site: Some(SourceSite::of(node)), code, message });
         }
-        if cursor.goto_first_child() { continue; }
+        if cursor.goto_first_child() { type_context.push(erased); continue; }
         loop {
             if cursor.goto_next_sibling() { break; }
             if !cursor.goto_parent() { return Ok((loads, notices, true)); }
+            type_context.pop();
         }
+    }
+}
+
+/// Only a direct anonymous keyword is a modifier. A default binding named
+/// `type` (import type from './x') is an identifier and remains a runtime load.
+fn keyword(node: Node<'_>, word: &str) -> bool {
+    let mut cursor = node.walk();
+    node.children(&mut cursor).any(|n| !n.is_named() && n.kind() == word)
+}
+
+fn erased_region(node: Node<'_>) -> bool {
+    match node.kind() {
+        "type_alias_declaration" | "interface_declaration" | "type_annotation"
+        | "type_arguments" | "type_parameters" | "type_query" | "implements_clause"
+        | "ambient_declaration" | "function_signature" | "method_signature"
+        | "abstract_method_signature" | "index_signature" => true,
+        "import_statement" | "export_statement" | "import_specifier" | "export_specifier" => keyword(node, "type"),
+        "public_field_definition" => keyword(node, "declare"),
+        _ => node.parent().is_some_and(|p| matches!(p.kind(), "as_expression" | "satisfies_expression")
+            && p.named_child(0).is_some_and(|first| first.id() != node.id())),
+    }
+}
+
+fn requires_typescript_transform(node: Node<'_>) -> bool {
+    match node.kind() {
+        "enum_declaration" | "internal_module" | "module" | "import_alias" | "decorator" => true,
+        "export_statement" => keyword(node, "="),
+        "required_parameter" | "optional_parameter" => {
+            let mut cursor = node.walk();
+            keyword(node, "readonly") || node.named_children(&mut cursor)
+                .any(|n| matches!(n.kind(), "accessibility_modifier" | "override_modifier"))
+        }
+        _ => false,
     }
 }
 
@@ -598,5 +690,192 @@ mod tests {
         assert!(std::str::from_utf8(g.source_bytes(&g.report.resolved_entrypoint).unwrap()).unwrap().contains("private_source_marker"));
         assert!(!serde_json::to_string(g.report()).unwrap().contains("private_source_marker"));
         assert!(g.report.fully_resolved);
+    }
+
+    fn typed_graph(root: &Path, entry: &str) -> CapturedModuleGraph {
+        capture(root, entry, GraphOptions::default()).unwrap()
+    }
+
+    #[test]
+    fn typescript_mts_cts_and_javascript_switch_grammars_per_captured_module() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.ts", "import './a.mts'; import './b.cts'; import './plain.mjs'; const n: number = 1;");
+        put(root.path(), "a.mts", "export const n: number = 2;");
+        put(root.path(), "b.cts", "const n: number = require('./data.json'); module.exports=n;");
+        put(root.path(), "plain.mjs", "export const n = 3;");
+        put(root.path(), "data.json", "1");
+        let g = typed_graph(root.path(), "app.ts");
+        assert!(g.report.fully_resolved, "{:?}", g.report.diagnostics);
+        assert_eq!(g.report.modules.len(), 5);
+        assert_eq!(g.report.modules.iter().filter(|m| m.source_language == SourceLanguage::TypeScript).count(), 3);
+        assert!(!g.report.type_resolution_performed);
+    }
+
+    #[test]
+    fn whole_type_declarations_never_probe_erased_paths_or_runtime_modules() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.ts", "import type {T} from '../outside'; export type {U} from './absent.d.ts'; type S = import('node:fs').Stats;");
+        let g = typed_graph(root.path(), "app.ts");
+        assert!(g.report.fully_resolved, "{:?}", g.report.diagnostics);
+        assert_eq!(g.report.edges.len(), 3);
+        assert!(g.report.edges.iter().all(|e| e.state == EdgeState::TypeOnly
+            && e.conditions.is_empty() && e.target.is_none() && !e.deferred_or_conditional));
+        assert!(g.report.probes.iter().all(|p| !p.path.contains("absent") && !p.path.contains("outside")));
+        assert_eq!(paths(&g), ["app.ts"]);
+    }
+
+    #[test]
+    fn inline_type_specifiers_preserve_empty_runtime_imports_and_reexports() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.ts", "import {type T} from './side.mts'; export {type T} from './side.mts'; import type from './side.mts';");
+        put(root.path(), "side.mts", "export type T = string; export default 1;");
+        let g = typed_graph(root.path(), "app.ts");
+        assert!(g.report.fully_resolved, "{:?}", g.report.diagnostics);
+        assert_eq!(g.report.edges.len(), 3);
+        assert!(g.report.edges.iter().all(|e| e.state == EdgeState::Resolved));
+        assert_eq!(paths(&g), ["app.ts", "side.mts"]);
+    }
+
+    #[test]
+    fn nested_import_types_are_erased_without_erasing_adjacent_runtime_expressions() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.ts", r#"
+type T = typeof import('type-a');
+interface Shape { value: import('type-b').Value; }
+let p: Promise<typeof import('type-c')> = import('./live.mts');
+const v = p as Promise<typeof import('type-d')>;
+const ok = v satisfies Promise<typeof import('type-e')>;
+type Factory = typeof require;
+interface Names { eval: Function; }
+"#);
+        put(root.path(), "live.mts", "export const value: number = 1;");
+        let g = typed_graph(root.path(), "app.ts");
+        assert!(g.report.fully_resolved, "{:?}", g.report.diagnostics);
+        assert_eq!(g.report.edges.iter().filter(|e| e.state == EdgeState::TypeOnly).count(), 5);
+        assert_eq!(g.report.edges.iter().filter(|e| e.state == EdgeState::Resolved).count(), 1);
+        assert_eq!(paths(&g), ["app.ts", "live.mts"]);
+    }
+
+    #[test]
+    fn ambient_module_imports_have_no_runtime_lookup_authority() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.ts", "declare module 'virtual' { import X from '../outside'; export {X}; } declare namespace N { type T = import('types').T; } const live: number = 1;");
+        let g = typed_graph(root.path(), "app.ts");
+        assert!(g.report.fully_resolved, "{:?}", g.report.diagnostics);
+        assert_eq!(g.report.edges.len(), 2);
+        assert!(g.report.edges.iter().all(|e| e.state == EdgeState::TypeOnly));
+    }
+
+    #[test]
+    fn import_equals_uses_require_conditions_and_reports_transform_boundary() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.cts", "import dep = require('dual'); export = dep;");
+        put(root.path(), "node_modules/dual/package.json", r#"{"exports":{"import":"./wrong.mjs","require":"./right.cjs"}}"#);
+        put(root.path(), "node_modules/dual/right.cjs", "module.exports=1;");
+        let g = typed_graph(root.path(), "app.cts");
+        assert!(!g.report.fully_resolved);
+        assert_eq!(g.report.edges.len(), 1, "{:?}", g.report.diagnostics);
+        assert_eq!(g.report.edges[0].kind, LoadKind::Require);
+        assert_eq!(g.report.edges[0].target.as_ref().unwrap().path, "node_modules/dual/right.cjs");
+        assert!(g.report.diagnostics.iter().all(|d| d.code == "TYPESCRIPT_TRANSFORM_REQUIRED"));
+    }
+
+    #[test]
+    fn type_only_import_equals_does_not_request_transform_or_require_a_package() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.cts", "import type Shape = require('absent'); const x: number = 1;");
+        let g = typed_graph(root.path(), "app.cts");
+        assert!(g.report.fully_resolved, "{:?}", g.report.diagnostics);
+        assert_eq!(g.report.edges.len(), 1);
+        assert_eq!(g.report.edges[0].state, EdgeState::TypeOnly);
+    }
+
+    #[test]
+    fn tsx_retains_explicit_edges_but_does_not_invent_implicit_jsx_dependencies() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.tsx", "import type {Props} from 'types'; import {X} from './component.ts'; export const view = <X>{import('./deferred.ts')}</X>;");
+        put(root.path(), "component.ts", "export const X: any = null;");
+        put(root.path(), "deferred.ts", "export default 1;");
+        let g = typed_graph(root.path(), "app.tsx");
+        assert!(!g.report.fully_resolved);
+        assert_eq!(paths(&g), ["app.tsx", "component.ts", "deferred.ts"]);
+        assert!(g.report.diagnostics.iter().any(|d| d.code == "UNSUPPORTED_JAVASCRIPT_SURFACE"));
+        assert!(!g.report.probes.iter().any(|p| p.path.contains("jsx-runtime")));
+    }
+
+    #[test]
+    fn nonerasable_typescript_keeps_real_loads_but_requires_transform_analysis() {
+        let root = tempfile::tempdir().unwrap();
+        for source in ["enum E { A = require('./value.cjs') }",
+            "namespace N { export const x = require('./value.cjs'); }",
+            "class C { constructor(public value = require('./value.cjs')) {} }"] {
+            put(root.path(), "app.ts", source);
+            put(root.path(), "value.cjs", "module.exports=1;");
+            let g = typed_graph(root.path(), "app.ts");
+            assert!(!g.report.fully_resolved, "{source}");
+            assert!(paths(&g).contains(&"value.cjs"), "{source}: {:?}", g.report.diagnostics);
+            assert!(g.report.diagnostics.iter().any(|d| d.code == "TYPESCRIPT_TRANSFORM_REQUIRED"));
+        }
+    }
+
+    #[test]
+    fn declaration_files_are_not_accepted_as_runtime_implementations() {
+        let root = tempfile::tempdir().unwrap();
+        for path in ["types.d.ts", "types.d.mts", "types.d.cts"] {
+            put(root.path(), path, "export interface T { value: string }");
+            let g = typed_graph(root.path(), path);
+            assert!(!g.report.fully_resolved);
+            assert_eq!(g.report.modules[0].source_language, SourceLanguage::Declaration);
+            assert!(!g.report.modules[0].analyzed);
+            assert_eq!(g.report.diagnostics[0].code, "DECLARATION_FILE_NOT_RUNTIME");
+        }
+    }
+
+    #[test]
+    fn typescript_does_not_enable_tsconfig_aliases_or_js_to_ts_substitution() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.ts", "import './helper.js'; import './helper'; import '@app/helper';");
+        put(root.path(), "helper.ts", "export default 1;");
+        put(root.path(), "tsconfig.json", r#"{"compilerOptions":{"paths":{"@app/*":["./*"]}}}"#);
+        let g = typed_graph(root.path(), "app.ts");
+        assert!(!g.report.fully_resolved);
+        assert_eq!(g.report.edges.len(), 3);
+        assert!(g.report.edges.iter().all(|e| e.state == EdgeState::Unresolved));
+        assert_eq!(paths(&g), ["app.ts"]);
+        assert!(!g.report.probes.iter().any(|p| p.path == "tsconfig.json"));
+    }
+
+    #[test]
+    fn erased_references_consume_the_same_global_site_budget() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.ts", &"import type {T} from 'types';".repeat(MAX_SITES + 1));
+        assert_eq!(capture(root.path(), "app.ts", GraphOptions::default()).err().unwrap().code, "ERR_MODULE_GRAPH_LIMIT");
+    }
+
+    #[test]
+    fn typescript_syntax_does_not_relax_the_javascript_grammar() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mjs", "import './typed.ts'; import './not-typed.js';");
+        put(root.path(), "typed.ts", "export const n: number = 1;");
+        put(root.path(), "not-typed.js", "export const n: number = 1;");
+        let g = graph(root.path());
+        assert!(!g.report.fully_resolved);
+        assert_eq!(g.report.diagnostics.len(), 1);
+        assert_eq!(g.report.diagnostics[0].code, "JAVASCRIPT_PARSE_ERROR");
+        assert_eq!(g.report.diagnostics[0].module.path, "not-typed.js");
+    }
+
+    #[test]
+    fn type_references_bind_source_spelling_not_unread_type_dependency_contents() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.ts", "import type {T} from './types.d.ts'; const private_value: number = 1;");
+        put(root.path(), "types.d.ts", "export interface T {}");
+        let first = typed_graph(root.path(), "app.ts");
+        put(root.path(), "types.d.ts", "export interface T {changed: true}");
+        assert_eq!(first.report.input_hash, typed_graph(root.path(), "app.ts").report.input_hash);
+        put(root.path(), "app.ts", "import type {T} from './different.d.ts';");
+        assert_ne!(first.report.input_hash, typed_graph(root.path(), "app.ts").report.input_hash);
+        assert!(std::str::from_utf8(first.source_bytes(&first.report.resolved_entrypoint).unwrap()).unwrap().contains("private_value"));
+        assert!(!serde_json::to_string(first.report()).unwrap().contains("private_value"));
     }
 }
