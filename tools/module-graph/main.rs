@@ -53,8 +53,11 @@ struct Args {
     #[arg(long = "condition", requires = "condition_query")]
     conditions: Vec<String>,
     /// Resolve a module request to an existing captured file without executing it.
-    #[arg(long, group = "condition_query", requires = "from", conflicts_with_all = ["importer_query", "impact", "importer", "require_resolved", "target_query", "package_manifest"])]
+    #[arg(long, groups = ["condition_query", "file_query"], requires = "from", conflicts_with_all = ["importer_query", "impact", "importer", "require_resolved", "target_query", "package_manifest"])]
     resolve_module: Option<String>,
+    /// Capture static and literal dependency sources reachable from this entrypoint.
+    #[arg(long, groups = ["condition_query", "file_query"], conflicts_with_all = ["importer_query", "impact", "importer", "require_resolved", "target_query", "package_manifest", "from", "resolution_mode"])]
+    capture_source_graph: Option<String>,
     /// Existing canonical project-relative importing file for --resolve-module.
     #[arg(long, requires = "resolve_module")]
     from: Option<String>,
@@ -62,7 +65,7 @@ struct Args {
     #[arg(long, requires = "resolve_module", value_parser = ["import", "require"])]
     resolution_mode: Option<String>,
     /// Follow bounded relative symlinks only while every component stays inside the project.
-    #[arg(long, requires = "resolve_module")]
+    #[arg(long, requires = "file_query")]
     allow_contained_symlinks: bool,
 }
 
@@ -89,6 +92,7 @@ fn inspect(args: Args) -> Result<(Value, u8), Box<dyn std::error::Error>> {
             return Err("expected hash requires exactly 64 lowercase hexadecimal digits".into());
         }
     }
+    if args.capture_source_graph.is_some() { return inspect_source_graph(&args); }
     if args.resolve_module.is_some() { return inspect_module_file(&args); }
     if args.resolve_export.is_some() || args.resolve_import.is_some() { return inspect_targets(&args); }
     if args.transitive || args.impact.is_some() { return inspect_topology(&args); }
@@ -164,6 +168,46 @@ fn inspect_topology(args: &Args) -> Result<(Value, u8), Box<dyn std::error::Erro
     });
     report[query] = result;
     Ok((report, if verdict == "INSPECTED" { 0 } else { 1 }))
+}
+
+#[cfg(unix)]
+fn inspect_source_graph(args: &Args) -> Result<(Value, u8), Box<dyn std::error::Error>> {
+    use module_resolution_graph::file_resolution::{SymlinkPolicy, source_graph};
+    let entrypoint = args.capture_source_graph.as_deref().ok_or("missing source graph entrypoint")?;
+    let options = source_graph::GraphOptions {
+        symlink_policy: if args.allow_contained_symlinks { SymlinkPolicy::Contained } else { SymlinkPolicy::Reject },
+        conditions: if args.conditions.is_empty() { None } else { Some(args.conditions.clone()) },
+    };
+    let mut report = json!({"schema_version":"franken-node/module-graph-inspection/v1",
+        "scope":"static-and-literal-module-requests", "execution_performed":false,
+        "release_certification":false, "runtime_completeness":false, "source_graph":null});
+    match source_graph::capture(&args.project, entrypoint, options) {
+        Ok(captured) => {
+            let graph = captured.report();
+            let matched = args.expected_hash.as_ref().map(|pin| pin == &graph.input_hash);
+            report["input_hash"] = json!(graph.input_hash);
+            report["expected_hash_matched"] = json!(matched);
+            if matched == Some(false) {
+                report["verdict"] = json!("HASH_MISMATCH");
+                return Ok((report, 1));
+            }
+            report["verdict"] = json!(if graph.fully_resolved { "CAPTURED" } else { "INCOMPLETE" });
+            report["source_graph"] = serde_json::to_value(graph)?;
+            Ok((report, if graph.fully_resolved { 0 } else { 1 }))
+        }
+        Err(error) => {
+            let missing = matches!(error.code, "ERR_MODULE_NOT_FOUND" | "MODULE_NOT_FOUND");
+            report["verdict"] = json!(if missing { "UNRESOLVED" } else { "ERROR" });
+            report["error_code"] = json!(error.code);
+            report["error"] = json!(error.detail);
+            Ok((report, if missing { 1 } else { 2 }))
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn inspect_source_graph(_: &Args) -> Result<(Value, u8), Box<dyn std::error::Error>> {
+    Err("source graph capture requires Unix descriptor-relative capture".into())
 }
 
 #[cfg(unix)]
@@ -302,7 +346,8 @@ fn capture_manifest(_: &Path, _: &str) -> Result<String, Box<dyn std::error::Err
 
 fn main() -> ExitCode {
     let args = Args::parse();
-    let scope = if args.resolve_module.is_some() { "project-contained-module-resolution" }
+    let scope = if args.capture_source_graph.is_some() { "static-and-literal-module-requests" }
+        else if args.resolve_module.is_some() { "project-contained-module-resolution" }
         else if args.resolve_export.is_some() || args.resolve_import.is_some() { "package-map-target-selection" }
         else if args.transitive || args.impact.is_some() { "declared-dependency-topology" }
         else { "lockfile-metadata-only" };

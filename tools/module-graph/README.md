@@ -59,7 +59,7 @@ security approval is fabricated, and `franken-node run` is unchanged.
 
 ```sh
 cargo test --manifest-path tools/module-graph/Cargo.toml \
-  --bin franken-module-graph --test cli --test topology --test package_targets --test module_files
+  --bin franken-module-graph --test cli --test topology --test package_targets --test module_files --test source_graph
 ```
 
 The graph builder's own unit tests run alongside executable CLI regressions.
@@ -361,8 +361,8 @@ no-follow flags. Absolute link targets (even ones currently pointing inside the
 project), outside-root targets, reserved repository state and nonregular targets
 remain errors. Symlink cycles or more than 40 hops per lookup fail closed, as do
 path/expansion/capture limits. Missing targets remain unresolved. The option is
-specific to `--resolve-module`; it does not change graph capture or standalone
-package-manifest inspection.
+available for `--resolve-module` and `--capture-source-graph`; it does not change
+lockfile topology capture or standalone package-manifest inspection.
 
 The importing file is finalized to its physical location **before** dependency
 lookup, matching ordinary loaded-module context rather than lexical
@@ -387,3 +387,73 @@ source bytes are not reopened after capture. This is still not an atomic snapsho
 of a hostile filesystem, lockfile verification, runtime permission, or execution
 loader integration. The selected root is trusted and every allowed link must
 remain within it; external development workspaces are deliberately unsupported.
+
+## Capture an entrypoint's source dependency graph
+
+Capture the supported static and literal dependency requests reachable from an
+entrypoint, rather than resolving just one request:
+
+```sh
+franken-module-graph ./project --capture-source-graph src/app.mjs
+franken-module-graph ./project --capture-source-graph src/app.cjs \
+  --allow-contained-symlinks --expected-hash "$REVIEWED_SOURCE_GRAPH_HASH"
+```
+
+This uses the production
+`module_resolution_graph::file_resolution::source_graph::capture` API. It
+extracts JavaScript static imports and re-export sources, direct literal
+`require` / `module.require` calls, and literal dynamic imports. Import edges use
+`node, import`; require edges use `node, require`. Explicit `--condition` flags
+replace the complete set for every edge. Supported quoted escapes and
+substitution-free template literals are decoded without running JavaScript.
+Comments and ordinary string contents are not treated as module requests.
+
+Each edge records its source byte span, one-based line/column, load kind, request,
+resolution status, target identity and selected package-map branches. Literal
+calls are conservatively included even inside deferred functions or dead
+branches: this is not a control-flow trace. Cycles and diamonds visit each
+physical file plus ESM query/fragment identity once. Contained workspace links
+retain physical package context. JSON modules are parsed as data, not scanned as
+JavaScript. TypeScript, native addons, Wasm and unknown source formats require
+separate analysis and produce explicit diagnostics.
+
+One resolver owns the entire graph capture. Sources, manifests, link text and
+negative probes are cached once across all edges, not captured independently
+from mutable paths. The `CapturedModuleGraph` owner provides a read-only report
+and `source_bytes(&ModuleId)` so a future consumer need not reopen a pathname.
+The command does not serialize source bytes or ordinary source literals. Module
+requests, filenames, mappings and diagnostics are still potentially sensitive.
+
+`CAPTURED` exits 0 only when this scanner's supported static/literal scope has no
+unresolved sites or analysis diagnostics. `INCOMPLETE` exits 1 while retaining
+good edges alongside missing imports, runtime-required builtins, nonliteral
+loads, parse failures and observed indirect loader/code-generation surfaces.
+Missing entrypoints return `UNRESOLVED`, exit 1. Unsafe capture and resource
+failures return `ERROR`, exit 2, without a partial successful graph.
+
+`fully_resolved` is **not runtime completeness**. Arbitrary aliases, computed
+property access, generated code, binding/control-flow analysis, import-attribute
+validation and module evaluation/linking semantics are outside the scanner.
+Shadowed direct require calls can be conservative false positives. A tree-sitter
+parse is not an engine compatibility result. `runtime_completeness`,
+`execution_performed` and `release_certification` remain false on every result;
+`franken-node run` and the engine loader are unchanged.
+
+The domain-separated graph `input_hash` binds the entrypoint, conditions and
+symlink policy, all captured source identities, edges, diagnostics, consulted
+manifests and lookup gaps. Identical captures are relocation-stable. Changing a
+transitive source or introducing a nearer resolution candidate changes the pin.
+An `--expected-hash` mismatch exits 1 and suppresses the `source_graph` payload;
+metadata-only, single-file and manifest-only pins cannot approve this scope.
+Pins are consistency checks, not signatures, provenance or permission to execute.
+
+Capture is bounded to 256 module identities, 4,096 dependency/diagnostic sites,
+262,144 traversed syntax nodes and 32 MiB of report evidence, in addition to the
+shared resolver's file/probe/link limits. There is no truncation-as-success and
+no claim of a real-time I/O or parsing deadline. Neither this graph nor the
+underlying observed capture is an atomic snapshot of a hostile filesystem.
+
+Graph capture is mutually exclusive with the other query modes and with
+`--from`, `--resolution-mode` and `--require-resolved`. Its own entrypoint and
+per-edge load kinds establish the resolution contexts, and its result always
+reports incomplete evidence without an additional strictness flag.

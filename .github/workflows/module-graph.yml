@@ -36,7 +36,7 @@ jobs:
           # The schema registry is a production dependency, not a standalone
           # test crate. --all-targets overrides its test=false and compiles
           # cross-product unit tests requiring the full engine workspace.
-          cargo +stable test --manifest-path tools/module-graph/Cargo.toml --bin franken-module-graph --test cli --test topology --test package_targets --test module_files 2>&1 | tee evidence/native-tests.log
+          cargo +stable test --manifest-path tools/module-graph/Cargo.toml --bin franken-module-graph --test cli --test topology --test package_targets --test module_files --test source_graph 2>&1 | tee evidence/native-tests.log
       - name: Preserve reproducible sources and native executable
         if: always()
         shell: bash
