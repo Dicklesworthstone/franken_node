@@ -559,6 +559,10 @@ name = "sdk_verifier_replay_bundle_frame_conformance"
 path = "tests/sdk_verifier_replay_bundle_frame_conformance.rs"
 
 [[test]]
+name = "sdk_verifier_cross_differential"
+path = "tests/sdk_verifier_cross_differential.rs"
+
+[[test]]
 name = "evidence_verification_spine_contract"
 path = "tests/evidence_verification_spine_contract.rs"
 required-features = ["control-plane"]

@@ -2215,7 +2215,6 @@ dependencies = [
  "arbitrary",
  "chrono",
  "ed25519-dalek",
- "frankenengine-node",
  "hex",
  "rand_core 0.6.4",
  "serde",
