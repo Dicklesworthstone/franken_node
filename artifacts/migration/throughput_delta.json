@@ -1,11 +1,11 @@
 {
   "bootstrap_ci95": {
-    "ci95_high_bp": 33043,
-    "ci95_low_bp": 19000,
+    "ci95_high_bp": 7020,
+    "ci95_low_bp": 1170,
     "resamples": 10000,
     "seed": 20260820
   },
-  "corpus_digest": "sha256:25515efbce56a2d5b1ddef638137e32cf4be0a177a5fb5c6da3eb08d125b0e73",
+  "corpus_digest": "sha256:224dd3730da74feb19fd1415446040c9e1aaaa061d822af252fff2d5412b2f85",
   "fixture_ids_cohort": [
     "corpus-commander",
     "hardened",
@@ -16,19 +16,19 @@
     "holdout-worker-service"
   ],
   "generated_at": "1970-01-01T00:00:00Z",
-  "holdout_ratio_bp": 19000,
+  "holdout_ratio_bp": 4163,
   "measured_runs": 5,
-  "median_baseline_ms": 76,
-  "median_tool_ms": 33,
+  "median_baseline_ms": 99,
+  "median_tool_ms": 221,
   "protocol": "manual-baseline: checked-in reference codemods (scripts/migration_baseline/baseline_{audit,rewrite,validate}.cjs) executed by node/bun perform the same three duties as franken-node migrate audit/rewrite/validate \u2014 tree+manifest audit, engines/script/module-syntax rewrite, static validation \u2014 on identical fresh copies of each frozen fixture. Both sides get 1 warmup then N measured runs; wall-clock ns around each spawned command; pipeline ms is the sum of its three commands. velocity_ratio_bp = round(median(baseline_ms)*10000/median(tooled_ms)) over all cohort+holdout runs. Minutes are never invented: every row is a measured wall-clock sample committed in the evidence census.",
   "required_velocity_ratio_bp": 30000,
   "schema_version": "franken-node/migration-throughput/v1",
   "signature": {
     "algorithm": "ed25519",
-    "signature_hex": "178017a6438bd352a155805e1ae961ae01a6b7280fad92c5fc722746d9aaaf29d337b8558597e3caa5a56b3f0988c1b86f2c61dea3982c0fb0af27d37e46e508",
+    "signature_hex": "1b5d36baaf5b1e3a2eae800745bcf528ed635ad65867b4a378647e402d421d5ddde167a5798e303386bb6a2b8e26f2de2f9c8beca6d1c80cf783b1e151117a00",
     "signer_key_id": "franken-node-migration-throughput-harness-v1",
     "signer_public_key_hex": "c8d3959a4260a1264d5b7a9532a8f9e2616916687b5d9ae93b700ccf05eaf3ad"
   },
-  "velocity_ratio_bp": 23030,
-  "warmup_runs": 2
+  "velocity_ratio_bp": 4480,
+  "warmup_runs": 1
 }
