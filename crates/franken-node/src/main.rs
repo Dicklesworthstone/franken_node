@@ -9993,6 +9993,7 @@ fn maybe_capture_run_incident(
     receipt: &RunExecutionReceipt,
     receipt_path: &Path,
     dispatch: &ops::engine_dispatcher::RunDispatchReport,
+    trace_id: &str,
 ) -> Result<Option<String>> {
     use frankenengine_node::tools::replay_bundle::{
         EventType, INCIDENT_EVIDENCE_SCHEMA, IncidentEvidenceEvent, IncidentEvidenceMetadata,
@@ -10047,7 +10048,9 @@ fn maybe_capture_run_incident(
         schema_version: INCIDENT_EVIDENCE_SCHEMA.to_string(),
         incident_id: incident_id.clone(),
         collected_at,
-        trace_id: ledger.trace_id.clone(),
+        // The run's operator-visible trace id (`--trace-id`), which also keys
+        // its structured logs and receipt; the ledger's own id is internal.
+        trace_id: trace_id.to_string(),
         severity: IncidentSeverity::High,
         incident_type: "runtime-security-control".to_string(),
         detector: "franken-node run (automatic capture)".to_string(),
@@ -30928,6 +30931,7 @@ fn main() -> Result<()> {
                 &receipt,
                 &receipt_path,
                 &dispatch,
+                &trace_id,
             ) {
                 Ok(incident) => incident,
                 Err(err) => {

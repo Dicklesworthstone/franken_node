@@ -375,35 +375,73 @@ fn parse_replay_result(stderr: &str) -> (bool, usize) {
     )
 }
 
+/// Where the incident chain's evidence comes from.
+enum IncidentEvidence<'a> {
+    /// `run` captured it itself when the run tripped a runtime control
+    /// (bd-reality-20260923-26n9r.8): the product default location, no
+    /// `--evidence-path`, real per-effect timestamps.
+    CapturedByRun,
+    /// A clean run trips no control and so has no incident; the chain is
+    /// exercised over evidence this harness assembles from the run's ledger.
+    AssembledFromLedger(&'a Value),
+}
+
+/// The id `run` gives an automatically captured incident: `INC-RUN-` plus the
+/// first 16 hex digits of the host-effect chain head.
+fn captured_incident_id(ledger: &Value) -> String {
+    let head = ledger["chain_head_hash"]
+        .as_str()
+        .expect("chain_head_hash")
+        .trim_start_matches("sha256:");
+    format!("INC-RUN-{}", &head[..16])
+}
+
 /// Drive the incident CLI chain (bundle --verify → replay → counterfactual
-/// --policy strict) over evidence assembled from the run's ledger, returning
-/// the bundle's integrity hash for the LTV leg.
+/// --policy strict) over the incident's evidence, returning the bundle's
+/// integrity hash for the LTV leg.
 fn incident_chain_leg(
     workspace: &Path,
     incident_id: &str,
     trace_id: &str,
-    ledger: &Value,
+    evidence: IncidentEvidence<'_>,
 ) -> String {
-    let evidence_path = workspace
-        .join("fixtures/incidents")
-        .join(incident_id)
-        .join("evidence.v1.json");
-    let event_count =
-        write_incident_evidence_from_ledger(&evidence_path, incident_id, trace_id, ledger);
-    let evidence_arg = evidence_path.to_string_lossy().to_string();
+    let mut bundle_args = vec![
+        "incident".to_string(),
+        "bundle".to_string(),
+        "--id".to_string(),
+        incident_id.to_string(),
+    ];
+    let event_count = match evidence {
+        IncidentEvidence::CapturedByRun => {
+            let captured = workspace
+                .join(".franken-node/state/incidents")
+                .join(incident_id)
+                .join("evidence.v1.json");
+            let package: Value =
+                serde_json::from_slice(&std::fs::read(&captured).unwrap_or_else(|err| {
+                    panic!("run must have captured {}: {err}", captured.display())
+                }))
+                .expect("captured evidence is JSON");
+            assert_eq!(package["detector"], "franken-node run (automatic capture)");
+            assert_eq!(package["trace_id"], trace_id);
+            package["events"].as_array().expect("events").len()
+        }
+        IncidentEvidence::AssembledFromLedger(ledger) => {
+            let evidence_path = workspace
+                .join("fixtures/incidents")
+                .join(incident_id)
+                .join("evidence.v1.json");
+            let count =
+                write_incident_evidence_from_ledger(&evidence_path, incident_id, trace_id, ledger);
+            bundle_args.push("--evidence-path".to_string());
+            bundle_args.push(evidence_path.to_string_lossy().to_string());
+            count
+        }
+    };
+    bundle_args.push("--verify".to_string());
+    let bundle_arg_refs = bundle_args.iter().map(String::as_str).collect::<Vec<_>>();
 
-    let bundle_output = run_cli(
-        workspace,
-        &[
-            "incident",
-            "bundle",
-            "--id",
-            incident_id,
-            "--evidence-path",
-            &evidence_arg,
-            "--verify",
-        ],
-    );
+    let bundle_output = run_cli(workspace, &bundle_arg_refs);
     assert!(
         bundle_output.status.success(),
         "incident bundle failed: {}",
@@ -1144,12 +1182,22 @@ fn tnr_full_pipeline_clean_run_single_trace_id() {
     verifier_sdk_leg(&ledger);
 
     // ---- L4 REPLAY: bundle → replay → counterfactual over the run's
-    // receipts through the real CLI.
+    // receipts through the real CLI. A clean run is not an incident, so
+    // nothing was captured and the harness assembles the evidence.
+    let captured = captured_incident_id(&ledger);
+    assert!(
+        !workspace
+            .path()
+            .join(".franken-node/state/incidents")
+            .join(&captured)
+            .exists(),
+        "a clean run must not capture an incident ({captured})"
+    );
     let bundle_integrity_hash = incident_chain_leg(
         workspace.path(),
         "INC-TNR-CLEAN-0001",
         CLEAN_TRACE_ID,
-        &ledger,
+        IncidentEvidence::AssembledFromLedger(&ledger),
     );
 
     // ---- L6 LTV: CLI attest + offline SDK verify over chain + bundle.
@@ -1382,17 +1430,18 @@ fn tnr_full_pipeline_denied_exfil_variant_contained() {
     // ---- L5 VSDK: the denial chain re-derives offline too.
     verifier_sdk_leg(&ledger);
 
-    // ---- L4 REPLAY + L6 LTV over the denial evidence.
+    // ---- L4 REPLAY + L6 LTV over the denial evidence `run` captured itself.
+    let incident_id = captured_incident_id(&ledger);
     let bundle_integrity_hash = incident_chain_leg(
         workspace.path(),
-        "INC-TNR-EXFIL-0001",
+        &incident_id,
         EXFIL_TRACE_ID,
-        &ledger,
+        IncidentEvidence::CapturedByRun,
     );
     ltv_leg(
         workspace.path(),
         &run.report,
-        "INC-TNR-EXFIL-0001.fnbundle",
+        &format!("{incident_id}.fnbundle"),
         &bundle_integrity_hash,
         EXFIL_TRACE_ID,
     );

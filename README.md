@@ -57,9 +57,10 @@ Under `franken-node`:
 - The trust card's `camouflage_hints` have been accumulating a
   `GradualCreep` signal since the second minor release; the
   `user_facing_risk_assessment` is already at `high`.
-- On any risky network egress, the **revocation freshness gate** would
-  fail closed because the local frontier is older than the
-  `balanced`-profile policy.
+- Under `strict`, `run` refuses a trusted dependency, and so the
+  dependency never reaches the network, once the **revocation frontier**
+  is more than 5 minutes old. Under `balanced` the same staleness is a
+  preflight warning (1-hour window).
 - If the malicious behavior had already executed, `incident bundle` +
   `incident replay` integrity-verify the recorded bundle (not live
   re-execution), and `incident counterfactual --policy strict` scores

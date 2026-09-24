@@ -51,65 +51,31 @@ ROOT = Path(__file__).resolve().parent.parent
 README = ROOT / "README.md"
 DEFAULT_BIN = ROOT / "target" / "debug" / "franken-node"
 
-# Top-level subcommands the README documents under "Command Reference"
-# (README.md L611-727). Keep in sync with that section.
-EXPECTED_TOP_LEVEL = {
-    "init",
-    "run",
-    "doctor",
-    "migrate",
-    "migrate-report",
-    "verify",
-    "trust",
-    "trust-card",
-    "remotecap",
-    "fleet",
-    "incident",
-    "ops",
-    "registry",
-    "bench",
-    "debug",
-    "runtime",
-    "safe-mode",
-    "proofs",
-}
+# A README command-table row: `| \`franken-node <command> [<subcommand>] ...\` |`.
+# The documented surface is read from the README itself (a hand-kept copy of
+# it here drifted from both the README and the binary).
+README_COMMAND_ROW = re.compile(r"^\|\s*`franken-node ([^`]+)`", re.MULTILINE)
+COMMAND_WORD = re.compile(r"^[a-z][a-z0-9-]*$")
 
-# Per-subcommand commands the README documents. Each tuple is (parent, child).
-# Keep this list in lockstep with README's "Command Reference" tables.
-EXPECTED_SUBCOMMANDS = {
-    "migrate": {"audit", "rewrite", "validate"},
-    # `migrate-report` is a TOP-LEVEL command, not a `migrate` subcommand.
-    "verify": {
-        "module",
-        "migration",
-        "compatibility",
-        "corpus",
-        "lockstep",
-        "release",
-        "transparency-log",
-        "recovery-runbook",
-    },
-    "trust": {"card", "list", "scan", "sync", "revoke", "quarantine"},
-    "trust-card": {"show", "export", "list", "compare", "diff"},
-    "remotecap": {"issue", "verify", "use", "revoke"},
-    "fleet": {"status", "describe", "release", "reconcile", "agent"},
-    "incident": {"bundle", "replay", "counterfactual", "list"},
-    "ops": {
-        "health-check",
-        "resource-governor",
-        "validation-readiness",
-        "validation-closeout",
-        "config-audit",
-        "metrics",
-    },
-    "registry": {"publish", "search", "verify", "gc"},
-    "bench": {"run"},
-    "debug": {"explain", "evidence", "trace"},
-    "doctor": {"workspace-pressure", "close-condition", "evidence-readiness"},
-    "runtime": {"lane", "epoch"},
-    "safe-mode": {"enter", "status", "exit"},
-    "proofs": {"queue", "workers"},
-}
+
+def documented_commands(readme_text: str) -> tuple[set[str], dict[str, set[str]]]:
+    """Top-level commands and per-parent subcommands the README documents.
+
+    The first word after `franken-node` in a command-table row is the
+    top-level command; a second plain word (not `<arg>`, `[opt]` or a flag)
+    is its subcommand.
+    """
+    top: set[str] = set()
+    subs: dict[str, set[str]] = {}
+    for match in README_COMMAND_ROW.finditer(readme_text):
+        words = match.group(1).split()
+        if not words or not COMMAND_WORD.match(words[0]):
+            continue
+        top.add(words[0])
+        subs.setdefault(words[0], set())
+        if len(words) > 1 and COMMAND_WORD.match(words[1]):
+            subs[words[0]].add(words[1])
+    return top, subs
 
 
 def run_help(bin_path: Path, args: list[str]) -> tuple[int, str, str]:
@@ -194,6 +160,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    if not README.is_file():
+        print(f"ERROR: README not found: {README}", file=sys.stderr)
+        return 2
+    expected_top, expected_subs = documented_commands(README.read_text(encoding="utf-8"))
+
     findings: dict[str, list[dict[str, str]]] = {
         "missing_top_level": [],
         "extra_top_level": [],
@@ -211,13 +182,15 @@ def main(argv: list[str] | None = None) -> int:
         return _report(findings, args.json)
 
     actual_top = extract_subcommands(stdout)
-    for cmd in sorted(EXPECTED_TOP_LEVEL - actual_top):
+    for cmd in sorted(expected_top - actual_top):
         findings["missing_top_level"].append({"command": cmd})
-    for cmd in sorted(actual_top - EXPECTED_TOP_LEVEL):
+    for cmd in sorted(actual_top - expected_top):
         findings["extra_top_level"].append({"command": cmd})
 
     # --- Per-subcommand surface --------------------------------------------
-    for parent, expected_children in EXPECTED_SUBCOMMANDS.items():
+    # Every documented top-level command is drilled into, so a subcommand the
+    # binary exposes but the README never mentions is reported too.
+    for parent, expected_children in sorted(expected_subs.items()):
         if parent not in actual_top:
             # Already flagged as missing top-level; skip drilldown.
             continue
