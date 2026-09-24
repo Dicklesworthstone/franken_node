@@ -158,16 +158,33 @@ Each claim entry uses this structure:
 - **Claim**: Risky and dangerous actions consult fresh trust state before
   executing; `now >= expires_at` fail-closed at the boundary so clock skew
   never produces a false "fresh" answer.
-- **Evidence artifact**: `crates/franken-node/src/security/revocation_freshness.rs`;
-  `crates/franken-node/src/security/revocation_freshness_gate.rs`
+- **Evidence artifact**: `crates/franken-node/src/security/revocation_freshness.rs`
+  (`registry_revocation_freshness_denial`);
+  `crates/franken-node/src/supply_chain/trust_card_registry_store.rs`
+  (`record_revocation_frontier`); `crates/franken-node/tests/remotecap_cli_e2e.rs`
+  (frontier-gated issuance tests)
 - **Verification command**:
-  `cargo test -p frankenengine-node revocation_freshness`
-- **Last verified**: 2026-05-20T00:00:00Z (registry backfill)
-- **Status**: verified (implementation + tests); pending (signed external
-  attestation)
-- **Notes**: Recent commit `6695a5c6 fix(close_condition): switch verify to
-  verify_strict (Ed25519 malleability)` confirms active hardening on the
-  fail-closed path.
+  `cargo test -p frankenengine-node --features test-support --test remotecap_cli_e2e --test revocation_freshness_regressions`
+- **Last verified**: 2026-09-24 (live, release build of 57d978f0e)
+- **Status**: verified live for `run` preflight, the execution-time recheck
+  and `remotecap issue`; pending (signed external attestation)
+- **Notes**: Until 2026-09-23 the gate was dead on default installs: it read
+  the mtime of a legacy `.json` snapshot that `init` never writes, and file
+  mtimes cannot witness freshness anyway (opening the fsqlite store rewrites
+  it). The frontier is now data: `registry_meta.revocation_frontier_epoch_secs`,
+  written only by `trust sync --force` with zero network errors. Live run on
+  2026-09-24:
+  - fresh frontier: strict passes;
+  - 498 s later: strict blocked with `revocation_stale`
+    ("age 498s > max 300s"), while balanced (3600 s) and legacy-risky pass;
+  - a resync with a network error did not advance the frontier;
+  - a clean resync restored strict.
+  `remotecap issue` had gated on the mtime of its own authoritative
+  revoked-token file (passing before the first revoke, then denying every
+  issue 5 minutes after one); it now requires a frontier within 300 s.
+  Owner decision (2026-09-24): only strict refuses a stale or missing
+  frontier; balanced admits with a preflight warning, so the default profile
+  keeps working offline.
 
 ### CLAIM-007: Counterfactual policy simulation
 

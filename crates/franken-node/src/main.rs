@@ -18850,7 +18850,10 @@ fn evaluate_run_trust_preflight(
                         // registry's trust signals were refreshed recently
                         // enough for the profile tier. The frontier is a
                         // recorded fact (`trust sync --force`), never a file
-                        // mtime, and a missing frontier is stale.
+                        // mtime, and a missing frontier is stale. Strict
+                        // (Dangerous) refuses a stale frontier; balanced (Risky)
+                        // admits with a warning so the default profile keeps
+                        // working offline.
                         if results
                             .iter()
                             .any(|result| result.status == RunDependencyTrustStatus::Trusted)
@@ -18862,12 +18865,16 @@ fn evaluate_run_trust_preflight(
                                 "trace-run-trust-preflight",
                             )
                         {
-                            violations.push(TrustViolation {
-                                dependency_name: None,
-                                extension_id: None,
-                                kind: TrustViolationKind::RevocationStale,
-                                detail,
-                            });
+                            if policy_tier == SafetyTier::Dangerous {
+                                violations.push(TrustViolation {
+                                    dependency_name: None,
+                                    extension_id: None,
+                                    kind: TrustViolationKind::RevocationStale,
+                                    detail,
+                                });
+                            } else {
+                                warnings.push(detail);
+                            }
                         }
 
                         if violations.is_empty() {

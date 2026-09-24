@@ -1085,6 +1085,78 @@ fn run_json_emits_blocked_preflight_verdict_for_revoked_dependency() {
     );
 }
 
+/// bd-reality-20260923-26n9r.15: a dependency whose trust card is High risk
+/// (here a typosquat of `lodash`, raised by `trust scan`) is refused under
+/// strict, admitted with a warning under balanced, and ignored under
+/// legacy-risky. Built entirely through operator commands, offline.
+#[test]
+fn run_preflight_refuses_high_risk_dependency_under_strict_only() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let path = workspace.path();
+    for (args, context) in [
+        (
+            &["init", "--profile", "balanced", "--out-dir", "."][..],
+            "init",
+        ),
+        // Empty registry: records the revocation frontier without network.
+        (&["trust", "sync", "--force"][..], "trust sync --force"),
+    ] {
+        let output = run_cli_in_workspace(path, args);
+        assert!(
+            output.status.success(),
+            "{context} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    write_run_package_manifest(path, &[("lodahs", "1.0.0")]);
+    let scan = run_cli_in_workspace(path, &["trust", "scan", ".", "--json"]);
+    assert!(
+        scan.status.success(),
+        "trust scan failed: {}",
+        String::from_utf8_lossy(&scan.stderr)
+    );
+
+    let strict = run_cli_in_workspace(path, &["run", "--policy", "strict", "--json", "."]);
+    assert!(
+        !strict.status.success(),
+        "strict must refuse a high-risk dependency"
+    );
+    let payload = parse_json_stdout(&strict, "strict run with high-risk dependency");
+    assert_eq!(payload["verdict"]["status"], "blocked");
+    let violation = payload["verdict"]["violations"]
+        .as_array()
+        .and_then(|violations| {
+            violations
+                .iter()
+                .find(|violation| violation["kind"] == "high_risk")
+        })
+        .unwrap_or_else(|| panic!("expected a high_risk violation, got {payload}"));
+    assert_eq!(violation["extension_id"], "npm:lodahs");
+    assert!(
+        violation["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("possible typosquat of popular package")),
+        "the refusal must carry the card's reason: {violation}"
+    );
+    assert_eq!(payload["verdict"]["results"][0]["status"], "high_risk");
+
+    let balanced = run_cli_in_workspace(path, &["run", "--policy", "balanced", "--json", "."]);
+    let payload = parse_json_stdout(&balanced, "balanced run with high-risk dependency");
+    assert_eq!(payload["preflight"]["verdict"]["status"], "passed");
+    assert!(
+        payload["preflight"]["verdict"]["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|warning| warning
+                .as_str()
+                .is_some_and(|text| text.contains("npm:lodahs") && text.contains("risk")))),
+        "balanced must admit with a risk warning: {payload}"
+    );
+
+    let legacy = run_cli_in_workspace(path, &["run", "--policy", "legacy-risky", "--json", "."]);
+    let payload = parse_json_stdout(&legacy, "legacy-risky run with high-risk dependency");
+    assert_eq!(payload["preflight"]["verdict"]["status"], "passed");
+}
+
 #[test]
 fn run_json_fails_closed_when_app_path_missing() {
     let workspace = tempfile::tempdir().expect("tempdir");
@@ -2956,11 +3028,18 @@ fn full_init_to_run_pipeline_with_trust_data_reports_trusted_extensions_json() {
 
     assert2::assert!(preflight_payload["verdict"]["status"] == "passed");
     assert2::assert!(run_payload["success"].as_bool() == Some(true));
+    // `init --scan` never records a revocation frontier, so balanced admits
+    // the trusted dependencies with exactly one warning naming the fix
+    // (strict would refuse); nothing else may warn.
+    let warnings = run_payload["preflight"]["verdict"]["warnings"]
+        .as_array()
+        .expect("warnings array");
+    assert2::assert!(warnings.len() == 1);
     assert2::assert!(
-        run_payload["preflight"]["verdict"]["warnings"]
-            .as_array()
-            .expect("warnings array")
-            .is_empty()
+        warnings[0]
+            .as_str()
+            .is_some_and(|warning| warning.contains("no revocation frontier has been recorded")
+                && warning.contains("trust sync --force"))
     );
     let runtime_probe =
         parse_captured_runtime_probe(&run_payload, "trusted registry captured output");

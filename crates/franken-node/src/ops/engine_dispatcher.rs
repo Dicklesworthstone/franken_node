@@ -4230,21 +4230,20 @@ impl EngineDispatcher {
 
         // Revocation freshness governs dependency trust decisions, exactly as
         // the preflight scopes it: re-check it for the dependencies that the
-        // preflight trusted.
+        // preflight trusted. Like the preflight, only the Dangerous tier
+        // (strict) refuses; balanced was already warned at preflight.
+        let freshness_tier = SafetyTier::for_policy_mode(policy_mode);
         if !trusted_extension_ids.is_empty()
+            && freshness_tier == SafetyTier::Dangerous
             && let Some(detail) = registry_revocation_freshness_denial(
                 &authoritative_registry,
-                SafetyTier::for_policy_mode(policy_mode),
+                freshness_tier,
                 now_secs,
                 "dispatch-run",
                 "trace-execution-revocation-freshness",
             )
         {
-            return Err(ActionableError::new(
-                detail,
-                "franken-node trust sync --force",
-            )
-            .into());
+            return Err(ActionableError::new(detail, "franken-node trust sync --force").into());
         }
 
         if has_authoritative_state && !trusted_extension_ids.is_empty() {
@@ -6755,9 +6754,9 @@ impl EngineDispatcher {
                 deterministic_budget: 5_000_000_000,
                 throughput_budget: 5_000_000_000,
                 deterministic_max_registers: 8192, // Generous register allocation
-                throughput_max_registers: 16384, // High register limit
-                max_call_depth: 128,             // Deep call stacks allowed
-                max_prototype_chain_depth: 64,   // Extended prototype chains
+                throughput_max_registers: 16384,   // High register limit
+                max_call_depth: 128,               // Deep call stacks allowed
+                max_prototype_chain_depth: 64,     // Extended prototype chains
             },
         };
 
