@@ -177,10 +177,6 @@ pub struct RolloutReport {
 }
 
 impl RolloutReport {
-    pub fn exit_code(&self) -> i32 {
-        if self.ok { 0 } else { 1 }
-    }
-
     pub fn render_human(&self) -> String {
         let mut out = String::new();
         let bar = match self.stage {
@@ -241,7 +237,6 @@ impl RolloutReport {
 /// Rollout configuration controlling transitions and thresholds.
 #[derive(Debug, Clone)]
 pub struct RolloutConfig {
-    pub canary_instances: u32,
     pub ramp_step_pct: u8,
     pub min_confidence_score: f64,
     pub require_lockstep_evidence: bool,
@@ -256,7 +251,6 @@ pub struct RolloutConfig {
 impl Default for RolloutConfig {
     fn default() -> Self {
         Self {
-            canary_instances: 1,
             ramp_step_pct: 25,
             min_confidence_score: 0.90,
             require_lockstep_evidence: true,

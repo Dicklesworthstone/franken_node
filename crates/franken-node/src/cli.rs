@@ -972,10 +972,6 @@ pub struct MigrateRolloutArgs {
     #[arg(long)]
     pub ramp_pct: Option<u8>,
 
-    /// Canary instance count.
-    #[arg(long, default_value = "1")]
-    pub canary_instances: u32,
-
     /// Force stage progression bypassing confidence score checks.
     #[arg(long)]
     pub force: bool,

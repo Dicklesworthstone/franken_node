@@ -84,16 +84,6 @@ fn run_cli_in_workspace_with_structured_logs(workspace: &Path, args: &[&str]) ->
     run_cli_in_workspace_with_env(workspace, &args_with_logs, &[])
 }
 
-fn run_cli_in_workspace_with_structured_logs_and_env(
-    workspace: &Path,
-    args: &[&str],
-    env: &[(&str, &str)],
-) -> Output {
-    let mut args_with_logs = args.to_vec();
-    args_with_logs.push("--structured-logs-jsonl");
-    run_cli_in_workspace_with_env(workspace, &args_with_logs, env)
-}
-
 fn run_cli_in_workspace_with_env(workspace: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
     let binary_path = resolve_binary_path();
     assert!(
@@ -538,12 +528,6 @@ fn parse_json_stdout(output: &Output, context: &str) -> Value {
         .unwrap_or_else(|err| panic!("{context} should emit valid JSON: {err}\nstdout:\n{stdout}"))
 }
 
-fn parse_json_stderr(output: &Output, context: &str) -> Value {
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    serde_json::from_str(&stderr)
-        .unwrap_or_else(|err| panic!("{context} should emit valid JSON: {err}\nstderr:\n{stderr}"))
-}
-
 /// Parse only the FIRST JSON document from stderr, ignoring whatever follows.
 /// With `--structured-logs-jsonl`, governed engine runs append RUN-* log
 /// lines after the preflight document (bd-etgyw), so the strict whole-buffer
@@ -945,108 +929,41 @@ fn trust_card_displays_known_extension_details() {
     assert!(stdout.contains("risk: Low"));
 }
 
-#[cfg(unix)]
+/// Declared dependencies with no trust registry cannot be checked for
+/// revocation: strict refuses to run (`registry_missing`) and names the
+/// bootstrap command; legacy-risky runs with the same advice as a skip.
 #[test]
 fn run_missing_registry_suggests_init_scan() {
-    // Perfect E2E: Real Node.js runtime detection with tempfile RAII and structured logging
-    use std::time::Instant;
-    use tempfile::TempDir;
-
-    init_test_tracing();
-    let test_start = Instant::now();
-
-    // Real tempdir workspace with RAII cleanup (no manual cleanup needed)
-    let workspace = TempDir::new().expect("create real tempdir workspace");
-
-    // Structured JSON-line logging: test start
-    log_pipeline_step(1, "setup_real_workspace", "tempdir_created_with_raii");
-
-    // Find real Node.js binary (no fake runtime scripts)
-    let node_binary = find_real_node_binary();
-    if node_binary.is_none() {
-        log_pipeline_step(0, "skip_test", "no_real_node_binary_found");
-        eprintln!("SKIP: No real Node.js binary found. Install Node.js to run this E2E test.");
-        return;
-    }
-    let node_path = node_binary.unwrap();
-
-    // Setup real project structure
-    create_franken_config_file(workspace.path());
+    let workspace = config_only_workspace();
     write_run_package_manifest(workspace.path(), &[("@acme/auth-guard", "^1.4.2")]);
 
-    log_pipeline_step(2, "setup_real_project", "config_and_manifest_created");
-
-    // Real subprocess execution with real Node.js in PATH
-    let node_dir = node_path.parent().expect("node binary parent directory");
-    let current_path = std::env::var("PATH").unwrap_or_default();
-    let real_node_path = format!("{}:{}", node_dir.display(), current_path);
-
-    // DE-MOCKED: Use real engine binary detection instead of empty env overrides
-    let output = run_cli_in_workspace_with_env(
-        workspace.path(),
-        &["run", "--policy", "strict", "--runtime", "node", "."],
-        &[
-            ("PATH", &real_node_path), // Real Node.js binary in PATH
-        ],
-    );
-
-    let execution_time_ms = test_start.elapsed().as_millis() as u64;
-    log_pipeline_step(
-        3,
-        "execute_real_cli",
-        &format!("completed_in_{}ms", execution_time_ms),
-    );
-
-    // Verify real E2E behavior
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let success = output.status.success();
-
-    log_pipeline_step(4, "verify_real_behavior", &format!("success={}", success));
-
+    let strict = run_cli_in_workspace(workspace.path(), &["run", "--policy", "strict", "."]);
+    let stderr = String::from_utf8_lossy(&strict.stderr);
     assert!(
-        success,
-        "run should succeed when the registry is missing but real Node.js runtime exists: {}",
-        stderr
+        !strict.status.success(),
+        "strict must refuse dependencies whose trust state cannot be consulted: {stderr}"
     );
-    assert!(stderr.contains("authoritative trust registry missing"));
-    assert!(stderr.contains("fix_command=franken-node init --profile strict --scan"));
-
-    log_pipeline_step(
-        5,
-        "test_complete",
-        "all_assertions_passed_with_real_components",
+    assert!(
+        stderr.contains("authoritative trust registry missing"),
+        "{stderr}"
     );
-    // Workspace automatically cleaned up by TempDir RAII
-}
+    assert!(
+        stderr.contains("franken-node init --profile strict --scan"),
+        "the refusal must name the bootstrap command: {stderr}"
+    );
 
-/// Find real Node.js binary on system (no mocks/fakes)
-fn find_real_node_binary() -> Option<std::path::PathBuf> {
-    let candidates = ["node", "/usr/bin/node", "/usr/local/bin/node"];
-    for candidate in &candidates {
-        let path = std::path::PathBuf::from(candidate);
-        // Test that it's actually a working Node.js binary
-        if let Ok(output) = std::process::Command::new(&path).arg("--version").output()
-            && output.status.success()
-        {
-            let version = String::from_utf8_lossy(&output.stdout);
-            tracing::info!(node_path = ?path, version = %version.trim(), "found real Node.js binary");
-            return Some(path);
-        }
-    }
-    None
-}
-
-/// Create minimal franken config file (real filesystem operations)
-fn create_franken_config_file(workspace: &std::path::Path) {
-    let config = r#"
-# Real E2E test configuration
-schema_version = "1.0"
-project_id = "real-e2e-test"
-
-[policy_enforcement]
-strict_mode = true
-"#;
-    std::fs::write(workspace.join(".franken-config.toml"), config).expect("write real config file");
+    let legacy = run_cli_in_workspace(
+        workspace.path(),
+        &["run", "--policy", "legacy-risky", "--json", "."],
+    );
+    let payload = parse_json_stdout(&legacy, "legacy-risky run with missing registry");
+    assert_eq!(payload["preflight"]["verdict"]["status"], "skipped");
+    assert!(
+        payload["preflight"]["verdict"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("init --profile legacy-risky --scan")),
+        "legacy-risky must still name the bootstrap command: {payload}"
+    );
 }
 
 #[test]
@@ -1337,38 +1254,37 @@ fn run_respects_configured_preferred_runtime_over_bun_heuristics() {
     fs::write(workspace.path().join("bun.lockb"), "").expect("write bun.lockb");
     fs::write(
         workspace.path().join("franken_node.toml"),
-        r#"
-[runtime]
-preferred = "node"
-"#,
+        format!(
+            "{}\n[runtime]\npreferred = \"node\"\n",
+            explicit_fixture_registry_config("balanced")
+        ),
     )
     .expect("write config");
 
     let runtime_path = runtime_path_env(&["node", "bun"]);
-
-    // DE-MOCKED: Use real engine binary detection with real runtime PATH
     let output = run_cli_in_workspace_with_env(
         workspace.path(),
-        &["run", "--policy", "balanced", "--json", "."],
+        &["run", "--policy", "balanced", "."],
         &[("PATH", runtime_path.as_str())],
     );
 
+    // The configured preference wins over the bun lockfile/packageManager
+    // heuristics, and a profile-governed run then refuses to launch that
+    // external runtime (it cannot enforce the capability contract) instead
+    // of silently falling back to bun or to the native engine.
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        output.status.success(),
-        "run should succeed with configured preferred runtime: {}",
-        String::from_utf8_lossy(&output.stderr)
+        !output.status.success(),
+        "an external runtime under a governed profile must fail closed: {stderr}"
     );
-    let preflight_payload = parse_json_stderr(&output, "preferred runtime preflight");
-    let run_payload = parse_json_stdout(&output, "preferred runtime completion");
-    let runtime_probe =
-        parse_captured_runtime_probe(&run_payload, "preferred runtime captured output");
-
-    assert_eq!(preflight_payload["verdict"]["status"], "passed");
-    assert_eq!(run_payload["dispatch"]["runtime"], "node");
-    assert_eq!(runtime_probe["marker"], "preferred-runtime");
-    assert_eq!(runtime_probe["runtime"], "node");
-    assert_eq!(runtime_probe["release"], "node");
-    assert_eq!(runtime_probe["policy"], "balanced");
+    assert!(
+        stderr.contains("cannot launch external runtime `node`"),
+        "the refusal must name the configured runtime, not the bun heuristic: {stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("preferred-runtime"),
+        "no guest code may run under the refused external runtime"
+    );
 }
 
 #[test]
@@ -3035,12 +2951,10 @@ fn full_init_to_run_pipeline_with_trust_data_reports_trusted_extensions_json() {
         .as_array()
         .expect("warnings array");
     assert2::assert!(warnings.len() == 1);
-    assert2::assert!(
-        warnings[0]
-            .as_str()
-            .is_some_and(|warning| warning.contains("no revocation frontier has been recorded")
-                && warning.contains("trust sync --force"))
-    );
+    assert2::assert!(warnings[0].as_str().is_some_and(|warning| {
+        warning.contains("no revocation frontier has been recorded")
+            && warning.contains("trust sync --force")
+    }));
     let runtime_probe =
         parse_captured_runtime_probe(&run_payload, "trusted registry captured output");
     assert2::assert!(runtime_probe["marker"] == "trusted-registry");
@@ -3061,6 +2975,13 @@ fn full_init_to_run_pipeline_with_trust_data_reports_trusted_extensions_json() {
             .iter()
             .any(|result| result["extension_id"] == "npm:@types/node")
     );
+    // The signed run receipt the report points at must exist and describe
+    // this run (same checks as the empty-registry pipeline test).
+    assert2::assert!(receipt_path.is_file());
+    let receipt_payload = read_json_file(&receipt_path, "run receipt");
+    assert2::assert!(receipt_payload["receipt_id"] == run_payload["receipt"]["receipt_id"]);
+    assert2::assert!(receipt_payload["preflight_verdict"]["status"] == "passed");
+    assert2::assert!(started.elapsed() < Duration::from_secs(30));
 }
 
 #[test]

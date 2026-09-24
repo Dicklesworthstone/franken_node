@@ -854,14 +854,27 @@ fn sentinel_enforcement_leg(workspace: &Path, run: &RunReport, trace_id: &str) {
         "rerun of a sentinel-quarantined app must fail closed; stdout:\n{}",
         String::from_utf8_lossy(&blocked.stdout)
     );
-    let blocked_stderr = String::from_utf8_lossy(&blocked.stderr);
+    // With --json the blocked preflight verdict is the stdout report (no
+    // second human error on stderr), so the reason is read from it.
+    let blocked_report: Value = serde_json::from_slice(&blocked.stdout)
+        .expect("blocked --json rerun must print the preflight verdict JSON");
+    let violations = blocked_report["verdict"]["violations"]
+        .as_array()
+        .expect("blocked verdict lists violations");
     assert!(
-        blocked_stderr.contains("quarantined by the Runtime Sentinel"),
-        "block reason must name the sentinel quarantine: {blocked_stderr}"
+        violations
+            .iter()
+            .any(|violation| violation["kind"] == "sentinel_quarantined"),
+        "block must be the typed sentinel quarantine: {blocked_report}"
+    );
+    let blocked_reason = blocked_report["verdict"].to_string();
+    assert!(
+        blocked_reason.contains("quarantined by the Runtime Sentinel"),
+        "block reason must name the sentinel quarantine: {blocked_report}"
     );
     assert!(
-        blocked_stderr.contains("trust release"),
-        "block reason must name the release command: {blocked_stderr}"
+        blocked_reason.contains("trust release"),
+        "block reason must name the release command: {blocked_report}"
     );
     layer_pass(
         "L7 ENFORCE rerun blocked at preflight",

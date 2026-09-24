@@ -31262,7 +31262,6 @@ fn main() -> Result<()> {
                 );
 
                 let config = migration::rollout::RolloutConfig {
-                    canary_instances: args.canary_instances,
                     auto_rollback_on_failure: !args.no_auto_rollback,
                     force: args.force,
                     lockstep_report: args.lockstep_report.clone(),
