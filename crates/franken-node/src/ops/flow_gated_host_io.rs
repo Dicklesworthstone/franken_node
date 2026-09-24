@@ -53,12 +53,12 @@ use std::collections::{BTreeMap, BTreeSet};
 #[cfg(feature = "engine")]
 use std::path::Path;
 #[cfg(feature = "engine")]
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "engine")]
 use frankenengine_extension_host::host_io::{
-    FsMetaResult, FsOperation, HostIoCapability, HostIoError, HostIoExceptionProvenance,
-    HostIoOutcome, HostIoProvider, HostIoRequest, HostIoResponse,
+    FsMetaResult, FsOperation, HostIoCapability, HostIoControl, HostIoError,
+    HostIoExceptionProvenance, HostIoOutcome, HostIoProvider, HostIoRequest, HostIoResponse,
 };
 
 #[cfg(feature = "engine")]
@@ -293,12 +293,11 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
 
     fn perform_descriptor_operation(
         &self,
-        request: &HostIoRequest,
-        granted: &[HostIoCapability],
         operation: FsOperation,
         path: &str,
         arguments: &[String],
         lineage: &FileLineage,
+        perform_inner: &dyn Fn() -> HostIoOutcome,
     ) -> HostIoOutcome {
         let mut descriptors = self.descriptors.lock().map_err(|_| HostIoError::Denied {
             reason: format!(
@@ -306,7 +305,7 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
                 self.trace_id
             ),
         })?;
-        let outcome = self.inner.perform(request, granted);
+        let outcome = perform_inner();
         let Ok(response) = &outcome else {
             // A denied open/close must not create or erase provenance.
             return outcome;
@@ -443,6 +442,37 @@ impl<P: HostIoProvider> HostIoProvider for FlowGatedHostIo<P> {
     }
 
     fn perform(&self, request: &HostIoRequest, granted: &[HostIoCapability]) -> HostIoOutcome {
+        self.gate(request, granted, &|request, granted| {
+            self.inner.perform(request, granted)
+        })
+    }
+
+    /// The engine drives every effect through this entry with an
+    /// operation-local supervisor; forwarding it (not calling the wrapped
+    /// `perform`) keeps network I/O interruptible and reachable at all.
+    fn perform_controlled(
+        &self,
+        request: &HostIoRequest,
+        granted: &[HostIoCapability],
+        control: Arc<dyn HostIoControl>,
+    ) -> HostIoOutcome {
+        self.gate(request, granted, &|request, granted| {
+            self.inner
+                .perform_controlled(request, granted, Arc::clone(&control))
+        })
+    }
+}
+
+#[cfg(feature = "engine")]
+impl<P: HostIoProvider> FlowGatedHostIo<P> {
+    /// Apply the flow policy, reaching the wrapped provider only via
+    /// `dispatch` (plain or supervised, chosen by the caller).
+    fn gate(
+        &self,
+        request: &HostIoRequest,
+        granted: &[HostIoCapability],
+        dispatch: &dyn Fn(&HostIoRequest, &[HostIoCapability]) -> HostIoOutcome,
+    ) -> HostIoOutcome {
         // A request lacking authority must not mutate provenance or reach the
         // underlying mechanism. This check does not grant any extra read I/O.
         let capability = request.required_capability();
@@ -461,18 +491,18 @@ impl<P: HostIoProvider> HostIoProvider for FlowGatedHostIo<P> {
             } => {
                 self.check_outbound(endpoint.as_bytes(), &lineage)?;
                 self.check_outbound(payload, &lineage)?;
-                self.inner.perform(request, granted)
+                dispatch(request, granted)
             }
             // Receive opens a new outbound socket too. It has no payload, but
             // its endpoint is still a sink and incomplete tracking must deny.
             HostIoRequest::NetworkRecv { endpoint, .. } => {
                 self.check_outbound(endpoint.as_bytes(), &lineage)?;
-                self.inner.perform(request, granted)
+                dispatch(request, granted)
             }
             // A sensitive read registers a secret sample AFTER it succeeds; the
             // read itself is a source, not a sink, and is never blocked.
             HostIoRequest::FsRead { path } => {
-                let outcome = self.inner.perform(request, granted);
+                let outcome = dispatch(request, granted);
                 if lineage.is_sensitive(path)
                     && let Ok(HostIoResponse::FsRead { bytes }) = &outcome
                 {
@@ -485,9 +515,9 @@ impl<P: HostIoProvider> HostIoProvider for FlowGatedHostIo<P> {
                 path,
                 arguments,
                 ..
-            } => self.perform_descriptor_operation(
-                request, granted, *operation, path, arguments, &lineage,
-            ),
+            } => self.perform_descriptor_operation(*operation, path, arguments, &lineage, &|| {
+                dispatch(request, granted)
+            }),
             HostIoRequest::FsMeta {
                 operation: operation @ (FsOperation::CopyFile | FsOperation::Rename | FsOperation::Symlink),
                 path,
@@ -500,14 +530,14 @@ impl<P: HostIoProvider> HostIoProvider for FlowGatedHostIo<P> {
                 if let Some(destination) = arguments.first() {
                     lineage.prepare_transfer(*operation, path, destination);
                 }
-                self.inner.perform(request, granted)
+                dispatch(request, granted)
             }
             // Local mutations are not network sinks. Other FsMeta operations
             // expose metadata, not file contents: an exists, stat or readlink
             // result must not become a secret byte sample.
             HostIoRequest::FsWrite { .. }
             | HostIoRequest::FsMeta { .. }
-            | HostIoRequest::RandomRead { .. } => self.inner.perform(request, granted),
+            | HostIoRequest::RandomRead { .. } => dispatch(request, granted),
         }
     }
 }

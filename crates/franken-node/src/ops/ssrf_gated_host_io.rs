@@ -11,14 +11,14 @@
 #[cfg(feature = "engine")]
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 #[cfg(feature = "engine")]
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 #[cfg(feature = "engine")]
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "engine")]
 use frankenengine_extension_host::host_io::{
-    HostIoCapability, HostIoError, HostIoExceptionProvenance, HostIoOutcome, HostIoProvider,
-    HostIoRequest, SANDBOXED_HOST_IO_NETWORK_TIMEOUT, SandboxedHostIo,
+    HostIoCapability, HostIoControl, HostIoError, HostIoExceptionProvenance, HostIoOutcome,
+    HostIoProvider, HostIoRequest, SANDBOXED_HOST_IO_NETWORK_TIMEOUT, SandboxedHostIo,
 };
 
 #[cfg(feature = "engine")]
@@ -152,6 +152,23 @@ pub trait PinnedNetworkProvider: HostIoProvider {
         let first = validate_pinned_candidates(request, granted, destinations, deadline)?;
         self.perform_pinned_network(request, granted, first, deadline)
     }
+
+    /// The same execution under the engine's operation-local supervisor. The
+    /// default keeps the numeric-only contract and forwards the control to the
+    /// wrapped provider's `perform_controlled`, never dropping it.
+    fn perform_pinned_network_candidates_controlled(
+        &self,
+        request: &HostIoRequest,
+        granted: &[HostIoCapability],
+        destinations: &[SocketAddr],
+        deadline: Instant,
+        control: Arc<dyn HostIoControl>,
+    ) -> HostIoOutcome {
+        let first = validate_pinned_candidates(request, granted, destinations, deadline)?;
+        perform_numeric_network_with(request, granted, first, deadline, |pinned| {
+            self.perform_controlled(pinned, granted, control)
+        })
+    }
 }
 
 #[cfg(feature = "engine")]
@@ -183,6 +200,24 @@ impl PinnedNetworkProvider for SandboxedHostIo {
     ) -> HostIoOutcome {
         SandboxedHostIo::perform_pinned_network_candidates(
             self, request, granted, destinations, deadline,
+        )
+    }
+
+    fn perform_pinned_network_candidates_controlled(
+        &self,
+        request: &HostIoRequest,
+        granted: &[HostIoCapability],
+        destinations: &[SocketAddr],
+        deadline: Instant,
+        control: Arc<dyn HostIoControl>,
+    ) -> HostIoOutcome {
+        SandboxedHostIo::perform_pinned_network_candidates_controlled(
+            self,
+            request,
+            granted,
+            destinations,
+            deadline,
+            control,
         )
     }
 }
@@ -235,6 +270,21 @@ fn perform_numeric_network_candidates<P: HostIoProvider + ?Sized>(
     perform_numeric_network(provider, request, granted, first, deadline)
 }
 
+#[cfg(feature = "engine")]
+fn perform_numeric_network_candidates_controlled<P: HostIoProvider + ?Sized>(
+    provider: &P,
+    request: &HostIoRequest,
+    granted: &[HostIoCapability],
+    destinations: &[SocketAddr],
+    deadline: Instant,
+    control: Arc<dyn HostIoControl>,
+) -> HostIoOutcome {
+    let first = validate_pinned_candidates(request, granted, destinations, deadline)?;
+    perform_numeric_network_with(request, granted, first, deadline, |pinned| {
+        provider.perform_controlled(pinned, granted, control)
+    })
+}
+
 /// Numeric-only delegation is safe for an arbitrary HostIoProvider: a DNS
 /// hostname is never passed downstream, and TLS identities are never rewritten.
 #[cfg(feature = "engine")]
@@ -244,6 +294,21 @@ fn perform_numeric_network<P: HostIoProvider + ?Sized>(
     granted: &[HostIoCapability],
     destination: SocketAddr,
     deadline: Instant,
+) -> HostIoOutcome {
+    perform_numeric_network_with(request, granted, destination, deadline, |pinned| {
+        provider.perform(pinned, granted)
+    })
+}
+
+/// Rewrite `request` to its numeric, policy-approved `destination` and hand it
+/// to `execute` (the wrapped provider's plain or supervised entry).
+#[cfg(feature = "engine")]
+fn perform_numeric_network_with(
+    request: &HostIoRequest,
+    granted: &[HostIoCapability],
+    destination: SocketAddr,
+    deadline: Instant,
+    execute: impl FnOnce(&HostIoRequest) -> HostIoOutcome,
 ) -> HostIoOutcome {
     let capability = request.required_capability();
     if !granted.contains(&capability) {
@@ -302,7 +367,7 @@ fn perform_numeric_network<P: HostIoProvider + ?Sized>(
         }
         _ => unreachable!("non-network requests were rejected before delegation"),
     };
-    let outcome = provider.perform(&pinned, granted);
+    let outcome = execute(&pinned);
     ensure_time_remaining(deadline).map_err(timeout)?;
     outcome
 }
@@ -408,6 +473,16 @@ fn build_ssrf_template(policy: &NetworkPolicyConfig, trace_id: &str) -> SsrfPoli
 type PinnedExecutor<P> =
     fn(&P, &HostIoRequest, &[HostIoCapability], &[SocketAddr], Instant) -> HostIoOutcome;
 
+#[cfg(feature = "engine")]
+type PinnedControlledExecutor<P> = fn(
+    &P,
+    &HostIoRequest,
+    &[HostIoCapability],
+    &[SocketAddr],
+    Instant,
+    Arc<dyn HostIoControl>,
+) -> HostIoOutcome;
+
 /// A host-I/O decorator binding every network authorization to its connect IP.
 /// The transport contract is chosen once at construction, never from a provider
 /// name or guest input. Function pointers preserve generic non-network wrappers
@@ -422,6 +497,7 @@ pub struct SsrfGatedHostIo<P: HostIoProvider, R: EndpointResolver = SystemEndpoi
     timeout: fn(&P) -> Duration,
     tls_supported: fn(&P) -> bool,
     execute_network: PinnedExecutor<P>,
+    execute_network_controlled: PinnedControlledExecutor<P>,
 }
 
 #[cfg(feature = "engine")]
@@ -446,6 +522,7 @@ impl<P: HostIoProvider> SsrfGatedHostIo<P> {
             timeout: |_| SANDBOXED_HOST_IO_NETWORK_TIMEOUT,
             tls_supported: |_| false,
             execute_network: perform_numeric_network_candidates::<P>,
+            execute_network_controlled: perform_numeric_network_candidates_controlled::<P>,
         }
     }
 }
@@ -483,6 +560,7 @@ impl<P: PinnedNetworkProvider, R: EndpointResolver> SsrfGatedHostIo<P, R> {
             timeout: P::network_timeout,
             tls_supported: P::supports_pinned_tls,
             execute_network: P::perform_pinned_network_candidates,
+            execute_network_controlled: P::perform_pinned_network_candidates_controlled,
         }
     }
 }
