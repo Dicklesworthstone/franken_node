@@ -206,6 +206,24 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Check 10: README scenario — trust scan flags a typosquat before admission.
+# ---------------------------------------------------------------------------
+echo "[10] trust scan flags a typosquatted dependency (lodahs ~ lodash)"
+mkdir -p typoapp
+printf '{"name":"typoapp","version":"1.0.0","dependencies":{"lodahs":"1.0.0"}}\n' > typoapp/package.json
+typo_rc=0
+typo_out="$(cd typoapp && "$BIN" trust scan . --json 2>&1)" || typo_rc=$?
+card_out="$(cd typoapp && "$BIN" trust card npm:lodahs --json 2>&1)" || typo_rc=$?
+if [[ $typo_rc -eq 0 ]] && grep -q "possible typosquat of popular package \`lodash\`" <<<"$typo_out" \
+  && grep -q '"level": *"high"' <<<"$card_out"; then
+  record PASS "trust scan flags lodahs as a typosquat of lodash (card risk high)"
+else
+  echo "  trust scan output: $typo_out" >&2
+  echo "  trust card output: $card_out" >&2
+  record FAIL "trust scan did not flag the typosquatted dependency"
+fi
+
+# ---------------------------------------------------------------------------
 # Aggregate result
 # ---------------------------------------------------------------------------
 echo

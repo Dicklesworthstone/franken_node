@@ -370,10 +370,21 @@ franken-node verify release ./release-dir --key-dir ./trusted-public-keys
    ```bash
    franken-node migrate audit ./my-app --format json --out migration-audit.json
    ```
-3. **Seed trust cards from your dependency graph:**
+3. **Seed trust cards from your dependency graph, then record a fresh
+   revocation frontier:**
    ```bash
    franken-node trust scan ./my-app --deep --audit
+   franken-node trust sync --force
    ```
+   `--deep`/`--audit` fetch registry and OSV data through a scoped remote
+   capability. They need a signing key in `FRANKEN_NODE_REMOTECAP_KEY` and a
+   token from `franken-node remotecap issue` in
+   `FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN`; without them the scan fails
+   closed. Issuing that token is itself gated on a frontier recorded within
+   the last 5 minutes, so in a fresh workspace run `trust sync --force` once
+   before `remotecap issue` (an empty registry syncs without network access).
+   Under `balanced`/`strict`, `run` admits a tracked dependency only if the
+   recorded frontier is fresh.
 4. **Compare the default Bun+franken dyad (not the L1 Node spec):**
    ```bash
    franken-node verify lockstep ./my-app --runtimes bun,franken-node
@@ -718,7 +729,7 @@ every leaf command available in the current build.
 | `franken-node migrate rewrite <path>` | Apply migration transforms. `--emit-rollback` writes an unsigned JSON `MigrationRollbackPlan` (not Ed25519-signed) plus `.migrate-backup/` snapshots. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--apply`, `--emit-rollback`, `--json`. |
 | `franken-node migrate rollback <path>` | Inspect retained native rewrite transactions or restore one by its explicit identity. `--transaction <ID>` selects the transaction; without `--apply` the command is preview-only, and there is no latest-ID inference. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--transaction`, `--apply`, `--json`. |
 | `franken-node migrate validate <path>` | Rerun static migration audit checks and, unless `--static-only`, a transformed-runtime smoke test. Does **not** run `verify lockstep`. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--format` (json\|text), `--json`, `--static-only`. |
-| `franken-node migrate rollout <path>` | Drive the progressive rollout state machine (shadow → canary → ramp → default) with fail-closed gates. `--action` is `promote` (default), `rollback`, or `status`; `--stage` overrides the target stage; `--ramp-pct` applies in ramp stage; `--canary-instances` defaults to 1. `--force` bypasses confidence-score checks; `--no-auto-rollback` disables automatic rollback on verification failure. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--migration-id`, `--action`, `--stage`, `--ramp-pct`, `--canary-instances`, `--force`, `--no-auto-rollback`, `--json`. |
+| `franken-node migrate rollout <path>` | Drive the progressive rollout state machine (shadow → canary → ramp → default) with fail-closed gates. `--action` is `promote` (default), `rollback`, or `status`; `--stage` overrides the target stage; `--ramp-pct` applies in ramp stage; `--canary-instances` defaults to 1. Leaving Shadow requires `--lockstep-report <path>`, the JSON printed by `franken-node verify lockstep <project> --json`. The report must have verdict Pass, include a franken leg and a reference leg, and match the project's current input. Without it the promotion fails closed. `--force` bypasses the confidence and evidence checks but never records `lockstep_verified`. `--no-auto-rollback` disables automatic rollback on verification failure. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--migration-id`, `--action`, `--stage`, `--ramp-pct`, `--canary-instances`, `--lockstep-report`, `--force`, `--no-auto-rollback`, `--json`. |
 | `franken-node migrate-report <path>` | Export one-command migration assessment. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--format` (json\|html), `--json` (alias for `--format json`), `--output`. |
 
 ### Verification
@@ -774,7 +785,7 @@ every leaf command available in the current build.
 
 | Command | Purpose |
 |---|---|
-| `franken-node incident bundle` | Export deterministic incident bundle. `--id` is handler-required so `--json` failures emit `franken-node/incident-error-cli/v1` instead of a human clap error. Reads evidence from `--evidence-path` or `<project-root>/.franken-node/state/incidents/<slug>/evidence.v1.json`. `--verify` checks the bundle after writing. Optional receipt-signing controls. Flags: `--json`. |
+| `franken-node incident bundle` | Export deterministic incident bundle. `--id` is handler-required so `--json` failures emit `franken-node/incident-error-cli/v1` instead of a human clap error. Reads evidence from `--evidence-path` or `<project-root>/.franken-node/state/incidents/<slug>/evidence.v1.json`. `run` writes that evidence automatically when a run trips a runtime security control (SSRF violation, denied host effect, or Sentinel escalation). The incident id is `INC-RUN-<host-effect chain head>`, and each event is one signed host-effect receipt with its recorded timestamp. `--verify` checks the bundle after writing. Optional receipt-signing controls. Flags: `--json`. |
 | `franken-node incident replay` | Integrity-verified replay of a recorded incident bundle (not live re-execution). `--bundle` is handler-required so `--json` failures emit `franken-node/incident-error-cli/v1` instead of a human clap error. **Also fails closed without `--trusted-public-key` or `--key-dir`.** Flags: `--json`. |
 | `franken-node incident counterfactual` | Simulate alternative policy actions. Same trust-anchor requirement as `replay`. `--bundle` and `--policy` are handler-required so `--json` failures emit `franken-node/incident-error-cli/v1` instead of a human clap error. Optional: `--promote`, `--promotion-signing-key`, `--operator-id`. `--model production` fails closed (engine-split kernel not in this build). Flags: `--json`. |
 | `franken-node incident list` | List recorded incidents. Filter: `--severity`. Flags: `--json` (failures `franken-node/incident-error-cli/v1`). |
@@ -1315,14 +1326,24 @@ Risky, Dangerous) and a per-tier maximum age policy. Before a risky or
 dangerous action runs, the runtime asks: is the local revocation frontier
 fresher than `policy.max_age_for(tier)`?
 
-- Comparison uses `now >= expires_at`, which fails closed at the
-  boundary so clock-skew on the operator side never produces a false
-  "fresh" answer.
-- `OSV` sync results carry their own freshness timestamp; the gate
-  consults the **registry's** publication timestamp, not the local cache's.
+- The **revocation frontier** is a value recorded in the durable trust
+  registry: the time of the last `trust sync --force` in which every trust
+  signal was fetched from the network without error. It is never inferred
+  from file timestamps, which the database rewrites even on read-only access.
+  A missing frontier counts as stale.
+- `run` applies the gate when it admits a dependency on the strength of
+  its trust card, both at preflight and again at execution time (TOCTOU
+  recheck). `strict` maps to Dangerous (5 min) and `balanced` to Risky
+  (1 h). `legacy-risky` is Standard, with no age floor.
+- Declared dependencies with no trust registry at all block `run` under
+  `strict`/`balanced` (`registry_missing`); `legacy-risky` warns.
+- `remotecap issue` is always Dangerous: it needs a frontier recorded within
+  the last 5 minutes in the working directory's registry. The local
+  revoked-token list (`remotecap revoke`) is authoritative and is not
+  treated as a freshness signal.
 - If the gate fails the action does not execute; the operator gets an
-  explicit `revocation frontier stale` error and a `trust sync --force`
-  recommendation.
+  explicit `revocation freshness gate denied …` error and a
+  `trust sync --force` recommendation.
 
 ### Threshold signatures (k-of-n)
 
@@ -1537,40 +1558,41 @@ torn write.
 ## Incident Bundle Anatomy
 
 A `.fnbundle` produced by `franken-node incident bundle` is a single
-canonical artifact carrying everything an external verifier needs to
-replay the incident byte-for-byte. The fields, modeled on the SDK's
-`ReplayBundle` struct:
+canonical JSON artifact (keys sorted, no floats) built from an incident
+evidence package (`.franken-node/state/incidents/<id>/evidence.v1.json`).
+Its fields (`tools::replay_bundle::ReplayBundle`):
 
 | Field | Purpose |
 |---|---|
-| `header` | `BundleHeader` carrying `hash_algorithm`, `payload_length_bytes`, `chunk_count`. Inspected before any payload parse. |
-| `schema_version`, `sdk_version` | Pinned schema and SDK strings. Verification refuses to load if either is unknown. |
-| `bundle_id`, `incident_id`, `created_at` | Stable identifiers and provenance timestamps. |
-| `policy_version` | The exact runtime policy version active during the captured window; required for faithful replay or counterfactual diff. |
-| `verifier_identity` | The identity that *produced* the bundle (the runtime), not the consumer. |
-| `timeline` | Ordered `TimelineEvent` sequence with `sequence_number`, `event_id`, `timestamp`, `event_type`, `payload`, `state_snapshot`, `causal_parent`, `policy_version` per event. |
-| `initial_state_snapshot` | The captured runtime state at the start of the window. |
-| `evidence_refs` | Opaque string pointers (path-like or registry-defined IDs) for each gate decision's evidence in the window. |
-| `artifacts` | `BTreeMap<String, BundleArtifact>` carrying any referenced trust cards, capability tokens, decision receipts, or registry payloads inline. |
-| `chunks` | `BundleChunk` segments enabling partial verification when the timeline is large. |
-| `metadata` | Operator-supplied annotations (incident severity, owner, related tickets). |
-| `integrity_hash` | Canonical hash over the payload bytes. Verifier recomputes and compares before any signature work. |
-| `signature` | `BundleSignature` over the integrity hash. Verified in constant time against the embedded or operator-supplied public key. |
+| `bundle_id`, `incident_id`, `created_at` | Stable identifiers; `bundle_id` and `created_at` are derived deterministically from the timeline. |
+| `policy_version` | The policy version recorded with the evidence. |
+| `timeline` | Ordered `TimelineEvent`s: `sequence_number`, `timestamp`, `event_type`, `payload`, `causal_parent`. |
+| `initial_state_snapshot` | The captured state at the start of the window. |
+| `manifest` | Event count, time span, chunk count, compressed size, and `decision_sequence_hash` over timeline + initial state + policy version. |
+| `chunks` | Gzip-sized `BundleChunk` segments of the timeline. |
+| `evidence_refs`, `trust_artifact_refs` | Relative pointers to the evidence behind each event (omitted when empty). |
+| `integrity_hash` | `SHA-256("replay_bundle_hash_v1:" ‖ canonical JSON of every field above)`. |
+| `signature` | Ed25519 over `"replay_bundle_sig_v1:" ‖ u64_le(len) ‖ integrity_hash`, with the signer's public key, key id, source and trust scope. |
 
-Verification order, enforced by `bundle::verify`:
+`incident replay` recomputes the integrity hash, verifies the signature
+against the operator-supplied trust anchor, and re-derives the
+decision-sequence hash from the recorded timeline. It is an integrity
+re-derivation of the **recorded** evidence, not a live re-execution of the
+original program (see [Limitations](#limitations)), and it certifies only
+what the evidence package contains.
 
-1. Parse the `header` and reject obviously malformed bundles before
-   touching the payload.
-2. Recompute `integrity_hash` over the payload bytes; mismatch → abort.
-3. Decode `signature` and verify against the trust anchor; mismatch →
-   abort.
-4. Validate `schema_version` and `sdk_version` against the registry.
-5. Replay the timeline through `replay::time_travel_engine` and compare
-   each step against `state_snapshot`.
+Independent verification: `frankenengine_verifier_sdk::incident_bundle::verify_incident_bundle`
+re-derives the integrity hash and the decision-sequence hash from the raw
+JSON, rejects unknown (unsigned) fields, and verifies the Ed25519 signature
+strictly under a public key **the verifier supplies**. The key embedded in the
+bundle is accepted only if it equals that anchor. Conformance:
+`sdk/verifier/tests/cli_incident_bundle.rs` (a real CLI-produced bundle) and
+`incident_bundle_integrity_conformance_sdk_independently_verifies_product_bundle`.
 
-Counterfactual mode (`incident counterfactual --policy <p>`) replays the
-same timeline under a different policy profile and diffs the decision
-trace; nothing about the bundle itself changes.
+Counterfactual mode (`incident counterfactual --policy <p>`) re-scores the
+recorded decision trace under a different policy's thresholds with the
+labelled `synthetic` executor. It does not execute the program again, and
+the bundle itself is unchanged.
 
 ---
 
@@ -3127,14 +3149,21 @@ trust, or even depend on, the main `frankenengine-node` crate.
 
 What it exposes:
 
-- `bundle`: free functions over `ReplayBundle` byte streams, including
-  `serialize`, `deserialize`, `hash`, `integrity_hash`, `seal`,
-  `sign_bundle`, `verify_ed25519_signature`, `verify_signed_bundle`, and
-  `verify`.
+- `incident_bundle`: `verify_incident_bundle(bytes, &trusted_signer)`
+  independently verifies a `.fnbundle` produced by `franken-node incident
+  bundle`. It re-derives the integrity and decision-sequence hashes, rejects
+  unsigned fields, and checks the Ed25519 signature under the verifier's own
+  anchor.
+- `bundle`: the SDK's own `ReplayBundle` byte-stream format (`serialize`,
+  `deserialize`, `hash`, `integrity_hash`, `seal`, `sign_bundle`,
+  `verify_ed25519_signature`, `verify_signed_bundle`, `verify`). This is a
+  separate format from the CLI's `.fnbundle`; use `incident_bundle` for CLI
+  output. `bundle::verify`'s built-in check is an unkeyed integrity digest.
+  Authenticity requires `verify_signed_bundle` with a trusted key.
 - `capsule`: verify a replay capsule, including schema-version checks
   and side-effect declaration matching.
-- `counterfactual`: re-run an incident bundle under an alternative
-  policy and emit a structured diff.
+- `counterfactual`: verify signed counterfactual receipts (it does not
+  re-run incidents).
 - `honesty_manifest`: independently re-verify the README's headline
   claims. `verify_honesty_manifest` recomputes every claim from the
   committed per-source census, checks each `evidence_digest` and the
@@ -3159,23 +3188,17 @@ validate franken-node's public claims. Its conformance is asserted by
 `tests/conformance/verifier_session_monotonic.rs`.
 
 ```rust
-use frankenengine_verifier_sdk::{bundle, create_verifier_sdk};
+use ed25519_dalek::VerifyingKey;
+use frankenengine_verifier_sdk::incident_bundle::verify_incident_bundle;
 
-fn audit(path: &std::path::Path) -> anyhow::Result<()> {
-    let bytes = std::fs::read(path)?;
-    // Recompute the integrity hash, parse, and verify the bundle's
-    // signature against the embedded public-key envelope.
-    let replay_bundle = bundle::verify(&bytes)?;
-
-    // Run the bundle through the SDK's workflow contract so that the
-    // auditor's identity is recorded in the session ledger.
-    let sdk = create_verifier_sdk("regulator-2026-q2");
-    sdk.validate_bundle(&bytes)?;
-
+/// Verify a `franken-node incident bundle` output against a signer key the
+/// auditor obtained independently (never the key embedded in the bundle).
+fn audit(bundle_path: &std::path::Path, trusted_signer: &VerifyingKey) -> anyhow::Result<()> {
+    let bytes = std::fs::read(bundle_path)?;
+    let verified = verify_incident_bundle(&bytes, trusted_signer)?;
     println!(
-        "verified bundle {}: {} timeline events",
-        replay_bundle.bundle_id,
-        replay_bundle.timeline.len()
+        "verified incident {} ({} events, integrity {})",
+        verified.incident_id, verified.event_count, verified.integrity_hash
     );
     Ok(())
 }
@@ -3188,7 +3211,7 @@ fn audit(path: &std::path::Path) -> anyhow::Result<()> {
 | Symptom | Cause | Fix |
 |---|---|---|
 | `lockstep validation failed` | Behavior delta across runtimes | `franken-node verify lockstep ./my-app --emit-fixtures` and inspect generated divergence fixtures. |
-| `revocation frontier stale` | Local trust state is older than the policy requirement, or vulnerability refresh has not been re-run since the last registry change | `franken-node trust sync --force`; the command refreshes npm cards against OSV, preserves stale data on network failures, and emits warnings for any package that could not be refreshed. |
+| `revocation freshness gate denied …` | A dependency is being admitted on the strength of its trust card, or a capability is being issued (`remotecap issue`, always 5 minutes), but the registry's recorded revocation frontier is older than allowed (strict: 5 minutes, balanced: 1 hour; legacy-risky has no floor) or was never recorded | `franken-node trust sync --force`. Only a forced refresh in which every trust signal was fetched without network errors records a new frontier; cached answers do not. The frontier is stored in the durable trust registry, not inferred from file timestamps. |
 | `artifact rejected: missing attestation` | Registry policy requires provenance proofs | Rebuild artifact with provenance metadata and re-sign before `registry publish`. |
 | `quarantine not converged` | One or more nodes did not apply the control action in time | `franken-node fleet status --verbose`, then `franken-node fleet reconcile`. Re-check the convergence timeout in `[fleet]`. |
 | `incident replay refused: no trust anchor` | `--trusted-public-key` / `--key-dir` missing on `incident replay` or `incident counterfactual` | Supply an Ed25519 trust anchor; no built-in trust roots exist. |

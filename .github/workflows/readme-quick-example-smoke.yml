@@ -14,7 +14,9 @@ name: README Quick Example Smoke
 
 on:
   push:
-    branches: [main, master]
+    # `master` mirrors `main` for legacy URLs; running on both doubled every
+    # multi-hour engine build for the same commit.
+    branches: [main]
   pull_request:
     paths:
       - crates/franken-node/**

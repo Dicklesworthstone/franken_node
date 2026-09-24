@@ -9,7 +9,8 @@ name: README CLI Drift Gate
 
 on:
   push:
-    branches: [main, master]
+    # `master` mirrors `main`; one run per commit is enough.
+    branches: [main]
   pull_request:
     paths:
       - README.md

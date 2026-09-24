@@ -286,8 +286,12 @@ The gate is invoked:
 | **Consistency** | `--consistency-mode` | Artifacts are well-formed and **honest**. L1 may be RED while the compatibility corpus is below 95%. Declaring L1 GREEN below the corpus floor is still FAIL. | Section 10.N CI (`scripts/verify_section_10n.py` 10N-ORACLE) so PRs can merge while the product is not yet shippable |
 | **Release / default** | `--release-mode` or no flag | All required dimensions are GREEN. This is the ship gate. | Tag publication / `franken-node doctor close-condition` |
 
-Consistency mode exists so an honest RED corpus (currently 86.43%) does not
-block every `src` PR. It does **not** waive the 95% floor for shipping.
+Consistency mode exists so an honest RED corpus does not block every `src`
+PR. The committed artifact records 69.82%
+(`artifacts/13/compatibility_corpus_results.json`, 2026-08-26). An
+uncommitted same-protocol re-run on 2026-09-23 against engine 0dce0e734
+measured 87.32%, which is still RED. Always read the current artifact rather
+than this prose. It does **not** waive the 95% floor for shipping.
 `--release-mode` remains fail-closed: L1 GREEN requires the measured
 compatibility corpus at or above 95%, plus proof-carrying effects and lockstep.
 

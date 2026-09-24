@@ -8,6 +8,20 @@ description: >-
 runs:
   using: composite
   steps:
+    # franken_engine's interpreter is a single very large compilation unit;
+    # standard runners were killed mid-compile ("runner has received a
+    # shutdown signal", exit 143). Add swap and cap parallel rustc jobs so the
+    # peak fits.
+    - name: Add swap and cap build parallelism
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo fallocate -l 16G /mnt/franken-swapfile
+        sudo chmod 600 /mnt/franken-swapfile
+        sudo mkswap /mnt/franken-swapfile
+        sudo swapon /mnt/franken-swapfile
+        free -h
+        echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
     - name: Clone siblings next to the workspace
       shell: bash
       run: |

@@ -254,12 +254,20 @@ Each claim entry uses this structure:
 - **Claim**: `frankenengine-verifier-sdk` (at `sdk/verifier/`) re-implements
   the verification side of the protocol so an auditor does not need to depend
   on the main `frankenengine-node` crate.
-- **Evidence artifact**: `sdk/verifier/src/lib.rs` (266 `#[test]` cases);
+- **Evidence artifact**: `sdk/verifier/src/lib.rs`;
+  `sdk/verifier/src/incident_bundle.rs` (independent verification of CLI
+  `.fnbundle` output under a verifier-supplied Ed25519 anchor);
+  `sdk/verifier/tests/cli_incident_bundle.rs` (a real CLI-produced bundle,
+  RFC 8032 TEST 1 anchor, tamper/reseal/foreign-signer negatives);
   `tests/conformance/verifier_sdk_capsule_replay.rs`;
   `tests/conformance/verifier_session_monotonic.rs`
 - **Verification command**: `cargo test -p frankenengine-verifier-sdk`
-- **Last verified**: 2026-05-20T00:00:00Z (registry backfill)
+- **Last verified**: 2026-09-24 (full SDK suite green, 7e97be752)
 - **Status**: verified
+- **Notes**: Before 7e97be752 the SDK could not parse CLI incident bundles
+  (`missing field artifact_path`): the SDK `bundle` module verifies a
+  different, SDK-native format whose built-in "signature" check is an
+  unkeyed digest.
 
 ### CLAIM-012: `#![forbid(unsafe_code)]` in lib.rs and main.rs
 
@@ -323,31 +331,37 @@ Each claim entry uses this structure:
 - **Last verified**: 2026-05-20T17:00:00Z (counted during reality-check)
 - **Status**: verified
 
-### CLAIM-016: 50 cargo-fuzz harnesses
+### CLAIM-016: 146 registered cargo-fuzz harnesses
 
 - **Category**: verification
-- **Source**: README.md L2555 ("43 cargo-fuzz harnesses" — under-counted)
+- **Source**: README.md "Fuzzing and Differential Testing"
 - **Claim**: cargo-fuzz harnesses target parsers, deserializers, signature
   verifiers, lifecycle inputs, canonical encoders, transcript readers.
-- **Evidence artifact**: `ls fuzz/fuzz_targets/` (actual count 50; README
-  said 43)
-- **Verification command**: `ls fuzz/fuzz_targets/ | wc -l`
-- **Last verified**: 2026-05-20T17:00:00Z
-- **Status**: verified
+- **Evidence artifact**: `fuzz/Cargo.toml` (146 `[[bin]]` targets, 146
+  sources under `fuzz/fuzz_targets/`)
+- **Verification command**: `rg -c '^\[\[bin\]\]' fuzz/Cargo.toml`
+- **Last verified**: 2026-09-23 (count only)
+- **Status**: verified (registration count); pending (compilation). The last
+  full compile census (2026-05-29) found 45 targets not compiling, and
+  `verification-target-compile-gate.yml` has never run (PR-only trigger, 0
+  PRs). `fuzz/regression/` holds 5 inputs (bd-fuzz-regression-corpus-f28ac).
 
-### CLAIM-017: 29 CI gate workflows
+### CLAIM-017: 51 CI workflow files
 
 - **Category**: verification
 - **Source**: README.md L928, L2335-2341
 - **Claim**: Gate-oriented CI with claim gates (ATC, BPET, DGIS, VEF),
   conformance gates, closer-discipline, mutants, coverage, security-golden-
   artifacts, etc.
-- **Evidence artifact**: `.github/workflows/*.yml` (29 files)
-- **Verification command**: `ls .github/workflows/ | wc -l`
-- **Last verified**: 2026-05-20T17:00:00Z
-- **Status**: verified
+- **Evidence artifact**: `.github/workflows/*.yml` (51 files)
+- **Verification command**: `ls .github/workflows/*.yml | wc -l`
+- **Last verified**: 2026-09-23
+- **Status**: verified (files exist); **not evidence of enforcement**. The
+  2026-09-23 audit found 82% of 1,924 main runs failing over 7 days, no green
+  cargo test of the crate ever, and 10 PR-only gates that never ran because
+  the repository has had no PRs (bd-reality-20260923-26n9r.9).
 
-### CLAIM-018: 11 Criterion benchmarks
+### CLAIM-018: 13 Criterion benchmarks
 
 - **Category**: performance
 - **Source**: README.md L2647-2657 (listed 8 by name)
@@ -355,8 +369,8 @@ Each claim entry uses this structure:
   gzip, trust-card canonical, proof-verifier gate, anti-entropy insert,
   threshold-sig verify, `perf_wins`, plus 3 additional benches the README
   doesn't enumerate.
-- **Evidence artifact**: `crates/franken-node/benches/` (11 `.rs` files);
-  `cargo bench -p frankenengine-node`
+- **Evidence artifact**: `crates/franken-node/Cargo.toml` (13 `[[bench]]`
+  targets as of 2026-09-23); `cargo bench -p frankenengine-node`
 - **Verification command**:
   `cargo bench -p frankenengine-node --benches --no-run`
 - **Last verified**: 2026-05-20T17:00:00Z
@@ -402,9 +416,20 @@ Each claim entry uses this structure:
 - **Last verified**: 2026-05-20T22:30:00Z (manually verified during bridge
   plan smoke test; before the bridge plan, this command failed with
   `trust.registry_signing_key must be configured` on every empty directory)
-- **Status**: verified
-- **Notes**: README's "Quick Example" Day-0 workflow now works end-to-end
-  through `init → trust scan → trust list → trust card`.
+- **Status**: pending
+- **Notes**: The verification command covers `init` only, not the claimed
+  `curl | bash` → policy-governed workload path. On 2026-09-23 that path was
+  broken at several points:
+  - The default installer ships v0.1.0 (1,136 commits stale), which cannot run
+    guest JS.
+  - `--method source` never clones frankentui.
+  - A fresh source build could not `run hello.js` without a sidecar engine
+    binary (fixed in 1ee827258).
+  - `trust scan --deep --audit` needs two undocumented environment variables.
+
+  The README smoke workflow now exercises `run` (check 9). This claim moves
+  back to verified only when a clean-container installer e2e passes
+  (bd-reality-20260923-26n9r.11, bd-34d5).
 
 ### CLAIM-021: ≥3 IBD capabilities adopted by production users
 
