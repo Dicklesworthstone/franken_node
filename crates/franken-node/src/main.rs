@@ -562,6 +562,9 @@ enum RunDependencyTrustStatus {
     Untracked,
     Revoked,
     Quarantined,
+    /// Card risk is High/Critical (known advisories, typosquat); refused
+    /// under strict.
+    HighRisk,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -691,6 +694,9 @@ enum TrustViolationKind {
     /// Dependencies are declared but no authoritative trust registry exists, so
     /// their revocation state cannot be consulted (strict/balanced fail closed).
     RegistryMissing,
+    /// A dependency's trust card assesses High/Critical risk: strict refuses
+    /// it, balanced admits it with a warning, legacy-risky ignores it.
+    HighRisk,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -18783,6 +18789,43 @@ fn evaluate_run_trust_preflight(
                                             detail,
                                         });
                                         continue;
+                                    }
+
+                                    if matches!(
+                                        card.user_facing_risk_assessment.level,
+                                        RiskLevel::High | RiskLevel::Critical
+                                    ) {
+                                        let detail = format!(
+                                            "dependency `{extension_id}` is {} risk: {}",
+                                            risk_level.as_deref().unwrap_or("high"),
+                                            card.user_facing_risk_assessment.summary
+                                        );
+                                        match policy_mode {
+                                            Profile::Strict => {
+                                                violations.push(TrustViolation {
+                                                    dependency_name: Some(dependency_name.clone()),
+                                                    extension_id: Some(extension_id.clone()),
+                                                    kind: TrustViolationKind::HighRisk,
+                                                    detail: detail.clone(),
+                                                });
+                                                results.push(RunDependencyTrustResult {
+                                                    dependency_name,
+                                                    version_requirement: dependency
+                                                        .version_requirement,
+                                                    section: dependency.section,
+                                                    extension_id,
+                                                    status: RunDependencyTrustStatus::HighRisk,
+                                                    trust_card_version: Some(
+                                                        card.trust_card_version,
+                                                    ),
+                                                    risk_level,
+                                                    detail,
+                                                });
+                                                continue;
+                                            }
+                                            Profile::Balanced => warnings.push(detail),
+                                            Profile::LegacyRisky => {}
+                                        }
                                     }
 
                                     results.push(RunDependencyTrustResult {
