@@ -63,6 +63,47 @@ pub fn snapshot_age_secs_for_path(path: &Path, now_secs: u64) -> Option<u64> {
     unix_mtime_epoch_secs(path).map(|mtime| snapshot_age_secs(mtime, now_secs))
 }
 
+/// Deny `action_id` at `tier` unless the trust registry whose snapshot path is
+/// `registry_path` carries a recorded revocation frontier fresh enough for the
+/// tier. Returns the operator-facing denial detail, or `None` when allowed.
+///
+/// The frontier is the time of the last fully successful network refresh of
+/// the registry's trust signals (`franken-node trust sync --force`); a missing
+/// or unreadable frontier is treated as stale for Risky/Dangerous tiers. The
+/// Standard tier (legacy-risky) has no age floor.
+#[must_use]
+pub fn registry_revocation_freshness_denial(
+    registry_path: &Path,
+    tier: SafetyTier,
+    now_secs: u64,
+    action_id: &str,
+    trace_id: &str,
+) -> Option<String> {
+    const FIX: &str = "refresh trust signals with `franken-node trust sync --force`";
+    if tier == SafetyTier::Standard {
+        return None;
+    }
+    let age = match crate::supply_chain::trust_card_registry_store::revocation_frontier_age_secs(
+        registry_path,
+        now_secs,
+    ) {
+        Ok(Some(age)) => age,
+        Ok(None) => {
+            return Some(format!(
+                "revocation freshness gate denied {action_id}: no revocation frontier has been recorded for the trust registry; {FIX}"
+            ));
+        }
+        Err(err) => {
+            return Some(format!(
+                "revocation freshness gate denied {action_id}: revocation frontier unreadable ({err}); {FIX}"
+            ));
+        }
+    };
+    evaluate_default_freshness(action_id, tier, age, trace_id, now_secs.to_string())
+        .err()
+        .map(|err| format!("revocation freshness gate denied {action_id}: {err}; {FIX}"))
+}
+
 /// Evaluate default product policy against a named action.
 pub fn evaluate_default_freshness(
     action_id: impl Into<String>,

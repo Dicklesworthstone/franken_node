@@ -46,6 +46,105 @@ pub fn durable_store_path(snapshot_path: &Path) -> PathBuf {
     snapshot_path.with_extension("db")
 }
 
+/// Registry-meta key recording the revocation frontier: the Unix time of the
+/// last fully successful network refresh of the registry's trust signals.
+const META_KEY_REVOCATION_FRONTIER: &str = "revocation_frontier_epoch_secs";
+
+/// Record that the registry's trust signals were refreshed from the network at
+/// `epoch_secs` (bd-reality-20260923-26n9r.1).
+///
+/// The revocation frontier is DATA, not a file mtime: merely opening the
+/// fsqlite store rewrites the database file, so file mtimes advance on
+/// read-only access and cannot witness revocation freshness.
+///
+/// # Errors
+///
+/// Returns [`TrustCardError::SnapshotWrite`] when the store cannot be updated.
+pub fn record_revocation_frontier(snapshot_path: &Path, epoch_secs: u64) -> Result<(), TrustCardError> {
+    let store = TrustCardRegistryStore::open(snapshot_path)?;
+    store.with_immediate_transaction(|_connection, tx| {
+        tx.execute_with_params(
+            "INSERT INTO registry_meta(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+            &[
+                SqliteValue::Text(META_KEY_REVOCATION_FRONTIER.into()),
+                SqliteValue::Text(epoch_secs.to_string()),
+            ],
+        )
+        .map_err(|err| TrustCardError::SnapshotWrite {
+            path: PathBuf::from("trust-card-registry-durable-store"),
+            detail: format!("record revocation frontier: {err}"),
+        })?;
+        Ok(())
+    })
+}
+
+/// The recorded revocation frontier, or `None` when the durable store does not
+/// exist or no fully successful refresh has ever been recorded.
+///
+/// # Errors
+///
+/// Returns [`TrustCardError::SnapshotRead`] when an existing store cannot be
+/// read or holds a malformed frontier value.
+pub fn read_revocation_frontier(snapshot_path: &Path) -> Result<Option<u64>, TrustCardError> {
+    if !durable_store_path(snapshot_path).is_file() {
+        return Ok(None);
+    }
+    let store = TrustCardRegistryStore::open(snapshot_path)?;
+    store.with_connection(|connection| {
+        let table = connection
+            .query_with_params(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'registry_meta';",
+                &[],
+            )
+            .map_err(|err| TrustCardError::SnapshotRead {
+                path: store.db_path.clone(),
+                detail: err.to_string(),
+            })?;
+        if table.is_empty() {
+            return Ok(None);
+        }
+        let rows = connection
+            .query_with_params(
+                "SELECT value FROM registry_meta WHERE key = ?1;",
+                &[SqliteValue::Text(META_KEY_REVOCATION_FRONTIER.into())],
+            )
+            .map_err(|err| TrustCardError::SnapshotRead {
+                path: store.db_path.clone(),
+                detail: format!("read revocation frontier: {err}"),
+            })?;
+        let Some(row) = rows.first() else {
+            return Ok(None);
+        };
+        match row.values().first() {
+            Some(SqliteValue::Text(value)) => value.parse::<u64>().map(Some).map_err(|err| {
+                TrustCardError::SnapshotRead {
+                    path: store.db_path.clone(),
+                    detail: format!("malformed revocation frontier `{value}`: {err}"),
+                }
+            }),
+            _ => Err(TrustCardError::SnapshotRead {
+                path: store.db_path.clone(),
+                detail: "revocation frontier is not text".to_string(),
+            }),
+        }
+    })
+}
+
+/// Age in seconds of the recorded revocation frontier at `now_secs` (a clock
+/// earlier than the frontier saturates to zero), or `None` when none exists.
+///
+/// # Errors
+///
+/// Propagates [`read_revocation_frontier`] failures.
+pub fn revocation_frontier_age_secs(
+    snapshot_path: &Path,
+    now_secs: u64,
+) -> Result<Option<u64>, TrustCardError> {
+    Ok(read_revocation_frontier(snapshot_path)?
+        .map(|frontier| crate::security::revocation_freshness::snapshot_age_secs(frontier, now_secs)))
+}
+
 /// Read one canonical-JSON slot out of an open connection.
 pub(crate) fn read_slot(
     connection: &Connection,
