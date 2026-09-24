@@ -121,6 +121,19 @@ fn remotecap_verify_contract_documents_scope_authorization_args() -> Result<(), 
 #[test]
 fn remotecap_cli_json_wire_lifecycle_conforms_to_contract() -> Result<(), String> {
     let workspace = TempDir::new().map_err(|err| format!("workspace: {err}"))?;
+    // Issuance is gated on a recorded revocation frontier: bootstrap the
+    // workspace and record one through the operator path.
+    for args in [
+        &["init", "--profile", "balanced", "--out-dir", "."][..],
+        &["trust", "sync", "--force"][..],
+    ] {
+        Command::cargo_bin("franken-node")
+            .map_err(|err| format!("franken-node binary should resolve: {err}"))?
+            .args(args)
+            .current_dir(workspace.path())
+            .assert()
+            .success();
+    }
 
     let mut issue_cmd = remotecap_cmd(&workspace)?;
     issue_cmd.args([

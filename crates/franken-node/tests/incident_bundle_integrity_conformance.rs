@@ -19,6 +19,7 @@ const INCIDENT_BUNDLE_INTEGRITY_VECTORS: &[&str] = &[
     "tampered_signature_rejection",
     "missing_evidence_ref_rejection",
     "future_dated_promotion_input_rejection",
+    "sdk_independent_verification",
 ];
 
 fn resolve_binary_path() -> PathBuf {
@@ -179,12 +180,56 @@ fn write_evidence_package(path: &Path, package: &IncidentEvidencePackage) {
 
 #[test]
 fn incident_bundle_integrity_conformance_vectors_cover_required_contract() {
-    assert_eq!(INCIDENT_BUNDLE_INTEGRITY_VECTORS.len(), 5);
+    assert_eq!(INCIDENT_BUNDLE_INTEGRITY_VECTORS.len(), 6);
+    assert!(INCIDENT_BUNDLE_INTEGRITY_VECTORS.contains(&"sdk_independent_verification"));
     assert!(INCIDENT_BUNDLE_INTEGRITY_VECTORS.contains(&"valid_bundle_round_trip"));
     assert!(INCIDENT_BUNDLE_INTEGRITY_VECTORS.contains(&"authoritative_input_byte_identical"));
     assert!(INCIDENT_BUNDLE_INTEGRITY_VECTORS.contains(&"tampered_signature_rejection"));
     assert!(INCIDENT_BUNDLE_INTEGRITY_VECTORS.contains(&"missing_evidence_ref_rejection"));
     assert!(INCIDENT_BUNDLE_INTEGRITY_VECTORS.contains(&"future_dated_promotion_input_rejection"));
+}
+
+/// The independent verifier SDK must accept exactly what the product signs:
+/// guards the product `.fnbundle` wire format against drifting away from
+/// `frankenengine_verifier_sdk::incident_bundle` (bd-reality-20260923-26n9r.7).
+#[test]
+fn incident_bundle_integrity_conformance_sdk_independently_verifies_product_bundle() {
+    use frankenengine_verifier_sdk::incident_bundle::{
+        IncidentBundleError, verify_incident_bundle,
+    };
+
+    let evidence = fixture_evidence_package("INC-SDK-ROUNDTRIP-001");
+    let mut bundle = generate_replay_bundle_from_evidence(&evidence).expect("generate bundle");
+    sign_bundle(&mut bundle);
+    let bytes = to_canonical_json(&bundle)
+        .expect("canonical bundle")
+        .into_bytes();
+    let anchor = fixture_signing_key().verifying_key();
+
+    let verified = verify_incident_bundle(&bytes, &anchor).expect("SDK verifies product bundle");
+    assert_eq!(verified.incident_id, "INC-SDK-ROUNDTRIP-001");
+    assert_eq!(verified.event_count, bundle.timeline.len());
+    assert_eq!(verified.integrity_hash, bundle.integrity_hash);
+    assert_eq!(
+        verified.decision_sequence_hash,
+        bundle.manifest.decision_sequence_hash
+    );
+
+    // A byte-level tamper the product would also reject must fail the SDK too.
+    let mut tampered: serde_json::Value = serde_json::from_slice(&bytes).expect("bundle json");
+    tampered["timeline"][0]["payload"]["signal"] = json!("benign");
+    let tampered = serde_json::to_vec(&tampered).expect("tampered json");
+    assert!(matches!(
+        verify_incident_bundle(&tampered, &anchor),
+        Err(IncidentBundleError::IntegrityMismatch { .. })
+    ));
+
+    // A signer other than the verifier's anchor is refused.
+    let foreign = ed25519_dalek::SigningKey::from_bytes(&[0x07_u8; 32]).verifying_key();
+    assert_eq!(
+        verify_incident_bundle(&bytes, &foreign),
+        Err(IncidentBundleError::SignerNotTrusted)
+    );
 }
 
 #[test]

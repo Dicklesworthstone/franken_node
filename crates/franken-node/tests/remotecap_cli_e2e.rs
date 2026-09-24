@@ -12,9 +12,31 @@ use tempfile::TempDir;
 
 const BINARY_UNDER_TEST: &str = env!("CARGO_BIN_EXE_franken-node");
 
-/// Test helper to create a temporary workspace for capability operations
+/// Test helper to create a temporary workspace for capability operations.
+///
+/// `remotecap issue` is a Dangerous-tier action gated on a recorded
+/// revocation frontier, so the workspace is bootstrapped the way an operator
+/// would: `init` (empty trust registry), then `trust sync --force`, which
+/// records the frontier after a clean refresh (no cards means no fetches).
 fn setup_test_workspace() -> TempDir {
-    TempDir::new().expect("Failed to create temp directory")
+    let workspace = TempDir::new().expect("Failed to create temp directory");
+    for args in [
+        &["init", "--profile", "balanced", "--out-dir", "."][..],
+        &["trust", "sync", "--force"][..],
+    ] {
+        let output = std::process::Command::new(BINARY_UNDER_TEST)
+            .args(args)
+            .current_dir(workspace.path())
+            .output()
+            .expect("spawn franken-node workspace bootstrap");
+        assert!(
+            output.status.success(),
+            "workspace bootstrap `{}` failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    workspace
 }
 
 /// Test helper to run remotecap commands with standard arguments
@@ -91,6 +113,103 @@ fn issue_token(workspace: &TempDir) -> Value {
 
     let output = cmd.assert().success().get_output().stdout.clone();
     serde_json::from_slice(&output).expect("issue output should be json")
+}
+
+fn issue_json_error(workspace: &Path) -> String {
+    let mut cmd = remotecap_cmd();
+    cmd.args([
+        "issue",
+        "--scope",
+        "network_egress",
+        "--endpoint",
+        "https://api.example.com",
+        "--ttl",
+        "1h",
+        "--operator-approved",
+        "--json",
+    ])
+    .current_dir(workspace);
+    let output = cmd.assert().failure().get_output().clone();
+    let payload: Value =
+        serde_json::from_slice(&output.stdout).expect("denied issue --json must be JSON");
+    assert_eq!(payload["command"].as_str(), Some("remotecap.issue"));
+    assert_eq!(payload["ok"].as_bool(), Some(false));
+    payload["error"].as_str().unwrap_or_default().to_string()
+}
+
+#[test]
+fn remotecap_issue_denied_without_recorded_revocation_frontier() {
+    let workspace = TempDir::new().expect("tempdir");
+    let init = std::process::Command::new(BINARY_UNDER_TEST)
+        .args(["init", "--profile", "balanced", "--out-dir", "."])
+        .current_dir(workspace.path())
+        .output()
+        .expect("spawn init");
+    assert!(init.status.success(), "init failed");
+
+    let error = issue_json_error(workspace.path());
+    assert!(
+        error.contains("no revocation frontier has been recorded")
+            && error.contains("trust sync --force"),
+        "issue without a frontier must fail closed and name the fix, got: {error}"
+    );
+}
+
+#[test]
+fn remotecap_issue_denied_when_revocation_frontier_is_stale() {
+    let workspace = setup_test_workspace();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs();
+    // Re-record the frontier as it would stand one hour after the last clean
+    // `trust sync --force`: past the 300s Dangerous-tier bound.
+    frankenengine_node::supply_chain::trust_card_registry_store::record_revocation_frontier(
+        &workspace
+            .path()
+            .join(".franken-node/state/trust-card-registry.v1.json"),
+        now - 3_600,
+    )
+    .expect("record aged frontier");
+
+    let error = issue_json_error(workspace.path());
+    assert!(
+        error.contains("RF_STALE_FRONTIER") && error.contains("max 300s"),
+        "issue behind a stale frontier must fail closed, got: {error}"
+    );
+}
+
+#[test]
+fn remotecap_issue_is_not_blocked_by_an_aged_local_revocation_list() {
+    // The local revoked-token list is authoritative, not a replica: a revoke
+    // an hour ago must not make every later issuance look stale.
+    let workspace = setup_test_workspace();
+    let issue = issue_token(&workspace);
+    let token_path = workspace.path().join("capability.json");
+    write_json(&token_path, &issue["token"]);
+    remotecap_cmd()
+        .args(["revoke", "--token-file"])
+        .arg(&token_path)
+        .arg("--json")
+        .current_dir(workspace.path())
+        .assert()
+        .success();
+
+    let state_path = workspace.path().join(".franken-node/remotecap/state.json");
+    let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3_600);
+    fs::File::options()
+        .write(true)
+        .open(&state_path)
+        .expect("revocation state written by revoke")
+        .set_modified(hour_ago)
+        .expect("backdate revocation state");
+
+    let reissued = issue_token(&workspace);
+    assert_eq!(
+        reissued["command"].as_str(),
+        Some("remotecap.issue"),
+        "issuance after an aged revoke must succeed, got {reissued}"
+    );
 }
 
 #[test]

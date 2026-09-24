@@ -3300,7 +3300,20 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
     );
 
     let remotecap_workspace = tempdir().expect("remotecap tempdir");
-    write_fail_closed_cli_config(remotecap_workspace.path());
+    // Issuance is gated on a recorded revocation frontier: bootstrap through
+    // `init` (fail-closed config + empty registry) and a clean forced sync.
+    for bootstrap in [
+        &["init", "--profile", "balanced", "--out-dir", "."][..],
+        &["trust", "sync", "--force"][..],
+    ] {
+        let output = run_cli_in_dir_with_env(remotecap_workspace.path(), bootstrap, &[]);
+        assert!(
+            output.status.success(),
+            "remotecap workspace bootstrap `{}` failed: {}",
+            bootstrap.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     let remotecap_issue_output = run_cli_in_dir_with_env(
         remotecap_workspace.path(),
         &[

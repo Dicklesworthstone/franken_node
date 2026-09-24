@@ -167,10 +167,7 @@ use frankenengine_node::{
             CapabilityGate, CapabilityProvider, RemoteCap, RemoteCapError, RemoteOperation,
             RemoteScope,
         },
-        revocation_freshness::{
-            SafetyTier, evaluate_default_freshness, registry_revocation_freshness_denial,
-            snapshot_age_secs_for_path,
-        },
+        revocation_freshness::{SafetyTier, registry_revocation_freshness_denial},
     },
     supply_chain::category_shift::validate_benchmark_thresholds,
     supply_chain::{
@@ -9976,6 +9973,110 @@ fn persist_run_execution_receipt(
     Ok(final_path)
 }
 
+/// Automatic incident capture (bd-reality-20260923-26n9r.8).
+///
+/// A run that trips a runtime security control — an SSRF violation, a denied
+/// host effect, or a Sentinel escalation — is recorded as a provenance-bound
+/// incident evidence package built from the run's signed host-effect ledger
+/// (real per-effect timestamps and receipts, no hand-authored events), at the
+/// location `incident bundle --id <id>` reads. Returns the captured incident id.
+fn maybe_capture_run_incident(
+    project_root: &Path,
+    policy_mode: &str,
+    app_path: &Path,
+    receipt: &RunExecutionReceipt,
+    receipt_path: &Path,
+    dispatch: &ops::engine_dispatcher::RunDispatchReport,
+) -> Result<Option<String>> {
+    use frankenengine_node::tools::replay_bundle::{
+        EventType, INCIDENT_EVIDENCE_SCHEMA, IncidentEvidenceEvent, IncidentEvidenceMetadata,
+        IncidentEvidencePackage, IncidentSeverity, validate_incident_evidence_package,
+    };
+
+    let Some(ledger) = dispatch.host_effect_ledger.as_ref() else {
+        return Ok(None);
+    };
+    let tripped_control = !receipt.core.ssrf_violations.is_empty()
+        || ledger.denied_count > 0
+        || receipt.core.sentinel_enforcement.is_some();
+    if !tripped_control || ledger.entries.is_empty() {
+        return Ok(None);
+    }
+
+    let head = ledger
+        .chain_head_hash
+        .trim_start_matches("sha256:")
+        .chars()
+        .take(16)
+        .collect::<String>();
+    let incident_id = format!("INC-RUN-{head}");
+    let receipt_ref = receipt_path
+        .strip_prefix(project_root)
+        .unwrap_or(receipt_path)
+        .to_string_lossy()
+        .into_owned();
+    let millis_to_rfc3339 = |millis: u64| {
+        chrono::DateTime::from_timestamp_millis(i64::try_from(millis).unwrap_or(i64::MAX))
+            .unwrap_or_default()
+            .to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+    };
+
+    let mut events = Vec::with_capacity(ledger.entries.len());
+    let mut previous_event_id: Option<String> = None;
+    for entry in &ledger.entries {
+        let event_id = format!("effect-{:06}", entry.index);
+        events.push(IncidentEvidenceEvent {
+            event_id: event_id.clone(),
+            timestamp: millis_to_rfc3339(entry.receipt.recorded_at_millis),
+            event_type: EventType::PolicyEval,
+            payload: serde_json::json!({ "effect_receipt_chain_entry": entry }),
+            provenance_ref: receipt_ref.clone(),
+            parent_event_id: previous_event_id.replace(event_id),
+            state_snapshot: None,
+            policy_version: None,
+        });
+    }
+    let collected_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+    let package = IncidentEvidencePackage {
+        schema_version: INCIDENT_EVIDENCE_SCHEMA.to_string(),
+        incident_id: incident_id.clone(),
+        collected_at,
+        trace_id: ledger.trace_id.clone(),
+        severity: IncidentSeverity::High,
+        incident_type: "runtime-security-control".to_string(),
+        detector: "franken-node run (automatic capture)".to_string(),
+        policy_version: policy_mode.to_string(),
+        initial_state_snapshot: serde_json::json!({
+            "run_receipt_id": receipt.core.receipt_id,
+            "run_receipt_hash": receipt.receipt_hash,
+            "host_effect_chain_head": ledger.chain_head_hash,
+            "effect_count": ledger.effect_count,
+            "allowed_count": ledger.allowed_count,
+            "denied_count": ledger.denied_count,
+            "ssrf_violations": receipt.core.ssrf_violations,
+            "sentinel_enforced": receipt.core.sentinel_enforcement.is_some(),
+        }),
+        events,
+        evidence_refs: vec![receipt_ref],
+        metadata: IncidentEvidenceMetadata {
+            title: format!(
+                "Run of {} tripped a runtime security control",
+                app_path.display()
+            ),
+            affected_components: vec![app_path.display().to_string()],
+            tags: vec!["auto-captured".to_string(), "run".to_string()],
+        },
+    };
+    validate_incident_evidence_package(&package, Some(&incident_id))
+        .map_err(|err| anyhow::anyhow!("captured incident evidence is invalid: {err}"))?;
+    let evidence_path = project_root
+        .join(INCIDENT_EVIDENCE_RELATIVE_DIR)
+        .join(incident_id_slug(&incident_id))
+        .join(INCIDENT_EVIDENCE_FILE_NAME);
+    write_bytes_atomically(&evidence_path, &serde_json::to_vec_pretty(&package)?)?;
+    Ok(Some(incident_id))
+}
+
 fn maybe_auto_quarantine_run_dependencies(
     project_root: &Path,
     config: &config::Config,
@@ -16766,22 +16867,20 @@ fn handle_remotecap_issue(args: &RemoteCapIssueArgs) -> Result<()> {
     };
     let scope = RemoteScope::new(operations, endpoint_prefixes);
 
-    let revocation_age_secs =
-        snapshot_age_secs_for_path(&remotecap_cli_state_path(), now_epoch_secs).unwrap_or(0);
-    if let Err(err) = evaluate_default_freshness(
-        "remotecap-issue",
+    // Issuing a capability is always Dangerous-tier: it requires a recorded
+    // revocation frontier (the last clean `trust sync --force`) no older than
+    // the tier allows. The local remotecap revocation list is authoritative,
+    // not a replica, so its mtime says nothing about freshness: gating on it
+    // passed vacuously before the first revoke and then denied every issue
+    // once that revoke aged past the tier (bd-reality-20260923-26n9r.1).
+    if let Some(detail) = registry_revocation_freshness_denial(
+        Path::new(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH),
         SafetyTier::Dangerous,
-        revocation_age_secs,
-        args.trace_id.clone(),
-        now_epoch_secs.to_string(),
+        now_epoch_secs,
+        "remotecap-issue",
+        &args.trace_id,
     ) {
-        return remotecap_fail(
-            "remotecap.issue",
-            args.json,
-            format!(
-                "revocation freshness gate denied remotecap issue: {err}. Refresh revocation data before issuing a capability."
-            ),
-        );
+        return remotecap_fail("remotecap.issue", args.json, detail);
     }
 
     let (cap, audit_event) = match provider.issue(
@@ -18141,9 +18240,12 @@ fn build_trust_scan_card_input(
     let artifact_hashes = artifact_hashes.into_iter().collect::<Vec<_>>();
 
     let vulnerability_count = audit_metadata.vulnerability_ids.len();
+    let typosquat = supply_chain::typosquat::detect_typosquat(&dependency.dependency_name);
     let risk_level = if vulnerability_count >= 3 {
         RiskLevel::Critical
-    } else if vulnerability_count > 0 {
+    } else if vulnerability_count > 0 || typosquat.is_some() {
+        // A name built to be mistaken for a popular package is a high-risk
+        // signal before any behaviour is observed (README scenario).
         RiskLevel::High
     } else if artifact_hashes.is_empty() {
         RiskLevel::Medium
@@ -18192,6 +18294,10 @@ fn build_trust_scan_card_input(
             "osv_vulns={}",
             audit_metadata.vulnerability_ids.join(",")
         ));
+    }
+    if let Some(finding) = &typosquat {
+        reputation_score_basis_points = reputation_score_basis_points.saturating_sub(200);
+        summary_bits.push(finding.describe());
     }
 
     TrustCardInput {
@@ -18398,6 +18504,15 @@ fn run_trust_scan(project_root: &Path, deep: bool, audit: bool) -> Result<TrustS
             }
         }
 
+        if let Some(finding) =
+            supply_chain::typosquat::detect_typosquat(&dependency.dependency_name)
+        {
+            warnings.push(format!(
+                "{}: {}",
+                dependency.extension_id,
+                finding.describe()
+            ));
+        }
         let input = build_trust_scan_card_input(
             dependency,
             lockfile_entry,
@@ -30752,6 +30867,22 @@ fn main() -> Result<()> {
                 &receipt,
                 configured_run_receipt_limit(&resolved.config),
             )?;
+            // The run already completed; a capture failure is reported loudly
+            // but does not rewrite the run's own exit semantics.
+            let captured_incident = match maybe_capture_run_incident(
+                &project_root,
+                &policy,
+                &app_path,
+                &receipt,
+                &receipt_path,
+                &dispatch,
+            ) {
+                Ok(incident) => incident,
+                Err(err) => {
+                    eprintln!("warning: automatic incident capture failed: {err:#}");
+                    None
+                }
+            };
 
             if structured_logs_jsonl {
                 eprint!(
@@ -30768,6 +30899,13 @@ fn main() -> Result<()> {
                 json,
                 console_only,
             )?;
+            if let Some(incident_id) = &captured_incident
+                && !json
+            {
+                eprintln!(
+                    "incident captured: {incident_id} (export with `franken-node incident bundle --id {incident_id} --verify`)"
+                );
+            }
 
             if dispatch.terminated_by_signal {
                 if json {
