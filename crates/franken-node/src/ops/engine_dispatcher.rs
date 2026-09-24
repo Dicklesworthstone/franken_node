@@ -2856,6 +2856,11 @@ struct DispatchResolutionInputs<'a> {
     cli_path: Option<&'a Path>,
     config_path: Option<&'a Path>,
     candidates: &'a [PathBuf],
+    /// Path of the running product binary when the native engine is compiled
+    /// in (`engine` feature). Native execution never launches an external
+    /// engine executable, so an embedded engine satisfies `auto` and
+    /// `franken-engine` runtime selection without any sidecar binary on disk.
+    embedded_engine: Option<&'a Path>,
 }
 
 struct DispatchReportInputs<'a> {
@@ -3592,6 +3597,13 @@ fn resolve_explicit_engine_plan_with(
     );
 
     if !command_exists_with(&binary, path_env, path_exists) {
+        if !has_explicit_engine_override(&inputs)
+            && let Some(embedded) = inputs.embedded_engine
+        {
+            return Ok(DispatchPlan::FrankenEngine {
+                binary: embedded.to_string_lossy().into_owned(),
+            });
+        }
         return Err(DispatchResolutionError::RequestedRuntimeUnavailable(
             ActionableError::new(
                 "requested runtime `franken-engine` was not found; fix --engine-bin, FRANKEN_ENGINE_BIN, FRANKEN_NODE_ENGINE_BINARY_PATH, or [engine].binary_path",
@@ -3641,19 +3653,33 @@ fn resolve_dispatch_plan_with(
         return Ok(DispatchPlan::FrankenEngine { binary });
     }
 
-    let explicit_override = inputs.cli_path.is_some()
-        || inputs.config_path.is_some()
-        || inputs
-            .env_override
-            .is_some_and(|value| !value.trim().is_empty());
-    if explicit_override {
+    if has_explicit_engine_override(&inputs) {
         return Err(DispatchResolutionError::RequestedRuntimeUnavailable(
             configured_engine_binary_missing_error(Path::new(&binary), app_path),
         ));
     }
 
+    // The native engine is linked into this binary: prefer it over any
+    // external Node/Bun fallback (which profile-governed `run` rejects anyway).
+    if let Some(embedded) = inputs.embedded_engine {
+        return Ok(DispatchPlan::FrankenEngine {
+            binary: embedded.to_string_lossy().into_owned(),
+        });
+    }
+
     resolve_fallback_runtime_plan_with(app_path, PreferredRuntime::Auto, path_env, path_exists)
         .map(DispatchPlan::RuntimeFallback)
+}
+
+/// An operator explicitly named an engine binary (CLI flag, env, or config).
+/// A missing explicitly-named binary is a misconfiguration that must surface,
+/// never be silently replaced by the embedded engine or a fallback runtime.
+fn has_explicit_engine_override(inputs: &DispatchResolutionInputs<'_>) -> bool {
+    inputs.cli_path.is_some()
+        || inputs.config_path.is_some()
+        || inputs
+            .env_override
+            .is_some_and(|value| !value.trim().is_empty())
 }
 
 fn captured_output_from(output: Output) -> CapturedProcessOutput {
@@ -4226,6 +4252,14 @@ impl EngineDispatcher {
         let config_path = config.engine.binary_path.as_deref();
         let started_at = Utc::now();
         let started = Instant::now();
+        // With the `engine` feature the engine runs natively inside this
+        // product binary (via its private session worker); no sidecar engine
+        // executable is ever launched.
+        let embedded_engine = if cfg!(feature = "engine") {
+            std::env::current_exe().ok()
+        } else {
+            None
+        };
         let dispatch_plan = match resolve_dispatch_plan_with(
             app_path,
             self.requested_runtime,
@@ -4235,6 +4269,7 @@ impl EngineDispatcher {
                 cli_path: self.configured_path.as_deref(),
                 config_path,
                 candidates: &default_engine_binary_candidates(),
+                embedded_engine: embedded_engine.as_deref(),
             },
             std::env::var_os("PATH"),
             &|path| path.exists(),
@@ -9380,6 +9415,7 @@ mod tests {
                 cli_path,
                 config_path: config.engine.binary_path.as_deref(),
                 candidates: &[],
+                embedded_engine: None,
             },
             None,
             &|path| path.exists(),
@@ -9877,6 +9913,7 @@ mod tests {
                 cli_path: None,
                 config_path: None,
                 candidates: &[runtime_dir.join("node")],
+                embedded_engine: None,
             },
             Some(runtime_dir.as_os_str().to_os_string()),
             &|path| path.exists(),
@@ -9985,6 +10022,7 @@ mod tests {
                 cli_path: None,
                 config_path: None,
                 candidates: &[PathBuf::from("/missing/auto")],
+                embedded_engine: None,
             },
             Some(runtime_dir.as_os_str().to_os_string()),
             &|path| path.exists(),
@@ -10001,6 +10039,74 @@ mod tests {
                 mode: RuntimeExecutionMode::FallbackFrankenEngineUnavailable,
             })
         );
+    }
+
+    #[test]
+    fn dispatch_plan_auto_selects_embedded_engine_without_sidecar_binary() {
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let app = temp_dir.path().join("hello.js");
+        std::fs::write(&app, "console.log('hello');").expect("write entry");
+        let runtime_dir = temp_dir.path().join("bin");
+        std::fs::create_dir(&runtime_dir).expect("runtime dir");
+        // A real `node` on PATH must NOT be chosen when the engine is embedded.
+        write_fake_executable(&runtime_dir.join("node"));
+        let embedded = temp_dir.path().join("franken-node");
+
+        for requested in [PreferredRuntime::Auto, PreferredRuntime::FrankenEngine] {
+            let plan = resolve_dispatch_plan_with(
+                &app,
+                requested,
+                DispatchResolutionInputs {
+                    configured_hint: "/missing/franken-engine",
+                    env_override: None,
+                    cli_path: None,
+                    config_path: None,
+                    candidates: &[PathBuf::from("/missing/auto")],
+                    embedded_engine: Some(embedded.as_path()),
+                },
+                Some(runtime_dir.as_os_str().to_os_string()),
+                &|path| path.exists(),
+            )
+            .expect("embedded engine plan");
+            assert_eq!(
+                plan,
+                DispatchPlan::FrankenEngine {
+                    binary: embedded.to_string_lossy().into_owned(),
+                },
+                "requested={requested:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_plan_explicit_missing_engine_is_not_masked_by_embedded_engine() {
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let app = temp_dir.path().join("hello.js");
+        std::fs::write(&app, "console.log('hello');").expect("write entry");
+        let embedded = temp_dir.path().join("franken-node");
+        let missing = temp_dir.path().join("does-not-exist/franken-engine");
+
+        for requested in [PreferredRuntime::Auto, PreferredRuntime::FrankenEngine] {
+            let err = resolve_dispatch_plan_with(
+                &app,
+                requested,
+                DispatchResolutionInputs {
+                    configured_hint: "/missing/franken-engine",
+                    env_override: None,
+                    cli_path: Some(missing.as_path()),
+                    config_path: None,
+                    candidates: &[PathBuf::from("/missing/auto")],
+                    embedded_engine: Some(embedded.as_path()),
+                },
+                None,
+                &|path| path.exists(),
+            )
+            .expect_err("explicitly configured missing engine must surface");
+            assert!(
+                matches!(err, DispatchResolutionError::RequestedRuntimeUnavailable(_)),
+                "requested={requested:?}"
+            );
+        }
     }
 
     #[test]
@@ -10026,6 +10132,7 @@ mod tests {
                 cli_path: None,
                 config_path: None,
                 candidates: &[PathBuf::from("/missing/auto")],
+                embedded_engine: None,
             },
             Some(runtime_dir.as_os_str().to_os_string()),
             &|path| path.exists(),
@@ -10071,6 +10178,7 @@ mod tests {
                 cli_path: None,
                 config_path: None,
                 candidates: &[PathBuf::from("/missing/auto")],
+                embedded_engine: None,
             },
             Some(runtime_dir.as_os_str().to_os_string()),
             &|path| path.exists(),
@@ -10106,6 +10214,7 @@ mod tests {
                 cli_path: None,
                 config_path: None,
                 candidates: &[PathBuf::from("/missing/auto")],
+                embedded_engine: None,
             },
             Some(empty_bin.as_os_str().to_os_string()),
             &|path| path.exists(),
@@ -10140,6 +10249,7 @@ mod tests {
                 cli_path: None,
                 config_path: None,
                 candidates: &[PathBuf::from("/missing/auto")],
+                embedded_engine: None,
             },
             Some(runtime_dir.as_os_str().to_os_string()),
             &|path| path.exists(),
@@ -10173,6 +10283,7 @@ mod tests {
                 cli_path: None,
                 config_path: None,
                 candidates: &[PathBuf::from("/missing/auto")],
+                embedded_engine: None,
             },
             Some(empty_bin.as_os_str().to_os_string()),
             &|path| path.exists(),
@@ -10205,6 +10316,7 @@ mod tests {
                 cli_path: None,
                 config_path: None,
                 candidates: &[PathBuf::from("/missing/auto")],
+                embedded_engine: None,
             },
             Some(runtime_dir.as_os_str().to_os_string()),
             &|path| path.exists(),
@@ -10246,6 +10358,7 @@ mod tests {
                     cli_path: None,
                     config_path: None,
                     candidates: &candidates,
+                    embedded_engine: None,
                 },
                 path_env.clone(),
                 &|path| path.exists(),
@@ -10287,6 +10400,7 @@ mod tests {
                 cli_path: None,
                 config_path: None,
                 candidates: &[PathBuf::from("/missing/auto")],
+                embedded_engine: None,
             },
             Some(runtime_dir.as_os_str().to_os_string()),
             &|path| path.exists(),
@@ -10325,6 +10439,7 @@ mod tests {
                 cli_path: None,
                 config_path: None,
                 candidates: &[PathBuf::from("/missing/auto")],
+                embedded_engine: None,
             },
             Some(runtime_dir.as_os_str().to_os_string()),
             &|path| path.exists(),
@@ -10474,6 +10589,7 @@ mod tests {
                 cli_path: Some(&cli_path),
                 config_path: None,
                 candidates: &[PathBuf::from("/missing/auto")],
+                embedded_engine: None,
             },
             None,
             &|path| path.exists(),
@@ -10500,6 +10616,7 @@ mod tests {
                 cli_path: None,
                 config_path: None,
                 candidates: &[PathBuf::from("/missing/auto")],
+                embedded_engine: None,
             },
             None,
             &|path| path.exists(),
@@ -10675,6 +10792,7 @@ mod tests {
                         cli_path: None,
                         config_path: Some(config_engine_path.as_path()),
                         candidates: &[],
+                        embedded_engine: None,
                     },
                     None,
                     &|path| path.exists(),
@@ -10764,6 +10882,7 @@ mod tests {
                             cli_path: None,
                             config_path: None,
                             candidates: &[],
+                            embedded_engine: None,
                         };
 
                         // Verify dispatch input handling
