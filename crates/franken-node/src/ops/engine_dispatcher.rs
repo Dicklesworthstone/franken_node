@@ -3973,6 +3973,57 @@ impl EngineDispatcher {
         (!app_path.is_absolute()).then(|| current_dir.to_path_buf())
     }
 
+    /// Resolve the entry file of a directory target the way `node <dir>`
+    /// does: package.json `main` (as a file, with `.js` appended, or as a
+    /// directory holding `index.js`), falling back to `index.js`. `main` may
+    /// not leave the package directory.
+    #[cfg(feature = "engine")]
+    fn resolve_directory_entrypoint(dir: &Path) -> std::result::Result<PathBuf, String> {
+        const MAX_PACKAGE_MANIFEST_BYTES: u64 = 1 << 20;
+        let manifest_path = dir.join("package.json");
+        if manifest_path.is_file() {
+            let raw = crate::bounded_read(&manifest_path, MAX_PACKAGE_MANIFEST_BYTES)
+                .map_err(|error| format!("Failed to read {}: {error}", manifest_path.display()))?;
+            let manifest: serde_json::Value = serde_json::from_slice(&raw)
+                .map_err(|error| format!("Invalid {}: {error}", manifest_path.display()))?;
+            if let Some(main) = manifest
+                .get("main")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|main| !main.is_empty())
+            {
+                let main_path = Path::new(main);
+                if main_path.components().any(|component| {
+                    !matches!(
+                        component,
+                        std::path::Component::Normal(_) | std::path::Component::CurDir
+                    )
+                }) {
+                    return Err(format!(
+                        "package.json `main` {main:?} must be a relative path inside {}",
+                        dir.display()
+                    ));
+                }
+                let base = dir.join(main_path);
+                let mut with_js = base.clone().into_os_string();
+                with_js.push(".js");
+                for candidate in [base.clone(), PathBuf::from(with_js), base.join("index.js")] {
+                    if candidate.is_file() {
+                        return Ok(candidate);
+                    }
+                }
+            }
+        }
+        let index = dir.join("index.js");
+        if index.is_file() {
+            return Ok(index);
+        }
+        Err(format!(
+            "{} has no entrypoint: package.json has no resolvable `main` and index.js is missing",
+            dir.display()
+        ))
+    }
+
     #[cfg(feature = "engine")]
     fn validate_native_session_worker_path(path: &Path) -> Result<PathBuf> {
         if !path.is_absolute() {
@@ -7007,6 +7058,19 @@ impl EngineDispatcher {
         // imports fail before resolution can enforce its module-root boundary.
         // Do not canonicalize here; a symlinked entrypoint must keep the
         // operator-selected directory as both its module and host-I/O root.
+        //
+        // `run <dir>` executes the directory's entry file (package.json
+        // `main`, else index.js) exactly as `node <dir>` does; the directory
+        // itself stays the project root everywhere else.
+        let resolved_entry;
+        let app_path = if app_path.is_dir() {
+            resolved_entry = Self::resolve_directory_entrypoint(app_path).map_err(|error| {
+                native_engine_spawn_error_with_telemetry_cleanup(error, &mut telemetry_guard)
+            })?;
+            resolved_entry.as_path()
+        } else {
+            app_path
+        };
         let (execution_app_path, module_root) = if app_path.is_absolute() {
             (app_path.to_path_buf(), None)
         } else {

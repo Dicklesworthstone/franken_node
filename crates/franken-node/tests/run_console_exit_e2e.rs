@@ -1083,3 +1083,97 @@ fn run_emits_correlated_structured_logs() {
         );
     }
 }
+
+/// `run <dir>` in an initialised workspace holding `files`, console-only.
+fn run_directory_target(files: &[(&str, &str)], target: &str) -> RunOutcome {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let init = Command::new(franken_node_bin())
+        .args(["init", "--profile", "balanced", "--out-dir", "."])
+        .current_dir(dir.path())
+        .output()
+        .expect("spawn franken-node init");
+    assert!(init.status.success(), "init must bootstrap the workspace");
+    for (relative, contents) in files {
+        let path = dir.path().join(relative);
+        std::fs::create_dir_all(path.parent().expect("fixture parent")).expect("fixture dir");
+        std::fs::write(&path, contents).expect("write fixture");
+    }
+    let output = Command::new(franken_node_bin())
+        .args([
+            "run",
+            target,
+            "--policy",
+            "balanced",
+            "--runtime",
+            "franken-engine",
+            "--engine-bin",
+            franken_node_bin(),
+            "--console-only",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("spawn franken-node run");
+    RunOutcome {
+        exit_code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+/// bd-reality-20260923-26n9r.4: `run <dir>` executes package.json `main`,
+/// exactly as `node <dir>` does (it previously failed reading the directory
+/// as source, which also made `verify lockstep <project>` diverge).
+#[test]
+fn run_directory_target_executes_package_main() {
+    let outcome = run_directory_target(
+        &[
+            (
+                "pkg/package.json",
+                r#"{"name":"pkg","version":"1.0.0","main":"lib/start"}"#,
+            ),
+            ("pkg/lib/start.js", "console.log(\"from-main\");\n"),
+            ("pkg/index.js", "console.log(\"from-index\");\n"),
+        ],
+        "pkg",
+    );
+    assert_eq!(outcome.exit_code, Some(0), "stderr:\n{}", outcome.stderr);
+    assert_eq!(outcome.stdout, "from-main\n");
+}
+
+#[test]
+fn run_directory_target_falls_back_to_index_js() {
+    let outcome = run_directory_target(
+        &[
+            ("package.json", r#"{"name":"app","version":"1.0.0"}"#),
+            ("index.js", "console.log(\"from-index\");\n"),
+        ],
+        ".",
+    );
+    assert_eq!(outcome.exit_code, Some(0), "stderr:\n{}", outcome.stderr);
+    assert_eq!(outcome.stdout, "from-index\n");
+}
+
+#[test]
+fn run_directory_target_refuses_main_outside_the_package() {
+    let outcome = run_directory_target(
+        &[
+            (
+                "pkg/package.json",
+                r#"{"name":"pkg","version":"1.0.0","main":"../outside.js"}"#,
+            ),
+            ("outside.js", "console.log(\"escaped\");\n"),
+        ],
+        "pkg",
+    );
+    assert_ne!(outcome.exit_code, Some(0));
+    assert!(
+        !outcome.stdout.contains("escaped"),
+        "a main outside the package must never execute: {}",
+        outcome.stdout
+    );
+    assert!(
+        outcome.stderr.contains("must be a relative path inside"),
+        "the refusal must name the rule, got:\n{}",
+        outcome.stderr
+    );
+}
