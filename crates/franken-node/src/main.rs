@@ -6105,7 +6105,7 @@ fn emit_runtime_error_json(command: &str, message: &str) -> Result<()> {
 }
 
 fn runtime_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Result<()> {
-    let message = error.to_string();
+    let message = format!("{error:#}");
     if json {
         emit_runtime_error_json(command, &message)?;
         fail_closed_after_json();
@@ -7568,7 +7568,7 @@ fn emit_init_error_json(message: &str) -> Result<()> {
 }
 
 fn init_fail(json: bool, error: impl std::fmt::Display) -> Result<()> {
-    let message = error.to_string();
+    let message = format!("{error:#}");
     if json {
         emit_init_error_json(&message)?;
         fail_closed_after_json();
@@ -8498,7 +8498,7 @@ fn emit_ops_error_json(command: &str, message: &str) -> Result<()> {
 }
 
 fn ops_fail(command: &str, json: bool, error: anyhow::Error) -> Result<()> {
-    let message = error.to_string();
+    let message = format!("{error:#}");
     if json {
         emit_ops_error_json(command, &message)?;
         fail_closed_after_json();
@@ -8524,7 +8524,7 @@ fn emit_proofs_error_json(command: &str, message: &str) -> Result<()> {
 }
 
 fn proofs_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Result<()> {
-    let message = error.to_string();
+    let message = format!("{error:#}");
     if json {
         emit_proofs_error_json(command, &message)?;
         fail_closed_after_json();
@@ -10471,7 +10471,7 @@ fn emit_trust_error_json(command: &str, message: &str) -> Result<()> {
 }
 
 fn trust_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Result<()> {
-    let message = error.to_string();
+    let message = format!("{error:#}");
     if json {
         emit_trust_error_json(command, &message)?;
         fail_closed_after_json();
@@ -10493,7 +10493,7 @@ fn emit_trust_card_error_json(command: &str, message: &str) -> Result<()> {
 }
 
 fn trust_card_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Result<()> {
-    let message = error.to_string();
+    let message = format!("{error:#}");
     if json {
         emit_trust_card_error_json(command, &message)?;
         fail_closed_after_json();
@@ -16950,7 +16950,7 @@ fn emit_remotecap_error_json(command: &str, error: &str) -> Result<()> {
 }
 
 fn remotecap_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Result<()> {
-    let message = error.to_string();
+    let message = format!("{error:#}");
     if json {
         emit_remotecap_error_json(command, &message)?;
         fail_closed_after_json();
@@ -19062,7 +19062,7 @@ fn emit_ltv_error_json(command: &str, message: &str) -> Result<()> {
 }
 
 fn ltv_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Result<()> {
-    let message = error.to_string();
+    let message = format!("{error:#}");
     if json {
         emit_ltv_error_json(command, &message)?;
         fail_closed_after_json();
@@ -19496,7 +19496,9 @@ fn emit_incident_error_json(command: &str, error: &str) -> Result<()> {
 }
 
 fn incident_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Result<()> {
-    let message = error.to_string();
+    // `{:#}` renders an anyhow chain (context: cause) so the JSON report names
+    // the root cause, not only the outermost context.
+    let message = format!("{error:#}");
     if json {
         emit_incident_error_json(command, &message)?;
         fail_closed_after_json();
@@ -22087,7 +22089,7 @@ fn emit_registry_error_json(command: &str, message: &str) -> Result<()> {
 }
 
 fn registry_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Result<()> {
-    let message = error.to_string();
+    let message = format!("{error:#}");
     if json {
         emit_registry_error_json(command, &message)?;
         fail_closed_after_json();
@@ -22982,7 +22984,7 @@ fn emit_fleet_error_json(command: &str, message: &str) -> Result<()> {
 }
 
 fn fleet_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Result<()> {
-    let message = error.to_string();
+    let message = format!("{error:#}");
     if json {
         emit_fleet_error_json(command, &message)?;
         fail_closed_after_json();
@@ -25977,7 +25979,7 @@ fn emit_verify_release_error_json(message: &str) -> Result<()> {
 }
 
 fn verify_release_fail(json: bool, error: impl std::fmt::Display) -> Result<()> {
-    let message = error.to_string();
+    let message = format!("{error:#}");
     if json {
         emit_verify_release_error_json(&message)?;
         fail_closed_after_json();
@@ -25999,7 +26001,7 @@ fn emit_debug_error_json(command: &str, message: &str) -> Result<()> {
 }
 
 fn debug_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Result<()> {
-    let message = error.to_string();
+    let message = format!("{error:#}");
     if json {
         emit_debug_error_json(command, &message)?;
         fail_closed_after_json();
