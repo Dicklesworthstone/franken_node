@@ -73,14 +73,17 @@ fn conformance_strict_profile_config_values() {
     // Test RuntimeConfig mapping
     let runtime_config = EngineDispatcher::map_config_to_runtime_config_for_tests(&config);
 
-    // MUST: Conservative execution budgets for strict security
+    // MUST: Conservative (lowest of the three profiles) execution budgets that
+    // still admit ordinary programs. The former 50k budget aborted a trivial
+    // 20,000-iteration loop (bd-reality-20260923-26n9r.5); the wall-clock
+    // timeout is the primary runaway guard.
     assert_eq!(
-        runtime_config.execution.deterministic_budget, 50_000,
-        "Strict profile MUST use conservative deterministic_budget: 50,000"
+        runtime_config.execution.deterministic_budget, 200_000_000,
+        "Strict profile MUST use conservative deterministic_budget: 200,000,000"
     );
     assert_eq!(
-        runtime_config.execution.throughput_budget, 100_000,
-        "Strict profile MUST use lower throughput_budget: 100,000"
+        runtime_config.execution.throughput_budget, 200_000_000,
+        "Strict profile MUST use conservative throughput_budget: 200,000,000"
     );
     assert_eq!(
         runtime_config.execution.deterministic_max_registers, 128,
@@ -205,15 +208,21 @@ fn conformance_balanced_profile_config_values() {
     // Test RuntimeConfig mapping
     let runtime_config = EngineDispatcher::map_config_to_runtime_config_for_tests(&config);
 
-    // MUST: Use ExecutionConfig::default() for balanced profile
+    // MUST: Instruction budgets admit ordinary programs on the default
+    // profile (the engine's 100k default aborted trivial loops,
+    // bd-reality-20260923-26n9r.5); other execution limits stay at defaults.
     let default_execution = frankenengine_engine::runtime_config::ExecutionConfig::default();
     assert_eq!(
-        runtime_config.execution.deterministic_budget, default_execution.deterministic_budget,
-        "Balanced profile MUST use default deterministic_budget"
+        runtime_config.execution.deterministic_budget, 1_000_000_000,
+        "Balanced profile MUST use deterministic_budget: 1,000,000,000"
     );
     assert_eq!(
-        runtime_config.execution.throughput_budget, default_execution.throughput_budget,
-        "Balanced profile MUST use default throughput_budget"
+        runtime_config.execution.max_call_depth, default_execution.max_call_depth,
+        "Balanced profile MUST keep the default max_call_depth"
+    );
+    assert_eq!(
+        runtime_config.execution.throughput_budget, 1_000_000_000,
+        "Balanced profile MUST use throughput_budget: 1,000,000,000"
     );
     assert_eq!(
         runtime_config.execution.deterministic_max_registers,
@@ -308,12 +317,12 @@ fn conformance_legacy_risky_profile_config_values() {
 
     // MUST: High execution budgets for legacy compatibility
     assert_eq!(
-        runtime_config.execution.deterministic_budget, 1_000_000,
-        "LegacyRisky profile MUST use high deterministic_budget: 1,000,000"
+        runtime_config.execution.deterministic_budget, 5_000_000_000,
+        "LegacyRisky profile MUST use high deterministic_budget: 5,000,000,000"
     );
     assert_eq!(
-        runtime_config.execution.throughput_budget, 10_000_000,
-        "LegacyRisky profile MUST use maximum throughput_budget: 10,000,000"
+        runtime_config.execution.throughput_budget, 5_000_000_000,
+        "LegacyRisky profile MUST use maximum throughput_budget: 5,000,000,000"
     );
     assert_eq!(
         runtime_config.execution.deterministic_max_registers, 8192,

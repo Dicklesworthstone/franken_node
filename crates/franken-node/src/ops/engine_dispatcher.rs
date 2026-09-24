@@ -12,9 +12,7 @@ use crate::{
         configured_child_process_spawn_admission_in_active_containment,
         configured_child_process_spawn_admission_in_active_containment_from_authenticated_run_key,
     },
-    security::revocation_freshness::{
-        SafetyTier, evaluate_default_freshness, snapshot_age_secs_for_path,
-    },
+    security::revocation_freshness::{SafetyTier, registry_revocation_freshness_denial},
     supply_chain::trust_card::{SnapshotSourceContext, TrustCardRegistry},
 };
 use anyhow::{Context, Result};
@@ -4160,19 +4158,18 @@ impl EngineDispatcher {
         })?;
 
         // SECURITY: Re-validate trust state to close TOCTOU gap between preflight and execution (bd-zqz0q)
-        let project_root = app_path
-            .parent()
-            .and_then(|p| p.parent())
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
-        // bd-o776s: persistence moved to the durable frankensqlite sibling
-        // (trust_card_registry.db) in the w0fc6.3 authority switch; keying the
-        // existence/mtime checks on the legacy .json made this entire
-        // execution-time revalidation silently SKIP for durably persisted
-        // registries — the exact revoked-since-preflight window bd-zqz0q
-        // closes. The loader already prefers the durable store and falls back
-        // to legacy JSON, so only the gate conditions need store awareness.
-        let authoritative_registry = project_root.join(".state").join("trust_card_registry.json");
+        //
+        // bd-reality-20260923-26n9r.1: this recheck previously resolved
+        // `<app>/../../.state/trust_card_registry.json` — a location no command
+        // writes (and whose `parent().parent()` escapes the project) — so both
+        // the freshness recheck and the revoked-since-preflight re-read were
+        // silently skipped on every real workspace. Resolve the same
+        // authoritative registry as the run preflight instead.
+        let project_root = project_root_for_path(app_path).to_path_buf();
+        let authoritative_registry = project_root
+            .join(".franken-node")
+            .join("state")
+            .join("trust-card-registry.v1.json");
         let durable_authoritative =
             frankenengine_node::supply_chain::trust_card_registry_store::durable_store_path(
                 &authoritative_registry,
@@ -4180,23 +4177,23 @@ impl EngineDispatcher {
         let has_authoritative_state =
             durable_authoritative.is_file() || authoritative_registry.is_file();
 
-        if let Some(age) = snapshot_age_secs_for_path(&durable_authoritative, now_secs)
-            .or_else(|| snapshot_age_secs_for_path(&authoritative_registry, now_secs))
-        {
-            let tier = SafetyTier::for_policy_mode(policy_mode);
-            if let Err(err) = evaluate_default_freshness(
+        // Revocation freshness governs dependency trust decisions, exactly as
+        // the preflight scopes it: re-check it for the dependencies that the
+        // preflight trusted.
+        if !trusted_extension_ids.is_empty()
+            && let Some(detail) = registry_revocation_freshness_denial(
+                &authoritative_registry,
+                SafetyTier::for_policy_mode(policy_mode),
+                now_secs,
                 "dispatch-run",
-                tier,
-                age,
                 "trace-execution-revocation-freshness",
-                now_secs.to_string(),
-            ) {
-                return Err(ActionableError::new(
-                    format!("Revocation freshness gate denied execution: {err}"),
-                    "Refresh revocation data with `franken-node trust sync` before running under this profile",
-                )
-                .into());
-            }
+            )
+        {
+            return Err(ActionableError::new(
+                detail,
+                "franken-node trust sync --force",
+            )
+            .into());
         }
 
         if has_authoritative_state && !trusted_extension_ids.is_empty() {
@@ -6680,20 +6677,32 @@ impl EngineDispatcher {
             OrchestratorConfig as RuntimeOrchestratorConfig,
         };
 
-        // Map profile to execution budgets and limits
+        // Map profile to execution budgets and limits.
+        //
+        // Instruction budgets are a runaway backstop, not a workload shape:
+        // the wall-clock execution timeout (`FRANKEN_ENGINE_TIMEOUT_SECS`) is
+        // the primary guard. The previous 50k/100k/1M budgets aborted a trivial
+        // 20,000-iteration loop under the default profile
+        // (bd-reality-20260923-26n9r.5), so no real program could run. Every
+        // guest that touches a capability (any `console.log`) executes on the
+        // deterministic lane, so that budget must admit ordinary programs.
         let execution = match config.profile {
             Profile::Strict => ExecutionConfig {
-                deterministic_budget: 50_000,     // Conservative budget for strict mode
-                throughput_budget: 100_000,       // Lower throughput budget
+                deterministic_budget: 200_000_000,
+                throughput_budget: 200_000_000,
                 deterministic_max_registers: 128, // Reduced register count
                 throughput_max_registers: 256,    // Conservative register limit
                 max_call_depth: 32,               // Shallow call stack for safety
                 max_prototype_chain_depth: 8,     // Limited prototype depth
             },
-            Profile::Balanced => ExecutionConfig::default(), // Use standard defaults
+            Profile::Balanced => ExecutionConfig {
+                deterministic_budget: 1_000_000_000,
+                throughput_budget: 1_000_000_000,
+                ..ExecutionConfig::default()
+            },
             Profile::LegacyRisky => ExecutionConfig {
-                deterministic_budget: 1_000_000, // Higher budget for legacy compatibility
-                throughput_budget: 10_000_000,   // Maximum throughput for legacy apps
+                deterministic_budget: 5_000_000_000,
+                throughput_budget: 5_000_000_000,
                 deterministic_max_registers: 8192, // Generous register allocation
                 throughput_max_registers: 16384, // High register limit
                 max_call_depth: 128,             // Deep call stacks allowed
@@ -9192,25 +9201,25 @@ mod tests {
     fn test_dispatch_run_rejects_revoked_extension_toctou() {
         // Test that extension revoked between preflight and execution is rejected (bd-zqz0q)
         let tmp = TempDir::new().expect("tempdir");
-        // dispatch_run derives the trust registry root from app_path.parent().parent(),
-        // so the app must live two levels below the project root that holds `.state`.
+        // dispatch_run resolves the same authoritative registry as the run
+        // preflight: `<project root>/.franken-node/state/trust-card-registry.v1.*`
+        // where the project root is the app file's directory.
         let project_root = tmp.path();
-        let app_path = project_root.join("workspace").join("test-app");
-        fs::create_dir_all(app_path.parent().expect("app parent dir")).expect("create app dir");
+        let app_path = project_root.join("test-app");
         // bd-o776s: the app must be a directly executable FILE — dispatch_run
         // resolves directory inputs to an entrypoint (and fails before the
         // trust revalidation this test targets) when handed a bare directory.
         write_fake_executable(&app_path);
 
         // Create project structure for trust registry
-        let trust_dir = project_root.join(".state");
+        let trust_dir = project_root.join(".franken-node").join("state");
         fs::create_dir_all(&trust_dir).expect("create trust dir");
 
         // Create minimal trust registry with trusted extension. The registry must be
         // signed with the SAME key dispatch_run uses to load it: synthesize a config
         // signing key and build the registry from that config so create/persist and
         // the later load_authoritative_state_from_config agree on the HMAC key.
-        let registry_path = trust_dir.join("trust_card_registry.json");
+        let registry_path = trust_dir.join("trust-card-registry.v1.json");
         let mut config = Config::default();
         config.synthesize_init_security_defaults();
         // bd-o776s: use wall-clock time. With the historical fixed epoch
@@ -9281,6 +9290,14 @@ mod tests {
         registry
             .persist_authoritative_state(&registry_path)
             .expect("persist registry");
+        // A fresh revocation frontier (what `trust sync --force` records) so the
+        // execution-time freshness recheck admits the trusted dependency and
+        // the TOCTOU revocation re-read is the check under test.
+        crate::supply_chain::trust_card_registry_store::record_revocation_frontier(
+            &registry_path,
+            now_secs,
+        )
+        .expect("record revocation frontier");
 
         // Create dispatcher
         let dispatcher =
