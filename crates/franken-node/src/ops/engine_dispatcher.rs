@@ -2226,21 +2226,16 @@ impl<P: HostIoProvider> WriteAheadHostIo<P> {
     fn new(inner: P, emitter: Option<NativeEffectWalEmitter>) -> Self {
         Self { inner, emitter }
     }
-}
 
-#[cfg(feature = "engine")]
-impl<P: HostIoProvider> HostIoProvider for WriteAheadHostIo<P> {
-    fn name(&self) -> &str {
-        "native-write-ahead-host-io"
-    }
-
-    fn filesystem_exception_provenance(&self) -> HostIoExceptionProvenance {
-        self.inner.filesystem_exception_provenance()
-    }
-
-    fn perform(&self, request: &HostIoRequest, granted: &[HostIoCapability]) -> HostIoOutcome {
+    /// Admit `request` to the WAL, run `execute` (any of the wrapped
+    /// provider's entries), then record completion.
+    fn write_ahead(
+        &self,
+        request: &HostIoRequest,
+        execute: impl FnOnce() -> HostIoOutcome,
+    ) -> HostIoOutcome {
         let Some(emitter) = self.emitter.as_ref() else {
-            return self.inner.perform(request, granted);
+            return execute();
         };
         let sequence = match emitter.admit(request) {
             Ok(sequence) => sequence,
@@ -2252,7 +2247,7 @@ impl<P: HostIoProvider> HostIoProvider for WriteAheadHostIo<P> {
                 });
             }
         };
-        let outcome = self.inner.perform(request, granted);
+        let outcome = execute();
         if let Err(error) = emitter.complete(sequence) {
             // The provider may already have changed external state. Preserve its
             // real outcome for the finalized ledger; if the session is killed
@@ -2266,6 +2261,32 @@ impl<P: HostIoProvider> HostIoProvider for WriteAheadHostIo<P> {
             );
         }
         outcome
+    }
+}
+
+#[cfg(feature = "engine")]
+impl<P: HostIoProvider> HostIoProvider for WriteAheadHostIo<P> {
+    fn name(&self) -> &str {
+        "native-write-ahead-host-io"
+    }
+
+    fn filesystem_exception_provenance(&self) -> HostIoExceptionProvenance {
+        self.inner.filesystem_exception_provenance()
+    }
+
+    fn perform(&self, request: &HostIoRequest, granted: &[HostIoCapability]) -> HostIoOutcome {
+        self.write_ahead(request, || self.inner.perform(request, granted))
+    }
+
+    fn perform_controlled(
+        &self,
+        request: &HostIoRequest,
+        granted: &[HostIoCapability],
+        control: Arc<dyn frankenengine_extension_host::host_io::HostIoControl>,
+    ) -> HostIoOutcome {
+        self.write_ahead(request, || {
+            self.inner.perform_controlled(request, granted, control)
+        })
     }
 }
 
@@ -2288,33 +2309,10 @@ impl<P: crate::ops::ssrf_gated_host_io::PinnedNetworkProvider>
         destination: std::net::SocketAddr,
         deadline: std::time::Instant,
     ) -> HostIoOutcome {
-        let Some(emitter) = self.emitter.as_ref() else {
-            return self
-                .inner
-                .perform_pinned_network(request, granted, destination, deadline);
-        };
-        let sequence = match emitter.admit(request) {
-            Ok(sequence) => sequence,
-            Err(error) => {
-                return Err(HostIoError::Denied {
-                    reason: format!(
-                        "native host effect refused before execution because write-ahead admission failed: {error}"
-                    ),
-                });
-            }
-        };
-        let outcome = self
-            .inner
-            .perform_pinned_network(request, granted, destination, deadline);
-        if let Err(error) = emitter.complete(sequence) {
-            tracing::error!(
-                effect_sequence = sequence,
-                effect_kind = request.kind(),
-                error = %error,
-                "Native host effect returned but its WAL completion marker failed"
-            );
-        }
-        outcome
+        self.write_ahead(request, || {
+            self.inner
+                .perform_pinned_network(request, granted, destination, deadline)
+        })
     }
 
     fn perform_pinned_network_candidates(
@@ -2324,33 +2322,29 @@ impl<P: crate::ops::ssrf_gated_host_io::PinnedNetworkProvider>
         destinations: &[std::net::SocketAddr],
         deadline: std::time::Instant,
     ) -> HostIoOutcome {
-        let Some(emitter) = self.emitter.as_ref() else {
-            return self
-                .inner
-                .perform_pinned_network_candidates(request, granted, destinations, deadline);
-        };
-        let sequence = match emitter.admit(request) {
-            Ok(sequence) => sequence,
-            Err(error) => {
-                return Err(HostIoError::Denied {
-                    reason: format!(
-                        "native host effect refused before execution because write-ahead admission failed: {error}"
-                    ),
-                });
-            }
-        };
-        let outcome = self
-            .inner
-            .perform_pinned_network_candidates(request, granted, destinations, deadline);
-        if let Err(error) = emitter.complete(sequence) {
-            tracing::error!(
-                effect_sequence = sequence,
-                effect_kind = request.kind(),
-                error = %error,
-                "Native host effect returned but its WAL completion marker failed"
-            );
-        }
-        outcome
+        self.write_ahead(request, || {
+            self.inner
+                .perform_pinned_network_candidates(request, granted, destinations, deadline)
+        })
+    }
+
+    fn perform_pinned_network_candidates_controlled(
+        &self,
+        request: &HostIoRequest,
+        granted: &[HostIoCapability],
+        destinations: &[std::net::SocketAddr],
+        deadline: std::time::Instant,
+        control: Arc<dyn frankenengine_extension_host::host_io::HostIoControl>,
+    ) -> HostIoOutcome {
+        self.write_ahead(request, || {
+            self.inner.perform_pinned_network_candidates_controlled(
+                request,
+                granted,
+                destinations,
+                deadline,
+                control,
+            )
+        })
     }
 }
 
@@ -2431,20 +2425,40 @@ impl HostIoProvider for CancellationGatedHostIo {
     }
 
     fn perform(&self, request: &HostIoRequest, granted: &[HostIoCapability]) -> HostIoOutcome {
-        let _effect_guard = match self.cancellation.effect_gate.lock() {
-            Ok(guard) => guard,
-            Err(_) => {
-                return Err(HostIoError::Denied {
+        let _effect_guard = self.admit()?;
+        self.inner.perform(request, granted)
+    }
+
+    /// The engine's supervised entry: same admission, control forwarded.
+    fn perform_controlled(
+        &self,
+        request: &HostIoRequest,
+        granted: &[HostIoCapability],
+        control: Arc<dyn frankenengine_extension_host::host_io::HostIoControl>,
+    ) -> HostIoOutcome {
+        let _effect_guard = self.admit()?;
+        self.inner.perform_controlled(request, granted, control)
+    }
+}
+
+#[cfg(feature = "engine")]
+impl CancellationGatedHostIo {
+    /// Hold the effect gate for the duration of one effect; refuse once the
+    /// run is cancelled.
+    fn admit(&self) -> std::result::Result<std::sync::MutexGuard<'_, ()>, HostIoError> {
+        let effect_guard =
+            self.cancellation
+                .effect_gate
+                .lock()
+                .map_err(|_| HostIoError::Denied {
                     reason: "native engine effect gate is poisoned".to_string(),
-                });
-            }
-        };
+                })?;
         if self.cancellation.token.is_cancelled() {
             return Err(HostIoError::Denied {
                 reason: "native engine execution was cancelled".to_string(),
             });
         }
-        self.inner.perform(request, granted)
+        Ok(effect_guard)
     }
 }
 
