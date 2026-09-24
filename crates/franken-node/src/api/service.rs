@@ -2784,7 +2784,7 @@ pub mod http_server {
     fn now_unix_secs() -> u64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| u64::try_from(duration.as_secs()).unwrap_or(u64::MAX))
+            .map(|duration| duration.as_secs())
             .unwrap_or(0)
     }
 

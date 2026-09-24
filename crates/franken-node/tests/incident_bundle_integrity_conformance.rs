@@ -382,9 +382,17 @@ fn incident_bundle_integrity_conformance_rejects_future_dated_promotion_input() 
         "future-dated promotion input must fail closed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    // With --json, operator failures are a schema-versioned JSON report on
+    // stdout followed by a fail-closed exit (67fc9dfe5), not stderr text.
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("--json failure must be a JSON report");
+    assert_eq!(
+        report["schema_version"].as_str(),
+        Some("franken-node/incident-error-cli/v1")
+    );
+    let error = report["error"].as_str().unwrap_or_default();
     assert!(
-        stderr.contains("replay bundle timestamp") && stderr.contains("in the future"),
-        "unexpected stderr: {stderr}"
+        error.contains("replay bundle timestamp") && error.contains("in the future"),
+        "unexpected error report: {report}"
     );
 }
