@@ -1,7 +1,7 @@
 {
   "schema_version": "franken-node/verifier-sdk-independence-evidence/v1",
   "bead_id": "bd-tenx3.5",
-  "timestamp_utc": "2026-09-22T18:33:23.308275+00:00",
+  "timestamp_utc": "2026-09-24T16:06:13.569949+00:00",
   "all_passed": true,
   "verdict": "PASS",
   "checks": [

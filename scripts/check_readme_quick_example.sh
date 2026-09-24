@@ -147,7 +147,9 @@ fi
 # Check 5: registry publish --help must not panic
 # ---------------------------------------------------------------------------
 echo "[5] registry publish --help (must not panic)"
-if pub_help="$("$BIN" registry publish --help 2>&1)" && grep -q "Publish signed extension artifact" <<<"$pub_help"; then
+# Match clap's usage line, which only renders on a successful help build; the
+# subcommand's prose description is editorial and changes.
+if pub_help="$("$BIN" registry publish --help 2>&1)" && grep -q "^Usage: .*registry publish" <<<"$pub_help"; then
   record PASS "registry publish --help renders without panic"
 else
   echo "  registry publish --help output: $pub_help" >&2

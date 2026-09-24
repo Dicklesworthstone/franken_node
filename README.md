@@ -383,8 +383,9 @@ franken-node verify release ./release-dir --key-dir ./trusted-public-keys
    closed. Issuing that token is itself gated on a frontier recorded within
    the last 5 minutes, so in a fresh workspace run `trust sync --force` once
    before `remotecap issue` (an empty registry syncs without network access).
-   Under `balanced`/`strict`, `run` admits a tracked dependency only if the
-   recorded frontier is fresh.
+   Under `strict`, `run` admits a tracked dependency only if the recorded
+   frontier is under 5 minutes old; `balanced` warns once it is over an hour
+   old or missing.
 4. **Compare the default Bun+franken dyad (not the L1 Node spec):**
    ```bash
    franken-node verify lockstep ./my-app --runtimes bun,franken-node
@@ -1333,10 +1334,16 @@ fresher than `policy.max_age_for(tier)`?
   A missing frontier counts as stale.
 - `run` applies the gate when it admits a dependency on the strength of
   its trust card, both at preflight and again at execution time (TOCTOU
-  recheck). `strict` maps to Dangerous (5 min) and `balanced` to Risky
-  (1 h). `legacy-risky` is Standard, with no age floor.
+  recheck). `strict` maps to Dangerous (5 min) and refuses a stale or
+  missing frontier (`revocation_stale`). `balanced` maps to Risky (1 h) and
+  admits with a preflight warning instead. `legacy-risky` is Standard, with
+  no age floor.
 - Declared dependencies with no trust registry at all block `run` under
   `strict`/`balanced` (`registry_missing`); `legacy-risky` warns.
+- A dependency whose trust card is High or Critical risk (known advisories
+  from `trust sync`/`trust scan --audit`, or a suspected typosquat) blocks
+  `run` under `strict` (`high_risk`). `balanced` admits it with a preflight
+  warning.
 - `remotecap issue` is always Dangerous: it needs a frontier recorded within
   the last 5 minutes in the working directory's registry. The local
   revoked-token list (`remotecap revoke`) is authoritative and is not
@@ -1781,7 +1788,7 @@ the defense:
 |---|---|---|
 | Supply-chain forgery | Adversary publishes a same-named artifact with a tampered binary | Registry requires Ed25519 signature; `registry verify` recomputes the artifact hash and verifies the signature in constant time |
 | Dependency poisoning | Compromised transitive npm dep ships a malicious payload | OSV refresh on `trust sync`; revocation freshness gates fail closed for risky actions when the frontier is stale |
-| Typosquatting | Adversary publishes `discrod`, `lodash-cli-tool` | DGIS contagion simulator + camouflage assessment raise the card's risk class; balanced/strict profiles refuse to admit high-risk extensions |
+| Typosquatting | Adversary publishes `lodahs`, `@evil/express` | `trust scan` compares each dependency against a pinned list of popular npm names (one edit away, scope or separator confusion, look-alike characters) and raises a match to High risk with the reason on the card. `run` under `strict` refuses High/Critical dependencies (`high_risk`); `balanced` admits them with a preflight warning; `legacy-risky` ignores risk. The seed list is small and curated, so a typosquat of an unlisted package is not caught. |
 | Revocation race | Adversary issues a sensitive action between revocation publication and local cache refresh | `risky_requires_fresh_revocation = true` + `dangerous_requires_fresh_revocation = true` block actions whose tier requires fresher state |
 | State divergence / fork attack | Adversary feeds two nodes inconsistent control-plane state | Fork detection state vectors; rollback proofs; `RollbackDetected` and `Forked` outcomes gate subsequent decisions |
 | Replay attack on tokens | Adversary re-uses a captured audience token | Bounded nonce window + `now >= expires_at` fail-closed + constant-time signature verification |
@@ -3211,7 +3218,7 @@ fn audit(bundle_path: &std::path::Path, trusted_signer: &VerifyingKey) -> anyhow
 | Symptom | Cause | Fix |
 |---|---|---|
 | `lockstep validation failed` | Behavior delta across runtimes | `franken-node verify lockstep ./my-app --emit-fixtures` and inspect generated divergence fixtures. |
-| `revocation freshness gate denied …` | A dependency is being admitted on the strength of its trust card, or a capability is being issued (`remotecap issue`, always 5 minutes), but the registry's recorded revocation frontier is older than allowed (strict: 5 minutes, balanced: 1 hour; legacy-risky has no floor) or was never recorded | `franken-node trust sync --force`. Only a forced refresh in which every trust signal was fetched without network errors records a new frontier; cached answers do not. The frontier is stored in the durable trust registry, not inferred from file timestamps. |
+| `revocation freshness gate denied …` | Under `strict`, a dependency is being admitted on the strength of its trust card, or a capability is being issued (`remotecap issue`, always 5 minutes), but the registry's recorded revocation frontier is more than 5 minutes old or was never recorded. Under `balanced` the same text appears as a preflight warning (1-hour window) and the run proceeds | `franken-node trust sync --force`. Only a forced refresh in which every trust signal was fetched without network errors records a new frontier; cached answers do not. The frontier is stored in the durable trust registry, not inferred from file timestamps. |
 | `artifact rejected: missing attestation` | Registry policy requires provenance proofs | Rebuild artifact with provenance metadata and re-sign before `registry publish`. |
 | `quarantine not converged` | One or more nodes did not apply the control action in time | `franken-node fleet status --verbose`, then `franken-node fleet reconcile`. Re-check the convergence timeout in `[fleet]`. |
 | `incident replay refused: no trust anchor` | `--trusted-public-key` / `--key-dir` missing on `incident replay` or `incident counterfactual` | Supply an Ed25519 trust anchor; no built-in trust roots exist. |
