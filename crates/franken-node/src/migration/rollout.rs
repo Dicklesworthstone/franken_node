@@ -151,9 +151,9 @@ impl RolloutState {
         hasher.update(self.migration_id.as_bytes());
         hasher.update(self.current_stage.as_str().as_bytes());
         hasher.update(self.status.as_str().as_bytes());
-        hasher.update(&[self.ramp_pct]);
-        hasher.update(&self.confidence_score.to_le_bytes());
-        hasher.update(&[if self.lockstep_verified { 1 } else { 0 }]);
+        hasher.update([self.ramp_pct]);
+        hasher.update(self.confidence_score.to_le_bytes());
+        hasher.update([u8::from(self.lockstep_verified)]);
         hex::encode(hasher.finalize())
     }
 }
@@ -206,9 +206,19 @@ impl RolloutReport {
         writeln!(out, "Migration Rollout Status").unwrap();
         writeln!(out, "  Migration ID:       {}", self.migration_id).unwrap();
         writeln!(out, "  Project:            {}", self.project_path).unwrap();
-        writeln!(out, "  Stage:              {} ({})", self.stage, self.status).unwrap();
+        writeln!(
+            out,
+            "  Stage:              {} ({})",
+            self.stage, self.status
+        )
+        .unwrap();
         writeln!(out, "  Progress:           {}", bar).unwrap();
-        writeln!(out, "  Confidence Score:   {:.2}%", self.confidence_score * 100.0).unwrap();
+        writeln!(
+            out,
+            "  Confidence Score:   {:.2}%",
+            self.confidence_score * 100.0
+        )
+        .unwrap();
         writeln!(out, "  Lockstep Verified:  {}", self.lockstep_verified).unwrap();
         writeln!(out, "  Rollback Triggered: {}", self.rollback_triggered).unwrap();
         writeln!(out, "  Summary:            {}", self.message).unwrap();
@@ -331,7 +341,10 @@ pub struct RolloutManager {
 
 impl RolloutManager {
     pub fn new(project_path: &Path, migration_id: Option<&str>) -> Self {
-        let state_dir = project_path.join(".franken-node").join("state").join("rollout");
+        let state_dir = project_path
+            .join(".franken-node")
+            .join("state")
+            .join("rollout");
         let id = migration_id
             .map(|s| s.to_string())
             .unwrap_or_else(|| Self::discover_or_generate_id(project_path));
@@ -387,12 +400,8 @@ impl RolloutManager {
         let path = self.state_file_path();
         let tmp_path = self.state_dir.join(format!("{}.tmp", self.migration_id));
 
-        let json = serde_json::to_string_pretty(state).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("failed serializing rollout state: {e}"),
-            )
-        })?;
+        let json = serde_json::to_string_pretty(state)
+            .map_err(|e| io::Error::other(format!("failed serializing rollout state: {e}")))?;
 
         {
             let mut file = File::create(&tmp_path)?;
@@ -441,7 +450,7 @@ impl RolloutManager {
         }
 
         let from_stage = state.current_stage;
-        let next_stage = target_stage.unwrap_or_else(|| match from_stage {
+        let next_stage = target_stage.unwrap_or(match from_stage {
             RolloutStage::Shadow => RolloutStage::Canary,
             RolloutStage::Canary => RolloutStage::Ramp,
             RolloutStage::Ramp => {
@@ -650,7 +659,11 @@ mod tests {
         outputs.insert("node".to_string(), b"hello\n".to_vec());
         outputs.insert(
             "franken-node".to_string(),
-            if diverge { b"goodbye\n".to_vec() } else { b"hello\n".to_vec() },
+            if diverge {
+                b"goodbye\n".to_vec()
+            } else {
+                b"hello\n".to_vec()
+            },
         );
         let check = oracle
             .run_cross_check("check-1", BoundaryScope::IO, input, &outputs)
@@ -668,7 +681,11 @@ mod tests {
             );
         }
         let report = oracle.generate_report(0);
-        let path = dir.join(if diverge { "lockstep-diverged.json" } else { "lockstep.json" });
+        let path = dir.join(if diverge {
+            "lockstep-diverged.json"
+        } else {
+            "lockstep.json"
+        });
         fs::write(&path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
         path
     }
@@ -684,9 +701,14 @@ mod tests {
         let dir = tempdir().unwrap();
         project_with_manifest(dir.path());
         let mgr = RolloutManager::new(dir.path(), Some("mig-evidence-01"));
-        let err = mgr.promote(&RolloutConfig::default(), None, None).unwrap_err();
+        let err = mgr
+            .promote(&RolloutConfig::default(), None, None)
+            .unwrap_err();
         assert!(err.contains("requires lockstep evidence"), "{err}");
-        assert_eq!(mgr.load_or_init().unwrap().current_stage, RolloutStage::Shadow);
+        assert_eq!(
+            mgr.load_or_init().unwrap().current_stage,
+            RolloutStage::Shadow
+        );
     }
 
     #[test]
@@ -696,12 +718,18 @@ mod tests {
         let mgr = RolloutManager::new(dir.path(), Some("mig-evidence-02"));
 
         let diverged = write_lockstep_report(dir.path(), &manifest, true);
-        let cfg = RolloutConfig { lockstep_report: Some(diverged), ..RolloutConfig::default() };
+        let cfg = RolloutConfig {
+            lockstep_report: Some(diverged),
+            ..RolloutConfig::default()
+        };
         let err = mgr.promote(&cfg, None, None).unwrap_err();
         assert!(err.contains("not Pass"), "{err}");
 
         let foreign = write_lockstep_report(dir.path(), b"{\"name\":\"other-project\"}", false);
-        let cfg = RolloutConfig { lockstep_report: Some(foreign), ..RolloutConfig::default() };
+        let cfg = RolloutConfig {
+            lockstep_report: Some(foreign),
+            ..RolloutConfig::default()
+        };
         let err = mgr.promote(&cfg, None, None).unwrap_err();
         assert!(err.contains("different input"), "{err}");
         assert!(!mgr.load_or_init().unwrap().lockstep_verified);
@@ -712,7 +740,10 @@ mod tests {
         let dir = tempdir().unwrap();
         project_with_manifest(dir.path());
         let mgr = RolloutManager::new(dir.path(), Some("mig-evidence-03"));
-        let cfg = RolloutConfig { force: true, ..RolloutConfig::default() };
+        let cfg = RolloutConfig {
+            force: true,
+            ..RolloutConfig::default()
+        };
         let report = mgr.promote(&cfg, None, None).unwrap();
         assert_eq!(report.stage, RolloutStage::Canary);
         assert!(!report.lockstep_verified);
@@ -760,7 +791,9 @@ mod tests {
         assert_eq!(rep3.ramp_pct, 55);
 
         // 4. Promote Ramp with explicit 100%
-        let rep4 = mgr.promote(&cfg, Some(RolloutStage::Ramp), Some(100)).unwrap();
+        let rep4 = mgr
+            .promote(&cfg, Some(RolloutStage::Ramp), Some(100))
+            .unwrap();
         assert_eq!(rep4.stage, RolloutStage::Ramp);
         assert_eq!(rep4.ramp_pct, 100);
 
@@ -777,7 +810,9 @@ mod tests {
         let mgr = RolloutManager::new(dir.path(), Some("mig-test-03"));
         let cfg = RolloutConfig::default();
 
-        let err = mgr.promote(&cfg, Some(RolloutStage::Default), None).unwrap_err();
+        let err = mgr
+            .promote(&cfg, Some(RolloutStage::Default), None)
+            .unwrap_err();
         assert!(err.contains("cannot skip from Shadow directly to Default"));
     }
 

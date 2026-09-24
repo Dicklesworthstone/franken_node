@@ -21,15 +21,18 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def resolve_binary() -> Path:
-    if "CARGO_BIN_EXE_franken-node" in os.environ:
-        return Path(os.environ["CARGO_BIN_EXE_franken-node"])
-    debug = ROOT / "target" / "debug" / "franken-node"
-    if debug.is_file():
-        return debug
-    release = ROOT / "target" / "release" / "franken-node"
-    if release.is_file():
-        return release
-    return debug
+    for var in ("FRANKEN_NODE_BIN", "CARGO_BIN_EXE_franken-node"):
+        if os.environ.get(var):
+            return Path(os.environ[var])
+    target_roots = [ROOT / "target"]
+    if os.environ.get("CARGO_TARGET_DIR"):
+        target_roots.insert(0, Path(os.environ["CARGO_TARGET_DIR"]))
+    for root in target_roots:
+        for profile in ("debug", "release"):
+            candidate = root / profile / "franken-node"
+            if candidate.is_file():
+                return candidate
+    return ROOT / "target" / "debug" / "franken-node"
 
 
 class TestMigrationRollout(unittest.TestCase):
@@ -84,14 +87,23 @@ class TestMigrationRollout(unittest.TestCase):
         self.assertEqual(data["stage"], "shadow")
         self.assertEqual(data["ramp_pct"], 0)
 
-        # 2. Promote Shadow -> Canary
+        # 2a. Leaving Shadow without lockstep evidence fails closed.
         proc = self.run_rollout([proj, "--action", "promote", "--json"])
+        self.assertNotEqual(proc.returncode, 0)
+        data = json.loads(proc.stdout)
+        self.assertFalse(data.get("ok", True))
+        self.assertIn("requires lockstep evidence", data.get("error", ""))
+
+        # 2b. A forced promotion proceeds but never claims lockstep verification
+        # (bd-reality-20260923-26n9r.16: the flag was previously hard-coded true).
+        proc = self.run_rollout([proj, "--action", "promote", "--force", "--json"])
         self.assertEqual(proc.returncode, 0, msg=proc.stderr)
         data = json.loads(proc.stdout)
         self.assertTrue(data["ok"])
         self.assertEqual(data["stage"], "canary")
         self.assertEqual(data["ramp_pct"], 5)
-        self.assertTrue(data["lockstep_verified"])
+        self.assertFalse(data["lockstep_verified"])
+        self.assertIn("forced without lockstep evidence", data["message"])
 
         # 3. Promote Canary -> Ramp
         proc = self.run_rollout([proj, "--action", "promote", "--json"])
@@ -135,8 +147,8 @@ class TestMigrationRollout(unittest.TestCase):
 
         proj = str(self.project_path)
 
-        # Promote to Canary first
-        self.run_rollout([proj, "--action", "promote", "--json"])
+        # Promote to Canary first (forced: no lockstep evidence in this test)
+        self.run_rollout([proj, "--action", "promote", "--force", "--json"])
 
         # Execute Rollback
         proc = self.run_rollout([proj, "--action", "rollback", "--json"])
