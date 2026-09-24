@@ -128,12 +128,36 @@ def test_check_policy_doc_exists():
     assert result["status"] == "PASS"
 
 
-def test_check_claims_have_artifacts_empty_registry():
-    from check_claim_language import check_claims_have_artifacts
-    result = check_claims_have_artifacts()
+def test_check_claims_have_artifacts_empty_registry(tmp_path, monkeypatch):
+    import check_claim_language
+    registry = tmp_path / "CLAIMS_REGISTRY.md"
+    registry.write_text("# Claims Registry\n\n## Registered Claims\n")
+    monkeypatch.setattr(check_claim_language, "REGISTRY_PATH", registry)
+    result = check_claim_language.check_claims_have_artifacts()
     # With no active claims, there's nothing to fail
     assert result["status"] == "PASS"
     assert result["details"]["claim_count"] == 0
+
+
+def test_artifact_paths_documented_code_span_form():
+    from check_claim_language import _extract_evidence_field, artifact_paths
+    block = (
+        "- **Evidence artifact**: `crates/a/src/x.rs` (`fn helper`);\n"
+        "  `sdk/v/src/lib.rs::verify`, `crates/a/tests/t.rs:12-40`,\n"
+        "  `.franken-node/state/incidents/<id>/`, `cargo test -p x`\n"
+        "- **Verification command**: `cargo test`\n"
+    )
+    value = _extract_evidence_field(block)
+    assert artifact_paths(value) == [
+        "crates/a/src/x.rs",
+        "sdk/v/src/lib.rs",
+        "crates/a/tests/t.rs",
+    ]
+
+
+def test_prose_only_evidence_cites_no_path():
+    from check_claim_language import artifact_paths
+    assert artifact_paths("60+ files per memory; grep `rg -n 'x' src/`") == []
 
 
 def test_claim_language_checker_e2e_json_passes():

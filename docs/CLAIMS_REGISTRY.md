@@ -93,23 +93,27 @@ Each claim entry uses this structure:
 - **Claim**: franken-node achieves ≥10× reduction in successful host
   compromise vs. baseline runtimes, measured via adversarial extension
   campaigns on an instrumented test harness.
-- **Evidence artifact**: `artifacts/security/compromise_reduction.json`
-  (target path; not yet emitted)
+- **Evidence artifact**: `artifacts/adversarial/compromise_reduction_v2.json`,
+  `artifacts/13/compromise_reduction_report.json`,
+  `crates/franken-node/tests/compromise_reduction_baseline_bench.rs`
+  (all three are invalid as a measurement; see Notes)
 - **Verification command**:
   `cargo test -p frankenengine-node --test 'adversarial_*' --release` then
   aggregate via the harness in
   `tests/security/exfiltration_sentinel_scenarios.rs`
 - **Last verified**: 2026-05-20T00:00:00Z (registry backfill)
 - **Status**: pending
-- **Notes**: Adversarial test suites that back this claim are real.
-  `artifacts/13/compromise_reduction_report.json` and
-  `artifacts/adversarial/compromise_reduction_v2.json` currently record
-  `baseline_attempts=20` vs `franken_attempts=10`. That is not an
-  equal-attempts 10× measurement. `scripts/check_compromise_reduction_gate.py`
-  now fails closed on unequal attempts (`INV-CRG-EQUAL-ATTEMPTS`,
-  bd-3cpa / this session). Do not treat the 20.0× v2 ratio as a verified
-  claim until baseline and franken-node run the same payloads the same
-  number of times.
+- **Notes**: The v2 bench's franken leg never executes the payload
+  (bd-reality-20260923-26n9r.3). It pre-installs a revoked trust card for the
+  dependency and runs `run .` (a directory, which the runtime could not run
+  until 2026-09-24). So every franken case was refused or errored before
+  guest code ran: all 20 recorded exit 1 with no typed error. The 20.0× ratio
+  therefore measures "an app whose dependency is already known-revoked is
+  refused", not containment of an executing payload.
+  `scripts/check_compromise_reduction_gate.py` also pins the exact values
+  20/0/20.0 in the bench source. The claim stays unmeasured until the
+  campaign runs each payload under each profile with a positive control
+  proving guest code executed.
 
 ### CLAIM-004: 100% deterministic replay for high-severity incidents
 
@@ -118,8 +122,8 @@ Each claim entry uses this structure:
 - **Claim**: Every high-severity incident has a full replay bundle
   (`.fnbundle`) such that any operator can replay it byte-for-byte.
 - **Evidence artifact**:
-  `tests/conformance/replay_bundle_integrity_conformance.rs`,
-  `tests/conformance/incident_bundle_integrity_conformance.rs`,
+  `crates/franken-node/tests/replay_bundle_integrity_conformance.rs`,
+  `crates/franken-node/tests/incident_bundle_integrity_conformance.rs`,
   per-incident bundles under `.franken-node/state/incidents/<id>/`
 - **Verification command**:
   `franken-node incident bundle --id INC-<n> --verify` then
@@ -195,7 +199,7 @@ Each claim entry uses this structure:
   decisions, blocked actions, and evidence.
 - **Evidence artifact**: `crates/franken-node/src/replay/time_travel_engine.rs`,
   `crates/franken-node/src/tools/counterfactual_replay.rs`,
-  `tests/incident_replay_counterfactual_cli_e2e.rs`
+  `crates/franken-node/tests/incident_replay_counterfactual_cli_e2e.rs`
 - **Verification command**:
   `franken-node incident counterfactual --bundle <b> --trusted-public-key <k> --policy strict --json`
 - **Last verified**: 2026-05-20T00:00:00Z (registry backfill)
@@ -216,7 +220,7 @@ Each claim entry uses this structure:
   signed divergence receipts when behavior diverges.
 - **Evidence artifact**: `crates/franken-node/src/runtime/lockstep_harness.rs`,
   `crates/franken-node/src/api/compat_gate.rs`,
-  `tests/conformance/lockstep_*` (see `.github/workflows/lockstep-runner-release-gate.yml`)
+  `crates/franken-node/tests/compat_lockstep_oracle_conformance.rs` (see `.github/workflows/lockstep-runner-release-gate.yml`)
 - **Verification command**:
   `franken-node verify lockstep <project> --runtimes node,bun,franken-node --emit-fixtures`
 - **Last verified**: 2026-05-20T00:00:00Z (registry backfill)
@@ -232,7 +236,7 @@ Each claim entry uses this structure:
   (Ed25519); admission enforces signature + provenance + `minimum_assurance_level`.
 - **Evidence artifact**: `crates/franken-node/src/registry/`,
   `crates/franken-node/src/extensions/artifact_contract.rs`,
-  `tests/registry_cli_wire_conformance.rs`
+  `crates/franken-node/tests/registry_cli_wire_conformance.rs`
 - **Verification command**:
   `franken-node registry publish ./dist --version 1.0.0 --signing-key <k> --json && franken-node registry verify npm:@example/plugin`
 - **Last verified**: 2026-05-20T22:00:00Z (CLI panic fixed in bridge plan;
@@ -327,12 +331,18 @@ Each claim entry uses this structure:
 - **Source**: README.md L2318-2320 "Security Posture"
 - **Claim**: All counter, sequence, epoch, and timestamp arithmetic uses
   `saturating_add` / `saturating_sub` to defeat overflow-based bypass.
-- **Evidence artifact**: 60+ files modified per memory record; codebase-wide
-  grep `rg -n 'saturating_(add|sub)' crates/franken-node/src/`
+- **Evidence artifact**: `crates/franken-node/src/` (2,502
+  `saturating_add`/`saturating_sub` uses across 325 files, counted
+  2026-09-24)
 - **Verification command**:
   `rg -n '(?<![a-zA-Z_])([+\-]=\s*1|\\.\\s*[\\w]+\\s*[+\\-]\\s*1)' crates/franken-node/src/` (regression: any naked `+= 1` on a counter is a candidate finding)
-- **Last verified**: 2026-05-20T00:00:00Z (registry backfill)
-- **Status**: verified
+- **Last verified**: 2026-09-24 (usage count only)
+- **Status**: pending
+- **Notes**: Downgraded from "verified". The earlier evidence was "60+ files
+  modified per memory record", and no gate checks "every" counter: the
+  verification command lists candidates, but nothing fails on a naked
+  `+= 1`. Saturating arithmetic is widespread, but "all" is not
+  demonstrated.
 
 ### CLAIM-015: ~23,000 `#[test]` cases across the workspace
 

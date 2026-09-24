@@ -53,7 +53,7 @@ def parse_claims(text: str) -> list[dict]:
             "title": title,
             "category": _extract_field(block, "Category"),
             "claim_text": _extract_field(block, "Claim"),
-            "evidence_artifacts": _extract_field(block, "Evidence artifacts"),
+            "evidence_artifacts": _extract_evidence_field(block),
             "verification_command": _extract_field(block, "Verification command"),
             "last_verified": _extract_field(block, "Last verified"),
             "status": _extract_field(block, "Status"),
@@ -71,6 +71,55 @@ def _extract_field(block: str, field_name: str) -> str:
     )
     m = pattern.search(block)
     return m.group(1).strip() if m else ""
+
+
+# The registry's documented format (docs/CLAIMS_REGISTRY.md "Format") spells the
+# field in the singular; the plural is the older spelling and still accepted.
+EVIDENCE_FIELD_LABELS = ("Evidence artifact", "Evidence artifacts")
+_CODE_SPAN = re.compile(r"`([^`]+)`")
+
+
+def _extract_evidence_field(block: str) -> str:
+    """The evidence field value, joined with its indented continuation lines."""
+    for label in EVIDENCE_FIELD_LABELS:
+        pattern = re.compile(
+            rf"^[ \t]*-[ \t]+\*\*{re.escape(label)}\*\*:[ \t]*(.*(?:\n[ \t]+\S.*)*)",
+            re.MULTILINE,
+        )
+        m = pattern.search(block)
+        if m:
+            return " ".join(line.strip() for line in m.group(1).splitlines()).strip()
+    return ""
+
+
+def artifact_paths(value: str) -> list[str]:
+    """Repository paths cited by an evidence field.
+
+    Markdown code spans are the documented form: every whitespace-free span
+    containing a `/` is a path (a trailing `::item` or `:line` reference is
+    dropped); spans that are commands or runtime templates (`<id>`) are not.
+    Without any code span the value is a comma-separated list of paths.
+    """
+    if "`" in value:
+        paths = []
+        for span in _CODE_SPAN.findall(value):
+            path = re.sub(r":\d[\d-]*$", "", span.split("::")[0])
+            if (
+                "/" in path
+                and not any(ch.isspace() for ch in path)
+                and "<" not in path
+                and not path.startswith("-")
+            ):
+                paths.append(path)
+        return paths
+    return [p.strip() for p in value.split(",") if p.strip()]
+
+
+def artifact_exists(path: str) -> bool:
+    """A cited path exists, or (for a glob) matches at least one file."""
+    if any(ch in path for ch in "*?["):
+        return any(ROOT.glob(path))
+    return (ROOT / path).exists()
 
 
 def check_registry_exists() -> dict:
@@ -132,11 +181,16 @@ def check_claims_have_artifacts() -> dict:
             check["status"] = "FAIL"
         else:
             # Check each artifact path exists
-            paths = [p.strip() for p in claim["evidence_artifacts"].split(",")]
+            paths = artifact_paths(claim["evidence_artifacts"])
+            if not paths:
+                entry["status"] = "FAIL"
+                entry["error"] = "Evidence field cites no repository path"
+                check["status"] = "FAIL"
+                check["details"]["claims"].append(entry)
+                continue
             missing = []
             for p in paths:
-                full = ROOT / p
-                if not full.exists():
+                if not artifact_exists(p):
                     missing.append(p)
             if missing:
                 entry["status"] = "FAIL"
@@ -166,7 +220,7 @@ def check_evidence_verdicts() -> dict:
             continue
 
         entry = {"id": claim["id"], "status": "PASS"}
-        paths = [p.strip() for p in claim["evidence_artifacts"].split(",")]
+        paths = artifact_paths(claim["evidence_artifacts"])
 
         for p in paths:
             full = ROOT / p
