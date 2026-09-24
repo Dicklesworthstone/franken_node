@@ -9,6 +9,21 @@
 //! lock coordinates cooperating rewrites, not arbitrary editors. Directory-handle
 //! relative NOFOLLOW operations reject symlink redirection, but this is not an OS
 //! sandbox against a privileged actor renaming directories or forging journals.
+//!
+//! Durability protocol (survives power loss / kernel crash, not only process
+//! exit, whose page cache survives anyway):
+//! 1. Every staged file's data is fsynced before it is renamed into place, so a
+//!    persisted rename can never expose an empty or torn file.
+//! 2. Renames only mark their parent directory dirty; each distinct dirty
+//!    directory is fsynced once per phase (batched, deduplicated by dev/inode).
+//! 3. PREPARE: backups, after-images and the session directory are made durable
+//!    (phase flush) BEFORE the pending journal is published; the journal's own
+//!    rename is then made durable by fsyncing the store. A durable journal thus
+//!    never references non-durable recovery material.
+//! 4. INSTALL/RECOVER: every replaced source's directory is flushed BEFORE the
+//!    journal is archived, so the journal is never retired while a partially
+//!    persisted multi-file state could remain.
+//! 5. Directories created on demand are made durable in their parent at once.
 
 use anyhow::{Context, Result, bail, ensure};
 use rustix::fs::{AtFlags, FlockOperation, Mode, OFlags, RenameFlags, flock, mkdirat,
@@ -16,7 +31,7 @@ use rustix::fs::{AtFlags, FlockOperation, Mode, OFlags, RenameFlags, flock, mkdi
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, Metadata, Permissions};
 use std::io::{Read, Write};
@@ -73,6 +88,8 @@ pub struct RewriteTransaction {
     backups: File,
     store: File,
     _lock: File,
+    /// Directories whose entries changed since the last phase flush.
+    dirty: std::cell::RefCell<DirtyDirectories>,
 }
 
 impl Drop for RewriteTransaction {
@@ -92,6 +109,51 @@ fn unique_name(prefix: &str) -> String {
 }
 
 fn digest(bytes: &[u8]) -> String { hex::encode(Sha256::digest(bytes)) }
+
+#[cfg(test)]
+thread_local! {
+    /// Ordered record of durability barriers issued on this thread (tests only).
+    static DURABILITY_LOG: std::cell::RefCell<Vec<&'static str>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn record_barrier(kind: &'static str) {
+    #[cfg(test)]
+    DURABILITY_LOG.with(|log| log.borrow_mut().push(kind));
+    #[cfg(not(test))]
+    let _ = kind;
+}
+
+/// fsync `file` (data or directory entries), recording the barrier `kind`.
+fn durable_sync(file: &File, kind: &'static str) -> Result<()> {
+    file.sync_all().with_context(|| format!("rewrite durability barrier failed ({kind})"))?;
+    record_barrier(kind);
+    Ok(())
+}
+
+/// Directories whose entries changed in the current phase. Each is fsynced
+/// once by [`DirtyDirectories::flush`], deduplicated by (device, inode).
+#[derive(Default)]
+struct DirtyDirectories {
+    dirs: BTreeMap<(u64, u64), File>,
+}
+
+impl DirtyDirectories {
+    fn mark(&mut self, dir: &File) -> Result<()> {
+        let metadata = dir.metadata()?;
+        if let std::collections::btree_map::Entry::Vacant(slot) = self.dirs.entry((metadata.dev(), metadata.ino())) {
+            slot.insert(dir.try_clone()?);
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        for dir in std::mem::take(&mut self.dirs).into_values() {
+            durable_sync(&dir, "dir")?;
+        }
+        Ok(())
+    }
+}
 
 fn validate_path(path: &str) -> Result<()> {
     ensure!(!path.is_empty() && path.len() <= 4096 && !path.contains(['\\', '\0'])
@@ -119,7 +181,7 @@ fn directory(parent: &File, path: &Path, create: bool) -> Result<File> {
         let Component::Normal(name) = component else { bail!("invalid directory component"); };
         if create {
             match mkdirat(&current, name, Mode::from_raw_mode(0o700)) {
-                Ok(()) => {},
+                Ok(()) => durable_sync(&current, "mkdir")?,
                 Err(Errno::EXIST) => {},
                 Err(error) => return Err(error.into()),
             }
@@ -182,20 +244,11 @@ fn stage<'a>(parent: &'a File, bytes: &[u8], mode: u32) -> Result<StagedFile<'a>
     let staged = StagedFile { parent, name, installed: false };
     file.write_all(bytes)?;
     file.set_permissions(Permissions::from_mode(mode))?;
+    // Data must be durable before any rename can make it visible (protocol 1).
+    durable_sync(&file, "file")?;
     Ok(staged)
 }
 
-fn publish_staged(parent: &File, name: &OsStr, bytes: &[u8], mode: u32, create_only: bool) -> Result<()> {
-    let mut staged = stage(parent, bytes, mode)?;
-    renameat_with(parent, staged.name.as_str(), parent, name,
-        if create_only { RenameFlags::NOREPLACE } else { RenameFlags::empty() })?;
-    staged.installed = true;
-    Ok(())
-}
-
-fn publish(parent: &File, name: &OsStr, bytes: &[u8], mode: u32, create_only: bool) -> Result<()> {
-    publish_staged(parent, name, bytes, mode, create_only)
-}
 
 fn verify_image(contents: &Contents, sha256: &str, length: usize, mode: Option<u32>) -> bool {
     contents.bytes.len() == length && digest(&contents.bytes) == sha256
@@ -214,7 +267,7 @@ impl RewriteTransaction {
         let metadata = lock.metadata()?;
         ensure!(metadata.is_file() && metadata.nlink() == 1, "invalid rewrite lock file");
         flock(&lock, FlockOperation::NonBlockingLockExclusive).context("another rewrite transaction holds the project lock")?;
-        let transaction = Self { root, backups, store, _lock: lock };
+        let transaction = Self { root, backups, store, _lock: lock, dirty: Default::default() };
         transaction.recover_pending().context("pending rewrite recovery failed; refusing a new apply")?;
         Ok(transaction)
     }
@@ -267,20 +320,45 @@ impl RewriteTransaction {
         }
         Self::validate_journal(&journal)?;
         mkdirat(&self.store, journal.session.as_str(), Mode::from_raw_mode(0o700))?;
+        self.dirty.borrow_mut().mark(&self.store)?;
         let session = directory(&self.store, Path::new(&journal.session), false)?;
         for (index, edit) in edits.iter().enumerate() {
             let (parent, name) = parent_and_name(&self.backups, edit.path, false)?;
             if let Some(backup) = read_optional(&parent, &name, MAX_FILE_BYTES)? {
                 ensure!(backup.bytes == edit.before, "immutable migration backup changed: {}", edit.path);
             } else {
-                publish_staged(&parent, &name, edit.before, 0o600, true)?;
+                self.publish_staged(&parent, &name, edit.before, 0o600)?;
             }
-            publish_staged(&session, OsStr::new(&format!("{index}.after")), edit.after, 0o600, true)?;
+            self.publish_staged(&session, OsStr::new(&format!("{index}.after")), edit.after, 0o600)?;
         }
+        // Recovery material must be durable before the journal references it.
+        self.flush_dirty()?;
         let encoded = serde_json::to_vec(&journal)?;
         ensure!(encoded.len() <= MAX_JOURNAL_BYTES, "rewrite journal exceeds metadata budget");
-        publish(&self.store, OsStr::new(PENDING), &encoded, 0o600, true)?;
+        self.publish_journal(&encoded)?;
         Ok(journal)
+    }
+
+    /// Stage `bytes` and create-only rename them to `name`; the directory entry
+    /// is made durable by the phase flush (protocol 2).
+    fn publish_staged(&self, parent: &File, name: &OsStr, bytes: &[u8], mode: u32) -> Result<()> {
+        let mut staged = stage(parent, bytes, mode)?;
+        renameat_with(parent, staged.name.as_str(), parent, name, RenameFlags::NOREPLACE)?;
+        staged.installed = true;
+        self.dirty.borrow_mut().mark(parent)
+    }
+
+    /// Publish the pending journal and make its directory entry durable at once:
+    /// no source may be replaced until the journal is on stable storage.
+    fn publish_journal(&self, encoded: &[u8]) -> Result<()> {
+        let mut staged = stage(&self.store, encoded, 0o600)?;
+        renameat_with(&self.store, staged.name.as_str(), &self.store, PENDING, RenameFlags::NOREPLACE)?;
+        staged.installed = true;
+        durable_sync(&self.store, "journal")
+    }
+
+    fn flush_dirty(&self) -> Result<()> {
+        self.dirty.borrow_mut().flush()
     }
 
     fn replace_image(
@@ -307,7 +385,7 @@ impl RewriteTransaction {
         );
         renameat_with(&parent, staged.name.as_str(), &parent, &name, RenameFlags::empty())?;
         staged.installed = true;
-        Ok(())
+        self.dirty.borrow_mut().mark(&parent)
     }
 
     pub(crate) fn install(&self, journal: &Journal, index: usize) -> Result<()> {
@@ -321,7 +399,9 @@ impl RewriteTransaction {
     fn archive(&self, journal: &Journal, name: &str) -> Result<()> {
         let session = directory(&self.store, Path::new(&journal.session), false)?;
         renameat_with(&self.store, PENDING, &session, name, RenameFlags::NOREPLACE)?;
-        Ok(())
+        // Both directory entries changed; persist the retirement itself.
+        durable_sync(&session, "archive")?;
+        durable_sync(&self.store, "archive")
     }
 
     fn recover_pending(&self) -> Result<bool> {
@@ -353,6 +433,8 @@ impl RewriteTransaction {
             if let Err(error) = restored { errors.push(format!("{error:#}")); }
         }
         ensure!(errors.is_empty(), "rewrite recovery incomplete; pending journal retained: {}", errors.join("; "));
+        // Restored sources must be durable before the journal is retired.
+        self.flush_dirty()?;
         self.archive(&journal, "rolled-back.json")?;
         Ok(true)
     }
@@ -372,6 +454,8 @@ impl RewriteTransaction {
             for index in 0..journal.records.len() {
                 self.install(&journal, index)?;
             }
+            // Every replaced source must be durable before the journal retires.
+            self.flush_dirty()?;
             self.archive(&journal, "applied.json")
         })();
         if let Err(error) = result {
@@ -458,6 +542,55 @@ mod tests {
         assert!(RewriteTransaction::open(root.path()).unwrap().apply(&plan).is_err());
         assert_original(root.path());
         assert!(!pending(root.path()).exists());
+    }
+
+    fn take_durability_log() -> Vec<&'static str> {
+        DURABILITY_LOG.with(|log| std::mem::take(&mut *log.borrow_mut()))
+    }
+
+    #[test]
+    fn apply_issues_durability_barriers_in_journal_protocol_order() {
+        let root = project();
+        let transaction = RewriteTransaction::open(root.path()).unwrap();
+        // open() created .migrate-backup and the store: each made durable in its parent.
+        assert_eq!(take_durability_log(), ["mkdir", "mkdir"]);
+        transaction.apply(&edits()).unwrap();
+        assert_eq!(
+            take_durability_log(),
+            [
+                // PREPARE: 2 backups + 2 after-images, data synced before rename.
+                "file", "file", "file", "file",
+                // One flush per distinct dirty directory: store (session mkdir),
+                // backups, session. Recovery material durable BEFORE the journal.
+                "dir", "dir", "dir",
+                // Journal data, then its directory entry.
+                "file", "journal",
+                // INSTALL: two replaced sources, data synced before each rename.
+                "file", "file",
+                // Source directory flushed once, BEFORE the journal is retired.
+                "dir",
+                // Retirement persisted in both directories.
+                "archive", "archive",
+            ]
+        );
+        assert_eq!(fs::read(root.path().join("a.js")).unwrap(), b"after-a");
+        assert_eq!(fs::read(root.path().join("b.js")).unwrap(), b"after-b");
+    }
+
+    #[test]
+    fn recovery_flushes_restored_sources_before_retiring_the_journal() {
+        let root = project();
+        {
+            let transaction = RewriteTransaction::open(root.path()).unwrap();
+            let journal = transaction.prepare(&edits()).unwrap();
+            transaction.install(&journal, 0).unwrap();
+        }
+        let _ = take_durability_log();
+        let _transaction = RewriteTransaction::open(root.path()).unwrap();
+        // One restored source (b.js was never replaced), its directory flushed,
+        // then the journal archived durably.
+        assert_eq!(take_durability_log(), ["file", "dir", "archive", "archive"]);
+        assert_original(root.path());
     }
 
     #[test]

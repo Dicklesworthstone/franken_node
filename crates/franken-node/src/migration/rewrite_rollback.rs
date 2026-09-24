@@ -7,7 +7,7 @@
 //! recovery metadata, not signatures; this is not an adversarial OS sandbox.
 
 use super::{Journal, MAX_FILE_BYTES, MAX_JOURNAL_BYTES, PENDING, RewriteTransaction, STORE,
-    digest, directory, parent_and_name, publish, read_optional, read_required, verify_image};
+    digest, directory, parent_and_name, read_optional, read_required, verify_image};
 use anyhow::{Context, Result, ensure};
 use rustix::fs::{Dir, FlockOperation, Mode, OFlags, flock, open, openat};
 use rustix::io::Errno;
@@ -105,7 +105,7 @@ fn open_existing(project: &Path) -> Result<Option<RewriteTransaction>> {
     let metadata = lock.metadata()?;
     ensure!(metadata.is_file() && metadata.nlink() == 1, "invalid rewrite lock file");
     flock(&lock, FlockOperation::NonBlockingLockExclusive).context("another rewrite holds the project lock")?;
-    Ok(Some(RewriteTransaction { root, backups, store, _lock: lock }))
+    Ok(Some(RewriteTransaction { root, backups, store, _lock: lock, dirty: Default::default() }))
 }
 
 struct JournalReader { remaining: usize }
@@ -263,7 +263,7 @@ pub fn run(project: &Path, id: Option<&str>, apply: bool) -> RollbackReport {
             // recovery protocol already converges monotonically to originals.
             let encoded = serde_json::to_vec(&selected.journal)?;
             ensure!(encoded.len() <= MAX_JOURNAL_BYTES, "rollback journal exceeds metadata budget");
-            publish(&transaction.store, OsStr::new(PENDING), &encoded, 0o600, true)?;
+            transaction.publish_journal(&encoded)?;
             report.pending_transaction_id = Some(id.to_owned());
         }
         ensure!(transaction.recover_pending().context(
@@ -569,7 +569,7 @@ mod tests {
             let transaction = open_existing(&root).unwrap().unwrap();
             let selected = select(&transaction, &id, None, &mut JournalReader::new()).unwrap().unwrap();
             assert!(preflight(&transaction, &selected.journal).iter().all(|file| file.error.is_none()));
-            publish(&transaction.store, OsStr::new(PENDING), &serde_json::to_vec(&selected.journal).unwrap(), 0o600, true).unwrap();
+            transaction.publish_journal(&serde_json::to_vec(&selected.journal).unwrap()).unwrap();
             for record in selected.journal.records.iter().rev().take(count) {
                 let (parent, name) = parent_and_name(&transaction.backups, &record.path, false).unwrap();
                 let before = read_required(&parent, &name, MAX_FILE_BYTES).unwrap();
