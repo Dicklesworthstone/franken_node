@@ -50,9 +50,11 @@ claim_id = "HC-003"
 claim_text = "franken_node API latency is within 10% of Node.js for equivalent workloads"
 verification_method = "benchmark"
 acceptance_threshold = "verdict = PASS"
-test_reference = "scripts/check_latency_gates.py"
+# Measured against node in the same invocation (bd-reality-20260923-26n9r.10);
+# check_latency_gates.py only validates the bd-3lh budget config and spec.
+test_reference = "scripts/bench_runtime_vs_node.py"
 category = "performance"
-procedure_ref = "scripts/check_latency_gates.py"
+procedure_ref = "scripts/bench_runtime_vs_node.py"
 harness_kind = "python"
 measurement_key = "verdict"
 
