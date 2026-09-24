@@ -9,9 +9,8 @@ use frankenengine_node::control_plane::fleet_transport::{
     AsupersyncFleetNetwork, AsupersyncFleetTransport, wait_until_fleet_converged_or_timeout,
 };
 use frankenengine_node::control_plane::fleet_transport::{
-    FileFleetTransport, FleetAction, FleetActionRecord, FleetTargetKind, FleetTransport,
-    NodeHealth, NodeStatus, canonical_fleet_convergence_receipt_payload,
-    fleet_convergence_receipt_verdict,
+    FleetAction, FleetActionRecord, FleetTargetKind, FleetTransport, NodeHealth, NodeStatus,
+    canonical_fleet_convergence_receipt_payload, fleet_convergence_receipt_verdict,
 };
 use frankenengine_node::supply_chain::trust_card::{
     ReputationTrend, RiskAssessment, RiskLevel, SnapshotSourceContext, TrustCardMutation,
@@ -1102,7 +1101,7 @@ fn fleet_release_fails_on_convergence_timeout() {
 fn fleet_reconcile_handles_realistic_partial_reconcile_across_multi_node_fleet() {
     let fleet_state = tempdir().expect("tempdir");
     let fleet_state_dir = fleet_state.path().join("fleet-state");
-    let (signing_key_path, signing_key) =
+    let (signing_key_path, _signing_key) =
         write_test_signing_key(fleet_state.path(), "keys/fleet.key", 21);
     let signing_key_path = signing_key_path.display().to_string();
     let mut transport = seed_transport(&fleet_state_dir);
@@ -2233,7 +2232,7 @@ fn fleet_agent_handles_sigterm_gracefully() {
     );
     let readiness_deadline = Instant::now() + Duration::from_secs(15);
     let agent_status = loop {
-        let mut readiness_transport = seed_durable_transport(&fleet_state_dir);
+        let readiness_transport = seed_durable_transport(&fleet_state_dir);
         if let Some(status) = readiness_transport
             .list_node_statuses()
             .expect("list readiness node statuses")
@@ -3209,7 +3208,7 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
     let timeout_state = tempdir().expect("timeout tempdir");
     write_fail_closed_cli_config(timeout_state.path());
     let timeout_state_dir = timeout_state.path().join("fleet-state");
-    let (timeout_signing_key_path, timeout_signing_key) =
+    let (timeout_signing_key_path, _timeout_signing_key) =
         write_test_signing_key(timeout_state.path(), "keys/fleet.key", 42);
     let timeout_signing_key_path = timeout_signing_key_path.display().to_string();
     let mut timeout_transport = seed_transport(&timeout_state_dir);
