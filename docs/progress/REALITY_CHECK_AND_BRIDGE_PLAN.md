@@ -615,3 +615,247 @@ The named regression e2e (`default_run_executes_fixture_js_through_embedded_engi
 - A second verification attempt (canonical inline lane for the `api/service.rs` honesty tests, `bd-svc-honesty-v4yy9`) also failed **before reaching this crate**: the sibling `franken_engine` lib itself did not compile (concurrent `fetch_update` → `try_update` API migration in flight engine-side) and the worker additionally SIGKILLed rustc (OOM) on the debug lib compile. The service.rs changes are fmt-clean but their three new inline tests are **written, not yet executed**; the bead carries the exact lane command to run once the engine tree compiles again.
 - `br` was mid schema-migration (v17→v19) by a concurrent agent during part of this pass; beads were read directly from SQLite read-only and mutated only after the migration settled.
 
+
+## Refresh 2026-09-23 (fifth full reality check — first LIVE-BINARY pass)
+
+**Method.** Earlier passes mostly read code and artifacts, and the Sep-22 pass could not build a binary because RCH was blocked. This pass **built a fresh release binary** and ran it:
+- **Builds:**
+  - release build via `rch exec` (fell back to local), 19 min;
+  - franken_node HEAD `8b8b45311` (`v0.1.0-1136`);
+  - franken_engine `0dce0e734`, 2026-09-23;
+  - a scratch crate that depends *only* on `sdk/verifier`.
+- **Probes run against the binary:**
+  - 20 realistic programs, 8 real npm packages (installed with bun), and ~30 language/runtime micro-probes, all compared against node v22.2.0;
+  - the adversarial payloads;
+  - the incident pipeline into the SDK;
+  - hyperfine timings against node and bun;
+  - a fresh full compatibility-corpus triad run.
+- **Parallel read-only audits (7):**
+  - plan-vision extraction;
+  - trust-gate wiring;
+  - incident/replay/SDK provenance;
+  - the host-API surface;
+  - CI/release reality (gh API);
+  - a bead-compliance audit of closures since Aug-19;
+  - a module-reachability census.
+- **Artifact handling:** all probe artifacts live in the session scratchpad. **No committed artifact was regenerated.**
+
+Beads: 4,352 total, 4,319 closed (99.2%).
+
+### Executive answer
+
+franken_node is a large, carefully fail-closed **trust/verification control plane** attached to a **native JS runtime that today can execute only single-file, self-contained, small programs**. Specifically:
+- no module loading;
+- a 100k-instruction budget on the default profile;
+- a frozen clock;
+- several silent miscompiles.
+
+The strongest claims made since Aug-29 do not survive running the software:
+- the ≥3× migration pass traded away crash durability;
+- the ≥10× compromise campaign never executed franken-node;
+- the revocation freshness gate is dead on every default install;
+- the independent SDK cannot read the CLI's incident bundles;
+- CI has never produced a green `cargo test` of the crate.
+
+One real positive: **compatibility on the corpus recovered to 87.32%** (from 69.82% in the stale committed artifact). The containment primitives (fs write, SSRF, eval, sandbox escape) genuinely block when a payload actually runs.
+
+### Live probes (release binary; `FRANKEN_NODE_ENGINE_BINARY_PATH` set, because default auto mode fails — see G-C below)
+
+**Runtime surface.** Of 20 realistic programs under balanced `--console-only`, 3 matched node cleanly, 2 more exited 0 with divergent output, and 15 failed.
+
+| Probe | node | franken-node |
+|---|---|---|
+| `console.log("hello")` | ok | ok (strict: exit **92**, verdict `Sandbox`) |
+| `require("./lib/math")` | `rel:5` | `ambient authority violation: access to 'require' requires effect 'fs.read'` |
+| lodash / ms+semver / dayjs / uuid / commander / express (node_modules) | all ok | **0/8**, same ambient-authority violation |
+| `const EventEmitter=require("events"); new EventEmitter()` | ok | refused (only the destructured `{EventEmitter}` pattern works) |
+| `.mjs` importing `./lib/esm_math.mjs` + `fs` | ok | `unauthorized flow … TopSecret -> Internal` |
+| `run dirapp` (package.json main) | — | `Failed to read application source … Is a directory` |
+| `(async()=>{ await null; … })()` | ok | `type error: expected function, got string` |
+| `[...generator()]` | `1+2` | `expected iterable, got object` |
+| `class A{#x=1; get x(){return this.#x}}` | `class:1` | **`class:this.#x`** (silent wrong answer, exit 0) |
+| `for(i<20000) s+=i` (balanced) | ok | `instruction budget exhausted: 100000/100000` (legacy-risky: 50k iterations ok, 100k fail) |
+| `Date.now()` | real time | `1767225600000` every run |
+| 1,500 × `console.log` | 1,500 lines | last 1,000 only (first 500 silently dropped) |
+| `console.log("before"); throw …` | prints `before` | stdout empty |
+| `console.log({a:1},[1,2,3])` | `{ a: 1 } [ 1, 2, 3 ]` | `[object Object] 1,2,3` |
+| `const s="password"; console.log(s.length)` | `8` | IFC refusal `Secret -> Internal` |
+| `process.env.HOME` / `process.exit(3)` (legacy-risky) | ok | ambient-authority violation (every profile) |
+| strict: `JSON.stringify` / `path.join` | ok | `capability denied: builtin:JsonStringify` / `builtin:PathJoin` |
+| `TextEncoder`, `structuredClone`, `globalThis` | defined | `undefined` ×3 |
+| fetch `169.254.169.254` metadata | blocked | blocked (strict `capability denied: net:request`; balanced SSRF) ✓ |
+
+**Security gates.**
+- **Revocation freshness (G-A).** Aging the `.db` registry 400 days still passes `--policy strict`. Adding a 400-day-old legacy `.json` makes the same run block (`RF_STALE_FRONTIER … age 34560000s > max 300s`). The gate reads the mtime of a file `init` never writes (`main.rs:294`, `:18566`).
+- **Adversarial payloads run directly.**
+  - `fs.writeFileSync`: denied under strict/balanced, **PWNED under legacy-risky**.
+  - metadata SSRF: blocked.
+  - `/etc/passwd`: refused under all profiles.
+  - `eval`: denied under all profiles.
+  - The containment is real.
+- **The ≥10× bench's franken leg reproduced exactly** (`run --policy strict --json .`): "cannot launch external runtime node", or with the engine configured "Is a directory". **It never executes guest code** (G-D).
+
+**Incident pipeline.**
+- A **hand-authored** `evidence.v1.json` produced a signed bundle.
+- `incident replay` → `matched=true`.
+- `incident counterfactual --policy strict` → executor `synthetic`, `changed_decisions=1, severity_delta=-47`.
+- The scratch crate using only `frankenengine-verifier-sdk` → `bundle::deserialize`/`verify`/`validate_bundle` all fail: `missing field artifact_path`. **The SDK cannot read CLI bundles** (G-E).
+
+**First run (G-C).**
+- A fresh build's default `run hello.js` fails. Auto mode finds no sidecar `franken-engine`/`frankenctl` binary, falls back to node, and refuses node. Yet the sidecar is never executed; it is a pure presence gate.
+- `trust scan --deep --audit` needs `FRANKEN_NODE_REMOTECAP_KEY` **and** a `remotecap issue` token in `FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN`, neither documented.
+- `incident bundle` needs a hand-generated fleet signing key.
+- `doctor` detects none of these, and exits 0 while reporting `overall_status: fail`.
+
+**Performance (never measured before).** hyperfine, same host (load average ≈ 50):
+- `run hello.js`: **164.3 ms ± 6.0**.
+- node: 36.7 ms ± 1.9, so franken-node is **4.5× slower**.
+- bun: 188 ms (this host's bun is anomalous).
+- The ~130 ms fixed per-run overhead dominates: a 50k-iteration loop costs the same as hello.
+- HC-003 ("within 10% of Node") is "verified" by `scripts/check_latency_gates.py`, which only greps spec keywords.
+
+**Compatibility corpus (fresh, scratch).**
+- `ops compat-corpus-run --require-node-reference`: node v22.2.0 + bun 1.4.2 + engine `0dce0e734`, `legacy-risky`, 9m42s.
+- **489/560 = 87.32%** (committed artifact: 69.82% @ 2026-08-26).
+- Remaining failures:
+
+| Family | Failures | Cause |
+|---|---|---|
+| child_process | 30 | Bubblewrap containment-unit abort |
+| crypto | 14 | 13 IFC `Secret -> Internal` |
+| stream | 21 | 12 IFC `TopSecret`, 3 output mismatch, rest type errors / `require` |
+| cluster | 2 | |
+| fs | 2 | |
+| http | 1 | |
+| net | 1 | |
+
+- IFC refusals: 97 → 26.
+- Bands: core 88.98 (floor 99), high-value 84.0 (95), edge 94.64 (90).
+- **+43 passes are needed for 95%.** child_process (30) + crypto IFC (13) is exactly that minimum.
+- Caveat: the corpus is 540 single-file micro-probes averaging 8.8 lines, with **zero** module/package usage, measured under `legacy-risky`. It **cannot detect** any of the ecosystem failures above.
+
+### Audits (agents; each finding spot-verified by hand where marked ✓)
+
+- **G-B ✓ Migration ≥3× bought with durability.** `rewrite_transaction.rs` `sync_all` count went 7 (35881aa36) → 1 (608f2088d) → 0 (318ac9360), while the ratio went 0.45× → 2.50× → 5.67×. 608f2088d's message describes `touched_dirs` batching that **does not exist** (`rg touched_dirs` → 0). The header still promises a durable journal. bd-v0lgc closed on it. CLAIMS_REGISTRY CLAIM-002 still says 2.30× pending; the section-13 artifacts say 5.56/5.67×.
+- **G-D ✓ ≥10× campaign invalid.** All 20 franken cases in `compromise_reduction_v2.json`: `exit_code:1, blocked:false, contained:false, typed_errors:[]`.
+- **G-F ✓ CI.**
+  - Last 7 days: 1,924 runs on main, 14.3% success, **82% failure**. No run has ever compiled and tested the crate successfully, and none runs `franken-node run`.
+  - 10 PR-only gates (claims-manifest, mutants, inline-lib-tests, no-self-compare, verification-target-compile, …) have **never run**: the repo has **0 PRs**.
+  - `connector-conformance.yml` has had invalid YAML since Feb (0/3,468). README Quick Example Smoke: 0/1,340.
+  - `dist.yml` never succeeded; the v0.1.0 assets were hand-uploaded. `install.sh --method source` never clones frankentui.
+- **G-G Reachability.**
+  - About **42.7%** of 360,816 non-test product lines is reachable from the default binary (module-level upper bound); 35.2% is compiled-but-unreachable; 22.1% is opt-in only.
+  - Unreachable: DGIS, BPET, VEF (except evidence_capsule), `replay::time_travel_engine` (referenced by nothing), and `control_plane::{audience_token, fork_detection, control_epoch, epoch_transition_barrier, divergence_gate, key_role_separation}`.
+  - Also unreachable: `security::copilot_engine` (IBD-8) and `tools::reputation_graph_apis` (IBD-9).
+  - bd-137 compat-gate APIs are implemented **three times**.
+- **G-H README scenario is fiction on CLI paths.**
+  - No typosquat or publisher-age computation anywhere.
+  - Camouflage/GradualCreep is reached only from tests.
+  - `migrate audit` never runs `trust scan`.
+  - No CLI path writes the evidence ledger; `run` receipts are hash-only.
+  - The per-profile camouflage threshold is a constant.
+  - Safe-mode crash-loop auto-entry has no callers.
+  - SSRF `monitor` blocks like `block`, and the FAQ's `mode = enforced|report-only` key does not exist (silently ignored).
+- **G-I Bead compliance** (load-bearing closures since Aug-19): 3 FALSE-CLOSED (w0fc6.9, bd-3cpa, tenx3.3) and 4 OVER-CLAIMED (w0fc6.7, tenx3.4, tenx3.5, v0lgc; v0lgc is effectively false-closed per G-B); the rest (w0fc6.1/.2/.3/.4/.5/.6/.8, bd-klpse, bd-9zrqh, readme-cli-drift) VERIFIED statically.
+  - tenx3.3 rollout: `lockstep_verified = true` hard-coded (`migration/rollout.rs:415`); confidence never computed; the "signature" is a SHA-256 digest.
+- **G-J Unmapped plan goals** (never assessed by V1–V28):
+  - performance budgets and HC-003;
+  - benign false-positive rate;
+  - engine pinning (a bare path dependency, which contradicts charter §2 rule 4; README:2506 claims "pinned");
+  - L2 as a differential oracle (today a GREEN backfill; engine Test262 is 3 precomputed vectors);
+  - IBD-8/IBD-9;
+  - isolation tiers;
+  - confidence half of 3×;
+  - per-band floors;
+  - convergence latency.
+
+### Vision checklist deltas (Aug-20 numbering + new items)
+
+| # | Goal | 2026-09-22 | **2026-09-23 (live)** |
+|---|---|---|---|
+| V1 | `run` executes guest JS | WORKING (fixture) | **PARTIAL.** Single-file only; 0/8 npm; 100k budget; default auto fails on a fresh build |
+| V2 | Revocation-first execution | "unified" (w0fc6.6) | **REGRESSED.** Gate dead on default installs; fails open |
+| V3 | Trust cards | WORKING | **PARTIAL.** Cards seeded; deep/audit fails by default; all `medium`; re-scan never refreshes |
+| V4 | Replay + counterfactual | PARTIAL | **INTEGRITY-ONLY.** Certifies hand-authored evidence; counterfactual synthetic; no run→incident capture |
+| V6 | ≥95% corpus | REGRESSED 69.82% | **RED 87.32%** (fresh, legacy-risky, single-file corpus) |
+| V10 | Verifier SDK independent | PARTIAL | **BROKEN for bundles.** Cannot parse CLI `.fnbundle`; unkeyed "signature" |
+| V11 | Doctor | WORKING | **PARTIAL.** Misses every first-run blocker; exit 0 on fail |
+| V16 | ≥3× migration | UNMET 2.30× | **WRONG_APPROACH.** "Pass" via fsync removal; proxy metric |
+| V17 | ≥10× compromise | UNPROVEN | **INVALID MEASUREMENT.** Franken leg never executes |
+| V25 | Release freshness | REGRESSED | **REGRESSED.** 1,136 commits; `--method source` broken; dist never green |
+| V27 | Effective coverage | PARTIAL | **NOT PROVEN.** No green CI `cargo test` ever; 10 gates never ran |
+| V29 | Performance vs Node / budgets | *unassessed* | **FAIL.** 4.5× node on hello; HC-003 keyword gate |
+| V30 | Module loading / ecosystem | *unassessed* | **NOT_STARTED** on the run path |
+| V31 | Language correctness | *unassessed* | **FAIL.** Silent miscompile + async/generator failures; no Test262 |
+| V32 | Primitives reachable from product | *unassessed* | **~43%** reachable; flagship primitives are islands |
+| V33 | Engine pinning + corpus provenance | *unassessed* | **ABSENT** |
+| V34 | Evidence ledger written by decisions | *unassessed* | **ABSENT** on CLI paths |
+
+**Strict WORKING count:** V15 (no unsafe) still holds. V13 (SSRF on the native path) and the containment primitives are verified live. V1, V3 and V11 are downgraded from the Sep-22 count, and V2 has regressed. The honest summary: the *verification/trust machinery* is broad and often real, but the *runtime it is supposed to govern* cannot yet run the ecosystem the charter targets.
+
+### Answers to the reality-check questions
+
+1. **What works today.**
+   - Single-file programs using a pattern-matched subset of 16 builtins, with real SSRF, capability, sandbox and eval containment and signed host-effect ledgers.
+   - `init`, `migrate audit`, plain `trust scan`, `incident bundle`/`replay` as integrity tools, and `doctor`.
+   - A recovered 87% single-file micro-corpus.
+2. **What does not work.**
+   - Module loading and npm packages; non-trivial compute (instruction budget); a real clock; several ES2015+ features.
+   - The strict profile for ordinary code.
+   - Revocation freshness on default installs.
+   - CLI→SDK bundle verification; run→incident capture.
+   - Deep trust intelligence (typosquat, publisher age, camouflage); the evidence ledger.
+   - CI.
+   - The fresh-build first run.
+3. **What is blocking.**
+   - The engine execution model: `require` is a compile-time recognizer, there is a deterministic-lane budget, and IFC is fail-high with no declassification. These are engine-first changes under the split contract.
+   - A measurement culture that closes KPI beads on artifacts that were never executed end to end: fsync removal, a directory passed to `run`, keyword gates, PR-only gates.
+   - Zero functioning CI to catch either problem.
+4. **Would the open/in-progress beads close the gap?** **No.**
+   - bd-28sz/bd-kx70h/family residuals can plausibly reach 95% **on this corpus**, which cannot see the module-loading, language or limits failures.
+   - bd-f5b04 (TNR) does not name module loading, execution limits or language correctness.
+   - bd-34d5 does not name the sidecar presence gate or the undocumented trust-scan env.
+   - No open bead covered the freshness-gate regression, the fsync durability trade, the invalid 10× campaign, the SDK/CLI format split, run→incident capture, CI trigger reality, performance, reachability, or engine pinning.
+5. **Vision goals with no bead before this pass:** all of V29–V34 plus G-A/G-B/G-D/G-E/G-F/G-H/G-I. They are now covered by the new epic below.
+
+### Beads created (Phase 3a) — epic `bd-reality-20260923-26n9r` (P0)
+
+| ID | P | Gap |
+|---|---|---|
+| `.1` | P0 bug | Revocation freshness gate dead/fail-open on default installs; needs a real signed revocation frontier (not file mtime) |
+| `.2` | P0 bug | Restore rewrite-transaction durability (7→0 fsyncs); barrier-count test; honest re-measure; reconcile CLAIM-002 |
+| `.3` | P1 bug | ≥10× campaign never executes the franken leg; positive controls, typed outcomes, Wilson bounds |
+| `.4` | P0 feature | Module loading on `run`: CJS/ESM resolution, node_modules, `run <dir>`, missing builtins (engine-first) |
+| `.5` | P1 feature | Execution-limits contract: instruction budget, virtual clock, console truncation, lost output, strict semantics, `process` |
+| `.6` | P1 bug | Language correctness (private fields, async IIFE, generator spread, inspect formatting, globals) + executed Test262 |
+| `.7` | P1 bug | SDK cannot parse CLI bundles; unkeyed SDK "signature"; CLI→SDK round-trip test |
+| `.8` | P1 feature | Product run→incident capture; stop certifying hand-authored evidence; coverage metric for "100% replay" |
+| `.9` | P1 bug | CI: PR-only gates never run, sibling checkout broken, invalid YAML, one honest canary job, dynamic badges |
+| `.10` | P2 task | Performance vs node, measured (replace HC-003 keyword gate); cut ~130 ms fixed overhead |
+| `.11` | P1 bug | First-run blockers: sidecar presence gate, undocumented trust-scan env/token, bundle key, doctor gaps |
+| `.12` | P1 task | Corpus v3 (ecosystem + language + per-profile) + provenance + engine revision pinning |
+| `.13` | P1 task | IFC benign false-positive rate + declassification surface |
+| `.14` | P2 task | Library islands: disposition (wire/gate/retire), dedupe bd-137, reachability gate |
+| `.15` | P2 feature | Make the README scenario real: typosquat, publisher age, camouflage on real data, evidence ledger writes |
+| `.16` | P1 task | False-closed/over-claimed follow-ups: tenx3.3, tenx3.4, tenx3.5, w0fc6.7, w0fc6.9, closer-gate hardening |
+| `.17` | P2 docs | README/CLAIMS_REGISTRY truth pass for all of the above |
+
+Related links point to bd-f5b04, bd-28sz, bd-kx70h, bd-34d5, bd-tenx3.1/.2/.3/.4/.5, bd-v0lgc, bd-3cpa, bd-rjc2m.21 and w0fc6.6/.7/.9, so existing owners see the new evidence. Blocking edges: `.15`←`.11`, `.8`←`.7`. `br dep cycles` is clean. Evidence comments were added to bd-kx70h (fresh 87.32% breakdown), bd-v0lgc and bd-3cpa.
+
+### Recommended order (bridge plan, highest vision impact first)
+
+1. `.1` and `.2`: correctness and security regressions. Small, surgical, and they stop the bleeding.
+2. `.9` (CI) and `.11` (first run): without them no other claim can be checked by anyone but an agent with a warm target dir.
+3. `.4` → `.5` → `.6`: turn the engine into something that runs npm code. This is the product.
+4. `.12` + `.13`: make the compatibility metric able to see (3), then chase 95% on a corpus that means something.
+5. `.7` → `.8`: make the verifier/incident story true end to end.
+6. `.3`, `.10`: re-measure the 10× and performance claims honestly.
+7. `.14`, `.15`, `.16`, `.17`: wire or retire the islands, make the README scenario real, clean up the false closes, align the docs.
+
+### Probe reproduction
+
+- **Build:** `rch exec -- env CARGO_TARGET_DIR=<scratch>/target CARGO_PROFILE_RELEASE_DEBUG=0 cargo build --release -p frankenengine-node --bin franken-node`.
+- **Probe workspace:** `init --profile balanced --out-dir .` in a scratch dir with `bun install` of lodash@4.17.21, ms@2.1.3, semver@7.6.3, minimist@1.2.8, dayjs@1.11.13, uuid@9.0.1, commander@12.1.0, express@4.21.2.
+- **Run each probe with:** `FRANKEN_NODE_ENGINE_BINARY_PATH=<binary> franken-node run <file> --policy balanced --console-only`, and compare with `node <file>`.
+- **Corpus:** `ops compat-corpus-run --corpus-root <copy of crates/franken-node/tests/fixtures/compat_corpus> --out <scratch>/results.json --require-node-reference`.
+- **Probe programs:** the one-liners in the tables above are complete. The beads `.4`/`.5`/`.6`/`.11` specify the checked-in probe scripts that will make these runs permanent.
