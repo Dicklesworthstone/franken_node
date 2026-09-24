@@ -10,7 +10,8 @@
 
 use ed25519_dalek::VerifyingKey;
 use frankenengine_verifier_sdk::incident_bundle::{
-    IncidentBundleError, incident_bundle_signature_payload, verify_incident_bundle,
+    IncidentBundleError, incident_bundle_canonical_digest, incident_bundle_signature_payload,
+    verify_incident_bundle,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -36,9 +37,9 @@ fn reseal_integrity(value: &mut Value) {
     let mut view = value.as_object().unwrap().clone();
     view.remove("integrity_hash");
     view.remove("signature");
-    // serde_json's default Map is ordered by key, matching canonical form.
-    let bytes = serde_json::to_vec(&Value::Object(view)).unwrap();
-    value["integrity_hash"] = Value::String(hex::encode(Sha256::digest(&bytes)));
+    value["integrity_hash"] = Value::String(
+        incident_bundle_canonical_digest(&Value::Object(view), "$.integrity_view").unwrap(),
+    );
 }
 
 #[test]
@@ -67,7 +68,10 @@ fn tampered_timeline_fails_integrity() {
     let mut value = fixture_value();
     value["timeline"][1]["payload"]["risk"] = Value::from(10);
     let err = verify_incident_bundle(&serde_json::to_vec(&value).unwrap(), &anchor()).unwrap_err();
-    assert!(matches!(err, IncidentBundleError::IntegrityMismatch { .. }), "{err}");
+    assert!(
+        matches!(err, IncidentBundleError::IntegrityMismatch { .. }),
+        "{err}"
+    );
 }
 
 #[test]
@@ -83,10 +87,11 @@ fn resealed_tamper_without_key_fails_signature() {
         "policy_version": value["policy_version"],
     });
     value["manifest"]["decision_sequence_hash"] =
-        Value::String(hex::encode(Sha256::digest(serde_json::to_vec(&sequence).unwrap())));
+        Value::String(incident_bundle_canonical_digest(&sequence, "$.decision_sequence").unwrap());
     reseal_integrity(&mut value);
     let payload = incident_bundle_signature_payload(value["integrity_hash"].as_str().unwrap());
-    value["signature"]["signed_payload_sha256"] = Value::String(hex::encode(Sha256::digest(&payload)));
+    value["signature"]["signed_payload_sha256"] =
+        Value::String(hex::encode(Sha256::digest(&payload)));
     assert_eq!(
         verify_incident_bundle(&serde_json::to_vec(&value).unwrap(), &anchor()),
         Err(IncidentBundleError::SignatureInvalid)
@@ -99,7 +104,10 @@ fn decision_sequence_rederivation_is_load_bearing() {
     value["manifest"]["decision_sequence_hash"] = Value::String("0".repeat(64));
     reseal_integrity(&mut value);
     let err = verify_incident_bundle(&serde_json::to_vec(&value).unwrap(), &anchor()).unwrap_err();
-    assert!(matches!(err, IncidentBundleError::DecisionSequenceMismatch { .. }), "{err}");
+    assert!(
+        matches!(err, IncidentBundleError::DecisionSequenceMismatch { .. }),
+        "{err}"
+    );
 }
 
 #[test]
@@ -108,6 +116,8 @@ fn unsigned_extra_field_is_rejected() {
     value["operator_note"] = Value::String("trust me".into());
     assert_eq!(
         verify_incident_bundle(&serde_json::to_vec(&value).unwrap(), &anchor()),
-        Err(IncidentBundleError::UnknownField { field: "operator_note".into() })
+        Err(IncidentBundleError::UnknownField {
+            field: "operator_note".into()
+        })
     );
 }

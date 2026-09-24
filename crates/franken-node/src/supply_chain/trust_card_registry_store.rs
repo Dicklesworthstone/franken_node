@@ -68,7 +68,7 @@ pub fn record_revocation_frontier(snapshot_path: &Path, epoch_secs: u64) -> Resu
              ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
             &[
                 SqliteValue::Text(META_KEY_REVOCATION_FRONTIER.into()),
-                SqliteValue::Text(epoch_secs.to_string()),
+                SqliteValue::Text(epoch_secs.to_string().into()),
             ],
         )
         .map_err(|err| TrustCardError::SnapshotWrite {

@@ -6,8 +6,9 @@
 //! crate:
 //!
 //! 1. the canonical integrity view (the bundle object minus `integrity_hash`
-//!    and `signature`, keys sorted, floats rejected, compact JSON) hashes to the
-//!    recorded `integrity_hash`;
+//!    and `signature`, keys sorted, floats rejected, compact JSON) hashes —
+//!    `SHA-256(b"replay_bundle_hash_v1:" || canonical_json)` — to the recorded
+//!    `integrity_hash`;
 //! 2. the manifest's `decision_sequence_hash` re-derives from the timeline,
 //!    initial state snapshot and policy version (the "replay" re-derivation);
 //! 3. the Ed25519 signature over
@@ -26,6 +27,9 @@ use subtle::ConstantTimeEq;
 
 /// Domain separator of the product's bundle signature payload.
 pub const INCIDENT_BUNDLE_SIGNATURE_DOMAIN: &[u8] = b"replay_bundle_sig_v1:";
+/// Domain prefix of every product bundle digest (integrity and decision
+/// sequence): `SHA-256(domain || canonical_json)`.
+pub const INCIDENT_BUNDLE_HASH_DOMAIN: &[u8] = b"replay_bundle_hash_v1:";
 /// Signature algorithm the product records.
 pub const INCIDENT_BUNDLE_SIGNATURE_ALGORITHM: &str = "ed25519";
 /// Trust scope the product records for incident bundles.
@@ -86,19 +90,29 @@ pub enum IncidentBundleError {
 impl std::fmt::Display for IncidentBundleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::TooLarge { bytes } => write!(f, "incident bundle exceeds size limit ({bytes} bytes)"),
+            Self::TooLarge { bytes } => {
+                write!(f, "incident bundle exceeds size limit ({bytes} bytes)")
+            }
             Self::Json(detail) => write!(f, "incident bundle is not valid JSON: {detail}"),
             Self::NotAnObject => write!(f, "incident bundle must be a JSON object"),
             Self::MissingField { field } => write!(f, "incident bundle missing field `{field}`"),
             Self::UnknownField { field } => {
-                write!(f, "incident bundle carries unsigned unknown field `{field}`")
+                write!(
+                    f,
+                    "incident bundle carries unsigned unknown field `{field}`"
+                )
             }
-            Self::WrongType { field } => write!(f, "incident bundle field `{field}` has the wrong type"),
+            Self::WrongType { field } => {
+                write!(f, "incident bundle field `{field}` has the wrong type")
+            }
             Self::NonDeterministicFloat { path } => {
                 write!(f, "incident bundle contains a float at {path}")
             }
             Self::IntegrityMismatch { expected, actual } => {
-                write!(f, "integrity hash mismatch: recorded {expected}, recomputed {actual}")
+                write!(
+                    f,
+                    "integrity hash mismatch: recorded {expected}, recomputed {actual}"
+                )
             }
             Self::DecisionSequenceMismatch { expected, actual } => write!(
                 f,
@@ -112,7 +126,10 @@ impl std::fmt::Display for IncidentBundleError {
                 write!(f, "unsupported bundle signature algorithm `{algorithm}`")
             }
             Self::SignatureTrustScopeMismatch { actual } => {
-                write!(f, "bundle signature trust scope `{actual}` is not `{INCIDENT_BUNDLE_TRUST_SCOPE}`")
+                write!(
+                    f,
+                    "bundle signature trust scope `{actual}` is not `{INCIDENT_BUNDLE_TRUST_SCOPE}`"
+                )
             }
             Self::SignatureKeySourceUntrusted => {
                 write!(f, "bundle was signed with an untrusted `local` key source")
@@ -121,7 +138,10 @@ impl std::fmt::Display for IncidentBundleError {
                 write!(f, "bundle signer is not the verifier-supplied trust anchor")
             }
             Self::SignaturePayloadHashMismatch => {
-                write!(f, "recorded signed_payload_sha256 does not match the signature payload")
+                write!(
+                    f,
+                    "recorded signed_payload_sha256 does not match the signature payload"
+                )
             }
             Self::SignatureMalformed => write!(f, "bundle signature is malformed"),
             Self::SignatureInvalid => write!(f, "bundle signature does not verify"),
@@ -136,7 +156,9 @@ fn canonicalize(value: &Value, path: &str) -> Result<Value, IncidentBundleError>
         Value::Null | Value::Bool(_) | Value::String(_) => Ok(value.clone()),
         Value::Number(number) => {
             if number.is_f64() {
-                Err(IncidentBundleError::NonDeterministicFloat { path: path.to_string() })
+                Err(IncidentBundleError::NonDeterministicFloat {
+                    path: path.to_string(),
+                })
             } else {
                 Ok(value.clone())
             }
@@ -152,25 +174,42 @@ fn canonicalize(value: &Value, path: &str) -> Result<Value, IncidentBundleError>
             keys.sort_unstable();
             let mut out = Map::new();
             for key in keys {
-                out.insert(key.clone(), canonicalize(&map[key], &format!("{path}.{key}"))?);
+                out.insert(
+                    key.clone(),
+                    canonicalize(&map[key], &format!("{path}.{key}"))?,
+                );
             }
             Ok(Value::Object(out))
         }
     }
 }
 
-fn canonical_sha256_hex(value: &Value, path: &str) -> Result<String, IncidentBundleError> {
+/// Domain-separated digest of the canonical JSON form of `value`.
+///
+/// # Errors
+///
+/// Rejects floats (non-deterministic encodings) and serialization failures.
+pub fn incident_bundle_canonical_digest(
+    value: &Value,
+    path: &str,
+) -> Result<String, IncidentBundleError> {
     let canonical = canonicalize(value, path)?;
     let bytes =
         serde_json::to_vec(&canonical).map_err(|err| IncidentBundleError::Json(err.to_string()))?;
-    Ok(hex::encode(Sha256::digest(&bytes)))
+    let mut hasher = Sha256::new();
+    hasher.update(INCIDENT_BUNDLE_HASH_DOMAIN);
+    hasher.update(&bytes);
+    Ok(hex::encode(hasher.finalize()))
 }
 
 fn ct_str_eq(left: &str, right: &str) -> bool {
     left.len() == right.len() && bool::from(left.as_bytes().ct_eq(right.as_bytes()))
 }
 
-fn string_field<'a>(object: &'a Map<String, Value>, field: &'static str) -> Result<&'a str, IncidentBundleError> {
+fn string_field<'a>(
+    object: &'a Map<String, Value>,
+    field: &'static str,
+) -> Result<&'a str, IncidentBundleError> {
     object
         .get(field)
         .ok_or(IncidentBundleError::MissingField { field })?
@@ -213,11 +252,12 @@ pub fn verify_incident_bundle(
             return Err(IncidentBundleError::MissingField { field });
         }
     }
-    if let Some(unknown) = object
-        .keys()
-        .find(|key| !REQUIRED_FIELDS.contains(&key.as_str()) && !OPTIONAL_FIELDS.contains(&key.as_str()))
-    {
-        return Err(IncidentBundleError::UnknownField { field: unknown.clone() });
+    if let Some(unknown) = object.keys().find(|key| {
+        !REQUIRED_FIELDS.contains(&key.as_str()) && !OPTIONAL_FIELDS.contains(&key.as_str())
+    }) {
+        return Err(IncidentBundleError::UnknownField {
+            field: unknown.clone(),
+        });
     }
 
     // 1. Integrity: canonical view = bundle minus integrity_hash and signature.
@@ -225,7 +265,8 @@ pub fn verify_incident_bundle(
     let mut view = object.clone();
     view.remove("integrity_hash");
     view.remove("signature");
-    let recomputed_integrity = canonical_sha256_hex(&Value::Object(view), "$.integrity_view")?;
+    let recomputed_integrity =
+        incident_bundle_canonical_digest(&Value::Object(view), "$.integrity_view")?;
     if !ct_str_eq(&recorded_integrity, &recomputed_integrity) {
         return Err(IncidentBundleError::IntegrityMismatch {
             expected: recorded_integrity,
@@ -246,8 +287,10 @@ pub fn verify_incident_bundle(
     let recorded_sequence = manifest
         .get("decision_sequence_hash")
         .and_then(Value::as_str)
-        .ok_or(IncidentBundleError::MissingField { field: "manifest.decision_sequence_hash" })?;
-    let recomputed_sequence = canonical_sha256_hex(
+        .ok_or(IncidentBundleError::MissingField {
+            field: "manifest.decision_sequence_hash",
+        })?;
+    let recomputed_sequence = incident_bundle_canonical_digest(
         &serde_json::json!({
             "timeline": timeline,
             "initial_state_snapshot": object["initial_state_snapshot"],
@@ -261,10 +304,11 @@ pub fn verify_incident_bundle(
             actual: recomputed_sequence,
         });
     }
-    let manifest_count = manifest
-        .get("event_count")
-        .and_then(Value::as_u64)
-        .ok_or(IncidentBundleError::MissingField { field: "manifest.event_count" })?;
+    let manifest_count = manifest.get("event_count").and_then(Value::as_u64).ok_or(
+        IncidentBundleError::MissingField {
+            field: "manifest.event_count",
+        },
+    )?;
     if usize::try_from(manifest_count).ok() != Some(timeline.len()) {
         return Err(IncidentBundleError::EventCountMismatch {
             manifest: manifest_count,
@@ -304,13 +348,16 @@ pub fn verify_incident_bundle(
         return Err(IncidentBundleError::SignerNotTrusted);
     }
     let payload = incident_bundle_signature_payload(&recorded_integrity);
-    if !ct_str_eq(sig_str("signed_payload_sha256")?, &hex::encode(Sha256::digest(&payload))) {
+    if !ct_str_eq(
+        sig_str("signed_payload_sha256")?,
+        &hex::encode(Sha256::digest(&payload)),
+    ) {
         return Err(IncidentBundleError::SignaturePayloadHashMismatch);
     }
-    let signature_bytes =
-        hex::decode(sig_str("signature_hex")?).map_err(|_| IncidentBundleError::SignatureMalformed)?;
-    let signature =
-        Signature::from_slice(&signature_bytes).map_err(|_| IncidentBundleError::SignatureMalformed)?;
+    let signature_bytes = hex::decode(sig_str("signature_hex")?)
+        .map_err(|_| IncidentBundleError::SignatureMalformed)?;
+    let signature = Signature::from_slice(&signature_bytes)
+        .map_err(|_| IncidentBundleError::SignatureMalformed)?;
     trusted_signer
         .verify_strict(&payload, &signature)
         .map_err(|_| IncidentBundleError::SignatureInvalid)?;
