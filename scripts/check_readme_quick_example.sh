@@ -189,6 +189,23 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Check 9: README "First safe workload" — run guest JS through the embedded
+# engine with NO engine-binary override and NO degraded-fallback opt-in.
+# ---------------------------------------------------------------------------
+echo "[9] run ./hello.js --policy balanced (embedded engine, no env overrides)"
+printf '%s\n' 'console.log("hello-from-engine");' > hello.js
+run_rc=0
+run_out="$(env -u FRANKEN_NODE_ENGINE_BINARY_PATH -u FRANKEN_ENGINE_BIN \
+  -u FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK \
+  "$BIN" run ./hello.js --policy balanced --console-only 2>&1)" || run_rc=$?
+if [[ $run_rc -eq 0 && "$run_out" == "hello-from-engine" ]]; then
+  record PASS "run executes guest JS through the embedded engine (exit 0, exact stdout)"
+else
+  echo "  run exit=$run_rc output: $run_out" >&2
+  record FAIL "run did not execute hello.js through the embedded engine"
+fi
+
+# ---------------------------------------------------------------------------
 # Aggregate result
 # ---------------------------------------------------------------------------
 echo

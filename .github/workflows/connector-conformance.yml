@@ -14,17 +14,36 @@ on:
 jobs:
   conformance:
     runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Checkout sibling repositories
+        uses: ./.github/actions/franken-siblings
 
-      - name: Run conformance tests
-        run: cargo test -- conformance::
-
-      - name: Run connector lifecycle tests
-        run: cargo test -- connector::
+      # The conformance:: and connector:: unit tests are inline #[cfg(test)]
+      # modules. A default `cargo test` compiles them OUT (lib.rs gate) and the
+      # connector modules additionally need opt-in features, so the former
+      # `cargo test -- conformance::` (which also never parsed: the trailing
+      # colon broke the YAML) could only ever pass by running zero tests.
+      # Run the dedicated inline lane and fail if a filter matches nothing.
+      - name: Run conformance and connector inline tests
+        run: |
+          set -euo pipefail
+          for filter in 'conformance::' 'connector::'; do
+            RUSTFLAGS='--cfg franken_node_inline_tests' cargo test -p frankenengine-node \
+              --features extended-surfaces,test-support --lib -- "$filter" 2>&1 | tee "/tmp/inline-${filter%::}.log"
+            passed=$(sed -n 's/^test result: [a-z]*\. \([0-9]*\) passed.*/\1/p' "/tmp/inline-${filter%::}.log" | awk '{s+=$1} END {print s+0}')
+            echo "filter=${filter} passed=${passed}"
+            if [ "${passed}" -eq 0 ]; then
+              echo "FAIL: filter ${filter} executed zero tests" >&2
+              exit 1
+            fi
+          done
 
       - name: Run Python verification
         run: |
@@ -49,4 +68,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: conformance-evidence
-          path: /tmp/*.json
+          path: |
+            /tmp/*.json
+            /tmp/inline-*.log

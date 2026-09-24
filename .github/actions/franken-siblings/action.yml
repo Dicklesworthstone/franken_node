@@ -1,0 +1,35 @@
+name: franken-siblings
+description: >-
+  Check out the sibling repositories franken_node builds against side by side
+  (Cargo path dependencies such as ../../../franken_engine and ../frankentui)
+  and expose them under /dp for the absolute dev-dependency paths. Records the
+  exact sibling revisions in $RUNNER_TEMP/sibling-revisions.txt so every run's
+  evidence names the engine revision it built against.
+runs:
+  using: composite
+  steps:
+    - name: Clone siblings next to the workspace
+      shell: bash
+      run: |
+        set -euo pipefail
+        parent="$(dirname "$GITHUB_WORKSPACE")"
+        : > "$RUNNER_TEMP/sibling-revisions.txt"
+        for repo in franken_engine frankentui fastapi_rust sqlmodel_rust asupersync frankensqlite; do
+          if [ ! -d "$parent/$repo/.git" ]; then
+            git clone --depth 1 "https://github.com/Dicklesworthstone/$repo.git" "$parent/$repo"
+          fi
+          echo "$repo $(git -C "$parent/$repo" rev-parse HEAD)" >> "$RUNNER_TEMP/sibling-revisions.txt"
+        done
+        sudo mkdir -p /dp
+        for repo in franken_engine frankentui fastapi_rust sqlmodel_rust asupersync frankensqlite; do
+          sudo ln -sfn "$parent/$repo" "/dp/$repo"
+        done
+        sudo ln -sfn "$GITHUB_WORKSPACE" /dp/franken_node
+        cat "$RUNNER_TEMP/sibling-revisions.txt"
+    - name: Install the nightly toolchain the workspace requires
+      shell: bash
+      run: |
+        set -euo pipefail
+        rustup toolchain install nightly --profile minimal --component rustfmt --component clippy
+        rustup default nightly
+        rustc --version

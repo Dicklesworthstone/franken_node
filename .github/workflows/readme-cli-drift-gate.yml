@@ -19,24 +19,28 @@ on:
       - .github/workflows/readme-cli-drift-gate.yml
   workflow_dispatch: {}
 
+concurrency:
+  group: readme-cli-drift-gate-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   drift:
     name: README CLI drift gate
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 120
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Checkout sibling franken_engine
-        uses: actions/checkout@v4
-        with:
-          repository: Dicklesworthstone/franken_engine
-          path: ../franken_engine
-
-      - name: Install Rust toolchain
-        run: rustup show
+      # Sibling path dependencies must sit next to the workspace; the former
+      # `actions/checkout` with `path: ../franken_engine` was rejected on every
+      # run, so this gate never reached the build.
+      - name: Checkout sibling repositories
+        uses: ./.github/actions/franken-siblings
 
       - name: Build franken-node binary
         run: cargo build -p frankenengine-node --bin franken-node --locked

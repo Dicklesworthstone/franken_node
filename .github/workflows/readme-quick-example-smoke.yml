@@ -23,26 +23,29 @@ on:
       - .github/workflows/readme-quick-example-smoke.yml
   workflow_dispatch: {}
 
+concurrency:
+  group: readme-quick-example-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   smoke:
     name: README Quick Example smoke
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 120
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # The crate depends on `franken_engine` as a sibling path dependency.
-      # Without it, the workspace build fails at link time.
-      - name: Checkout sibling franken_engine
-        uses: actions/checkout@v4
-        with:
-          repository: Dicklesworthstone/franken_engine
-          path: ../franken_engine
-
-      - name: Install Rust toolchain
-        run: rustup show
+      # The workspace depends on sibling repositories (franken_engine,
+      # frankentui, ...) as path dependencies. `actions/checkout` cannot place
+      # a checkout outside the workspace (`path: ../franken_engine` was
+      # rejected on every run), so clone them side by side instead.
+      - name: Checkout sibling repositories
+        uses: ./.github/actions/franken-siblings
 
       - name: Build franken-node binary
         run: cargo build -p frankenengine-node --bin franken-node --locked
