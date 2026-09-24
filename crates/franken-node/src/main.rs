@@ -168,7 +168,8 @@ use frankenengine_node::{
             RemoteScope,
         },
         revocation_freshness::{
-            SafetyTier, evaluate_default_freshness, snapshot_age_secs_for_path,
+            SafetyTier, evaluate_default_freshness, registry_revocation_freshness_denial,
+            snapshot_age_secs_for_path,
         },
     },
     supply_chain::category_shift::validate_benchmark_thresholds,
@@ -690,6 +691,9 @@ enum TrustViolationKind {
     SentinelQuarantined,
     /// Product revocation snapshot is older than the profile's SafetyTier window.
     RevocationStale,
+    /// Dependencies are declared but no authoritative trust registry exists, so
+    /// their revocation state cannot be consulted (strict/balanced fail closed).
+    RegistryMissing,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -10011,7 +10015,12 @@ fn quarantine_trusted_run_dependencies(
     evidence_refs: Option<Vec<VerifiedEvidenceRef>>,
 ) -> Result<Vec<String>> {
     let registry_path = project_root.join(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH);
-    if !registry_path.is_file() {
+    // The durable store is the authority (the legacy JSON is a one-time import
+    // source): keying this on the JSON alone silently disabled auto-quarantine
+    // for every durably persisted registry (bd-reality-20260923-26n9r.1).
+    if !registry_path.is_file()
+        && !supply_chain::trust_card_registry_store::durable_store_path(&registry_path).is_file()
+    {
         tracing::warn!(
             registry_path = %registry_path.display(),
             "skipping automatic run quarantine because trust registry is unavailable"
@@ -18542,8 +18551,23 @@ fn evaluate_run_trust_preflight(
                 )
                 .is_file();
             if !authoritative_registry.is_file() && !registry_store_exists {
-                PreFlightVerdict::Skipped {
-                    reason: missing_trust_registry_message(&authoritative_registry, policy_mode),
+                let reason = missing_trust_registry_message(&authoritative_registry, policy_mode);
+                if policy_mode == Profile::LegacyRisky {
+                    PreFlightVerdict::Skipped { reason }
+                } else {
+                    // Revocation-first execution: declared dependencies whose
+                    // trust state cannot be consulted must not run silently.
+                    PreFlightVerdict::Blocked {
+                        reason: reason.clone(),
+                        warnings: Vec::new(),
+                        violations: vec![TrustViolation {
+                            dependency_name: None,
+                            extension_id: None,
+                            kind: TrustViolationKind::RegistryMissing,
+                            detail: reason,
+                        }],
+                        results: Vec::new(),
+                    }
                 }
             } else {
                 match TrustCardRegistry::load_authoritative_state_from_config(
@@ -18562,23 +18586,6 @@ fn evaluate_run_trust_preflight(
                             Profile::Balanced => SafetyTier::Risky,
                             Profile::LegacyRisky => SafetyTier::Standard,
                         };
-                        if let Some(age) =
-                            snapshot_age_secs_for_path(&authoritative_registry, now_secs)
-                            && let Err(err) = evaluate_default_freshness(
-                                "run-preflight",
-                                policy_tier,
-                                age,
-                                "trace-run-trust-preflight",
-                                now_secs.to_string(),
-                            )
-                        {
-                            violations.push(TrustViolation {
-                                dependency_name: None,
-                                extension_id: None,
-                                kind: TrustViolationKind::RevocationStale,
-                                detail: format!("revocation freshness gate denied run: {err}"),
-                            });
-                        }
 
                         for dependency in dependencies {
                             let dependency_name = dependency.dependency_name.clone();
@@ -18678,6 +18685,31 @@ fn evaluate_run_trust_preflight(
                                     });
                                 }
                             }
+                        }
+
+                        // Revocation-first execution: admitting a dependency on
+                        // the strength of its trust card requires that the
+                        // registry's trust signals were refreshed recently
+                        // enough for the profile tier. The frontier is a
+                        // recorded fact (`trust sync --force`), never a file
+                        // mtime, and a missing frontier is stale.
+                        if results
+                            .iter()
+                            .any(|result| result.status == RunDependencyTrustStatus::Trusted)
+                            && let Some(detail) = registry_revocation_freshness_denial(
+                                &authoritative_registry,
+                                policy_tier,
+                                now_secs,
+                                "run-preflight",
+                                "trace-run-trust-preflight",
+                            )
+                        {
+                            violations.push(TrustViolation {
+                                dependency_name: None,
+                                extension_id: None,
+                                kind: TrustViolationKind::RevocationStale,
+                                detail,
+                            });
                         }
 
                         if violations.is_empty() {
@@ -25836,7 +25868,10 @@ fn named_cli_fail(
     json: bool,
     error: impl std::fmt::Display,
 ) -> Result<()> {
-    let message = error.to_string();
+    // Alternate formatting keeps the full anyhow cause chain ("context: root
+    // cause"); `to_string()` printed only the outermost context and hid the
+    // actionable root cause (e.g. which config key is missing).
+    let message = format!("{error:#}");
     if json {
         emit_named_cli_error_json(schema, command, &message)?;
         fail_closed_after_json();
@@ -31040,6 +31075,7 @@ fn main() -> Result<()> {
                     canary_instances: args.canary_instances,
                     auto_rollback_on_failure: !args.no_auto_rollback,
                     force: args.force,
+                    lockstep_report: args.lockstep_report.clone(),
                     ..Default::default()
                 };
 
@@ -31403,6 +31439,28 @@ fn main() -> Result<()> {
                     && let Err(err) = persist_trust_card_cli_registry(&state)
                 {
                     return trust_fail("trust.sync", args.json, err);
+                }
+                // The revocation frontier advances only on a forced refresh in
+                // which every trust signal was fetched from the network without
+                // error; cached answers and partial failures prove nothing new
+                // about revocation freshness (bd-reality-20260923-26n9r.1).
+                if args.force && audit_report.network_errors == 0 {
+                    if let Err(err) =
+                        supply_chain::trust_card_registry_store::record_revocation_frontier(
+                            &state.path,
+                            now_secs,
+                        )
+                    {
+                        return trust_fail(
+                            "trust.sync",
+                            args.json,
+                            anyhow::anyhow!(err.to_string()),
+                        );
+                    }
+                } else if !args.json {
+                    eprintln!(
+                        "note: revocation frontier not advanced (requires `trust sync --force` with no network errors)"
+                    );
                 }
                 for warning in &audit_report.warnings {
                     eprintln!("warning: {warning}");

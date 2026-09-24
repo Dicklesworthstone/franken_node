@@ -237,6 +237,10 @@ pub struct RolloutConfig {
     pub require_lockstep_evidence: bool,
     pub auto_rollback_on_failure: bool,
     pub force: bool,
+    /// `franken-node verify lockstep <project> --json` report proving the
+    /// migrated project behaves identically across runtimes. Required to leave
+    /// Shadow when `require_lockstep_evidence` is set (unless `force`).
+    pub lockstep_report: Option<PathBuf>,
 }
 
 impl Default for RolloutConfig {
@@ -248,8 +252,74 @@ impl Default for RolloutConfig {
             require_lockstep_evidence: true,
             auto_rollback_on_failure: true,
             force: false,
+            lockstep_report: None,
         }
     }
+}
+
+/// Upper bound on a lockstep report read as rollout evidence.
+const MAX_LOCKSTEP_REPORT_BYTES: u64 = 16 * 1024 * 1024;
+
+/// The bytes the lockstep harness feeds its cross-runtime checks for `project`
+/// (`LockstepHarness::verify_lockstep_entry`): the entry file for a file
+/// target, otherwise the project's package.json, otherwise its path.
+fn lockstep_input_payload(project: &Path) -> Vec<u8> {
+    if project.is_file() {
+        fs::read(project).unwrap_or_default()
+    } else {
+        fs::read(project.join("package.json"))
+            .unwrap_or_else(|_| project.to_string_lossy().as_bytes().to_vec())
+    }
+}
+
+/// Verify that `report_path` is a passing lockstep oracle report FOR THIS
+/// PROJECT and return its SHA-256 (bound into the transition receipt).
+///
+/// Rejects: unreadable/oversized/unparseable reports, any non-`Pass` verdict,
+/// reports without checks, reports lacking either a franken product leg or a
+/// reference-runtime leg, and reports whose checked input differs from this
+/// project's current bytes (evidence from another project or a stale tree).
+pub fn verify_lockstep_evidence(project: &Path, report_path: &Path) -> Result<String, String> {
+    use frankenengine_node::runtime::nversion_oracle::{DivergenceReport, OracleVerdict};
+
+    let file = File::open(report_path)
+        .map_err(|e| format!("cannot open lockstep report {}: {e}", report_path.display()))?;
+    let mut raw = Vec::new();
+    file.take(MAX_LOCKSTEP_REPORT_BYTES + 1)
+        .read_to_end(&mut raw)
+        .map_err(|e| format!("cannot read lockstep report {}: {e}", report_path.display()))?;
+    if raw.len() as u64 > MAX_LOCKSTEP_REPORT_BYTES {
+        return Err("lockstep report exceeds the evidence size limit".to_string());
+    }
+    let report: DivergenceReport = serde_json::from_slice(&raw)
+        .map_err(|e| format!("lockstep report is not a `verify lockstep --json` report: {e}"))?;
+
+    if report.verdict != OracleVerdict::Pass {
+        return Err(format!(
+            "lockstep report verdict is {:?}, not Pass; resolve divergences before promotion",
+            report.verdict
+        ));
+    }
+    if report.checks.is_empty() {
+        return Err("lockstep report contains no cross-runtime checks".to_string());
+    }
+    let has_product_leg = report.runtimes.values().any(|rt| !rt.is_reference);
+    let has_reference_leg = report.runtimes.values().any(|rt| rt.is_reference);
+    if !has_product_leg || !has_reference_leg {
+        return Err(
+            "lockstep report must compare the franken product runtime against at least one reference runtime"
+                .to_string(),
+        );
+    }
+    let expected = lockstep_input_payload(project);
+    if let Some(check) = report.checks.iter().find(|check| check.input != expected) {
+        return Err(format!(
+            "lockstep report check {} was produced for different input than this project's current state; re-run `franken-node verify lockstep {} --json`",
+            check.check_id,
+            project.display()
+        ));
+    }
+    Ok(format!("sha256:{}", hex::encode(Sha256::digest(&raw))))
 }
 
 /// Manager coordinating state machine transitions and durable state storage.
@@ -405,6 +475,30 @@ impl RolloutManager {
             }
         }
 
+        // Leaving Shadow exposes real traffic: require verified lockstep
+        // evidence for THIS project. `lockstep_verified` is set only from a
+        // verified report, never assumed (bd-reality-20260923-26n9r.16).
+        let mut evidence_note = None;
+        if from_stage == RolloutStage::Shadow
+            && next_stage != RolloutStage::Shadow
+            && !state.lockstep_verified
+        {
+            match config.lockstep_report.as_deref() {
+                Some(report_path) => {
+                    let digest = verify_lockstep_evidence(&self.project_path, report_path)?;
+                    state.lockstep_verified = true;
+                    evidence_note = Some(format!("lockstep evidence {digest}"));
+                }
+                None if config.require_lockstep_evidence && !config.force => {
+                    return Err(format!(
+                        "promotion out of Shadow requires lockstep evidence: run `franken-node verify lockstep {} --json > lockstep.json` and pass --lockstep-report lockstep.json",
+                        self.project_path.display()
+                    ));
+                }
+                None => {}
+            }
+        }
+
         let mut new_ramp_pct = state.ramp_pct;
         match next_stage {
             RolloutStage::Shadow => {
@@ -412,7 +506,6 @@ impl RolloutManager {
             }
             RolloutStage::Canary => {
                 new_ramp_pct = 5;
-                state.lockstep_verified = true;
             }
             RolloutStage::Ramp => {
                 if let Some(override_pct) = target_ramp_pct {
@@ -431,11 +524,20 @@ impl RolloutManager {
         }
 
         let now = chrono::Utc::now().to_rfc3339();
-        let reason = if from_stage == next_stage && next_stage == RolloutStage::Ramp {
+        let mut reason = if from_stage == next_stage && next_stage == RolloutStage::Ramp {
             format!("stepped traffic ramp to {}%", new_ramp_pct)
         } else {
             format!("promoted from {} to {}", from_stage, next_stage)
         };
+        if let Some(note) = evidence_note {
+            reason.push_str("; ");
+            reason.push_str(&note);
+        } else if from_stage == RolloutStage::Shadow
+            && next_stage != RolloutStage::Shadow
+            && !state.lockstep_verified
+        {
+            reason.push_str("; forced without lockstep evidence");
+        }
 
         let event = RolloutTransitionEvent {
             from_stage,
@@ -524,7 +626,98 @@ impl RolloutManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frankenengine_node::runtime::nversion_oracle::{
+        BoundaryScope, RuntimeEntry, RuntimeOracle,
+    };
+    use std::collections::BTreeMap;
     use tempfile::tempdir;
+
+    /// Produce a lockstep report with the real oracle for `input`, where the
+    /// franken leg agrees (`diverge = false`) or disagrees with the reference.
+    fn write_lockstep_report(dir: &Path, input: &[u8], diverge: bool) -> PathBuf {
+        let mut oracle = RuntimeOracle::new("rollout-test-trace", 100);
+        for (id, is_reference) in [("node", true), ("franken-node", false)] {
+            oracle
+                .register_runtime(RuntimeEntry {
+                    runtime_id: id.to_string(),
+                    runtime_name: id.to_string(),
+                    version: "test".to_string(),
+                    is_reference,
+                })
+                .unwrap();
+        }
+        let mut outputs = BTreeMap::new();
+        outputs.insert("node".to_string(), b"hello\n".to_vec());
+        outputs.insert(
+            "franken-node".to_string(),
+            if diverge { b"goodbye\n".to_vec() } else { b"hello\n".to_vec() },
+        );
+        let check = oracle
+            .run_cross_check("check-1", BoundaryScope::IO, input, &outputs)
+            .unwrap();
+        if let Some(frankenengine_node::runtime::nversion_oracle::CheckOutcome::Diverge {
+            outputs: div_outputs,
+        }) = check.outcome
+        {
+            oracle.classify_divergence(
+                "div-1",
+                "check-1",
+                BoundaryScope::IO,
+                frankenengine_node::runtime::nversion_oracle::RiskTier::High,
+                &div_outputs,
+            );
+        }
+        let report = oracle.generate_report(0);
+        let path = dir.join(if diverge { "lockstep-diverged.json" } else { "lockstep.json" });
+        fs::write(&path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+        path
+    }
+
+    fn project_with_manifest(dir: &Path) -> Vec<u8> {
+        let manifest = br#"{"name":"rollout-fixture","version":"1.0.0"}"#.to_vec();
+        fs::write(dir.join("package.json"), &manifest).unwrap();
+        manifest
+    }
+
+    #[test]
+    fn leaving_shadow_without_lockstep_evidence_fails_closed() {
+        let dir = tempdir().unwrap();
+        project_with_manifest(dir.path());
+        let mgr = RolloutManager::new(dir.path(), Some("mig-evidence-01"));
+        let err = mgr.promote(&RolloutConfig::default(), None, None).unwrap_err();
+        assert!(err.contains("requires lockstep evidence"), "{err}");
+        assert_eq!(mgr.load_or_init().unwrap().current_stage, RolloutStage::Shadow);
+    }
+
+    #[test]
+    fn diverged_or_foreign_lockstep_report_is_rejected() {
+        let dir = tempdir().unwrap();
+        let manifest = project_with_manifest(dir.path());
+        let mgr = RolloutManager::new(dir.path(), Some("mig-evidence-02"));
+
+        let diverged = write_lockstep_report(dir.path(), &manifest, true);
+        let cfg = RolloutConfig { lockstep_report: Some(diverged), ..RolloutConfig::default() };
+        let err = mgr.promote(&cfg, None, None).unwrap_err();
+        assert!(err.contains("not Pass"), "{err}");
+
+        let foreign = write_lockstep_report(dir.path(), b"{\"name\":\"other-project\"}", false);
+        let cfg = RolloutConfig { lockstep_report: Some(foreign), ..RolloutConfig::default() };
+        let err = mgr.promote(&cfg, None, None).unwrap_err();
+        assert!(err.contains("different input"), "{err}");
+        assert!(!mgr.load_or_init().unwrap().lockstep_verified);
+    }
+
+    #[test]
+    fn forced_promotion_never_claims_lockstep_verification() {
+        let dir = tempdir().unwrap();
+        project_with_manifest(dir.path());
+        let mgr = RolloutManager::new(dir.path(), Some("mig-evidence-03"));
+        let cfg = RolloutConfig { force: true, ..RolloutConfig::default() };
+        let report = mgr.promote(&cfg, None, None).unwrap();
+        assert_eq!(report.stage, RolloutStage::Canary);
+        assert!(!report.lockstep_verified);
+        assert!(report.message.contains("forced without lockstep evidence"));
+    }
 
     #[test]
     fn fresh_rollout_initializes_in_shadow_stage() {
@@ -542,14 +735,19 @@ mod tests {
     #[test]
     fn promotion_advances_through_stages() {
         let dir = tempdir().unwrap();
+        let manifest = project_with_manifest(dir.path());
         let mgr = RolloutManager::new(dir.path(), Some("mig-test-02"));
-        let cfg = RolloutConfig::default();
+        let cfg = RolloutConfig {
+            lockstep_report: Some(write_lockstep_report(dir.path(), &manifest, false)),
+            ..RolloutConfig::default()
+        };
 
-        // 1. Promote Shadow -> Canary
+        // 1. Promote Shadow -> Canary (with verified lockstep evidence)
         let rep1 = mgr.promote(&cfg, None, None).unwrap();
         assert_eq!(rep1.stage, RolloutStage::Canary);
         assert_eq!(rep1.ramp_pct, 5);
         assert!(rep1.lockstep_verified);
+        assert!(rep1.message.contains("lockstep evidence sha256:"));
 
         // 2. Promote Canary -> Ramp (initial 25%)
         let rep2 = mgr.promote(&cfg, None, None).unwrap();
@@ -605,8 +803,12 @@ mod tests {
     #[test]
     fn restart_safe_idempotency_preserves_state() {
         let dir = tempdir().unwrap();
+        let manifest = project_with_manifest(dir.path());
         let mgr1 = RolloutManager::new(dir.path(), Some("mig-test-05"));
-        let cfg = RolloutConfig::default();
+        let cfg = RolloutConfig {
+            lockstep_report: Some(write_lockstep_report(dir.path(), &manifest, false)),
+            ..RolloutConfig::default()
+        };
         mgr1.promote(&cfg, None, None).unwrap(); // Promoted to Canary
 
         // Reopen in a second manager instance

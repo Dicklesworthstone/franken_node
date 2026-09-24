@@ -984,6 +984,14 @@ pub struct MigrateRolloutArgs {
     #[arg(long)]
     pub no_auto_rollback: bool,
 
+    /// Lockstep evidence for leaving Shadow: the JSON report printed by
+    /// `franken-node verify lockstep <project> --json`. It must have verdict
+    /// Pass, a franken leg and a reference leg, and match the project's current
+    /// input. Without it (and without --force) promotion out of Shadow fails
+    /// closed; --force proceeds but never records `lockstep_verified`.
+    #[arg(long)]
+    pub lockstep_report: Option<PathBuf>,
+
     /// Emit structured JSON output.
     #[arg(long)]
     pub json: bool,
