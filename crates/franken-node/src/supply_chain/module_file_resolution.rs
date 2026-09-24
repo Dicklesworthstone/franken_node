@@ -308,7 +308,7 @@ impl Resolver {
                     if kind == FileType::Directory { flags |= OFlags::DIRECTORY; }
                     let mut file = File::from(openat(directory, name, flags, Mode::empty()).map_err(|e| io_error(path, e))?);
                     let before = file.metadata().map_err(|e| io_error(path, e))?;
-                    if before.dev() != info.st_dev as u64 || before.ino() != info.st_ino as u64
+                    if before.dev() != info.st_dev || before.ino() != info.st_ino
                         || before.is_dir() != (kind == FileType::Directory) || (!before.is_file() && !before.is_dir()) {
                         return Err(error("ERR_MODULE_INPUT_CHANGED", "resolution input changed while opening"));
                     }
@@ -396,19 +396,17 @@ impl Resolver {
 
     fn package(&mut self, directory: &str, request: &str, mode: ResolutionMode, depth: usize) -> Result<(String, String)> {
         let (name, subpath) = package_parts(request)?;
-        if let Some((scope, manifest)) = self.scope(directory)? {
-            if manifest.name.as_deref() == Some(name) && manifest.exports {
-                return self.mapping(&scope, &manifest, MapKind::Exports, &subpath, mode, depth);
-            }
+        if let Some((scope, manifest)) = self.scope(directory)?
+            && manifest.name.as_deref() == Some(name) && manifest.exports {
+            return self.mapping(&scope, &manifest, MapKind::Exports, &subpath, mode, depth);
         }
         let mut ancestor = directory;
         loop {
             if ancestor.rsplit('/').next() != Some("node_modules") {
                 let package = join(&join(ancestor, "node_modules"), name);
                 if self.probe(&package)?.is_dir() {
-                    if let Some(manifest) = self.manifest(&package)? {
-                        if manifest.exports { return self.mapping(&package, &manifest, MapKind::Exports, &subpath, mode, depth); }
-                    }
+                    if let Some(manifest) = self.manifest(&package)?
+                        && manifest.exports { return self.mapping(&package, &manifest, MapKind::Exports, &subpath, mode, depth); }
                     if mode == ResolutionMode::Import {
                         if subpath == "." {
                             // Node's legacy package-root main/index search is

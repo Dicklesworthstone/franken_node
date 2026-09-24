@@ -258,10 +258,9 @@ impl PackageMap {
 }
 
 fn match_map<'a>(members: &'a [(String, OrderedValue)], request: &'a str) -> Option<(&'a str, &'a OrderedValue, Option<&'a str>)> {
-    if !request.contains('*') && !request.ends_with('/') {
-        if let Some((key, target)) = members.iter().find(|(key, _)| key == request) {
-            return Some((key, target, None));
-        }
+    if !request.contains('*') && !request.ends_with('/')
+        && let Some((key, target)) = members.iter().find(|(key, _)| key == request) {
+        return Some((key, target, None));
     }
     let mut best = None;
     let mut rank = (0, 0);
@@ -294,8 +293,8 @@ fn select_target(target: &OrderedValue, pattern: Option<&str>, kind: MapKind,
         OrderedValue::Null => Ok(Resolved::Blocked),
         OrderedValue::Invalid => Err(error("ERR_INVALID_PACKAGE_TARGET", "target must be a string, condition object, array or null")),
         OrderedValue::String(value) => {
-            let target_kind = if value.starts_with("./") {
-                validate_segments(&value[2..], "ERR_INVALID_PACKAGE_TARGET")?;
+            let target_kind = if let Some(relative) = value.strip_prefix("./") {
+                validate_segments(relative, "ERR_INVALID_PACKAGE_TARGET")?;
                 TargetKind::PackageRelative
             } else {
                 if kind != MapKind::Imports || !external_package_request(value) {

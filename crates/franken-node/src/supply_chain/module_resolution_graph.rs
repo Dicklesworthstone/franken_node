@@ -252,10 +252,10 @@ fn build_graph_parts(
     let mut workspace_by_name = BTreeMap::new();
     let mut workspace_by_path = BTreeMap::new();
     for package in packages.iter().filter(|package| package.workspace) {
-        if let Some(name) = &package.name {
-            if workspace_by_name.insert(name.clone(), package.package_id.clone()).is_some() {
-                return invalid_metadata(format!("duplicate workspace package name {name:?}"));
-            }
+        if let Some(name) = &package.name
+            && workspace_by_name.insert(name.clone(), package.package_id.clone()).is_some()
+        {
+            return invalid_metadata(format!("duplicate workspace package name {name:?}"));
         }
         workspace_by_path.insert(manifest_directory(&package.relative_manifest_path), package);
     }
@@ -810,10 +810,10 @@ fn read_package_lock(project_root: &Path) -> ModuleResolutionGraphResult<Lockfil
     if !value.is_object() {
         return invalid_metadata("package-lock.json must contain an object");
     }
-    if let Some(version) = value.get("lockfileVersion") {
-        if !matches!(version.as_u64(), Some(1..=3)) {
-            return invalid_metadata("unsupported lockfileVersion; supported versions are 1, 2 and 3");
-        }
+    if let Some(version) = value.get("lockfileVersion")
+        && !matches!(version.as_u64(), Some(1..=3))
+    {
+        return invalid_metadata("unsupported lockfileVersion; supported versions are 1, 2 and 3");
     }
     let mut lockfile = Lockfile::default();
     if let Some(packages_value) = value.get("packages") {
