@@ -708,6 +708,38 @@ impl<P: HostIoProvider, R: EndpointResolver> HostIoProvider for SsrfGatedHostIo<
         let (addresses, deadline) = self.gate_endpoint(request, endpoint, use_tls, granted)?;
         (self.execute_network)(&self.inner, request, granted, &addresses, deadline)
     }
+
+    /// The engine drives every effect through this supervised entry. The SSRF
+    /// gate is identical to `perform`; the control is forwarded to the pinned
+    /// executor or the wrapped provider, never dropped (dropping it made every
+    /// guest network request fail as "not implemented").
+    fn perform_controlled(
+        &self,
+        request: &HostIoRequest,
+        granted: &[HostIoCapability],
+        control: Arc<dyn HostIoControl>,
+    ) -> HostIoOutcome {
+        let (endpoint, use_tls) = match request {
+            HostIoRequest::NetworkSend { endpoint, .. }
+            | HostIoRequest::NetworkRecv { endpoint, .. } => (endpoint, false),
+            HostIoRequest::NetworkRequest { endpoint, use_tls, .. } => (endpoint, *use_tls),
+            HostIoRequest::FsRead { .. }
+            | HostIoRequest::FsWrite { .. }
+            | HostIoRequest::FsMeta { .. }
+            | HostIoRequest::RandomRead { .. } => {
+                return self.inner.perform_controlled(request, granted, control);
+            }
+        };
+        let (addresses, deadline) = self.gate_endpoint(request, endpoint, use_tls, granted)?;
+        (self.execute_network_controlled)(
+            &self.inner,
+            request,
+            granted,
+            &addresses,
+            deadline,
+            control,
+        )
+    }
 }
 
 #[cfg(all(test, feature = "engine"))]
