@@ -69,8 +69,9 @@ Each claim entry uses this structure:
 - **Verification command**:
   `python3 scripts/check_migration_velocity_gate.py --json`; SDK recompute:
   `cargo test -p frankenengine-verifier-sdk --test migration_throughput_recompute`
-- **Last verified**: 2026-08-22 (live measurement of record)
-- **Status**: pending (measured 2.30x, CI95 [1.90x, 3.30x] — below 3.0x)
+- **Last verified**: 2026-09-24 (live re-measurement with durability
+  restored; binary sha256 `44d775911149…` recorded in the census)
+- **Status**: pending (measured 1.24x, CI95 [0.97x, 1.35x]; below 3.0x)
 - **Notes**: The constructed Feb 2026 report
   (`artifacts/13/migration_velocity_report.json`, fictional
   `cohort-*-001` archetypes, 3.15x) is **not** evidence and the gate rejects
@@ -84,6 +85,16 @@ Each claim entry uses this structure:
   holdout-worker-service 1.95x. The claim stays **pending** until a
   re-measurement meets 3.0x; `bd-3agp` remains historically closed and must
   not be cited as verified 3x.
+  2026-09-24: the ratio later reported (5.56x, which closed bd-v0lgc) came
+  from deleting all fsync barriers in `rewrite_transaction.rs`
+  (608f2088d/318ac9360; bd-reality-20260923-26n9r.2). With batched barriers
+  restored (bb102ec67), two consecutive runs of release build 44d775911149…
+  (5 fixtures x 5 runs, load average 20-40) measured 0.97x
+  (CI95 [0.86x, 1.17x]) and 1.24x (CI95 [0.97x, 1.35x]). The committed
+  artifact is the second. Per fixture: risky 1.50x, hardened 1.33x,
+  corpus-commander 1.21x, holdout-worker-service 0.98x,
+  rewrite-shell-commonjs 0.85x. Wall-clock against scripted codemods is also
+  only a proxy for the charter's "time-to-production + confidence" metric.
 
 ### CLAIM-003: ≥10× reduction in successful host compromise vs. baseline
 

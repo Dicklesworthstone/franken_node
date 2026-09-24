@@ -11,6 +11,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import sys
 from pathlib import Path
@@ -72,6 +73,50 @@ def _parse_iso8601(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+# Hosts reserved for documentation and testing (RFC 2606, RFC 6761). A
+# replication whose source or evidence lives on one of these is not evidence
+# of anything, however well-formed the record around it is.
+PLACEHOLDER_HOSTS = {"example.com", "example.net", "example.org", "localhost"}
+PLACEHOLDER_HOST_SUFFIXES = (".example", ".test", ".invalid", ".localhost",
+                             ".example.com", ".example.net", ".example.org")
+
+
+def _evidence_ref_problem(ref: str, evidence_base: Path | None) -> str | None:
+    """Why `ref` cannot be evidence, or None.
+
+    A remote reference must not use a reserved placeholder host. A relative
+    reference names evidence shipped with the report and must exist beside it.
+    """
+    parsed = urlparse(ref)
+    if parsed.scheme in {"http", "https"}:
+        host = (parsed.hostname or "").lower()
+        if not host:
+            return f"{ref}: no host"
+        if host in PLACEHOLDER_HOSTS or host.endswith(PLACEHOLDER_HOST_SUFFIXES):
+            return f"{ref}: placeholder host {host} (RFC 2606/6761) is not evidence"
+        return None
+    if parsed.scheme:
+        return f"{ref}: unsupported scheme {parsed.scheme}"
+    relative = Path(ref)
+    if relative.is_absolute() or ".." in relative.parts:
+        return f"{ref}: evidence path must be relative to the report"
+    if evidence_base is not None and not (evidence_base / relative).is_file():
+        return f"{ref}: evidence file not found beside the report"
+    return None
+
+
+def write_sample_evidence(directory: Path) -> None:
+    """Create the evidence files `sample_report()` references (tests only)."""
+    for replication in sample_report()["replications"]:
+        refs = [replication["source_url"]] + [
+            result["evidence_uri"] for result in replication["claim_results"].values()
+        ]
+        for ref in refs:
+            path = directory / ref
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"ref": ref}) + "\n", encoding="utf-8")
+
+
 def sample_report() -> dict[str, Any]:
     return {
         "bead_id": BEAD_ID,
@@ -85,15 +130,15 @@ def sample_report() -> dict[str, Any]:
                 "organization": "OpenSec Labs",
                 "independent": True,
                 "executed_at_utc": "2026-02-18T16:45:00Z",
-                "source_url": "https://example.org/opensec/franken_node_replication_20260218",
+                "source_url": "evidence/opensec/replication.json",
                 "source_commit": "0a6c9a8f71a8380dcf23cc9eb7ae4b06f2d64511",
                 "evaluator_hash": "ba4515ec17b6e8f774f6fba6054b8b9f8e86c79940f9cf3d95b6c499f3c37c8b",
                 "environment_fingerprint": "ubuntu-22.04|x86_64|python3.12|runner-v2",
                 "disclosed_funding_conflict": False,
                 "claim_results": {
-                    "migration_velocity_3x": {"pass": True, "evidence_uri": "https://example.org/opensec/evidence/migration_velocity.json", "measured_value": "3.41x"},
-                    "compromise_reduction_10x": {"pass": True, "evidence_uri": "https://example.org/opensec/evidence/compromise_reduction.json", "measured_value": "12.3x"},
-                    "replay_coverage_100pct": {"pass": True, "evidence_uri": "https://example.org/opensec/evidence/replay_coverage.json", "measured_value": "100%"},
+                    "migration_velocity_3x": {"pass": True, "evidence_uri": "evidence/opensec/migration_velocity.json", "measured_value": "3.41x"},
+                    "compromise_reduction_10x": {"pass": True, "evidence_uri": "evidence/opensec/compromise_reduction.json", "measured_value": "12.3x"},
+                    "replay_coverage_100pct": {"pass": True, "evidence_uri": "evidence/opensec/replay_coverage.json", "measured_value": "100%"},
                 },
             },
             {
@@ -101,15 +146,15 @@ def sample_report() -> dict[str, Any]:
                 "organization": "Boundary Proofs Consortium",
                 "independent": True,
                 "executed_at_utc": "2026-02-19T10:12:00Z",
-                "source_url": "https://example.org/bpc/franken_node_replication_20260219",
+                "source_url": "evidence/bpc/replication.json",
                 "source_commit": "0a6c9a8f71a8380dcf23cc9eb7ae4b06f2d64511",
                 "evaluator_hash": "7f2fca1ab414035eb4d7fc1d7d2442be26d5eb44557af73f2ad8d2081f6f8d2d",
                 "environment_fingerprint": "debian-12|x86_64|python3.11|runner-v4",
                 "disclosed_funding_conflict": False,
                 "claim_results": {
-                    "migration_velocity_3x": {"pass": True, "evidence_uri": "https://example.org/bpc/evidence/migration_velocity.json", "measured_value": "3.22x"},
-                    "compromise_reduction_10x": {"pass": True, "evidence_uri": "https://example.org/bpc/evidence/compromise_reduction.json", "measured_value": "10.9x"},
-                    "replay_coverage_100pct": {"pass": True, "evidence_uri": "https://example.org/bpc/evidence/replay_coverage.json", "measured_value": "100%"},
+                    "migration_velocity_3x": {"pass": True, "evidence_uri": "evidence/bpc/migration_velocity.json", "measured_value": "3.22x"},
+                    "compromise_reduction_10x": {"pass": True, "evidence_uri": "evidence/bpc/compromise_reduction.json", "measured_value": "10.9x"},
+                    "replay_coverage_100pct": {"pass": True, "evidence_uri": "evidence/bpc/replay_coverage.json", "measured_value": "100%"},
                 },
             },
             {
@@ -117,15 +162,15 @@ def sample_report() -> dict[str, Any]:
                 "organization": "Delta Audit Group",
                 "independent": False,
                 "executed_at_utc": "2026-02-20T08:05:00Z",
-                "source_url": "https://example.org/delta/franken_node_replication_20260220",
+                "source_url": "evidence/delta/replication.json",
                 "source_commit": "0a6c9a8f71a8380dcf23cc9eb7ae4b06f2d64511",
                 "evaluator_hash": "7e20bc8f4328c2bcc3f950fe9ca58aa315f5715dfcf56240a68fc5a9a96cfc33",
                 "environment_fingerprint": "macos-14|arm64|python3.12|runner-v3",
                 "disclosed_funding_conflict": True,
                 "claim_results": {
-                    "migration_velocity_3x": {"pass": True, "evidence_uri": "https://example.org/delta/evidence/migration_velocity.json", "measured_value": "3.07x"},
-                    "compromise_reduction_10x": {"pass": True, "evidence_uri": "https://example.org/delta/evidence/compromise_reduction.json", "measured_value": "10.2x"},
-                    "replay_coverage_100pct": {"pass": True, "evidence_uri": "https://example.org/delta/evidence/replay_coverage.json", "measured_value": "100%"},
+                    "migration_velocity_3x": {"pass": True, "evidence_uri": "evidence/delta/migration_velocity.json", "measured_value": "3.07x"},
+                    "compromise_reduction_10x": {"pass": True, "evidence_uri": "evidence/delta/compromise_reduction.json", "measured_value": "10.2x"},
+                    "replay_coverage_100pct": {"pass": True, "evidence_uri": "evidence/delta/replay_coverage.json", "measured_value": "100%"},
                 },
             },
         ],
@@ -139,7 +184,11 @@ def sample_report() -> dict[str, Any]:
     }
 
 
-def _evaluate_replications(replications: list[dict[str, Any]], required_claims: set[str]) -> dict[str, Any]:
+def _evaluate_replications(
+    replications: list[dict[str, Any]],
+    required_claims: set[str],
+    evidence_base: Path | None = None,
+) -> dict[str, Any]:
     validation_errors: list[str] = []
     organizations: set[str] = set()
     evaluator_hashes: set[str] = set()
@@ -206,6 +255,12 @@ def _evaluate_replications(replications: list[dict[str, Any]], required_claims: 
             )
 
         replication_passes_all_claims = True
+        source_url = repl.get("source_url")
+        if isinstance(source_url, str) and source_url.strip():
+            problem = _evidence_ref_problem(source_url, evidence_base)
+            if problem:
+                replication_passes_all_claims = False
+                validation_errors.append(f"replications[{idx}].source_url {problem}")
         for claim in required_claims:
             claim_payload = claim_results.get(claim, {})
             if not isinstance(claim_payload, dict):
@@ -223,6 +278,13 @@ def _evaluate_replications(replications: list[dict[str, Any]], required_claims: 
             if not isinstance(evidence_uri, str) or not evidence_uri.strip():
                 replication_passes_all_claims = False
                 validation_errors.append(f"replications[{idx}].claim_results.{claim}.evidence_uri required")
+            else:
+                problem = _evidence_ref_problem(evidence_uri, evidence_base)
+                if problem:
+                    replication_passes_all_claims = False
+                    validation_errors.append(
+                        f"replications[{idx}].claim_results.{claim}.evidence_uri {problem}"
+                    )
             if not isinstance(measured_value, str) or not measured_value.strip():
                 replication_passes_all_claims = False
                 validation_errors.append(f"replications[{idx}].claim_results.{claim}.measured_value required")
@@ -359,7 +421,7 @@ def run_checks(spec_path: Path = SPEC, report_path: Path = REPORT) -> dict[str, 
         item for item in replications_raw if isinstance(item, dict)
     ] if isinstance(replications_raw, list) else []
 
-    evaluation = _evaluate_replications(replications, REQUIRED_CLAIMS)
+    evaluation = _evaluate_replications(replications, REQUIRED_CLAIMS, report_path.parent)
     _check(
         "replication schema and claim result completeness",
         len(evaluation["validation_errors"]) == 0,
@@ -516,9 +578,20 @@ def self_test() -> bool:
 
         passing = sample_report()
         report_path.write_text(json.dumps(passing, indent=2), encoding="utf-8")
+        write_sample_evidence(root)
         pass_result = run_checks(spec_path=spec_path, report_path=report_path)
         if pass_result["verdict"] != "PASS":
             return False
+
+        # The same record with its evidence on a placeholder host is rejected.
+        placeholder = sample_report()
+        placeholder["replications"][0]["claim_results"]["migration_velocity_3x"][
+            "evidence_uri"
+        ] = "https://example.org/evidence/migration_velocity.json"
+        report_path.write_text(json.dumps(placeholder, indent=2), encoding="utf-8")
+        if run_checks(spec_path=spec_path, report_path=report_path)["verdict"] != "FAIL":
+            return False
+        report_path.write_text(json.dumps(passing, indent=2), encoding="utf-8")
 
         failing = sample_report()
         failing["replications"][1]["independent"] = False

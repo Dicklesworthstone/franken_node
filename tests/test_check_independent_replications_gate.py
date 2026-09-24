@@ -37,10 +37,48 @@ def _spec_text() -> str:
 
 
 class TestIndependentReplicationsGate(TestCase):
-    def test_run_checks_passes_repo_artifacts(self) -> None:
+    def test_repo_report_is_rejected_for_placeholder_evidence(self) -> None:
+        # The committed report's "replications" cite evidence on example.org
+        # (RFC 2606 documentation hosts): no independent replication exists.
         result = mod.run_checks()
         self.assertEqual(result["bead_id"], "bd-whxp")
-        self.assertEqual(result["verdict"], "PASS")
+        self.assertEqual(result["verdict"], "FAIL")
+        schema = next(
+            check
+            for check in result["checks"]
+            if check["check"] == "replication schema and claim result completeness"
+        )
+        self.assertFalse(schema["pass"])
+        self.assertIn("placeholder host example.org", schema["detail"])
+
+    def test_placeholder_evidence_host_fails(self) -> None:
+        with TemporaryDirectory(prefix="bd-whxp-test-") as tmp:
+            root = Path(tmp)
+            spec_path = root / "spec.md"
+            report_path = root / "report.json"
+            spec_path.write_text(_spec_text(), encoding="utf-8")
+            mod.write_sample_evidence(root)
+            payload = mod.sample_report()
+            for replication in payload["replications"]:
+                replication["source_url"] = "https://replicator.example/report"
+            report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+            result = mod.run_checks(spec_path=spec_path, report_path=report_path)
+
+        self.assertEqual(result["verdict"], "FAIL")
+
+    def test_missing_relative_evidence_file_fails(self) -> None:
+        with TemporaryDirectory(prefix="bd-whxp-test-") as tmp:
+            root = Path(tmp)
+            spec_path = root / "spec.md"
+            report_path = root / "report.json"
+            spec_path.write_text(_spec_text(), encoding="utf-8")
+            # No evidence files written beside the report.
+            report_path.write_text(json.dumps(mod.sample_report(), indent=2), encoding="utf-8")
+
+            result = mod.run_checks(spec_path=spec_path, report_path=report_path)
+
+        self.assertEqual(result["verdict"], "FAIL")
 
     def test_insufficient_independent_replications_fails(self) -> None:
         with TemporaryDirectory(prefix="bd-whxp-test-") as tmp:
@@ -49,6 +87,7 @@ class TestIndependentReplicationsGate(TestCase):
             report_path = root / "report.json"
 
             spec_path.write_text(_spec_text(), encoding="utf-8")
+            mod.write_sample_evidence(root)
             payload = mod.sample_report()
             payload["replications"][1]["independent"] = False
             payload["summary"]["independent_replication_count"] = 1
@@ -74,6 +113,7 @@ class TestIndependentReplicationsGate(TestCase):
             report_path = root / "report.json"
 
             spec_path.write_text(_spec_text(), encoding="utf-8")
+            mod.write_sample_evidence(root)
             payload = mod.sample_report()
             payload["replications"][1]["organization"] = payload["replications"][0]["organization"]
             report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -96,6 +136,7 @@ class TestIndependentReplicationsGate(TestCase):
             report_path = root / "report.json"
 
             spec_path.write_text(_spec_text(), encoding="utf-8")
+            mod.write_sample_evidence(root)
             payload = mod.sample_report()
             payload["replications"][0]["claim_results"]["compromise_reduction_10x"]["pass"] = False
             payload["summary"]["independent_replications_passing"] = 1

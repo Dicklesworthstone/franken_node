@@ -309,6 +309,42 @@ def resolve_binary() -> tuple[Path, str]:
     return binary, profile
 
 
+def binary_provenance(binary: Path) -> dict:
+    """Identify exactly which binary was measured.
+
+    `measured_at_commit` is the repository HEAD when the measurement ran (with
+    `-dirty` for an unclean tree); the binary's own build commit is not
+    recoverable from the file, so the sha256 is the binding identity.
+    """
+    digest = hashlib.sha256()
+    with binary.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+
+    def git(*args: str) -> str:
+        try:
+            return subprocess.run(
+                ["git", *args], cwd=ROOT, capture_output=True, text=True, timeout=30
+            ).stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+
+    commit = git("rev-parse", "HEAD")
+    if commit and git("status", "--porcelain", "--untracked-files=no"):
+        commit += "-dirty"
+    try:
+        version = subprocess.run(
+            [str(binary), "--version"], capture_output=True, text=True, timeout=30
+        ).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        version = ""
+    return {
+        "sha256": "sha256:" + digest.hexdigest(),
+        "version": version,
+        "measured_at_commit": commit,
+    }
+
+
 def resolve_js_runtime() -> tuple[str, str]:
     runtime = shutil.which("node") or shutil.which("bun")
     if not runtime:
@@ -571,6 +607,7 @@ def build_artifacts(
     runtime_version: str,
     warmup_runs: int,
     measured_runs: int,
+    provenance: dict | None = None,
 ) -> tuple:
     assert_no_constructed_ids(fixture_entries)
     for fixture_id, equivalence in equivalences.items():
@@ -602,6 +639,7 @@ def build_artifacts(
         "generated_at": MIGTP_GENERATED_AT,
         "protocol": PROTOCOL_TEXT,
         "binary_profile": binary_profile,
+        "binary_provenance": provenance or {},
         "runtime_name": Path(runtime_name).name,
         "runtime_version": runtime_version,
         "warmup_runs": warmup_runs,
@@ -680,6 +718,7 @@ def main() -> int:
         runtime_version,
         args.warmup,
         args.runs,
+        binary_provenance(binary),
     )
 
     SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
