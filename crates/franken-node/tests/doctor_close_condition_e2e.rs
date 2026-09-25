@@ -756,11 +756,25 @@ fn doctor_close_condition_requires_trusted_signing_key() {
         !output.status.success(),
         "doctor close-condition should fail closed without a trusted key"
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    // --json failures are the doctor-error-cli envelope on stdout (99b80878b).
+    let error = json_error_message(&output);
     assert!(
-        stderr.contains("no signing key was configured"),
-        "unexpected stderr: {stderr}"
+        error.contains("no signing key was configured"),
+        "unexpected error: {error}"
     );
+}
+
+fn json_error_message(output: &std::process::Output) -> String {
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
+        panic!(
+            "--json failure must be a JSON envelope on stdout: {err}; stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    assert_eq!(report["schema_version"], "franken-node/doctor-error-cli/v1");
+    assert_eq!(report["ok"], false);
+    report["error"].as_str().expect("error string").to_string()
 }
 
 /// bd-9zrqh: the dual-oracle VERDICT is a diagnostic and must not require
@@ -830,18 +844,18 @@ fn doctor_close_condition_fails_closed_when_release_policy_ci_output_is_missing(
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let error = json_error_message(&output);
     assert!(
-        stderr.contains("failed generating close-condition receipt"),
-        "unexpected stderr: {stderr}"
+        error.contains("failed generating close-condition receipt"),
+        "unexpected error: {error}"
     );
     assert!(
-        stderr.contains("release-policy CI output not accessible"),
-        "unexpected stderr: {stderr}"
+        error.contains("release-policy CI output not accessible"),
+        "unexpected error: {error}"
     );
     assert!(
-        !stderr.contains("placeholder_schema"),
-        "stderr should not mention placeholder linkage fallback: {stderr}"
+        !error.contains("placeholder_schema"),
+        "error should not mention placeholder linkage fallback: {error}"
     );
     assert!(
         !receipt_path.exists(),
@@ -2038,6 +2052,7 @@ fn doctor_close_condition_failure_names_missing_input_and_fix_command_bd_9zrqh()
     // "failed generating close-condition receipt" line.
     let root = TempDir::new().expect("fixture root");
     let signing_key_path = root.path().join(".franken-node/keys/receipt-signing.key");
+    fs::create_dir_all(signing_key_path.parent().expect("key parent")).expect("key dir");
     fs::write(&signing_key_path, hex::encode([7u8; 32])).expect("signing key seed");
 
     let output = Command::cargo_bin("franken-node")

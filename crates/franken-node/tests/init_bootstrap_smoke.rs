@@ -395,17 +395,21 @@ fn init_provisions_trust_scan_remotecap_key_and_scoped_token() {
     };
     let key_suffix = ".franken-node/keys/remotecap-signing.key";
     let token_suffix = ".franken-node/remotecap/trust-scan-token.json";
+    let receipt_key_suffix = ".franken-node/keys/receipt-signing.key";
 
     let first = init(&["init", "--profile", "balanced", "--out-dir", ".", "--json"]);
     assert_eq!(init_file_action(&first, key_suffix), "created");
     assert_eq!(init_file_action(&first, token_suffix), "created");
-    let key = std::fs::read_to_string(root.join(key_suffix)).expect("read signing key");
-    assert_eq!(key.len(), 64, "32 random bytes, hex encoded");
-    assert!(key.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert_eq!(init_file_action(&first, receipt_key_suffix), "created");
+    for suffix in [key_suffix, receipt_key_suffix] {
+        let key = std::fs::read_to_string(root.join(suffix)).expect("read signing key");
+        assert_eq!(key.len(), 64, "{suffix}: 32 random bytes, hex encoded");
+        assert!(key.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        for suffix in [key_suffix, token_suffix] {
+        for suffix in [key_suffix, token_suffix, receipt_key_suffix] {
             let mode = std::fs::metadata(root.join(suffix))
                 .expect("stat provisioned file")
                 .permissions()
@@ -464,7 +468,26 @@ fn init_provisions_trust_scan_remotecap_key_and_scoped_token() {
     assert_eq!(init_file_action(&second, key_suffix), "skipped_existing");
     assert_eq!(init_file_action(&second, token_suffix), "skipped_existing");
     assert_eq!(
+        init_file_action(&second, receipt_key_suffix),
+        "skipped_existing"
+    );
+    assert_eq!(
         std::fs::read(root.join(token_suffix)).expect("reread token"),
         token_before
+    );
+
+    // Receipt export now finds and parses the provisioned default key: the
+    // close-condition command gets past key loading and fails later, on the
+    // oracle inputs this bare workspace does not have.
+    let close_condition = run(&["doctor", "close-condition", "--json"]);
+    assert!(!close_condition.status.success());
+    let stdout = String::from_utf8_lossy(&close_condition.stdout);
+    assert!(
+        !stdout.contains("no signing key was configured") && !stdout.contains("failed decoding"),
+        "the init-provisioned receipt key must be found and parsed: {stdout}"
+    );
+    assert!(
+        stdout.contains("failed generating close-condition receipt"),
+        "{stdout}"
     );
 }

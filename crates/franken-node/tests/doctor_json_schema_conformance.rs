@@ -237,14 +237,30 @@ fn run_doctor_with_env(args: &[String], env_pairs: &[(&str, String)]) -> Output 
         .expect("run franken-node doctor with env")
 }
 
+/// Doctor exits 1 exactly when `overall_status` is `fail`
+/// (bd-reality-20260923-26n9r.11); environment-sensitive checks can fail on a
+/// loaded host, so the exit code is checked against the report.
 fn parse_report(output: &Output) -> Value {
-    assert!(
-        output.status.success(),
-        "doctor command failed: stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
+        panic!(
+            "doctor stdout must be valid JSON: {err}; stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    let expected_code = if report["overall_status"] == "fail" {
+        1
+    } else {
+        0
+    };
+    assert_eq!(
+        output.status.code(),
+        Some(expected_code),
+        "doctor exit code must follow overall_status={}; stderr={}",
+        report["overall_status"],
         String::from_utf8_lossy(&output.stderr)
     );
-    serde_json::from_slice(&output.stdout).expect("doctor stdout must be valid JSON")
+    report
 }
 
 fn canonicalize_doctor_runtime_metadata(value: &mut Value) {

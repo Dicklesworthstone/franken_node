@@ -8,12 +8,11 @@
 //!    It binds no socket and does not use fastapi_rust in the product build.
 //! 2. Fleet convergence wait outcomes carry failure diagnostics.
 //! 3. Fleet convergence receipt signatures have the expected structure.
+//!
 //! None of them exercise an asupersync control lane: the fleet agent runs on
 //! the durable file transport.
 
-use frankenengine_node::api::service::http_server::{
-    EVENT_FASTAPI_REQUEST_SERVED, HealthStatusResponse, dispatch_http_request,
-};
+use frankenengine_node::api::service::http_server::{HealthStatusResponse, dispatch_http_request};
 use frankenengine_node::control_plane::fleet_transport::{
     FleetConvergenceFailureContext, FleetConvergenceReceiptSignature, FleetConvergenceWaitOutcome,
 };
@@ -43,7 +42,7 @@ fn test_control_plane_route_dispatcher_health_and_catalog() {
         json_val["schema_version"],
         "franken-node/control-plane-catalog/v1"
     );
-    assert!(json_val["endpoints"].as_array().expect("array").len() > 0);
+    assert!(!json_val["endpoints"].as_array().expect("array").is_empty());
 
     let (status, content_type, body) =
         dispatch_http_request("GET", "/nonexistent", "test-charter-404-1");

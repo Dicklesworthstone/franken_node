@@ -1702,6 +1702,23 @@ fn compat_corpus_run_cli_emits_genuine_digest_bound_artifact() {
     // Honest gate state for an 83.33% run: blocked, no fabricated pass.
     assert_eq!(artifact["ci_gate"]["threshold_met"], false);
     assert_eq!(artifact["ci_gate"]["release_blocked"], true);
+
+    // bd-reality-20260923-26n9r.12 d3: the artifact names the exact build
+    // that produced it and the host conditions it ran under.
+    let provenance = &artifact["run_provenance"];
+    let binary = std::fs::read(env!("CARGO_BIN_EXE_franken-node")).expect("read binary");
+    assert_eq!(
+        provenance["binary_sha256"].as_str(),
+        Some(sha256_prefixed(&binary).as_str()),
+        "{provenance}"
+    );
+    assert_eq!(provenance["policy_mode"], "legacy-risky");
+    assert_eq!(provenance["host"]["os"], std::env::consts::OS);
+    assert!(provenance["host"]["available_parallelism"].as_u64() >= Some(1));
+    assert!(
+        provenance["source_revision_note"].is_string(),
+        "{provenance}"
+    );
 }
 
 #[test]

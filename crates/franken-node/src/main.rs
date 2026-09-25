@@ -7979,6 +7979,60 @@ fn bootstrap_state_directory(
     Ok(actions)
 }
 
+/// Write 32 fresh random bytes, hex-encoded, to a new owner-only (0600) file.
+/// Refuses to overwrite an existing file.
+fn create_private_random_key_file(path: &Path) -> Result<()> {
+    use rand::RngCore as _;
+    use std::io::Write as _;
+    let mut key_bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut key_bytes);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed creating {}", parent.display()))?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("failed creating {}", path.display()))?;
+    file.write_all(hex::encode(key_bytes).as_bytes())
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("failed writing {}", path.display()))
+}
+
+/// Provision the default receipt signing key that
+/// `resolve_receipt_signing_key_path` falls back to, so decision receipts,
+/// incident bundles and close-condition receipts are signed after `init`
+/// (bd-reality-20260923-26n9r.11). Skipped when a key path is configured or
+/// supplied through the environment; an existing key is kept.
+fn provision_receipt_signing_key(
+    root: &Path,
+    configured_path: Option<&Path>,
+) -> Result<Option<InitFileAction>> {
+    if configured_path.is_some()
+        || std::env::var_os("FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH").is_some()
+    {
+        return Ok(None);
+    }
+    let key_path = root.join(".franken-node/keys/receipt-signing.key");
+    let action = if key_path.exists() {
+        InitFileActionKind::SkippedExisting
+    } else {
+        create_private_random_key_file(&key_path)?;
+        InitFileActionKind::Created
+    };
+    Ok(Some(InitFileAction {
+        path: key_path.display().to_string(),
+        action,
+        backup_path: None,
+    }))
+}
+
 /// Provision the RemoteCap signing key and the default trust-scan egress
 /// token under `root` (bd-reality-20260923-26n9r.11).
 ///
@@ -8000,26 +8054,7 @@ fn provision_trust_scan_remotecap(root: &Path, now_secs: u64) -> Result<Vec<Init
             backup_path: None,
         });
     } else if std::env::var_os("FRANKEN_NODE_REMOTECAP_KEY").is_none() {
-        use rand::RngCore as _;
-        use std::io::Write as _;
-        let mut key_bytes = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut key_bytes);
-        let parent = key_path.parent().unwrap_or(root);
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed creating {}", parent.display()))?;
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(&key_path)
-            .with_context(|| format!("failed creating {}", key_path.display()))?;
-        file.write_all(hex::encode(key_bytes).as_bytes())
-            .and_then(|()| file.sync_all())
-            .with_context(|| format!("failed writing {}", key_path.display()))?;
+        create_private_random_key_file(&key_path)?;
         actions.push(InitFileAction {
             path: key_path.display().to_string(),
             action: InitFileActionKind::Created,
@@ -8390,6 +8425,27 @@ fn handle_ops_proof_carrying_evidence(_args: &OpsProofCarryingEvidenceArgs) -> R
     )
 }
 
+/// The 1-minute load average from `/proc/loadavg`, where available.
+#[cfg(feature = "engine")]
+fn host_load_average_1m() -> Option<f64> {
+    std::fs::read_to_string("/proc/loadavg")
+        .ok()?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// SHA-256 of the running executable, identifying the exact build.
+#[cfg(feature = "engine")]
+fn current_binary_sha256() -> Option<String> {
+    let bytes = std::fs::read(std::env::current_exe().ok()?).ok()?;
+    Some(format!(
+        "sha256:{}",
+        hex::encode(sha2::Sha256::digest(&bytes))
+    ))
+}
+
 /// bd-kfseq: run the committed compatibility corpus across bun (reference
 /// leg) and the native franken_engine (this binary's own `run
 /// --console-only` path), adjudicate every case through the lockstep oracle,
@@ -8411,12 +8467,15 @@ fn handle_ops_compat_corpus_run(args: &OpsCompatCorpusRunArgs) -> Result<()> {
     let policy = parse_profile_override(Some(&args.policy))?.unwrap_or(Profile::LegacyRisky);
     let snapshot = capture_corpus(&args.corpus_root)?;
     let corpus_version = content_addressed_corpus_version(&snapshot)?;
+    let load_at_start = host_load_average_1m();
+    let case_timeout_secs = args.case_timeout_secs.clamp(1, 600);
     let run = run_corpus(
         &snapshot,
-        std::time::Duration::from_secs(args.case_timeout_secs.clamp(1, 600)),
+        std::time::Duration::from_secs(case_timeout_secs),
         args.require_node_reference,
         policy,
     )?;
+    let load_at_end = host_load_average_1m();
 
     let existing = match std::fs::read_to_string(&args.out) {
         Ok(raw) => Some(
@@ -8456,6 +8515,31 @@ fn handle_ops_compat_corpus_run(args: &OpsCompatCorpusRunArgs) -> Result<()> {
         );
         document["reproducibility"]["external_repro_command"] = serde_json::json!(command);
     }
+    // bd-reality-20260923-26n9r.12 d3: what produced these numbers. The binary
+    // digest identifies the build exactly; the git revisions are only what the
+    // build embedded (a dev build embeds no engine revision and no dirty flag).
+    let source_revision = ops::embedded_source_revision()?;
+    document["run_provenance"] = serde_json::json!({
+        "binary_sha256": current_binary_sha256(),
+        "franken_node_build_git_sha": option_env!("FRANKEN_NODE_GIT_SHA"),
+        "source_revision": source_revision,
+        "source_revision_note": if source_revision.is_some() {
+            "embedded by the release build"
+        } else {
+            "not embedded: development build; engine revision unknown"
+        },
+        "policy_mode": policy.to_string(),
+        "case_timeout_secs": case_timeout_secs,
+        "host": {
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "available_parallelism": std::thread::available_parallelism()
+                .map(std::num::NonZeroUsize::get)
+                .ok(),
+            "load_average_1m_at_start": load_at_start,
+            "load_average_1m_at_end": load_at_end,
+        },
+    });
 
     if let Some(parent) = args.out.parent()
         && !parent.as_os_str().is_empty()
@@ -31017,6 +31101,17 @@ fn main() -> Result<()> {
                 }
                 match provision_trust_scan_remotecap(bootstrap_root, now_unix_secs()) {
                     Ok(remotecap_actions) => file_actions.extend(remotecap_actions),
+                    Err(err) => return init_fail(json, err),
+                }
+                match provision_receipt_signing_key(
+                    bootstrap_root,
+                    resolved
+                        .config
+                        .security
+                        .decision_receipt_signing_key_path
+                        .as_deref(),
+                ) {
+                    Ok(receipt_key_action) => file_actions.extend(receipt_key_action),
                     Err(err) => return init_fail(json, err),
                 }
             }

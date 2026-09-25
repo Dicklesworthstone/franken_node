@@ -101,12 +101,17 @@ fi
 # ---------------------------------------------------------------------------
 # Check 2: written config round-trips through Config::resolve
 # ---------------------------------------------------------------------------
-echo "[2] doctor reads the init-written config"
-if "$BIN" doctor --json >/dev/null 2>doctor.err; then
-  record PASS "doctor accepts init's config (round-trip)"
+echo "[2] doctor reads the init-written config (exit 1 exactly when overall_status=fail)"
+doctor_rc=0
+doctor_out="$("$BIN" doctor --json 2>doctor.err)" || doctor_rc=$?
+doctor_status="$(sed -n 's/^ *"overall_status": *"\([a-z]*\)".*/\1/p' <<<"$doctor_out" | head -1)"
+expected_doctor_rc=0
+[[ "$doctor_status" == "fail" ]] && expected_doctor_rc=1
+if [[ -n "$doctor_status" && "$doctor_status" != "fail" && $doctor_rc -eq $expected_doctor_rc ]]; then
+  record PASS "doctor accepts init's config (overall_status=$doctor_status, exit $doctor_rc)"
 else
-  echo "  doctor stderr: $(head -3 doctor.err)" >&2
-  record FAIL "doctor rejected init's config"
+  echo "  doctor exit=$doctor_rc overall_status=${doctor_status:-<unparsed>} stderr: $(head -3 doctor.err)" >&2
+  record FAIL "doctor rejected init's config or its exit code disagrees with overall_status"
 fi
 
 # ---------------------------------------------------------------------------
@@ -223,6 +228,25 @@ else
   echo "  trust scan output: $typo_out" >&2
   echo "  trust card output: $card_out" >&2
   record FAIL "trust scan did not flag the typosquatted dependency"
+fi
+
+# ---------------------------------------------------------------------------
+# Check 11: init provisioned the trust-scan egress capability, so
+# `trust scan --deep --audit` and `trust sync` need no env setup.
+# ---------------------------------------------------------------------------
+echo "[11] init-provisioned trust-scan token verifies for npm and nothing else"
+token=.franken-node/remotecap/trust-scan-token.json
+verify_token() {
+  env -u FRANKEN_NODE_REMOTECAP_KEY "$BIN" remotecap verify --token-file "$token" \
+    --operation network_egress --endpoint "$1" --json >/dev/null 2>&1
+}
+if [[ -f "$token" && -f .franken-node/keys/receipt-signing.key ]] \
+  && verify_token https://registry.npmjs.org/lodash \
+  && ! verify_token https://evil.example/exfil; then
+  record PASS "init provisions a scoped trust-scan token and a receipt signing key"
+else
+  echo "  token present: $([[ -f "$token" ]] && echo yes || echo no)" >&2
+  record FAIL "init did not provision a working, scoped trust-scan token"
 fi
 
 # ---------------------------------------------------------------------------

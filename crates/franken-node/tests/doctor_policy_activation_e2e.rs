@@ -131,13 +131,30 @@ fn debug_trace_args(
     args
 }
 
+/// Parse a completed `--json` report. Doctor exits 1 exactly when its
+/// `overall_status` is `fail` (bd-reality-20260923-26n9r.11), which the
+/// environment-sensitive checks can cause on a loaded host, so the exit code
+/// is checked against the report instead of assumed to be 0.
 fn parse_successful_json(output: Output) -> Value {
-    assert!(
-        output.status.success(),
-        "doctor command failed: {}",
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
+        panic!(
+            "doctor output must be valid JSON: {err}; stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    let expected_code = if report["overall_status"] == "fail" {
+        1
+    } else {
+        0
+    };
+    assert_eq!(
+        output.status.code(),
+        Some(expected_code),
+        "doctor exit code must follow overall_status={}; stderr={}",
+        report["overall_status"],
         String::from_utf8_lossy(&output.stderr)
     );
-    serde_json::from_slice(&output.stdout).expect("doctor output must be valid JSON")
+    report
 }
 
 fn parse_jsonl_lines(bytes: &[u8]) -> Vec<Value> {
@@ -162,15 +179,8 @@ fn doctor_structured_log_args(trace_id: &str, extra_args: Vec<String>) -> Vec<St
 
 fn run_doctor_structured_logs_jsonl(args: Vec<String>, trace_id: &str) -> (Value, Vec<Value>) {
     let output = run_doctor_args(&args, None);
-    assert!(
-        output.status.success(),
-        "doctor command failed: stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let report: Value = serde_json::from_slice(&output.stdout).expect("stdout report JSON");
     let log_lines = parse_jsonl_lines(&output.stderr);
+    let report = parse_successful_json(output);
     assert_doctor_structured_log_contract(trace_id, &report, &log_lines);
     (report, log_lines)
 }

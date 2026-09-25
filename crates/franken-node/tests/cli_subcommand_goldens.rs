@@ -471,22 +471,77 @@ frankenengine-extension-host = { path = "../../../franken_engine/crates/franken-
     // re-derivable receipt chain built through the production API.
     // bd-ihusm: L1 also requires a genuine-oracle-run provenance and a
     // digest-bound per-test result set for the GREEN golden.
+    // The L1 leg also requires content-bound runtime observations and the
+    // public corpus_pass artifact; built the same way as the
+    // doctor_close_condition_e2e fixtures.
+    let empty_digest = format!("sha256:{}", hex::encode(Sha256::digest([])));
     let per_test_results: Vec<Value> = (0..100)
         .map(|index| {
+            let observation = json!({
+                "stdout_digest": empty_digest.clone(),
+                "stderr_digest": empty_digest.clone(),
+                "stdout_bytes": 0,
+                "stderr_bytes": 0,
+                "stdout_truncated": false,
+                "stderr_truncated": false,
+                "exit_code": 0,
+                "termination_kind": "exited",
+                "timed_out": false,
+                "elapsed_ms": index + 1,
+            });
             json!({
                 "test_id": format!("tc::fs::{index:04}"),
                 "api_family": "fs",
                 "band": "core",
                 "risk_band": "critical",
                 "status": if index < 98 { "pass" } else { "fail" },
+                "runtime_observations": {
+                    "bun": observation.clone(),
+                    "franken-engine-native": observation,
+                },
             })
         })
         .collect();
+    let result_digest =
+        frankenengine_node::ops::close_condition::compute_compatibility_corpus_result_digest(
+            &per_test_results,
+        );
+    let runtime_versions = std::collections::BTreeMap::from([
+        ("bun".to_string(), "1.3.14-test".to_string()),
+        (
+            "franken-engine-native".to_string(),
+            "0.1.0-test".to_string(),
+        ),
+    ]);
+    let observations_digest =
+        frankenengine_node::ops::close_condition::compute_compatibility_corpus_runtime_observations_digest(
+            &per_test_results,
+            frankenengine_node::ops::close_condition::COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION,
+            &result_digest,
+            "dyad",
+            &runtime_versions,
+        )
+        .expect("fixture runtime observations digest");
     let corpus = json!({
         "corpus": {
             "corpus_version": "compat-corpus-golden",
             "provenance": frankenengine_node::ops::close_condition::COMPATIBILITY_CORPUS_ONLINE_PROVENANCE,
-            "result_digest": frankenengine_node::ops::close_condition::compute_compatibility_corpus_result_digest(&per_test_results),
+            "result_digest": result_digest,
+            "runtime_observations_schema_version": frankenengine_node::ops::close_condition::COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION,
+            "runtime_observations_digest": observations_digest,
+            "lockstep_topology": "dyad",
+            "reference_runtimes": [{
+                "runtime_id": "bun",
+                "runtime_name": "bun",
+                "version": "1.3.14-test",
+                "is_reference": true,
+            }],
+            "product_runtime": {
+                "runtime_id": "franken-engine-native",
+                "runtime_name": "franken-engine-native",
+                "version": "0.1.0-test",
+                "is_reference": false,
+            },
         },
         "thresholds": { "overall_pass_rate_min_pct": 95.0 },
         "totals": {
@@ -521,6 +576,23 @@ frankenengine-extension-host = { path = "../../../franken_engine/crates/franken-
             },
         }))
         .expect("verdict artifact render"),
+    )?;
+    write_fixture(
+        &root.join("artifacts/compat/corpus_pass.json"),
+        &serde_json::to_string_pretty(&json!({
+            "gate": "compat_corpus_pass_gate",
+            "verdict": "GREEN",
+            "timestamp": "2026-02-21T00:00:00Z",
+            "owner_track": "10.2",
+            "metric": {
+                "name": "targeted_compatibility_corpus_pass_rate",
+                "target_pct": 95.0,
+                "observed_pct": 98.0,
+                "passed": true,
+            },
+            "notes": [],
+        }))
+        .expect("corpus_pass artifact render"),
     )?;
     write_fixture(
         &root.join("artifacts/section/10.N/gate_verdict/bd-1neb_section_gate.json"),
@@ -676,6 +748,7 @@ fn registry_help_output() {
 #[test]
 fn incident_help_output() {
     let mut cmd = Command::cargo_bin("franken-node").expect("franken-node binary");
+    disable_cli_color(&mut cmd);
     let assertion = cmd.args(["incident", "--help"]).assert().success();
 
     let stdout = String::from_utf8_lossy(&assertion.get_output().stdout);
@@ -687,6 +760,7 @@ fn incident_help_output() {
 #[test]
 fn ltv_help_output() {
     let mut cmd = Command::cargo_bin("franken-node").expect("franken-node binary");
+    disable_cli_color(&mut cmd);
     let assertion = cmd.args(["ltv", "--help"]).assert().success();
 
     let stdout = String::from_utf8_lossy(&assertion.get_output().stdout);
