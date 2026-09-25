@@ -2768,7 +2768,11 @@ pub mod http_server {
                 "path": path,
                 "status": status,
                 "trace_id": trace_id,
-                "charter_status": "fastapi_rust_http_served",
+                // In-process route dispatch (a match on method and path; no
+                // socket, no fastapi_rust in the product build). The old value
+                // "fastapi_rust_http_served" claimed a substrate that is not
+                // used here (bd-reality-20260923-26n9r.16).
+                "charter_status": "in_process_route_dispatch",
             }))
             .unwrap_or_default()
         );

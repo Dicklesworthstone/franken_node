@@ -1,10 +1,15 @@
-//! End-to-end and integration verification for bd-reality-20260820-w0fc6.9:
-//! Charter substrates verification (asupersync, fastapi_rust, frankentui).
+//! Control-plane surface checks originally written for
+//! bd-reality-20260820-w0fc6.9 (charter substrates). Re-registered by
+//! bd-reality-20260923-26n9r.16 after it was dropped from Cargo.toml.
 //!
-//! Asserts that:
-//! 1. asupersync fleet control lane activation or explicit fail-closed / degraded-mode fallback works as specified by the charter.
-//! 2. fastapi_rust control-plane HTTP route dispatcher serves health and catalog requests with structured logs.
-//! 3. frankentui model/view presentation rendering produces structured operator surfaces with telemetry events.
+//! What these tests do and do not show:
+//! 1. The in-process control-plane route dispatcher (`dispatch_http_request`,
+//!    a match on method and path) serves health, catalog and 404 responses.
+//!    It binds no socket and does not use fastapi_rust in the product build.
+//! 2. Fleet convergence wait outcomes carry failure diagnostics.
+//! 3. Fleet convergence receipt signatures have the expected structure.
+//! None of them exercise an asupersync control lane: the fleet agent runs on
+//! the durable file transport.
 
 use frankenengine_node::api::service::http_server::{
     EVENT_FASTAPI_REQUEST_SERVED, HealthStatusResponse, dispatch_http_request,
@@ -15,7 +20,7 @@ use frankenengine_node::control_plane::fleet_transport::{
 use serde_json::Value;
 
 #[test]
-fn test_fastapi_rust_control_plane_health_and_catalog() {
+fn test_control_plane_route_dispatcher_health_and_catalog() {
     let trace_id = "test-charter-fastapi-health-1";
     let (status, content_type, body) = dispatch_http_request("GET", "/health", trace_id);
 

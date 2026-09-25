@@ -10605,6 +10605,27 @@ fn handle_trust_release_command(args: &cli::TrustReleaseArgs) -> Result<()> {
     Ok(())
 }
 
+/// Name the engine containment verdict behind a native exit code in 91..=95
+/// (engine_dispatcher's `exit_code_for_containment_severity`), so an operator
+/// does not read it as the program's own exit status.
+fn native_containment_note(runtime: &str, exit_code: Option<i32>) -> Option<String> {
+    if runtime != "franken_engine" {
+        return None;
+    }
+    let code = exit_code?;
+    let action = match code {
+        91 => "Challenge",
+        92 => "Sandbox",
+        93 => "Suspend",
+        94 => "Terminate",
+        95 => "Quarantine",
+        _ => return None,
+    };
+    Some(format!(
+        "runtime containment: exit {code} is the engine's containment verdict {action}, not a program exit status"
+    ))
+}
+
 fn render_run_execution_receipt_summary(
     receipt: &RunExecutionReceipt,
     receipt_path: &Path,
@@ -10765,6 +10786,9 @@ fn emit_run_completion_output(
         "{}",
         render_run_execution_receipt_summary(receipt, receipt_path)
     );
+    if let Some(note) = native_containment_note(&dispatch.runtime, dispatch.exit_code) {
+        println!("{note}");
+    }
     // bd-5r99w.12: surface the trust-native host-effect ledger in human output.
     if let Some(ledger) = dispatch.host_effect_ledger.as_ref()
         && ledger.effect_count > 0
@@ -12732,12 +12756,25 @@ fn build_doctor_report_with_cwd_and_policy_input(
         },
     ));
 
-    // Workspace pressure governance check (bd-p9mpd.5)
+    // Workspace pressure governance check (bd-p9mpd.5). It reports transient
+    // host load (free disk, active cargo builds, rch availability, agent
+    // reservations), not the health of this installation, so in the product
+    // doctor it is advisory: at most Warn, never failing the verdict (which
+    // now drives the exit code). `doctor workspace-pressure` keeps the full
+    // signal.
     checks.push(evaluate_doctor_check(
         "DR-WORKSPACE-001",
         "DOC-WSP-001",
         "workspace.pressure",
-        evaluate_workspace_pressure_governance,
+        || {
+            let (status, message, remediation) = evaluate_workspace_pressure_governance();
+            let status = if matches!(status, DoctorStatus::Fail) {
+                DoctorStatus::Warn
+            } else {
+                status
+            };
+            (status, message, remediation)
+        },
     ));
 
     // DR-RESOURCE-GOVERNOR-014: Check workspace resource pressure monitoring
@@ -24344,16 +24381,21 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
     let poll_interval = std::time::Duration::from_secs(resolved.poll_interval_secs);
     let (_, _state_dir, mut transport) = open_fleet_transport(Path::new("."))?;
 
+    // The agent always runs over `open_fleet_transport` (DurableFleetTransport).
+    // The asupersync feature compiles the substrate in but does not route this
+    // loop through it, so the event must not claim an asupersync control lane
+    // (it previously reported ASUPERSYNC_CONTROL_LANE_ACTIVATED /
+    // "charter_compliant_control_lane"; bd-reality-20260923-26n9r.16).
     #[cfg(feature = "asupersync-transport")]
     {
         eprintln!(
             "{}",
             serde_json::to_string(&serde_json::json!({
-                "event_code": "ASUPERSYNC_CONTROL_LANE_ACTIVATED",
+                "event_code": "FLEET_TRANSPORT_DURABLE",
                 "node_id": resolved.node_id,
                 "zone_id": resolved.zone_id,
-                "substrate": "asupersync",
-                "charter_status": "charter_compliant_control_lane",
+                "substrate": "frankensqlite_durable",
+                "charter_status": "asupersync_transport_compiled_not_wired",
             }))
             .unwrap_or_default()
         );
@@ -32307,6 +32349,12 @@ fn main() -> Result<()> {
                     "doctor",
                     &render_doctor_report_human(&report, args.verbose),
                 )?;
+            }
+            // A failing verdict is a failing command: scripts and CI can
+            // gate on `franken-node doctor`. Warnings still exit 0. The
+            // complete report is already printed; add no second error line.
+            if matches!(report.overall_status, DoctorStatus::Fail) {
+                fail_closed_after_json_with_code(1);
             }
         }
     }
