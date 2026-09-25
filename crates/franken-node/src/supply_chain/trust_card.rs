@@ -1693,7 +1693,8 @@ impl TrustCardRegistry {
         }
 
         let mut next = latest.clone();
-        next.trust_card_version = next_trust_card_version(latest.trust_card_version, &extension_id)?;
+        next.trust_card_version =
+            next_trust_card_version(latest.trust_card_version, &extension_id)?;
         next.previous_version_hash = Some(latest.card_hash.clone());
         next.publisher = input.publisher;
         next.provenance_summary = input.provenance_summary;

@@ -18442,6 +18442,37 @@ fn build_trust_scan_card_input(
     }
 }
 
+/// Why a `--deep`/`--audit` rescan leaves an existing card as is, or `None`
+/// to refresh it. A refresh needs evidence that was actually fetched and the
+/// same version, and may lower risk only on an OSV answer from the default
+/// endpoint (the rule `trust sync` applies).
+fn trust_scan_refresh_refusal(
+    existing: &TrustCard,
+    input: &TrustCardInput,
+    fetched_evidence: bool,
+    lowering_authenticated: bool,
+) -> Option<String> {
+    if !fetched_evidence {
+        return Some("no deep or audit evidence was fetched".to_string());
+    }
+    if existing.extension.version != input.extension.version {
+        return Some(format!(
+            "card is for version {} but the project resolves {}",
+            existing.extension.version, input.extension.version
+        ));
+    }
+    let (from, to) = (
+        existing.user_facing_risk_assessment.level,
+        input.user_facing_risk_assessment.level,
+    );
+    if to < from && !lowering_authenticated {
+        return Some(format!(
+            "the new evidence would lower risk from {from:?} to {to:?}, which needs an --audit answer from the default OSV endpoint"
+        ));
+    }
+    None
+}
+
 fn build_trust_scan_item(
     dependency: &RunPackageDependency,
     card: &TrustCard,
@@ -18465,10 +18496,11 @@ fn build_trust_scan_item(
 
 fn render_trust_scan_human(report: &TrustScanReport) -> String {
     let mut lines = vec![format!(
-        "trust scan completed: project={} scanned={} created={} skipped_existing={} lockfile_entries={} deep={} audit={} warnings={}",
+        "trust scan completed: project={} scanned={} created={} refreshed={} skipped_existing={} lockfile_entries={} deep={} audit={} warnings={}",
         report.project_root,
         report.scanned_dependencies,
         report.created_cards,
+        report.refreshed_cards,
         report.skipped_existing,
         report.lockfile_entries,
         report.deep,
@@ -18480,6 +18512,7 @@ fn render_trust_scan_human(report: &TrustScanReport) -> String {
             "  {} {}@{} section={} publisher={} risk={} vulns={} dependents={} integrity_hashes={}",
             match item.status {
                 TrustScanItemStatus::Created => "created",
+                TrustScanItemStatus::Refreshed => "refreshed",
                 TrustScanItemStatus::SkippedExisting => "skipped",
             },
             item.extension_id,
@@ -18515,6 +18548,7 @@ fn run_trust_scan(project_root: &Path, deep: bool, audit: bool) -> Result<TrustS
     let mut warnings = Vec::new();
     let mut items = Vec::new();
     let mut created_cards = 0usize;
+    let mut refreshed_cards = 0usize;
     let mut skipped_existing = 0usize;
     let mut remote_cap_context = if deep || audit {
         Some(trust_scan_remote_cap_context(now_secs)?)
@@ -18523,15 +18557,19 @@ fn run_trust_scan(project_root: &Path, deep: bool, audit: bool) -> Result<TrustS
     };
 
     for dependency in &dependencies {
-        if let Some(existing) = state
+        let existing = state
             .registry
             .read(&dependency.extension_id, now_secs, "trace-cli-trust-scan")
-            .map_err(|err| anyhow::anyhow!(err.to_string()))?
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        // A plain rescan has no new evidence for an existing card.
+        if let Some(existing) = &existing
+            && !deep
+            && !audit
         {
             skipped_existing = skipped_existing.saturating_add(1);
             items.push(build_trust_scan_item(
                 dependency,
-                &existing,
+                existing,
                 TrustScanItemStatus::SkippedExisting,
                 0,
                 None,
@@ -18541,6 +18579,8 @@ fn run_trust_scan(project_root: &Path, deep: bool, audit: bool) -> Result<TrustS
 
         let lockfile_entry = lockfile_metadata.get(&dependency.dependency_name);
         let mut deep_metadata = TrustScanDeepMetadata::default();
+        let mut deep_fetched = false;
+        let mut audit_fetched = false;
         if deep {
             let remote_cap = remote_cap_context
                 .as_mut()
@@ -18550,7 +18590,10 @@ fn run_trust_scan(project_root: &Path, deep: bool, audit: bool) -> Result<TrustS
                 lockfile_entry.and_then(|entry| entry.resolved_version.as_deref()),
                 remote_cap,
             ) {
-                Ok(metadata) => deep_metadata = metadata,
+                Ok(metadata) => {
+                    deep_metadata = metadata;
+                    deep_fetched = true;
+                }
                 Err(err) if is_remote_cap_denial(&err) => {
                     return Err(err.context(format!(
                         "RemoteCap denied trust scan deep metadata for {}",
@@ -18577,7 +18620,10 @@ fn run_trust_scan(project_root: &Path, deep: bool, audit: bool) -> Result<TrustS
                 resolved_version,
                 remote_cap,
             ) {
-                Ok(metadata) => audit_metadata = metadata,
+                Ok(metadata) => {
+                    audit_metadata = metadata;
+                    audit_fetched = true;
+                }
                 Err(err) if is_remote_cap_denial(&err) => {
                     return Err(err.context(format!(
                         "RemoteCap denied trust scan audit metadata for {}",
@@ -18591,15 +18637,9 @@ fn run_trust_scan(project_root: &Path, deep: bool, audit: bool) -> Result<TrustS
             }
         }
 
-        if let Some(finding) =
+        let typosquat_warning =
             supply_chain::typosquat::detect_typosquat(&dependency.dependency_name)
-        {
-            warnings.push(format!(
-                "{}: {}",
-                dependency.extension_id,
-                finding.describe()
-            ));
-        }
+                .map(|finding| format!("{}: {}", dependency.extension_id, finding.describe()));
         let input = build_trust_scan_card_input(
             dependency,
             lockfile_entry,
@@ -18607,21 +18647,52 @@ fn run_trust_scan(project_root: &Path, deep: bool, audit: bool) -> Result<TrustS
             &audit_metadata,
             now_secs,
         );
-        let card = state
-            .registry
-            .create(input, now_secs, "trace-cli-trust-scan")
-            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-        created_cards = created_cards.saturating_add(1);
+        let (card, status) = if let Some(existing) = existing {
+            if let Some(reason) = trust_scan_refresh_refusal(
+                &existing,
+                &input,
+                deep_fetched || audit_fetched,
+                audit_fetched && audit_metadata.risk_lowering_authenticated,
+            ) {
+                warnings.push(format!(
+                    "{}: existing card not refreshed: {reason}",
+                    dependency.extension_id
+                ));
+                skipped_existing = skipped_existing.saturating_add(1);
+                items.push(build_trust_scan_item(
+                    dependency,
+                    &existing,
+                    TrustScanItemStatus::SkippedExisting,
+                    0,
+                    None,
+                ));
+                continue;
+            }
+            let card = state
+                .registry
+                .refresh_from_scan(input, now_secs, "trace-cli-trust-scan")
+                .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+            refreshed_cards = refreshed_cards.saturating_add(1);
+            (card, TrustScanItemStatus::Refreshed)
+        } else {
+            let card = state
+                .registry
+                .create(input, now_secs, "trace-cli-trust-scan")
+                .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+            created_cards = created_cards.saturating_add(1);
+            (card, TrustScanItemStatus::Created)
+        };
+        warnings.extend(typosquat_warning);
         items.push(build_trust_scan_item(
             dependency,
             &card,
-            TrustScanItemStatus::Created,
+            status,
             audit_metadata.vulnerability_ids.len(),
             deep_metadata.dependent_count,
         ));
     }
 
-    if created_cards > 0 || !state.path.is_file() {
+    if created_cards > 0 || refreshed_cards > 0 || !state.path.is_file() {
         persist_trust_card_cli_registry(&state)?;
     }
 
@@ -18631,6 +18702,7 @@ fn run_trust_scan(project_root: &Path, deep: bool, audit: bool) -> Result<TrustS
         registry_path: state.path.display().to_string(),
         scanned_dependencies: dependencies.len(),
         created_cards,
+        refreshed_cards,
         skipped_existing,
         lockfile_entries: lockfile_metadata.len(),
         deep,
@@ -33855,6 +33927,7 @@ mod run_trust_gate_tests {
                 registry_path: "C:\\Windows\\System32".to_string(),
                 scanned_dependencies: usize::MAX,
                 created_cards: usize::MAX,
+                refreshed_cards: usize::MAX,
                 skipped_existing: usize::MAX,
                 lockfile_entries: usize::MAX,
                 deep: true,
