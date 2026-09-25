@@ -8254,12 +8254,14 @@ fn handle_ops_compat_corpus_run(args: &OpsCompatCorpusRunArgs) -> Result<()> {
         anyhow::bail!("--out is required");
     }
 
+    let policy = parse_profile_override(Some(&args.policy))?.unwrap_or(Profile::LegacyRisky);
     let snapshot = capture_corpus(&args.corpus_root)?;
     let corpus_version = content_addressed_corpus_version(&snapshot)?;
     let run = run_corpus(
         &snapshot,
         std::time::Duration::from_secs(args.case_timeout_secs.clamp(1, 600)),
         args.require_node_reference,
+        policy,
     )?;
 
     let existing = match std::fs::read_to_string(&args.out) {
@@ -8278,7 +8280,7 @@ fn handle_ops_compat_corpus_run(args: &OpsCompatCorpusRunArgs) -> Result<()> {
         }
     };
 
-    let document = build_corpus_results_document_with_references(
+    let mut document = build_corpus_results_document_with_references(
         existing.as_ref(),
         &run.outcomes,
         &corpus_version,
@@ -8287,6 +8289,19 @@ fn handle_ops_compat_corpus_run(args: &OpsCompatCorpusRunArgs) -> Result<()> {
         &corpus_generated_at_utc(),
         &args.corpus_root.display().to_string(),
     )?;
+    // Record the profile the product leg actually ran under (the result
+    // digest covers per-test rows only, so this does not disturb it).
+    document["corpus"]["policy_mode"] = serde_json::json!(policy.to_string());
+    if policy != Profile::LegacyRisky
+        && let Some(command) = document["reproducibility"]["external_repro_command"].as_str()
+    {
+        let command = command.replacen(
+            "ops compat-corpus-run",
+            &format!("ops compat-corpus-run --policy {policy}"),
+            1,
+        );
+        document["reproducibility"]["external_repro_command"] = serde_json::json!(command);
+    }
 
     if let Some(parent) = args.out.parent()
         && !parent.as_os_str().is_empty()

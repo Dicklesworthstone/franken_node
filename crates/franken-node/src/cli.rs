@@ -2020,6 +2020,12 @@ pub struct OpsCompatCorpusRunArgs {
     /// dyad unless this flag is supplied explicitly.
     #[arg(long = "require-node-reference")]
     pub require_node_reference: bool,
+
+    /// Profile the franken product leg runs under (`strict`, `balanced`,
+    /// `legacy-risky`). The artifact of record is measured under
+    /// `legacy-risky`; `balanced` is the product default operators get.
+    #[arg(long, default_value = "legacy-risky")]
+    pub policy: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

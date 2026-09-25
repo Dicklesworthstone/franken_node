@@ -1350,10 +1350,11 @@ fn corpus_process_authority(
     template_config_path: &Path,
     canonical_run_root: &Path,
     case_timeout: Duration,
+    policy: Profile,
 ) -> Result<CorpusProcessAuthority> {
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (template_config_path, canonical_run_root, case_timeout);
+        let _ = (template_config_path, canonical_run_root, case_timeout, policy);
         bail!("corpus child-process authority is supported only on Linux");
     }
 
@@ -1386,20 +1387,19 @@ fn corpus_process_authority(
         let ttl_ms = timeout_ms
             .saturating_add(60_000)
             .clamp(60_000, MAX_CHILD_PROCESS_SPAWN_TOKEN_TTL_MS);
-        // Sign the exact configuration shape the `run --policy
-        // legacy-risky` child will authenticate. Directly deserializing the
-        // balanced init template would bind the token to pre-resolution
-        // defaults and admission would correctly reject it after CLI profile
-        // resolution.
+        // Sign the exact configuration shape the `run --policy <policy>`
+        // child will authenticate. Directly deserializing the balanced init
+        // template would bind the token to pre-resolution defaults and
+        // admission would correctly reject it after CLI profile resolution.
         let mut config = Config::resolve(
             Some(template_config_path),
             CliOverrides {
-                profile: Some(Profile::LegacyRisky),
+                profile: Some(policy),
             },
         )
         .with_context(|| {
             format!(
-                "resolve corpus workspace template config {} for legacy-risky run",
+                "resolve corpus workspace template config {} for {policy} run",
                 template_config_path.display()
             )
         })?
@@ -1885,6 +1885,7 @@ pub fn run_corpus(
     snapshot: &CorpusSnapshot,
     case_timeout: Duration,
     require_node_reference: bool,
+    policy: Profile,
 ) -> Result<CorpusRunResult> {
     use crate::runtime::nversion_oracle::{
         BoundaryScope, CheckOutcome, RuntimeEntry, RuntimeOracle,
@@ -1983,6 +1984,7 @@ pub fn run_corpus(
                 &template.path().join("franken_node.toml"),
                 &canonical_run_root,
                 case_timeout,
+                policy,
             )
             .with_context(|| {
                 format!(
@@ -2034,7 +2036,7 @@ pub fn run_corpus(
             .arg(&snapshot_case.staged_relative_path)
             .arg("--console-only")
             .arg("--policy")
-            .arg("legacy-risky")
+            .arg(policy.to_string())
             .arg("--runtime")
             .arg("franken-engine")
             .arg("--engine-bin")
@@ -3566,6 +3568,7 @@ mod snapshot_staging_tests {
             &template.path().join("franken_node.toml"),
             &canonical_run_root,
             Duration::from_secs(30),
+            Profile::LegacyRisky,
         )
         .expect("provision authority");
         stage_identical_corpus_config_in_dirs(&authority, &[&bun_dir, &franken_dir])
