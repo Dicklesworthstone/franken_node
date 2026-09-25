@@ -7,7 +7,8 @@
 <div align="center">
 
 ![Status](https://img.shields.io/badge/status-pre--1.0-yellow)
-![Build](https://img.shields.io/badge/build-passing-brightgreen)
+[![README smoke](https://github.com/Dicklesworthstone/franken_node/actions/workflows/readme-quick-example-smoke.yml/badge.svg?branch=main)](https://github.com/Dicklesworthstone/franken_node/actions/workflows/readme-quick-example-smoke.yml)
+[![Verifier SDK standalone](https://github.com/Dicklesworthstone/franken_node/actions/workflows/verifier-sdk-standalone.yml/badge.svg?branch=main)](https://github.com/Dicklesworthstone/franken_node/actions/workflows/verifier-sdk-standalone.yml)
 ![Security](https://img.shields.io/badge/security-trust--native-1f6feb)
 ![Unsafe](https://img.shields.io/badge/unsafe-forbidden-success)
 ![Compatibility](https://img.shields.io/badge/compatibility-node%20%2B%20bun-5b3cc4)
@@ -112,8 +113,10 @@ replay part of the runtime contract, so JS/TS velocity comes with:
 - **Trust cards**: every extension carries provenance, behavior risk, audit
   history, and a camouflage assessment
 - **Deterministic incident replay**: a high-severity incident exports as a
-  signed bundle that any operator can replay byte-for-byte and run policy
-  counterfactuals against
+  signed bundle whose recorded evidence any operator (or the standalone
+  verifier SDK) can integrity-verify and re-derive, and run policy
+  counterfactuals against. Replay re-derives the recording; it does not
+  re-execute the program.
 - **Migration autopilot**: audit → rewrite → validate → rollout, with
   unsigned JSON rollback plans (not Ed25519-signed). `migrate validate`
   is static+smoke; behavioral comparison is a separate `verify lockstep`
@@ -295,8 +298,11 @@ curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/franken_node/main
 ```
 
 A checksum-verified release asset is used when you pass `--method release` or
-`--version vX.Y.Z`. Prebuilt binaries ship for **Linux x86_64**, **macOS Apple
-Silicon (arm64)**, and **Windows x86_64**. Pass `--help` (bash) / `-EasyMode`
+`--version vX.Y.Z`. The only published release is **v0.1.0** (2026-05-29),
+over 1,100 commits behind `main`, so none of the behavior described in this
+README since then is in it; build from source for current behavior. The
+release installer targets Linux x86_64, macOS Apple Silicon (arm64) and
+Windows x86_64, but no current build of those assets exists. Pass `--help` (bash) / `-EasyMode`
 (PowerShell adds the dir to PATH) for options.
 
 Child-process spawning is not enabled by any runtime profile. Profile-governed
@@ -659,9 +665,10 @@ engine depend on that property to work across runs.
 ## Network Egress and SSRF Policy
 
 `security::ssrf_policy` and `security::network_guard` together enforce
-**egress policy** as a runtime default. Every outbound network call from
-the runtime, an extension, or a remote-capability operation transits the
-SSRF policy gate before any TCP socket opens.
+**egress policy** as a runtime default. Every guest network call on the
+`run` path transits the SSRF policy gate before any socket opens. `run`
+executes guests only in the native engine; external node/bun runtimes are
+refused under the governed profiles.
 
 The policy is configured in `franken_node.toml`:
 
@@ -692,9 +699,10 @@ Mechanics:
 - **Capability binding.** `franken-node remotecap issue --endpoint <e>`
   pins capability tokens to specific endpoints; the gate refuses use of
   a token at any other endpoint regardless of the operation requested.
-- **Monitor mode.** During migration, `ssrf_enforcement = "monitor"` allows
-  the call but records the would-be-decision so operators can review
-  before flipping the gate to `block`.
+- **Enforcement modes.** `ssrf_enforcement` is `block` (default), `monitor`
+  or `none`. On the native `run` path `monitor` currently enforces exactly
+  like `block`; an allow-and-record mode is not implemented yet. Only
+  `none` disables the gate.
 - **TLS for guest `https` egress.** A guest `https.*`/`fetch(https://…)`
   call performs a real TLS handshake in the engine's network mechanism
   (rustls; certificate verification against the built-in webpki roots).
@@ -1538,11 +1546,14 @@ sequence of segments without trusting the producer.
 
 ### Time-travel replay engine
 
-`replay::time_travel_engine` captures a `WorkflowTrace`: the sequence of
+`replay::time_travel_engine` is a library API that no CLI command calls
+yet. `incident replay` does an integrity re-derivation of the recorded
+bundle instead. The engine captures a `WorkflowTrace`: the sequence of
 steps, their inputs and outputs, the environment snapshot at the start of
 the workflow, schema version metadata, and the side-effect declarations
-required to reproduce them. Replay re-executes the trace against the same
-schema version and produces a `ReplayResult` whose `verdict` is one of:
+required to reproduce them. Its replay re-executes the trace against the
+same schema version and produces a `ReplayResult` whose `verdict` is one
+of:
 
 - `ReplayVerdict::Identical`: every step's output and side-effects
   matched the captured values.
@@ -2533,9 +2544,10 @@ implementation CI gate.
 
 The split keeps the verifier SDK auditable: a third party can verify
 product-layer claims (trust, migration, replay, fleet) without having to
-audit the engine internals, and vice versa. Engine revisions are pinned
-by `Cargo.toml` path dependency; bumping the engine revision is an
-explicit, reviewed change.
+audit the engine internals, and vice versa. The engine is a `Cargo.toml`
+path dependency on a sibling checkout (`../franken_engine`). A path
+dependency pins nothing: a build uses whatever that checkout contains, so
+reproducing a binary needs the engine commit recorded alongside it.
 
 For native runs, the product parent retains a persistent evidence root outside
 the execution child, provisions a fresh short-lived engine signing authority
@@ -2938,17 +2950,17 @@ Profile selection changes concrete behavior. The salient differences:
 
 | Behavior | `strict` | `balanced` | `legacy-risky` |
 |---|---|---|---|
-| `risky_requires_fresh_revocation` | required | required | relaxed |
-| `dangerous_requires_fresh_revocation` | required | required | required |
-| `quarantine_on_high_risk` | auto-quarantine | auto-quarantine | warn-only |
-| Lockstep validation before rollout | required | required | optional |
+| Stale or missing revocation frontier at `run` (trusted deps) | refuse (5 min) | warn (1 h) | no floor |
+| High/Critical-risk dependency at `run` | refuse (`high_risk`) | warn | ignored |
+| Auto-quarantine of dependencies | after an SSRF violation or sentinel escalation | same | warn-only |
+| Lockstep evidence to leave rollout Shadow | required | required | required (all profiles; `--force` bypasses and is recorded) |
 | Divergence receipts | always emitted | emitted in production | optional |
 | `registry.require_signatures` | required | required | may be relaxed |
 | `registry.require_provenance` | required | required | may be relaxed |
 | Compatibility mode | tightest | balanced | permissive |
 | SSRF default | block | block | block |
-| Safe-mode auto-entry on crash-loop | yes | yes | yes |
-| Camouflage severity threshold for risk bump | low | medium | high |
+| Safe-mode auto-entry on crash-loop | not implemented (the crash-loop detector has no caller) | same | same |
+| Camouflage severity threshold for risk bump | constant 0.50, not yet per profile | same | same |
 
 The profile string is canonicalized at load time and recorded in every
 decision receipt; replays under a different profile produce a
@@ -3372,21 +3384,23 @@ Every outbound network call passes through the SSRF policy gate
 (`security::ssrf_policy`). The gate enforces CIDR-aware deny rules
 (including private ranges and loopback by default), checks per-connector
 allowlist entries with optional port pinning, and re-validates resolved
-IPs after DNS resolution to defeat rebinding. `[security.network_policy].mode`
-selects `enforced` or `report-only`; in `report-only` mode, the call
-proceeds but the decision is captured for review. Capability tokens are
+IPs after DNS resolution to defeat rebinding.
+`[security.network_policy].ssrf_enforcement` is `block` (default),
+`monitor` or `none`. `monitor` currently enforces like `block` on the
+native `run` path (no allow-and-record mode yet); `none` disables the gate. Capability tokens are
 endpoint-bound, so a token issued for `https://api.example.com` cannot be
 silently redirected to `http://127.0.0.1:8080`.
 
 ### What happens when the runtime enters safe mode?
 
 `franken-node safe-mode enter --reason <reason> --operator-id <id>
---trust-state-hash <hash>` (or an automatic entry from
-`crash-loop`, `trust-corruption`, or `epoch-mismatch`) suspends new
+--trust-state-hash <hash>` suspends new
 capability issuance, refuses to issue new decisions, and persists
 unsigned JSON operator state under `.franken-node/safe-mode/state.json`
-(not Ed25519-signed). The runtime continues to emit telemetry and accept
-inspection commands. Exiting requires
+(not Ed25519-signed). There is no automatic entry yet: `crash-loop`,
+`trust-corruption` and `epoch-mismatch` are reason labels an operator
+passes, and no detector triggers them. The runtime continues to emit
+telemetry and accept inspection commands. Exiting requires
 `franken-node safe-mode exit --confirm --operator-id <id>` plus the
 operator attestations (`--trust-state-consistent`,
 `--no-unresolved-incidents`, `--evidence-ledger-intact`), which are not
