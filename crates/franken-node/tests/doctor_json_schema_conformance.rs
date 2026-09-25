@@ -237,9 +237,11 @@ fn run_doctor_with_env(args: &[String], env_pairs: &[(&str, String)]) -> Output 
         .expect("run franken-node doctor with env")
 }
 
-/// Doctor exits 1 exactly when `overall_status` is `fail`
-/// (bd-reality-20260923-26n9r.11); environment-sensitive checks can fail on a
-/// loaded host, so the exit code is checked against the report.
+/// The main `doctor` report (`franken-node/doctor-cli/v1`) exits 1 exactly
+/// when `overall_status` is `fail` (bd-reality-20260923-26n9r.11), which
+/// environment-sensitive checks can cause on a loaded host, so its exit code
+/// is checked against the report. `doctor evidence-readiness` evaluates an
+/// input snapshot and reports a failing verdict with exit 0.
 fn parse_report(output: &Output) -> Value {
     let report: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
         panic!(
@@ -248,11 +250,9 @@ fn parse_report(output: &Output) -> Value {
             String::from_utf8_lossy(&output.stderr)
         )
     });
-    let expected_code = if report["overall_status"] == "fail" {
-        1
-    } else {
-        0
-    };
+    let main_report_failed = report["schema_version"] == "franken-node/doctor-cli/v1"
+        && report["overall_status"] == "fail";
+    let expected_code = if main_report_failed { 1 } else { 0 };
     assert_eq!(
         output.status.code(),
         Some(expected_code),

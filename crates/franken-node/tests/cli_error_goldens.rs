@@ -4,18 +4,17 @@
 //! arguments or missing dependencies. Error messages should be stable
 //! and informative.
 
-use assert_cmd::Command;
 use insta::assert_snapshot;
 
 #[path = "cli_golden_helpers.rs"]
 mod cli_golden_helpers;
 
-use cli_golden_helpers::with_scrubbed_snapshot_settings;
+use cli_golden_helpers::{franken_node_cmd, with_scrubbed_snapshot_settings};
 
 /// Test error output for missing required arguments.
 #[test]
 fn trust_card_show_missing_extension_id() {
-    let mut cmd = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let mut cmd = franken_node_cmd();
     let assertion = cmd.args(["trust-card", "show"]).assert().failure();
 
     let stderr = String::from_utf8_lossy(&assertion.get_output().stderr);
@@ -26,7 +25,7 @@ fn trust_card_show_missing_extension_id() {
 
 #[test]
 fn verify_release_missing_bundle_path() {
-    let mut cmd = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let mut cmd = franken_node_cmd();
     let assertion = cmd.args(["verify", "release"]).assert().failure();
 
     let stderr = String::from_utf8_lossy(&assertion.get_output().stderr);
@@ -37,7 +36,7 @@ fn verify_release_missing_bundle_path() {
 
 #[test]
 fn remotecap_issue_missing_scope() {
-    let mut cmd = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let mut cmd = franken_node_cmd();
     let assertion = cmd.args(["remotecap", "issue"]).assert().failure();
 
     let stderr = String::from_utf8_lossy(&assertion.get_output().stderr);
@@ -48,7 +47,7 @@ fn remotecap_issue_missing_scope() {
 
 #[test]
 fn fleet_status_invalid_format() {
-    let mut cmd = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let mut cmd = franken_node_cmd();
     let assertion = cmd
         .args(["fleet", "status", "--format", "invalid"])
         .assert()
@@ -62,7 +61,7 @@ fn fleet_status_invalid_format() {
 
 #[test]
 fn registry_search_invalid_limit() {
-    let mut cmd = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let mut cmd = franken_node_cmd();
     let assertion = cmd
         .args(["registry", "search", "--limit", "invalid"])
         .assert()
@@ -76,7 +75,7 @@ fn registry_search_invalid_limit() {
 
 #[test]
 fn incident_bundle_missing_path() {
-    let mut cmd = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let mut cmd = franken_node_cmd();
     let assertion = cmd.args(["incident", "bundle"]).assert().failure();
 
     let stderr = String::from_utf8_lossy(&assertion.get_output().stderr);
@@ -87,7 +86,7 @@ fn incident_bundle_missing_path() {
 
 #[test]
 fn doctor_invalid_subcommand() {
-    let mut cmd = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let mut cmd = franken_node_cmd();
     let assertion = cmd.args(["doctor", "invalid"]).assert().failure();
 
     let stderr = String::from_utf8_lossy(&assertion.get_output().stderr);

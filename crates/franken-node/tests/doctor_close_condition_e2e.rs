@@ -861,10 +861,12 @@ fn doctor_close_condition_fails_closed_when_release_policy_ci_output_is_missing(
         !receipt_path.exists(),
         "close-condition receipt must not be emitted without release-policy data"
     );
+    // stdout carries only the ok:false error envelope checked above; no
+    // receipt or verdict may leak on a fail-closed linkage outage.
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        output.stdout.is_empty(),
-        "stdout should remain empty on fail-closed linkage outage: {}",
-        String::from_utf8_lossy(&output.stdout)
+        !stdout.contains("oracle-close-condition-receipt") && !stdout.contains("\"verdict\""),
+        "no receipt or verdict on fail-closed linkage outage: {stdout}"
     );
 }
 

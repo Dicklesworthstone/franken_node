@@ -489,15 +489,23 @@ frankenengine-extension-host = { path = "../../../franken_engine/crates/franken-
                 "timed_out": false,
                 "elapsed_ms": index + 1,
             });
+            let passed = index < 98;
+            // A failing case genuinely diverges from the reference leg.
+            let mut franken_observation = observation.clone();
+            if !passed {
+                franken_observation["stdout_digest"] =
+                    json!(format!("sha256:{}", hex::encode(Sha256::digest(b"x"))));
+                franken_observation["stdout_bytes"] = json!(1);
+            }
             json!({
                 "test_id": format!("tc::fs::{index:04}"),
                 "api_family": "fs",
                 "band": "core",
                 "risk_band": "critical",
-                "status": if index < 98 { "pass" } else { "fail" },
+                "status": if passed { "pass" } else { "fail" },
                 "runtime_observations": {
-                    "bun": observation.clone(),
-                    "franken-engine-native": observation,
+                    "bun": observation,
+                    "franken-engine-native": franken_observation,
                 },
             })
         })

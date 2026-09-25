@@ -11,9 +11,16 @@ use insta::{Settings, assert_snapshot};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-/// Create a franken-node command instance for testing.
+/// Create a franken-node command instance for testing, with clap's colored
+/// output disabled so goldens do not depend on the runner's terminal
+/// environment (ANSI codes leaked into snapshots on hosts that force color).
 pub fn franken_node_cmd() -> Command {
-    Command::cargo_bin("franken-node").expect("franken-node binary")
+    let mut cmd = Command::cargo_bin("franken-node").expect("franken-node binary");
+    cmd.env("NO_COLOR", "1")
+        .env("CLICOLOR", "0")
+        .env("CLICOLOR_FORCE", "0")
+        .env_remove("FORCE_COLOR");
+    cmd
 }
 
 /// Pretty-print JSON stdout with error handling.
