@@ -1199,7 +1199,7 @@ feature.
 | **Audience tokens** | `control_plane::audience_token` | Expiry, attenuation, domain separation, token chains with depth/root/leaf accessors, replay-resistant nonce window | Library only |
 | **Fork detection** | `control_plane::fork_detection` | State-vector hashing, rollback proofs, marker-proof verifier, `DetectionResult` (`Converged`/`Forked`/`GapDetected`/`RollbackDetected`) | Library only |
 | **Control epoch barriers** | `control_plane::control_epoch`, `epoch_transition_barrier` | Validity-window policy, `EpochRejectionReason` enum, fail-closed artifact rejection | Library only (`runtime epoch` compares integers you pass it) |
-| **Evidence ledger** | `observability::evidence_ledger` | Append-only Ed25519-signed decision log, hash-chain prev-entry linkage, replay-attack detection, bounded capacity with eviction, optional spill-to-disk | Partly: every `run` appends a signed, hash-chained entry to `.franken-node/state/evidence-ledger.db` and `verify transparency-log` checks it; revoke, quarantine and fleet decisions do not append yet |
+| **Evidence ledger** | `observability::evidence_ledger` | Append-only Ed25519-signed decision log, hash-chain prev-entry linkage, replay-attack detection, bounded capacity with eviction, optional spill-to-disk | Yes: `run` (including preflight refusals), `trust revoke`, `trust quarantine` and `trust release` append signed, hash-chained entries to `.franken-node/state/evidence-ledger.db`; `verify transparency-log` checks it. Fleet decisions do not append yet |
 | **Remote capability tokens** | `security::remote_cap`, `remote::*` | Scope-bound, single-use-optional Ed25519 tokens with endpoint binding | Yes: `remotecap`, `trust scan --deep/--audit`, `trust sync`, `init` |
 | **DGIS adversarial topology** | `security::dgis`, `dgis::*` | Dependency contagion simulator, fragility model, SPOF detection, immunization planner | Partly: the fragility model scores npm maintainer data in `trust scan --deep`; the contagion simulator, SPOF detection and immunization planner are library only |
 | **BPET evolution risk scorer** | `security::bpet`, `migration::bpet_migration_gate` | Phenotype feature extraction, topology risk delta during rollout | Library only (`bpet_migration_gate`: `feature:admin-tools`) |
@@ -1268,10 +1268,11 @@ The same model in words:
    release/reconcile` sign their decision and convergence receipts, and
    sentinel escalations are signed. Each `run` also appends a signed,
    hash-chained entry (receipt id and hash, exit code, containment
-   verdict, host-effect chain head) to the durable evidence ledger;
+   verdict, host-effect chain head) to the durable evidence ledger, as do
+   preflight refusals and `trust revoke`/`quarantine`/`release`;
    `verify transparency-log .franken-node/state/evidence-ledger.db
    --public-key .franken-node/keys/receipt-signing.pub` checks the chain.
-   Revoke, quarantine and fleet decisions do not append to it yet.
+   Fleet decisions do not append to it yet.
 
 ---
 
