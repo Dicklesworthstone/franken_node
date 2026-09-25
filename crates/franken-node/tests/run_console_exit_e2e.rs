@@ -1340,3 +1340,98 @@ fn runs_append_signed_chained_entries_to_the_durable_evidence_ledger() {
     assert_eq!(report["status"], "valid");
     assert_eq!(report["signatures_verified"], true);
 }
+
+/// bd-reality-20260923-26n9r.15 deliverable 6: operator trust decisions and
+/// preflight refusals land in the same signed, hash-chained ledger as runs.
+#[test]
+fn revoke_and_preflight_denial_append_to_the_evidence_ledger() {
+    use frankenengine_node::observability::evidence_ledger::{
+        DecisionKind, EvidenceEntry, evidence_entry_hash_hex,
+    };
+    use frankenengine_node::observability::evidence_ledger_durable::DurableEvidenceLedger;
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let cli = |args: &[&str]| {
+        Command::new(franken_node_bin())
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .expect("spawn franken-node")
+    };
+    assert!(
+        cli(&["init", "--profile", "balanced", "--out-dir", "."])
+            .status
+            .success()
+    );
+    std::fs::write(
+        dir.path().join("package.json"),
+        r#"{"name":"ledger-app","version":"1.0.0","dependencies":{"left-pad":"1.3.0"}}"#,
+    )
+    .expect("write package.json");
+    std::fs::write(dir.path().join("app.js"), COMPUTE_APP).expect("write app");
+    let scan = cli(&["trust", "scan", "."]);
+    assert!(
+        scan.status.success(),
+        "{}",
+        String::from_utf8_lossy(&scan.stderr)
+    );
+    let revoke = cli(&["trust", "revoke", "npm:left-pad"]);
+    assert!(
+        revoke.status.success(),
+        "{}",
+        String::from_utf8_lossy(&revoke.stderr)
+    );
+
+    let run = cli(&[
+        "run",
+        "app.js",
+        "--policy",
+        "balanced",
+        "--runtime",
+        "franken-engine",
+        "--engine-bin",
+        franken_node_bin(),
+    ]);
+    assert!(
+        !run.status.success(),
+        "a revoked dependency must block the run: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let entries = DurableEvidenceLedger::open_default(dir.path())
+        .expect("open evidence ledger")
+        .entries_json()
+        .expect("read evidence ledger")
+        .iter()
+        .map(|json| serde_json::from_str::<EvidenceEntry>(json).expect("evidence entry"))
+        .collect::<Vec<_>>();
+    assert_eq!(entries.len(), 2, "revoke + preflight denial: {entries:?}");
+    assert_eq!(
+        entries[0].schema_version,
+        "franken-node/trust-decision-evidence/v1"
+    );
+    assert_eq!(entries[0].decision_kind, DecisionKind::Deny);
+    assert_eq!(entries[0].payload["action"], "revoke");
+    assert_eq!(entries[0].payload["extension_id"], "npm:left-pad");
+    assert_eq!(
+        entries[1].schema_version,
+        "franken-node/run-preflight-denial-evidence/v1"
+    );
+    assert_eq!(entries[1].decision_kind, DecisionKind::Deny);
+    assert_eq!(
+        entries[1].prev_entry_hash,
+        evidence_entry_hash_hex(&entries[0])
+    );
+
+    let verify = cli(&[
+        "verify",
+        "transparency-log",
+        ".franken-node/state/evidence-ledger.db",
+        "--public-key",
+        ".franken-node/keys/receipt-signing.pub",
+        "--json",
+    ]);
+    let report: Value = serde_json::from_slice(&verify.stdout).expect("verify --json");
+    assert_eq!(report["status"], "valid", "{report}");
+    assert_eq!(verify.status.code(), Some(0));
+}

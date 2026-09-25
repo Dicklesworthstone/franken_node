@@ -10269,11 +10269,74 @@ fn persist_run_execution_receipt(
 /// location `incident bundle --id <id>` reads. Returns the captured incident id.
 /// Schema of the payload `run` records in the durable evidence ledger.
 const RUN_DECISION_EVIDENCE_SCHEMA: &str = "franken-node/run-decision-evidence/v1";
+/// Schema of the payload for a run refused by its trust preflight.
+const RUN_PREFLIGHT_DENIAL_EVIDENCE_SCHEMA: &str = "franken-node/run-preflight-denial-evidence/v1";
+/// Schema of the payload for operator trust decisions (revoke, quarantine,
+/// release).
+const TRUST_DECISION_EVIDENCE_SCHEMA: &str = "franken-node/trust-decision-evidence/v1";
 
-/// Record the run's outcome as a signed, hash-chained entry in the durable
-/// evidence ledger under `.franken-node/state/` (bd-reality-20260923-26n9r.15
-/// deliverable 6). Signed with the receipt signing key `init` provisions;
-/// returns `Ok(None)` without writing when no key is configured.
+/// Append one decision as a signed, hash-chained entry to the durable
+/// evidence ledger under `project_root/.franken-node/state/`
+/// (bd-reality-20260923-26n9r.15 deliverable 6). Signed with the receipt
+/// signing key `init` provisions; returns `Ok(None)` without writing when no
+/// key is configured.
+fn append_decision_evidence(
+    project_root: &Path,
+    schema_version: &str,
+    decision_id: &str,
+    decision_kind: observability::evidence_ledger::DecisionKind,
+    trace_id: &str,
+    payload: serde_json::Value,
+) -> Result<Option<observability::evidence_ledger::EvidenceEntry>> {
+    let Some(signing) = load_receipt_signing_material(None)? else {
+        return Ok(None);
+    };
+    let now = chrono::Utc::now();
+    let entry = observability::evidence_ledger::EvidenceEntry {
+        schema_version: schema_version.to_string(),
+        entry_id: Some(decision_id.to_string()),
+        decision_id: decision_id.to_string(),
+        decision_kind,
+        decision_time: now.to_rfc3339(),
+        timestamp_ms: u64::try_from(now.timestamp_millis()).unwrap_or(0),
+        trace_id: trace_id.to_string(),
+        epoch_id: 0,
+        payload,
+        size_bytes: 0,
+        signature: String::new(),
+        prev_entry_hash: String::new(),
+    };
+    let store =
+        observability::evidence_ledger_durable::DurableEvidenceLedger::open_default(project_root)
+            .context("failed opening the durable evidence ledger")?;
+    store
+        .append_signed_chained(entry, &signing.signing_key)
+        .map(Some)
+        .context("failed appending to the durable evidence ledger")
+}
+
+/// Record an operator trust decision in the durable evidence ledger under
+/// `project_root`; a failure is reported on stderr and never changes the
+/// command's outcome (the decision itself is already persisted).
+fn record_trust_decision_evidence(
+    project_root: &Path,
+    decision_id: &str,
+    decision_kind: observability::evidence_ledger::DecisionKind,
+    payload: serde_json::Value,
+) {
+    if let Err(err) = append_decision_evidence(
+        project_root,
+        TRUST_DECISION_EVIDENCE_SCHEMA,
+        decision_id,
+        decision_kind,
+        "trace-cli-trust-decision",
+        payload,
+    ) {
+        eprintln!("warning: evidence ledger append failed: {err:#}");
+    }
+}
+
+/// Record the run's outcome in the durable evidence ledger.
 fn append_run_evidence_entry(
     project_root: &Path,
     receipt: &RunExecutionReceipt,
@@ -10281,11 +10344,8 @@ fn append_run_evidence_entry(
     dispatch: &ops::engine_dispatcher::RunDispatchReport,
     trace_id: &str,
 ) -> Result<Option<observability::evidence_ledger::EvidenceEntry>> {
-    use observability::evidence_ledger::{DecisionKind, EvidenceEntry};
+    use observability::evidence_ledger::DecisionKind;
 
-    let Some(signing) = load_receipt_signing_material(None)? else {
-        return Ok(None);
-    };
     let containment_verdict = native_containment_action(&dispatch.runtime, dispatch.exit_code);
     let decision_kind = match containment_verdict {
         Some("Quarantine") => DecisionKind::Quarantine,
@@ -10293,17 +10353,13 @@ fn append_run_evidence_entry(
         None => DecisionKind::Admit,
     };
     let ledger = dispatch.host_effect_ledger.as_ref();
-    let now = chrono::Utc::now();
-    let entry = EvidenceEntry {
-        schema_version: RUN_DECISION_EVIDENCE_SCHEMA.to_string(),
-        entry_id: Some(receipt.core.receipt_id.clone()),
-        decision_id: receipt.core.receipt_id.clone(),
+    append_decision_evidence(
+        project_root,
+        RUN_DECISION_EVIDENCE_SCHEMA,
+        &receipt.core.receipt_id,
         decision_kind,
-        decision_time: now.to_rfc3339(),
-        timestamp_ms: u64::try_from(now.timestamp_millis()).unwrap_or(0),
-        trace_id: trace_id.to_string(),
-        epoch_id: 0,
-        payload: serde_json::json!({
+        trace_id,
+        serde_json::json!({
             "app_path": receipt.core.app_path,
             "profile": receipt.core.profile,
             "runtime": receipt.core.runtime_used,
@@ -10316,17 +10372,7 @@ fn append_run_evidence_entry(
             "host_effects_allowed": ledger.map(|ledger| ledger.allowed_count),
             "host_effects_denied": ledger.map(|ledger| ledger.denied_count),
         }),
-        size_bytes: 0,
-        signature: String::new(),
-        prev_entry_hash: String::new(),
-    };
-    let store =
-        observability::evidence_ledger_durable::DurableEvidenceLedger::open_default(project_root)
-            .context("failed opening the durable evidence ledger")?;
-    store
-        .append_signed_chained(entry, &signing.signing_key)
-        .map(Some)
-        .context("failed appending to the durable evidence ledger")
+    )
 }
 
 fn maybe_capture_run_incident(
@@ -10916,6 +10962,18 @@ fn handle_trust_release_command(args: &cli::TrustReleaseArgs) -> Result<()> {
     record.release_operator = Some(args.operator_id.clone());
     record.release_reason = Some(args.reason.clone());
     persist_sentinel_quarantine_record(&record_path, &record)?;
+    record_trust_decision_evidence(
+        &project_root,
+        &format!("trust-release:{app_content_hash}:{released_at}"),
+        observability::evidence_ledger::DecisionKind::Release,
+        serde_json::json!({
+            "action": "release",
+            "app_path": args.app.display().to_string(),
+            "app_content_hash": app_content_hash,
+            "operator_id": args.operator_id,
+            "reason": args.reason,
+        }),
+    );
 
     if !args.json {
         eprintln!(
@@ -31318,6 +31376,23 @@ fn main() -> Result<()> {
                 emit_run_preflight_report(&preflight, json)?;
             }
             if preflight.verdict.is_blocked() {
+                // The refusal is a decision too: record it before exiting.
+                // A ledger failure is reported, never allowed to unblock.
+                if let Err(err) = append_decision_evidence(
+                    &run_project_root(&app_path),
+                    RUN_PREFLIGHT_DENIAL_EVIDENCE_SCHEMA,
+                    &preflight.receipt.receipt_id,
+                    observability::evidence_ledger::DecisionKind::Deny,
+                    &trace_id,
+                    serde_json::json!({
+                        "app_path": preflight.app_path,
+                        "policy_mode": preflight.policy_mode,
+                        "verdict": preflight.verdict,
+                    }),
+                ) && !structured_logs_jsonl
+                {
+                    eprintln!("warning: evidence ledger append failed: {err:#}");
+                }
                 if json {
                     fail_closed_after_json();
                 }
@@ -32061,6 +32136,21 @@ fn main() -> Result<()> {
                 if let Err(err) = persist_trust_card_cli_registry(&state) {
                     return trust_fail("trust.revoke", args.json, err);
                 }
+                record_trust_decision_evidence(
+                    Path::new("."),
+                    &format!(
+                        "trust-revoke:{}:v{}",
+                        card.extension.extension_id, card.trust_card_version
+                    ),
+                    observability::evidence_ledger::DecisionKind::Deny,
+                    serde_json::json!({
+                        "action": "revoke",
+                        "extension_id": card.extension.extension_id,
+                        "version": card.extension.version,
+                        "trust_card_version": card.trust_card_version,
+                        "card_hash": card.card_hash,
+                    }),
+                );
                 println!("{}", render_trust_card_for_trust_command(&card, args.json)?);
                 if let Some(ref ctx) = receipt_export_ctx
                     && let Err(err) = export_signed_receipts(
@@ -32112,6 +32202,20 @@ fn main() -> Result<()> {
                 if let Err(err) = persist_trust_card_cli_registry(&state) {
                     return trust_fail("trust.quarantine", args.json, err);
                 }
+                record_trust_decision_evidence(
+                    Path::new("."),
+                    &format!("trust-quarantine:{fleet_incident_id}"),
+                    observability::evidence_ledger::DecisionKind::Quarantine,
+                    serde_json::json!({
+                        "action": "quarantine",
+                        "artifact": args.artifact,
+                        "fleet_incident_id": fleet_incident_id,
+                        "affected_extensions": updates
+                            .iter()
+                            .map(|card| card.extension.extension_id.clone())
+                            .collect::<Vec<_>>(),
+                    }),
+                );
                 let report = TrustQuarantineCliReport {
                     schema_version: TRUST_QUARANTINE_CLI_SCHEMA_VERSION,
                     command: "trust.quarantine",
