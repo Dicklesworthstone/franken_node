@@ -453,6 +453,12 @@ impl TelemetryRuntimeHandle {
             ShutdownReason::Requested => reason_codes::SHUTDOWN_REQUESTED,
         };
         self.stop_flag.store(true, Ordering::Release);
+        // Wake the accept loop out of its poll interval so it observes the
+        // flag now; an unpark before the park is kept as a token, so the
+        // wake-up cannot be lost.
+        if let Some(listener) = self.listener_handle.as_ref() {
+            listener.thread().unpark();
+        }
         self.transition_state(BridgeLifecycleState::Draining);
         TelemetryBridge::with_state(&self.state, |metrics| {
             metrics.record_event(
@@ -983,8 +989,11 @@ impl TelemetryBridge {
                     }
                 }
                 Err(err) if err.kind() == ErrorKind::WouldBlock => {
-                    // Non-blocking: no pending connection, sleep briefly
-                    thread::sleep(timeouts::TELEMETRY_ACCEPT_POLL_INTERVAL);
+                    // Non-blocking: no pending connection. Park rather than
+                    // sleep so `stop()` can wake this thread at once: a plain
+                    // 100 ms sleep made every run wait out the remainder of
+                    // the interval at shutdown (the listener is joined first).
+                    thread::park_timeout(timeouts::TELEMETRY_ACCEPT_POLL_INTERVAL);
                 }
                 Err(err) => {
                     Self::with_state(&state, |metrics| {
