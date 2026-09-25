@@ -52,12 +52,18 @@ team.
 
 Under `franken-node`:
 
-- `trust scan --deep --audit` (run on every `migrate audit`) flagged the
-  publisher as 2 weeks old with typosquat distance 2 from the canonical
-  package, **before the package was admitted**.
-- The trust card's `camouflage_hints` have been accumulating a
-  `GradualCreep` signal since the second minor release; the
-  `user_facing_risk_assessment` is already at `high`.
+- `trust scan --deep` reads the package's npm registry record and writes
+  onto its trust card that the package was first published 14 days ago
+  (new packages are raised to at least medium risk), plus a DGIS
+  maintainer-fragility score (sole maintainer, no maintainers, no
+  publish in over a year). A package name one edit away from a pinned
+  popular package is raised to high risk. This happens **before the
+  package is admitted**. The scan does not see publisher account age
+  (npm does not publish it) or a look-alike publisher username.
+- Behavior drift across releases is not yet on the card: the BPET
+  camouflage detector (`security::bpet::camouflage_detector`) can flag
+  `GradualCreep` in an observed-vs-declared capability series, but no
+  runtime path feeds it yet, so `camouflage_hints` stays empty.
 - Under `strict`, `run` refuses a trusted dependency, and so the
   dependency never reaches the network, once the **revocation frontier**
   is more than 5 minutes old. Under `balanced` the same staleness is a
@@ -2513,12 +2519,17 @@ decision receipts into immutable storage.
 
 ### Package registries
 
-`franken-node trust scan` integrates with npm-flavored registries by
-default and consults OSV for vulnerabilities. For private registries,
-configure the registry URL via your usual npm tooling; the scan will
-follow the lockfile's resolution. The `[registry]` section in
-`franken_node.toml` controls signature and provenance requirements
-independently of upstream policy.
+`franken-node trust scan` reads `package.json` and, when present,
+`package-lock.json` for the resolved version and integrity hashes.
+`--deep` fetches package metadata from the public npm registry
+(`registry.npmjs.org`) and dependent counts from `api.deps.dev`; those
+two hosts, over HTTPS, are the only ones the scan will contact, so
+private registries and npm registry mirrors are not supported.
+`--audit` and `trust sync` query OSV (`api.osv.dev`, or
+`FRANKEN_NODE_OSV_QUERY_URL`; during `trust sync` a clean answer from a
+non-default endpoint is refused as a reason to lower a card's risk). The
+`[registry]` section in `franken_node.toml` governs the local extension
+registry's signature and provenance requirements, not npm.
 
 ---
 
