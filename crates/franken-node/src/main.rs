@@ -583,6 +583,8 @@ struct RunDependencyTrustResult {
 #[serde(rename_all = "snake_case")]
 enum TrustScanItemStatus {
     Created,
+    /// An existing card re-derived from `--deep`/`--audit` evidence.
+    Refreshed,
     SkippedExisting,
 }
 
@@ -607,6 +609,7 @@ struct TrustScanReport {
     registry_path: String,
     scanned_dependencies: usize,
     created_cards: usize,
+    refreshed_cards: usize,
     skipped_existing: usize,
     lockfile_entries: usize,
     deep: bool,
@@ -18377,7 +18380,9 @@ fn build_trust_scan_card_input(
     }
     // Fragility lowers reputation (bus factor, abandonment) but is not a
     // malice signal, so it does not change the risk level.
-    let fragility_penalty = (registry_findings.fragility.total * 200.0).round().clamp(0.0, 200.0);
+    let fragility_penalty = (registry_findings.fragility.total * 200.0)
+        .round()
+        .clamp(0.0, 200.0);
     reputation_score_basis_points =
         reputation_score_basis_points.saturating_sub(fragility_penalty as u16);
     summary_bits.extend(registry_findings.describe());

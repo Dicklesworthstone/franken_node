@@ -1656,6 +1656,115 @@ impl TrustCardRegistry {
         Ok(next)
     }
 
+    /// Re-derive the latest card for `input.extension` from a fresh scan of
+    /// the same version (`trust scan --deep/--audit` over an existing card)
+    /// and append it as a new version.
+    ///
+    /// Scan-owned fields (publisher, provenance, reputation, risk assessment,
+    /// verification time, derivation evidence) come from `input`. Operator
+    /// decisions carry over unchanged: certification level, revocation,
+    /// quarantine, and camouflage hints, whose risk floor is re-applied so a
+    /// rescan cannot erase a camouflage bump. The audit history is kept.
+    ///
+    /// # Errors
+    /// `NotFound` without a card to refresh; `InvalidInput` when `input` names
+    /// a different version (a new artifact, not a refresh); `EvidenceMissing`
+    /// without evidence; signing errors.
+    pub fn refresh_from_scan(
+        &mut self,
+        input: TrustCardInput,
+        now_secs: u64,
+        trace_id: &str,
+    ) -> Result<TrustCard, TrustCardError> {
+        let extension_id = input.extension.extension_id.clone();
+        validate_extension_id(&extension_id)?;
+        ensure_evidence_refs_present(&input.evidence_refs)?;
+        let latest = self
+            .latest_verified_card(&extension_id)?
+            .cloned()
+            .ok_or_else(|| TrustCardError::NotFound(extension_id.clone()))?;
+        if latest.extension.version != input.extension.version {
+            return Err(TrustCardError::InvalidInput {
+                reason: format!(
+                    "card for `{extension_id}` is version `{}`; a scan of version `{}` is a new artifact, not a refresh",
+                    latest.extension.version, input.extension.version
+                ),
+            });
+        }
+
+        let mut next = latest.clone();
+        next.trust_card_version = next_trust_card_version(latest.trust_card_version, &extension_id)?;
+        next.previous_version_hash = Some(latest.card_hash.clone());
+        next.publisher = input.publisher;
+        next.provenance_summary = input.provenance_summary;
+        next.reputation_score_basis_points = input.reputation_score_basis_points;
+        next.reputation_trend = input.reputation_trend;
+        next.last_verified_timestamp = input.last_verified_timestamp;
+        next.user_facing_risk_assessment = input.user_facing_risk_assessment;
+        next.derivation_evidence = Some(DerivationMetadata {
+            derivation_chain_hash: compute_trust_card_derivation_hash(
+                &input.evidence_refs,
+                now_secs,
+            ),
+            evidence_refs: input.evidence_refs,
+            derived_at_epoch: now_secs,
+        });
+        let camouflage_severity = next
+            .camouflage_hints
+            .iter()
+            .map(|hint| hint.severity)
+            .filter(|severity| severity.is_finite())
+            .fold(0.0_f64, f64::max);
+        if camouflage_severity >= TRUST_CARD_CAMOUFLAGE_RISK_BUMP_SEVERITY {
+            let kinds = next
+                .camouflage_hints
+                .iter()
+                .map(|hint| hint.kind.as_str())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join(",");
+            let risk = &mut next.user_facing_risk_assessment;
+            risk.level = risk.level.max(camouflage_risk_level(camouflage_severity));
+            risk.summary = camouflage_risk_summary(&risk.summary, &kinds, camouflage_severity);
+        }
+        push_bounded(
+            &mut next.audit_history,
+            AuditRecord {
+                timestamp: timestamp_from_secs(now_secs),
+                event_code: TRUST_CARD_UPDATED.to_string(),
+                detail: "trust card refreshed from scan".to_string(),
+                trace_id: trace_id.to_string(),
+            },
+            MAX_AUDIT_HISTORY,
+        );
+
+        sign_card_in_place(&mut next, &self.registry_key)?;
+        self.advance_snapshot_sequence_for_mutation();
+        push_bounded(
+            self.cards_by_extension
+                .entry(extension_id.clone())
+                .or_default(),
+            next.clone(),
+            MAX_CARD_VERSIONS,
+        );
+        self.cache_by_extension.insert(
+            extension_id.clone(),
+            CachedCard {
+                card: next.clone(),
+                cached_at_secs: now_secs,
+            },
+        );
+        self.emit(
+            TRUST_CARD_UPDATED,
+            Some(extension_id),
+            trace_id,
+            now_secs,
+            "refreshed trust card from scan",
+        );
+        Ok(next)
+    }
+
     /// Mark the latest trust card with suspected trajectory-gaming camouflage.
     ///
     /// # Parameters
