@@ -485,7 +485,9 @@ Each claim entry uses this structure:
   - `--method source` never clones frankentui.
   - A fresh source build could not `run hello.js` without a sidecar engine
     binary (fixed in 1ee827258).
-  - `trust scan --deep --audit` needs two undocumented environment variables.
+  - `trust scan --deep --audit` needed two undocumented environment variables
+    (fixed in 96f8f0188: `init` provisions a RemoteCap key and a scoped
+    trust-scan token, and the receipt signing key is provisioned too).
 
   The README smoke workflow now exercises `run` (check 9). This claim moves
   back to verified only when a clean-container installer e2e passes
