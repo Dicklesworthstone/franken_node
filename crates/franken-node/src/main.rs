@@ -10275,13 +10275,17 @@ const RUN_PREFLIGHT_DENIAL_EVIDENCE_SCHEMA: &str = "franken-node/run-preflight-d
 /// release).
 const TRUST_DECISION_EVIDENCE_SCHEMA: &str = "franken-node/trust-decision-evidence/v1";
 
+/// The evidence-ledger directory of a project (`.franken-node/state/`).
+fn project_ledger_dir(project_root: &Path) -> PathBuf {
+    project_root.join(".franken-node/state")
+}
+
 /// Append one decision as a signed, hash-chained entry to the durable
-/// evidence ledger under `project_root/.franken-node/state/`
-/// (bd-reality-20260923-26n9r.15 deliverable 6). Signed with the receipt
-/// signing key `init` provisions; returns `Ok(None)` without writing when no
-/// key is configured.
+/// evidence ledger in `ledger_dir` (bd-reality-20260923-26n9r.15
+/// deliverable 6). Signed with the receipt signing key `init` provisions;
+/// returns `Ok(None)` without writing when no key is configured.
 fn append_decision_evidence(
-    project_root: &Path,
+    ledger_dir: &Path,
     schema_version: &str,
     decision_id: &str,
     decision_kind: observability::evidence_ledger::DecisionKind,
@@ -10306,26 +10310,25 @@ fn append_decision_evidence(
         signature: String::new(),
         prev_entry_hash: String::new(),
     };
-    let store =
-        observability::evidence_ledger_durable::DurableEvidenceLedger::open_default(project_root)
-            .context("failed opening the durable evidence ledger")?;
+    let store = observability::evidence_ledger_durable::DurableEvidenceLedger::open(ledger_dir)
+        .context("failed opening the durable evidence ledger")?;
     store
         .append_signed_chained(entry, &signing.signing_key)
         .map(Some)
         .context("failed appending to the durable evidence ledger")
 }
 
-/// Record an operator trust decision in the durable evidence ledger under
-/// `project_root`; a failure is reported on stderr and never changes the
+/// Record an operator trust decision in the durable evidence ledger in
+/// `ledger_dir`; a failure is reported on stderr and never changes the
 /// command's outcome (the decision itself is already persisted).
 fn record_trust_decision_evidence(
-    project_root: &Path,
+    ledger_dir: &Path,
     decision_id: &str,
     decision_kind: observability::evidence_ledger::DecisionKind,
     payload: serde_json::Value,
 ) {
     if let Err(err) = append_decision_evidence(
-        project_root,
+        ledger_dir,
         TRUST_DECISION_EVIDENCE_SCHEMA,
         decision_id,
         decision_kind,
@@ -10354,7 +10357,7 @@ fn append_run_evidence_entry(
     };
     let ledger = dispatch.host_effect_ledger.as_ref();
     append_decision_evidence(
-        project_root,
+        &project_ledger_dir(project_root),
         RUN_DECISION_EVIDENCE_SCHEMA,
         &receipt.core.receipt_id,
         decision_kind,
@@ -10963,7 +10966,7 @@ fn handle_trust_release_command(args: &cli::TrustReleaseArgs) -> Result<()> {
     record.release_reason = Some(args.reason.clone());
     persist_sentinel_quarantine_record(&record_path, &record)?;
     record_trust_decision_evidence(
-        &project_root,
+        &project_ledger_dir(&project_root),
         &format!("trust-release:{app_content_hash}:{released_at}"),
         observability::evidence_ledger::DecisionKind::Release,
         serde_json::json!({
@@ -31379,7 +31382,7 @@ fn main() -> Result<()> {
                 // The refusal is a decision too: record it before exiting.
                 // A ledger failure is reported, never allowed to unblock.
                 if let Err(err) = append_decision_evidence(
-                    &run_project_root(&app_path),
+                    &project_ledger_dir(&run_project_root(&app_path)),
                     RUN_PREFLIGHT_DENIAL_EVIDENCE_SCHEMA,
                     &preflight.receipt.receipt_id,
                     observability::evidence_ledger::DecisionKind::Deny,
@@ -32137,7 +32140,7 @@ fn main() -> Result<()> {
                     return trust_fail("trust.revoke", args.json, err);
                 }
                 record_trust_decision_evidence(
-                    Path::new("."),
+                    &project_ledger_dir(Path::new(".")),
                     &format!(
                         "trust-revoke:{}:v{}",
                         card.extension.extension_id, card.trust_card_version
@@ -32203,7 +32206,7 @@ fn main() -> Result<()> {
                     return trust_fail("trust.quarantine", args.json, err);
                 }
                 record_trust_decision_evidence(
-                    Path::new("."),
+                    &project_ledger_dir(Path::new(".")),
                     &format!("trust-quarantine:{fleet_incident_id}"),
                     observability::evidence_ledger::DecisionKind::Quarantine,
                     serde_json::json!({
@@ -32522,6 +32525,20 @@ fn main() -> Result<()> {
                     Err(err) => return fleet_fail("fleet.release", args.json, err),
                 };
                 debug_assert_eq!(report.state_dir, state_dir);
+                // Fleet decisions are recorded beside the fleet state (the
+                // project's `.franken-node/state/` for the default layout).
+                record_trust_decision_evidence(
+                    state_dir.parent().unwrap_or(&state_dir),
+                    &format!("fleet-release:{operation_id}"),
+                    observability::evidence_ledger::DecisionKind::Release,
+                    serde_json::json!({
+                        "action": "fleet_release",
+                        "operation_id": operation_id,
+                        "incident_id": incident.incident_id,
+                        "zone_id": incident.zone_id,
+                        "trace_id": trace.trace_id,
+                    }),
+                );
                 if let Err(err) = emit_fleet_action_report(&report, args.json) {
                     return fleet_fail("fleet.release", args.json, err);
                 }

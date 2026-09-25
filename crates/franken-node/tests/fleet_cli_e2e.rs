@@ -1015,6 +1015,32 @@ fn fleet_release_publishes_release_action_to_transport() {
             && incident_id == "inc-release-1"
             && reason == "manual release via fleet CLI"
     ));
+
+    // bd-reality-20260923-26n9r.15: the release decision is recorded in the
+    // evidence ledger beside the fleet state, signed with the receipt key,
+    // and never in the command's working directory (here the repo root).
+    let ledger =
+        frankenengine_node::observability::evidence_ledger_durable::DurableEvidenceLedger::open(
+            fleet_state.path(),
+        )
+        .expect("open evidence ledger beside the fleet state");
+    let entries = ledger.entries_json().expect("read evidence ledger");
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    let entry: frankenengine_node::observability::evidence_ledger::EvidenceEntry =
+        serde_json::from_str(&entries[0]).expect("evidence entry");
+    assert_eq!(entry.payload["action"], "fleet_release");
+    assert_eq!(entry.payload["incident_id"], "inc-release-1");
+    frankenengine_node::observability::evidence_ledger::verify_evidence_entry(
+        &entry,
+        &signing_key.verifying_key(),
+    )
+    .expect("entry is signed with the fleet receipt key");
+    assert!(
+        !repo_root()
+            .join(".franken-node/state/evidence-ledger.db")
+            .exists(),
+        "fleet release must not write a ledger into the working directory"
+    );
 }
 
 #[test]
