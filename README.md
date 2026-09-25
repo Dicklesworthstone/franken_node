@@ -2942,8 +2942,9 @@ becomes a regression case forever. Coverage data lives in
 `mutants-gate.yml` workflow runs `cargo-mutants` against the test
 surface as a separate proof-of-effective-coverage signal: a mutant that
 survives indicates a gap in the test surface, not a bug per se. The gate
-enforces a **registered mutation-adequacy floor** (`MUTATION_SCORE_FLOOR_BP`),
-so a change that guts the focused suites' detection power fails CI.
+enforces a **registered mutation-adequacy floor** (`MUTATION_SCORE_FLOOR_BP`)
+on pull requests that touch the focused modules. Changes currently land by
+direct push to `main`, so the gate has not run yet.
 
 ### Effective coverage, not a raw count
 
@@ -2958,7 +2959,8 @@ single token count:
    This count is recomputed from the committed tree by the Honesty Manifest
    ([Honesty Manifest](#honesty-manifest)).
 2. **Mutation adequacy** — the fraction of seeded mutants the suite catches,
-   measured live by `mutants-gate.yml` and held above the registered floor.
+   measured by `mutants-gate.yml` against the registered floor (a
+   pull-request gate that has not run yet; see above).
    Mutation score measures whether the tests would *catch a regression*, which a
    count cannot.
 3. **A pass-rate confidence interval** — the verifier SDK exposes the Wilson
@@ -3418,8 +3420,11 @@ mutation testing, and security golden artifacts are all enforced.
 
 ### How does franken-node prevent SSRF and DNS rebinding?
 
-Every outbound network call passes through the SSRF policy gate
-(`security::ssrf_policy`). The gate enforces CIDR-aware deny rules
+Every outbound network call guest code makes on the native engine path
+(the default for `run`) passes through the SSRF policy gate
+(`security::ssrf_policy`). The node/bun fallback runtimes, which need the
+explicit `FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK` opt-in, get policy
+hints only and are not gated. The gate enforces CIDR-aware deny rules
 (including private ranges and loopback by default), checks per-connector
 allowlist entries with optional port pinning, and re-validates resolved
 IPs after DNS resolution to defeat rebinding.

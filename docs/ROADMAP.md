@@ -1,5 +1,12 @@
 # FrankenEngine Roadmap
 
+> **What this is (2026-09-25):** the original FrankenEngine program roadmap
+> (February 2026), kept for its goals and rules. It is not a status report
+> for `franken_node`, and its phase labels are not current. For what works
+> today, read the README (which marks unimplemented items) and the live
+> reality-check epic `bd-reality-20260923-26n9r` (`br show
+> bd-reality-20260923-26n9r`).
+
 ## Source Of Truth
 
 - Canonical product plan for this repository: `/dp/franken_node/docs/plans/PLAN_TO_CREATE_FRANKEN_NODE.md`

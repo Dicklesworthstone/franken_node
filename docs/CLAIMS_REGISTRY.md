@@ -383,13 +383,16 @@ Each claim entry uses this structure:
 - **Source**: README.md L2348
 - **Claim**: Roughly 23,000 `#[test]` cases across inline `#[cfg(test)]`
   modules and the workspace test trees.
-- **Evidence artifact**: 24,255 actual count (under-count in README):
-  20,854 in `src/` + 1,538 in `tests/` + 1,597 in `crates/franken-node/tests/` +
-  266 in `sdk/verifier/`
+- **Evidence artifact**: 26,532 `#[test]` attributes on 2026-09-25, of which
+  22,139 are inline in `crates/franken-node/src/`
 - **Verification command**:
   `rg -c '^\\s*#\\[test\\]' crates/franken-node/src/ tests/ crates/franken-node/tests/ sdk/verifier/ | awk -F: '{s+=$2} END {print s}'`
-- **Last verified**: 2026-05-20T17:00:00Z (counted during reality-check)
-- **Status**: verified
+- **Last verified**: 2026-09-25 (registered count)
+- **Status**: verified as a **registered** count only. Executed count is not
+  measured: the inline tests compile only on the dedicated inline lane
+  (`--cfg franken_node_inline_tests`), and no CI job runs the full suite
+  (bd-reality-20260923-26n9r.9). A registered test is not evidence that it
+  runs or passes.
 
 ### CLAIM-016: 146 registered cargo-fuzz harnesses
 
@@ -433,8 +436,9 @@ Each claim entry uses this structure:
   targets as of 2026-09-23); `cargo bench -p frankenengine-node`
 - **Verification command**:
   `cargo bench -p frankenengine-node --benches --no-run`
-- **Last verified**: 2026-05-20T17:00:00Z
-- **Status**: verified
+- **Last verified**: 2026-09-25 (13 `[[bench]]` targets registered)
+- **Status**: verified as registered targets; no CI job compiles or runs
+  them, so no benchmark result is claimed here.
 - **Notes**: README under-counts; the 3 extras (`crypto_scheme_bench`,
   `evidence_ledger_performance`, `replay_bundle_gzip_bench` already in list,
   one more) should be added to the README's `[[bench]]` enumeration.
@@ -453,9 +457,12 @@ Each claim entry uses this structure:
 - **Verification command**: `franken-node doctor close-condition --json`
 - **Last verified**: 2026-05-20T00:00:00Z (registry backfill)
 - **Status**: pending
-- **Notes**: CLI handler `handle_doctor_close_condition` is wired in
-  `main.rs:6218+`. The three verdict artifacts at the documented paths are
-  not yet checked in. Tracked by Track-3 bridge-plan item `[T3-ORACLES]`.
+- **Notes**: CLI handler `handle_doctor_close_condition` is wired. The
+  verdict artifacts are checked in under `artifacts/oracle/`: L1 product
+  RED (2026-07-12, compatibility corpus below 95%), L2 engine GREEN and
+  release policy GREEN (both 2026-05-21, not re-derived since), so the
+  committed `close_condition_receipt.json` is RED. Tracked by Track-3
+  bridge-plan item `[T3-ORACLES]`.
 
 ### CLAIM-020: First-run bootstrap is friction-minimized
 
