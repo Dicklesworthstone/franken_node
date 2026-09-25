@@ -8013,12 +8013,13 @@ fn create_private_random_key_file(path: &Path) -> Result<()> {
 fn provision_receipt_signing_key(
     root: &Path,
     configured_path: Option<&Path>,
-) -> Result<Option<InitFileAction>> {
+) -> Result<Vec<InitFileAction>> {
     if configured_path.is_some()
         || std::env::var_os("FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH").is_some()
     {
-        return Ok(None);
+        return Ok(Vec::new());
     }
+    let mut actions = Vec::new();
     let key_path = root.join(".franken-node/keys/receipt-signing.key");
     let action = if key_path.exists() {
         InitFileActionKind::SkippedExisting
@@ -8026,11 +8027,38 @@ fn provision_receipt_signing_key(
         create_private_random_key_file(&key_path)?;
         InitFileActionKind::Created
     };
-    Ok(Some(InitFileAction {
+    actions.push(InitFileAction {
         path: key_path.display().to_string(),
         action,
         backup_path: None,
-    }))
+    });
+
+    // The matching public key, so receipts, incident bundles and the
+    // evidence ledger can be verified (`verify transparency-log
+    // --public-key`, `incident replay --trusted-public-key`).
+    let public_key_path = root.join(".franken-node/keys/receipt-signing.pub");
+    if public_key_path.exists() {
+        actions.push(InitFileAction {
+            path: public_key_path.display().to_string(),
+            action: InitFileActionKind::SkippedExisting,
+            backup_path: None,
+        });
+    } else if let Some(signing_key) = crate::bounded_read(&key_path, MAX_SIGNING_KEY_BYTES)
+        .ok()
+        .and_then(|raw| parse_signing_key_from_blob(&raw))
+    {
+        std::fs::write(
+            &public_key_path,
+            format!("{}\n", hex::encode(signing_key.verifying_key().to_bytes())),
+        )
+        .with_context(|| format!("failed writing {}", public_key_path.display()))?;
+        actions.push(InitFileAction {
+            path: public_key_path.display().to_string(),
+            action: InitFileActionKind::Created,
+            backup_path: None,
+        });
+    }
+    Ok(actions)
 }
 
 /// Provision the RemoteCap signing key and the default trust-scan egress
@@ -10239,6 +10267,68 @@ fn persist_run_execution_receipt(
 /// incident evidence package built from the run's signed host-effect ledger
 /// (real per-effect timestamps and receipts, no hand-authored events), at the
 /// location `incident bundle --id <id>` reads. Returns the captured incident id.
+/// Schema of the payload `run` records in the durable evidence ledger.
+const RUN_DECISION_EVIDENCE_SCHEMA: &str = "franken-node/run-decision-evidence/v1";
+
+/// Record the run's outcome as a signed, hash-chained entry in the durable
+/// evidence ledger under `.franken-node/state/` (bd-reality-20260923-26n9r.15
+/// deliverable 6). Signed with the receipt signing key `init` provisions;
+/// returns `Ok(None)` without writing when no key is configured.
+fn append_run_evidence_entry(
+    project_root: &Path,
+    receipt: &RunExecutionReceipt,
+    receipt_path: &Path,
+    dispatch: &ops::engine_dispatcher::RunDispatchReport,
+    trace_id: &str,
+) -> Result<Option<observability::evidence_ledger::EvidenceEntry>> {
+    use observability::evidence_ledger::{DecisionKind, EvidenceEntry};
+
+    let Some(signing) = load_receipt_signing_material(None)? else {
+        return Ok(None);
+    };
+    let containment_verdict = native_containment_action(&dispatch.runtime, dispatch.exit_code);
+    let decision_kind = match containment_verdict {
+        Some("Quarantine") => DecisionKind::Quarantine,
+        Some(_) => DecisionKind::Escalate,
+        None => DecisionKind::Admit,
+    };
+    let ledger = dispatch.host_effect_ledger.as_ref();
+    let now = chrono::Utc::now();
+    let entry = EvidenceEntry {
+        schema_version: RUN_DECISION_EVIDENCE_SCHEMA.to_string(),
+        entry_id: Some(receipt.core.receipt_id.clone()),
+        decision_id: receipt.core.receipt_id.clone(),
+        decision_kind,
+        decision_time: now.to_rfc3339(),
+        timestamp_ms: u64::try_from(now.timestamp_millis()).unwrap_or(0),
+        trace_id: trace_id.to_string(),
+        epoch_id: 0,
+        payload: serde_json::json!({
+            "app_path": receipt.core.app_path,
+            "profile": receipt.core.profile,
+            "runtime": receipt.core.runtime_used,
+            "exit_code": receipt.core.exit_code,
+            "containment_verdict": containment_verdict,
+            "violation_count": receipt.core.violation_count,
+            "receipt_hash": receipt.receipt_hash,
+            "receipt_path": receipt_path.display().to_string(),
+            "host_effect_chain_head": ledger.map(|ledger| ledger.chain_head_hash.clone()),
+            "host_effects_allowed": ledger.map(|ledger| ledger.allowed_count),
+            "host_effects_denied": ledger.map(|ledger| ledger.denied_count),
+        }),
+        size_bytes: 0,
+        signature: String::new(),
+        prev_entry_hash: String::new(),
+    };
+    let store =
+        observability::evidence_ledger_durable::DurableEvidenceLedger::open_default(project_root)
+            .context("failed opening the durable evidence ledger")?;
+    store
+        .append_signed_chained(entry, &signing.signing_key)
+        .map(Some)
+        .context("failed appending to the durable evidence ledger")
+}
+
 fn maybe_capture_run_incident(
     project_root: &Path,
     policy_mode: &str,
@@ -26617,27 +26707,46 @@ fn handle_verify_transparency_log(args: &VerifyTransparencyLogArgs) -> Result<i3
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("Invalid UTF-8 in log path"))?;
 
-    // Read transparency log file
-    let file = File::open(&args.log_path)
-        .with_context(|| format!("Failed to open transparency log: {:?}", args.log_path))?;
-    let reader = BufReader::new(file);
-
+    // Prevent memory exhaustion from unbounded collection growth
+    const MAX_EVIDENCE_ENTRIES_PER_OPERATION: usize = 10_000;
     let mut entries: Vec<EvidenceEntry> = Vec::new();
-    let mut line_number: usize = 0;
 
-    for line in reader.lines() {
-        line_number = line_number.saturating_add(1);
-        let line = line.with_context(|| format!("Failed to read line {}", line_number))?;
-        if line.trim().is_empty() {
-            continue;
+    // The durable store `run` appends to (`.franken-node/state/
+    // evidence-ledger.db`) is read row by row; anything else is JSONL.
+    let durable_state_dir = args.log_path.parent().filter(|state_dir| {
+        observability::evidence_ledger_durable::durable_store_path(state_dir) == args.log_path
+    });
+    if let Some(state_dir) = durable_state_dir {
+        if !args.log_path.is_file() {
+            anyhow::bail!("Failed to open transparency log: {:?}", args.log_path);
         }
+        let store = observability::evidence_ledger_durable::DurableEvidenceLedger::open(state_dir)
+            .with_context(|| format!("Failed to open evidence ledger {:?}", args.log_path))?;
+        let rows = store
+            .entries_json()
+            .with_context(|| format!("Failed to read evidence ledger {:?}", args.log_path))?;
+        for (index, row) in rows.iter().enumerate() {
+            let entry: EvidenceEntry = serde_json::from_str(row)
+                .with_context(|| format!("Invalid JSON in ledger row {}: {}", index + 1, row))?;
+            push_bounded(&mut entries, entry, MAX_EVIDENCE_ENTRIES_PER_OPERATION);
+        }
+    } else {
+        let file = File::open(&args.log_path)
+            .with_context(|| format!("Failed to open transparency log: {:?}", args.log_path))?;
+        let reader = BufReader::new(file);
+        let mut line_number: usize = 0;
 
-        let entry: EvidenceEntry = serde_json::from_str(&line)
-            .with_context(|| format!("Invalid JSON at line {}: {}", line_number, line))?;
+        for line in reader.lines() {
+            line_number = line_number.saturating_add(1);
+            let line = line.with_context(|| format!("Failed to read line {}", line_number))?;
+            if line.trim().is_empty() {
+                continue;
+            }
 
-        // Prevent memory exhaustion from unbounded collection growth
-        const MAX_EVIDENCE_ENTRIES_PER_OPERATION: usize = 10_000;
-        push_bounded(&mut entries, entry, MAX_EVIDENCE_ENTRIES_PER_OPERATION);
+            let entry: EvidenceEntry = serde_json::from_str(&line)
+                .with_context(|| format!("Invalid JSON at line {}: {}", line_number, line))?;
+            push_bounded(&mut entries, entry, MAX_EVIDENCE_ENTRIES_PER_OPERATION);
+        }
     }
 
     if entries.is_empty() {
@@ -31366,6 +31475,17 @@ fn main() -> Result<()> {
                     None
                 }
             };
+            // Likewise a ledger append failure is reported, not fatal.
+            if let Err(err) = append_run_evidence_entry(
+                &project_root,
+                &receipt,
+                &receipt_path,
+                &dispatch,
+                &trace_id,
+            ) && !structured_logs_jsonl
+            {
+                eprintln!("warning: evidence ledger append failed: {err:#}");
+            }
 
             if structured_logs_jsonl {
                 eprint!(

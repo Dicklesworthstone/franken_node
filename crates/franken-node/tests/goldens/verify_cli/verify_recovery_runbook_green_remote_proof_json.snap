@@ -208,5 +208,7 @@ source: crates/franken-node/tests/cli_subcommand_goldens.rs
     "flight_recorder_refs": 0,
     "failed_attempt_details": [],
     "pending_recoveries": []
-  }
+  },
+  "live_broker": false,
+  "input_source": "empty_default_snapshot"
 }

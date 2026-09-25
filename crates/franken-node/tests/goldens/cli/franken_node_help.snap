@@ -8,23 +8,23 @@ Usage: franken-node <COMMAND>
 Commands:
   init            Bootstrap config, policy profile, and workspace metadata
   run             Run app under policy-governed runtime controls
-  runtime         Runtime lane and epoch inspection[PATH]
-  safe-mode       Safe-mode operator lifecycle control
-  proofs          Proof-pipeline queue and worker operator controls
-  migrate         Migration audit, rewrite, and validation workflows
+  runtime         Local default lane snapshot and integer epoch compare (not a live node)
+  safe-mode       Safe-mode operator lifecycle; persist is unsigned JSON (not Ed25519-signed)
+  proofs          Proof-pipeline snapshot[PATH] inspection and restart-request artifacts (not a live broker)
+  migrate         Migration audit, rewrite, and validation (rollback JSON is unsigned; validate is not lockstep)
   migrate-report  Export one-command migration assessment report
-  verify          Compatibility verification across runtimes
-  trust           Extension trust management
-  remotecap       Remote capability token issuance and inspection
-  trust-card      Trust-card API[PATH] parity surfaces
-  fleet           Fleet control plane operations
-  incident        Incident replay and forensics
+  verify          Local verification family (Node is the lockstep spec when included; matching only Bun stays fail)
+  trust           Local trust-card registry, OSV scan, and file-transport quarantine log
+  remotecap       Ed25519 capability tokens; `use` is dry-run (does not send HTTP)
+  trust-card      Local trust-card registry inspect (show[PATH]; not a live HTTP API)
+  fleet           Local file-transport fleet[PATH] log (not a live control plane)
+  incident        Recorded incident bundles: export, integrity-verified replay, counterfactual (not live re-execution)
   ltv             Long-term verifiability attestation and offline verification
-  ops             Runtime operations and health inspection
-  registry        Extension registry operations
-  bench           Benchmark suite execution
-  debug           Debug policy evaluation and trace execution steps
-  doctor          Diagnose environment and policy setup
+  ops             Local ops snapshots: health files, config audit, metrics, corpus run (not a live daemon)
+  registry        Local on-disk signed-artifact registry (not a live npm[PATH] service)
+  bench           Benchmark suite; report is SHA256 `provenance_hash` (not Ed25519-signed)
+  debug           Local artifact debug: receipt explain, evidence inspect, fixture policy-activation trace
+  doctor          Local diagnostics: config[PATH], close-condition, evidence snapshot, workspace pressure, bwrap
   help            Print this message or the help of the given subcommand(s)
 
 Options:

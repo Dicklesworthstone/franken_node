@@ -232,5 +232,7 @@ source: crates/franken-node/tests/cli_subcommand_goldens.rs
         "fail_closed": false
       }
     ]
-  }
+  },
+  "live_broker": false,
+  "input_source": "empty_default_snapshot"
 }

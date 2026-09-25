@@ -1,13 +1,13 @@
 ---
 source: crates/franken-node/tests/cli_subcommand_goldens.rs
 ---
-Extension registry operations
+Local on-disk signed-artifact registry (not a live npm[PATH] service)
 
 Usage: franken-node registry <COMMAND>
 
 Commands:
-  publish  Publish signed extension artifact
-  search   Query extension registry with trust filters
+  publish  Admit a signed artifact into the local on-disk registry (not npm[PATH] publish)
+  search   Query locally stored registry artifacts with trust filters
   verify   Verify a locally stored registry artifact's hash and signature
   gc       Archive older locally stored registry artifacts, keeping the newest N active entries per lineage
   help     Print this message or the help of the given subcommand(s)

@@ -1,7 +1,7 @@
 ---
 source: crates/franken-node/tests/cli_subcommand_goldens.rs
 ---
-Fleet control plane operations
+Local file-transport fleet[PATH] log (not a live control plane)
 
 Usage: franken-node fleet <COMMAND>
 

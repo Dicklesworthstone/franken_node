@@ -491,3 +491,45 @@ fn init_provisions_trust_scan_remotecap_key_and_scoped_token() {
         "{stdout}"
     );
 }
+
+/// bd-reality-20260923-26n9r.17: an unknown key under
+/// `[security.network_policy]` (for example a `mode = "enforced"` line an
+/// operator believes switches enforcement on) is rejected instead of being
+/// silently ignored.
+#[test]
+fn unknown_network_policy_key_is_rejected_not_ignored() {
+    let Some(bin) = require_binary() else { return };
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let init = Command::new(&bin)
+        .args(["init", "--profile", "balanced", "--out-dir", ".", "--json"])
+        .current_dir(root)
+        .output()
+        .expect("invoke init");
+    assert!(init.status.success(), "init must succeed");
+
+    let config_path = root.join("franken_node.toml");
+    let config = std::fs::read_to_string(&config_path).expect("read config");
+    assert!(config.contains("[security.network_policy]\n"), "{config}");
+    std::fs::write(
+        &config_path,
+        config.replacen(
+            "[security.network_policy]\n",
+            "[security.network_policy]\nmode = \"enforced\"\n",
+            1,
+        ),
+    )
+    .expect("write config with unknown key");
+
+    let doctor = Command::new(&bin)
+        .args(["doctor", "--json"])
+        .current_dir(root)
+        .output()
+        .expect("invoke doctor");
+    assert_eq!(doctor.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&doctor.stdout);
+    assert!(
+        stdout.contains("unknown field `mode`"),
+        "the unknown key must be named: {stdout}"
+    );
+}

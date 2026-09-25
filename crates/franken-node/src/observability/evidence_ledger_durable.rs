@@ -26,8 +26,13 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use ed25519_dalek::SigningKey;
 use fsqlite::compat::TransactionExt;
 use fsqlite::{Connection, SqliteValue};
+
+use crate::observability::evidence_ledger::{
+    EvidenceEntry, evidence_entry_hash_hex, sign_evidence_entry,
+};
 
 /// Historical spill-file candidates, oldest convention first. Shared with the
 /// ops metrics readers so legacy counting and one-time import agree.
@@ -165,6 +170,76 @@ impl DurableEvidenceLedger {
             .map_err(|err| io::Error::other(format!("insert entry: {err}")))?;
             tx.commit()
                 .map_err(|err| io::Error::other(format!("commit entry: {err}")))
+        })
+    }
+
+    /// Link `entry` to the newest stored entry (`prev_entry_hash`), sign it
+    /// and append it, all inside one committed transaction so concurrent
+    /// appenders cannot fork the chain. Returns the entry as stored.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the newest stored row is not an evidence
+    /// entry, or the transaction fails.
+    pub fn append_signed_chained(
+        &self,
+        mut entry: EvidenceEntry,
+        signing_key: &SigningKey,
+    ) -> io::Result<EvidenceEntry> {
+        self.with_connection(|connection| {
+            let mut tx = connection
+                .transaction()
+                .map_err(|err| io::Error::other(format!("begin entry transaction: {err}")))?;
+            let rows = connection
+                .query("SELECT entry_json FROM evidence_entries ORDER BY seq DESC LIMIT 1;")
+                .map_err(|err| io::Error::other(format!("read chain head: {err}")))?;
+            entry.prev_entry_hash = match rows.first().and_then(|row| row.values().first()) {
+                Some(SqliteValue::Text(previous_json)) => {
+                    let previous: EvidenceEntry = serde_json::from_str(&previous_json.to_string())
+                        .map_err(|err| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!("newest stored row is not an evidence entry: {err}"),
+                            )
+                        })?;
+                    evidence_entry_hash_hex(&previous)
+                }
+                _ => String::new(),
+            };
+            sign_evidence_entry(&mut entry, signing_key);
+            let entry_json = serde_json::to_string(&entry)
+                .map_err(|err| io::Error::other(format!("encode entry: {err}")))?;
+            tx.execute_with_params(
+                "INSERT INTO evidence_entries(recorded_at, entry_json) VALUES (?1, ?2);",
+                &[
+                    SqliteValue::Text(chrono::Utc::now().to_rfc3339().into()),
+                    SqliteValue::Text(entry_json.into()),
+                ],
+            )
+            .map_err(|err| io::Error::other(format!("insert entry: {err}")))?;
+            tx.commit()
+                .map_err(|err| io::Error::other(format!("commit entry: {err}")))?;
+            Ok(entry)
+        })
+    }
+
+    /// Every stored entry payload, oldest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the store cannot be read.
+    pub fn entries_json(&self) -> io::Result<Vec<String>> {
+        self.with_connection(|connection| {
+            let rows = connection
+                .query("SELECT entry_json FROM evidence_entries ORDER BY seq ASC;")
+                .map_err(|err| io::Error::other(format!("read entries: {err}")))?;
+            Ok(rows
+                .iter()
+                .filter_map(|row| match row.values().first() {
+                    Some(SqliteValue::Text(json)) => Some(json.to_string()),
+                    _ => None,
+                })
+                .collect())
         })
     }
 

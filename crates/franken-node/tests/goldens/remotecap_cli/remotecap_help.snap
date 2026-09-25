@@ -1,12 +1,12 @@
 ---
 source: crates/franken-node/tests/cli_subcommand_goldens.rs
 ---
-Remote capability token issuance and inspection
+Ed25519 capability tokens; `use` is dry-run (does not send HTTP)
 
 Usage: franken-node remotecap <COMMAND>
 
 Commands:
-  issue   Issue a signed capability token for network-bound operations
+  issue   Issue a local Ed25519 capability token (does not perform the scoped network operation)
   verify  Verify a capability token without consuming single-use tokens
   use     Authorize a token (dry-run; does not send the HTTP request)
   revoke  Revoke a capability token in the local CLI state

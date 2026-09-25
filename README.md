@@ -760,7 +760,7 @@ every leaf command available in the current build.
 | `franken-node verify corpus <path>` | Verify corpus schema and coverage. The corpus path is handler-required so `--json` failures emit `verifier-cli-contract-v1` instead of a human clap error. Flags: `--json`. |
 | `franken-node verify lockstep <path>` | Compare runtimes in lockstep. Default `--runtimes bun,franken-node`. Use `--runtimes node,bun,franken-node` only when `node` is real Node.js; Node is then the spec and matching only Bun stays fail. The project path is handler-required so `--json` failures emit `franken-node/verify-lockstep-error-cli/v1` instead of a human clap error. `--emit-fixtures` writes divergence fixtures. Flags: `--json` (stderr banner off; early failures `franken-node/verify-lockstep-error-cli/v1`). |
 | `franken-node verify release <path>` | Verify release artifact signatures. The release path and `--key-dir` are handler-required so `--json` failures emit `franken-node/verify-release-error-cli/v1` instead of a human clap error. **Fails closed without `--key-dir`.** Flags: `--json` (`franken-node/verify-release-cli/v1`; early failures `franken-node/verify-release-error-cli/v1`). |
-| `franken-node verify transparency-log <path>` | Verify transparency-log hash chain. The log path is handler-required so `--json` failures emit `franken-node/verify-transparency-log-error-cli/v1` instead of a human clap error. Empty logs fail closed. Without `--public-key`, signatures are `unproven` (non-zero exit), not PASS. Flags: `--json` (`franken-node/verify-transparency-log-cli/v1`; early failures `franken-node/verify-transparency-log-error-cli/v1`). |
+| `franken-node verify transparency-log <path>` | Verify transparency-log hash chain: a JSONL export, or the durable ledger `run` appends to (`.franken-node/state/evidence-ledger.db`). The log path is handler-required so `--json` failures emit `franken-node/verify-transparency-log-error-cli/v1` instead of a human clap error. Empty logs fail closed. Without `--public-key`, signatures are `unproven` (non-zero exit), not PASS. Flags: `--json` (`franken-node/verify-transparency-log-cli/v1`; early failures `franken-node/verify-transparency-log-error-cli/v1`). |
 | `franken-node verify recovery-runbook` | Generate a recovery runbook from a `--readiness-input` snapshot (not a live broker). Flags: `--json` (early failures `franken-node/verify-recovery-runbook-error-cli/v1`). |
 
 ### Trust and supply chain
@@ -1199,7 +1199,7 @@ feature.
 | **Audience tokens** | `control_plane::audience_token` | Expiry, attenuation, domain separation, token chains with depth/root/leaf accessors, replay-resistant nonce window | Library only |
 | **Fork detection** | `control_plane::fork_detection` | State-vector hashing, rollback proofs, marker-proof verifier, `DetectionResult` (`Converged`/`Forked`/`GapDetected`/`RollbackDetected`) | Library only |
 | **Control epoch barriers** | `control_plane::control_epoch`, `epoch_transition_barrier` | Validity-window policy, `EpochRejectionReason` enum, fail-closed artifact rejection | Library only (`runtime epoch` compares integers you pass it) |
-| **Evidence ledger** | `observability::evidence_ledger` | Append-only Ed25519-signed decision log, hash-chain prev-entry linkage, replay-attack detection, bounded capacity with eviction, optional spill-to-disk | Partly: `verify transparency-log` verifies entries and the sentinel signs escalation entries; no command appends to a ledger |
+| **Evidence ledger** | `observability::evidence_ledger` | Append-only Ed25519-signed decision log, hash-chain prev-entry linkage, replay-attack detection, bounded capacity with eviction, optional spill-to-disk | Partly: every `run` appends a signed, hash-chained entry to `.franken-node/state/evidence-ledger.db` and `verify transparency-log` checks it; revoke, quarantine and fleet decisions do not append yet |
 | **Remote capability tokens** | `security::remote_cap`, `remote::*` | Scope-bound, single-use-optional Ed25519 tokens with endpoint binding | Yes: `remotecap`, `trust scan --deep/--audit`, `trust sync`, `init` |
 | **DGIS adversarial topology** | `security::dgis`, `dgis::*` | Dependency contagion simulator, fragility model, SPOF detection, immunization planner | Partly: the fragility model scores npm maintainer data in `trust scan --deep`; the contagion simulator, SPOF detection and immunization planner are library only |
 | **BPET evolution risk scorer** | `security::bpet`, `migration::bpet_migration_gate` | Phenotype feature extraction, topology risk delta during rollout | Library only (`bpet_migration_gate`: `feature:admin-tools`) |
@@ -1226,7 +1226,7 @@ flowchart TD
     D --> E["Revocation freshness gate<br/><code>SafetyTier</code> vs. frontier age"]
     E --> F["Capability scope<br/>audience token + endpoint binding"]
     F --> G["Runtime policy profile<br/>strict | balanced | legacy-risky"]
-    G --> H["Decision receipt<br/>signed on export; ledger append not yet wired"]
+    G --> H["Decision receipt<br/>run outcomes appended to the evidence ledger"]
 
     classDef identity fill:#1f6feb,color:#fff,stroke:#0a3b91;
     classDef storage fill:#5b3cc4,color:#fff,stroke:#3a2780;
@@ -1266,8 +1266,12 @@ The same model in words:
    execution receipt, `trust revoke`/`trust quarantine`/`incident bundle`
    export signed decision receipts with `--receipt-out`, `fleet
    release/reconcile` sign their decision and convergence receipts, and
-   sentinel escalations are signed. No command appends these to the
-   evidence ledger yet.
+   sentinel escalations are signed. Each `run` also appends a signed,
+   hash-chained entry (receipt id and hash, exit code, containment
+   verdict, host-effect chain head) to the durable evidence ledger;
+   `verify transparency-log .franken-node/state/evidence-ledger.db
+   --public-key .franken-node/keys/receipt-signing.pub` checks the chain.
+   Revoke, quarantine and fleet decisions do not append to it yet.
 
 ---
 
@@ -1930,7 +1934,9 @@ bootstrap layout is:
 | `.franken-node/state/trust-card-registry.v1.db` | Durable trust-card registry store (WAL frankensqlite; the legacy `.v1.json` pair is a one-time import source only) |
 | `.franken-node/safe-mode/state.json` | Unsigned JSON safe-mode controller persist (not Ed25519-signed); override with `--state-dir` |
 | `.franken-node/keys/` | Signing key material; excluded from version control by the generated `.gitignore` |
-| `.franken-node/keys/receipt-signing.key` | Default Ed25519 seed (mode 0600) for decision receipts, incident bundles and close-condition receipts, used when neither `--receipt-signing-key`, `FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH` nor `security.decision_receipt_signing_key_path` is set |
+| `.franken-node/keys/receipt-signing.key` | Default Ed25519 seed (mode 0600) for decision receipts, incident bundles, close-condition receipts and evidence-ledger entries, used when neither `--receipt-signing-key`, `FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH` nor `security.decision_receipt_signing_key_path` is set |
+| `.franken-node/keys/receipt-signing.pub` | Matching public key (hex), for `verify transparency-log --public-key` and `incident replay --trusted-public-key` |
+| `.franken-node/state/evidence-ledger.db` | Durable evidence ledger: one signed, hash-chained entry per `run` (WAL frankensqlite) |
 | `.franken-node/keys/remotecap-signing.key` | RemoteCap signing key (mode 0600), used when `FRANKEN_NODE_REMOTECAP_KEY` is unset |
 | `.franken-node/remotecap/trust-scan-token.json` | Default trust-scan egress token (mode 0600, git-ignored), used when `FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN` is unset |
 
@@ -2936,8 +2942,10 @@ is undergoing API-drift remediation; the verification-target compile census
 - `fuzz_config_toml_parse`: adversarial TOML cannot crash or trigger
   unbounded allocation in the config loader.
 
-Discovered failure inputs land in `fuzz/regression/` so the same input
-becomes a regression case forever. Coverage data lives in
+`fuzz/regression/` is meant to keep discovered failure inputs as permanent
+regression cases, but today it holds 5 inputs for 2 of the 146 targets
+(`shim`, `migration`, dated 2026-02), and no test or CI step replays them
+yet (bd-fuzz-regression-corpus-f28ac). Coverage data lives in
 `fuzz/coverage/`; fuzz artifacts live in `fuzz/artifacts/`. The
 `mutants-gate.yml` workflow runs `cargo-mutants` against the test
 surface as a separate proof-of-effective-coverage signal: a mutant that

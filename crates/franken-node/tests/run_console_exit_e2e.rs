@@ -1218,3 +1218,125 @@ fn containment_exit_is_labelled_as_a_containment_verdict() {
         human.stdout
     );
 }
+
+/// bd-reality-20260923-26n9r.15 deliverable 6: every `run` in an initialized
+/// workspace appends a signed, hash-chained entry to the durable evidence
+/// ledger, signed with the receipt key `init` provisioned.
+#[test]
+fn runs_append_signed_chained_entries_to_the_durable_evidence_ledger() {
+    use frankenengine_node::observability::evidence_ledger::{
+        EvidenceEntry, evidence_entry_hash_hex, verify_evidence_entry,
+    };
+    use frankenengine_node::observability::evidence_ledger_durable::DurableEvidenceLedger;
+
+    let (dir, first) = run_app(COMPUTE_APP, &["--json"]);
+    assert_eq!(first.exit_code, Some(0), "stderr=\n{}", first.stderr);
+    let first_report: Value = serde_json::from_str(&first.stdout).expect("first run --json");
+    let second = Command::new(franken_node_bin())
+        .args([
+            "run",
+            "app.js",
+            "--policy",
+            "balanced",
+            "--runtime",
+            "franken-engine",
+            "--engine-bin",
+            franken_node_bin(),
+            "--json",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("spawn second run");
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let second_report: Value = serde_json::from_slice(&second.stdout).expect("second run --json");
+
+    let store = DurableEvidenceLedger::open_default(dir.path()).expect("open evidence ledger");
+    let entries = store
+        .entries_json()
+        .expect("read evidence ledger")
+        .iter()
+        .map(|json| serde_json::from_str::<EvidenceEntry>(json).expect("stored evidence entry"))
+        .collect::<Vec<_>>();
+    assert_eq!(entries.len(), 2, "one entry per run");
+
+    let seed_hex =
+        std::fs::read_to_string(dir.path().join(".franken-node/keys/receipt-signing.key"))
+            .expect("init-provisioned receipt key");
+    let seed: [u8; 32] = hex::decode(seed_hex.trim())
+        .expect("hex seed")
+        .try_into()
+        .expect("32-byte seed");
+    let verifying_key = ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key();
+    for (entry, report) in entries.iter().zip([&first_report, &second_report]) {
+        verify_evidence_entry(entry, &verifying_key).expect("entry signature verifies");
+        assert_eq!(
+            entry.decision_id,
+            report["receipt"]["receipt_id"]
+                .as_str()
+                .expect("receipt id")
+        );
+        assert_eq!(entry.payload["exit_code"], 0);
+        assert_eq!(
+            entry.payload["receipt_hash"],
+            report["receipt"]["receipt_hash"]
+        );
+    }
+    assert_eq!(
+        entries[0].prev_entry_hash, "",
+        "first entry starts the chain"
+    );
+    assert_eq!(
+        entries[1].prev_entry_hash,
+        evidence_entry_hash_hex(&entries[0]),
+        "second entry links to the first"
+    );
+
+    // A tampered payload no longer verifies.
+    let mut tampered = entries[1].clone();
+    tampered.payload["exit_code"] = serde_json::json!(1);
+    assert!(verify_evidence_entry(&tampered, &verifying_key).is_err());
+
+    // init also wrote the matching public key.
+    let public_key =
+        std::fs::read_to_string(dir.path().join(".franken-node/keys/receipt-signing.pub"))
+            .expect("init-provisioned receipt public key");
+    assert_eq!(public_key.trim(), hex::encode(verifying_key.to_bytes()));
+
+    // The CLI verifies the same durable ledger: the chain alone is
+    // "unproven" (exit 1); with the public key it is "valid" (exit 0).
+    let verify = |extra: &[&str]| {
+        let mut args = vec![
+            "verify",
+            "transparency-log",
+            ".franken-node/state/evidence-ledger.db",
+            "--json",
+        ];
+        args.extend_from_slice(extra);
+        let output = Command::new(franken_node_bin())
+            .args(&args)
+            .current_dir(dir.path())
+            .output()
+            .expect("spawn verify transparency-log");
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
+            panic!(
+                "verify transparency-log --json: {err}; stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        (output.status.code(), report)
+    };
+    let (code, report) = verify(&[]);
+    assert_eq!(code, Some(1), "{report}");
+    assert_eq!(report["status"], "unproven");
+    assert_eq!(report["total_entries"], 2);
+    assert_eq!(report["hash_chain_errors"], serde_json::json!([]));
+    let (code, report) = verify(&["--public-key", ".franken-node/keys/receipt-signing.pub"]);
+    assert_eq!(code, Some(0), "{report}");
+    assert_eq!(report["status"], "valid");
+    assert_eq!(report["signatures_verified"], true);
+}

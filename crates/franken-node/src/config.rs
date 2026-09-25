@@ -3599,7 +3599,12 @@ pub enum SsrfEnforcementMode {
 }
 
 /// Network egress policy configuration for spawned runtime processes.
+///
+/// Unknown keys are rejected: a mistyped security switch (e.g. a `mode = ...`
+/// line) must fail loudly instead of being silently ignored
+/// (bd-reality-20260923-26n9r.17).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkPolicyConfig {
     /// SSRF enforcement mode: none, monitor, or block.
     #[serde(default)]
@@ -3635,6 +3640,7 @@ pub struct NetworkPolicyConfig {
 
 /// An entry in the network allowlist.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkAllowlistEntry {
     /// Host pattern (exact match or *.example.com wildcard).
     pub host: String,

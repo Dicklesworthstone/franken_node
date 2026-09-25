@@ -1,14 +1,14 @@
 ---
 source: crates/franken-node/tests/cli_subcommand_goldens.rs
 ---
-Diagnose environment and policy setup
+Local diagnostics: config[PATH], close-condition, evidence snapshot, workspace pressure, bwrap
 
 Usage: franken-node doctor [OPTIONS] [COMMAND]
 
 Commands:
   close-condition          Emit the dual-oracle close-condition receipt
-  evidence-readiness       Report whether generated evidence is ready for operator trust
-  workspace-pressure       Analyze workspace pressure and resource usage
+  evidence-readiness       Report evidence readiness from an `--input` snapshot (not a live broker)
+  workspace-pressure       Probe local disk, memory, RCH slots, and build counts; apply pressure policy
   process-spawn-readiness  Validate the Linux Bubblewrap backend required for process spawning
   help                     Print this message or the help of the given subcommand(s)
 
@@ -18,9 +18,9 @@ Options:
       --profile <PROFILE>
           Runtime profile override: strict, balanced, or legacy-risky. Controls security[PATH] behavior (not packaging profiles like local[PATH])
       --policy-activation-input <POLICY_ACTIVATION_INPUT>
-          Path to policy activation input JSON for live guardrail diagnostics. Falls back to `FRANKEN_NODE_DOCTOR_POLICY_ACTIVATION_INPUT` when the flag is omitted; the CLI flag takes precedence (bd-lmbt0) [env: FRANKEN_NODE_DOCTOR_POLICY_ACTIVATION_INPUT=]
+          Path to policy-activation snapshot JSON (not a live guardrail probe). Falls back to `FRANKEN_NODE_DOCTOR_POLICY_ACTIVATION_INPUT` when the flag is omitted; the CLI flag takes precedence (bd-lmbt0) [env: FRANKEN_NODE_DOCTOR_POLICY_ACTIVATION_INPUT=]
       --json
-          Emit machine-readable JSON (`franken-node/doctor-cli/v1`)
+          Emit machine-readable JSON (`franken-node[PATH]`). Early failures (invalid `--profile`, config resolve) emit `franken-node[PATH]` then exit 1
       --structured-logs-jsonl
           Emit structured diagnostic log events as JSONL to stderr
       --trace-id <TRACE_ID>

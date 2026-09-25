@@ -17,7 +17,9 @@ source: crates/franken-node/tests/cli_subcommand_goldens.rs
     "skipped_test_cases": 0,
     "pass_rate_pct": 98.0,
     "required_pass_rate_pct": 95.0,
-    "blocking_findings": []
+    "blocking_findings": [],
+    "node_canonical_observation_passes": 98,
+    "child_process_native_eval_aborts": 0
   },
   "L2_engine_boundary_oracle": {
     "verdict": "GREEN",
@@ -109,7 +111,7 @@ source: crates/franken-node/tests/cli_subcommand_goldens.rs
     "algorithm": "SHA-256",
     "canonicalization": "lexicographically-sorted-json-keys/no-whitespace",
     "hash_scope": "close_condition_receipt_v1_len_prefixed_core",
-    "sha256": "sha256:9ff2d58c70ad8a43033203fc0e65c14c99e0272386319991b48796fc2632e1ce",
+    "sha256": "sha256:7caf9e201c4f736825c29a129c5757a68ae9282ba107f613f2100f15327d1262",
     "signature": {
       "algorithm": "ed25519",
       "public_key_hex": "fa4834147f6e690c3693eff61336046403cd8ae2a14f31b3c407358569239565",
@@ -117,8 +119,8 @@ source: crates/franken-node/tests/cli_subcommand_goldens.rs
       "key_source": "cli",
       "signing_identity": "oracle-close-condition",
       "trust_scope": "oracle_close_condition",
-      "signed_payload_sha256": "9ff2d58c70ad8a43033203fc0e65c14c99e0272386319991b48796fc2632e1ce",
-      "signature_hex": "785231fc59d9b505406f6fcf784d6a93591ef552abf293b2e9cfaa1110b54b72b0b4df411c897f97a0ff2a0c85e4898bb2fec4036f399cf3d5a8ad2c16382c09"
+      "signed_payload_sha256": "7caf9e201c4f736825c29a129c5757a68ae9282ba107f613f2100f15327d1262",
+      "signature_hex": "e96dfa566b05413a1625b42d897348cc18f8331070e3ac6f5f9052caf25128e681385dc996b7ef9d168618fed2f6a5a3a64fc93486353692efbe98ab83e6c700"
     }
   }
 }

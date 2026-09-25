@@ -1,7 +1,7 @@
 ---
 source: crates/franken-node/tests/cli_subcommand_goldens.rs
 ---
-Trust-card API[PATH] parity surfaces
+Local trust-card registry inspect (show[PATH]; not a live HTTP API)
 
 Usage: franken-node trust-card <COMMAND>
 
