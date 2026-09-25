@@ -1,0 +1,39 @@
+name: Workflow Lint
+
+# bd-reality-20260923-26n9r.9 deliverable 3: a workflow file that does not
+# parse, or whose expressions do not type-check, never runs, so the gate it
+# implements silently stops enforcing anything (connector-conformance.yml was
+# invalid for months). actionlint parses every workflow and checks its
+# expressions, contexts and action inputs. Shellcheck and pyflakes are off:
+# the embedded scripts predate this gate and are out of its scope.
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - '.github/workflows/**'
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install actionlint 1.7.7 (checksum-pinned)
+        run: |
+          set -euo pipefail
+          curl -sSL -o actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz
+          echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  actionlint.tar.gz" \
+            | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
+
+      - name: Lint every workflow
+        run: ./actionlint -shellcheck= -pyflakes= -no-color
