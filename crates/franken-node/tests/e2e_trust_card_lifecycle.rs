@@ -22,9 +22,11 @@
 //! tracing event PLUS a JSON-line on stderr so a CI failure can be
 //! reconstructed from the test transcript.
 
+use std::collections::BTreeMap;
 use std::sync::Once;
 use std::time::Instant;
 
+use frankenengine_node::security::trajectory_gaming::{CamouflageHint, CamouflageKind};
 use frankenengine_node::supply_chain::certification::{EvidenceType, VerifiedEvidenceRef};
 use frankenengine_node::supply_chain::trust_card::{
     BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
@@ -393,4 +395,161 @@ fn e2e_trust_card_revoked_card_signature_still_verifies() {
     // moves the card into a non-trusted lifecycle state.
     verify_card_signature(&revoked, REGISTRY_KEY).expect("signature still verifies");
     h.log_phase("post_revoke_signature_ok", true, json!({}));
+}
+
+fn no_mutation() -> TrustCardMutation {
+    TrustCardMutation {
+        certification_level: None,
+        revocation_status: None,
+        active_quarantine: None,
+        reputation_score_basis_points: None,
+        reputation_trend: None,
+        user_facing_risk_assessment: None,
+        last_verified_timestamp: None,
+        evidence_refs: None,
+    }
+}
+
+/// bd-reality-20260923-26n9r.15: a `trust scan --deep/--audit` rescan
+/// replaces the scan-owned fields of an existing card while certification,
+/// quarantine, revocation, camouflage risk and audit history carry over.
+#[test]
+fn e2e_trust_card_refresh_from_scan_keeps_operator_decisions() {
+    let h = Harness::new("e2e_trust_card_refresh_from_scan_keeps_operator_decisions");
+    let mut reg = TrustCardRegistry::new(60, REGISTRY_KEY);
+    let extension_id = "npm:@e2e/rescanned";
+    let now = 1_745_750_000u64;
+    reg.create(realistic_input(extension_id, "2.0.0"), now, "trace-c")
+        .expect("create");
+    reg.update(
+        extension_id,
+        TrustCardMutation {
+            active_quarantine: Some(true),
+            ..no_mutation()
+        },
+        now + 1,
+        "trace-q",
+    )
+    .expect("quarantine");
+    let marked = reg
+        .mark_camouflage_suspected(
+            extension_id,
+            &[CamouflageHint {
+                kind: CamouflageKind::GradualCreep,
+                severity: 0.7,
+                evidence: BTreeMap::from([("slope".to_string(), 0.4)]),
+                sample_indices: vec![0, 1, 2, 3],
+            }],
+            vec![evidence("ev-camo", now + 2, "sha256:camouflage-evidence")],
+            now + 2,
+            "trace-camo",
+        )
+        .expect("camouflage mark");
+    assert_eq!(marked.user_facing_risk_assessment.level, RiskLevel::High);
+
+    let mut rescan = realistic_input(extension_id, "2.0.0");
+    rescan.publisher = PublisherIdentity {
+        publisher_id: "npm:maintainer-x".to_string(),
+        display_name: "maintainer-x".to_string(),
+    };
+    rescan.provenance_summary.artifact_hashes = vec!["sha512:rescanned".to_string()];
+    rescan.certification_level = CertificationLevel::Unknown;
+    rescan.reputation_score_basis_points = 6_000;
+    rescan.user_facing_risk_assessment = RiskAssessment {
+        level: RiskLevel::Low,
+        summary: "rescan: no findings".to_string(),
+    };
+    rescan.evidence_refs = vec![evidence("ev-rescan", now + 3, "sha256:rescan-evidence")];
+    let refreshed = reg
+        .refresh_from_scan(rescan, now + 3, "trace-rescan")
+        .expect("refresh");
+    verify_card_signature(&refreshed, REGISTRY_KEY).expect("refreshed card verifies");
+    assert_eq!(refreshed.trust_card_version, marked.trust_card_version + 1);
+    assert_eq!(
+        refreshed.previous_version_hash.as_deref(),
+        Some(marked.card_hash.as_str())
+    );
+    // Scan-owned fields come from the rescan.
+    assert_eq!(refreshed.publisher.publisher_id, "npm:maintainer-x");
+    assert_eq!(
+        refreshed.provenance_summary.artifact_hashes,
+        vec!["sha512:rescanned".to_string()]
+    );
+    assert_eq!(refreshed.reputation_score_basis_points, 6_000);
+    // Operator decisions carry over.
+    assert_eq!(refreshed.certification_level, CertificationLevel::Silver);
+    assert!(refreshed.active_quarantine);
+    assert!(matches!(
+        refreshed.revocation_status,
+        RevocationStatus::Active
+    ));
+    assert_eq!(refreshed.camouflage_hints, marked.camouflage_hints);
+    // The camouflage floor survives a clean rescan.
+    assert_eq!(refreshed.user_facing_risk_assessment.level, RiskLevel::High);
+    let summary = &refreshed.user_facing_risk_assessment.summary;
+    assert!(summary.starts_with("rescan: no findings"), "{summary}");
+    assert!(
+        summary.contains("suspected trajectory camouflage (gradual_creep;"),
+        "{summary}"
+    );
+    assert_eq!(
+        refreshed.audit_history.len(),
+        marked.audit_history.len() + 1
+    );
+    assert_eq!(
+        refreshed
+            .audit_history
+            .last()
+            .map(|record| record.detail.as_str()),
+        Some("trust card refreshed from scan")
+    );
+    h.log_phase(
+        "refreshed",
+        true,
+        json!({"version": refreshed.trust_card_version, "risk": "high"}),
+    );
+
+    // Revocation carries over too.
+    let revoked_id = "npm:@e2e/rescanned-revoked";
+    reg.create(realistic_input(revoked_id, "1.0.0"), now, "trace-c2")
+        .expect("create");
+    reg.update(
+        revoked_id,
+        TrustCardMutation {
+            revocation_status: Some(RevocationStatus::Revoked {
+                reason: "compromised publisher".into(),
+                revoked_at: "2026-04-26T22:10:00Z".into(),
+            }),
+            ..no_mutation()
+        },
+        now + 1,
+        "trace-r",
+    )
+    .expect("revoke");
+    let rescanned_revoked = reg
+        .refresh_from_scan(realistic_input(revoked_id, "1.0.0"), now + 2, "trace-rr")
+        .expect("refresh revoked card");
+    assert!(matches!(
+        rescanned_revoked.revocation_status,
+        RevocationStatus::Revoked { .. }
+    ));
+
+    // A different version is a new artifact, and a missing card has nothing
+    // to refresh.
+    let err = reg
+        .refresh_from_scan(realistic_input(extension_id, "2.1.0"), now + 4, "trace-v")
+        .expect_err("version change is not a refresh");
+    assert!(
+        matches!(err, TrustCardError::InvalidInput { .. }),
+        "{err:?}"
+    );
+    let err = reg
+        .refresh_from_scan(
+            realistic_input("npm:@e2e/never-scanned", "1.0.0"),
+            now + 4,
+            "trace-n",
+        )
+        .expect_err("nothing to refresh");
+    assert!(matches!(err, TrustCardError::NotFound(_)), "{err:?}");
+    h.log_phase("refusals", true, json!({}));
 }

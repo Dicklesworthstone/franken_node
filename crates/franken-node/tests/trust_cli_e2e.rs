@@ -2627,6 +2627,117 @@ fn trust_scan_is_idempotent() {
     assert!(stdout.contains("skipped_existing=3"));
 }
 
+fn trust_scan_audit(workspace: &Path, osv_url: &str) -> Output {
+    let token_path = issue_osv_fixture_remotecap(workspace, osv_url);
+    run_cli_in_workspace_with_env(
+        workspace,
+        &["trust", "scan", ".", "--audit", "--json"],
+        &[
+            ("FRANKEN_NODE_OSV_QUERY_URL", osv_url),
+            ("FRANKEN_NODE_REMOTECAP_KEY", FIXTURE_REMOTECAP_KEY),
+            (
+                "FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN",
+                token_path.to_str().expect("fixture token path is utf8"),
+            ),
+        ],
+    )
+}
+
+/// bd-reality-20260923-26n9r.15: `init` seeds baseline cards, so a later
+/// `trust scan --audit` must apply its evidence to existing cards instead of
+/// skipping them; a clean answer from a non-default OSV endpoint must not
+/// lower the risk it raised.
+#[test]
+fn trust_scan_audit_refreshes_existing_cards_without_unauthenticated_lowering() {
+    let workspace = scannable_trust_workspace();
+    let baseline = run_cli_in_workspace(workspace.path(), &["trust", "scan", "."]);
+    assert!(
+        baseline.status.success(),
+        "baseline trust scan failed: {}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+
+    let (osv_url, requests, server) = spawn_osv_static_response_server(
+        3,
+        200,
+        "OK",
+        r#"{"vulns":[{"id":"GHSA-scan-refresh-0001"}]}"#,
+    );
+    let refreshed = trust_scan_audit(workspace.path(), &osv_url);
+    server.join().expect("join OSV fixture server");
+    assert!(
+        refreshed.status.success(),
+        "trust scan --audit failed: {}",
+        String::from_utf8_lossy(&refreshed.stderr)
+    );
+    assert_eq!(requests.lock().expect("lock OSV requests").len(), 3);
+    let report = parse_json_stdout(&refreshed, "trust scan --audit");
+    assert_eq!(report["created_cards"], 0);
+    assert_eq!(report["refreshed_cards"], 3);
+    assert_eq!(report["skipped_existing"], 0);
+    let items = report["items"].as_array().expect("scan items");
+    assert_eq!(items.len(), 3);
+    for item in items {
+        assert_eq!(item["status"], "refreshed", "{item}");
+        assert_eq!(item["risk_level"], "high", "{item}");
+        assert_eq!(item["vulnerability_count"], 1, "{item}");
+    }
+
+    let export = |context: &str| {
+        let exported = run_cli_in_workspace(
+            workspace.path(),
+            &["trust-card", "export", "npm:react", "--json"],
+        );
+        assert!(
+            exported.status.success(),
+            "trust-card export failed: {}",
+            String::from_utf8_lossy(&exported.stderr)
+        );
+        parse_json_stdout(&exported, context)
+    };
+    let card = export("trust-card export after refresh");
+    assert_eq!(card["trust_card_version"], 2);
+    assert_eq!(card["extension"]["version"], "19.2.4");
+    assert_eq!(card["user_facing_risk_assessment"]["level"], "high");
+    assert!(
+        card["user_facing_risk_assessment"]["summary"]
+            .as_str()
+            .expect("risk summary")
+            .contains("osv_vulns=GHSA-scan-refresh-0001"),
+        "{card}"
+    );
+    assert_eq!(
+        card["provenance_summary"]["artifact_hashes"][0],
+        "sha512:01020304"
+    );
+    let history = card["audit_history"].as_array().expect("audit history");
+    assert_eq!(history.len(), 2, "creation record is kept: {card}");
+    assert_eq!(history[1]["detail"], "trust card refreshed from scan");
+
+    let (clean_url, clean_requests, clean_server) =
+        spawn_osv_static_response_server(3, 200, "OK", "{}");
+    let held = trust_scan_audit(workspace.path(), &clean_url);
+    clean_server.join().expect("join clean OSV fixture server");
+    assert!(
+        held.status.success(),
+        "clean trust scan --audit failed: {}",
+        String::from_utf8_lossy(&held.stderr)
+    );
+    assert_eq!(clean_requests.lock().expect("lock OSV requests").len(), 3);
+    let report = parse_json_stdout(&held, "clean trust scan --audit");
+    assert_eq!(report["refreshed_cards"], 0);
+    assert_eq!(report["skipped_existing"], 3);
+    let warnings = report["warnings"].as_array().expect("scan warnings");
+    assert!(
+        warnings.iter().any(|warning| warning.as_str()
+            == Some("npm:react: existing card not refreshed: the new evidence would lower risk from High to Low, which needs an --audit answer from the default OSV endpoint")),
+        "{report}"
+    );
+    let card = export("trust-card export after refused lowering");
+    assert_eq!(card["trust_card_version"], 2);
+    assert_eq!(card["user_facing_risk_assessment"]["level"], "high");
+}
+
 #[test]
 fn trust_scan_uses_project_configured_registry_signing_key() {
     let workspace = scannable_trust_workspace();
