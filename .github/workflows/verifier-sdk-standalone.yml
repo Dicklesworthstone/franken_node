@@ -1,0 +1,71 @@
+name: Verifier SDK Standalone
+
+# The verifier SDK's promise is that an outside auditor can check franken-node
+# evidence without trusting (or even having) franken-node's code. This job
+# proves it: it checks out ONLY sdk/verifier plus the committed evidence the
+# SDK's recompute tests read — no root workspace manifest and no product
+# crates — then builds and tests the SDK and fails if its dependency graph
+# reaches any franken-node crate. It replaces the string-search independence
+# check (bd-reality-20260923-26n9r.16, deliverable 4).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - sdk/verifier/**
+      - artifacts/migration/**
+      - docs/honesty_manifest.json
+      - docs/honesty_manifest_evidence.json
+      - .github/workflows/verifier-sdk-standalone.yml
+  pull_request:
+    paths:
+      - sdk/verifier/**
+      - artifacts/migration/**
+      - docs/honesty_manifest.json
+      - docs/honesty_manifest_evidence.json
+      - .github/workflows/verifier-sdk-standalone.yml
+  workflow_dispatch: {}
+
+concurrency:
+  group: verifier-sdk-standalone-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  standalone:
+    name: Build and test sdk/verifier without franken-node
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Sparse checkout (SDK + evidence only)
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /sdk/verifier/
+            /artifacts/migration/
+            /docs/honesty_manifest.json
+            /docs/honesty_manifest_evidence.json
+            /LICENSE
+
+      - name: Prove the product workspace is absent
+        run: |
+          set -euo pipefail
+          test ! -e Cargo.toml
+          test ! -e crates
+          test -f sdk/verifier/Cargo.toml
+
+      # Stable on purpose: an auditor should not need the product's nightly.
+      - name: Show toolchain
+        run: rustup default stable && cargo --version
+
+      - name: Dependency graph excludes franken-node crates
+        run: |
+          set -euo pipefail
+          cargo tree --manifest-path sdk/verifier/Cargo.toml -e normal,build > sdk-tree.txt
+          if grep -E 'frankenengine-node|franken-security-macros|frankenengine-engine|frankenengine-extension-host' sdk-tree.txt; then
+            echo "verifier SDK depends on a franken-node crate" >&2
+            exit 1
+          fi
+
+      - name: Test the SDK standalone
+        run: cargo test --manifest-path sdk/verifier/Cargo.toml

@@ -1,17 +1,21 @@
+# Self-contained on purpose (no `workspace = true` inheritance): an auditor
+# must be able to build and test the verifier from `sdk/verifier/` alone,
+# without franken_node's crates. CI proves it (verifier-sdk-standalone.yml).
+# Keep version/edition/license in step with the root [workspace.package].
 [package]
 name = "frankenengine-verifier-sdk"
-version.workspace = true
-edition.workspace = true
+version = "0.1.0"
+edition = "2024"
 description = "Verifier SDK for replaying bundles, checking canonical hashes, and verifying Ed25519 signatures"
-license.workspace = true
+license = "LicenseRef-MIT-OpenAI-Anthropic-Rider"
 
 [features]
 fuzz = ["arbitrary"]
 test-support = []
 
 [dependencies]
-serde.workspace = true
-serde_json.workspace = true
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 ed25519-dalek = "2.1.1"
 sha2 = "0.11.0"
 hex = "0.4.3"

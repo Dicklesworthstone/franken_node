@@ -721,7 +721,7 @@ every leaf command available in the current build.
 |---|---|
 | `franken-node init` | Bootstrap config, policy profile, and `.franken-node/state/` workspace metadata. Flags: `--profile`, `--config`, `--out-dir`, `--overwrite`, `--backup-existing`, `--scan`, `--state-dir`, `--no-state`, `--json` (`franken-node/init-cli/v1`; failures `franken-node/init-error-cli/v1`). |
 | `franken-node run <app_path>` | Run app under policy-governed runtime controls. A directory runs its entry file as `node <dir>` does: package.json `main` (as given, with `.js`, or its `index.js`), else `index.js`; a `main` outside the directory is refused. The app path is handler-required so `--json` failures emit `franken-node/run-error-cli/v1` instead of a human clap error. Flags: `--policy`, `--config`, `--runtime` (auto\|node\|bun\|franken-engine), `--engine-bin`, `--compat-preflight`, `--json` (early failures `franken-node/run-error-cli/v1`; blocked preflight prints JSON then exits 1). External Node/Bun selections fail closed; use `verify lockstep` for comparison. |
-| `franken-node doctor` | Local diagnostics: config/profile, close-condition, evidence snapshot, workspace pressure, bwrap. `--policy-activation-input` is a snapshot JSON file (not a live guardrail probe). Flags: `--config`, `--profile`, `--policy-activation-input`, `--verbose`, `--json` (early failures `franken-node/doctor-error-cli/v1`), `--structured-logs-jsonl`. |
+| `franken-node doctor` | Local diagnostics: config/profile, close-condition, evidence snapshot, workspace pressure, bwrap. Exits 1 when the overall verdict is `fail` (after printing the full report) and 0 for `pass`/`warn`. Workspace pressure (host load, builds, disk) is advisory in this command and never fails it; `doctor workspace-pressure` gives the full signal. `--policy-activation-input` is a snapshot JSON file (not a live guardrail probe). Flags: `--config`, `--profile`, `--policy-activation-input`, `--verbose`, `--json` (early failures `franken-node/doctor-error-cli/v1`), `--structured-logs-jsonl`. |
 
 ### Migration
 
@@ -3153,7 +3153,10 @@ The crate `frankenengine-verifier-sdk` (at
 [`sdk/verifier/`](sdk/verifier/)) is a small, deliberately stable Rust
 API for independent third-party verification. It re-implements the
 verification side of the protocol so that a verifier does not need to
-trust, or even depend on, the main `frankenengine-node` crate.
+trust, or even depend on, the main `frankenengine-node` crate. It builds
+and tests on stable Rust from `sdk/verifier/` alone, with no workspace and
+no franken-node crates: `cargo test --manifest-path sdk/verifier/Cargo.toml`.
+CI checks this on every change (`verifier-sdk-standalone.yml`).
 
 What it exposes:
 

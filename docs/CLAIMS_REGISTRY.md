@@ -293,10 +293,17 @@ Each claim entry uses this structure:
   RFC 8032 TEST 1 anchor, tamper/reseal/foreign-signer negatives);
   `tests/conformance/verifier_sdk_capsule_replay.rs`;
   `tests/conformance/verifier_session_monotonic.rs`
-- **Verification command**: `cargo test -p frankenengine-verifier-sdk`
-- **Last verified**: 2026-09-24 (full SDK suite green, 7e97be752)
+- **Verification command**: `cargo test -p frankenengine-verifier-sdk`;
+  standalone proof `.github/workflows/verifier-sdk-standalone.yml` (sparse
+  checkout of `sdk/verifier/` + committed evidence only, no workspace
+  manifest, no product crates; `cargo tree` must not reach any franken-node
+  crate; stable toolchain)
+- **Last verified**: 2026-09-24 (standalone copy without the workspace:
+  full SDK suite green on stable and nightly, zero franken-node crates in the
+  dependency graph)
 - **Status**: verified
-- **Notes**: Before 7e97be752 the SDK could not parse CLI incident bundles
+- **Notes**: `sdk/verifier/Cargo.toml` no longer inherits workspace fields, so
+  it builds from its own directory. Before 7e97be752 the SDK could not parse CLI incident bundles
   (`missing field artifact_path`): the SDK `bundle` module verifies a
   different, SDK-native format whose built-in "signature" check is an
   unkeyed digest.
