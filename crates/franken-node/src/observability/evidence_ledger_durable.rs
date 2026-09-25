@@ -70,6 +70,12 @@ fn open_tier1_connection(db_path: &Path) -> io::Result<Connection> {
 }
 
 fn ensure_schema(connection: &Connection) -> io::Result<()> {
+    // Opening an up-to-date store must not write: every `run` opens the
+    // ledger, and a committed schema write costs a synchronous=FULL commit
+    // (an fsync) before the entry's own commit.
+    if schema_is_current(connection) {
+        return Ok(());
+    }
     let mut tx = connection
         .transaction()
         .map_err(|err| io::Error::other(format!("begin schema transaction: {err}")))?;
@@ -96,6 +102,27 @@ fn ensure_schema(connection: &Connection) -> io::Result<()> {
     .map_err(|err| io::Error::other(format!("record schema version: {err}")))?;
     tx.commit()
         .map_err(|err| io::Error::other(format!("commit schema: {err}")))
+}
+
+/// Whether both tables exist and the recorded schema version is current. A
+/// missing table or any read error answers `false`, so `ensure_schema` runs.
+fn schema_is_current(connection: &Connection) -> bool {
+    let Ok(rows) = connection.query_with_params(
+        "SELECT value FROM evidence_meta WHERE key = ?1;",
+        &[SqliteValue::Text(META_KEY_SCHEMA_VERSION.into())],
+    ) else {
+        return false;
+    };
+    let version_is_current = matches!(
+        rows.first().and_then(|row| row.values().first()),
+        Some(SqliteValue::Text(version)) if version.to_string() == EVIDENCE_DB_SCHEMA_VERSION
+    );
+    version_is_current
+        && connection
+            .query(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'evidence_entries';",
+            )
+            .is_ok_and(|rows| !rows.is_empty())
 }
 
 /// Durable WAL-backed evidence ledger store.
