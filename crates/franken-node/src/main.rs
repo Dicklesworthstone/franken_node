@@ -629,6 +629,9 @@ struct TrustScanDeepMetadata {
     dependent_count: Option<u64>,
     resolved_version: Option<String>,
     registry_integrity_hashes: Vec<String>,
+    /// Package recency and maintainer signals from the packument
+    /// (`supply_chain::npm_registry_signals`).
+    registry_signals: supply_chain::npm_registry_signals::RegistrySignals,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -17943,6 +17946,7 @@ fn parse_trust_scan_npm_metadata(
         dependent_count: None,
         resolved_version,
         registry_integrity_hashes,
+        registry_signals: supply_chain::npm_registry_signals::parse_registry_signals(payload),
     }
 }
 
@@ -18302,13 +18306,21 @@ fn build_trust_scan_card_input(
 
     let vulnerability_count = audit_metadata.vulnerability_ids.len();
     let typosquat = supply_chain::typosquat::detect_typosquat(&dependency.dependency_name);
+    // Registry recency and DGIS maintainer fragility (from `--deep` npm
+    // metadata; empty signals, and so no findings, without it).
+    let registry_findings = supply_chain::npm_registry_signals::assess_registry_signals(
+        &deep_metadata.registry_signals,
+        now_secs,
+    );
+    let new_package = registry_findings.new_package_age_days.is_some();
     let risk_level = if vulnerability_count >= 3 {
         RiskLevel::Critical
     } else if vulnerability_count > 0 || typosquat.is_some() {
         // A name built to be mistaken for a popular package is a high-risk
         // signal before any behaviour is observed (README scenario).
         RiskLevel::High
-    } else if artifact_hashes.is_empty() {
+    } else if artifact_hashes.is_empty() || new_package {
+        // A brand-new package has no track record: never Low.
         RiskLevel::Medium
     } else {
         RiskLevel::Low
@@ -18360,6 +18372,15 @@ fn build_trust_scan_card_input(
         reputation_score_basis_points = reputation_score_basis_points.saturating_sub(200);
         summary_bits.push(finding.describe());
     }
+    if new_package {
+        reputation_score_basis_points = reputation_score_basis_points.saturating_sub(150);
+    }
+    // Fragility lowers reputation (bus factor, abandonment) but is not a
+    // malice signal, so it does not change the risk level.
+    let fragility_penalty = (registry_findings.fragility.total * 200.0).round().clamp(0.0, 200.0);
+    reputation_score_basis_points =
+        reputation_score_basis_points.saturating_sub(fragility_penalty as u16);
+    summary_bits.extend(registry_findings.describe());
 
     TrustCardInput {
         extension: ExtensionIdentity {

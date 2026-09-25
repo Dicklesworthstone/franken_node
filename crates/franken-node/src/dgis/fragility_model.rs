@@ -287,6 +287,18 @@ impl FragilityScore {
         !self.factors.is_empty()
     }
 
+    /// Score an explicit list of observed factors with this model's weights,
+    /// bound and severity ordering. For callers that can observe only some
+    /// signals (e.g. `trust scan --deep` from npm registry metadata): they
+    /// must pass what they saw, never defaults standing in for unknowns.
+    pub fn from_factors(factors: Vec<FragilityFactor>, now: i64) -> Self {
+        let mut acc = Accumulator::new();
+        for factor in factors {
+            acc.add(factor);
+        }
+        acc.finalize(now)
+    }
+
     /// Deterministic length-prefixed content hash used for downstream
     /// fingerprinting of fragility findings. Domain-separated with
     /// `b"dgis_fragility_v1:"` to prevent cross-module collisions.
