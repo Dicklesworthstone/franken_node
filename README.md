@@ -1175,40 +1175,48 @@ under which snapshot.
 
 ## Trust-Native Primitives
 
-Every primitive below is implemented in `crates/franken-node/src/`;
-none are CLI-only stubs. Each has accompanying integration and
-conformance tests under `tests/` and `crates/franken-node/tests/`.
+Every primitive below is implemented in `crates/franken-node/src/` and
+has integration or conformance tests under `tests/` and
+`crates/franken-node/tests/`. Being implemented is not the same as being
+used: the last column says whether a command of the default binary (default
+features) actually calls it, from a static trace of the command handlers on
+2026-09-25 (bd-reality-20260923-26n9r.14). "Library only" means compiled but
+reached by no command; `feature:` means compiled only with that opt-in
+feature.
 
-| Primitive | Module | Properties |
-|---|---|---|
-| **Trust cards** | `supply_chain::trust_card` | Publisher identity, risk assessment, audit history, version tracking, camouflage hint, HMAC-signed snapshots, trusted-vs-untrusted source context |
-| **Revocation freshness gates** | `security::revocation_freshness{_gate}` | SafetyTier-based (Standard/Risky/Dangerous) age policies; `now >= expires_at` fail-closed semantics; bound to capability issuance |
-| **Fleet quarantine state machine** | `api::fleet_quarantine`, `control_plane::fleet_transport` | `QuarantineScope`, `FleetAction` (quarantine/revoke/release), signed `DecisionReceipt`, `ConvergencePhase` tracking, file-backed durable transport |
-| **Deterministic incident replay** | `replay::time_travel_engine`, `tools::replay_bundle` | `WorkflowTrace` capture, environment snapshot, schema versioning, `ReplayVerdict`, divergence detection, fsync-backed durable serialization |
-| **Counterfactual simulator** | `replay::time_travel_engine` + `sdk/verifier` | Re-execute the same trace under an alternative `--policy`; emit diff of decisions, blocked actions, and evidence |
-| **Compatibility lockstep oracle** | `runtime::lockstep_harness`, `api::compat_gate` | `verify lockstep` defaults to Bun+franken dyad; corpus L1 treats Node as spec (matching only Bun stays fail; `child_process` aborts remain fail) |
-| **Migration autopilot** | `migration::*`, BPET migration gate | Audit → rewrite → validate → rollout; unsigned JSON `MigrationRollbackPlan` (not Ed25519-signed); `migrate validate` is static+smoke, not `verify lockstep` |
-| **Signed extension registry** | `registry::*`, `extensions::artifact_contract` | Ed25519-signed artifacts, schema enforcement, assurance levels, GC, search |
-| **Threshold signature verification** | `security::threshold_sig` | k-of-n quorum, cached configurations, domain-separated and constant-time verification |
-| **MMR proofs** | `control_plane::mmr_proofs` | Merkle-Mountain-Range inclusion/prefix proofs, raw-hash internals, rebuild/sync from marker streams |
-| **Audience tokens** | `control_plane::audience_token` | Expiry, attenuation, domain separation, token chains with depth/root/leaf accessors, replay-resistant nonce window |
-| **Fork detection** | `control_plane::fork_detection` | State-vector hashing, rollback proofs, marker-proof verifier, `DetectionResult` (`Converged`/`Forked`/`GapDetected`/`RollbackDetected`) |
-| **Control epoch barriers** | `control_plane::control_epoch`, `epoch_transition_barrier` | Validity-window policy, `EpochRejectionReason` enum, fail-closed artifact rejection |
-| **Evidence ledger** | `observability::evidence_ledger` | Append-only Ed25519-signed decision log, hash-chain prev-entry linkage, replay-attack detection, bounded capacity with eviction, optional spill-to-disk |
-| **Remote capability tokens** | `security::remote_cap`, `remote::*` | Scope-bound, single-use-optional Ed25519 tokens with endpoint binding |
-| **DGIS adversarial topology** | `security::dgis`, `dgis::*` | Dependency contagion simulator, fragility model, SPOF detection, immunization planner |
-| **BPET evolution risk scorer** | `security::bpet`, `migration::bpet_migration_gate` | Phenotype feature extraction, topology risk delta during rollout |
-| **ATC adversarial trajectory checker** | `security::trajectory_gaming` + `federation::atc_*` | Camouflage detection severity, ATC participation weighting, reciprocity tracking |
-| **VEF execution receipts** | `vef::*` | Proof service / generator / scheduler / verifier, linked receipt chain, fail-closed verification |
-| **Verifier SDK** | `sdk/verifier` (`frankenengine-verifier-sdk`) | Independent bundle replay, capsule verification, counterfactual reasoning outside the producing runtime |
+| Primitive | Module | Properties | Reached by the default CLI |
+|---|---|---|---|
+| **Trust cards** | `supply_chain::trust_card` | Publisher identity, risk assessment, audit history, version tracking, camouflage hint, HMAC-signed snapshots, trusted-vs-untrusted source context | Yes: `trust`, `trust-card`, `run` preflight. Camouflage marking is library only |
+| **Revocation freshness gates** | `security::revocation_freshness{_gate}` | SafetyTier-based (Standard/Risky/Dangerous) age policies; `now >= expires_at` fail-closed semantics; bound to capability issuance | `revocation_freshness`: yes (`run` preflight, `remotecap issue`). `revocation_freshness_gate`: library only |
+| **Fleet quarantine state machine** | `api::fleet_quarantine`, `control_plane::fleet_transport` | `QuarantineScope`, `FleetAction` (quarantine/revoke/release), signed `DecisionReceipt`, `ConvergencePhase` tracking, file-backed durable transport | Partly: `fleet release/reconcile` use the durable file transport and signed decision receipts; `FleetControlManager` and the release-quorum logic are library only |
+| **Deterministic incident replay** | `replay::time_travel_engine`, `tools::replay_bundle` | `WorkflowTrace` capture, environment snapshot, schema versioning, `ReplayVerdict`, divergence detection, fsync-backed durable serialization | `tools::replay_bundle`: yes (`incident bundle/replay`, `run` incident capture). `time_travel_engine`: library only |
+| **Counterfactual simulator** | `replay::time_travel_engine` + `sdk/verifier` | Re-execute the same trace under an alternative `--policy`; emit diff of decisions, blocked actions, and evidence | `incident counterfactual` scores recorded evidence; `time_travel_engine` is library only |
+| **Compatibility lockstep oracle** | `runtime::lockstep_harness`, `api::compat_gate` | `verify lockstep` defaults to Bun+franken dyad; corpus L1 treats Node as spec (matching only Bun stays fail; `child_process` aborts remain fail) | `lockstep_harness`: yes (`verify lockstep`). `compat_gate`: `feature:control-plane` |
+| **Migration autopilot** | `migration::*`, BPET migration gate | Audit → rewrite → validate → rollout; unsigned JSON `MigrationRollbackPlan` (not Ed25519-signed); `migrate validate` is static+smoke, not `verify lockstep` | `migration::*`: yes (`migrate`). BPET migration gate: `feature:admin-tools` |
+| **Signed extension registry** | `supply_chain::extension_registry`; `registry::*`, `extensions::artifact_contract` | Ed25519-signed artifacts, schema enforcement, assurance levels, GC, search | Yes: the `registry` commands use `supply_chain::extension_registry`. `registry::*`: `feature:admin-tools`; `artifact_contract`: `feature:advanced-features` |
+| **Threshold signature verification** | `security::threshold_sig` | k-of-n quorum, cached configurations, domain-separated and constant-time verification | Library only |
+| **MMR proofs** | `control_plane::mmr_proofs` | Merkle-Mountain-Range inclusion/prefix proofs, raw-hash internals, rebuild/sync from marker streams | Library only |
+| **Audience tokens** | `control_plane::audience_token` | Expiry, attenuation, domain separation, token chains with depth/root/leaf accessors, replay-resistant nonce window | Library only |
+| **Fork detection** | `control_plane::fork_detection` | State-vector hashing, rollback proofs, marker-proof verifier, `DetectionResult` (`Converged`/`Forked`/`GapDetected`/`RollbackDetected`) | Library only |
+| **Control epoch barriers** | `control_plane::control_epoch`, `epoch_transition_barrier` | Validity-window policy, `EpochRejectionReason` enum, fail-closed artifact rejection | Library only (`runtime epoch` compares integers you pass it) |
+| **Evidence ledger** | `observability::evidence_ledger` | Append-only Ed25519-signed decision log, hash-chain prev-entry linkage, replay-attack detection, bounded capacity with eviction, optional spill-to-disk | Partly: `verify transparency-log` verifies entries and the sentinel signs escalation entries; no command appends to a ledger |
+| **Remote capability tokens** | `security::remote_cap`, `remote::*` | Scope-bound, single-use-optional Ed25519 tokens with endpoint binding | Yes: `remotecap`, `trust scan --deep/--audit`, `trust sync`, `init` |
+| **DGIS adversarial topology** | `security::dgis`, `dgis::*` | Dependency contagion simulator, fragility model, SPOF detection, immunization planner | Partly: the fragility model scores npm maintainer data in `trust scan --deep`; the contagion simulator, SPOF detection and immunization planner are library only |
+| **BPET evolution risk scorer** | `security::bpet`, `migration::bpet_migration_gate` | Phenotype feature extraction, topology risk delta during rollout | Library only (`bpet_migration_gate`: `feature:admin-tools`) |
+| **ATC adversarial trajectory checker** | `security::trajectory_gaming` + `federation::atc_*` | Camouflage detection severity, ATC participation weighting, reciprocity tracking | Library only (`federation::atc_*`: `feature:advanced-features`) |
+| **VEF execution receipts** | `vef::*` | Proof service / generator / scheduler / verifier, linked receipt chain, fail-closed verification | Partly: `debug evidence` verifies `vef::evidence_capsule`; the proof service, scheduler, verifier and receipt chain are library only |
+| **Verifier SDK** | `sdk/verifier` (`frankenengine-verifier-sdk`) | Independent bundle replay, capsule verification, counterfactual reasoning outside the producing runtime | Yes: `ltv attest/verify-as-of` call it; incident bundles the CLI writes verify with its `verify_incident_bundle`; it also builds standalone |
 
 ---
 
 ## The Trust Gradient
 
-Trust in franken-node is graduated rather than binary. The same
-extension flows through the same set of gates on every action, and the
-gates layer:
+Trust in franken-node is graduated rather than binary. The diagram is
+the full model for a signed extension; not every command passes every
+gate. `run` checks the dependency's trust card, the revocation frontier
+and the runtime profile. Registry admission, provenance and capability
+scope apply to the `registry` and `remotecap` commands, not to npm
+dependencies at `run`. The gates layer:
 
 ```mermaid
 flowchart TD
@@ -1218,7 +1226,7 @@ flowchart TD
     D --> E["Revocation freshness gate<br/><code>SafetyTier</code> vs. frontier age"]
     E --> F["Capability scope<br/>audience token + endpoint binding"]
     F --> G["Runtime policy profile<br/>strict | balanced | legacy-risky"]
-    G --> H["Decision receipt<br/>signed, linked into evidence ledger"]
+    G --> H["Decision receipt<br/>signed on export; ledger append not yet wired"]
 
     classDef identity fill:#1f6feb,color:#fff,stroke:#0a3b91;
     classDef storage fill:#5b3cc4,color:#fff,stroke:#3a2780;
@@ -1243,9 +1251,10 @@ The same model in words:
    read and verifies the signature in constant time.
 3. **Provenance.** `registry.require_provenance = true` rejects
    artifacts that did not arrive with attestation metadata.
-4. **Reputation.** Trust cards aggregate publisher behavior over time;
-   camouflage assessment penalizes trajectories that drift toward
-   adversarial patterns.
+4. **Reputation.** Trust cards aggregate what scans and syncs observe
+   (vulnerabilities, typosquats, package age, maintainer fragility).
+   Camouflage assessment can raise a card's risk, but no command feeds
+   it trajectory data yet.
 5. **Currency.** Revocation freshness gates refuse risky and dangerous
    actions when the local frontier is older than policy allows.
 6. **Audience.** Capability tokens are bound to specific endpoints and
@@ -1253,8 +1262,12 @@ The same model in words:
    another.
 7. **Profile.** The operator-selected runtime profile sets thresholds
    for every gate above, all at once.
-8. **Audit.** Every gate decision is recordable as a signed receipt
-   linked into the evidence ledger.
+8. **Audit.** Decisions leave receipts: every `run` writes a SHA-256
+   execution receipt, `trust revoke`/`trust quarantine`/`incident bundle`
+   export signed decision receipts with `--receipt-out`, `fleet
+   release/reconcile` sign their decision and convergence receipts, and
+   sentinel escalations are signed. No command appends these to the
+   evidence ledger yet.
 
 ---
 
