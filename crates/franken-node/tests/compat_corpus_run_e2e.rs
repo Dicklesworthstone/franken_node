@@ -742,6 +742,13 @@ fn outcome(
         timed_out: false,
         elapsed_ms: 1,
     };
+    // A failing case must actually diverge from the reference: the builder
+    // refuses a `fail` whose franken leg matches it (12bc351d1).
+    let mut franken_observation = observation.clone();
+    if status == "fail" {
+        franken_observation.stdout_digest = format!("sha256:{}", hex::encode(Sha256::digest(b"x")));
+        franken_observation.stdout_bytes = 1;
+    }
     CaseOutcome {
         test_id: test_id.to_string(),
         api_family: family.to_string(),
@@ -752,8 +759,8 @@ fn outcome(
             .then(|| "lockstep divergence: output mismatch vs bun reference".to_string()),
         investigation_bead_id: bead.map(str::to_string),
         runtime_observations: BTreeMap::from([
-            ("bun".to_string(), observation.clone()),
-            ("franken-engine-native".to_string(), observation),
+            ("bun".to_string(), observation),
+            ("franken-engine-native".to_string(), franken_observation),
         ]),
     }
 }

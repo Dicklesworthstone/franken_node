@@ -351,3 +351,120 @@ fn init_overwrite_and_backup_json_fails_closed() {
         "--overwrite and --backup-existing are mutually exclusive",
     );
 }
+
+fn init_file_action(report: &serde_json::Value, path_suffix: &str) -> String {
+    report["file_actions"]
+        .as_array()
+        .expect("init file_actions")
+        .iter()
+        .find(|action| {
+            action["path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with(path_suffix))
+        })
+        .and_then(|action| action["action"].as_str())
+        .unwrap_or_else(|| panic!("no init file action for {path_suffix}: {report}"))
+        .to_string()
+}
+
+/// bd-reality-20260923-26n9r.11: `init` provisions the RemoteCap signing key
+/// and a trust-scan egress token scoped to the public metadata endpoints, so
+/// `trust scan --deep/--audit` and `trust sync` work without env setup.
+#[test]
+fn init_provisions_trust_scan_remotecap_key_and_scoped_token() {
+    let Some(bin) = require_binary() else { return };
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let run = |args: &[&str]| {
+        Command::new(&bin)
+            .args(args)
+            .env_remove("FRANKEN_NODE_REMOTECAP_KEY")
+            .env_remove("FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN")
+            .current_dir(root)
+            .output()
+            .expect("invoke franken-node")
+    };
+    let init = |args: &[&str]| {
+        let output = run(args);
+        assert!(
+            output.status.success(),
+            "init failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).expect("init --json")
+    };
+    let key_suffix = ".franken-node/keys/remotecap-signing.key";
+    let token_suffix = ".franken-node/remotecap/trust-scan-token.json";
+
+    let first = init(&["init", "--profile", "balanced", "--out-dir", ".", "--json"]);
+    assert_eq!(init_file_action(&first, key_suffix), "created");
+    assert_eq!(init_file_action(&first, token_suffix), "created");
+    let key = std::fs::read_to_string(root.join(key_suffix)).expect("read signing key");
+    assert_eq!(key.len(), 64, "32 random bytes, hex encoded");
+    assert!(key.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        for suffix in [key_suffix, token_suffix] {
+            let mode = std::fs::metadata(root.join(suffix))
+                .expect("stat provisioned file")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "{suffix} must be private");
+        }
+    }
+    let gitignore =
+        std::fs::read_to_string(root.join(".franken-node/.gitignore")).expect("read .gitignore");
+    assert!(gitignore.contains("remotecap/trust-scan-token.json"));
+
+    // The token verifies under the provisioned key for the metadata hosts and
+    // for nothing else.
+    let verify = |endpoint: &str| {
+        run(&[
+            "remotecap",
+            "verify",
+            "--token-file",
+            token_suffix,
+            "--operation",
+            "network_egress",
+            "--endpoint",
+            endpoint,
+            "--json",
+        ])
+    };
+    for endpoint in [
+        "https://registry.npmjs.org/lodash",
+        "https://api.deps.dev/v3alpha/systems/npm/packages/lodash",
+        "https://api.osv.dev/v1/query",
+    ] {
+        let output = verify(endpoint);
+        assert!(
+            output.status.success(),
+            "{endpoint}: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert!(
+        !verify("https://evil.example/exfil").status.success(),
+        "the default token must not authorize other hosts"
+    );
+
+    // A second init keeps both.
+    let token_before = std::fs::read(root.join(token_suffix)).expect("read token");
+    let second = init(&[
+        "init",
+        "--profile",
+        "balanced",
+        "--out-dir",
+        ".",
+        "--overwrite",
+        "--json",
+    ]);
+    assert_eq!(init_file_action(&second, key_suffix), "skipped_existing");
+    assert_eq!(init_file_action(&second, token_suffix), "skipped_existing");
+    assert_eq!(
+        std::fs::read(root.join(token_suffix)).expect("reread token"),
+        token_before
+    );
+}

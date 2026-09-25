@@ -621,6 +621,10 @@ fn clean_compute_run_surfaces_real_exit_zero_and_signed_receipt() {
         "the signed receipt must record the SAME real exit code as the dispatch"
     );
     assert_eq!(report["success"].as_bool(), Some(true));
+    assert!(
+        report.get("containment_verdict").is_none(),
+        "an ordinary exit carries no containment verdict: {report}"
+    );
 
     // bd-5r99w.1: captured output is the real (here empty) console stream, never
     // the old Rust `{:?}` debug dump of the orchestrator result.
@@ -1175,5 +1179,42 @@ fn run_directory_target_refuses_main_outside_the_package() {
         outcome.stderr.contains("must be a relative path inside"),
         "the refusal must name the rule, got:\n{}",
         outcome.stderr
+    );
+}
+
+/// bd-reality-20260923-26n9r.5: a native exit code of 91-95 is the engine's
+/// containment verdict, not the program's exit status, and `run` says so in
+/// both output modes. The only reproducer at hand is the engine false positive
+/// bd-pgzo7 (a benign JSON-heavy program is stopped into Sandbox, exit 92).
+/// When bd-pgzo7 is fixed this program exits 0 and this test must move to a
+/// true-positive containment case instead.
+#[test]
+fn containment_exit_is_labelled_as_a_containment_verdict() {
+    const JSON_HEAVY_APP: &str = "const rows = [];\n\
+        for (let i = 0; i < 2000; i++) rows.push({ id: i, name: 'row-' + i, tags: ['a', 'b'], ok: i % 2 === 0 });\n\
+        let t = '';\n\
+        for (let r = 0; r < 20; r++) t = JSON.stringify(JSON.parse(JSON.stringify(rows)));\n\
+        console.log(t.length);\n";
+
+    let (_dir, outcome) = run_app(JSON_HEAVY_APP, &["--json"]);
+    assert_eq!(
+        outcome.exit_code,
+        Some(92),
+        "bd-pgzo7 reproducer changed behaviour; stdout=\n{}\nstderr=\n{}",
+        outcome.stdout,
+        outcome.stderr
+    );
+    let report: Value = serde_json::from_str(&outcome.stdout).expect("run --json report");
+    assert_eq!(report["containment_verdict"], "Sandbox", "{report}");
+    assert_eq!(report["dispatch"]["captured_output"]["stdout"], "112781\n");
+
+    let (_dir, human) = run_app(JSON_HEAVY_APP, &[]);
+    assert_eq!(human.exit_code, Some(92));
+    assert!(
+        human.stdout.contains(
+            "runtime containment: exit 92 is the engine's containment verdict Sandbox, not a program exit status"
+        ),
+        "stdout=\n{}",
+        human.stdout
     );
 }

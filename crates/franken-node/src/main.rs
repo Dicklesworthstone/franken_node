@@ -311,6 +311,16 @@ const TRUST_SCAN_NPM_REGISTRY_BASE_URL: &str = "https://registry.npmjs.org";
 const TRUST_SCAN_OSV_QUERY_URL: &str = "https://api.osv.dev/v1/query";
 const TRUST_SCAN_DEPS_DEV_BASE_URL: &str = "https://api.deps.dev/v3alpha";
 const TRUST_SCAN_REMOTECAP_TOKEN_ENV: &str = "FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN";
+/// RemoteCap signing key provisioned by `init`, used when
+/// `FRANKEN_NODE_REMOTECAP_KEY` is unset (relative to the project root).
+const REMOTECAP_SIGNING_KEY_RELATIVE_PATH: &str = ".franken-node/keys/remotecap-signing.key";
+/// Default trust-scan egress token issued by `init`, used when
+/// `FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN` is unset (relative to the
+/// project root).
+const TRUST_SCAN_DEFAULT_TOKEN_RELATIVE_PATH: &str =
+    ".franken-node/remotecap/trust-scan-token.json";
+/// Lifetime of the default trust-scan token; re-running `init` renews it.
+const TRUST_SCAN_DEFAULT_TOKEN_TTL_SECS: u64 = 90 * 24 * 60 * 60;
 #[cfg(feature = "http-client")]
 const TRUST_SCAN_HTTP_TIMEOUT_MS_ENV: &str = "FRANKEN_NODE_TRUST_SCAN_HTTP_TIMEOUT_MS";
 #[cfg(feature = "http-client")]
@@ -851,6 +861,10 @@ struct RunCommandOutput {
     dispatch: ops::engine_dispatcher::RunDispatchReport,
     receipt: RunExecutionReceipt,
     receipt_path: String,
+    /// The engine's containment verdict when the exit code is one
+    /// (`native_containment_action`); absent for ordinary program exits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    containment_verdict: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -6211,12 +6225,18 @@ fn handle_runtime_command(command: RuntimeCommand) -> Result<()> {
 }
 
 fn resolve_remotecap_signing_key() -> Result<String> {
+    resolve_remotecap_signing_key_for(Path::new("."))
+}
+
+/// `FRANKEN_NODE_REMOTECAP_KEY`, else the key `init` provisioned under
+/// `project_root` (bd-reality-20260923-26n9r.11).
+fn resolve_remotecap_signing_key_for(project_root: &Path) -> Result<String> {
     match std::env::var("FRANKEN_NODE_REMOTECAP_KEY") {
-        Ok(key) if !key.trim().is_empty() => Ok(key),
+        Ok(key) if !key.trim().is_empty() => return Ok(key),
         Ok(_) => {
             #[cfg(test)]
             {
-                Ok(["franken-node", "dev", "remotecap", "key"].join("-"))
+                return Ok(["franken-node", "dev", "remotecap", "key"].join("-"));
             }
             #[cfg(not(test))]
             {
@@ -6225,7 +6245,21 @@ fn resolve_remotecap_signing_key() -> Result<String> {
                 )
             }
         }
-        Err(_) => {
+        Err(_) => {}
+    }
+    let key_path = project_root.join(REMOTECAP_SIGNING_KEY_RELATIVE_PATH);
+    match crate::bounded_read(&key_path, 4096) {
+        Ok(raw) => {
+            let key = String::from_utf8(raw).with_context(|| {
+                format!("RemoteCap signing key {} is not UTF-8", key_path.display())
+            })?;
+            let key = key.trim();
+            if key.is_empty() {
+                anyhow::bail!("RemoteCap signing key {} is empty", key_path.display());
+            }
+            Ok(key.to_string())
+        }
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
             #[cfg(test)]
             {
                 Ok(["franken-node", "dev", "remotecap", "key"].join("-"))
@@ -6233,10 +6267,17 @@ fn resolve_remotecap_signing_key() -> Result<String> {
             #[cfg(not(test))]
             {
                 anyhow::bail!(
-                    "FRANKEN_NODE_REMOTECAP_KEY environment variable is not set - production deployments require an explicit signing key"
+                    "FRANKEN_NODE_REMOTECAP_KEY is not set and no RemoteCap signing key exists at {}; run `franken-node init` to provision one",
+                    key_path.display()
                 )
             }
         }
+        Err(source) => Err(source).with_context(|| {
+            format!(
+                "failed reading RemoteCap signing key {}",
+                key_path.display()
+            )
+        }),
     }
 }
 
@@ -7820,8 +7861,10 @@ const STATE_BOOTSTRAP_SUBDIRS: &[&str] = &[
 /// Contents for .franken-node/.gitignore — exclude sensitive and transient state.
 const STATE_GITIGNORE_CONTENTS: &str = "\
 # franken-node state — managed automatically
-# Exclude signing keys and transient execution receipts from version control.
+# Exclude signing keys, bearer tokens and transient execution receipts from
+# version control.
 keys/
+remotecap/trust-scan-token.json
 state/execution-receipts/
 ";
 
@@ -7933,6 +7976,111 @@ fn bootstrap_state_directory(
         "state directory bootstrap complete"
     );
 
+    Ok(actions)
+}
+
+/// Provision the RemoteCap signing key and the default trust-scan egress
+/// token under `root` (bd-reality-20260923-26n9r.11).
+///
+/// Without a token, `trust scan --deep/--audit` and `trust sync` are denied
+/// egress, and `trust sync --force` is the only way to record the revocation
+/// frontier that `remotecap issue` requires, so a fresh project could never
+/// obtain one. `init` therefore issues it directly, with a fixed scope: network
+/// egress to the three public metadata endpoints trust scanning reads. With
+/// `FRANKEN_NODE_REMOTECAP_KEY` set, no key file is written and the token is
+/// signed with that key. An existing key is kept; the token is re-issued only
+/// when missing or expired.
+fn provision_trust_scan_remotecap(root: &Path, now_secs: u64) -> Result<Vec<InitFileAction>> {
+    let mut actions = Vec::new();
+    let key_path = root.join(REMOTECAP_SIGNING_KEY_RELATIVE_PATH);
+    if key_path.exists() {
+        actions.push(InitFileAction {
+            path: key_path.display().to_string(),
+            action: InitFileActionKind::SkippedExisting,
+            backup_path: None,
+        });
+    } else if std::env::var_os("FRANKEN_NODE_REMOTECAP_KEY").is_none() {
+        use rand::RngCore as _;
+        use std::io::Write as _;
+        let mut key_bytes = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut key_bytes);
+        let parent = key_path.parent().unwrap_or(root);
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed creating {}", parent.display()))?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&key_path)
+            .with_context(|| format!("failed creating {}", key_path.display()))?;
+        file.write_all(hex::encode(key_bytes).as_bytes())
+            .and_then(|()| file.sync_all())
+            .with_context(|| format!("failed writing {}", key_path.display()))?;
+        actions.push(InitFileAction {
+            path: key_path.display().to_string(),
+            action: InitFileActionKind::Created,
+            backup_path: None,
+        });
+    }
+
+    let token_path = root.join(TRUST_SCAN_DEFAULT_TOKEN_RELATIVE_PATH);
+    let current = read_remotecap_token(&token_path)
+        .ok()
+        .filter(|cap| now_secs < cap.expires_at_epoch_secs());
+    if current.is_some() {
+        actions.push(InitFileAction {
+            path: token_path.display().to_string(),
+            action: InitFileActionKind::SkippedExisting,
+            backup_path: None,
+        });
+        return Ok(actions);
+    }
+    let signing_key = resolve_remotecap_signing_key_for(root)?;
+    let provider = CapabilityProvider::try_new(&signing_key)
+        .map_err(|err| anyhow::anyhow!("failed creating RemoteCap provider: {err}"))?;
+    let scope = RemoteScope::new(
+        vec![RemoteOperation::NetworkEgress],
+        vec![
+            TRUST_SCAN_NPM_REGISTRY_BASE_URL.to_string(),
+            TRUST_SCAN_DEPS_DEV_BASE_URL.to_string(),
+            TRUST_SCAN_OSV_QUERY_URL.to_string(),
+        ],
+    );
+    let (cap, _) = provider
+        .issue(
+            "franken-node-init",
+            scope,
+            now_secs,
+            TRUST_SCAN_DEFAULT_TOKEN_TTL_SECS,
+            true,
+            false,
+            "trace-init-trust-scan-remotecap",
+        )
+        .map_err(|err| anyhow::anyhow!("failed issuing the default trust-scan token: {err}"))?;
+    let replaced = token_path.exists();
+    write_bytes_atomically(
+        &token_path,
+        &serde_json::to_vec_pretty(&serde_json::json!({ "token": cap }))?,
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed restricting {}", token_path.display()))?;
+    }
+    actions.push(InitFileAction {
+        path: token_path.display().to_string(),
+        action: if replaced {
+            InitFileActionKind::Overwritten
+        } else {
+            InitFileActionKind::Created
+        },
+        backup_path: None,
+    });
     Ok(actions)
 }
 
@@ -10629,19 +10777,25 @@ fn handle_trust_release_command(args: &cli::TrustReleaseArgs) -> Result<()> {
 /// Name the engine containment verdict behind a native exit code in 91..=95
 /// (engine_dispatcher's `exit_code_for_containment_severity`), so an operator
 /// does not read it as the program's own exit status.
-fn native_containment_note(runtime: &str, exit_code: Option<i32>) -> Option<String> {
+/// The engine's containment verdict encoded in a native exit code (91-95),
+/// or `None` for an ordinary program exit status.
+fn native_containment_action(runtime: &str, exit_code: Option<i32>) -> Option<&'static str> {
     if runtime != "franken_engine" {
         return None;
     }
+    match exit_code? {
+        91 => Some("Challenge"),
+        92 => Some("Sandbox"),
+        93 => Some("Suspend"),
+        94 => Some("Terminate"),
+        95 => Some("Quarantine"),
+        _ => None,
+    }
+}
+
+fn native_containment_note(runtime: &str, exit_code: Option<i32>) -> Option<String> {
+    let action = native_containment_action(runtime, exit_code)?;
     let code = exit_code?;
-    let action = match code {
-        91 => "Challenge",
-        92 => "Sandbox",
-        93 => "Suspend",
-        94 => "Terminate",
-        95 => "Quarantine",
-        _ => return None,
-    };
     Some(format!(
         "runtime containment: exit {code} is the engine's containment verdict {action}, not a program exit status"
     ))
@@ -10781,6 +10935,7 @@ fn emit_run_completion_output(
             dispatch: dispatch.clone(),
             receipt: receipt.clone(),
             receipt_path: receipt_path.display().to_string(),
+            containment_verdict: native_containment_action(&dispatch.runtime, dispatch.exit_code),
         };
         println!(
             "{}",
@@ -18015,10 +18170,23 @@ impl TrustScanRemoteCapContext {
     }
 }
 
-fn trust_scan_remote_cap_context(now_epoch_secs: u64) -> Result<TrustScanRemoteCapContext> {
-    let cap = match std::env::var_os(TRUST_SCAN_REMOTECAP_TOKEN_ENV) {
-        Some(path) if !path.as_os_str().is_empty() => {
-            let token_path = PathBuf::from(path);
+fn trust_scan_remote_cap_context(
+    project_root: &Path,
+    now_epoch_secs: u64,
+) -> Result<TrustScanRemoteCapContext> {
+    let (token_path, default_token) = match std::env::var_os(TRUST_SCAN_REMOTECAP_TOKEN_ENV) {
+        Some(path) if !path.as_os_str().is_empty() => (Some(PathBuf::from(path)), false),
+        Some(_) => {
+            anyhow::bail!("{TRUST_SCAN_REMOTECAP_TOKEN_ENV} is empty");
+        }
+        // The token `init` issued, when present (bd-reality-20260923-26n9r.11).
+        None => {
+            let path = project_root.join(TRUST_SCAN_DEFAULT_TOKEN_RELATIVE_PATH);
+            (path.is_file().then_some(path), true)
+        }
+    };
+    let cap = match token_path {
+        Some(token_path) => {
             let cap = read_remotecap_token(&token_path)?;
             let state = load_remotecap_cli_state()?;
             if state.revoked_token_ids.contains(cap.token_id()) {
@@ -18026,14 +18194,18 @@ fn trust_scan_remote_cap_context(now_epoch_secs: u64) -> Result<TrustScanRemoteC
                     token_id: cap.token_id().to_string(),
                 }));
             }
+            if default_token && now_epoch_secs >= cap.expires_at_epoch_secs() {
+                anyhow::bail!(
+                    "the default trust-scan RemoteCap token {} expired at epoch {}; re-run `franken-node init` to renew it",
+                    token_path.display(),
+                    cap.expires_at_epoch_secs()
+                );
+            }
             Some(cap)
-        }
-        Some(_) => {
-            anyhow::bail!("{TRUST_SCAN_REMOTECAP_TOKEN_ENV} is empty");
         }
         None => None,
     };
-    let signing_key = resolve_remotecap_signing_key()?;
+    let signing_key = resolve_remotecap_signing_key_for(project_root)?;
     let gate = match cap.as_ref() {
         Some(cap) => remotecap_cli_capability_gate(&signing_key, cap)?,
         None => CapabilityGate::try_new(&signing_key)?,
@@ -18138,7 +18310,8 @@ fn fetch_trust_scan_audit_metadata(
     dependency_name: &str,
     resolved_version: Option<&str>,
 ) -> Result<TrustScanAuditMetadata> {
-    let mut remote_cap = trust_scan_remote_cap_context(now_unix_secs())?;
+    // `trust sync` works on the registry under the current directory.
+    let mut remote_cap = trust_scan_remote_cap_context(Path::new("."), now_unix_secs())?;
     fetch_trust_scan_audit_metadata_with_remote_cap(
         dependency_name,
         resolved_version,
@@ -18551,7 +18724,7 @@ fn run_trust_scan(project_root: &Path, deep: bool, audit: bool) -> Result<TrustS
     let mut refreshed_cards = 0usize;
     let mut skipped_existing = 0usize;
     let mut remote_cap_context = if deep || audit {
-        Some(trust_scan_remote_cap_context(now_secs)?)
+        Some(trust_scan_remote_cap_context(&project_root, now_secs)?)
     } else {
         None
     };
@@ -30840,6 +31013,10 @@ fn main() -> Result<()> {
                     &resolved.config.trust,
                 ) {
                     Ok(state_actions) => file_actions.extend(state_actions),
+                    Err(err) => return init_fail(json, err),
+                }
+                match provision_trust_scan_remotecap(bootstrap_root, now_unix_secs()) {
+                    Ok(remotecap_actions) => file_actions.extend(remotecap_actions),
                     Err(err) => return init_fail(json, err),
                 }
             }

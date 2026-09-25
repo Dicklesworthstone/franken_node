@@ -389,13 +389,15 @@ franken-node verify release ./release-dir --key-dir ./trusted-public-keys
    franken-node trust scan ./my-app --deep --audit
    franken-node trust sync --force
    ```
-   `--deep`/`--audit` fetch registry and OSV data through a scoped remote
-   capability. They need a signing key in `FRANKEN_NODE_REMOTECAP_KEY` and a
-   token from `franken-node remotecap issue` in
-   `FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN`; without them the scan fails
-   closed. Issuing that token is itself gated on a frontier recorded within
-   the last 5 minutes, so in a fresh workspace run `trust sync --force` once
-   before `remotecap issue` (an empty registry syncs without network access).
+   `--deep`/`--audit` and `trust sync` fetch registry and OSV data through
+   a scoped remote capability. `init` provisions it: a signing key at
+   `.franken-node/keys/remotecap-signing.key` (mode 0600) and a 90-day token
+   at `.franken-node/remotecap/trust-scan-token.json` whose only scope is
+   network egress to `registry.npmjs.org`, `api.deps.dev` and the OSV query
+   endpoint. Re-running `init` renews an expired token; `remotecap revoke
+   --token-file` revokes it. `FRANKEN_NODE_REMOTECAP_KEY` and
+   `FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN` override both. Without a
+   token the scan fails closed.
    Under `strict`, `run` admits a tracked dependency only if the recorded
    frontier is under 5 minutes old; `balanced` warns once it is over an hour
    old or missing.
@@ -1915,6 +1917,8 @@ bootstrap layout is:
 | `.franken-node/state/trust-card-registry.v1.db` | Durable trust-card registry store (WAL frankensqlite; the legacy `.v1.json` pair is a one-time import source only) |
 | `.franken-node/safe-mode/state.json` | Unsigned JSON safe-mode controller persist (not Ed25519-signed); override with `--state-dir` |
 | `.franken-node/keys/` | Signing key material; excluded from version control by the generated `.gitignore` |
+| `.franken-node/keys/remotecap-signing.key` | RemoteCap signing key (mode 0600), used when `FRANKEN_NODE_REMOTECAP_KEY` is unset |
+| `.franken-node/remotecap/trust-scan-token.json` | Default trust-scan egress token (mode 0600, git-ignored), used when `FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN` is unset |
 
 Additional subtrees are materialized lazily by individual subsystems
 (`.franken-node/safe-mode/state.json` unsigned JSON, proof pipeline
@@ -2969,6 +2973,10 @@ Profile selection changes concrete behavior. The salient differences:
 | `registry.require_signatures` | required | required | may be relaxed |
 | `registry.require_provenance` | required | required | may be relaxed |
 | Compatibility mode | tightest | balanced | permissive |
+| Guest file writes (`fs.writeFileSync` and friends; confined to the project root) | denied | denied | allowed |
+| `process.platform`, `process.arch` and other allowlisted `process` shape reads | denied | denied | allowed |
+| `process.env` reads | denied | denied | denied (no profile grants them yet) |
+| Compatibility corpus pass rate (560 cases, 2026-09-25, same binary) | 0.00%: every program, even `console.log('hello')`, prints its output and then exits 92 (engine containment verdict Sandbox; engine bug bd-pgzo7) | 78.93% (fs 2/50) | 86.61% |
 | SSRF default | block | block | block |
 | Safe-mode auto-entry on crash-loop | not implemented (the crash-loop detector has no caller) | same | same |
 | Camouflage severity threshold for risk bump | constant 0.50, not yet per profile | same | same |
@@ -3312,8 +3320,13 @@ one pass.
 
 ### Is this a drop-in replacement for Node or Bun?
 
-No. The measured compatibility corpus is the L1 spec (currently 69.82%,
-391/560 per `artifacts/13/compatibility_corpus_results.json`) and `child_process` native-eval aborts remain fail, not pass.
+No. The measured compatibility corpus is the L1 spec. Its artifact of
+record says 69.82% (391/560, `artifacts/13/compatibility_corpus_results.json`);
+a 2026-09-25 re-measurement on one host measured 78.93% under the default
+`balanced` profile, which refuses file writes and `process.platform` by
+policy, and 86.61% under `legacy-risky` (see CLAIM-001 for provenance
+limits). `child_process` is 0/30 in every profile: native-eval aborts
+remain fail, not pass.
 `verify lockstep` defaults to a Bun+franken dyad for hosts without real
 Node.js; that dyad is not the spec. When `--runtimes` includes `node` as
 real Node.js, Node is the spec and matching only Bun stays fail. Inspect

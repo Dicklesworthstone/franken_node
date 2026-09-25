@@ -55,6 +55,21 @@ Each claim entry uses this structure:
   host, engine build, node/bun versions, or fixture-tree revision, so
   cross-host reproduction is currently unverifiable; treat headline deltas
   as within-measurement-uncertainty until provenance is pinned (bd-kx70h).
+  PER-PROFILE MEASUREMENT (2026-09-25, bd-reality-20260923-26n9r.12): one
+  release binary (sha256 prefix 3516d452e6872f40; franken_node at or after
+  02dbe4168 with other agents' uncommitted edits; engine approximately
+  99426e910, not bound), node v22.2.0 + bun 1.4.2, same host, back to back
+  via `ops compat-corpus-run --require-node-reference --policy <p>`:
+  `balanced` (the default profile) 442/560 = 78.93%; `legacy-risky`
+  485/560 = 86.61%; `strict` 0/560 = 0.00% (even a one-line
+  `console.log('hello')` prints its output and then exits 92, the engine's
+  Sandbox containment verdict; engine bd-pgzo7). Between balanced and
+  legacy-risky, every family scores the same
+  except fs (2/50 vs 43/50: balanced grants no fs_write capability, so any
+  file write is refused) and os (28/30 vs 30/30: balanced lowers with a
+  deny-all ambient grant, so `process.platform` is refused). The artifact
+  of record above was NOT regenerated from this dirty, unbound build. The
+  headline for operators is the balanced figure.
 
 ### CLAIM-002: ≥3× migration throughput vs. baseline
 
