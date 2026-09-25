@@ -30,6 +30,11 @@
 #      form documented in the README.
 #   8. `verify recovery-runbook --readiness-input <path>` must accept the
 #      long-flag form documented in the README.
+#   9-11. `run` executes guest JS, `trust scan` flags a typosquat, and `init`
+#      provisions the trust-scan token and receipt signing key.
+#  12. A run whose egress the SSRF gate denies is captured as an incident
+#      that bundles and replays against init's public key, and the evidence
+#      ledger verifies.
 #
 # Exit codes:
 #   0  — all checks passed
@@ -247,6 +252,35 @@ if [[ -f "$token" && -f .franken-node/keys/receipt-signing.key ]] \
 else
   echo "  token present: $([[ -f "$token" ]] && echo yes || echo no)" >&2
   record FAIL "init did not provision a working, scoped trust-scan token"
+fi
+
+# ---------------------------------------------------------------------------
+# Check 12: README incident flow — a run whose egress the SSRF gate denies is
+# captured as an incident, exported as a signed bundle, and replays against
+# the public key init wrote; the run is also in the verified evidence ledger.
+# ---------------------------------------------------------------------------
+echo "[12] SSRF-denied run -> incident bundle -> replay; evidence ledger verifies"
+printf '%s\n' "fetch('http://127.0.0.1:9/x').then(r => console.log(r.status)).catch(() => console.log('denied'));" > egress.js
+"$BIN" run ./egress.js --policy balanced --json >/dev/null 2>&1 || true
+incident_id="$(ls .franken-node/state/incidents 2>/dev/null | head -1 || true)"
+replay_ok=false
+if [[ -n "$incident_id" ]] \
+  && "$BIN" incident bundle --id "$incident_id" --verify --json >bundle.json 2>bundle.err \
+  && "$BIN" incident replay --bundle "${incident_id}.fnbundle" \
+       --trusted-public-key .franken-node/keys/receipt-signing.pub >replay.out 2>&1 \
+  && grep -q 'matched=true' replay.out; then
+  replay_ok=true
+fi
+ledger_status="$("$BIN" verify transparency-log .franken-node/state/evidence-ledger.db \
+  --public-key .franken-node/keys/receipt-signing.pub --json 2>ledger.err \
+  | sed -n 's/^ *"status": *"\([a-z]*\)".*/\1/p' | head -1 || true)"
+if [[ "$replay_ok" == true && "$ledger_status" == "valid" ]]; then
+  record PASS "incident ${incident_id} bundled and replayed against init's key; evidence ledger valid"
+else
+  echo "  incident=${incident_id:-<none>} replay_ok=$replay_ok ledger_status=${ledger_status:-<none>}" >&2
+  [[ -f replay.out ]] && head -3 replay.out >&2
+  [[ -s ledger.err ]] && head -3 ledger.err >&2
+  record FAIL "incident bundle/replay or evidence-ledger verification failed"
 fi
 
 # ---------------------------------------------------------------------------
