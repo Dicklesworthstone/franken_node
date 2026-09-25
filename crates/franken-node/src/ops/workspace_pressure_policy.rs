@@ -3667,8 +3667,10 @@ pub fn get_workspace_disk_space() -> Result<u64, Box<dyn std::error::Error>> {
     match get_available_disk_space(".") {
         Ok(bytes) => Ok(bytes),
         Err(e) => {
-            // Log error but don't fail - return conservative estimate
-            eprintln!("Warning: disk space detection failed: {e}. Using conservative estimate.");
+            // Log error but don't fail - return conservative estimate. Not
+            // eprintln!: doctor --structured-logs-jsonl stderr must stay pure
+            // JSONL, and the estimate is visible in the pressure report.
+            tracing::warn!(error = %e, "disk space detection failed; using conservative estimate");
             Ok(1_000_000_000) // 1GB conservative fallback
         }
     }
@@ -3683,7 +3685,9 @@ pub fn get_active_file_reservations() -> Result<u32, Box<dyn std::error::Error>>
         return Ok(count);
     }
 
-    eprintln!("Warning: Agent Mail reservation count unavailable. Using conservative estimate.");
+    // Not eprintln!: doctor --structured-logs-jsonl stderr must stay pure
+    // JSONL; the report already says coordination=degraded.
+    tracing::warn!("Agent Mail reservation count unavailable; using conservative estimate");
     Ok(5)
 }
 
