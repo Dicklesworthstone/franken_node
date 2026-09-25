@@ -205,7 +205,14 @@ def check_claims_have_artifacts() -> dict:
 
 
 def check_evidence_verdicts() -> dict:
-    """CLAIM-VERDICTS: Check that referenced evidence JSON files contain verdicts."""
+    """CLAIM-VERDICTS: cited JSON evidence parses, and any verdict it records is
+    a non-empty string.
+
+    Raw measurement data (corpus results, signed timing census) carries no
+    verdict: each claim's verification command recomputes that live, and a
+    committed verdict file only goes stale (bd-3agp's check_report.json said
+    PASS for months after the live gate turned FAIL).
+    """
     check = {"id": "CLAIM-VERDICTS", "status": "PASS", "details": {"claims": []}}
     if not REGISTRY_PATH.exists():
         check["status"] = "FAIL"
@@ -230,9 +237,12 @@ def check_evidence_verdicts() -> dict:
                 continue
             try:
                 data = json.loads(full.read_text())
-                if "verdict" not in data:
+                verdict = data.get("verdict") if isinstance(data, dict) else None
+                if isinstance(data, dict) and "verdict" in data and not (
+                    isinstance(verdict, str) and verdict.strip()
+                ):
                     entry["status"] = "FAIL"
-                    entry["error"] = f"{p}: missing 'verdict' field"
+                    entry["error"] = f"{p}: 'verdict' must be a non-empty string"
                     check["status"] = "FAIL"
             except json.JSONDecodeError:
                 entry["status"] = "FAIL"

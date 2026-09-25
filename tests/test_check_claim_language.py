@@ -155,6 +155,31 @@ def test_artifact_paths_documented_code_span_form():
     ]
 
 
+def _registry_with_evidence(tmp_path, monkeypatch, artifact: dict):
+    import check_claim_language
+    (tmp_path / "artifacts").mkdir()
+    (tmp_path / "artifacts" / "data.json").write_text(json.dumps(artifact))
+    registry = tmp_path / "CLAIMS_REGISTRY.md"
+    registry.write_text(
+        "### CLAIM-001: Example\n"
+        "- **Category**: migration\n"
+        "- **Evidence artifact**: `artifacts/data.json`\n"
+    )
+    monkeypatch.setattr(check_claim_language, "ROOT", tmp_path)
+    monkeypatch.setattr(check_claim_language, "REGISTRY_PATH", registry)
+    return check_claim_language
+
+
+def test_raw_measurement_json_without_verdict_passes(tmp_path, monkeypatch):
+    gate = _registry_with_evidence(tmp_path, monkeypatch, {"velocity_ratio_bp": 12353})
+    assert gate.check_evidence_verdicts()["status"] == "PASS"
+
+
+def test_recorded_verdict_must_be_non_empty(tmp_path, monkeypatch):
+    gate = _registry_with_evidence(tmp_path, monkeypatch, {"verdict": ""})
+    assert gate.check_evidence_verdicts()["status"] == "FAIL"
+
+
 def test_prose_only_evidence_cites_no_path():
     from check_claim_language import artifact_paths
     assert artifact_paths("60+ files per memory; grep `rg -n 'x' src/`") == []
