@@ -344,6 +344,13 @@ install_from_source() {
   info "Source bootstrap: ${REPO}@${NODE_REF} + ${ENGINE_REPO}@${ENGINE_REF} (side-by-side)"
   clone_ref "$REPO" "$node_dir" "$NODE_REF" || die "failed to clone ${REPO}@${NODE_REF}"
   clone_ref "$ENGINE_REPO" "$engine_dir" "$ENGINE_REF" || die "failed to clone ${ENGINE_REPO}@${ENGINE_REF}"
+  # The workspace also resolves these siblings by relative path (frankentui
+  # is a dependency; fastapi_rust and sqlmodel_rust are dev-dependencies that
+  # Cargo still loads to resolve the workspace).
+  local sibling
+  for sibling in frankentui fastapi_rust sqlmodel_rust; do
+    clone_ref "$sibling" "${src}/${sibling}" main || die "failed to clone ${sibling}@main"
+  done
   info "Building $BINARY_NAME from source (links franken_engine — this can take a while)"
   run_with_spinner "cargo build --release" \
     env RCH_CARGO_WRAPPER_BYPASS=1 \

@@ -220,14 +220,17 @@ assert2 = "0.4.0"
 # in fastapi-rust, so with `default-features = false` alone that target failed to
 # compile with E0432/E0425. This is a dev-dependency and the workspace uses
 # resolver = "2", so the feature does not leak into non-test builds.
-fastapi_rust = { package = "fastapi-rust", path = "/dp/fastapi_rust/crates/fastapi", default-features = false, features = [
+# Sibling checkouts are referenced relatively (like franken_engine above), so
+# a side-by-side source checkout builds without a /dp symlink
+# (bd-reality-20260923-26n9r.9).
+fastapi_rust = { package = "fastapi-rust", path = "../../../fastapi_rust/crates/fastapi", default-features = false, features = [
     "testing",
 ] }
 tokio = { workspace = true, features = ["sync", "time"] }
 regex = "1.11.1"
-sqlmodel = { path = "/dp/sqlmodel_rust/crates/sqlmodel", default-features = false }
-sqlmodel-core = { path = "/dp/sqlmodel_rust/crates/sqlmodel-core" }
-sqlmodel-schema = { path = "/dp/sqlmodel_rust/crates/sqlmodel-schema" }
+sqlmodel = { path = "../../../sqlmodel_rust/crates/sqlmodel", default-features = false }
+sqlmodel-core = { path = "../../../sqlmodel_rust/crates/sqlmodel-core" }
+sqlmodel-schema = { path = "../../../sqlmodel_rust/crates/sqlmodel-schema" }
 syn = { version = "2.0", features = ["full"] }
 tracing-subscriber = { workspace = true }
 insta = { version = "1.40", features = ["json", "filters", "redactions"] }
