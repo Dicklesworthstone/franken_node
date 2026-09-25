@@ -88,6 +88,7 @@ def main():
         # Check both docs/ and root-level paths
         candidates = [
             ROOT / "docs" / ref,
+            ROOT / "docs" / "plans" / ref,
             ROOT / ref,
         ]
         found = any(c.exists() for c in candidates)
