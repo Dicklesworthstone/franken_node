@@ -25,36 +25,39 @@ on:
       - ".github/workflows/cli-goldens-gate.yml"
   workflow_dispatch: {}
 
+# Pushes to main arrive every few minutes and the engine build takes hours;
+# cancelling in-progress runs on main meant no run ever finished. Only PR runs
+# cancel; on main the running job completes and only the newest push waits.
+concurrency:
+  group: cli-goldens-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   cli-subcommand-goldens:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     defaults:
       run:
         shell: bash
-        working-directory: franken_node
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
     steps:
-      - name: Check out franken_node
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          path: franken_node
 
-      - name: Check out franken_engine sibling
-        uses: actions/checkout@v4
-        with:
-          repository: Dicklesworthstone/franken_engine
-          path: franken_engine
-
-      - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
+      # The workspace needs every path-dependency sibling (franken_engine,
+      # frankentui, fastapi_rust, sqlmodel_rust, ...). Checking out only
+      # franken_engine left `ftui` unresolvable, so this gate failed at
+      # manifest load on every run and never compared a snapshot.
+      - name: Checkout sibling repositories
+        uses: ./.github/actions/franken-siblings
 
       - name: Cache cargo home and target
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: cli-goldens
-          key: ${{ hashFiles('franken_node/Cargo.lock', 'franken_node/crates/franken-node/Cargo.toml') }}
-          workspaces: |
-            franken_node -> target
+          key: ${{ hashFiles('Cargo.lock', 'crates/franken-node/Cargo.toml') }}
           cache-all-crates: "true"
 
       - name: Run CLI subcommand goldens (fail on snapshot drift)

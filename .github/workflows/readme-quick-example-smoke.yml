@@ -25,9 +25,12 @@ on:
       - .github/workflows/readme-quick-example-smoke.yml
   workflow_dispatch: {}
 
+# A run takes 40-75 minutes and main receives pushes every few minutes, so
+# cancelling in-progress runs on main left almost every run cancelled. Only PR
+# runs cancel; on main the running job completes and the newest push waits.
 concurrency:
   group: readme-quick-example-smoke-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   smoke:
