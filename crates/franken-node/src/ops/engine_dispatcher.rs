@@ -13371,7 +13371,7 @@ mod tests {
         let bridge = TelemetryBridge::new(socket_path.to_str().expect("utf8"), adapter);
         let handle = bridge.start().expect("start telemetry bridge");
 
-        let (output, _telemetry, _ledger, _evidence_identity) =
+        let (output, _telemetry, _ledger, _evidence_identity, _engine_decision) =
             EngineDispatcher::run_engine_native(&app, &config, "legacy-risky", handle)
                 .expect("legacy-risky native run accepts static process shape");
         assert!(output.status.success());
@@ -13508,7 +13508,7 @@ mod tests {
         let bridge = TelemetryBridge::new(socket_path.to_str().expect("utf8"), adapter);
         let handle = bridge.start().expect("start telemetry bridge");
 
-        let (_output, _telemetry, ledger, evidence_identity) =
+        let (_output, _telemetry, ledger, evidence_identity, _engine_decision) =
             EngineDispatcher::run_engine_native(&app, &config, "legacy-risky", handle)
                 .expect("native run succeeds");
         let ledger = ledger.expect("native path always surfaces a host-effect ledger");
