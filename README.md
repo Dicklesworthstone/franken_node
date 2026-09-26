@@ -1001,6 +1001,10 @@ preferred = "auto"
 remote_max_in_flight = 50
 # Retry hint when bulkhead is saturated
 bulkhead_retry_after_ms = 50
+# Instruction budget for one `run` in the native engine (optional; default
+# strict 200M, balanced 1B, legacy-risky 5B). Also
+# FRANKEN_NODE_RUNTIME_MAX_INSTRUCTIONS. The wall-clock timeout still applies.
+# max_instructions = 1_000_000_000
 
 [runtime.lanes.cancel]
 max_concurrent = 12
@@ -1982,6 +1986,7 @@ convention. The most common:
 |---|---|---|
 | `FRANKEN_NODE_PROFILE` | `profile` | `strict`, `balanced`, or `legacy-risky` |
 | `FRANKEN_NODE_RUNTIME_PREFERRED` | `runtime.preferred` | `auto`, `node`, `bun`, or `franken-engine` |
+| `FRANKEN_NODE_RUNTIME_MAX_INSTRUCTIONS` | `runtime.max_instructions` | Instruction budget for one `run` (> 0); replaces the profile default |
 | `FRANKEN_NODE_ENGINE_BINARY_PATH` | `engine.binary_path` | Override the resolved `franken_engine` binary path |
 | `FRANKEN_NODE_COMPATIBILITY_MODE` | `compatibility.mode` | API compatibility mode |
 | `FRANKEN_NODE_COMPATIBILITY_EMIT_DIVERGENCE_RECEIPTS` | `compatibility.emit_divergence_receipts` | `true`/`false` |
