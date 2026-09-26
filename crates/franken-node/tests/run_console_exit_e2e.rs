@@ -1277,11 +1277,17 @@ fn benign_json_heavy_run_completes_and_the_engine_explains_the_allow() {
             outcome.stderr
         );
         let report = last_json_document(&outcome.stdout);
-        assert!(report.get("containment_verdict").is_none(), "{policy}: {report}");
+        assert!(
+            report.get("containment_verdict").is_none(),
+            "{policy}: {report}"
+        );
         assert_eq!(report["dispatch"]["captured_output"]["stdout"], "112781\n");
 
         let decision = &report["dispatch"]["engine_decision"];
-        assert_eq!(decision["containment_action"], "allow", "{policy}: {decision}");
+        assert_eq!(
+            decision["containment_action"], "allow",
+            "{policy}: {decision}"
+        );
         assert_eq!(decision["risk_state"], "benign", "{policy}: {decision}");
         assert!(
             decision["selector_action"]

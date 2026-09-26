@@ -427,17 +427,23 @@ fn test_native_engine_execution_with_telemetry() {
     let policy_mode = config.profile.to_string();
 
     // Execute through the real product supervisor and its same-image worker.
-    // The balanced-profile sentinel deliberately challenges this otherwise
-    // completed run, so the public CLI exits with the report's containment
-    // code after emitting the full completion envelope.
+    // A benign completed run is allowed: the Challenge this test once pinned
+    // was the expected-loss prior tax the engine now downgrades (bd-sxh8o.4,
+    // bd-pgzo7), so the CLI exits 0 after the full completion envelope.
     let output = invoke_product_supervisor(&app_path, &config, &policy_mode, &fixture_engine)
         .expect("native product supervisor should return a completion envelope");
-    assert_eq!(output.status.code(), Some(91));
+    assert_eq!(output.status.code(), Some(0));
     let report = parse_product_dispatch(&output)
-        .expect("challenged native run should still emit a valid dispatch report");
+        .expect("completed native run should emit a valid dispatch report");
     assert_eq!(report.runtime, "franken_engine");
     assert!(!report.used_fallback_runtime);
-    assert_eq!(report.exit_code, Some(91));
+    assert_eq!(report.exit_code, Some(0));
+    let decision = report
+        .engine_decision
+        .as_ref()
+        .expect("native run carries the engine's decision");
+    assert_eq!(decision.containment_action, "allow");
+    assert_eq!(decision.risk_state, "benign");
     assert!(report.telemetry.is_some(), "Telemetry should be present");
 
     // Verify telemetry was emitted
