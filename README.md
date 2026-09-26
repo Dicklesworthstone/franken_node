@@ -3336,9 +3336,15 @@ one pass.
   the instruction count; human output prints the same as a `why:` line under
   the containment note. An entry runs as an ES module when it is `.mjs`, or
   `.js` whose nearest `package.json` declares `"type": "module"` (Node's
-  package-scope rule); anything else runs as a script. `require` of local
-  files and of npm packages from the entry does not work yet
-  (bd-reality-20260923-26n9r.4). The broader host-effect
+  package-scope rule); anything else runs as a CommonJS module, so it has
+  `require`, `module`, `exports`, `__filename` and `__dirname` and can
+  `require('./lib/x')` files inside the project directory, while
+  `require('fs')`, `require('path')` and the other supported builtins keep
+  routing through the capability-gated host calls. npm packages do not load
+  yet: there is no `node_modules` resolution, and builtins exist only as
+  recognized call patterns such as `fs.readFileSync(...)`, not as runtime
+  objects a package can pass around or inspect (bd-reality-20260923-26n9r.4).
+  The broader host-effect
   "runtime-of-record" — the full Node/Bun host-API surface with
   capability-metered effects — is still in active development under the
   engine-split program; do not yet rely on it as a complete drop-in for
