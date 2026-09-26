@@ -1220,6 +1220,50 @@ fn run_directory_target_refuses_main_outside_the_package() {
     );
 }
 
+/// bd-reality-20260923-26n9r.5 deliverable 1: the instruction budget is an
+/// operator control. A loop that completes under the profile default stops
+/// with the engine's budget error once `runtime.max_instructions` (here via
+/// FRANKEN_NODE_RUNTIME_MAX_INSTRUCTIONS) is set below what it needs.
+#[test]
+fn runtime_max_instructions_bounds_a_run() {
+    const LOOP_APP: &str =
+        "let s = 0;\nfor (let i = 0; i < 100000; i++) { s += i; }\nconsole.log(String(s));\n";
+    let (dir, default_run) = run_app(LOOP_APP, &[]);
+    assert_eq!(
+        default_run.exit_code,
+        Some(0),
+        "stderr=\n{}",
+        default_run.stderr
+    );
+    assert!(
+        default_run.stdout.starts_with("4999950000\n"),
+        "{}",
+        default_run.stdout
+    );
+
+    let limited = Command::new(franken_node_bin())
+        .args([
+            "run",
+            "app.js",
+            "--policy",
+            "balanced",
+            "--runtime",
+            "franken-engine",
+            "--engine-bin",
+            franken_node_bin(),
+        ])
+        .env("FRANKEN_NODE_RUNTIME_MAX_INSTRUCTIONS", "10000")
+        .current_dir(dir.path())
+        .output()
+        .expect("spawn limited run");
+    let stderr = String::from_utf8_lossy(&limited.stderr);
+    assert_ne!(limited.status.code(), Some(0), "stderr=\n{stderr}");
+    assert!(
+        stderr.contains("instruction budget exhausted"),
+        "the refusal must name the budget:\n{stderr}"
+    );
+}
+
 /// The last JSON document on a `run --json` stdout (the run report; a
 /// preflight report may precede it).
 fn last_json_document(stdout: &str) -> Value {

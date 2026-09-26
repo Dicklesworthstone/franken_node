@@ -1242,6 +1242,7 @@ mod tests {
             bulkhead_retry_after_ms: 20,
             lanes,
             drain_timeout_ms: None,
+            max_instructions: None,
         }
     }
 

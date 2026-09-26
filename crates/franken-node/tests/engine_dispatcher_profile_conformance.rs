@@ -64,6 +64,31 @@ fn mjs_entrypoints_select_module_goal_bd_ergy0() {
     }
 }
 
+/// `runtime.max_instructions` replaces every profile's instruction budget on
+/// both lanes (bd-reality-20260923-26n9r.5 deliverable 1); unset keeps the
+/// profile default.
+#[test]
+#[cfg(feature = "engine")]
+fn runtime_max_instructions_overrides_the_profile_budget() {
+    for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+        let default =
+            EngineDispatcher::map_config_to_runtime_config_for_tests(&config_with_profile(profile));
+        assert!(
+            default.execution.deterministic_budget >= 200_000_000,
+            "{profile:?}"
+        );
+
+        let mut config = config_with_profile(profile);
+        config.runtime.max_instructions = Some(12_345);
+        let limited = EngineDispatcher::map_config_to_runtime_config_for_tests(&config);
+        assert_eq!(
+            limited.execution.deterministic_budget, 12_345,
+            "{profile:?}"
+        );
+        assert_eq!(limited.execution.throughput_budget, 12_345, "{profile:?}");
+    }
+}
+
 /// Node's package-scope rule (bd-reality-20260923-26n9r.4 deliverable 2): a
 /// `.js` entry is ESM when its nearest package.json says `"type": "module"`;
 /// `.cjs` stays CommonJS and `.mjs` stays ESM regardless of scope.

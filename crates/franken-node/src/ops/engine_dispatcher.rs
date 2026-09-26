@@ -6852,7 +6852,7 @@ impl EngineDispatcher {
         // (bd-reality-20260923-26n9r.5), so no real program could run. Every
         // guest that touches a capability (any `console.log`) executes on the
         // deterministic lane, so that budget must admit ordinary programs.
-        let execution = match config.profile {
+        let mut execution = match config.profile {
             Profile::Strict => ExecutionConfig {
                 deterministic_budget: 200_000_000,
                 throughput_budget: 200_000_000,
@@ -6875,6 +6875,12 @@ impl EngineDispatcher {
                 max_prototype_chain_depth: 64,     // Extended prototype chains
             },
         };
+        // An operator-set `runtime.max_instructions` replaces the profile's
+        // budget on both lanes (bd-reality-20260923-26n9r.5 deliverable 1).
+        if let Some(max_instructions) = config.runtime.max_instructions {
+            execution.deterministic_budget = max_instructions;
+            execution.throughput_budget = max_instructions;
+        }
 
         // Map observability settings to governance config
         let governance = GovernanceConfig {

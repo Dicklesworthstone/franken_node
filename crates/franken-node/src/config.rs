@@ -1385,6 +1385,14 @@ impl Config {
                     MAX_MERGE_DECISIONS,
                 );
             }
+            if let Some(value) = section.max_instructions {
+                self.runtime.max_instructions = Some(value);
+                push_bounded(
+                    decisions,
+                    MergeDecision::new(stage.clone(), "runtime.max_instructions", value),
+                    MAX_MERGE_DECISIONS,
+                );
+            }
         }
 
         if let Some(section) = &overrides.thresholds {
@@ -1933,6 +1941,15 @@ impl Config {
                 MAX_MERGE_DECISIONS,
             );
         }
+        if let Some(raw) = env_lookup("FRANKEN_NODE_RUNTIME_MAX_INSTRUCTIONS") {
+            let parsed = parse_env_u64("FRANKEN_NODE_RUNTIME_MAX_INSTRUCTIONS", &raw)?;
+            self.runtime.max_instructions = Some(parsed);
+            push_bounded(
+                decisions,
+                MergeDecision::new(MergeStage::Env, "runtime.max_instructions", parsed),
+                MAX_MERGE_DECISIONS,
+            );
+        }
 
         apply_env_field_opt_f64(
             "FRANKEN_NODE_THRESHOLDS_MAX_FAILURE_RATE",
@@ -2127,6 +2144,11 @@ impl Config {
         if self.runtime.bulkhead_retry_after_ms == 0 {
             return Err(ConfigError::ValidationFailed(
                 "runtime.bulkhead_retry_after_ms must be > 0".to_string(),
+            ));
+        }
+        if self.runtime.max_instructions == Some(0) {
+            return Err(ConfigError::ValidationFailed(
+                "runtime.max_instructions must be > 0".to_string(),
             ));
         }
         validate_opt_score(
@@ -3045,6 +3067,7 @@ struct RuntimeOverrides {
     pub bulkhead_retry_after_ms: Option<u64>,
     pub lanes: Option<BTreeMap<String, RuntimeLaneOverrides>>,
     pub drain_timeout_ms: Option<u64>,
+    pub max_instructions: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -3774,6 +3797,11 @@ pub struct RuntimeConfig {
     /// When `None`, consumers use `timeouts::RUNTIME_DRAIN_TIMEOUT_MS`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drain_timeout_ms: Option<u64>,
+    /// Instruction budget for one `run` of guest code in the native engine,
+    /// replacing the profile's default (strict 200M, balanced 1B,
+    /// legacy-risky 5B). The wall-clock timeout still applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_instructions: Option<u64>,
 }
 
 impl RuntimeConfig {
@@ -3804,6 +3832,7 @@ impl RuntimeConfig {
                 RuntimeLaneConfig::new(4, 20, 32, 100, LaneOverflowPolicy::ShedOldest),
             ),
             drain_timeout_ms: None,
+            max_instructions: None,
         }
     }
 
@@ -3831,6 +3860,7 @@ impl RuntimeConfig {
                 RuntimeLaneConfig::new(8, 20, 64, 100, LaneOverflowPolicy::ShedOldest),
             ),
             drain_timeout_ms: None,
+            max_instructions: None,
         }
     }
 
@@ -3858,6 +3888,7 @@ impl RuntimeConfig {
                 RuntimeLaneConfig::new(16, 20, 128, 100, LaneOverflowPolicy::ShedOldest),
             ),
             drain_timeout_ms: None,
+            max_instructions: None,
         }
     }
 }
