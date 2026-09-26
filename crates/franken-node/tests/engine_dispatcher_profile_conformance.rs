@@ -89,6 +89,26 @@ fn runtime_max_instructions_overrides_the_profile_budget() {
     }
 }
 
+/// bd-rff5g: every entry that is not an ES module runs as a CommonJS module,
+/// so it can `require` files beside it; ES module entries never do.
+#[test]
+#[cfg(feature = "engine")]
+fn script_entries_are_commonjs_modules_and_module_entries_are_not() {
+    let config = config_with_profile(Profile::Balanced);
+    let mapped = |path: &str| {
+        let orchestrator =
+            EngineDispatcher::map_config_to_orchestrator_config_for_entrypoint_for_tests(
+                &config,
+                Path::new(path),
+            );
+        (orchestrator.parse_goal, orchestrator.commonjs_entry)
+    };
+    for script in ["app.js", "app.cjs", "app"] {
+        assert_eq!(mapped(script), (ParseGoal::Script, true), "{script}");
+    }
+    assert_eq!(mapped("app.mjs"), (ParseGoal::Module, false));
+}
+
 /// Node's package-scope rule (bd-reality-20260923-26n9r.4 deliverable 2): a
 /// `.js` entry is ESM when its nearest package.json says `"type": "module"`;
 /// `.cjs` stays CommonJS and `.mjs` stays ESM regardless of scope.

@@ -1144,6 +1144,36 @@ fn run_directory_target_executes_package_main() {
     assert_eq!(outcome.stdout, "from-main\n");
 }
 
+/// bd-reality-20260923-26n9r.4 / engine bd-rff5g: a CommonJS entry requires a
+/// sibling module by relative path, uses `__dirname`, and still reaches the
+/// `path` builtin, as `node app.js` does.
+#[test]
+fn run_commonjs_entry_requires_a_sibling_module() {
+    let outcome = run_directory_target(
+        &[
+            (
+                "pkg/package.json",
+                r#"{"name":"pkg","version":"1.0.0","main":"app.js"}"#,
+            ),
+            (
+                "pkg/app.js",
+                "const math = require('./lib/math');\n\
+                 const path = require('path');\n\
+                 console.log(String(math.add(2, 3)));\n\
+                 console.log(path.join('a', 'b'));\n\
+                 console.log(typeof __dirname);\n",
+            ),
+            (
+                "pkg/lib/math.js",
+                "module.exports = { add: (a, b) => a + b };\n",
+            ),
+        ],
+        "pkg",
+    );
+    assert_eq!(outcome.exit_code, Some(0), "stderr:\n{}", outcome.stderr);
+    assert_eq!(outcome.stdout, "5\na/b\nstring\n");
+}
+
 /// bd-reality-20260923-26n9r.4 deliverable 2: a `.js` entry in a
 /// `"type": "module"` package is ESM, as in Node; without the type field the
 /// same source is a script, where `export` is a syntax error.

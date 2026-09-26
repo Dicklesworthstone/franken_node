@@ -7101,6 +7101,7 @@ impl EngineDispatcher {
             },
             epoch,
             parse_goal: ParseGoal::Script, // Default to script parsing (most common)
+            commonjs_entry: false, // Set per entrypoint by map_config_to_orchestrator_config_for_entrypoint
             parser_options,
             trace_id_prefix: config.observability.namespace.clone(), // Use observability namespace
             policy_id: Self::generate_opaque_policy_id(config.profile, None), // Opaque policy ID to prevent information disclosure
@@ -8260,6 +8261,10 @@ impl EngineDispatcher {
     ) -> OrchestratorConfig {
         let mut orchestrator_config = Self::map_config_to_orchestrator_config(config);
         orchestrator_config.parse_goal = Self::parse_goal_for_entrypoint(app_path);
+        // bd-rff5g: as in Node, an entry that is not an ES module is a
+        // CommonJS module, so it gets require/module/exports/__filename/
+        // __dirname and can require files beside it (inside the module root).
+        orchestrator_config.commonjs_entry = orchestrator_config.parse_goal == ParseGoal::Script;
         orchestrator_config
     }
 
