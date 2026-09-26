@@ -1024,11 +1024,13 @@ max_variance_pct = 5.0
 regression_threshold_pct = 10.0
 ```
 
-With `--out-dir`, `franken-node init` writes starter configuration files with
-the active profile. Without `--out-dir`, it prints the resolved starter TOML to
-stdout instead. Unless `--no-state` is supplied, it also bootstraps the default
-state layout under `--state-dir`, `--out-dir`, or the current directory, in
-that order. `franken-node ops config-audit --json` prints the resolved
+`franken-node init` writes starter configuration files with the active
+profile and, unless `--no-state` is supplied, bootstraps the default state
+layout under `--state-dir`, `--out-dir`, or the current directory, in that
+order. The config is written to `--out-dir`, or else beside that state: state
+bootstrap signs the trust-card registry with the config's registry key, so the
+two must travel together. Only `init --no-state` without `--out-dir` prints
+the resolved starter TOML to stdout instead of writing it. `franken-node ops config-audit --json` prints the resolved
 configuration with profile overlays applied.
 
 ---
@@ -3321,7 +3323,16 @@ one pass.
   is never mistaken for a live re-run.
 - **`franken-node run` executes through the in-process franken-engine** and
   surfaces the program's real console output (stdout/stderr) plus an exit code
-  derived from the runtime's containment verdict. The broader host-effect
+  derived from the runtime's containment verdict (91 Challenge, 92 Sandbox,
+  93 Suspend, 94 Terminate, 95 Quarantine). `run --json` carries the engine's
+  reasoning in `dispatch.engine_decision`: the MAP risk state and posterior,
+  the expected-loss selector's action, the stopping rule that crossed, and
+  the instruction count; human output prints the same as a `why:` line under
+  the containment note. An entry runs as an ES module when it is `.mjs`, or
+  `.js` whose nearest `package.json` declares `"type": "module"` (Node's
+  package-scope rule); anything else runs as a script. `require` of local
+  files and of npm packages from the entry does not work yet
+  (bd-reality-20260923-26n9r.4). The broader host-effect
   "runtime-of-record" — the full Node/Bun host-API surface with
   capability-metered effects — is still in active development under the
   engine-split program; do not yet rely on it as a complete drop-in for
