@@ -826,6 +826,47 @@ fn console_only_run_emits_guest_streams_verbatim() {
     );
 }
 
+/// A program that prints and then throws keeps what it printed, as under
+/// Node: the output reaches the operator's streams ahead of the failure and
+/// the run still exits non-zero. A throw used to discard everything printed
+/// before it, so a failing program looked like it had printed nothing.
+#[test]
+fn a_failed_run_still_emits_the_output_printed_before_the_throw() {
+    const PRINT_THEN_THROW_APP: &str =
+        "console.log(\"before\");\nconsole.error(\"warned\");\nthrow new Error(\"boom\");\n";
+
+    let (_dir, console_only) = run_app(PRINT_THEN_THROW_APP, &["--console-only"]);
+    assert_ne!(
+        console_only.exit_code,
+        Some(0),
+        "an uncaught throw still fails the run; stderr=\n{}",
+        console_only.stderr
+    );
+    assert_eq!(
+        console_only.stdout, "before\n",
+        "stdout is exactly what the guest printed; stderr=\n{}",
+        console_only.stderr
+    );
+    assert!(
+        console_only.stderr.starts_with("warned\n"),
+        "guest stderr precedes the failure diagnostic, got:\n{}",
+        console_only.stderr
+    );
+    assert!(
+        console_only.stderr.contains("uncaught exception"),
+        "the failure diagnostic is still reported, got:\n{}",
+        console_only.stderr
+    );
+
+    let (_dir, human) = run_app(PRINT_THEN_THROW_APP, &[]);
+    assert_ne!(human.exit_code, Some(0), "stderr=\n{}", human.stderr);
+    assert!(
+        human.stdout.starts_with("before\n"),
+        "the default mode prints guest output before any run metadata, got:\n{}",
+        human.stdout
+    );
+}
+
 #[test]
 fn verify_lockstep_json_fails_closed_when_project_path_missing() {
     let output = Command::new(franken_node_bin())

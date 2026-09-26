@@ -31490,11 +31490,21 @@ fn main() -> Result<()> {
                     if let Some(failure) =
                         err.downcast_ref::<ops::engine_dispatcher::NativeRunFailure>()
                     {
-                        emit_failed_run_effect_evidence(
-                            failure.host_effect_ledger(),
-                            json,
-                            console_only,
-                        )?;
+                        // What the program printed before failing reaches the
+                        // operator's streams first, as it does for a completed
+                        // run (and under Node).
+                        if !json {
+                            let guest_output = failure.guest_output();
+                            if !guest_output.stdout.is_empty() {
+                                print!("{}", guest_output.stdout);
+                            }
+                            if !guest_output.stderr.is_empty() {
+                                eprint!("{}", guest_output.stderr);
+                            }
+                        }
+                        if let Some(ledger) = failure.host_effect_ledger() {
+                            emit_failed_run_effect_evidence(ledger, json, console_only)?;
+                        }
                     }
                     #[cfg(feature = "engine")]
                     if let Some(interruption) =

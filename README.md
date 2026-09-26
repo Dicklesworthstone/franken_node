@@ -3334,7 +3334,9 @@ one pass.
   reasoning in `dispatch.engine_decision`: the MAP risk state and posterior,
   the expected-loss selector's action, the stopping rule that crossed, and
   the instruction count; human output prints the same as a `why:` line under
-  the containment note. An entry runs as an ES module when it is `.mjs`, or
+  the containment note. A program that throws still prints what it printed
+  before the throw, then exits non-zero, as under Node (`run --json` does not
+  yet carry that output). An entry runs as an ES module when it is `.mjs`, or
   `.js` whose nearest `package.json` declares `"type": "module"` (Node's
   package-scope rule); anything else runs as a CommonJS module, so it has
   `require`, `module`, `exports`, `__filename` and `__dirname` and can

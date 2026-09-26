@@ -407,6 +407,12 @@ enum NativeSessionResponse {
         /// it is trusted.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         host_effect_ledger: Option<HostEffectLedger>,
+        /// What the guest printed before failing, encoded like `Completed`'s
+        /// streams. Empty when execution never began or printed nothing.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        stdout_base64: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        stderr_base64: String,
     },
     TelemetryFailed {
         schema_version: String,
@@ -2014,6 +2020,7 @@ fn native_engine_spawn_error_with_telemetry_cleanup(
             ),
             telemetry_report: None,
             host_effect_ledger: None,
+            guest_output: (Vec::new(), Vec::new()),
         };
     };
 
@@ -2025,6 +2032,7 @@ fn native_engine_spawn_error_with_telemetry_cleanup(
             ),
             telemetry_report: Some(Box::new(report)),
             host_effect_ledger: None,
+            guest_output: (Vec::new(), Vec::new()),
         },
         Ok(report) => EngineProcessError::Spawn {
             message: format!(
@@ -2033,6 +2041,7 @@ fn native_engine_spawn_error_with_telemetry_cleanup(
             ),
             telemetry_report: Some(Box::new(report)),
             host_effect_ledger: None,
+            guest_output: (Vec::new(), Vec::new()),
         },
         Err(cleanup_error) => EngineProcessError::Spawn {
             message: format!(
@@ -2040,6 +2049,7 @@ fn native_engine_spawn_error_with_telemetry_cleanup(
             ),
             telemetry_report: None,
             host_effect_ledger: None,
+            guest_output: (Vec::new(), Vec::new()),
         },
     }
 }
@@ -2546,7 +2556,7 @@ pub struct EngineDispatcher {
     native_session_worker_path: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CapturedProcessOutput {
     pub stdout: String,
     pub stderr: String,
@@ -2852,28 +2862,39 @@ impl std::fmt::Display for NativeRunInterruption {
 #[cfg(feature = "engine")]
 impl std::error::Error for NativeRunInterruption {}
 
-/// A native run that aborted after the engine had already performed or been
-/// denied host effects (bd-muy9u).
+/// A native run that failed after it had already done something the operator
+/// must still see: performed or been denied host effects (bd-muy9u), or
+/// printed output before throwing.
 ///
 /// The run stays failed and the operator-visible text is byte-identical to the
 /// [`ActionableError`] the same failure produced before: this type exists only
-/// to keep the attempt's signed, hash-chained host-effect ledger attached, so
-/// the CLI can surface the very evidence a denial produced instead of dropping
-/// it because the program happened to abort afterwards. Recover it with
+/// to keep the attempt's signed, hash-chained host-effect ledger and its guest
+/// output attached, so the CLI can surface what a denial produced and what the
+/// program printed instead of dropping both because the program aborted
+/// afterwards. Recover it with
 /// `anyhow::Error::downcast_ref::<NativeRunFailure>()`.
 #[derive(Debug)]
 pub struct NativeRunFailure {
     actionable: ActionableError,
-    host_effect_ledger: Box<HostEffectLedger>,
+    host_effect_ledger: Option<Box<HostEffectLedger>>,
+    guest_output: CapturedProcessOutput,
 }
 
 impl NativeRunFailure {
     /// The signed, hash-chained ledger of effects this failed run performed or
-    /// was denied. Verified against the same integrity rules as a successful
+    /// was denied, when the engine could certify the attempt's effect
+    /// boundary. Verified against the same integrity rules as a successful
     /// run's ledger before the failure was constructed.
     #[must_use]
-    pub fn host_effect_ledger(&self) -> &HostEffectLedger {
-        &self.host_effect_ledger
+    pub fn host_effect_ledger(&self) -> Option<&HostEffectLedger> {
+        self.host_effect_ledger.as_deref()
+    }
+
+    /// What the program printed before it failed, split into stdout and
+    /// stderr exactly as a completed run's output is.
+    #[must_use]
+    pub fn guest_output(&self) -> &CapturedProcessOutput {
+        &self.guest_output
     }
 }
 
@@ -2973,6 +2994,11 @@ enum EngineProcessError {
         /// the `engine` feature never reads the field.
         #[cfg_attr(not(feature = "engine"), allow(dead_code))]
         host_effect_ledger: Option<Box<HostEffectLedger>>,
+        /// The `(stdout, stderr)` bytes the guest printed before the attempt
+        /// failed, rendered exactly as a completed run's streams are. Empty
+        /// when execution never began or printed nothing.
+        #[cfg_attr(not(feature = "engine"), allow(dead_code))]
+        guest_output: (Vec<u8>, Vec<u8>),
     },
     TelemetryDrain(String),
 }
@@ -2988,6 +3014,15 @@ impl EngineProcessError {
         } = &mut self
         {
             *host_effect_ledger = ledger.map(Box::new);
+        }
+        self
+    }
+
+    /// Attach what the guest printed before the failure. As with the ledger,
+    /// the failure itself is unchanged; the output simply stops being lost.
+    fn with_guest_output(mut self, stdout: Vec<u8>, stderr: Vec<u8>) -> Self {
+        if let Self::Spawn { guest_output, .. } = &mut self {
+            *guest_output = (stdout, stderr);
         }
         self
     }
@@ -3839,6 +3874,33 @@ fn engine_containment_decision(
         decision_rationale: security_entry.map(|entry| entry.chosen_action.rationale.clone()),
         instructions_executed: result.instructions_executed,
     }
+}
+
+/// Decode the output a failed native session reported, under the same size
+/// bound a completed session's output is held to.
+#[cfg(feature = "engine")]
+fn decode_failed_guest_output(
+    stdout_base64: &str,
+    stderr_base64: &str,
+) -> Result<CapturedProcessOutput, String> {
+    use base64::Engine as _;
+
+    let decode = |stream: &str, encoded: &str| {
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|error| format!("{stream} base64 was invalid: {error}"))
+    };
+    let stdout = decode("stdout", stdout_base64)?;
+    let stderr = decode("stderr", stderr_base64)?;
+    if stdout.len().saturating_add(stderr.len()) > NATIVE_SESSION_MAX_GUEST_OUTPUT_BYTES {
+        return Err(format!(
+            "it exceeded the {NATIVE_SESSION_MAX_GUEST_OUTPUT_BYTES}-byte guest output bound"
+        ));
+    }
+    Ok(CapturedProcessOutput {
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+    })
 }
 
 /// Render captured console output into separated stdout/stderr byte streams.
@@ -5116,6 +5178,8 @@ impl EngineDispatcher {
                     ),
                     // The worker never started, so no effect could have run.
                     host_effect_ledger: None,
+                    stdout_base64: String::new(),
+                    stderr_base64: String::new(),
                 });
             }
         };
@@ -5149,6 +5213,10 @@ impl EngineDispatcher {
                                     // unusable. Losing the effects here would be
                                     // the same evidence gap on a rarer path.
                                     host_effect_ledger,
+                                    stdout_base64: base64::engine::general_purpose::STANDARD
+                                        .encode(&output.stdout),
+                                    stderr_base64: base64::engine::general_purpose::STANDARD
+                                        .encode(&output.stderr),
                                 });
                             };
                             NativeSessionResponse::Completed {
@@ -5168,12 +5236,15 @@ impl EngineDispatcher {
                         Err(EngineProcessError::Spawn {
                             message,
                             host_effect_ledger,
+                            guest_output: (stdout, stderr),
                             ..
                         }) => NativeSessionResponse::ExecutionFailed {
                             schema_version: NATIVE_SESSION_SCHEMA.to_string(),
                             nonce,
                             message,
                             host_effect_ledger: host_effect_ledger.map(|ledger| *ledger),
+                            stdout_base64: base64::engine::general_purpose::STANDARD.encode(stdout),
+                            stderr_base64: base64::engine::general_purpose::STANDARD.encode(stderr),
                         },
                         Err(EngineProcessError::TelemetryDrain(message)) => {
                             NativeSessionResponse::TelemetryFailed {
@@ -5209,6 +5280,8 @@ impl EngineDispatcher {
                     // effect boundary is unknown. Emitting an empty ledger here
                     // would assert "no effects occurred" without evidence.
                     host_effect_ledger: None,
+                    stdout_base64: String::new(),
+                    stderr_base64: String::new(),
                 }
             }
         };
@@ -6414,6 +6487,8 @@ impl EngineDispatcher {
                 nonce: response_nonce,
                 message,
                 host_effect_ledger,
+                stdout_base64,
+                stderr_base64,
             } => {
                 validate_envelope(&schema_version, &response_nonce).map_err(|error| {
                     EngineDispatchError::EngineExecutionError {
@@ -6445,19 +6520,35 @@ impl EngineDispatcher {
                     },
                     None => (None, String::new()),
                 };
+                // Output the guest printed before failing is held to the same
+                // protocol bounds as a completed run's. A malformed or oversized
+                // payload is withheld with a note rather than replacing the
+                // execution failure the operator actually needs to see.
+                let (guest_output, output_note) =
+                    match decode_failed_guest_output(&stdout_base64, &stderr_base64) {
+                        Ok(guest_output) => (guest_output, String::new()),
+                        Err(rejection) => (
+                            CapturedProcessOutput::default(),
+                            format!("; guest output was withheld: {rejection}"),
+                        ),
+                    };
                 let dispatch_error = EngineDispatchError::EngineExecutionError {
                     app_path: app_path_buf,
-                    error_message: format!("{message}{evidence_note}"),
+                    error_message: format!("{message}{evidence_note}{output_note}"),
                     phase: "execution".to_string(),
                 };
                 let actionable = dispatch_error.to_actionable();
-                Err(match host_effect_ledger {
-                    Some(ledger) => anyhow::Error::new(NativeRunFailure {
-                        actionable,
-                        host_effect_ledger: Box::new(ledger),
-                    }),
-                    None => actionable.into(),
-                })
+                if host_effect_ledger.is_none()
+                    && guest_output.stdout.is_empty()
+                    && guest_output.stderr.is_empty()
+                {
+                    return Err(actionable.into());
+                }
+                Err(anyhow::Error::new(NativeRunFailure {
+                    actionable,
+                    host_effect_ledger: host_effect_ledger.map(Box::new),
+                    guest_output,
+                }))
             }
             NativeSessionResponse::TelemetryFailed {
                 schema_version,
@@ -7478,11 +7569,17 @@ impl EngineDispatcher {
                             "Harvested host-effect ledger from a failed run"
                         );
                     }
+                    // What the program printed before failing is part of the
+                    // run's output: a failed run reports it the same way a
+                    // completed run does.
+                    let (stdout, stderr) =
+                        render_console_streams(&orchestrator.last_failed_console_output());
                     return Err(native_engine_spawn_error_with_telemetry_cleanup(
                         format!("Native execution failed: {error}"),
                         &mut telemetry_guard,
                     )
-                    .with_host_effect_ledger(host_effect_ledger));
+                    .with_host_effect_ledger(host_effect_ledger)
+                    .with_guest_output(stdout, stderr));
                 }
             }
         };
@@ -8209,6 +8306,7 @@ impl EngineDispatcher {
                         ),
                         telemetry_report: Some(Box::new(report)),
                         host_effect_ledger: None,
+                        guest_output: (Vec::new(), Vec::new()),
                     }),
                     Ok(report) => Err(EngineProcessError::Spawn {
                         message: format!(
@@ -8217,6 +8315,7 @@ impl EngineDispatcher {
                         ),
                         telemetry_report: Some(Box::new(report)),
                         host_effect_ledger: None,
+                        guest_output: (Vec::new(), Vec::new()),
                     }),
                     Err(cleanup_err) => Err(EngineProcessError::Spawn {
                         message: format!(
@@ -8224,6 +8323,7 @@ impl EngineDispatcher {
                         ),
                         telemetry_report: None,
                         host_effect_ledger: None,
+                        guest_output: (Vec::new(), Vec::new()),
                     }),
                 }
             }
