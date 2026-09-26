@@ -64,6 +64,41 @@ fn mjs_entrypoints_select_module_goal_bd_ergy0() {
     }
 }
 
+/// Node's package-scope rule (bd-reality-20260923-26n9r.4 deliverable 2): a
+/// `.js` entry is ESM when its nearest package.json says `"type": "module"`;
+/// `.cjs` stays CommonJS and `.mjs` stays ESM regardless of scope.
+#[test]
+#[cfg(feature = "engine")]
+fn js_entry_goal_follows_nearest_package_json_type() {
+    let config = config_with_profile(Profile::Balanced);
+    let goal = |path: &Path| {
+        EngineDispatcher::map_config_to_orchestrator_config_for_entrypoint_for_tests(&config, path)
+            .parse_goal
+    };
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let esm = workspace.path().join("esm");
+    std::fs::create_dir_all(esm.join("src/nested")).expect("esm dirs");
+    std::fs::write(esm.join("package.json"), r#"{"type":"module"}"#).expect("esm manifest");
+    assert_eq!(goal(&esm.join("index.js")), ParseGoal::Module);
+    assert_eq!(goal(&esm.join("src/nested/deep.js")), ParseGoal::Module);
+    assert_eq!(goal(&esm.join("legacy.cjs")), ParseGoal::Script);
+
+    // A nearer package.json without a type re-scopes to CommonJS.
+    std::fs::write(esm.join("src/package.json"), r#"{"name":"inner"}"#).expect("inner");
+    assert_eq!(goal(&esm.join("src/nested/deep.js")), ParseGoal::Script);
+
+    let cjs = workspace.path().join("cjs");
+    std::fs::create_dir_all(&cjs).expect("cjs dir");
+    std::fs::write(cjs.join("package.json"), r#"{"type":"commonjs"}"#).expect("cjs manifest");
+    assert_eq!(goal(&cjs.join("index.js")), ParseGoal::Script);
+    assert_eq!(goal(&cjs.join("index.mjs")), ParseGoal::Module);
+
+    let broken = workspace.path().join("broken");
+    std::fs::create_dir_all(&broken).expect("broken dir");
+    std::fs::write(broken.join("package.json"), b"{not json").expect("broken manifest");
+    assert_eq!(goal(&broken.join("index.js")), ParseGoal::Script);
+}
+
 /// Conformance test: Strict profile must produce conservative security settings
 #[test]
 #[cfg(feature = "engine")]
@@ -471,7 +506,7 @@ fn conformance_profile_capability_mappings() {
     let test_cases = [
         (
             Profile::Strict,
-            &["module_load", "fs_read", "timer"] as &[&str],
+            &["module_load", "fs_read", "builtin", "timer"] as &[&str],
         ),
         (
             Profile::Balanced,

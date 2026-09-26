@@ -262,6 +262,80 @@ fn config_resolved_from_init_output_is_valid_for_subsequent_commands() {
     );
 }
 
+/// The README's Quick Example bootstraps with a bare `init --profile
+/// balanced`. That used to sign the new trust-card registry with a freshly
+/// synthesized key and then only PRINT the config holding it, so the next
+/// command failed with `trust.registry_signing_key must be configured` and
+/// the signing key sat in terminal scrollback.
+#[test]
+fn init_without_out_dir_persists_config_beside_the_state_it_signed() {
+    let Some(bin) = require_binary() else { return };
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+
+    let init = Command::new(&bin)
+        .args(["init", "--profile", "balanced"])
+        .current_dir(root)
+        .output()
+        .expect("invoke bare init");
+    assert!(
+        init.status.success(),
+        "bare init must succeed: stderr=\n{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&init.stdout);
+    assert!(
+        !stdout.contains("registry_signing_key"),
+        "bare init must not print the signing key to stdout: {stdout}"
+    );
+    let written = std::fs::read_to_string(root.join("franken_node.toml"))
+        .expect("bare init writes franken_node.toml beside .franken-node/");
+    assert!(written.contains("registry_signing_key"), "{written}");
+    assert!(root.join(".franken-node/state").is_dir());
+
+    let trust_list = Command::new(&bin)
+        .args(["trust", "list", "--json"])
+        .current_dir(root)
+        .output()
+        .expect("invoke trust list");
+    assert!(
+        trust_list.status.success(),
+        "trust list must open the registry bare init signed; exit={} stdout=\n{}\nstderr=\n{}",
+        trust_list.status,
+        String::from_utf8_lossy(&trust_list.stdout),
+        String::from_utf8_lossy(&trust_list.stderr),
+    );
+}
+
+/// `--no-state` creates no keyed state, so without `--out-dir` it stays a
+/// preview: the resolved config goes to stdout and nothing is written.
+#[test]
+fn init_no_state_without_out_dir_prints_config_and_writes_nothing() {
+    let Some(bin) = require_binary() else { return };
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+
+    let init = Command::new(&bin)
+        .args(["init", "--profile", "balanced", "--no-state"])
+        .current_dir(root)
+        .output()
+        .expect("invoke init --no-state");
+    assert!(
+        init.status.success(),
+        "init --no-state must succeed: stderr=\n{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    assert!(String::from_utf8_lossy(&init.stdout).contains("[trust]"));
+    let entries = std::fs::read_dir(root)
+        .expect("read tempdir")
+        .map(|entry| entry.expect("dir entry").file_name())
+        .collect::<Vec<_>>();
+    assert!(
+        entries.is_empty(),
+        "init --no-state without --out-dir must not write files: {entries:?}"
+    );
+}
+
 fn assert_init_json_error(output: &std::process::Output, error_needle: &str) {
     assert!(
         !output.status.success(),

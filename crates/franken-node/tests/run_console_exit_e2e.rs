@@ -1144,6 +1144,44 @@ fn run_directory_target_executes_package_main() {
     assert_eq!(outcome.stdout, "from-main\n");
 }
 
+/// bd-reality-20260923-26n9r.4 deliverable 2: a `.js` entry in a
+/// `"type": "module"` package is ESM, as in Node; without the type field the
+/// same source is a script, where `export` is a syntax error.
+#[test]
+fn run_type_module_package_executes_js_entry_as_esm() {
+    const ESM_SOURCE: &str =
+        "const greeting = \"from-esm\";\nexport default greeting;\nconsole.log(greeting);\n";
+    let esm = run_directory_target(
+        &[
+            (
+                "pkg/package.json",
+                r#"{"name":"pkg","version":"1.0.0","type":"module","main":"main.js"}"#,
+            ),
+            ("pkg/main.js", ESM_SOURCE),
+        ],
+        "pkg",
+    );
+    assert_eq!(esm.exit_code, Some(0), "stderr:\n{}", esm.stderr);
+    assert_eq!(esm.stdout, "from-esm\n");
+
+    let script = run_directory_target(
+        &[
+            (
+                "pkg/package.json",
+                r#"{"name":"pkg","version":"1.0.0","main":"main.js"}"#,
+            ),
+            ("pkg/main.js", ESM_SOURCE),
+        ],
+        "pkg",
+    );
+    assert_ne!(
+        script.exit_code,
+        Some(0),
+        "without \"type\": \"module\" the entry must parse as a script; stdout:\n{}",
+        script.stdout
+    );
+}
+
 #[test]
 fn run_directory_target_falls_back_to_index_js() {
     let outcome = run_directory_target(
@@ -1182,41 +1220,96 @@ fn run_directory_target_refuses_main_outside_the_package() {
     );
 }
 
-/// bd-reality-20260923-26n9r.5: a native exit code of 91-95 is the engine's
-/// containment verdict, not the program's exit status, and `run` says so in
-/// both output modes. The only reproducer at hand is the engine false positive
-/// bd-pgzo7 (a benign JSON-heavy program is stopped into Sandbox, exit 92).
-/// When bd-pgzo7 is fixed this program exits 0 and this test must move to a
-/// true-positive containment case instead.
+/// The last JSON document on a `run --json` stdout (the run report; a
+/// preflight report may precede it).
+fn last_json_document(stdout: &str) -> Value {
+    serde_json::Deserializer::from_str(stdout)
+        .into_iter::<Value>()
+        .filter_map(Result::ok)
+        .last()
+        .unwrap_or_else(|| panic!("no JSON document on stdout:\n{stdout}"))
+}
+
+/// bd-pgzo7 (engine 92c65f951): this benign JSON-heavy program used to exit
+/// 92 (Sandbox) under balanced, and every strict run did, because a
+/// saturated resource signal and the Conservative matrix's prior tax read as
+/// containment. It now completes in both profiles, and the engine's own
+/// account of the decision (bd-reality-20260923-26n9r.5) travels in the
+/// report: the selector's choice, the final Allow, and the posterior behind
+/// it. No guest program reaches a 91-95 verdict after that fix; the
+/// containment note's wording is exercised only when one does.
 #[test]
-fn containment_exit_is_labelled_as_a_containment_verdict() {
+fn benign_json_heavy_run_completes_and_the_engine_explains_the_allow() {
     const JSON_HEAVY_APP: &str = "const rows = [];\n\
         for (let i = 0; i < 2000; i++) rows.push({ id: i, name: 'row-' + i, tags: ['a', 'b'], ok: i % 2 === 0 });\n\
         let t = '';\n\
         for (let r = 0; r < 20; r++) t = JSON.stringify(JSON.parse(JSON.stringify(rows)));\n\
         console.log(t.length);\n";
 
-    let (_dir, outcome) = run_app(JSON_HEAVY_APP, &["--json"]);
-    assert_eq!(
-        outcome.exit_code,
-        Some(92),
-        "bd-pgzo7 reproducer changed behaviour; stdout=\n{}\nstderr=\n{}",
-        outcome.stdout,
-        outcome.stderr
-    );
-    let report: Value = serde_json::from_str(&outcome.stdout).expect("run --json report");
-    assert_eq!(report["containment_verdict"], "Sandbox", "{report}");
-    assert_eq!(report["dispatch"]["captured_output"]["stdout"], "112781\n");
+    let (dir, balanced) = run_app(JSON_HEAVY_APP, &["--json"]);
+    let strict = Command::new(franken_node_bin())
+        .args([
+            "run",
+            "app.js",
+            "--policy",
+            "strict",
+            "--runtime",
+            "franken-engine",
+            "--engine-bin",
+            franken_node_bin(),
+            "--json",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("spawn strict run");
+    let strict = RunOutcome {
+        exit_code: strict.status.code(),
+        stdout: String::from_utf8_lossy(&strict.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&strict.stderr).into_owned(),
+    };
 
-    let (_dir, human) = run_app(JSON_HEAVY_APP, &[]);
-    assert_eq!(human.exit_code, Some(92));
-    assert!(
-        human.stdout.contains(
-            "runtime containment: exit 92 is the engine's containment verdict Sandbox, not a program exit status"
-        ),
-        "stdout=\n{}",
-        human.stdout
-    );
+    for (policy, outcome) in [("balanced", &balanced), ("strict", &strict)] {
+        assert_eq!(
+            outcome.exit_code,
+            Some(0),
+            "{policy}: benign run must complete; stdout=\n{}\nstderr=\n{}",
+            outcome.stdout,
+            outcome.stderr
+        );
+        let report = last_json_document(&outcome.stdout);
+        assert!(report.get("containment_verdict").is_none(), "{policy}: {report}");
+        assert_eq!(report["dispatch"]["captured_output"]["stdout"], "112781\n");
+
+        let decision = &report["dispatch"]["engine_decision"];
+        assert_eq!(decision["containment_action"], "allow", "{policy}: {decision}");
+        assert_eq!(decision["risk_state"], "benign", "{policy}: {decision}");
+        assert!(
+            decision["selector_action"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()),
+            "{policy}: selector action missing: {decision}"
+        );
+        assert!(
+            decision["decision_rationale"]
+                .as_str()
+                .is_some_and(|value| value.contains("benign_completion_downgrade=")),
+            "{policy}: signed rationale missing: {decision}"
+        );
+        let posterior_total: i64 = [
+            "posterior_benign_millionths",
+            "posterior_anomalous_millionths",
+            "posterior_malicious_millionths",
+            "posterior_unknown_millionths",
+        ]
+        .iter()
+        .map(|field| decision[*field].as_i64().expect("posterior component"))
+        .sum();
+        assert!(
+            (999_000..=1_001_000).contains(&posterior_total),
+            "{policy}: posterior must be a distribution: {decision}"
+        );
+        assert!(decision["instructions_executed"].as_u64().unwrap_or(0) > 1_000_000);
+    }
 }
 
 /// bd-reality-20260923-26n9r.15 deliverable 6: every `run` in an initialized
