@@ -3002,7 +3002,8 @@ Profile selection changes concrete behavior. The salient differences:
 | Guest file writes (`fs.writeFileSync` and friends; confined to the project root) | denied | denied | allowed |
 | `process.platform`, `process.arch` and other allowlisted `process` shape reads | denied | denied | allowed |
 | `process.env` reads | denied | denied | denied (no profile grants them yet) |
-| Compatibility corpus pass rate (560 cases, 2026-09-25, same binary) | 0.00%: every program, even `console.log('hello')`, prints its output and then exits 92 (engine containment verdict Sandbox; engine bug bd-pgzo7) | 78.93% (fs 2/50) | 86.61% |
+| Pure builtins (JSON, Error, Number, `path` string operations) | allowed | allowed | allowed |
+| Compatibility corpus pass rate (560 cases, 2026-09-26, same binary, back to back) | 70.71%: the same as balanced except `http` 3/50, since strict grants no network egress | 78.93% (fs 2/50) | 86.61% |
 | SSRF default | block | block | block |
 | Safe-mode auto-entry on crash-loop | not implemented (the crash-loop detector has no caller) | same | same |
 | Camouflage severity threshold for risk bump | constant 0.50, not yet per profile | same | same |

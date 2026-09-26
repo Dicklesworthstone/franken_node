@@ -63,8 +63,15 @@ Each claim entry uses this structure:
   `balanced` (the default profile) 442/560 = 78.93%; `legacy-risky`
   485/560 = 86.61%; `strict` 0/560 = 0.00% (even a one-line
   `console.log('hello')` prints its output and then exits 92, the engine's
-  Sandbox containment verdict; engine bd-pgzo7). Between balanced and
-  legacy-risky, every family scores the same
+  Sandbox containment verdict; engine bd-pgzo7). RE-MEASURED 2026-09-26 on
+  the same host and procedure: build10 (sha256 prefix 625f989b1434b211;
+  engine 92c65f951 removes the Conservative-matrix prior tax) gives strict
+  33/560 = 5.89%, and build11 (c0fefc2eaec51091; node 56cd964ce also grants
+  strict the pure `builtin` capability, without which JSON.stringify and
+  `new Error` aborted) gives strict 396/560 = 70.71%, which matches
+  balanced in every family except http (3/50: strict grants no network
+  egress). Balanced and legacy-risky stayed 442 and 485 on both builds.
+  Between balanced and legacy-risky, every family scores the same
   except fs (2/50 vs 43/50: balanced grants no fs_write capability, so any
   file write is refused) and os (28/30 vs 30/30: balanced lowers with a
   deny-all ambient grant, so `process.platform` is refused). The artifact
