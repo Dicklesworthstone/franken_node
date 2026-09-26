@@ -2611,11 +2611,30 @@ mod contract_tests {
         assert!(!body.contains("\"live_control_plane\":true"));
     }
 
+    const TEST_REGISTRY_KEY: &str = "x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c=";
+    const OTHER_REGISTRY_KEY: &str = "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=";
+
+    fn test_trust_config(registry_signing_key: &str) -> crate::config::TrustConfig {
+        crate::config::TrustConfig {
+            risky_requires_fresh_revocation: false,
+            dangerous_requires_fresh_revocation: false,
+            quarantine_on_high_risk: false,
+            card_cache_ttl_secs: None,
+            freshness_window_secs: None,
+            min_trust_score: None,
+            decay_factor: None,
+            registry_signing_key: Some(registry_signing_key.to_string()),
+            reputation_tier_thresholds: None,
+            test_coverage_threshold_pct: None,
+        }
+    }
+
     #[test]
     fn http_server_trust_cards_fail_closed_without_registry() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let (status, content_type, body) = http_server::trust_cards_catalog_response_for_base(
             tmp.path(),
+            &test_trust_config(TEST_REGISTRY_KEY),
             "test-trust-cards-missing",
         );
         assert_eq!(status, 503);
@@ -2630,18 +2649,7 @@ mod contract_tests {
         let snapshot = tmp
             .path()
             .join(http_server::TRUST_CARD_REGISTRY_CATALOG_RELATIVE_PATH);
-        let trust_config = crate::config::TrustConfig {
-            risky_requires_fresh_revocation: false,
-            dangerous_requires_fresh_revocation: false,
-            quarantine_on_high_risk: false,
-            card_cache_ttl_secs: None,
-            freshness_window_secs: None,
-            min_trust_score: None,
-            decay_factor: None,
-            registry_signing_key: Some("x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c=".to_string()),
-            reputation_tier_thresholds: None,
-            test_coverage_threshold_pct: None,
-        };
+        let trust_config = test_trust_config(TEST_REGISTRY_KEY);
         let mut registry =
             crate::supply_chain::trust_card::TrustCardRegistry::from_config(&trust_config)
                 .expect("registry from default config");
@@ -2649,8 +2657,19 @@ mod contract_tests {
             .persist_authoritative_state(&snapshot)
             .expect("persist fresh registry store");
 
+        // A registry the workspace's key did not sign is refused, not listed
+        // (the handler used the in-crate default key, so every real
+        // workspace's registry read as unavailable).
+        let (foreign_status, _, foreign_body) = http_server::trust_cards_catalog_response_for_base(
+            tmp.path(),
+            &test_trust_config(OTHER_REGISTRY_KEY),
+            "test-trust-cards-foreign-key",
+        );
+        assert_eq!(foreign_status, 503, "{foreign_body}");
+
         let (status, content_type, body) = http_server::trust_cards_catalog_response_for_base(
             tmp.path(),
+            &trust_config,
             "test-trust-cards-empty",
         );
         assert_eq!(status, 200);
@@ -2742,7 +2761,18 @@ pub mod http_server {
             ("GET", "/v1/trust/cards") | ("GET", "/api/v1/trust/cards") => {
                 let base_dir =
                     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                trust_cards_catalog_response_for_base(&base_dir, trace_id)
+                match RuntimeConfig::resolve(None, crate::config::CliOverrides::default()) {
+                    Ok(resolved) => trust_cards_catalog_response_for_base(
+                        &base_dir,
+                        &resolved.config.trust,
+                        trace_id,
+                    ),
+                    Err(error) => trust_registry_unavailable_response(
+                        &base_dir.join(TRUST_CARD_REGISTRY_CATALOG_RELATIVE_PATH),
+                        trace_id,
+                        &format!("workspace configuration unavailable: {error}"),
+                    ),
+                }
             }
             _ => {
                 let resp = json!({
@@ -2821,11 +2851,15 @@ pub mod http_server {
     ///
     /// The in-process catalog owns no registry of its own; it discovers the
     /// workspace registry relative to `base_dir` exactly like the trust-card
-    /// CLI. When no registry can be loaded, the endpoint fails closed with a
-    /// typed `trust-registry-unavailable` problem document — it never
-    /// fabricates an empty card list.
+    /// CLI, and verifies it with the workspace's own registry key as that CLI
+    /// does; a registry signed with any other key, including the in-crate
+    /// default, is refused rather than listed. When no registry can be
+    /// loaded, the endpoint fails closed with a typed
+    /// `trust-registry-unavailable` problem document — it never fabricates an
+    /// empty card list.
     pub fn trust_cards_catalog_response_for_base(
         base_dir: &std::path::Path,
+        trust_config: &crate::config::TrustConfig,
         trace_id: &str,
     ) -> (u16, String, String) {
         use crate::supply_chain::trust_card::{
@@ -2836,9 +2870,9 @@ pub mod http_server {
         let now_secs = now_unix_secs();
         let unavailable =
             |detail: String| trust_registry_unavailable_response(&snapshot_path, trace_id, &detail);
-        let Ok(mut registry) = TrustCardRegistry::load_authoritative_state(
+        let Ok(mut registry) = TrustCardRegistry::load_authoritative_state_from_config(
             &snapshot_path,
-            crate::config::timeouts::TRUST_CARD_CACHE_TTL_SECS,
+            trust_config,
             now_secs,
             SnapshotSourceContext::TrustedFile,
         ) else {
@@ -2860,10 +2894,19 @@ pub mod http_server {
             })
             .collect();
         let total_count = summaries.len();
+        // Name the file the cards were actually read from: the durable store
+        // when present (the loader's first choice), else the legacy snapshot.
+        let store_path =
+            crate::supply_chain::trust_card_registry_store::durable_store_path(&snapshot_path);
+        let registry_path = if store_path.is_file() {
+            store_path
+        } else {
+            snapshot_path.clone()
+        };
         let resp = json!({
             "schema_version": "franken-node/trust-cards/v1",
             "source": "durable_trust_card_registry",
-            "registry_path": snapshot_path.display().to_string(),
+            "registry_path": registry_path.display().to_string(),
             "cards": summaries,
             "total_count": total_count,
             "trace_id": trace_id,

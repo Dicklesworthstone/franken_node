@@ -883,6 +883,7 @@ fn http_server_trust_cards_fail_closed_without_registry() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let (status, content_type, body) = http_server::trust_cards_catalog_response_for_base(
         tmp.path(),
+        &frankenengine_node::config::Config::default().trust,
         "test-trust-cards-missing",
     );
     assert_eq!(status, 503);
@@ -921,6 +922,7 @@ fn http_server_trust_cards_read_real_registry_store() {
 
     let (status, content_type, body) = http_server::trust_cards_catalog_response_for_base(
         tmp.path(),
+        &trust_config,
         "test-trust-cards-empty",
     );
     assert_eq!(status, 200);
