@@ -393,6 +393,8 @@ enum NativeSessionResponse {
         telemetry_report: Box<TelemetryRuntimeReport>,
         host_effect_ledger: Option<HostEffectLedger>,
         evidence_verification_identity: EvidenceVerificationIdentity,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        engine_decision: Option<EngineContainmentDecision>,
     },
     ExecutionFailed {
         schema_version: String,
@@ -2590,6 +2592,42 @@ pub struct RunDispatchReport {
     /// (surfaced as a warning, never fabricated).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sentinel: Option<crate::policy::runtime_sentinel::RunSentinelReport>,
+    /// The engine's own account of a completed native run's containment
+    /// decision. `None` for non-native runs and for native runs that failed
+    /// before producing a decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_decision: Option<EngineContainmentDecision>,
+}
+
+/// Why the engine contained (or allowed) a completed native run
+/// (bd-reality-20260923-26n9r.5). Exit codes 91-95 only name the verdict;
+/// this carries the MAP risk state and posterior the run's evidence produced,
+/// the action the expected-loss selector chose before any override, and the
+/// stopping rule that crossed, if one did. Copied from the engine's
+/// `OrchestratorResult`; nothing here is recomputed by the product.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineContainmentDecision {
+    pub containment_action: String,
+    pub selector_action: String,
+    pub risk_state: String,
+    pub posterior_benign_millionths: i64,
+    pub posterior_anomalous_millionths: i64,
+    pub posterior_malicious_millionths: i64,
+    pub posterior_unknown_millionths: i64,
+    pub expected_loss_millionths: i64,
+    /// Stopping rule that crossed (`cusum`, `secretary`, `composite`) or
+    /// `none`; `None` when the engine issued no stopping certificate.
+    pub stopping_trigger: Option<String>,
+    pub stopping_observations: Option<u64>,
+    pub cusum_statistic_millionths: Option<i64>,
+    /// The guardplane hook's last requested action, when the hook ran; a
+    /// hook request can make the final action more severe than the
+    /// selector's.
+    pub guardplane_last_action: Option<String>,
+    /// The engine's signed rationale for the chosen action (risk state,
+    /// stopping override, benign-completion downgrade).
+    pub decision_rationale: Option<String>,
+    pub instructions_executed: u64,
 }
 
 /// bd-5r99w.12: the trust-native effect ledger surfaced by `franken-node run`.
@@ -2890,6 +2928,7 @@ struct DispatchReportInputs<'a> {
     runtime_evidence_identity_capture: Option<RuntimeEvidenceIdentityCapture>,
     #[cfg(feature = "engine")]
     runtime_evidence_identity_capture_path: Option<PathBuf>,
+    engine_decision: Option<EngineContainmentDecision>,
 }
 
 #[cfg(feature = "engine")]
@@ -2898,6 +2937,7 @@ type NativeEngineSuccess = (
     TelemetryRuntimeReport,
     Option<HostEffectLedger>,
     EvidenceVerificationIdentity,
+    EngineContainmentDecision,
 );
 
 #[cfg(feature = "engine")]
@@ -2907,6 +2947,7 @@ type NativeEngineDispatchSuccess = (
     Option<HostEffectLedger>,
     RuntimeEvidenceIdentityCapture,
     PathBuf,
+    Option<EngineContainmentDecision>,
 );
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3753,6 +3794,53 @@ fn exit_code_for_containment_severity(severity: u32) -> i32 {
     }
 }
 
+/// Node's package-scope rule for `.js` files: the nearest ancestor
+/// `package.json` decides, and `"type": "module"` makes the file ESM. A scope
+/// file that cannot be read or parsed counts as CommonJS.
+#[cfg(feature = "engine")]
+fn package_scope_is_module(app_path: &Path) -> bool {
+    let absolute = std::path::absolute(app_path).unwrap_or_else(|_| app_path.to_path_buf());
+    let Some(scope_dir) = absolute
+        .ancestors()
+        .skip(1)
+        .find(|dir| dir.join("package.json").is_file())
+    else {
+        return false;
+    };
+    std::fs::read(scope_dir.join("package.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|manifest| manifest.get("type").and_then(|t| t.as_str()) == Some("module"))
+}
+
+#[cfg(feature = "engine")]
+fn engine_containment_decision(
+    result: &frankenengine_engine::execution_orchestrator::OrchestratorResult,
+) -> EngineContainmentDecision {
+    let stopping = result.optimal_stopping_certificate.as_ref();
+    let security_entry = result.evidence_entries.iter().find(|entry| {
+        entry.decision_type == frankenengine_engine::evidence_ledger::DecisionType::SecurityAction
+    });
+    EngineContainmentDecision {
+        containment_action: result.containment_action.to_string(),
+        selector_action: result.action_decision.action.to_string(),
+        risk_state: result.risk_state.to_string(),
+        posterior_benign_millionths: result.posterior.p_benign,
+        posterior_anomalous_millionths: result.posterior.p_anomalous,
+        posterior_malicious_millionths: result.posterior.p_malicious,
+        posterior_unknown_millionths: result.posterior.p_unknown,
+        expected_loss_millionths: result.expected_loss_millionths,
+        stopping_trigger: stopping.map(|certificate| certificate.algorithm.clone()),
+        stopping_observations: stopping.map(|certificate| certificate.observations_before_stop),
+        cusum_statistic_millionths: stopping
+            .and_then(|certificate| certificate.cusum_statistic_millionths),
+        guardplane_last_action: security_entry
+            .and_then(|entry| entry.metadata.get("guardplane_last_action").cloned()),
+        decision_rationale: security_entry.map(|entry| entry.chosen_action.rationale.clone()),
+        instructions_executed: result.instructions_executed,
+    }
+}
+
 /// Render captured console output into separated stdout/stderr byte streams.
 ///
 /// Mirrors Node/Bun console semantics: `console.log`/`console.info` go to
@@ -4505,6 +4593,7 @@ impl EngineDispatcher {
                 runtime_evidence_identity_capture: None,
                 #[cfg(feature = "engine")]
                 runtime_evidence_identity_capture_path: None,
+                engine_decision: None,
             }));
         }
 
@@ -4608,6 +4697,7 @@ impl EngineDispatcher {
             host_effect_ledger,
             runtime_evidence_identity_capture,
             runtime_evidence_identity_capture_path,
+            engine_decision,
         ) = {
             tracing::info!(
                 execution_mode = "native",
@@ -4628,7 +4718,7 @@ impl EngineDispatcher {
             )
         }?;
         #[cfg(not(feature = "engine"))]
-        let (output, report, host_effect_ledger) = {
+        let (output, report, host_effect_ledger, engine_decision) = {
             if config.profile == Profile::Strict {
                 let dispatch_error = EngineDispatchError::EngineNotBuilt {
                     app_path: app_path.to_path_buf(),
@@ -4639,7 +4729,7 @@ impl EngineDispatcher {
             tracing::warn!("Engine feature disabled; falling back to external process execution");
             Self::run_engine_process(&mut cmd, telemetry_handle)
                 .map_err(|err| anyhow::anyhow!("{err}"))
-                .map(|(output, report)| (output, report, None::<HostEffectLedger>))
+                .map(|(output, report)| (output, report, None::<HostEffectLedger>, None))
         }?;
         if !report.drain_completed {
             eprintln!(
@@ -4669,6 +4759,7 @@ impl EngineDispatcher {
             runtime_evidence_identity_capture: Some(runtime_evidence_identity_capture),
             #[cfg(feature = "engine")]
             runtime_evidence_identity_capture_path: Some(runtime_evidence_identity_capture_path),
+            engine_decision,
         }))
     }
 
@@ -4740,6 +4831,7 @@ impl EngineDispatcher {
                 .runtime_evidence_identity_capture_path
                 .map(|path| path.display().to_string()),
             sentinel,
+            engine_decision: inputs.engine_decision,
         }
     }
 
@@ -5044,6 +5136,7 @@ impl EngineDispatcher {
                             telemetry_report,
                             host_effect_ledger,
                             evidence_verification_identity,
+                            engine_decision,
                         )) => {
                             let Some(exit_code) = output.status.code() else {
                                 return write_response(NativeSessionResponse::ExecutionFailed {
@@ -5069,6 +5162,7 @@ impl EngineDispatcher {
                                 telemetry_report: Box::new(telemetry_report),
                                 host_effect_ledger,
                                 evidence_verification_identity,
+                                engine_decision: Some(engine_decision),
                             }
                         }
                         Err(EngineProcessError::Spawn {
@@ -6223,6 +6317,7 @@ impl EngineDispatcher {
                 telemetry_report,
                 host_effect_ledger,
                 evidence_verification_identity,
+                engine_decision,
             } => {
                 validate_envelope(&schema_version, &response_nonce).map_err(|message| {
                     EngineDispatchError::EngineExecutionError {
@@ -6311,6 +6406,7 @@ impl EngineDispatcher {
                     host_effect_ledger,
                     expected_evidence_capture,
                     evidence_capture_path,
+                    engine_decision,
                 ))
             }
             NativeSessionResponse::ExecutionFailed {
@@ -6441,6 +6537,12 @@ impl EngineDispatcher {
             Profile::Strict => vec![
                 "module_load".to_string(), // Maps to RuntimeCapability::ModuleLoad
                 "fs_read".to_string(),     // Maps to RuntimeCapability::FsRead
+                // Pure computation (JSON, Error, Number, ...). It carries no
+                // external authority: effectful builtins map to their own
+                // capabilities (randomness to random_read), and the engine's
+                // own run path grants it ambiently. Without it strict aborted
+                // on the first JSON.stringify or `new Error`.
+                "builtin".to_string(), // Maps to RuntimeCapability::Builtin
                 "timer".to_string(), // Maps to RuntimeCapability::Timer (for timeout functionality)
             ],
             Profile::Balanced => vec![
@@ -7458,6 +7560,7 @@ impl EngineDispatcher {
             stdout,
             stderr,
         };
+        let engine_decision = engine_containment_decision(&execution_result);
 
         // Stop telemetry and return
         let telemetry_guard = telemetry_guard.take().ok_or_else(|| {
@@ -7477,6 +7580,7 @@ impl EngineDispatcher {
             telemetry_report,
             Some(host_effect_ledger),
             expected_evidence_identity,
+            engine_decision,
         ))
     }
 
@@ -8133,15 +8237,13 @@ impl EngineDispatcher {
 
     #[cfg(feature = "engine")]
     fn parse_goal_for_entrypoint(app_path: &Path) -> ParseGoal {
-        if matches!(
-            app_path
-                .extension()
-                .and_then(|extension| extension.to_str()),
-            Some("mjs")
-        ) {
-            ParseGoal::Module
-        } else {
-            ParseGoal::Script
+        match app_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+        {
+            Some("mjs") => ParseGoal::Module,
+            Some("js") if package_scope_is_module(app_path) => ParseGoal::Module,
+            _ => ParseGoal::Script,
         }
     }
 
@@ -8496,6 +8598,7 @@ mod tests {
             host_effect_ledger: None,
             runtime_evidence_identity_capture: Some(capture.clone()),
             runtime_evidence_identity_capture_path: Some(capture_path.clone()),
+            engine_decision: None,
         });
 
         assert_eq!(
@@ -10596,6 +10699,7 @@ mod tests {
             runtime_evidence_identity_capture: None,
             #[cfg(feature = "engine")]
             runtime_evidence_identity_capture_path: None,
+            engine_decision: None,
         });
 
         assert_eq!(report.runtime, "node");
@@ -10632,6 +10736,7 @@ mod tests {
             runtime_evidence_identity_capture: None,
             #[cfg(feature = "engine")]
             runtime_evidence_identity_capture_path: None,
+            engine_decision: None,
         });
 
         assert_eq!(report.duration_ms, u64::MAX);
@@ -10661,6 +10766,7 @@ mod tests {
             runtime_evidence_identity_capture: None,
             #[cfg(feature = "engine")]
             runtime_evidence_identity_capture_path: None,
+            engine_decision: None,
         });
 
         assert_eq!(report.captured_output.stdout, "\u{fffd}ok");
@@ -11217,6 +11323,7 @@ mod tests {
                         runtime_evidence_identity_capture: None,
                         #[cfg(feature = "engine")]
                         runtime_evidence_identity_capture_path: None,
+                        engine_decision: None,
                     };
 
                     // Verify report field sanitization
@@ -11521,6 +11628,7 @@ mod tests {
                     runtime_evidence_identity_capture: None,
                     #[cfg(feature = "engine")]
                     runtime_evidence_identity_capture_path: None,
+                    engine_decision: None,
                 };
 
                 // Build report with malicious output
@@ -11552,6 +11660,7 @@ mod tests {
                         .as_ref()
                         .map(|path| path.display().to_string()),
                     sentinel: None,
+                    engine_decision: None,
                 };
 
                 // Test report serialization safety
@@ -12163,6 +12272,7 @@ mod tests {
                     #[cfg(feature = "engine")]
                     runtime_evidence_identity_capture_path: None,
                     sentinel: None,
+                    engine_decision: None,
                 };
 
                 // Test dispatch report serialization with poisoned telemetry
@@ -13445,6 +13555,7 @@ mod tests {
             runtime_evidence_identity_capture: None,
             #[cfg(feature = "engine")]
             runtime_evidence_identity_capture_path: None,
+            engine_decision: None,
         });
         let json = serde_json::to_string(&report).expect("serialize run report");
         assert!(

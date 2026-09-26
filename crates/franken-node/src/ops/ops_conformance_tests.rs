@@ -93,6 +93,7 @@ fn run_dispatch_report_json_keeps_receipt_fields_stable() {
         #[cfg(feature = "engine")]
         runtime_evidence_identity_capture_path: None,
         sentinel: None,
+        engine_decision: None,
     };
 
     let encoded = serde_json::to_value(&report).unwrap();
@@ -132,6 +133,7 @@ fn run_dispatch_report_json_round_trips_without_format_drift() {
         #[cfg(feature = "engine")]
         runtime_evidence_identity_capture_path: None,
         sentinel: None,
+        engine_decision: None,
     };
 
     let encoded = serde_json::to_string(&report).unwrap();

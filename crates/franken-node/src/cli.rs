@@ -208,7 +208,9 @@ pub struct InitArgs {
     #[arg(long, value_parser = parse_safe_content_pathbuf)]
     pub config: Option<PathBuf>,
 
-    /// Output directory for generated config files.
+    /// Output directory for generated config files (default: the directory
+    /// whose `.franken-node/` state is bootstrapped; with `--no-state` and no
+    /// `--out-dir`, the resolved config is printed to stdout instead).
     #[arg(long, value_parser = parse_safe_content_pathbuf)]
     pub out_dir: Option<PathBuf>,
 

@@ -11028,12 +11028,31 @@ fn native_containment_action(runtime: &str, exit_code: Option<i32>) -> Option<&'
     }
 }
 
-fn native_containment_note(runtime: &str, exit_code: Option<i32>) -> Option<String> {
+fn native_containment_note(
+    runtime: &str,
+    exit_code: Option<i32>,
+    decision: Option<&ops::engine_dispatcher::EngineContainmentDecision>,
+) -> Option<String> {
     let action = native_containment_action(runtime, exit_code)?;
     let code = exit_code?;
-    Some(format!(
+    let mut note = format!(
         "runtime containment: exit {code} is the engine's containment verdict {action}, not a program exit status"
-    ))
+    );
+    if let Some(decision) = decision {
+        note.push_str(&format!(
+            "\n  why: risk_state={} posterior(benign={} malicious={} anomalous={} unknown={} ppm) selector={} stopping={} guardplane={} instructions={}",
+            decision.risk_state,
+            decision.posterior_benign_millionths,
+            decision.posterior_malicious_millionths,
+            decision.posterior_anomalous_millionths,
+            decision.posterior_unknown_millionths,
+            decision.selector_action,
+            decision.stopping_trigger.as_deref().unwrap_or("none"),
+            decision.guardplane_last_action.as_deref().unwrap_or("none"),
+            decision.instructions_executed,
+        ));
+    }
+    Some(note)
 }
 
 fn render_run_execution_receipt_summary(
@@ -11197,7 +11216,11 @@ fn emit_run_completion_output(
         "{}",
         render_run_execution_receipt_summary(receipt, receipt_path)
     );
-    if let Some(note) = native_containment_note(&dispatch.runtime, dispatch.exit_code) {
+    if let Some(note) = native_containment_note(
+        &dispatch.runtime,
+        dispatch.exit_code,
+        dispatch.engine_decision.as_ref(),
+    ) {
         println!("{note}");
     }
     // bd-5r99w.12: surface the trust-native host-effect ledger in human output.
@@ -31207,8 +31230,16 @@ fn main() -> Result<()> {
                 .as_deref()
                 .or(out_dir.as_deref())
                 .unwrap_or_else(|| Path::new("."));
+            // The config lands where the state does. State bootstrap signs the
+            // trust-card registry with the (possibly just synthesized) registry
+            // key, so a config that is only printed leaves a workspace no later
+            // command can open and puts the signing key in terminal scrollback.
+            // Print-only stays for `--no-state`, which creates no keyed state.
+            let config_out_dir = out_dir
+                .clone()
+                .or_else(|| (!no_state).then(|| bootstrap_root.to_path_buf()));
 
-            if let Some(ref out_dir) = out_dir {
+            if let Some(ref out_dir) = config_out_dir {
                 if let Err(err) = std::fs::create_dir_all(out_dir).with_context(|| {
                     format!("failed creating init output dir {}", out_dir.display())
                 }) {
@@ -33474,6 +33505,7 @@ mod run_trust_gate_tests {
             #[cfg(feature = "engine")]
             runtime_evidence_identity_capture_path: None,
             sentinel: None,
+            engine_decision: None,
         }
     }
 
