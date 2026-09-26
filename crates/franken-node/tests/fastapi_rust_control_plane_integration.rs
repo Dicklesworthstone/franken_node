@@ -914,7 +914,7 @@ fn http_server_trust_cards_read_real_registry_store() {
         reputation_tier_thresholds: None,
         test_coverage_threshold_pct: None,
     };
-    let mut registry =
+    let registry =
         TrustCardRegistry::from_config(&trust_config).expect("registry from default config");
     registry
         .persist_authoritative_state(&snapshot)

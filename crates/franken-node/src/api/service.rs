@@ -2650,7 +2650,7 @@ mod contract_tests {
             .path()
             .join(http_server::TRUST_CARD_REGISTRY_CATALOG_RELATIVE_PATH);
         let trust_config = test_trust_config(TEST_REGISTRY_KEY);
-        let mut registry =
+        let registry =
             crate::supply_chain::trust_card::TrustCardRegistry::from_config(&trust_config)
                 .expect("registry from default config");
         registry
