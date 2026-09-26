@@ -806,8 +806,13 @@ impl LaneRouter {
                             evicted_operation_ids.push(evicted.operation_id);
                         }
                     }
+                    // Trim to the new limit, not below it. A queue holding
+                    // exactly `queue_limit` operations is full, not over, and
+                    // it drains as in-flight work completes; `>=` here
+                    // (8525a7de8) discarded one extra queued operation on
+                    // every reload, and every queued one at a limit of 1.
                     LaneOverflowPolicy::EnqueueWithTimeout => {
-                        while lane_state.queue.len() >= lane_cfg.queue_limit {
+                        while lane_state.queue.len() > lane_cfg.queue_limit {
                             let Some(evicted) = lane_state.queue.pop_back() else {
                                 break;
                             };
@@ -815,7 +820,7 @@ impl LaneRouter {
                         }
                     }
                     LaneOverflowPolicy::ShedOldest => {
-                        while lane_state.queue.len() >= lane_cfg.queue_limit {
+                        while lane_state.queue.len() > lane_cfg.queue_limit {
                             let Some(evicted) = lane_state.queue.pop_front() else {
                                 break;
                             };

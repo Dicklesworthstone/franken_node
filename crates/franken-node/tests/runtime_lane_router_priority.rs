@@ -67,8 +67,12 @@ fn configured_merge_decision_cap_bounds_resolved_diagnostics() {
     std::fs::write(
         &path,
         r#"
+[trust]
+registry_signing_key = "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI="
+
 [security]
 max_merge_decisions = 2
+authorized_api_keys = ["lane-router-test-key"]
 
 [runtime]
 preferred = "bun"
