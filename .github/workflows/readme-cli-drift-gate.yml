@@ -20,9 +20,12 @@ on:
       - .github/workflows/readme-cli-drift-gate.yml
   workflow_dispatch: {}
 
+# The gate builds the engine (tens of minutes) while main receives pushes
+# every few minutes; cancelling in-progress runs on main left 14 of its last
+# 20 runs cancelled. Only PR runs cancel; on main the running job finishes.
 concurrency:
   group: readme-cli-drift-gate-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   drift:
