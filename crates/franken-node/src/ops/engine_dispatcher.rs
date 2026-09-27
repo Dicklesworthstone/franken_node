@@ -2664,12 +2664,16 @@ pub struct HostEffectLedger {
     pub trace_id: String,
     /// Hash-chain head committing to the full effect sequence (genesis if empty).
     pub chain_head_hash: String,
-    /// Total effects recorded (allowed + denied).
+    /// Total effects recorded (allowed + denied + failed).
     pub effect_count: usize,
     /// Effects that were authorized and executed.
     pub allowed_count: usize,
-    /// Effects refused before execution (fail-closed; no result/post-state).
+    /// Effects a gate refused before execution (fail-closed; no
+    /// result/post-state).
     pub denied_count: usize,
+    /// Effects the gates authorized but the host could not perform (a missing
+    /// file, an I/O error); no result/post-state, and not a refusal.
+    pub failed_count: usize,
     /// The append-only, hash-chained receipt entries. Wire-identical to the
     /// verifier SDK's `EffectReceiptChainEntry`, so the SDK re-derives the chain
     /// directly from this list.
@@ -2683,7 +2687,7 @@ pub struct HostEffectLedger {
 
 #[cfg(feature = "engine")]
 const HOST_EFFECT_LEDGER_SIGNATURE_DOMAIN: &[u8] =
-    b"franken-node:host-effect-ledger-signature:v2\0";
+    b"franken-node:host-effect-ledger-signature:v3\0";
 
 #[cfg(feature = "engine")]
 #[derive(Serialize)]
@@ -2694,10 +2698,12 @@ struct HostEffectLedgerSignaturePayload<'a> {
     effect_count: usize,
     allowed_count: usize,
     denied_count: usize,
+    failed_count: usize,
     entries: &'a [crate::runtime::effect_receipt::EffectReceiptChainEntry],
 }
 
 #[cfg(feature = "engine")]
+#[allow(clippy::too_many_arguments)]
 fn host_effect_ledger_signature_payload_fields(
     schema_version: &str,
     trace_id: &str,
@@ -2705,6 +2711,7 @@ fn host_effect_ledger_signature_payload_fields(
     effect_count: usize,
     allowed_count: usize,
     denied_count: usize,
+    failed_count: usize,
     entries: &[crate::runtime::effect_receipt::EffectReceiptChainEntry],
 ) -> Result<Vec<u8>> {
     let payload = serde_json::to_vec(&HostEffectLedgerSignaturePayload {
@@ -2714,6 +2721,7 @@ fn host_effect_ledger_signature_payload_fields(
         effect_count,
         allowed_count,
         denied_count,
+        failed_count,
         entries,
     })
     .context("serialize host-effect ledger signature payload")?;
@@ -2740,6 +2748,7 @@ fn host_effect_ledger_signature_payload(ledger: &HostEffectLedger) -> Result<Vec
         ledger.effect_count,
         ledger.allowed_count,
         ledger.denied_count,
+        ledger.failed_count,
         &ledger.entries,
     )
 }
@@ -2768,7 +2777,19 @@ fn validate_host_effect_ledger(
             ledger.entries.len()
         ));
     }
-    if ledger.allowed_count.saturating_add(ledger.denied_count) != ledger.effect_count {
+    // Each count must equal the entries it summarizes, not merely sum to the
+    // total: a failure relabelled as a denial (or the reverse) is refused.
+    let count_outcomes = |label: &str| {
+        ledger
+            .entries
+            .iter()
+            .filter(|entry| entry.receipt.policy_outcome.label() == label)
+            .count()
+    };
+    if ledger.allowed_count != count_outcomes("allowed")
+        || ledger.denied_count != count_outcomes("denied")
+        || ledger.failed_count != count_outcomes("failed")
+    {
         return Err("native-session ledger outcome counts were inconsistent".to_string());
     }
     EffectReceiptChain::verify_entries_integrity(&ledger.entries)
@@ -7736,15 +7757,15 @@ impl EngineDispatcher {
         signed_epoch: SecurityEpoch,
     ) -> Result<HostEffectLedger> {
         use crate::runtime::effect_receipt::{
-            EFFECT_RECEIPT_EMPTY_LINEAGE_HASH, EffectKind, EffectLineageFields, EffectReceipt,
-            EffectReceiptChain, FlowPolicyVerdict,
+            EFFECT_RECEIPT_EMPTY_LABEL_SET_COMMITMENT, EFFECT_RECEIPT_EMPTY_LINEAGE_HASH,
+            EffectKind, EffectLineageFields, EffectReceipt, EffectReceiptChain, FlowPolicyVerdict,
         };
         use crate::security::lineage_tracker::{
             classify_sensitive_source_path, secret_file_label_set_commitment,
         };
         use crate::storage::cas::content_hash;
         use frankenengine_extension_host::host_io::{
-            HostIoCapability, HostIoRequest, HostIoResponse,
+            HostIoCapability, HostIoError, HostIoRequest, HostIoResponse,
         };
 
         // Canonically frame one filesystem-receipt argument. Each field is
@@ -7867,6 +7888,7 @@ impl EngineDispatcher {
         let mut chain = EffectReceiptChain::new();
         let mut allowed_count = 0usize;
         let mut denied_count = 0usize;
+        let mut failed_count = 0usize;
 
         // bd-plhag: run-scoped information-flow labeling by CONTENT CONTAINMENT.
         // Bytes read from recognized secret-bearing files are retained here; a
@@ -8175,6 +8197,40 @@ impl EngineDispatcher {
                         lineage,
                     )
                 }
+                // The gates authorized the effect and the host could not perform
+                // it (a Node-style filesystem error such as ENOENT, an I/O error,
+                // an unimplemented operation). Recording that as a denial would
+                // sign a policy decision no gate made, and would feed incident
+                // capture and the sentinel a refusal that never happened. Like an
+                // allowed effect, an attempt that carried the secret keeps its
+                // commitment: an attempt at a sink is not a block.
+                Err(
+                    err @ (HostIoError::Fs { .. }
+                    | HostIoError::Io { .. }
+                    | HostIoError::NotImplemented { .. }),
+                ) => {
+                    failed_count = failed_count.saturating_add(1);
+                    let lineage = EffectLineageFields {
+                        input_lineage_hash: EFFECT_RECEIPT_EMPTY_LINEAGE_HASH.to_string(),
+                        output_lineage_hash: None,
+                        label_set_commitment: taint_commitment.clone().unwrap_or_else(|| {
+                            EFFECT_RECEIPT_EMPTY_LABEL_SET_COMMITMENT.to_string()
+                        }),
+                        declassification_ref: None,
+                        flow_policy_verdict: FlowPolicyVerdict::LabelClean,
+                    };
+                    EffectReceipt::failed_with_lineage(
+                        seq,
+                        trace_id,
+                        effect_kind,
+                        capability_ref,
+                        err.to_string(),
+                        content_hash(&input_bytes),
+                        args_hash,
+                        recorded_at_millis,
+                        lineage,
+                    )
+                }
                 Err(err) => {
                     denied_count = denied_count.saturating_add(1);
                     // A DENIED effect that carries the secret is a flow BLOCK: it
@@ -8228,6 +8284,7 @@ impl EngineDispatcher {
             effect_count,
             allowed_count,
             denied_count,
+            failed_count,
             &entries,
         )?;
         let signature = signing_authority
@@ -8241,6 +8298,7 @@ impl EngineDispatcher {
             effect_count,
             allowed_count,
             denied_count,
+            failed_count,
             entries,
             signature,
         })
