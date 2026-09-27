@@ -3342,10 +3342,16 @@ one pass.
   `require`, `module`, `exports`, `__filename` and `__dirname` and can
   `require('./lib/x')` files inside the project directory, while
   `require('fs')`, `require('path')` and the other supported builtins keep
-  routing through the capability-gated host calls. npm packages do not load
-  yet: there is no `node_modules` resolution, and builtins exist only as
-  recognized call patterns such as `fs.readFileSync(...)`, not as runtime
-  objects a package can pass around or inspect (bd-reality-20260923-26n9r.4).
+  routing through the capability-gated host calls. `require('pkg')` resolves
+  installed packages the way Node does (the `node_modules` walk-up inside the
+  project directory, package.json `exports` with the `require` condition,
+  `main`, and `.json` modules), but real npm packages do not run yet: of six
+  probed (lodash, ms/semver, dayjs, uuid, commander, minimist), none matches
+  Node. Large files exceed the per-file parse budget, some syntax still fails to
+  parse, string literals mentioning "token" or "password" are refused by the
+  information-flow check, and builtins exist only as recognized call patterns
+  such as `fs.readFileSync(...)`, not as runtime objects a package can pass
+  around (bd-reality-20260923-26n9r.4).
   The broader host-effect
   "runtime-of-record" — the full Node/Bun host-API surface with
   capability-metered effects — is still in active development under the
