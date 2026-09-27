@@ -819,7 +819,7 @@ impl fmt::Display for BundleError {
             ),
             Self::EffectReceiptDeniedHasHash { index, field } => write!(
                 formatter,
-                "denied effect receipt {index} must not carry {field}"
+                "denied or failed effect receipt {index} must not carry {field}"
             ),
             Self::EffectReceiptMissingCasBytes {
                 index,
@@ -2706,14 +2706,54 @@ mod tests {
             recorded_at_millis: 1_700_000_000_000,
         };
 
+        // Authorized, attempted, and failed on the host: not a refusal.
+        let failed = EffectReceipt {
+            schema_version: EFFECT_RECEIPT_SCHEMA_VERSION.to_string(),
+            seq: 2,
+            trace_id: "trace-bd-5r99w-12".to_string(),
+            effect_kind: EffectKind::FsRead,
+            policy_outcome: EffectPolicyOutcome::Failed {
+                capability_ref: "host-io:fs_read".to_string(),
+                reason: "host filesystem error ENOENT: missing.txt".to_string(),
+            },
+            pre_state_hash: cas_content_hash(b""),
+            args_hash: cas_content_hash(b"missing.txt"),
+            result_hash: None,
+            post_state_hash: None,
+            input_lineage_hash: empty.clone(),
+            output_lineage_hash: None,
+            label_set_commitment: empty.clone(),
+            declassification_ref: None,
+            flow_policy_verdict: FlowPolicyVerdict::LabelClean,
+            recorded_at_millis: 1_700_000_000_000,
+        };
+
         let e0 = build_entry(0, EFFECT_RECEIPT_CHAIN_GENESIS, allowed);
         let e1 = build_entry(1, &e0.chain_hash, denied);
-        let entries = vec![e0, e1];
+        let e2 = build_entry(2, &e1.chain_hash, failed);
+        let entries = vec![e0, e1, e2];
 
         // Offline re-derivation of the bare run --json ledger succeeds.
         let report = verify_effect_chain_entries(&entries).expect("offline chain verifies");
-        assert_eq!(report.effect_count, 2);
-        assert_eq!(report.head_chain_hash, entries[1].chain_hash);
+        assert_eq!(report.effect_count, 3);
+        assert_eq!(report.head_chain_hash, entries[2].chain_hash);
+        assert_eq!(report.verified_effects[2].outcome, "failed");
+        assert_eq!(
+            report.verified_effects[2].capability_ref.as_deref(),
+            Some("host-io:fs_read")
+        );
+        assert!(report.verified_effects[2].result_hash.is_none());
+
+        // Relabelling the failure as a denial changes the receipt hash, so the
+        // chain no longer verifies.
+        let mut relabelled = entries.clone();
+        relabelled[2].receipt.policy_outcome = EffectPolicyOutcome::Denied {
+            reason: "host filesystem error ENOENT: missing.txt".to_string(),
+        };
+        assert!(
+            verify_effect_chain_entries(&relabelled).is_err(),
+            "a failure relabelled as a denial must fail closed"
+        );
         assert_eq!(report.verified_effects[0].effect_kind, "fs_read");
         assert_eq!(report.verified_effects[0].outcome, "allowed");
         assert_eq!(
