@@ -10454,6 +10454,7 @@ fn maybe_capture_run_incident(
             "effect_count": ledger.effect_count,
             "allowed_count": ledger.allowed_count,
             "denied_count": ledger.denied_count,
+            "failed_count": ledger.failed_count,
             "ssrf_violations": receipt.core.ssrf_violations,
             "sentinel_enforced": receipt.core.sentinel_enforcement.is_some(),
         }),
@@ -11249,8 +11250,13 @@ fn emit_run_completion_output(
 /// authorizing capability or refusal reason, plus the tamper-evident chain head.
 fn render_host_effect_ledger_human(ledger: &ops::engine_dispatcher::HostEffectLedger) -> String {
     use runtime::effect_receipt::PolicyOutcome;
+    let failed = if ledger.failed_count > 0 {
+        format!(", {} failed", ledger.failed_count)
+    } else {
+        String::new()
+    };
     let mut out = format!(
-        "host-effect ledger: {} effect(s) ({} allowed, {} denied) chain_head={}",
+        "host-effect ledger: {} effect(s) ({} allowed, {} denied{failed}) chain_head={}",
         ledger.effect_count, ledger.allowed_count, ledger.denied_count, ledger.chain_head_hash,
     );
     for entry in &ledger.entries {
@@ -11258,6 +11264,7 @@ fn render_host_effect_ledger_human(ledger: &ops::engine_dispatcher::HostEffectLe
         let (verdict, detail) = match &receipt.policy_outcome {
             PolicyOutcome::Allowed { capability_ref } => ("allowed", capability_ref.as_str()),
             PolicyOutcome::Denied { reason } => ("denied", reason.as_str()),
+            PolicyOutcome::Failed { reason, .. } => ("failed", reason.as_str()),
         };
         out.push_str(&format!(
             "\n  [{}] {} {} ({})",
@@ -13530,6 +13537,9 @@ fn render_run_structured_logs_jsonl(
                 }
                 runtime::effect_receipt::PolicyOutcome::Denied { reason } => {
                     ("denied", reason.as_str())
+                }
+                runtime::effect_receipt::PolicyOutcome::Failed { reason, .. } => {
+                    ("failed", reason.as_str())
                 }
             };
             let effect_line = run_structured_log_line_with_details(

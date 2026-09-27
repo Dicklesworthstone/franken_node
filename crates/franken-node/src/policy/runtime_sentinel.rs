@@ -1073,7 +1073,7 @@ pub fn sentinel_signal_for_effect_entry(
                 sanitize_detail(reason)
             ),
         ),
-        PolicyOutcome::Allowed { .. }
+        PolicyOutcome::Allowed { .. } | PolicyOutcome::Failed { .. }
             if carries_secret_labels
                 && matches!(receipt.flow_policy_verdict, FlowPolicyVerdict::LabelClean)
                 && egress_capable_sink =>
@@ -1081,7 +1081,8 @@ pub fn sentinel_signal_for_effect_entry(
             // Honest DETECTION: secret-labeled bytes reached a sink the
             // endpoint gates allowed. The ledger records it; the sentinel
             // treats it as exfiltration evidence of the same strength as a
-            // blocked attempt.
+            // blocked attempt. A host failure does not excuse the attempt:
+            // the gates let the bytes through to the sink.
             (
                 SentinelSignalKind::EffectReceiptAnomaly,
                 MAG_SECRET_EXFIL_BP,
@@ -1105,6 +1106,15 @@ pub fn sentinel_signal_for_effect_entry(
             MAG_ALLOWED_CLEAN_BP,
             LR_ALLOWED_CLEAN_PPM,
             format!("allowed {kind_label};seq={}", receipt.seq),
+        ),
+        // A host failure on an authorized effect (a missing file, an I/O
+        // error) is an ordinary capability use, not a policy violation: no
+        // gate refused anything.
+        PolicyOutcome::Failed { .. } => (
+            SentinelSignalKind::CapabilityInvocation,
+            MAG_ALLOWED_CLEAN_BP,
+            LR_ALLOWED_CLEAN_PPM,
+            format!("failed {kind_label};seq={}", receipt.seq),
         ),
     };
 

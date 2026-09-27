@@ -226,9 +226,10 @@ pub fn produce_proof_carrying_effects_evidence() -> Result<ProofCarryingEffectsE
         })?;
         match &entry.receipt.policy_outcome {
             PolicyOutcome::Allowed { .. } => {}
-            PolicyOutcome::Denied { reason } => bail!(
-                "producer run recorded a denied {} effect ({reason}); \
+            PolicyOutcome::Denied { reason } | PolicyOutcome::Failed { reason, .. } => bail!(
+                "producer run recorded a {} {} effect ({reason}); \
                  every acceptance-subject effect must execute",
+                entry.receipt.policy_outcome.label(),
                 entry.receipt.effect_kind.label()
             ),
         }

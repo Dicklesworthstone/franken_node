@@ -507,7 +507,7 @@ fn run_surfaces_signed_host_effect_ledger_bd_5r99w_12() {
         .host_effect_ledger
         .as_ref()
         .expect("native run must surface a host-effect ledger");
-    assert_eq!(ledger.schema_version, "host-effect-ledger-v2.0");
+    assert_eq!(ledger.schema_version, "host-effect-ledger-v3.0");
     assert_eq!(
         ledger.effect_count, 2,
         "expected fs_write + fs_read, got {:?}",
@@ -717,7 +717,7 @@ fn run_surfaces_signed_http_request_effect_ledger_bd_656a2() {
         .host_effect_ledger
         .as_ref()
         .expect("native http run must surface a host-effect ledger");
-    assert_eq!(ledger.schema_version, "host-effect-ledger-v2.0");
+    assert_eq!(ledger.schema_version, "host-effect-ledger-v3.0");
     assert_eq!(
         ledger.effect_count, 1,
         "expected a single http_request effect, got {:?}",
@@ -868,7 +868,7 @@ fn run_surfaces_signed_https_request_effect_ledger_bd_3894s() {
         .host_effect_ledger
         .as_ref()
         .expect("native https run must surface a host-effect ledger");
-    assert_eq!(ledger.schema_version, "host-effect-ledger-v2.0");
+    assert_eq!(ledger.schema_version, "host-effect-ledger-v3.0");
     assert_eq!(
         ledger.effect_count, 1,
         "expected a single http_request effect, got {:?}",

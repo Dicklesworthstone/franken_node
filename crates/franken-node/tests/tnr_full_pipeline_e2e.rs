@@ -1059,10 +1059,10 @@ fn tnr_full_pipeline_clean_run_single_trace_id() {
         !ledger.is_null(),
         "native run must surface the host-effect ledger"
     );
-    assert_eq!(ledger["schema_version"], json!("host-effect-ledger-v2.0"));
+    assert_eq!(ledger["schema_version"], json!("host-effect-ledger-v3.0"));
     assert!(
         ledger["signature"].is_object(),
-        "v2 host-effect ledger must carry its runtime-evidence signature envelope"
+        "the host-effect ledger must carry its runtime-evidence signature envelope"
     );
     let kinds: Vec<&str> = ledger["entries"]
         .as_array()
