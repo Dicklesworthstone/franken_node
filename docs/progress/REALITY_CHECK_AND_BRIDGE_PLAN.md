@@ -1005,3 +1005,30 @@ Balanced failures (118) by cause:
 - **README:76-77** no longer claims every decision is in the evidence ledger; it names the decisions that are.
 - **Beads**: reopened .1, .7, .8 (evidence on each); filed bd-bwn5a and bd-fkdzv (both P1; `.8` and `.4` blocked by them); evidence comments on .5, .6, .9, .10, .11, .13. `br dep cycles` clean.
 - **npm re-probe with the parser fixes**: needs a release binary containing 27c5bd165. build14 compiled remotely but rch lost the artifact (completion "unconfirmed", `rch jobs recover` refused on an artifact-policy error), so a rebuild is queued; the result is appended below when it lands.
+
+### Addendum 2026-09-27 evening: npm re-probe and new live findings
+
+**npm re-probe on build15** (node a5a1721fa + engine b57e6a660, which includes 27c5bd165). Each probe ran in the same directory as Node v22 and was compared byte-for-byte:
+
+| Package | balanced | legacy-risky | First wall |
+|---|---|---|---|
+| minimist | FAIL | **MATCHES Node** | balanced: `register 256 out of bounds` (engine bd-9vouw.23) |
+| lodash | FAIL | FAIL | module token budget 121,230 > 65,536 (the engine now honors the configured budget, 719f6d422; the default is still 64K, bd-fkdzv) |
+| dayjs | FAIL | FAIL | parser: an `=` inside a `?:` branch was taken as the statement's assignment operator (root cause found; fix on the engine parser branch) |
+| semver | FAIL | FAIL | IFC keyword label Secret → Internal at lowering (.13 / engine bd-9vouw.19) |
+| commander | FAIL | FAIL | IFC keyword label TopSecret → Internal, 171 denied flows (.13) |
+| uuid | FAIL | FAIL | no runtime module for `crypto` (bd-305gi) |
+
+Result: balanced 0/6, legacy-risky 1/6 (was 0/6 and 0/6). The IFC keyword heuristic is now the largest single blocker: 2 of 6 packages and 27 of 560 corpus cases.
+
+**Console output was silently truncated and unbounded in bytes** (live, build13):
+- 1,500 `console.log` lines print only lines 500–1499, exit 0, with no warning, in every profile (a 1,000-entry ring that evicted the oldest entries).
+- 300 × 1 MiB lines reach 1.48 GB RSS, then die as "Engine crashed with panic … bug in the engine" on the 24 MiB native-session frame.
+- Engine fix in verification (branch `console-budget-fail-closed`): overflow is a typed `ConsoleBudgetExceeded` failure that JS cannot catch; the head of the output is kept; the entry caps become 100k/1M; a new 8 MiB byte budget fits node's 10 MiB guest-output bound.
+
+**Async failures exited 0** (engine bd-xzemw, now in progress):
+- A throw inside a `setTimeout`/`setImmediate` callback was printed to the host's stderr and dropped.
+- An unhandled rejection (`Promise.reject(e)`, or a throwing async function that nobody awaits) was ignored.
+- The fix makes both end the run like Node's uncaught exception. Rejections are tracked incrementally, without a per-tick store walk, and rejections observed by combinators or adoption are marked handled.
+
+**Class fields** (engine bd-9vouw.64): on branch `class-fields-fail-closed`, still in verification, the parser refuses them with `UnsupportedSyntax` instead of silently dropping them. This is refusal-only, so the bead stays open for the implementation.
