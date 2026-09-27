@@ -859,3 +859,149 @@ Related links point to bd-f5b04, bd-28sz, bd-kx70h, bd-34d5, bd-tenx3.1/.2/.3/.4
 - **Run each probe with:** `FRANKEN_NODE_ENGINE_BINARY_PATH=<binary> franken-node run <file> --policy balanced --console-only`, and compare with `node <file>`.
 - **Corpus:** `ops compat-corpus-run --corpus-root <copy of crates/franken-node/tests/fixtures/compat_corpus> --out <scratch>/results.json --require-node-reference`.
 - **Probe programs:** the one-liners in the tables above are complete. The beads `.4`/`.5`/`.6`/`.11` specify the checked-in probe scripts that will make these runs permanent.
+
+## Refresh 2026-09-27 (sixth full reality check — live-binary delta pass)
+
+**Method.** Same measuring stick: README (3,542 lines) and AGENTS.md read in full, plus the charter, the plan (§3, §9, §11-16) and every earlier section of this file. Everything below was either run against a release binary or re-read from the code:
+- **Binaries.**
+  - `build13` is node `ac8deece2` plus engine `fcb7b3877`.
+  - `build14` is node `a5a1721fa` plus engine `27c5bd165`, the current main of both repos.
+- **Comparisons.** Every probe was run against node v22.2.0, with bun 1.4 as the lockstep second leg.
+- **Corpus.** Each profile was run with the new and the incumbent binary back to back in one invocation.
+- **CI.** Measured from the GitHub API.
+- **Closure audit.** An independent audit checked every bead closed since 09-23 in both repos, and I re-verified its load-bearing findings by hand before acting on them.
+- **Artifacts.** No committed artifact was regenerated; probe artifacts live in the session scratchpad.
+
+**Beads:** 4,374 total. The active set grew because three closes were reopened and two gaps were filed (below).
+
+### Executive answer
+
+The runtime crossed the line from "runs only self-contained single files" to **"runs real CommonJS programs, resolves installed npm packages, and fails honestly"** in four days.
+- **What landed:**
+  - `require('./lib/x')`;
+  - Node's `node_modules` resolution: `exports` conditions in author order, patterns, `main`, JSON modules, and core-module precedence;
+  - output kept when a program throws;
+  - a 5M-iteration loop under the default profile;
+  - a working first run from a fresh build under all three profiles;
+  - `strict` hello exiting 0;
+  - hello-world overhead 1.79× node, down from 4.5×.
+- **Closed or narrowed as landed:** the incident pipeline runs end to end from a real `run` (auto capture → signed bundle → replay `matched=true` → verification in the SDK via `ltv attest`), and the revocation gate blocks under strict on a default install.
+
+**What has not moved is the charter's headline:**
+- No real npm package runs yet: 0/6. Each now fails one layer deeper, on four named gaps.
+- The compatibility corpus is flat at 70.71 / 78.93 / 86.61% (strict / balanced / legacy-risky). It cannot see the ecosystem failures anyway (.12).
+- CI is 28% green.
+- The only release is 1,218 commits stale.
+
+The closure audit also found that 4 of 8 recent closes had shipped less than they promised. Three were reopened.
+
+### Live probes (release binaries; no engine env, no degraded fallback)
+
+| Probe | 2026-09-23 | **2026-09-27** |
+|---|---|---|
+| Fresh dir: `init` + `run hello.js` (no `FRANKEN_NODE_ENGINE_BINARY_PATH`) | failed (sidecar presence gate) | **exit 0** under strict, balanced, legacy-risky; doctor `warn`, 0 failing checks |
+| `strict` hello | exit 92 (Sandbox) | **exit 0** |
+| `require("./lib/math")` | ambient-authority refusal | **works** (engine b2f96f751, node be768f452) |
+| `require('pkg')` from `node_modules` | refused | **resolves** (engine fcb7b3877): main, `exports` require-condition, subpaths, `*` patterns, `null` exclusion, scoped, JSON, hoisted walk-up, core precedence |
+| 6 real npm packages (lodash, ms+semver, dayjs, uuid, commander, minimist) | 0/8 (no module loading) | **0/6**, each past resolution: lodash parse budget (bd-fkdzv); minimist/dayjs/commander parser bugs (**fixed** engine 27c5bd165 — see npm re-probe below); semver IFC keyword false positive on the key `tokens` (.13); uuid `require('crypto')` as an object (engine bd-305gi) |
+| Language probe (10 snippets) | 5/10 (09-23), 7/10 (09-24) | **8/10**. Still silently wrong: private field (`this.#x`) and std globals. Root cause of the first: **the parser drops every class field**, public and static included (`class A { y = 2 }` → `undefined`) |
+| Execution limits (.5 acceptance, 7 probes) | 0/7 | **2/7**: 5e6-iteration loop ✓, throw-after-log ✓. Still failing: frozen `Date.now()`, first 500 of 1,500 lines dropped silently, a timer throw exits 0, `process.exit`/`argv`/`env` refused at lowering |
+| `console.log({a:1},[1,2,3])` | `[object Object] 1,2,3` | `{ a: 1 } [ 1, 2, 3 ]` ✓ (engine a56eeac63) |
+| hyperfine `run hello.js` vs `node` (same invocation, load ≈178/64 cores) | 4.5× slower (164 vs 37 ms) | **1.79× ± 0.30** (91.8 ± 14.3 vs 51.2 ± 2.9 ms) |
+| SSRF egress → incident | hand-authored evidence only | **auto-captured** `INC-RUN-*`; `incident bundle --verify` ok; `incident replay` `matched=true`; `incident counterfactual` executor `synthetic` (documented); **`ltv attest` verifies the CLI bundle through the SDK** |
+| Revocation freshness, default install, no frontier | gate dead (read a never-written `.json` mtime) | **strict blocks** ("no revocation frontier has been recorded"), balanced warns and runs |
+| `trust scan` typosquats (`lodahs`, `expres`) | no typosquat logic | **raised to high** ("possible typosquat of popular package `lodash`") |
+| `verify lockstep . --runtimes bun,franken-node` (CJS program) | — | **Pass**, 0 divergences; report records both runtime versions as `unknown` (provenance gap) |
+| `migrate audit` (probe project) | works | works: 33 files, 5 findings (skips `node_modules`) |
+
+**Compatibility corpus** (560 cases, `--require-node-reference`, build13 vs build12 back to back per profile, host load ≈170):
+
+| Profile | Pass | Core (floor 99) | High-value (95) | Edge (90) | vs incumbent |
+|---|---|---|---|---|---|
+| strict | 396 (70.71%) | 71.26% | 68.80% | 76.79% | identical pass set |
+| balanced | 442 (78.93%) | 79.53% | 77.20% | 83.93% | identical pass set |
+| legacy-risky | 485 (86.61%) | 88.98% | 84.40% | 85.71% | identical pass set |
+
+The four days of runtime work above (CJS entries, `node_modules`, kept output on throw) **moved the corpus by zero cases on every profile**, because its 540 single-file micro-probes exercise none of it. That is .12's point, now measured.
+
+Balanced failures (118) by cause:
+- guest file writes denied by the profile's policy: 46 (owner decision bd-bpmb2, not a defect);
+- `child_process` Bubblewrap abort: 30;
+- IFC refusals: **27 = 4.82% benign false positives** (14 `TopSecret`, 13 `Secret`);
+- core module needed as a runtime object: 5;
+- `process` access: 4;
+- type errors: 3;
+- output mismatch: 3.
+
+### New defects found by this pass
+
+1. **`--console-only` stderr polluted by the incident notice** (verified live): a run that tripped capture printed `incident captured: …` on stderr, breaking the byte-exact console contract the lockstep/corpus franken leg relies on. **Fixed** in this session (see Work-session addendum).
+2. **The effect ledger records ordinary I/O errors as policy denials** (verified live): a caught `ENOENT` read is receipted `policy_outcome: denied`, counted in `denied_count`, auto-captured as a High "runtime-security-control" incident, and fed to the sentinel. `PolicyOutcome` has only `Allowed`/`Denied`. **NO_BEAD → bd-bwn5a** (P1).
+3. **Parser token budget blocks real modules**: required modules parse under `ParserOptions::default()` (64K tokens) regardless of profile; the per-profile token caps (32K/64K/128K) bind long before the documented source-byte caps (256 KB / 1 MB / 2 MB). lodash = 121,230 tokens. **NO_BEAD → bd-fkdzv** (P1, blocks .4).
+4. **Class fields silently dropped** (parser `split_class_members` skips `;`-terminated members; no AST field node). Silent wrong answers for any ES2022 class field. Recorded as the root cause on .6 (engine-first).
+5. **Two parser defects** blocking minimist/dayjs/commander: `=` inside a regex literal parsed as an assignment; a line starting with `||`/`?`/`:`/`,` split into its own statement. **Fixed** engine 27c5bd165 with unit tests.
+6. **`incident list` cannot see captured-but-unbundled incidents** (scans `*.fnbundle` only): a deliverable of the reopened .8.
+7. **Engine test suite is red at main** (~18 tests, pre-existing and not owned): baseline_interpreter_integration 5, bd_8y64t 2, path shadow 1, memory_budget_adversarial 4 (16 KiB budget overrun by 4-67 bytes), and 6 parser-contract tests that still pin lenient top-level `await` / mismatched-quote behaviour and the old `ParseErrorCode` count after another agent made the parser stricter. The **engine beads DB has been wedged** ("recovery in progress") since 2026-09-25 00:06 with no live `br` process, so none of these (nor the engine-side items above) can be filed engine-side; texts are queued in the session scratchpad and `br doctor --repair` (JSONL rebuild, backups kept) needs an owner decision.
+
+### Closure audit (every close since 2026-09-23, both repos: 7 node + 1 engine)
+
+| Close | Verdict | Action |
+|---|---|---|
+| bd-vxw97 (lane router reload) | VERIFIED | — |
+| bd-svc-honesty-v4yy9 (service.rs catalog) | VERIFIED | — |
+| .2 (rewrite durability) | VERIFIED (7→0 fsyncs restored as ordered `durable_sync`; honest re-measure 1.24×) | — |
+| .1 (revocation freshness) | THIN: behaviour real (verified live) but the acceptance probe script, the CLI-level A/B/C tests, the signed frontier record, the single resolver and the `DR-TRUST-FRESHNESS` check are all missing | **Reopened** |
+| .7 (SDK reads CLI bundles) | THIN: headline fixed (verified live via `ltv attest`) but the unkeyed digest is still *named* a signature in SDK code (`bundle.rs:137,2464,2545`), the second bundle format was neither removed nor versioned, and the README example is not compiled | **Reopened** |
+| .8 (run → incident capture) | FALSE-CLOSED on scope: 3/5 deliverables absent (`incident capture --from-run` + hand-edit refusal, `incident list` over the store, `ops incident-coverage`), package unsigned and unreferenced from the receipt, acceptance unmet by the close_reason's own admission; plus the two regressions above | **Reopened** (now blocked by bd-bwn5a) |
+| .17 (README truth pass) | THIN (minor): README:76-77 absolute "every decision is a signed receipt" | Fixed in this session |
+| engine bd-9vouw.6 | THIN (minor): default budget left at 100k without an evidence-based decision | Queued (engine DB wedged) |
+
+### Vision checklist deltas (Aug-20 numbering + V29-V34)
+
+| # | Goal | 2026-09-23 | **2026-09-27** |
+|---|---|---|---|
+| V1 | `run` executes guest JS | PARTIAL: single-file only | **PARTIAL, much wider**: CJS programs + local `require` + `node_modules` resolution + ESM entries by package type; fresh first run works; real npm packages 0/6 on four named gaps |
+| V2 | Revocation-first execution | REGRESSED (gate dead) | **WORKING behaviour, PROOF GAP** (strict blocks live; acceptance tests missing → .1 reopened) |
+| V3 | Trust cards | PARTIAL | **PARTIAL+**: typosquat + registry signals live on `trust scan`; camouflage still library-only |
+| V4 | Replay + counterfactual | INTEGRITY-ONLY | **INTEGRITY, now from real runs**: auto-capture → bundle → replay → SDK; counterfactual still synthetic; capture over-fires on I/O errors (bd-bwn5a) |
+| V6 | ≥95% corpus | RED 87.32% (legacy, scratch) | **RED, flat**: strict 70.71 / balanced 78.93 / legacy-risky 86.61; no band meets its floor; zero cases moved by four days of runtime work, blind to the ecosystem (.12) |
+| V10 | Verifier SDK independent | BROKEN for bundles | **WORKING for CLI bundles** (verified live); honesty naming open (.7 reopened) |
+| V11 | Doctor | PARTIAL | **PARTIAL+**: fresh workspace reports `warn`, 0 failures |
+| V16 | ≥3× migration | WRONG_APPROACH | **UNMET, honestly measured**: durability restored, 1.24× (bd-v0lgc) |
+| V17 | ≥10× compromise | INVALID | unchanged (.3 open) |
+| V25 | Release freshness | 1,136 commits | **1,218 commits** behind `v0.1.0` |
+| V27 | Effective coverage / CI | 14.3% green | **28.2% green** (256/908, 09-21..27); 9 workflows never green in the window |
+| V29 | Performance vs node | 4.5× | **1.79× ± 0.30** on hello (loaded host) |
+| V30 | Module loading / ecosystem | NOT_STARTED | **PARTIAL**: resolution done, npm execution blocked (bd-fkdzv, .13, bd-305gi); the re-probe with the 27c5bd165 parser fixes is recorded in the addendum below |
+| V31 | Language correctness | FAIL | **FAIL, narrower**: 8/10 probes; class fields dropped (silent); no Test262 |
+| V32 | Primitives reachable | ~43% | unchanged (.14) |
+| V33 | Engine pinning + provenance | ABSENT | **PARTIAL**: corpus results carry `run_provenance`; engine is still a bare path dependency; lockstep report records runtime versions as `unknown` |
+| V34 | Evidence ledger written by decisions | ABSENT on CLI | **WORKING** for `run` (incl. preflight refusals), `trust revoke/quarantine/release`, `fleet release`; `verify transparency-log` checks it |
+
+**Strict WORKING count:** V10, V15, V34 join V13; V2 behaves but lacks its proof. The runtime (V1/V30/V31) is the axis that moved most, and it is still the one that decides the charter.
+
+### Answers to the reality-check questions
+
+1. **What works today:** everything in the probe table marked ✓/works: governed execution of CommonJS programs with local modules and real module resolution, with containment (SSRF, capability, eval, sandbox) and signed host-effect ledgers; the incident pipeline from a real run to SDK verification; revocation gating; typosquat-aware trust cards; lockstep on small programs; `migrate audit`; a fresh first run.
+2. **What does not work:** any real npm package (four gaps, one fixed today); ES2022 class fields; a real clock; >1,000 console lines; `process.exit/argv/env`; timer-throw exit codes; CI (72% red, 9 never-green workflows); a current release; the 3×/10× KPIs; benign-code IFC false positives on keyword literals and property names (.13).
+3. **What is blocking:** (a) the engine execution model's remaining gaps (parse budget, class fields, builtins as runtime objects, IFC keyword labels), all engine-first under the split contract, while (b) the engine's own issue tracker is wedged and ~18 engine tests are red and unowned, so engine work cannot be tracked or gated where it lives.
+4. **Would the open/in-progress beads close the gap?** Closer than on 09-23 but **no**: the npm path now has concrete blockers with owners (bd-fkdzv, .13, bd-305gi, .6), but no bead makes the npm probe a *measured, gated* metric (the corpus still cannot see it; .12), and the engine-side items cannot be filed until the engine tracker is repaired.
+5. **Vision goals with no bead before this pass:** the ledger denial/failure conflation (bd-bwn5a) and the parse-budget contract (bd-fkdzv); both filed.
+
+### Bridge plan (next, highest vision impact first)
+
+1. **Owner decisions** (unblock everything else): repair the engine beads DB (`br doctor --repair`); decide .13's keyword-label question (it blocks semver today and 4.64% of the corpus); decide bd-fkdzv's parse-budget policy.
+2. **npm execution** (.4 via bd-fkdzv, then .6 class fields fail-closed → implemented, then bd-305gi builtins): re-run the 6-package probe after each; check the probe in as an e2e with node-identical assertions so progress is a number.
+3. **Honesty of evidence** (bd-bwn5a, then .8's remaining deliverables): a denial must mean a policy refusal.
+4. **.5 remainder**: real clock (with deterministic mode kept for replay), console overflow reported (not silent), timer-throw exit code, `process` surface.
+5. **CI** (.9): make the 9 never-green workflows start/pass or retire them with owner sign-off.
+6. **Corpus v3** (.12): add module/package cases so the headline metric can see (1)-(4).
+7. Reopened .1/.7 acceptance items; release freshness (V25) once corpus and CI are credible.
+
+### Work-session addendum (2026-09-27, this pass)
+
+- **Engine 27c5bd165** (landed, main + master): the parser skips regex literals when scanning for a top-level `=`, and a line that starts with an operator continues the previous statement. Unit tests `merge_logical_lines_continues_lines_that_start_with_an_operator`, `parse_script_accepts_leading_operator_continuations`, `regex_literals_containing_equals_are_not_assignments`; lib `parser::` 1490/1490 via rch.
+- **`--console-only` purity**: `run` no longer prints the incident-capture notice on the guest's stderr in console-only mode (`main.rs`, capture notice gated on `!console_only`); regression test `console_only_run_keeps_incident_capture_notice_out_of_guest_streams`.
+- **README:76-77** no longer claims every decision is in the evidence ledger; it names the decisions that are.
+- **Beads**: reopened .1, .7, .8 (evidence on each); filed bd-bwn5a and bd-fkdzv (both P1; `.8` and `.4` blocked by them); evidence comments on .5, .6, .9, .10, .11, .13. `br dep cycles` clean.
+- **npm re-probe with the parser fixes**: needs a release binary containing 27c5bd165. build14 compiled remotely but rch lost the artifact (completion "unconfirmed", `rch jobs recover` refused on an artifact-policy error), so a rebuild is queued; the result is appended below when it lands.

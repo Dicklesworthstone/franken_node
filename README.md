@@ -73,8 +73,11 @@ Under `franken-node`:
   re-execution), and `incident counterfactual --policy strict` scores
   an alternative policy against that recorded evidence.
 
-Every gate above is a runtime default, not an external scanner. Every
-decision is a signed receipt linked into the evidence ledger.
+Every gate above is a runtime default, not an external scanner. Each `run`
+(including a preflight refusal) and each `trust revoke`/`quarantine`/`release`
+and `fleet release` decision appends a signed, hash-chained entry to the
+evidence ledger; other decisions (a trust-scan risk raise, for example) are
+recorded on the trust card, not in the ledger.
 
 <div align="center">
   <img src="docs/assets/operator_workflow_terminal.svg" alt="franken-node operator workflow: audit, trust scan, lockstep, quarantine, incident bundle, counterfactual">
