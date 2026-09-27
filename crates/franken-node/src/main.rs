@@ -31621,8 +31621,12 @@ fn main() -> Result<()> {
                 json,
                 console_only,
             )?;
+            // `--console-only` streams are exactly the guest's (the lockstep
+            // franken leg compares them against node/bun), so the capture
+            // notice is metadata that must not appear there.
             if let Some(incident_id) = &captured_incident
                 && !json
+                && !console_only
             {
                 eprintln!(
                     "incident captured: {incident_id} (export with `franken-node incident bundle --id {incident_id} --verify`)"

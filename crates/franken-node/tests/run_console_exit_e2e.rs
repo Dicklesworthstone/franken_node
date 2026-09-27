@@ -826,6 +826,38 @@ fn console_only_run_emits_guest_streams_verbatim() {
     );
 }
 
+/// A run that trips a security control is captured as an incident, but under
+/// `--console-only` the capture notice must not reach the guest's streams:
+/// the lockstep franken leg compares them byte for byte against node/bun.
+#[test]
+fn console_only_run_keeps_incident_capture_notice_out_of_guest_streams() {
+    let (dir, outcome) = run_app(DENIED_EGRESS_APP, &["--console-only"]);
+    assert_eq!(
+        outcome.exit_code,
+        Some(0),
+        "a handled egress refusal is a clean run; stderr=\n{}",
+        outcome.stderr
+    );
+    assert_eq!(
+        outcome.stdout, "egress refused as expected\n",
+        "stdout must be exactly the guest console output"
+    );
+    assert!(
+        outcome.stderr.is_empty(),
+        "console-only stderr must carry only guest stderr (none here), got:\n{}",
+        outcome.stderr
+    );
+    let incidents = dir.path().join(".franken-node/state/incidents");
+    let captured = std::fs::read_dir(&incidents)
+        .map(|entries| entries.filter_map(Result::ok).count())
+        .unwrap_or(0);
+    assert!(
+        captured >= 1,
+        "the refused egress must still be captured as an incident under {}",
+        incidents.display()
+    );
+}
+
 /// A program that prints and then throws keeps what it printed, as under
 /// Node: the output reaches the operator's streams ahead of the failure and
 /// the run still exits non-zero. A throw used to discard everything printed
