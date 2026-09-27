@@ -858,6 +858,59 @@ fn console_only_run_keeps_incident_capture_notice_out_of_guest_streams() {
     );
 }
 
+/// bd-bwn5a: reading a file that does not exist is an ordinary host failure,
+/// not a policy denial. The signed ledger records it as `failed` (the gates
+/// authorized the read; the host reported ENOENT), it is not counted as a
+/// denial, and it does not trip incident capture.
+#[test]
+fn host_io_error_is_recorded_as_failed_not_denied_and_captures_no_incident() {
+    const ENOENT_APP: &str = "const fs = require('fs');\n\
+        try { fs.readFileSync('./missing.txt', 'utf8'); } catch (e) { console.log('caught:' + e.code); }\n";
+
+    let (dir, outcome) = run_app(ENOENT_APP, &["--json"]);
+    let report = last_json_document(&outcome.stdout);
+    assert_eq!(
+        outcome.exit_code,
+        Some(0),
+        "a handled ENOENT is a clean run; stderr=\n{}",
+        outcome.stderr
+    );
+    assert_eq!(
+        report["dispatch"]["captured_output"]["stdout"].as_str(),
+        Some("caught:ENOENT\n")
+    );
+    let ledger = &report["dispatch"]["host_effect_ledger"];
+    assert_eq!(
+        ledger["effect_count"].as_u64(),
+        Some(1),
+        "ledger=\n{ledger}"
+    );
+    assert_eq!(
+        ledger["failed_count"].as_u64(),
+        Some(1),
+        "ledger=\n{ledger}"
+    );
+    assert_eq!(
+        ledger["denied_count"].as_u64(),
+        Some(0),
+        "ledger=\n{ledger}"
+    );
+    let receipt = &ledger["entries"][0]["receipt"];
+    assert_eq!(
+        receipt["policy_outcome"]["outcome"].as_str(),
+        Some("failed")
+    );
+    assert_eq!(
+        receipt["policy_outcome"]["capability_ref"].as_str(),
+        Some("host-io:fs_read")
+    );
+    assert!(receipt["result_hash"].is_null());
+    assert!(
+        !dir.path().join(".franken-node/state/incidents").exists(),
+        "an ordinary I/O error must not be captured as a security incident"
+    );
+}
+
 /// A program that prints and then throws keeps what it printed, as under
 /// Node: the output reaches the operator's streams ahead of the failure and
 /// the run still exits non-zero. A throw used to discard everything printed
