@@ -123,10 +123,18 @@ pub enum PolicyOutcome {
     /// The effect was authorized and executed; the capability token id that
     /// authorized it is recorded for audit.
     Allowed { capability_ref: String },
-    /// The effect was refused before execution. Carries the typed refusal
-    /// reason; the receipt will have no result/post-state (fail-closed proof
-    /// that nothing ran).
+    /// The effect was refused before execution by a policy, capability,
+    /// sandbox, SSRF or flow gate. Carries the typed refusal reason; the
+    /// receipt will have no result/post-state (fail-closed proof that nothing
+    /// ran).
     Denied { reason: String },
+    /// The gates authorized the effect, but the host could not perform it
+    /// (a missing file, an I/O error). No policy refused anything, so this is
+    /// not a denial; like a denial it produced no result or post-state.
+    Failed {
+        capability_ref: String,
+        reason: String,
+    },
 }
 
 impl PolicyOutcome {
@@ -134,6 +142,16 @@ impl PolicyOutcome {
         match self {
             PolicyOutcome::Allowed { .. } => 1,
             PolicyOutcome::Denied { .. } => 2,
+            PolicyOutcome::Failed { .. } => 3,
+        }
+    }
+
+    /// Stable label for logs, human output and structured events.
+    pub const fn label(&self) -> &'static str {
+        match self {
+            PolicyOutcome::Allowed { .. } => "allowed",
+            PolicyOutcome::Denied { .. } => "denied",
+            PolicyOutcome::Failed { .. } => "failed",
         }
     }
 }
@@ -241,7 +259,7 @@ pub enum EffectReceiptError {
     EmptyField { field: &'static str },
     #[error("allowed effect receipt is missing its {field}")]
     AllowedMissingHash { field: &'static str },
-    #[error("denied effect receipt must not carry a {field}")]
+    #[error("denied or failed effect receipt must not carry a {field}")]
     DeniedHasHash { field: &'static str },
     #[error("effect receipt lineage field {field} must be canonical sha256:<hex>")]
     MalformedLineageHash { field: &'static str, value: String },
@@ -409,6 +427,43 @@ impl EffectReceipt {
         }
     }
 
+    /// Build a receipt for an effect the gates authorized but the host could
+    /// not perform. Like a denial it carries no result or post-state; unlike
+    /// one it records the authorizing capability, since no gate refused it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn failed_with_lineage(
+        seq: u64,
+        trace_id: impl Into<String>,
+        effect_kind: EffectKind,
+        capability_ref: impl Into<String>,
+        reason: impl Into<String>,
+        pre_state_hash: ContentHash,
+        args_hash: ContentHash,
+        recorded_at_millis: u64,
+        lineage: EffectLineageFields,
+    ) -> Self {
+        Self {
+            schema_version: EFFECT_RECEIPT_SCHEMA.to_string(),
+            seq,
+            trace_id: trace_id.into(),
+            effect_kind,
+            policy_outcome: PolicyOutcome::Failed {
+                capability_ref: capability_ref.into(),
+                reason: reason.into(),
+            },
+            pre_state_hash,
+            args_hash,
+            result_hash: None,
+            post_state_hash: None,
+            input_lineage_hash: lineage.input_lineage_hash,
+            output_lineage_hash: lineage.output_lineage_hash,
+            label_set_commitment: lineage.label_set_commitment,
+            declassification_ref: lineage.declassification_ref,
+            flow_policy_verdict: lineage.flow_policy_verdict,
+            recorded_at_millis,
+        }
+    }
+
     /// Validate the receipt: known schema version (refuse-on-unknown, so a
     /// deserialized/cross-boundary receipt with an unexpected schema fails
     /// closed) plus the allowed/denied invariant — an `Allowed` receipt must
@@ -442,6 +497,7 @@ impl EffectReceipt {
             });
         }
         let is_allowed = matches!(&self.policy_outcome, PolicyOutcome::Allowed { .. });
+        let is_denied = matches!(&self.policy_outcome, PolicyOutcome::Denied { .. });
         match &self.policy_outcome {
             PolicyOutcome::Allowed { capability_ref } => {
                 if capability_ref.trim().is_empty() {
@@ -465,7 +521,18 @@ impl EffectReceipt {
                     });
                 }
             }
-            PolicyOutcome::Denied { reason } => {
+            PolicyOutcome::Denied { reason }
+            | PolicyOutcome::Failed {
+                capability_ref: _,
+                reason,
+            } => {
+                if let PolicyOutcome::Failed { capability_ref, .. } = &self.policy_outcome
+                    && capability_ref.trim().is_empty()
+                {
+                    return Err(EffectReceiptError::EmptyField {
+                        field: "capability_ref",
+                    });
+                }
                 if reason.trim().is_empty() {
                     return Err(EffectReceiptError::EmptyField { field: "reason" });
                 }
@@ -509,7 +576,9 @@ impl EffectReceipt {
                 }
             }
             FlowPolicyVerdict::Blocked => {
-                if is_allowed {
+                // A block is a refusal: an effect the host attempted (allowed
+                // or failed) was, by definition, not blocked.
+                if !is_denied {
                     return Err(EffectReceiptError::LineagePolicyInvalid {
                         detail: "blocked flow verdict requires a denied effect".to_string(),
                     });
@@ -539,6 +608,13 @@ impl EffectReceipt {
         match &self.policy_outcome {
             PolicyOutcome::Allowed { capability_ref } => update_str(&mut h, capability_ref),
             PolicyOutcome::Denied { reason } => update_str(&mut h, reason),
+            PolicyOutcome::Failed {
+                capability_ref,
+                reason,
+            } => {
+                update_str(&mut h, capability_ref);
+                update_str(&mut h, reason);
+            }
         }
         update_str(&mut h, self.pre_state_hash.as_str());
         update_str(&mut h, self.args_hash.as_str());
@@ -886,6 +962,81 @@ mod tests {
             r.result_hash.is_none() && r.post_state_hash.is_none(),
             "a denied effect must prove nothing ran"
         );
+    }
+
+    fn failed(lineage: EffectLineageFields) -> EffectReceipt {
+        EffectReceipt::failed_with_lineage(
+            0,
+            "trace-1",
+            EffectKind::FsRead,
+            "host-io:fs_read",
+            "host filesystem error ENOENT: missing.txt",
+            h("pre"),
+            h("args"),
+            1234,
+            lineage,
+        )
+    }
+
+    #[test]
+    fn failed_receipt_is_neither_allowed_nor_denied() {
+        let r = failed(EffectLineageFields::label_clean_denied());
+        assert!(r.validate().is_ok(), "{:?}", r.validate());
+        assert_eq!(r.policy_outcome.label(), "failed");
+        assert!(r.result_hash.is_none() && r.post_state_hash.is_none());
+
+        // The same reason recorded as a denial is a different receipt.
+        let denied = EffectReceipt::denied(
+            0,
+            "trace-1",
+            EffectKind::FsRead,
+            "host filesystem error ENOENT: missing.txt",
+            h("pre"),
+            h("args"),
+            1234,
+        );
+        assert_ne!(r.receipt_hash(), denied.receipt_hash());
+        // The authorizing capability is committed into the hash.
+        let mut other_capability = r.clone();
+        other_capability.policy_outcome = PolicyOutcome::Failed {
+            capability_ref: "host-io:fs_write".to_string(),
+            reason: "host filesystem error ENOENT: missing.txt".to_string(),
+        };
+        assert_ne!(r.receipt_hash(), other_capability.receipt_hash());
+    }
+
+    #[test]
+    fn failed_receipt_rejects_results_blocks_and_empty_fields() {
+        let mut with_result = failed(EffectLineageFields::label_clean_denied());
+        with_result.result_hash = Some(h("out"));
+        assert!(matches!(
+            with_result.validate(),
+            Err(EffectReceiptError::DeniedHasHash {
+                field: "result_hash"
+            })
+        ));
+
+        // An effect the host attempted was not blocked by the flow policy.
+        let blocked = failed(EffectLineageFields::blocked(
+            EFFECT_RECEIPT_EMPTY_LINEAGE_HASH,
+            EFFECT_RECEIPT_EMPTY_LABEL_SET_COMMITMENT,
+        ));
+        assert!(matches!(
+            blocked.validate(),
+            Err(EffectReceiptError::LineagePolicyInvalid { .. })
+        ));
+
+        let mut no_capability = failed(EffectLineageFields::label_clean_denied());
+        no_capability.policy_outcome = PolicyOutcome::Failed {
+            capability_ref: " ".to_string(),
+            reason: "host I/O error: reset".to_string(),
+        };
+        assert!(matches!(
+            no_capability.validate(),
+            Err(EffectReceiptError::EmptyField {
+                field: "capability_ref"
+            })
+        ));
     }
 
     #[test]
