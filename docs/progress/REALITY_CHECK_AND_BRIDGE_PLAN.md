@@ -1016,10 +1016,12 @@ Balanced failures (118) by cause:
 | lodash | FAIL | FAIL | module token budget 121,230 > 65,536 (the engine now honors the configured budget, 719f6d422; the default is still 64K, bd-fkdzv) |
 | dayjs | FAIL | FAIL | parser: an `=` inside a `?:` branch was taken as the statement's assignment operator (root cause found; fix on the engine parser branch) |
 | semver | FAIL | FAIL | IFC keyword label Secret → Internal at lowering (.13 / engine bd-9vouw.19) |
-| commander | FAIL | FAIL | IFC keyword label TopSecret → Internal, 171 denied flows (.13) |
+| commander | FAIL | FAIL | IFC import ceiling: the eleven `require()`s at the top of `lib/command.js` raise the whole-program label to TopSecret, 171 denied flows (engine bd-j8f7q; no keywords are involved) |
 | uuid | FAIL | FAIL | no runtime module for `crypto` (bd-305gi) |
 
-Result: balanced 0/6, legacy-risky 1/6 (was 0/6 and 0/6). The IFC keyword heuristic is now the largest single blocker: 2 of 6 packages and 27 of 560 corpus cases.
+Result: balanced 0/6, legacy-risky 1/6 (was 0/6 and 0/6). IFC over-labelling is now the largest blocker class: 2 of 6 packages, through two different mechanisms.
+- **Keyword heuristic** (.13 / engine bd-9vouw.19): semver's only trigger is the object-literal key `tokens:` at index.js:84, and the same heuristic hits 27 of 560 corpus cases.
+- **Import ceiling** (engine bd-j8f7q): hits commander.
 
 **Console output was silently truncated and unbounded in bytes** (live, build13):
 - 1,500 `console.log` lines print only lines 500–1499, exit 0, with no warning, in every profile (a 1,000-entry ring that evicted the oldest entries).
