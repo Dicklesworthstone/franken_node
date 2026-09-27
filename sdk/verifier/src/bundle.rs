@@ -182,8 +182,19 @@ impl EffectKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum EffectPolicyOutcome {
-    Allowed { capability_ref: String },
-    Denied { reason: String },
+    Allowed {
+        capability_ref: String,
+    },
+    /// A gate refused the effect before it ran.
+    Denied {
+        reason: String,
+    },
+    /// The gates authorized the effect but the host could not perform it (a
+    /// missing file, an I/O error): not a refusal, and nothing was produced.
+    Failed {
+        capability_ref: String,
+        reason: String,
+    },
 }
 
 impl EffectPolicyOutcome {
@@ -191,6 +202,7 @@ impl EffectPolicyOutcome {
         match self {
             Self::Allowed { .. } => 1,
             Self::Denied { .. } => 2,
+            Self::Failed { .. } => 3,
         }
     }
 
@@ -198,12 +210,15 @@ impl EffectPolicyOutcome {
         match self {
             Self::Allowed { .. } => "allowed",
             Self::Denied { .. } => "denied",
+            Self::Failed { .. } => "failed",
         }
     }
 
     fn capability_ref(&self) -> Option<&str> {
         match self {
-            Self::Allowed { capability_ref } => Some(capability_ref),
+            Self::Allowed { capability_ref } | Self::Failed { capability_ref, .. } => {
+                Some(capability_ref)
+            }
             Self::Denied { .. } => None,
         }
     }
@@ -1995,6 +2010,7 @@ fn validate_effect_receipt(index: u64, receipt: &EffectReceipt) -> BundleResult<
         });
     }
     let is_allowed = matches!(&receipt.policy_outcome, EffectPolicyOutcome::Allowed { .. });
+    let is_denied = matches!(&receipt.policy_outcome, EffectPolicyOutcome::Denied { .. });
     match &receipt.policy_outcome {
         EffectPolicyOutcome::Allowed { .. } => {
             if receipt.result_hash.is_none() {
@@ -2016,7 +2032,7 @@ fn validate_effect_receipt(index: u64, receipt: &EffectReceipt) -> BundleResult<
                 });
             }
         }
-        EffectPolicyOutcome::Denied { .. } => {
+        EffectPolicyOutcome::Denied { .. } | EffectPolicyOutcome::Failed { .. } => {
             if receipt.result_hash.is_some() {
                 return Err(BundleError::EffectReceiptDeniedHasHash {
                     index,
@@ -2061,7 +2077,7 @@ fn validate_effect_receipt(index: u64, receipt: &EffectReceipt) -> BundleResult<
             }
         }
         FlowPolicyVerdict::Blocked => {
-            if is_allowed {
+            if !is_denied {
                 return Err(BundleError::EffectReceiptLineagePolicy {
                     index,
                     detail: "blocked flow verdict requires a denied effect".to_string(),
@@ -2194,6 +2210,13 @@ fn effect_receipt_hash(receipt: &EffectReceipt) -> String {
             update_hash_str(&mut hasher, capability_ref);
         }
         EffectPolicyOutcome::Denied { reason } => {
+            update_hash_str(&mut hasher, reason);
+        }
+        EffectPolicyOutcome::Failed {
+            capability_ref,
+            reason,
+        } => {
+            update_hash_str(&mut hasher, capability_ref);
             update_hash_str(&mut hasher, reason);
         }
     }
