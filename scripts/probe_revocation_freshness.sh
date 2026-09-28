@@ -97,10 +97,17 @@ case $result in
     blocked\|*revocation_stale*RF_STALE_FRONTIER*) report B ok "strict preflight BLOCKED behind a stale frontier: ${result#blocked|}" ;;
     *) report B fail "strict preflight should be blocked (revocation_stale), got: $result" ;;
 esac
+# The same frontier under balanced: balanced's Risky-tier max age is 3600s, so a
+# frontier only ~WAIT_SECS old (past strict's 300s Dangerous floor, well within
+# 3600s) is still FRESH under balanced -- it must admit with NO stale warning.
+# The balanced stale-WARNING path (frontier older than 3600s) is exercised by
+# trust_cli_e2e::run_revocation_frontier_is_signed_data_that_gates_strict_runs,
+# which ages the frontier 400 days; waiting 3600s live here would be wasteful.
 result=$(preflight "$WORK/synced" balanced)
 case $result in
-    passed\|*RF_STALE_FRONTIER*) report B-balanced ok "balanced admits with a stale-frontier warning" ;;
-    *) report B-balanced fail "balanced should pass with an RF_STALE_FRONTIER warning, got: $result" ;;
+    passed\|\|) report B-balanced ok "balanced admits cleanly: frontier within balanced's 3600s max age" ;;
+    passed\|*RF_STALE_FRONTIER*) report B-balanced fail "balanced warned at ${WAIT_SECS}s but the frontier is within balanced's 3600s max age: $result" ;;
+    *) report B-balanced fail "balanced should pass (fresh under its own max age), got: $result" ;;
 esac
 
 result=$(preflight "$WORK/never-synced" strict)
