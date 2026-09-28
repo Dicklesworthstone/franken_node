@@ -258,6 +258,8 @@ struct NativeSessionRequest {
     telemetry_socket_path: PathBuf,
     process_spawn_trust_key_hex: Option<String>,
     runtime_evidence_grant: RuntimeEvidenceSessionGrant,
+    /// The program's own arguments, for `process.argv` (bd-my9hk).
+    app_args: Vec<String>,
 }
 
 #[cfg(all(feature = "engine", target_os = "linux"))]
@@ -2379,6 +2381,8 @@ struct NativeEngineRunContext {
     process_spawn_admission: Option<ChildProcessSpawnAdmission>,
     evidence_authority: RuntimeEvidenceAuthority,
     effect_wal: Option<NativeEffectWalEmitter>,
+    /// The program's own arguments, for `process.argv` (bd-my9hk).
+    app_args: Vec<String>,
 }
 
 #[cfg(feature = "engine")]
@@ -2554,6 +2558,9 @@ pub struct EngineDispatcher {
     /// protocol. The product CLI supplies its own absolute path explicitly;
     /// direct library callers may do the same through the builder below.
     native_session_worker_path: Option<PathBuf>,
+    /// The program's own arguments (`run app.js -- a b`), which become
+    /// `process.argv[2..]` (bd-my9hk).
+    app_args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -3850,6 +3857,27 @@ fn exit_code_for_containment_severity(severity: u32) -> i32 {
     }
 }
 
+/// The run's exit status (bd-my9hk). A containment verdict always wins. Past
+/// that, the program's own `process.exit(n)` / `process.exitCode = n` decides,
+/// truncated to 8 bits like a POSIX exit status. A program status inside the
+/// containment-class range (91..=95) is reported as `1`, so those codes keep
+/// meaning "the runtime contained this run".
+#[cfg(any(feature = "engine", test))]
+fn run_exit_status(containment_exit_code: i32, program_exit_code: Option<i32>) -> i32 {
+    if containment_exit_code != 0 {
+        return containment_exit_code;
+    }
+    let Some(code) = program_exit_code else {
+        return 0;
+    };
+    let status = code & 0xff;
+    if (CONTAINED_EXIT_CODE_BASE + 1..=CONTAINED_EXIT_CODE_BASE + 5).contains(&status) {
+        1
+    } else {
+        status
+    }
+}
+
 /// Node's package-scope rule for `.js` files: the nearest ancestor
 /// `package.json` decides, and `"type": "module"` makes the file ESM. A scope
 /// file that cannot be read or parsed counts as CommonJS.
@@ -4131,6 +4159,7 @@ impl Default for EngineDispatcher {
             configured_path: None,
             requested_runtime: PreferredRuntime::Auto,
             native_session_worker_path: None,
+            app_args: Vec::new(),
         }
     }
 }
@@ -4309,6 +4338,14 @@ impl EngineDispatcher {
     /// engine, while this path must implement franken-node's private protocol.
     pub fn with_native_session_worker_path(mut self, path: PathBuf) -> Self {
         self.native_session_worker_path = Some(path);
+        self
+    }
+
+    /// Set the program's own arguments (`run app.js -- a b`): they follow the
+    /// runtime and script paths in `process.argv` (bd-my9hk).
+    #[must_use]
+    pub fn with_app_args(mut self, app_args: Vec<String>) -> Self {
+        self.app_args = app_args;
         self
     }
 
@@ -4798,6 +4835,7 @@ impl EngineDispatcher {
                 &native_session_worker_path,
                 process_spawn_admission.as_ref(),
                 process_spawn_trust_key_hex.as_deref(),
+                &self.app_args,
             )
         }?;
         #[cfg(not(feature = "engine"))]
@@ -5166,6 +5204,7 @@ impl EngineDispatcher {
         let app_path = request.app_path;
         let config = request.config;
         let policy_mode = request.policy_mode;
+        let app_args = request.app_args;
         let nonce = request.nonce;
         let cancellation = NativeEngineCancellation::new();
         let effect_wal = NativeEffectWalEmitter::new(nonce.clone(), Box::new(io::stdout()));
@@ -5180,6 +5219,7 @@ impl EngineDispatcher {
                     process_spawn_admission,
                     evidence_authority,
                     effect_wal: Some(effect_wal),
+                    app_args,
                 },
             )
         });
@@ -5314,6 +5354,9 @@ impl EngineDispatcher {
     /// absolute deadline, panic detection, and detailed error context.
     #[cfg(feature = "engine")]
     #[allow(clippy::type_complexity)]
+    // The same independently-sourced supervision inputs as
+    // `run_engine_native_with_timeout` below, minus the deadline.
+    #[allow(clippy::too_many_arguments)]
     fn run_engine_native_with_error_handling(
         app_path: &Path,
         config: &Config,
@@ -5322,6 +5365,7 @@ impl EngineDispatcher {
         native_session_worker_path: &Path,
         process_spawn_admission: Option<&ChildProcessSpawnAdmission>,
         process_spawn_trust_key_hex: Option<&str>,
+        app_args: &[String],
     ) -> Result<NativeEngineDispatchSuccess> {
         use std::time::Duration;
 
@@ -5340,6 +5384,7 @@ impl EngineDispatcher {
             native_session_worker_path,
             process_spawn_admission,
             process_spawn_trust_key_hex,
+            app_args,
             timeout,
         )
     }
@@ -5349,10 +5394,11 @@ impl EngineDispatcher {
     /// mutating process-wide environment state.
     #[cfg(feature = "engine")]
     #[allow(clippy::type_complexity)]
-    // Eight arguments, one over the lint's threshold. Every one is a distinct,
+    // Nine arguments, two over the lint's threshold. Every one is a distinct,
     // independently-sourced input to a single subprocess supervision call — the
     // app, the resolved config, the policy mode, two socket/worker paths, the
-    // optional signed spawn admission, its trust key, and the deadline. Bundling
+    // optional signed spawn admission, its trust key, the program's own
+    // arguments (bd-my9hk), and the deadline. Bundling
     // them into a struct would only move the argument list one call frame up, so
     // the lint is allowed here rather than worked around. The `timeout` argument
     // in particular is deliberate (see the doc comment above): passing it
@@ -5370,6 +5416,7 @@ impl EngineDispatcher {
         native_session_worker_path: &Path,
         process_spawn_admission: Option<&ChildProcessSpawnAdmission>,
         process_spawn_trust_key_hex: Option<&str>,
+        app_args: &[String],
         timeout: std::time::Duration,
     ) -> Result<NativeEngineDispatchSuccess> {
         use base64::Engine as _;
@@ -5839,6 +5886,7 @@ impl EngineDispatcher {
             telemetry_socket_path: telemetry_socket_path.to_path_buf(),
             process_spawn_trust_key_hex: process_spawn_trust_key_hex.map(str::to_string),
             runtime_evidence_grant,
+            app_args: app_args.to_vec(),
         };
         let request_frame = Zeroizing::new(
             encode_native_session_frame(&request, NATIVE_SESSION_MAX_REQUEST_BYTES).map_err(
@@ -7249,6 +7297,7 @@ impl EngineDispatcher {
                 process_spawn_admission: None,
                 evidence_authority,
                 effect_wal: None,
+                app_args: Vec::new(),
             },
         )
     }
@@ -7273,6 +7322,7 @@ impl EngineDispatcher {
             process_spawn_admission,
             evidence_authority,
             effect_wal,
+            app_args,
         } = run_context;
         let mut telemetry_guard = Some(telemetry_guard);
 
@@ -7395,6 +7445,22 @@ impl EngineDispatcher {
             )
         })?;
         orchestrator.set_cancellation_token(cancellation.token().clone());
+        // `process.argv` as Node reports it: the runtime, the script's absolute
+        // path, then the program's own arguments (bd-my9hk). Whether the
+        // program may read it is still the profile's ambient grant (bd-y30zw).
+        let mut process_argv = Vec::with_capacity(app_args.len().saturating_add(2));
+        process_argv.push(std::env::current_exe().map_or_else(
+            |_| "franken-node".to_string(),
+            |path| path.display().to_string(),
+        ));
+        process_argv.push(
+            std::path::absolute(app_path)
+                .unwrap_or_else(|_| app_path.to_path_buf())
+                .display()
+                .to_string(),
+        );
+        process_argv.extend(app_args);
+        orchestrator.set_process_argv(process_argv);
 
         // Process authority is orthogonal to the ordinary runtime profile. The
         // provider exists only inside a worker that has reauthenticated the
@@ -7667,9 +7733,12 @@ impl EngineDispatcher {
         let (stdout, stderr) = render_console_streams(&execution_result.console_output);
 
         // bd-5r99w.2: derive the REAL exit code from the runtime's containment
-        // verdict instead of always stamping synthetic success.
-        let exit_code =
-            exit_code_for_containment_severity(execution_result.containment_action.severity());
+        // verdict instead of always stamping synthetic success; with no
+        // containment, the program's own `process.exit` code (bd-my9hk).
+        let exit_code = run_exit_status(
+            exit_code_for_containment_severity(execution_result.containment_action.severity()),
+            execution_result.exit_code,
+        );
 
         tracing::info!(
             execution_mode = "native",
@@ -9843,6 +9912,26 @@ mod tests {
             (0..=5).map(exit_code_for_containment_severity).collect();
         assert_eq!(codes.len(), 6);
         assert!(codes.iter().filter(|&&c| c == 0).count() == 1);
+    }
+
+    #[test]
+    fn run_exit_status_prefers_containment_then_the_program_code_bd_my9hk() {
+        // A containment verdict always wins over the program's own code.
+        assert_eq!(run_exit_status(92, Some(0)), 92);
+        assert_eq!(run_exit_status(95, None), 95);
+        // No containment: the program's code, or 0 when it set none.
+        assert_eq!(run_exit_status(0, None), 0);
+        assert_eq!(run_exit_status(0, Some(0)), 0);
+        assert_eq!(run_exit_status(0, Some(3)), 3);
+        // 8-bit truncation like a POSIX exit status.
+        assert_eq!(run_exit_status(0, Some(256)), 0);
+        assert_eq!(run_exit_status(0, Some(-1)), 255);
+        // The containment-class range stays unambiguous.
+        for code in 91..=95 {
+            assert_eq!(run_exit_status(0, Some(code)), 1, "{code}");
+        }
+        assert_eq!(run_exit_status(0, Some(90)), 90);
+        assert_eq!(run_exit_status(0, Some(96)), 96);
     }
 
     #[test]
@@ -14383,6 +14472,7 @@ mod tests {
             telemetry_socket_path: PathBuf::from("/tmp/native-session-frame.sock"),
             process_spawn_trust_key_hex: Some("11".repeat(32)),
             runtime_evidence_grant: runtime_evidence_grant_for_test(&nonce, [0x21; 32], [0x42; 32]),
+            app_args: vec!["alpha".to_string()],
         };
         let frame = encode_native_session_frame(&request, NATIVE_SESSION_MAX_REQUEST_BYTES)
             .expect("encode request frame");
@@ -14392,6 +14482,7 @@ mod tests {
         assert_eq!(decoded.schema_version, NATIVE_SESSION_SCHEMA);
         assert_eq!(decoded.nonce, request.nonce);
         assert_eq!(decoded.config, request.config);
+        assert_eq!(decoded.app_args, request.app_args);
         assert_eq!(
             decoded.process_spawn_trust_key_hex,
             request.process_spawn_trust_key_hex
@@ -14821,6 +14912,7 @@ mod tests {
             &std::env::current_exe().expect("resolve containment test executable"),
             Some(&admission),
             None,
+            &[],
             timeout,
         );
         let elapsed = started.elapsed();
@@ -14875,6 +14967,7 @@ mod tests {
             &std::env::current_exe().expect("resolve test worker executable"),
             None,
             None,
+            &[],
             timeout,
         );
         let elapsed = start.elapsed();

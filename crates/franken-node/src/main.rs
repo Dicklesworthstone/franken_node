@@ -31380,6 +31380,7 @@ fn main() -> Result<()> {
                 runtime,
                 engine_bin,
                 compat_preflight,
+                app_args,
             } = args;
 
             let profile_override = match parse_profile_override(Some(&policy)) {
@@ -31481,7 +31482,8 @@ fn main() -> Result<()> {
                 .context("failed resolving current franken-node binary for native execution")?;
             let dispatcher =
                 ops::engine_dispatcher::EngineDispatcher::new(engine_bin, requested_runtime)
-                    .with_native_session_worker_path(native_session_worker_path);
+                    .with_native_session_worker_path(native_session_worker_path)
+                    .with_app_args(app_args);
             let dispatch = match dispatcher.dispatch_run(
                 &app_path,
                 &resolved.config,

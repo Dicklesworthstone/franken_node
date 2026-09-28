@@ -94,6 +94,14 @@ fn private_native_session_worker_refuses_direct_cli_invocation() {
 }
 
 fn run_app(app_src: &str, extra_args: &[&str]) -> (tempfile::TempDir, RunOutcome) {
+    run_app_with_policy(app_src, "balanced", extra_args)
+}
+
+fn run_app_with_policy(
+    app_src: &str,
+    policy: &str,
+    extra_args: &[&str],
+) -> (tempfile::TempDir, RunOutcome) {
     let dir = tempfile::TempDir::new().expect("tempdir");
     std::fs::write(dir.path().join("app.js"), app_src).expect("write fixture app");
 
@@ -129,7 +137,7 @@ fn run_app(app_src: &str, extra_args: &[&str]) -> (tempfile::TempDir, RunOutcome
     cmd.arg("run")
         .arg("app.js")
         .arg("--policy")
-        .arg("balanced")
+        .arg(policy)
         .arg("--runtime")
         .arg("franken-engine")
         .arg("--engine-bin")
@@ -950,6 +958,148 @@ fn a_failed_run_still_emits_the_output_printed_before_the_throw() {
         "the default mode prints guest output before any run metadata, got:\n{}",
         human.stdout
     );
+}
+
+/// bd-my9hk: `process.exit(n)` and `process.exitCode = n` set the run's exit
+/// status and the output printed before the exit is kept. A program status in
+/// the containment-class range (91..=95) is reported as 1 so those codes keep
+/// meaning "the runtime contained this run".
+#[test]
+fn process_exit_and_exit_code_set_the_run_exit_status_bd_my9hk() {
+    let (_dir, exited) = run_app(
+        "console.log(\"before\");\nprocess.exit(3);\nconsole.log(\"after\");\n",
+        &["--console-only"],
+    );
+    assert_eq!(exited.exit_code, Some(3), "stderr=\n{}", exited.stderr);
+    assert_eq!(exited.stdout, "before\n", "stderr=\n{}", exited.stderr);
+
+    let (_dir, exit_code) = run_app(
+        "process.exitCode = 7;\nconsole.log(\"done\");\n",
+        &["--console-only"],
+    );
+    assert_eq!(
+        exit_code.exit_code,
+        Some(7),
+        "stderr=\n{}",
+        exit_code.stderr
+    );
+    assert_eq!(exit_code.stdout, "done\n");
+
+    let (_dir, reserved) = run_app("process.exit(92);\n", &["--console-only"]);
+    assert_eq!(
+        reserved.exit_code,
+        Some(1),
+        "a program status in the containment range must not pose as a verdict; stderr=\n{}",
+        reserved.stderr
+    );
+}
+
+/// bd-my9hk: the program's own arguments (`run app.js -- a b`) reach
+/// `process.argv` where the profile grants process-shape reads (legacy-risky,
+/// bd-y30zw); under balanced the read stays refused.
+#[test]
+fn app_args_reach_process_argv_where_the_profile_allows_it_bd_my9hk() {
+    const ARGV_APP: &str = "console.log(process.argv.slice(2).join(\",\"));\n\
+        console.log(process.argv[1].endsWith(\"app.js\"));\n";
+
+    let (_dir, legacy) = run_app_with_policy(
+        ARGV_APP,
+        "legacy-risky",
+        &["--console-only", "--", "alpha", "beta"],
+    );
+    assert_eq!(legacy.exit_code, Some(0), "stderr=\n{}", legacy.stderr);
+    assert_eq!(legacy.stdout, "alpha,beta\ntrue\n");
+
+    let (_dir, balanced) = run_app(ARGV_APP, &["--console-only", "--", "alpha", "beta"]);
+    assert_ne!(balanced.exit_code, Some(0), "stdout=\n{}", balanced.stdout);
+    assert!(
+        balanced.stderr.contains("ambient authority violation"),
+        "stderr=\n{}",
+        balanced.stderr
+    );
+}
+
+/// A program's whole console output reaches the operator. 1,500 lines used to
+/// arrive as lines 500..1499 with exit 0: the engine kept a silent 1,000-entry
+/// ring and dropped the oldest lines (fixed in franken_engine fb07b73f2).
+#[test]
+fn a_run_prints_every_console_line_not_only_the_last_thousand() {
+    const MANY_LINES_APP: &str = "for (let i = 0; i < 1500; i++) { console.log(\"line \" + i); }\n";
+
+    let (_dir, outcome) = run_app(MANY_LINES_APP, &["--console-only"]);
+    assert_eq!(outcome.exit_code, Some(0), "stderr=\n{}", outcome.stderr);
+    let expected: String = (0..1500).map(|i| format!("line {i}\n")).collect();
+    assert!(
+        outcome.stdout == expected,
+        "stdout must be all 1,500 lines in order; got {} lines starting {:?}",
+        outcome.stdout.lines().count(),
+        outcome.stdout.lines().next()
+    );
+}
+
+/// Console output past the engine's budget fails the run and names the limit.
+/// It used to be truncated silently, or to take the session worker down as
+/// "Engine crashed with panic" once the result frame overflowed.
+#[test]
+fn console_output_over_the_budget_fails_the_run_and_names_the_limit() {
+    const HUGE_OUTPUT_APP: &str = "const line = \"x\".repeat(1048576);\n\
+        for (let i = 0; i < 9; i++) { console.log(line); }\n";
+
+    let (_dir, outcome) = run_app(HUGE_OUTPUT_APP, &["--console-only"]);
+    assert_ne!(outcome.exit_code, Some(0), "stderr=\n{}", outcome.stderr);
+    assert!(
+        outcome.stderr.contains("console output budget exceeded"),
+        "stderr=\n{}",
+        outcome.stderr.chars().take(2000).collect::<String>()
+    );
+    assert!(
+        !outcome.stderr.contains("panic"),
+        "stderr=\n{}",
+        outcome.stderr
+    );
+    // The eight lines printed before the budget ran out are delivered.
+    assert_eq!(outcome.stdout.len(), 8 * (1_048_576 + 1));
+}
+
+/// bd-xzemw: an exception thrown in a timer callback ends the program like
+/// Node's uncaught exception. It used to be dropped and the run exited 0.
+#[test]
+fn an_exception_thrown_in_a_timer_callback_fails_the_run_bd_xzemw() {
+    const TIMER_THROW_APP: &str = "console.log(\"before\");\n\
+        setTimeout(() => { throw new Error(\"timer boom\"); }, 1);\n\
+        setTimeout(() => { console.log(\"after\"); }, 50);\n";
+
+    let (_dir, outcome) = run_app(TIMER_THROW_APP, &["--console-only"]);
+    assert_ne!(outcome.exit_code, Some(0), "stderr=\n{}", outcome.stderr);
+    assert_eq!(outcome.stdout, "before\n", "stderr=\n{}", outcome.stderr);
+    assert!(
+        outcome.stderr.contains("timer boom"),
+        "stderr=\n{}",
+        outcome.stderr
+    );
+}
+
+/// bd-xzemw: an unhandled Promise rejection ends the program like Node's
+/// default `--unhandled-rejections=throw`; a handled one does not.
+#[test]
+fn an_unhandled_promise_rejection_fails_the_run_bd_xzemw() {
+    const REJECTION_APP: &str = "console.log(\"before\");\n\
+        Promise.reject(new Error(\"nobody caught me\"));\n\
+        setTimeout(() => { console.log(\"after\"); }, 10);\n";
+
+    let (_dir, outcome) = run_app(REJECTION_APP, &["--console-only"]);
+    assert_ne!(outcome.exit_code, Some(0), "stderr=\n{}", outcome.stderr);
+    assert_eq!(outcome.stdout, "before\n", "stderr=\n{}", outcome.stderr);
+    assert!(
+        outcome.stderr.contains("nobody caught me"),
+        "stderr=\n{}",
+        outcome.stderr
+    );
+
+    const HANDLED_APP: &str = "Promise.reject(new Error(\"x\")).catch((e) => { console.log(\"caught \" + e.message); });\n";
+    let (_dir, handled) = run_app(HANDLED_APP, &["--console-only"]);
+    assert_eq!(handled.exit_code, Some(0), "stderr=\n{}", handled.stderr);
+    assert_eq!(handled.stdout, "caught x\n");
 }
 
 #[test]

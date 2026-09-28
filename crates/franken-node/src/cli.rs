@@ -325,6 +325,12 @@ pub struct RunArgs {
     /// Run the canonical first-tranche compat-op oracle before execution.
     #[arg(long)]
     pub compat_preflight: bool,
+
+    /// Arguments for the program itself, after `--`
+    /// (`franken-node run app.js -- a b`). They become `process.argv[2..]`
+    /// where the policy lets the program read `process.argv` (bd-my9hk).
+    #[arg(last = true)]
+    pub app_args: Vec<String>,
 }
 
 impl RunArgs {
