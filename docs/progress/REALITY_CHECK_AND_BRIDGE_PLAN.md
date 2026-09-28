@@ -1034,3 +1034,24 @@ Result: balanced 0/6, legacy-risky 1/6 (was 0/6 and 0/6). IFC over-labelling is 
 - The fix makes both end the run like Node's uncaught exception. Rejections are tracked incrementally, without a per-tick store walk, and rejections observed by combinators or adoption are marked handled.
 
 **Class fields** (engine bd-9vouw.64): on branch `class-fields-fail-closed`, still in verification, the parser refuses them with `UnsupportedSyntax` instead of silently dropping them. This is refusal-only, so the bead stays open for the implementation.
+
+### Addendum 2026-09-27 late: landed and verified on a live release binary (build16)
+
+Landed:
+- franken_engine fb07b73f2 (console budget), 6a1955fc0 (class-field refusal; `=` inside `?:` branches), c1d0b05f5 (`process.exit` / `exitCode` / argv), 083aac714 (timer throws and unhandled rejections), 719f6d422 (module parse budget).
+- franken_node a4ec6df57 (`run app.js -- args`, exit-status mapping, e2e tests) and 9b415077a (ledger: TLS trust refusals stay denials; failed spawns are `failed`).
+- Beads closed: engine bd-xzemw, bd-my9hk.
+
+Live checks on build16 (node 732e4f65a + engine f80cee567), `--console-only`:
+
+| Program | Result |
+|---|---|
+| 1,500 × `console.log` | all 1,500 lines, exit 0 (was: lines 500..1499, exit 0) |
+| 9 × 1 MiB lines | 8 lines kept, exit 1, `console output budget exceeded: 9 entries / 9437184 bytes, limits …` (was: 1.48 GB RSS, "Engine crashed with panic") |
+| throw in `setTimeout` | `before`, exit 1, `uncaught exception: Error: timer boom` (was: exit 0) |
+| `Promise.reject(e)` unhandled | `before`, exit 1, `uncaught exception: Error: …` (was: exit 0, later timers ran) |
+| `process.exit(3)` / `process.exitCode = 7` | exit 3 / exit 7 (was: refused at lowering) |
+| `run app.js -- alpha beta` (legacy-risky) | `process.argv.slice(2)` = `alpha,beta`; balanced still refuses `process.argv` (bd-y30zw, owner question on .5) |
+| `class A { y = 2 }` | refused: `class fields and private names are not supported yet` (was: `undefined`, exit 0) |
+
+npm re-probe on build16: balanced 0/6, legacy-risky 1/6 (minimist). lodash now parses, and its next wall is a runtime `expected function, got string`, probably an `Expression::Raw` fallback. dayjs now parses, and its next wall is `globalThis` refused at lowering (BRIDGE-15.13). The other walls are unchanged: semver (keyword IFC), commander (import ceiling), uuid (`crypto` module).
