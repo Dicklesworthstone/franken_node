@@ -371,11 +371,11 @@ fn incident_list_human_output() {
     let stdout = std::str::from_utf8(&output.stdout).expect("Invalid UTF-8");
 
     // Human-readable output should contain headers or an empty-list message.
-    // Prod renders "incident list: no bundles found" on an empty workspace
+    // Prod renders "incident list: no incidents found" on an empty workspace
     // (this exact wording is pinned by a unit test), so match case-insensitively.
     let lower = stdout.to_lowercase();
     assert!(
-        lower.contains("incident") || lower.contains("no bundles") || stdout.contains("ID"),
+        lower.contains("incident") || lower.contains("no incidents") || stdout.contains("ID"),
         "Expected human-readable incident list output: {}",
         stdout
     );

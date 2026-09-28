@@ -5535,6 +5535,12 @@ struct IncidentListEntry {
     event_count: usize,
     created_at: String,
     path: String,
+    /// `bundle` (a signed `.fnbundle`) or `captured` (evidence a run wrote to
+    /// the incident store, listed before anyone bundles it).
+    source: String,
+    /// `verified` / `valid`, or why the entry could not be read or verified.
+    /// One unreadable entry is reported here instead of failing the listing.
+    status: String,
 }
 
 fn normalize_incident_severity_label(raw: &str) -> Option<&'static str> {
@@ -5640,46 +5646,137 @@ fn infer_incident_bundle_severity(bundle: &tools::replay_bundle::ReplayBundle) -
     "unknown".to_string()
 }
 
+/// Evidence packages a run captured into the incident store
+/// (`<store>/<incident slug>/evidence.v1.json`), sorted. A missing store is an
+/// empty list.
+fn collect_captured_incident_evidence_paths(store: &Path) -> Result<Vec<PathBuf>> {
+    if !store.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(store)
+        .with_context(|| format!("failed reading incident store {}", store.display()))?
+    {
+        let entry =
+            entry.with_context(|| format!("failed reading entry in {}", store.display()))?;
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed reading file type for {}", entry.path().display()))?;
+        if !file_type.is_dir() {
+            continue;
+        }
+        let evidence = entry.path().join(INCIDENT_EVIDENCE_FILE_NAME);
+        if evidence.is_file() {
+            paths.push(evidence);
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+fn read_captured_incident_evidence(
+    path: &Path,
+) -> Result<tools::replay_bundle::IncidentEvidencePackage> {
+    let bytes =
+        std::fs::read(path).with_context(|| format!("failed reading {}", path.display()))?;
+    let package: tools::replay_bundle::IncidentEvidencePackage =
+        serde_json::from_slice(&bytes).context("not an incident evidence package")?;
+    tools::replay_bundle::validate_incident_evidence_package(&package, None)
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    Ok(package)
+}
+
 fn collect_incident_list_entries(
     root: &Path,
     severity_filter: Option<&str>,
 ) -> Result<Vec<IncidentListEntry>> {
     let mut entries = Vec::new();
-    let bundle_paths = collect_incident_bundle_paths(root)?;
-    // Defer the signing-key requirement until we actually have a bundle to
-    // open. `incident list` on a fresh workspace (zero bundles) should not
-    // fail-closed on a missing fleet signing key just to report an empty
-    // list. This matches the operator UX: list is a read-only query.
-    if bundle_paths.is_empty() {
-        return Ok(entries);
-    }
-    let trusted_signing_material = load_receipt_signing_material(None)?
-        .ok_or_else(|| missing_replay_bundle_signing_key_error("list"))?;
-    let trusted_key_id = signing_material_key_id(&trusted_signing_material);
-
-    for path in bundle_paths {
-        let bundle = read_bundle_from_path_with_trusted_key(&path, Some(&trusted_key_id))
-            .with_context(|| format!("failed reading incident bundle {}", path.display()))?;
-        let severity = infer_incident_bundle_severity(&bundle);
-        if let Some(filter) = severity_filter
-            && severity != filter
-        {
-            continue;
-        }
-        let display_path = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
+    let display_path = |path: &Path| {
+        path.strip_prefix(root)
+            .unwrap_or(path)
             .display()
-            .to_string();
-        entries.push(IncidentListEntry {
-            incident_id: bundle.incident_id,
-            severity,
-            event_count: bundle.manifest.event_count,
-            created_at: bundle.created_at,
-            path: display_path,
+            .to_string()
+    };
+
+    // Evidence a run captured (bd-reality-20260923-26n9r.8): visible before
+    // anyone bundles it. A package that fails to parse or validate is listed
+    // with the reason, not dropped and not fatal.
+    for path in
+        collect_captured_incident_evidence_paths(&root.join(INCIDENT_EVIDENCE_RELATIVE_DIR))?
+    {
+        entries.push(match read_captured_incident_evidence(&path) {
+            Ok(package) => IncidentListEntry {
+                severity: serde_json::to_value(package.severity)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_string))
+                    .unwrap_or_else(|| "unknown".to_string()),
+                event_count: package.events.len(),
+                created_at: package.collected_at,
+                incident_id: package.incident_id,
+                path: display_path(&path),
+                source: "captured".to_string(),
+                status: "valid".to_string(),
+            },
+            Err(err) => IncidentListEntry {
+                incident_id: path
+                    .parent()
+                    .and_then(Path::file_name)
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                severity: "unknown".to_string(),
+                event_count: 0,
+                created_at: String::new(),
+                path: display_path(&path),
+                source: "captured".to_string(),
+                status: format!("invalid: {err:#}"),
+            },
         });
     }
 
+    let bundle_paths = collect_incident_bundle_paths(root)?;
+    // The signing key is only needed to verify bundles. Without it every
+    // bundle is reported as unverifiable, and a bundle that fails verification
+    // (for example one signed by a foreign key) is reported on its own line:
+    // `incident list` is a read-only query, not a gate.
+    let trusted_key_id = if bundle_paths.is_empty() {
+        None
+    } else {
+        load_receipt_signing_material(None)?.map(|material| signing_material_key_id(&material))
+    };
+    for path in bundle_paths {
+        let verified: Result<tools::replay_bundle::ReplayBundle> = match trusted_key_id.as_ref() {
+            Some(key_id) => read_bundle_from_path_with_trusted_key(&path, Some(key_id.as_str()))
+                .map_err(anyhow::Error::from),
+            None => Err(missing_replay_bundle_signing_key_error("list").into()),
+        };
+        entries.push(match verified {
+            Ok(bundle) => IncidentListEntry {
+                severity: infer_incident_bundle_severity(&bundle),
+                event_count: bundle.manifest.event_count,
+                created_at: bundle.created_at,
+                incident_id: bundle.incident_id,
+                path: display_path(&path),
+                source: "bundle".to_string(),
+                status: "verified".to_string(),
+            },
+            Err(err) => IncidentListEntry {
+                incident_id: path
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                severity: "unknown".to_string(),
+                event_count: 0,
+                created_at: String::new(),
+                path: display_path(&path),
+                source: "bundle".to_string(),
+                status: format!("unverified: {err:#}"),
+            },
+        });
+    }
+
+    if let Some(filter) = severity_filter {
+        entries.retain(|entry| entry.severity == filter);
+    }
     entries.sort_by(|left, right| {
         left.incident_id
             .cmp(&right.incident_id)
@@ -5691,8 +5788,8 @@ fn collect_incident_list_entries(
 fn render_incident_list(entries: &[IncidentListEntry], severity_filter: Option<&str>) -> String {
     if entries.is_empty() {
         return match severity_filter {
-            Some(filter) => format!("incident list: no bundles found for severity={filter}"),
-            None => "incident list: no bundles found".to_string(),
+            Some(filter) => format!("incident list: no incidents found for severity={filter}"),
+            None => "incident list: no incidents found".to_string(),
         };
     }
 
@@ -5701,12 +5798,18 @@ fn render_incident_list(entries: &[IncidentListEntry], severity_filter: Option<&
     if let Some(filter) = severity_filter {
         lines.push(format!("severity_filter={filter}"));
     }
-    lines.push("incident_id | severity | events | created_at | path".to_string());
-    lines.push("----------- | -------- | ------ | ---------- | ----".to_string());
+    lines.push("incident_id | severity | events | created_at | source | status | path".to_string());
+    lines.push("----------- | -------- | ------ | ---------- | ------ | ------ | ----".to_string());
     for entry in entries {
         lines.push(format!(
-            "{} | {} | {} | {} | {}",
-            entry.incident_id, entry.severity, entry.event_count, entry.created_at, entry.path
+            "{} | {} | {} | {} | {} | {} | {}",
+            entry.incident_id,
+            entry.severity,
+            entry.event_count,
+            entry.created_at,
+            entry.source,
+            entry.status,
+            entry.path
         ));
     }
     lines.join("\n")
@@ -17052,7 +17155,7 @@ mod incident_list_tests {
         let rendered = render_incident_list(&[], Some("critical"));
         assert_eq!(
             rendered,
-            "incident list: no bundles found for severity=critical"
+            "incident list: no incidents found for severity=critical"
         );
     }
 

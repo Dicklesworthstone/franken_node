@@ -866,6 +866,61 @@ fn console_only_run_keeps_incident_capture_notice_out_of_guest_streams() {
     );
 }
 
+/// bd-reality-20260923-26n9r.8 (deliverable 3): `incident list` shows an
+/// incident a run captured before anyone bundles it, and a bundle it cannot
+/// verify is reported on its own line instead of failing the whole listing.
+#[test]
+fn incident_list_shows_run_captured_incidents_and_tolerates_bad_bundles() {
+    let (dir, outcome) = run_app(DENIED_EGRESS_APP, &["--console-only"]);
+    assert_eq!(outcome.exit_code, Some(0), "stderr=\n{}", outcome.stderr);
+
+    let list = |dir: &std::path::Path| {
+        let output = Command::new(franken_node_bin())
+            .args(["incident", "list", "--json"])
+            .current_dir(dir)
+            .output()
+            .expect("spawn franken-node incident list");
+        assert!(
+            output.status.success(),
+            "incident list must succeed; stderr=\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let payload: Value =
+            serde_json::from_slice(&output.stdout).expect("incident list --json is JSON");
+        payload["incidents"]
+            .as_array()
+            .expect("incidents array")
+            .clone()
+    };
+
+    let incidents = list(dir.path());
+    assert_eq!(incidents.len(), 1, "{incidents:?}");
+    assert_eq!(incidents[0]["source"], "captured");
+    assert_eq!(incidents[0]["status"], "valid");
+    assert_eq!(incidents[0]["severity"], "high");
+    assert!(
+        incidents[0]["incident_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("INC-RUN-")),
+        "{incidents:?}"
+    );
+
+    std::fs::write(dir.path().join("bogus.fnbundle"), b"not a replay bundle")
+        .expect("write corrupt bundle");
+    let incidents = list(dir.path());
+    assert_eq!(incidents.len(), 2, "{incidents:?}");
+    let bogus = incidents
+        .iter()
+        .find(|entry| entry["source"] == "bundle")
+        .expect("the corrupt bundle is listed");
+    assert!(
+        bogus["status"]
+            .as_str()
+            .is_some_and(|status| status.starts_with("unverified:")),
+        "{bogus:?}"
+    );
+}
+
 /// bd-bwn5a: reading a file that does not exist is an ordinary host failure,
 /// not a policy denial. The signed ledger records it as `failed` (the gates
 /// authorized the read; the host reported ENOENT), it is not counted as a
