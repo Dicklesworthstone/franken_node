@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use frankenengine_verifier_sdk::bundle::{
     deserialize, hash, integrity_hash, verify, BundleArtifact, BundleChunk, BundleHeader,
-    BundleSignature, ReplayBundle, TimelineEvent,
+    ReplayBundle, TimelineEvent,
 };
 use hex::FromHex;
 use libfuzzer_sys::fuzz_target;
@@ -34,9 +34,6 @@ fuzz_target!(|data: FuzzInput| {
         }
         FuzzInput::StructuredArtifact(artifact) => {
             fuzz_bundle_artifact_structured(artifact);
-        }
-        FuzzInput::StructuredSignature(signature) => {
-            fuzz_bundle_signature_structured(signature);
         }
         FuzzInput::RawBundleBytes(bytes) => {
             fuzz_bundle_raw_bytes(bytes);
@@ -186,30 +183,11 @@ fn fuzz_bundle_chunk_structured(chunk: BundleChunk) {
     verify_structured_bundle(&test_bundle);
 }
 
-/// Fuzz structured BundleSignature objects
-fn fuzz_bundle_signature_structured(signature: BundleSignature) {
-    if let Ok(json) = serde_json::to_vec(&signature) {
-        // Round-trip property for BundleSignature
-        let parsed_signature = serde_json::from_slice::<BundleSignature>(&json);
-        assert!(
-            parsed_signature.is_ok(),
-            "BundleSignature round-trip should succeed"
-        );
-    }
-
-    // Test hex decoding edge cases
-    fuzz_hex_parse(&signature.signature_hex);
-
-    // Test signature verification with fuzzed signature
-    let test_bundle = create_minimal_bundle_with_signature(signature);
-    verify_structured_bundle(&test_bundle);
-}
-
 /// Helper to create minimal bundle for testing components
 fn create_minimal_bundle_with_header(header: BundleHeader) -> ReplayBundle {
     ReplayBundle {
         header,
-        schema_version: "vsdk-replay-bundle-v1.0".to_string(),
+        schema_version: "vsdk-replay-bundle-v2.0".to_string(),
         sdk_version: "0.1.0".to_string(),
         bundle_id: "test".to_string(),
         incident_id: "test".to_string(),
@@ -223,10 +201,6 @@ fn create_minimal_bundle_with_header(header: BundleHeader) -> ReplayBundle {
         chunks: vec![],
         metadata: std::collections::BTreeMap::new(),
         integrity_hash: String::new(),
-        signature: BundleSignature {
-            algorithm: "ed25519".to_string(),
-            signature_hex: String::new(),
-        },
     }
 }
 
@@ -238,17 +212,6 @@ fn create_minimal_bundle_with_chunks(chunks: Vec<BundleChunk>) -> ReplayBundle {
         chunk_count: u32::try_from(chunks.len()).unwrap_or(u32::MAX),
     });
     bundle.chunks = chunks;
-    bundle
-}
-
-/// Helper to create minimal bundle with fuzzed signature
-fn create_minimal_bundle_with_signature(signature: BundleSignature) -> ReplayBundle {
-    let mut bundle = create_minimal_bundle_with_header(BundleHeader {
-        hash_algorithm: "sha256".to_string(),
-        payload_length_bytes: 0,
-        chunk_count: 0,
-    });
-    bundle.signature = signature;
     bundle
 }
 
@@ -319,7 +282,6 @@ fn fuzz_bundle_raw_bytes(bytes: Vec<u8>) {
     let _event_result = serde_json::from_slice::<TimelineEvent>(&bytes);
     let _chunk_result = serde_json::from_slice::<BundleChunk>(&bytes);
     let _artifact_result = serde_json::from_slice::<BundleArtifact>(&bytes);
-    let _signature_result = serde_json::from_slice::<BundleSignature>(&bytes);
 
     // Very small inputs should be rejected for complex structures
     if bytes.len() < 10 && !bytes.is_empty() {
@@ -415,7 +377,6 @@ struct FuzzReplayBundle {
     chunks: Vec<BundleChunk>,
     metadata: Vec<(String, String)>,
     integrity_hash: String,
-    signature: BundleSignature,
 }
 
 impl FuzzReplayBundle {
@@ -454,7 +415,6 @@ impl FuzzReplayBundle {
             chunks: self.chunks.into_iter().take(16).collect(),
             metadata,
             integrity_hash: bounded_text(self.integrity_hash, 128),
-            signature: self.signature,
         }
     }
 }
@@ -557,8 +517,6 @@ enum FuzzInput {
     StructuredChunk(BundleChunk),
     /// Generate valid structured BundleArtifact then test hex decoding
     StructuredArtifact(BundleArtifact),
-    /// Generate valid structured BundleSignature then test signature verification
-    StructuredSignature(BundleSignature),
     /// Raw bytes for coverage-guided fuzzing of parser edge cases
     RawBundleBytes(Vec<u8>),
 }

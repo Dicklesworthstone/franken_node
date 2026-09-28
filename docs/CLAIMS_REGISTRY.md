@@ -327,8 +327,10 @@ Each claim entry uses this structure:
 - **Notes**: `sdk/verifier/Cargo.toml` no longer inherits workspace fields, so
   it builds from its own directory. Before 7e97be752 the SDK could not parse CLI incident bundles
   (`missing field artifact_path`): the SDK `bundle` module verifies a
-  different, SDK-native format whose built-in "signature" check is an
-  unkeyed digest.
+  different, SDK-native format whose built-in "signature" check was an
+  unkeyed digest; schema `vsdk-replay-bundle-v2.0` removed that field
+  (bd-reality-20260923-26n9r.7), leaving `integrity_hash` for integrity and
+  the detached Ed25519 `verify_signed_bundle` for authenticity.
 
 ### CLAIM-012: `#![forbid(unsafe_code)]` in lib.rs and main.rs
 

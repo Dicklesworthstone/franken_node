@@ -8,10 +8,10 @@
     {
       "error_type": "UnsupportedSchema",
       "error_data": {
-        "expected": "vsdk-replay-bundle-v1.0",
-        "actual": "vsdk-replay-bundle-v0.9"
+        "expected": "vsdk-replay-bundle-v2.0",
+        "actual": "vsdk-replay-bundle-v1.0"
       },
-      "expected_display": "replay bundle schema mismatch: expected vsdk-replay-bundle-v1.0, got vsdk-replay-bundle-v0.9"
+      "expected_display": "replay bundle schema mismatch: expected vsdk-replay-bundle-v2.0, got vsdk-replay-bundle-v1.0"
     },
     {
       "error_type": "UnsupportedSdk",

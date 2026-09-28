@@ -4,7 +4,7 @@
     "payload_length_bytes": 77,
     "chunk_count": 1
   },
-  "schema_version": "vsdk-replay-bundle-v1.0",
+  "schema_version": "vsdk-replay-bundle-v2.0",
   "sdk_version": "vsdk-v1.0",
   "bundle_id": "facade-bundle-001",
   "incident_id": "facade-incident-001",
@@ -52,9 +52,5 @@
     }
   ],
   "metadata": {},
-  "integrity_hash": "56850137b9bb37b5168aa8cea07ed06cbdb112955f299252d08ad554a409ed64",
-  "signature": {
-    "algorithm": "sha256",
-    "signature_hex": "d692c9f0f94c95ff9320960288ac88028f16b08a2ab290c18496bcec5f3711bb"
-  }
+  "integrity_hash": "b5feddbfa74bc36e3fd99687dea089f1e3782c211f077cca817a775010f3d39e"
 }

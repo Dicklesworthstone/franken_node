@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 use ed25519_dalek::SigningKey;
 use frankenengine_verifier_sdk::SDK_VERSION;
 use frankenengine_verifier_sdk::bundle::{
-    BundleArtifact, BundleChunk, BundleError, BundleHeader, BundleSignature,
-    REPLAY_BUNDLE_HASH_ALGORITHM, REPLAY_BUNDLE_SCHEMA_VERSION, ReplayBundle, TimelineEvent, hash,
-    seal, sign_bundle, verify_signed_bundle,
+    BundleArtifact, BundleChunk, BundleError, BundleHeader, REPLAY_BUNDLE_HASH_ALGORITHM,
+    REPLAY_BUNDLE_SCHEMA_VERSION, ReplayBundle, TimelineEvent, hash, seal, sign_bundle,
+    verify_signed_bundle,
 };
 use serde_json::json;
 
@@ -163,10 +163,6 @@ fn canonical_replay_bundle() -> ReplayBundle {
         chunks,
         metadata,
         integrity_hash: String::new(),
-        signature: BundleSignature {
-            algorithm: REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
-            signature_hex: String::new(),
-        },
     };
     seal(&mut bundle).expect("fixture should seal");
     bundle

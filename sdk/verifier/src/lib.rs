@@ -1478,7 +1478,9 @@ impl VerifierSdk {
     /// use frankenengine_verifier_sdk::capsule::build_reference_capsule;
     ///
     /// let sdk = VerifierSdk::new("verifier://docs");
-    /// let result = sdk.verify_claim(&build_reference_capsule())?;
+    /// // The key `build_reference_capsule` signs with.
+    /// let key = ed25519_dalek::SigningKey::from_bytes(&[1_u8; 32]).verifying_key();
+    /// let result = sdk.verify_claim(&key, &build_reference_capsule())?;
     /// let mut log = Vec::new();
     /// let entry = sdk.append_transparency_log(&mut log, &result)?;
     /// assert_eq!(log, vec![entry]);
@@ -1613,7 +1615,9 @@ impl VerifierSdk {
     /// use frankenengine_verifier_sdk::capsule::build_reference_capsule;
     ///
     /// let sdk = VerifierSdk::new("verifier://docs");
-    /// let result = sdk.verify_claim(&build_reference_capsule())?;
+    /// // The key `build_reference_capsule` signs with.
+    /// let key = ed25519_dalek::SigningKey::from_bytes(&[1_u8; 32]).verifying_key();
+    /// let result = sdk.verify_claim(&key, &build_reference_capsule())?;
     /// let mut session = sdk.create_session("session-docs")?;
     /// let step = sdk.record_session_step(&mut session, &result)?;
     /// assert_eq!(step.step_index, 0);
@@ -4170,10 +4174,6 @@ mod tests {
             }],
             metadata: BTreeMap::new(),
             integrity_hash: String::new(),
-            signature: bundle::BundleSignature {
-                algorithm: bundle::REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
-                signature_hex: String::new(),
-            },
         };
         bundle::seal(&mut replay_bundle).expect("test replay bundle should seal");
         bundle::serialize(&replay_bundle).expect("test replay bundle should serialize")
@@ -4320,10 +4320,6 @@ mod tests {
                 "migration_equivalence".to_string(),
             )]),
             integrity_hash: String::new(),
-            signature: bundle::BundleSignature {
-                algorithm: bundle::REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
-                signature_hex: String::new(),
-            },
         };
         bundle::seal(&mut replay_bundle).expect("test migration bundle should seal");
         bundle::serialize(&replay_bundle).expect("test migration bundle should serialize")

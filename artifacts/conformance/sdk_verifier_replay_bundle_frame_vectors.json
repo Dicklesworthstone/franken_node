@@ -18,7 +18,7 @@
       "spec_section": "VSDK-BUNDLE-6.12",
       "level": "MUST",
       "tested": true,
-      "note": "signature tampering on otherwise canonical bytes fails closed"
+      "note": "integrity-hash tampering on otherwise canonical bytes fails closed (schema v2.0 carries no unkeyed signature; bd-reality-20260923-26n9r.7)"
     }
   ],
   "vectors": [
@@ -27,10 +27,9 @@
       "source_fixture": "sdk/verifier/tests/fixtures/public_api/bundle_canonical.json",
       "input_mode": "parsed_fixture_reserialize",
       "expected": "pass",
-      "expected_canonical_bytes_sha256": "cc07a0febd4e10c38b5c01f229c2f4b41313a8fffff368cd69f39ea6b7695460",
-      "expected_byte_len": 1473,
-      "expected_integrity_hash": "56850137b9bb37b5168aa8cea07ed06cbdb112955f299252d08ad554a409ed64",
-      "expected_signature_hex": "d692c9f0f94c95ff9320960288ac88028f16b08a2ab290c18496bcec5f3711bb"
+      "expected_canonical_bytes_sha256": "01e750c508133b6b7bd0f8c0ac89d044b1f4d5ea296b0d0fedb1724955741700",
+      "expected_byte_len": 1355,
+      "expected_integrity_hash": "b5feddbfa74bc36e3fd99687dea089f1e3782c211f077cca817a775010f3d39e"
     },
     {
       "name": "bundle_pretty_fixture_raw_bytes_reject_noncanonical",
@@ -40,12 +39,12 @@
       "expected_error": "NonCanonicalEncoding"
     },
     {
-      "name": "bundle_signature_flip_rejects_canonical_tamper",
+      "name": "bundle_integrity_hash_flip_rejects_canonical_tamper",
       "source_fixture": "sdk/verifier/tests/fixtures/public_api/bundle_canonical.json",
       "input_mode": "parsed_fixture_reserialize",
-      "mutation": "flip_signature_last_nibble",
+      "mutation": "flip_integrity_hash_last_nibble",
       "expected": "fail",
-      "expected_error": "SignatureMismatch"
+      "expected_error": "IntegrityMismatch"
     }
   ]
 }

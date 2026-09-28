@@ -2,11 +2,11 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use frankenengine_verifier_sdk::bundle::{
-    BundleArtifact, BundleChunk, BundleError, BundleHeader, BundleSignature,
-    CAPABILITY_PROOF_SCHEMA_VERSION, CAPABILITY_RECEIPT_SCHEMA_VERSION, CapabilityPolicyProfile,
-    CapabilityPostcondition, CapabilityProof, CapabilityReceipt, CapabilityRevocationFreshness,
-    CapabilityScope, EFFECT_RECEIPT_EVENT_TYPE, EFFECT_RECEIPT_SCHEMA_VERSION, EffectKind,
-    EffectPolicyOutcome, EffectReceipt, EffectReceiptChainEntry, FN_VSDK_CAPABILITY_PROOF_VERIFIED,
+    BundleArtifact, BundleChunk, BundleError, BundleHeader, CAPABILITY_PROOF_SCHEMA_VERSION,
+    CAPABILITY_RECEIPT_SCHEMA_VERSION, CapabilityPolicyProfile, CapabilityPostcondition,
+    CapabilityProof, CapabilityReceipt, CapabilityRevocationFreshness, CapabilityScope,
+    EFFECT_RECEIPT_EVENT_TYPE, EFFECT_RECEIPT_SCHEMA_VERSION, EffectKind, EffectPolicyOutcome,
+    EffectReceipt, EffectReceiptChainEntry, FN_VSDK_CAPABILITY_PROOF_VERIFIED,
     FN_VSDK_CAPABILITY_RECEIPT_VERIFIED, FN_VSDK_CAPABILITY_SCHEMA_PASS,
     FN_VSDK_CAPABILITY_SCHEMA_START, FN_VSDK_EFFECT_CHAIN_PASS, FN_VSDK_EFFECT_CHAIN_START,
     FN_VSDK_EFFECT_VERIFIED, FN_VSDK_NON_EXFILTRATION_EFFECT, FN_VSDK_NON_EXFILTRATION_PASS,
@@ -745,10 +745,6 @@ federated-peer,frankenengine-node-0.1.0,quarantine,sha256:36b7
         chunks,
         metadata,
         integrity_hash: String::new(),
-        signature: BundleSignature {
-            algorithm: REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
-            signature_hex: String::new(),
-        },
     };
     seal(&mut bundle).expect("fixture should seal");
     bundle
@@ -889,10 +885,6 @@ fn effect_chain_replay_bundle() -> ReplayBundle {
         chunks,
         metadata,
         integrity_hash: String::new(),
-        signature: BundleSignature {
-            algorithm: REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
-            signature_hex: String::new(),
-        },
     };
     seal(&mut bundle).expect("effect-chain bundle should seal");
     bundle
@@ -1121,6 +1113,13 @@ fn effect_receipt_hash(receipt: &EffectReceipt) -> String {
         EffectPolicyOutcome::Denied { reason } => {
             update_hash_str(&mut hasher, reason);
         }
+        EffectPolicyOutcome::Failed {
+            capability_ref,
+            reason,
+        } => {
+            update_hash_str(&mut hasher, capability_ref);
+            update_hash_str(&mut hasher, reason);
+        }
     }
     update_hash_str(&mut hasher, &receipt.pre_state_hash);
     update_hash_str(&mut hasher, &receipt.args_hash);
@@ -1176,6 +1175,7 @@ fn policy_outcome_tag(outcome: &EffectPolicyOutcome) -> u8 {
     match outcome {
         EffectPolicyOutcome::Allowed { .. } => 1,
         EffectPolicyOutcome::Denied { .. } => 2,
+        EffectPolicyOutcome::Failed { .. } => 3,
     }
 }
 

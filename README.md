@@ -3235,7 +3235,8 @@ What it exposes:
   `deserialize`, `hash`, `integrity_hash`, `seal`, `sign_bundle`,
   `verify_ed25519_signature`, `verify_signed_bundle`, `verify`). This is a
   separate format from the CLI's `.fnbundle`; use `incident_bundle` for CLI
-  output. `bundle::verify`'s built-in check is an unkeyed integrity digest.
+  output. `bundle::verify` checks integrity only (`integrity_hash`, an unkeyed
+  digest; schema `vsdk-replay-bundle-v2.0` carries no "signature" field).
   Authenticity requires `verify_signed_bundle` with a trusted key.
 - `capsule`: verify a replay capsule, including schema-version checks
   and side-effect declaration matching.
@@ -3264,13 +3265,19 @@ validate franken-node's public claims. Its conformance is asserted by
 `tests/conformance/verifier_sdk_capsule_replay.rs` and
 `tests/conformance/verifier_session_monotonic.rs`.
 
+This function runs as the doc-test of `verify_incident_bundle`
+(`sdk/verifier/src/incident_bundle.rs`), against a bundle the real CLI wrote:
+
 ```rust
 use ed25519_dalek::VerifyingKey;
 use frankenengine_verifier_sdk::incident_bundle::verify_incident_bundle;
 
 /// Verify a `franken-node incident bundle` output against a signer key the
 /// auditor obtained independently (never the key embedded in the bundle).
-fn audit(bundle_path: &std::path::Path, trusted_signer: &VerifyingKey) -> anyhow::Result<()> {
+fn audit(
+    bundle_path: &std::path::Path,
+    trusted_signer: &VerifyingKey,
+) -> Result<(), Box<dyn std::error::Error>> {
     let bytes = std::fs::read(bundle_path)?;
     let verified = verify_incident_bundle(&bytes, trusted_signer)?;
     println!(

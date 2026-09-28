@@ -1,21 +1,26 @@
 # Verifier SDK Conformance Coverage Matrix
 
-> **Status**: ✅ **100% conformance** for the spec-derived `conformance_harness.rs` matrix  
-> **Last Updated**: 2026-04-23  
+> **Status**: **54/58 (93.1%)** for the spec-derived `conformance_harness.rs` matrix, measured 2026-09-28; 4 MUST failures tracked in `bd-wwfh4`  
+> **Last Updated**: 2026-09-28  
 > **Test Suite**: `conformance_harness.rs`
 
 ## Coverage Summary
 
-| Spec Section | MUST Clauses | SHOULD Clauses | MAY Clauses | Tested | Passing | Score |
-|-------------|:-----------:|:--------------:|:-----------:|:------:|:-------:|-------|
-| Schema Version | 5 | 0 | 0 | 5 | 5 | 100% |
-| Event Codes | 5 | 0 | 0 | 5 | 5 | 100% |
-| Error Codes | 6 | 0 | 0 | 6 | 6 | 100% |
-| Invariants | 4 | 0 | 0 | 4 | 4 | 100% |
-| Capsule Format | 8 | 2 | 0 | 10 | 10 | 100% |
-| Bundle Format | 12 | 3 | 0 | 15 | 15 | 100% |
-| SDK Interface | 11 | 1 | 0 | 12 | 12 | 100% |
-| **TOTAL** | **51** | **6** | **0** | **57** | **57** | **100%** |
+Measured 2026-09-28 (`cargo test -p frankenengine-verifier-sdk --all-features
+--test conformance_harness`; the harness is `test-support`-gated and did not
+compile from the keyed-capsule API change until then, so earlier "100%" figures
+were never measured). Failures are tracked in `bd-wwfh4`.
+
+| Spec Section | Tested | Passing | Score |
+|-------------|:------:|:-------:|-------|
+| Schema Version | 5 | 5 | 100% |
+| Event Codes | 5 | 5 | 100% |
+| Error Codes | 6 | 6 | 100% |
+| Invariants | 4 | 4 | 100% |
+| Capsule Format | 10 | 9 | 90% |
+| Bundle Format | 16 | 16 | 100% |
+| SDK Interface | 12 | 9 | 75% |
+| **TOTAL** | **58** | **54** | **93.1%** |
 
 ## Requirement Coverage Detail
 
@@ -27,7 +32,7 @@
 | VSDK-SCHEMA-1.2 | MUST | SDK_VERSION_MIN must match SDK_VERSION | ✅ PASS |
 | VSDK-SCHEMA-1.3 | MUST | check_sdk_version must accept only vsdk-v1.0 | ✅ PASS |
 | VSDK-SCHEMA-1.4 | MUST | check_sdk_version must reject all other versions | ✅ PASS |
-| VSDK-SCHEMA-1.5 | MUST | REPLAY_BUNDLE_SCHEMA_VERSION must be vsdk-replay-bundle-v1.0 | ✅ PASS |
+| VSDK-SCHEMA-1.5 | MUST | REPLAY_BUNDLE_SCHEMA_VERSION must be vsdk-replay-bundle-v2.0 | ✅ PASS |
 
 ### Event Code Requirements (VSDK-EVENT-*)
 
@@ -69,7 +74,7 @@
 | VSDK-CAPSULE-5.4 | MUST | CapsuleVerdict must support Pass, Fail, Inconclusive | ✅ PASS |
 | VSDK-CAPSULE-5.5 | MUST | CapsuleReplayResult must include expected/actual hashes | ✅ PASS |
 | VSDK-CAPSULE-5.6 | MUST | CapsuleError must cover all error scenarios | ✅ PASS |
-| VSDK-CAPSULE-5.7 | MUST | Capsule signature verification must be constant-time | ✅ PASS |
+| VSDK-CAPSULE-5.7 | MUST | Capsule signature verification must be constant-time | ❌ FAIL (tamper yields `Ed25519SignatureMalformed`, not `SignatureInvalid`; bd-wwfh4) |
 | VSDK-CAPSULE-5.8 | MUST | Capsule replay must be deterministic | ✅ PASS |
 | VSDK-CAPSULE-5.9 | SHOULD | Capsule metadata should be preserved during replay | ✅ PASS |
 | VSDK-CAPSULE-5.10 | SHOULD | Capsule inputs should validate against manifest | ✅ PASS |
@@ -83,7 +88,7 @@
 | VSDK-BUNDLE-6.3 | MUST | TimelineEvent must include sequence_number and timestamp | ✅ PASS |
 | VSDK-BUNDLE-6.4 | MUST | BundleChunk must specify index and total_chunks | ✅ PASS |
 | VSDK-BUNDLE-6.5 | MUST | BundleArtifact must include digest and bytes_hex | ✅ PASS |
-| VSDK-BUNDLE-6.6 | MUST | BundleSignature must specify algorithm and signature_hex | ✅ PASS |
+| VSDK-BUNDLE-6.6 | MUST | Replay bundles must carry no unkeyed signature; bytes that do are refused | ✅ PASS |
 | VSDK-BUNDLE-6.7 | MUST | Bundle serialization must be deterministic | ✅ PASS |
 | VSDK-BUNDLE-6.8 | MUST | Bundle verification must validate integrity hash | ✅ PASS |
 | VSDK-BUNDLE-6.9 | MUST | Bundle hash must use SHA-256 with domain separation | ✅ PASS |
@@ -100,9 +105,9 @@
 |---------|-------|-------------|--------|
 | VSDK-INTERFACE-7.1 | MUST | create_verifier_sdk must return configured VerifierSdk | ✅ PASS |
 | VSDK-INTERFACE-7.2 | MUST | verify_claim must validate capsules and return result | ✅ PASS |
-| VSDK-INTERFACE-7.3 | MUST | verify_migration_artifact must fail closed on structural-only replay bundles | ✅ PASS |
-| VSDK-INTERFACE-7.4 | MUST | verify_trust_state must validate trust-anchor shape before failing closed on structural-only replay bundles | ✅ PASS |
-| VSDK-INTERFACE-7.5 | MUST | ValidationWorkflow execution must preserve structural-bundle authentication guardrails | ✅ PASS |
+| VSDK-INTERFACE-7.3 | MUST | verify_migration_artifact must fail closed on structural-only replay bundles | ❌ FAIL (returns `Ok` with verdict `Fail`, not `UnauthenticatedStructuralBundle`; bd-wwfh4) |
+| VSDK-INTERFACE-7.4 | MUST | verify_trust_state must validate trust-anchor shape before failing closed on structural-only replay bundles | ❌ FAIL (anchor-bound `Pass`; bd-wwfh4) |
+| VSDK-INTERFACE-7.5 | MUST | ValidationWorkflow execution must preserve structural-bundle authentication guardrails | ❌ FAIL (`execute_workflow` reports "cryptographically verified" for an unkeyed bundle; bd-wwfh4) |
 | VSDK-INTERFACE-7.6 | MUST | VerificationSession must track steps and seal state | ✅ PASS |
 | VSDK-INTERFACE-7.7 | MUST | create_session must reject malformed session ids | ✅ PASS |
 | VSDK-INTERFACE-7.8 | MUST | TransparencyLogEntry must provide merkle proof chain | ✅ PASS |
@@ -132,10 +137,10 @@ This conformance harness implements **Pattern 4: Spec-Derived Test Matrix** from
 
 ### Test Coverage Accounting
 
-- **Total Requirements**: 57 (51 MUST + 6 SHOULD + 0 MAY)
-- **Tested Requirements**: 57 (100% coverage)
-- **Passing Tests**: 57 (100% conformance within the harness matrix)
-- **Expected Failures**: 0 (for the clauses exercised by `conformance_harness.rs`)
+- **Tested Requirements**: 58
+- **Passing Tests**: 54 (measured 2026-09-28)
+- **Failing Tests**: 4 (VSDK-CAPSULE-5.7, VSDK-INTERFACE-7.3/7.4/7.5; `bd-wwfh4`)
+- **Expected Failures**: 0
 
 ### CI Integration
 
@@ -147,7 +152,10 @@ The conformance harness produces structured JSON output for automated reporting:
 
 ## Known Divergences
 
-**Harness Status**: No known divergences in the spec-derived `conformance_harness.rs` matrix.
+**Harness Status**: 4 failing MUST clauses (see the table; `bd-wwfh4`). The
+harness is gated on the `test-support` feature and the standalone CI job runs
+`cargo test` without it, so until `bd-wwfh4` flips CI to `--all-features` this
+harness does not run in CI.
 
 **Auxiliary Fixture Drift**:
 - `sdk/verifier/tests/fixtures/public_api/facade_result.json` materializes runtime RFC3339 timestamps during contract checks; facade and transparency fixtures still admit non-live digest semantics. Tracked in `bd-cjo9z`.
@@ -161,8 +169,8 @@ This report summarizes the frozen clauses exercised by `conformance_harness.rs`.
 
 - **Test Updates**: Required only when vsdk specification changes (breaking)
 - **Coverage Review**: Monthly audit to ensure new requirements are tested
-- **Conformance Gate**: CI blocks merging if conformance score < 95%
+- **Conformance Gate**: none yet: the harness does not run in CI (`bd-wwfh4`)
 
 ---
 
-**Conformance Score**: 🎯 **100%** (57/57 harness requirements validated)
+**Conformance Score**: **93.1%** (54/58 harness requirements pass, measured 2026-09-28)

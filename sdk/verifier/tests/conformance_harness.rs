@@ -40,14 +40,19 @@ struct ConformanceCase {
 enum RequirementLevel {
     Must,
     Should,
-    May,
 }
 
 #[derive(Debug, Clone)]
 enum TestResult {
     Pass,
-    Fail { reason: String },
-    ExpectedFailure { reason: String },
+    Fail {
+        reason: String,
+    },
+    // The report tallies expected failures separately; no case uses it today.
+    #[allow(dead_code)]
+    ExpectedFailure {
+        reason: String,
+    },
 }
 
 /// Comprehensive conformance test suite covering all vsdk-v1.0 requirements
@@ -85,7 +90,7 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         id: "VSDK-SCHEMA-1.5",
         section: "schema",
         level: RequirementLevel::Must,
-        description: "REPLAY_BUNDLE_SCHEMA_VERSION must be vsdk-replay-bundle-v1.0",
+        description: "REPLAY_BUNDLE_SCHEMA_VERSION must be vsdk-replay-bundle-v2.0",
         test_fn: test_bundle_schema_version_constant,
     },
     // === Event Code Requirements (MUST) ===
@@ -307,8 +312,8 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         id: "VSDK-BUNDLE-6.6",
         section: "bundle",
         level: RequirementLevel::Must,
-        description: "BundleSignature must specify algorithm and signature_hex",
-        test_fn: test_bundle_signature_format,
+        description: "Replay bundles must carry no unkeyed signature; bytes that do are refused",
+        test_fn: test_bundle_refuses_unkeyed_signature_field,
     },
     ConformanceCase {
         id: "VSDK-BUNDLE-6.7",
@@ -618,12 +623,12 @@ fn test_sdk_version_check_rejects_others() -> TestResult {
 }
 
 fn test_bundle_schema_version_constant() -> TestResult {
-    if REPLAY_BUNDLE_SCHEMA_VERSION == "vsdk-replay-bundle-v1.0" {
+    if REPLAY_BUNDLE_SCHEMA_VERSION == "vsdk-replay-bundle-v2.0" {
         TestResult::Pass
     } else {
         TestResult::Fail {
             reason: format!(
-                "REPLAY_BUNDLE_SCHEMA_VERSION is '{}', expected 'vsdk-replay-bundle-v1.0'",
+                "REPLAY_BUNDLE_SCHEMA_VERSION is '{}', expected 'vsdk-replay-bundle-v2.0'",
                 REPLAY_BUNDLE_SCHEMA_VERSION
             ),
         }
@@ -711,7 +716,7 @@ fn test_sdk_event_preserves_detail() -> TestResult {
         let event = SdkEvent::new(CAPSULE_SIGNED, detail);
         if event.detail != detail {
             return TestResult::Fail {
-                reason: format!("SdkEvent did not preserve detail exactly"),
+                reason: "SdkEvent did not preserve detail exactly".to_string(),
             };
         }
     }
@@ -1027,9 +1032,20 @@ fn test_capsule_error_coverage() -> TestResult {
     TestResult::Pass
 }
 
+/// `build_reference_capsule` signs with this fixed test key. Capsule
+/// signatures are keyed Ed25519, so the harness re-signs mutated capsules and
+/// verifies under the matching key.
+fn reference_capsule_signing_key() -> SigningKey {
+    SigningKey::from_bytes(&[1_u8; 32])
+}
+
+fn reference_capsule_verifying_key() -> ed25519_dalek::VerifyingKey {
+    reference_capsule_signing_key().verifying_key()
+}
+
 fn test_capsule_signature_constant_time() -> TestResult {
     let capsule = build_reference_capsule();
-    if let Err(err) = verify_signature(&capsule) {
+    if let Err(err) = verify_signature(&reference_capsule_verifying_key(), &capsule) {
         return TestResult::Fail {
             reason: format!("valid capsule signature rejected: {err}"),
         };
@@ -1037,7 +1053,7 @@ fn test_capsule_signature_constant_time() -> TestResult {
 
     let mut tampered = capsule;
     tampered.signature.push('0');
-    match verify_signature(&tampered) {
+    match verify_signature(&reference_capsule_verifying_key(), &tampered) {
         Err(CapsuleError::SignatureInvalid(_)) => TestResult::Pass,
         other => TestResult::Fail {
             reason: format!("tampered capsule signature was not rejected correctly: {other:?}"),
@@ -1047,7 +1063,11 @@ fn test_capsule_signature_constant_time() -> TestResult {
 
 fn test_capsule_replay_deterministic() -> TestResult {
     let capsule = build_reference_capsule();
-    let first = match replay(&capsule, "verifier://conformance") {
+    let first = match replay(
+        &reference_capsule_verifying_key(),
+        &capsule,
+        "verifier://conformance",
+    ) {
         Ok(result) => result,
         Err(err) => {
             return TestResult::Fail {
@@ -1055,7 +1075,11 @@ fn test_capsule_replay_deterministic() -> TestResult {
             };
         }
     };
-    let second = match replay(&capsule, "verifier://conformance") {
+    let second = match replay(
+        &reference_capsule_verifying_key(),
+        &capsule,
+        "verifier://conformance",
+    ) {
         Ok(result) => result,
         Err(err) => {
             return TestResult::Fail {
@@ -1079,9 +1103,13 @@ fn test_capsule_metadata_preserved_during_replay() -> TestResult {
         .manifest
         .metadata
         .insert("source".to_string(), "conformance".to_string());
-    sign_capsule(&mut capsule);
+    sign_capsule(&reference_capsule_signing_key(), &mut capsule);
 
-    match replay(&capsule, "verifier://metadata") {
+    match replay(
+        &reference_capsule_verifying_key(),
+        &capsule,
+        "verifier://metadata",
+    ) {
         Ok(result)
             if result.verdict == CapsuleVerdict::Pass
                 && capsule.manifest.metadata.get("source").map(String::as_str)
@@ -1101,8 +1129,12 @@ fn test_capsule_metadata_preserved_during_replay() -> TestResult {
 fn test_capsule_inputs_validate_against_manifest() -> TestResult {
     let mut missing_input = build_reference_capsule();
     missing_input.inputs.remove("artifact_b");
-    sign_capsule(&mut missing_input);
-    match replay(&missing_input, "verifier://inputs") {
+    sign_capsule(&reference_capsule_signing_key(), &mut missing_input);
+    match replay(
+        &reference_capsule_verifying_key(),
+        &missing_input,
+        "verifier://inputs",
+    ) {
         Err(CapsuleError::ManifestIncomplete(message)) if message.contains("input_refs") => {}
         other => {
             return TestResult::Fail {
@@ -1115,8 +1147,12 @@ fn test_capsule_inputs_validate_against_manifest() -> TestResult {
     extra_input
         .inputs
         .insert("artifact_c".to_string(), "content_of_c".to_string());
-    sign_capsule(&mut extra_input);
-    match replay(&extra_input, "verifier://inputs") {
+    sign_capsule(&reference_capsule_signing_key(), &mut extra_input);
+    match replay(
+        &reference_capsule_verifying_key(),
+        &extra_input,
+        "verifier://inputs",
+    ) {
         Err(CapsuleError::ManifestIncomplete(message)) if message.contains("input_refs") => {
             TestResult::Pass
         }
@@ -1152,10 +1188,6 @@ fn test_replay_bundle_required_fields() -> TestResult {
         chunks: vec![],
         metadata: BTreeMap::new(),
         integrity_hash: "hash".to_string(),
-        signature: BundleSignature {
-            algorithm: "algo".to_string(),
-            signature_hex: "sig".to_string(),
-        },
     };
     TestResult::Pass
 }
@@ -1235,25 +1267,44 @@ fn test_bundle_artifact_integrity() -> TestResult {
     }
 }
 
-fn test_bundle_signature_format() -> TestResult {
-    let signature_hex = hash(b"conformance-signature");
-    let signature = BundleSignature {
-        algorithm: REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
-        signature_hex,
-    };
-
-    if signature.algorithm == REPLAY_BUNDLE_HASH_ALGORITHM
-        && signature.signature_hex.len() == 64
-        && signature
-            .signature_hex
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
-        TestResult::Pass
-    } else {
-        TestResult::Fail {
-            reason: "BundleSignature format incorrect".to_string(),
+/// Schema v1.0's `signature` was `SHA256(domain || integrity_hash)`: anyone
+/// could recompute it. v2.0 has no such field, and canonical bytes with it
+/// spliced back in are refused; authenticity is `verify_signed_bundle`.
+fn test_bundle_refuses_unkeyed_signature_field() -> TestResult {
+    let bundle = canonical_replay_bundle();
+    let canonical = match serialize(&bundle) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return TestResult::Fail {
+                reason: format!("canonical bundle failed to serialize: {err}"),
+            };
         }
+    };
+    if let Err(err) = verify(&canonical) {
+        return TestResult::Fail {
+            reason: format!("canonical bundle failed to verify: {err}"),
+        };
+    }
+    let Some((&b'}', body)) = canonical.split_last() else {
+        return TestResult::Fail {
+            reason: "canonical bundle bytes do not end with `}`".to_string(),
+        };
+    };
+    let mut with_signature = body.to_vec();
+    with_signature.extend_from_slice(
+        format!(
+            ",\"signature\":{{\"algorithm\":\"{REPLAY_BUNDLE_HASH_ALGORITHM}\",\"signature_hex\":\"{}\"}}}}",
+            bundle.integrity_hash
+        )
+        .as_bytes(),
+    );
+    match verify(&with_signature) {
+        Err(BundleError::NonCanonicalEncoding) => TestResult::Pass,
+        other => TestResult::Fail {
+            reason: format!(
+                "a bundle carrying an unkeyed `signature` must be refused, got {other:?}"
+            ),
+        },
     }
 }
 
@@ -1539,7 +1590,7 @@ fn test_create_verifier_sdk() -> TestResult {
 fn test_verify_claim_interface() -> TestResult {
     let sdk = create_verifier_sdk("verifier://claim");
     let capsule = build_reference_capsule();
-    match sdk.verify_claim(&capsule) {
+    match sdk.verify_claim(&reference_capsule_verifying_key(), &capsule) {
         Ok(result)
             if result.operation == VerificationOperation::Claim
                 && result.verdict == VerificationVerdict::Pass
@@ -1703,7 +1754,7 @@ fn test_session_id_validation_interface() -> TestResult {
 fn test_transparency_log_interface() -> TestResult {
     let sdk = create_verifier_sdk("verifier://log");
     let capsule = build_reference_capsule();
-    let result = match sdk.verify_claim(&capsule) {
+    let result = match sdk.verify_claim(&reference_capsule_verifying_key(), &capsule) {
         Ok(result) => result,
         Err(err) => {
             return TestResult::Fail {
@@ -1735,7 +1786,7 @@ fn test_transparency_log_interface() -> TestResult {
 fn test_verification_result_confidence() -> TestResult {
     let sdk = create_verifier_sdk("verifier://confidence");
     let capsule = build_reference_capsule();
-    match sdk.verify_claim(&capsule) {
+    match sdk.verify_claim(&reference_capsule_verifying_key(), &capsule) {
         Ok(result) if result.confidence_score == 1.0 => TestResult::Pass,
         Ok(result) => TestResult::Fail {
             reason: format!(
@@ -1752,7 +1803,7 @@ fn test_verification_result_confidence() -> TestResult {
 fn test_result_signature_verification() -> TestResult {
     let sdk = create_verifier_sdk("verifier://signature");
     let capsule = build_reference_capsule();
-    let mut result = match sdk.verify_claim(&capsule) {
+    let mut result = match sdk.verify_claim(&reference_capsule_verifying_key(), &capsule) {
         Ok(result) => result,
         Err(err) => {
             return TestResult::Fail {
@@ -1779,7 +1830,7 @@ fn test_interface_version_validation() -> TestResult {
     let mut sdk = create_verifier_sdk("verifier://version");
     sdk.sdk_version = "vsdk-v2.0".to_string();
     let capsule = build_reference_capsule();
-    match sdk.verify_claim(&capsule) {
+    match sdk.verify_claim(&reference_capsule_verifying_key(), &capsule) {
         Err(VerifierSdkError::UnsupportedSdk(message))
             if message.contains(ERR_SDK_VERSION_UNSUPPORTED) =>
         {
@@ -1913,10 +1964,6 @@ fn canonical_replay_bundle_with_verifier(verifier_identity: &str) -> ReplayBundl
         chunks,
         metadata,
         integrity_hash: String::new(),
-        signature: BundleSignature {
-            algorithm: REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
-            signature_hex: String::new(),
-        },
     };
     seal(&mut bundle).expect("fixture should seal");
     bundle

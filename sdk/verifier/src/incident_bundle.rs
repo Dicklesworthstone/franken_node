@@ -235,6 +235,42 @@ pub fn incident_bundle_signature_payload(integrity_hash: &str) -> Vec<u8> {
 ///
 /// Returns the first failed check as an [`IncidentBundleError`]; nothing is
 /// accepted partially.
+///
+/// # Example
+///
+/// The README's "Verifier SDK" example, run against a bundle the real CLI
+/// wrote (`tests/fixtures/cli_incident_bundle/INC-SDK-FIXTURE-1.fnbundle`,
+/// signed with the RFC 8032 section 7.1 TEST 1 key):
+///
+/// ```
+/// use ed25519_dalek::VerifyingKey;
+/// use frankenengine_verifier_sdk::incident_bundle::verify_incident_bundle;
+///
+/// /// Verify a `franken-node incident bundle` output against a signer key the
+/// /// auditor obtained independently (never the key embedded in the bundle).
+/// fn audit(
+///     bundle_path: &std::path::Path,
+///     trusted_signer: &VerifyingKey,
+/// ) -> Result<(), Box<dyn std::error::Error>> {
+///     let bytes = std::fs::read(bundle_path)?;
+///     let verified = verify_incident_bundle(&bytes, trusted_signer)?;
+///     println!(
+///         "verified incident {} ({} events, integrity {})",
+///         verified.incident_id, verified.event_count, verified.integrity_hash
+///     );
+///     Ok(())
+/// }
+///
+/// let mut anchor = [0_u8; 32];
+/// hex::decode_to_slice(
+///     "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+///     &mut anchor,
+/// )?;
+/// let bundle = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+///     .join("tests/fixtures/cli_incident_bundle/INC-SDK-FIXTURE-1.fnbundle");
+/// audit(&bundle, &VerifyingKey::from_bytes(&anchor)?)?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn verify_incident_bundle(
     bytes: &[u8],
     trusted_signer: &VerifyingKey,

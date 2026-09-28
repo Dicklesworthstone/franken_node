@@ -2,22 +2,44 @@ use std::collections::BTreeMap;
 
 use frankenengine_verifier_sdk::SDK_VERSION;
 use frankenengine_verifier_sdk::bundle::{
-    BundleArtifact, BundleChunk, BundleError, BundleHeader, BundleSignature,
-    REPLAY_BUNDLE_HASH_ALGORITHM, REPLAY_BUNDLE_SCHEMA_VERSION, ReplayBundle, TimelineEvent, hash,
-    seal, serialize, verify,
+    BundleArtifact, BundleChunk, BundleError, BundleHeader, REPLAY_BUNDLE_HASH_ALGORITHM,
+    REPLAY_BUNDLE_SCHEMA_VERSION, ReplayBundle, TimelineEvent, hash, seal, serialize, verify,
 };
 use serde_json::json;
 
 #[test]
-fn verify_returns_typed_error_for_tampered_signature_bytes() {
+fn verify_refuses_bundle_bytes_that_carry_the_removed_unkeyed_signature() {
+    // v1.0 bundles carried `signature: {algorithm, signature_hex}`, an unkeyed
+    // SHA-256 of `integrity_hash` that anyone could recompute
+    // (bd-reality-20260923-26n9r.7). v2.0 has no such field: canonical bytes
+    // with it spliced back in are not a v2.0 bundle.
+    let bundle = canonical_replay_bundle();
+    let canonical = serialize(&bundle).expect("fixture should serialize");
+    verify(&canonical).expect("the canonical fixture verifies");
+    assert_eq!(canonical.last(), Some(&b'}'));
+    let mut bytes = canonical[..canonical.len() - 1].to_vec();
+    bytes.extend_from_slice(
+        format!(
+            ",\"signature\":{{\"algorithm\":\"sha256\",\"signature_hex\":\"{}\"}}}}",
+            bundle.integrity_hash
+        )
+        .as_bytes(),
+    );
+
+    let err = verify(&bytes).expect_err("a bundle carrying the removed field must be refused");
+    assert!(matches!(err, BundleError::NonCanonicalEncoding), "{err:?}");
+}
+
+#[test]
+fn verify_returns_typed_error_for_tampered_integrity_hash_bytes() {
     let bundle = canonical_replay_bundle();
     let mut bytes = serialize(&bundle).expect("fixture should serialize");
-    let offset = find_subsequence(&bytes, bundle.signature.signature_hex.as_bytes())
-        .expect("serialized fixture should contain signature bytes");
+    let offset = find_subsequence(&bytes, bundle.integrity_hash.as_bytes())
+        .expect("serialized fixture should contain the integrity hash");
     bytes[offset] = if bytes[offset] == b'a' { b'b' } else { b'a' };
 
-    let err = verify(&bytes).expect_err("tampered signature must be rejected");
-    assert!(matches!(err, BundleError::SignatureMismatch { .. }));
+    let err = verify(&bytes).expect_err("a tampered integrity hash must be rejected");
+    assert!(matches!(err, BundleError::IntegrityMismatch { .. }));
 }
 
 #[test]
@@ -177,10 +199,6 @@ fn canonical_replay_bundle() -> ReplayBundle {
         chunks,
         metadata,
         integrity_hash: String::new(),
-        signature: BundleSignature {
-            algorithm: REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
-            signature_hex: String::new(),
-        },
     };
     seal(&mut bundle).expect("fixture should seal");
     bundle

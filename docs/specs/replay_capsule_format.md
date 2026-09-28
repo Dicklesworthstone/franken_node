@@ -19,7 +19,7 @@ payload that binds manifest fields, metadata, payload bytes, and ordered
 inputs.
 
 The standalone workspace crate `sdk/verifier` is structural-only. It exposes
-deterministic schema, replay, and structural signature digest helpers for
+deterministic schema, replay, and integrity digest helpers for
 external tooling, but it is not the replacement-critical canonical verifier and
 does not claim detached cryptographic verification authority.
 

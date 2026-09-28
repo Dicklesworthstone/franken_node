@@ -3,7 +3,8 @@
 //! Coverage matrix:
 //! - MUST: canonical replay-bundle bytes remain byte-for-byte stable
 //! - MUST: the live verifier accepts the canonical frame and rejects non-canonical framing
-//! - MUST: canonical signature tampering fails closed
+//! - MUST: canonical integrity-hash tampering fails closed (schema v2.0 has no
+//!   unkeyed signature to tamper; bd-reality-20260923-26n9r.7)
 
 use std::path::{Path, PathBuf};
 
@@ -48,7 +49,7 @@ enum ExpectedVerdict {
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Mutation {
-    FlipSignatureLastNibble,
+    FlipIntegrityHashLastNibble,
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,8 +68,6 @@ struct BundleFrameVector {
     expected_byte_len: Option<usize>,
     #[serde(default)]
     expected_integrity_hash: Option<String>,
-    #[serde(default)]
-    expected_signature_hex: Option<String>,
 }
 
 fn conformance_vectors() -> Result<BundleFrameVectors, String> {
@@ -106,14 +105,14 @@ fn load_fixture_bundle(relative: &str) -> Result<ReplayBundle, String> {
 
 fn mutate_bundle(bundle: &mut ReplayBundle, mutation: Mutation) -> Result<(), String> {
     match mutation {
-        Mutation::FlipSignatureLastNibble => {
-            let current = bundle.signature.signature_hex.clone();
+        Mutation::FlipIntegrityHashLastNibble => {
+            let current = bundle.integrity_hash.clone();
             let (prefix, last) =
                 current.split_at(current.len().checked_sub(1).ok_or_else(|| {
-                    "signature tamper vector requires non-empty signature_hex".to_string()
+                    "integrity tamper vector requires a non-empty integrity_hash".to_string()
                 })?);
             let flipped = if last == "0" { "1" } else { "0" };
-            bundle.signature.signature_hex = format!("{prefix}{flipped}");
+            bundle.integrity_hash = format!("{prefix}{flipped}");
             Ok(())
         }
     }
@@ -122,7 +121,6 @@ fn mutate_bundle(bundle: &mut ReplayBundle, mutation: Mutation) -> Result<(), St
 fn bundle_error_name(error: &BundleError) -> &'static str {
     match error {
         BundleError::NonCanonicalEncoding => "NonCanonicalEncoding",
-        BundleError::SignatureMismatch { .. } => "SignatureMismatch",
         BundleError::IntegrityMismatch { .. } => "IntegrityMismatch",
         _ => "Other",
     }
@@ -212,14 +210,6 @@ fn sdk_verifier_replay_bundle_frame_vectors_match_live_bundle_contract() -> Test
                             format!("{} must declare expected_integrity_hash", vector.name)
                         })?,
                         "{} integrity hash drifted from the checked-in vector",
-                        vector.name
-                    );
-                    assert_eq!(
-                        verified.signature.signature_hex,
-                        vector.expected_signature_hex.as_deref().ok_or_else(|| {
-                            format!("{} must declare expected_signature_hex", vector.name)
-                        })?,
-                        "{} signature hex drifted from the checked-in vector",
                         vector.name
                     );
 

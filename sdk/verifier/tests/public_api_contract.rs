@@ -27,7 +27,10 @@ const LEGACY_FACADE_RESULT_TIMESTAMP: &str = "2026-04-21T12:00:00.000000Z";
 enum RequirementLevel {
     Must,   // Breaking changes are NOT allowed
     Should, // Breaking changes require major version bump
-    May,    // Breaking changes allowed with documentation
+    // Breaking changes allowed with documentation; the report handles it, no
+    // case uses it today.
+    #[allow(dead_code)]
+    May,
 }
 
 /// Test categories for organization
@@ -112,10 +115,6 @@ fn make_structural_bundle_bytes(verifier_identity: &str) -> Result<Vec<u8>, Stri
         }],
         metadata: BTreeMap::new(),
         integrity_hash: String::new(),
-        signature: bundle::BundleSignature {
-            algorithm: bundle::REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
-            signature_hex: String::new(),
-        },
     };
 
     bundle::seal(&mut replay_bundle).map_err(|err| err.to_string())?;
@@ -1179,7 +1178,7 @@ fn test_verifier_sdk_new_rejects_invalid_identities() -> Result<(), String> {
             }
             other => {
                 return Err(format!(
-                    "Expected InvalidVerifierIdentity for '{}' ({}), got error type mismatch",
+                    "Expected InvalidVerifierIdentity for '{}' ({}), got {other:?}",
                     invalid_input, description
                 ));
             }
@@ -1203,10 +1202,11 @@ fn test_verify_migration_artifact_rejects_structural_bundle() -> Result<(), Stri
             Ok(())
         }
         Ok(result) => Err(format!(
-            "expected structural bundle rejection, got unexpected success"
+            "expected structural bundle rejection, got success with verdict {:?}",
+            result.verdict
         )),
         Err(other) => Err(format!(
-            "expected UnauthenticatedStructuralBundle, got different error type"
+            "expected UnauthenticatedStructuralBundle, got {other:?}"
         )),
     }
 }
@@ -1226,10 +1226,11 @@ fn test_verify_trust_state_rejects_structural_bundle() -> Result<(), String> {
             Ok(())
         }
         Ok(result) => Err(format!(
-            "expected structural bundle rejection, got unexpected success"
+            "expected structural bundle rejection, got success with verdict {:?}",
+            result.verdict
         )),
         Err(other) => Err(format!(
-            "expected UnauthenticatedStructuralBundle, got different error type"
+            "expected UnauthenticatedStructuralBundle, got {other:?}"
         )),
     }
 }
@@ -1243,12 +1244,10 @@ fn test_verify_trust_state_rejects_malformed_trust_anchor() -> Result<(), String
             assert_eq!(actual, "not-a-sha256-digest");
             Ok(())
         }
-        Ok(result) => Err(format!(
-            "expected malformed trust-anchor rejection, got unexpected success"
-        )),
-        Err(other) => Err(format!(
-            "expected MalformedTrustAnchor, got different error type"
-        )),
+        Ok(_) => {
+            Err("expected malformed trust-anchor rejection, got unexpected success".to_string())
+        }
+        Err(other) => Err(format!("expected MalformedTrustAnchor, got {other:?}")),
     }
 }
 
@@ -1272,14 +1271,15 @@ fn test_create_session_rejects_malformed_session_ids() -> Result<(), String> {
                 assert_eq!(actual, session_id);
                 assert_eq!(reason, expected_reason);
             }
-            Ok(session) => {
-                return Err(format!(
+            Ok(_) => {
+                return Err(
                     "expected InvalidSessionId for session validation, got unexpected success"
-                ));
+                        .to_string(),
+                );
             }
             Err(other) => {
                 return Err(format!(
-                    "expected InvalidSessionId for session validation, got different error type"
+                    "expected InvalidSessionId for session validation, got {other:?}"
                 ));
             }
         }
@@ -1366,11 +1366,11 @@ fn test_execute_workflow_rejects_structural_bundle() -> Result<(), String> {
             assert_eq!(verifier_identity, "verifier://alpha");
             Ok(())
         }
-        Ok(result) => Err(format!(
-            "expected structural bundle rejection, got unexpected workflow success"
-        )),
+        Ok(_) => {
+            Err("expected structural bundle rejection, got unexpected workflow success".to_string())
+        }
         Err(other) => Err(format!(
-            "expected UnauthenticatedStructuralBundle, got different error type"
+            "expected UnauthenticatedStructuralBundle, got {other:?}"
         )),
     }
 }
@@ -1391,10 +1391,10 @@ fn test_execute_workflow_rejects_unsupported_sdk_version() -> Result<(), String>
             );
             Ok(())
         }
-        Ok(result) => Err(format!(
-            "expected unsupported sdk rejection, got unexpected workflow success"
-        )),
-        Err(other) => Err(format!("expected UnsupportedSdk, got different error type")),
+        Ok(_) => {
+            Err("expected unsupported sdk rejection, got unexpected workflow success".to_string())
+        }
+        Err(other) => Err(format!("expected UnsupportedSdk, got {other:?}")),
     }
 }
 
@@ -1672,8 +1672,8 @@ fn public_api_conformance_suite() {
         // Structured JSON-line output for CI parsing
         let json_result = json!({
             "test_id": test_case.id,
-            "category": test_case.category.to_string(),
-            "level": test_case.level.to_string(),
+            "category": format!("{:?}", test_case.category),
+            "level": format!("{:?}", test_case.level),
             "description": test_case.description,
             "verdict": verdict
         });

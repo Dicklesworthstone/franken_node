@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use frankenengine_verifier_sdk::SDK_VERSION;
 use frankenengine_verifier_sdk::bundle::{
-    BundleArtifact, BundleChunk, BundleHeader, BundleSignature, REPLAY_BUNDLE_HASH_ALGORITHM,
+    BundleArtifact, BundleChunk, BundleHeader, REPLAY_BUNDLE_HASH_ALGORITHM,
     REPLAY_BUNDLE_SCHEMA_VERSION, ReplayBundle, TimelineEvent, hash, seal, serialize,
 };
 use frankenengine_verifier_sdk::capsule;
@@ -13,13 +13,19 @@ use frankenengine_verifier_sdk::{
 };
 use serde_json::json;
 
+/// `capsule::build_reference_capsule` signs with this fixed test key; claim
+/// verification is keyed, so the facade verifies under the matching key.
+fn reference_capsule_verifying_key() -> ed25519_dalek::VerifyingKey {
+    ed25519_dalek::SigningKey::from_bytes(&[1_u8; 32]).verifying_key()
+}
+
 #[test]
 fn verifier_sdk_facade_verifies_claim_artifact_trust_state_and_session() {
     let sdk = create_verifier_sdk("verifier://facade-test");
 
     let claim = capsule::build_reference_capsule();
     let claim_result = sdk
-        .verify_claim(&claim)
+        .verify_claim(&reference_capsule_verifying_key(), &claim)
         .expect("reference claim capsule should verify");
     assert_eq!(claim_result.verdict, VerificationVerdict::Pass);
     assert!(!claim_result.verifier_signature.is_empty());
@@ -114,10 +120,10 @@ fn verifier_sdk_facade_validates_bundles_workflows_and_transparency_log() {
 
     let claim = capsule::build_reference_capsule();
     let first_result = sdk
-        .verify_claim(&claim)
+        .verify_claim(&reference_capsule_verifying_key(), &claim)
         .expect("claim result should be transparency-loggable");
     let second_result = sdk
-        .verify_claim(&claim)
+        .verify_claim(&reference_capsule_verifying_key(), &claim)
         .expect("repeat claim result should remain transparency-loggable");
     let mut log = Vec::new();
     let first_entry = sdk
@@ -222,10 +228,6 @@ fn canonical_replay_bundle() -> ReplayBundle {
         chunks,
         metadata: BTreeMap::new(),
         integrity_hash: String::new(),
-        signature: BundleSignature {
-            algorithm: REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
-            signature_hex: String::new(),
-        },
     };
     seal(&mut bundle).expect("fixture should seal");
     bundle

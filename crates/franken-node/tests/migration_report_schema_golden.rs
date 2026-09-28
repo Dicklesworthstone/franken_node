@@ -319,10 +319,6 @@ fn make_sdk_migration_equivalence_bundle(capsule: &TestMigrationEquivalenceCapsu
             "migration_equivalence".to_string(),
         )]),
         integrity_hash: String::new(),
-        signature: bundle::BundleSignature {
-            algorithm: bundle::REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
-            signature_hex: String::new(),
-        },
     };
     bundle::seal(&mut replay_bundle).expect("migration equivalence bundle seals");
     bundle::serialize(&replay_bundle).expect("migration equivalence bundle serializes")

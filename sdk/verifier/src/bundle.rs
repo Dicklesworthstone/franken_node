@@ -18,7 +18,13 @@ use subtle::ConstantTimeEq;
 use crate::SDK_VERSION;
 
 /// Stable schema marker for SDK replay bundles.
-pub const REPLAY_BUNDLE_SCHEMA_VERSION: &str = "vsdk-replay-bundle-v1.0";
+///
+/// v2.0 dropped v1.0's `signature` field (bd-reality-20260923-26n9r.7): it
+/// was `SHA256(domain || integrity_hash)`, an unkeyed digest anyone can
+/// recompute, so it proved nothing beyond `integrity_hash`. A sealed bundle
+/// is integrity-checked by `integrity_hash`; it is authenticated only by a
+/// detached Ed25519 signature (`sign_bundle` / `verify_signed_bundle`).
+pub const REPLAY_BUNDLE_SCHEMA_VERSION: &str = "vsdk-replay-bundle-v2.0";
 
 /// Hash algorithm tag accepted by the verifier SDK bundle surface.
 pub const REPLAY_BUNDLE_HASH_ALGORITHM: &str = "sha256";
@@ -52,7 +58,6 @@ pub const FN_VSDK_CAPABILITY_RECEIPT_VERIFIED: &str = "FN-VSDK-CAPABILITY-RECEIP
 pub const FN_VSDK_CAPABILITY_SCHEMA_PASS: &str = "FN-VSDK-CAPABILITY-SCHEMA-PASS";
 
 const HASH_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:canonical-hash:v1:";
-const SIGNATURE_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:structural-signature:v1:";
 const ED25519_BUNDLE_SIGNATURE_DOMAIN: &[u8] =
     b"frankenengine-verifier-sdk:ed25519-bundle-signature:v1:";
 const CAS_HASH_DOMAIN: &[u8] = b"storage_cas_content_hash_v1:";
@@ -85,7 +90,6 @@ pub struct ReplayBundle {
     pub chunks: Vec<BundleChunk>,
     pub metadata: BTreeMap<String, String>,
     pub integrity_hash: String,
-    pub signature: BundleSignature,
 }
 
 /// Versioned replay bundle header checked before payload integrity.
@@ -129,14 +133,6 @@ pub struct BundleArtifact {
     pub media_type: String,
     pub digest: String,
     pub bytes_hex: String,
-}
-
-/// Structural signature over a sealed bundle's integrity hash.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "fuzz", derive(arbitrary::Arbitrary))]
-pub struct BundleSignature {
-    pub algorithm: String,
-    pub signature_hex: String,
 }
 
 /// Class of host effect described by an embedded proof-carrying receipt.
@@ -549,10 +545,6 @@ pub enum BundleError {
         expected: String,
         actual: String,
     },
-    SignatureMismatch {
-        expected: String,
-        actual: String,
-    },
     InvalidVerifierIdentity {
         actual: String,
     },
@@ -748,13 +740,6 @@ impl fmt::Display for BundleError {
             } => write!(
                 formatter,
                 "replay bundle integrity mismatch (expected and actual digests redacted)"
-            ),
-            Self::SignatureMismatch {
-                expected: _,
-                actual: _,
-            } => write!(
-                formatter,
-                "replay bundle signature mismatch (expected and actual signatures redacted)"
             ),
             Self::InvalidVerifierIdentity { actual: _ } => write!(
                 formatter,
@@ -989,10 +974,6 @@ pub fn integrity_hash(bundle: &ReplayBundle) -> BundleResult<String> {
 /// ```
 pub fn seal(bundle: &mut ReplayBundle) -> BundleResult<()> {
     bundle.integrity_hash = integrity_hash(bundle)?;
-    bundle.signature = BundleSignature {
-        algorithm: REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
-        signature_hex: compute_signature_hex(&bundle.integrity_hash),
-    };
     Ok(())
 }
 
@@ -1104,7 +1085,6 @@ pub fn verify(bytes: &[u8]) -> BundleResult<ReplayBundle> {
             actual,
         });
     }
-    validate_signature(&bundle)?;
     Ok(bundle)
 }
 
@@ -2272,7 +2252,6 @@ fn validate_structure(bundle: &ReplayBundle) -> Result<(), BundleError> {
         });
     }
     validate_hash_algorithm(&bundle.header.hash_algorithm)?;
-    validate_hash_algorithm(&bundle.signature.algorithm)?;
     validate_canonical_text("bundle_id", &bundle.bundle_id)?;
     validate_canonical_text("incident_id", &bundle.incident_id)?;
     validate_nonempty("created_at", &bundle.created_at)?;
@@ -2281,7 +2260,6 @@ fn validate_structure(bundle: &ReplayBundle) -> Result<(), BundleError> {
     validate_nonempty("verifier_identity", &bundle.verifier_identity)?;
     validate_verifier_identity(&bundle.verifier_identity)?;
     validate_nonempty("integrity_hash", &bundle.integrity_hash)?;
-    validate_nonempty("signature.signature_hex", &bundle.signature.signature_hex)?;
     if bundle.timeline.is_empty() {
         return Err(BundleError::EmptyTimeline);
     }
@@ -2484,17 +2462,6 @@ fn payload_length_bytes(artifacts: &BTreeMap<String, BundleArtifact>) -> Result<
     Ok(total)
 }
 
-fn validate_signature(bundle: &ReplayBundle) -> Result<(), BundleError> {
-    let expected = compute_signature_hex(&bundle.integrity_hash);
-    if !constant_time_eq(&bundle.signature.signature_hex, &expected) {
-        return Err(BundleError::SignatureMismatch {
-            expected,
-            actual: bundle.signature.signature_hex.clone(),
-        });
-    }
-    Ok(())
-}
-
 fn validate_nonempty(field: &'static str, value: &str) -> Result<(), BundleError> {
     if value.trim().is_empty() {
         Err(BundleError::MissingField { field })
@@ -2563,13 +2530,6 @@ fn parse_rfc3339_timestamp(
         field,
         actual: value.to_string(),
     })
-}
-
-fn compute_signature_hex(integrity_hash: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(SIGNATURE_DOMAIN);
-    hasher.update(integrity_hash.as_bytes());
-    hex::encode(hasher.finalize())
 }
 
 fn ed25519_bundle_signature_payload(bundle: &ReplayBundle) -> Vec<u8> {
@@ -2828,10 +2788,6 @@ mod tests {
             }],
             metadata: BTreeMap::new(),
             integrity_hash: String::new(),
-            signature: BundleSignature {
-                algorithm: REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
-                signature_hex: String::new(),
-            },
         };
         seal(&mut bundle).expect("test bundle should seal");
         bundle
@@ -3175,10 +3131,6 @@ mod tests {
             expected: "expected-digest".to_string(),
             actual: "actual-digest".to_string(),
         };
-        let signature_error = BundleError::SignatureMismatch {
-            expected: "expected-signature".to_string(),
-            actual: "actual-signature".to_string(),
-        };
 
         let verifier_display = verifier_error.to_string();
         assert!(!verifier_display.contains("verifier://evil"));
@@ -3196,11 +3148,6 @@ mod tests {
         assert!(digest_display.contains("redacted"));
         assert!(!digest_display.contains("expected-digest"));
         assert!(!digest_display.contains("actual-digest"));
-
-        let signature_display = signature_error.to_string();
-        assert!(signature_display.contains("redacted"));
-        assert!(!signature_display.contains("expected-signature"));
-        assert!(!signature_display.contains("actual-signature"));
     }
 
     #[test]

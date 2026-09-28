@@ -99,6 +99,57 @@ fn resealed_tamper_without_key_fails_signature() {
 }
 
 #[test]
+fn stripped_or_null_signature_is_rejected() {
+    // Stripping the signature (or leaving the product's unsigned `null`) must
+    // not downgrade the bundle to "integrity only".
+    let mut stripped = fixture_value();
+    stripped.as_object_mut().unwrap().remove("signature");
+    assert_eq!(
+        verify_incident_bundle(&serde_json::to_vec(&stripped).unwrap(), &anchor()),
+        Err(IncidentBundleError::MissingField { field: "signature" })
+    );
+    let mut unsigned = fixture_value();
+    unsigned["signature"] = Value::Null;
+    assert_eq!(
+        verify_incident_bundle(&serde_json::to_vec(&unsigned).unwrap(), &anchor()),
+        Err(IncidentBundleError::WrongType { field: "signature" })
+    );
+}
+
+#[test]
+fn swapped_signer_is_rejected_under_the_verifiers_anchor() {
+    use ed25519_dalek::Signer;
+    // An attacker re-signs the untouched payload with their own key and
+    // embeds their public key: the signature is valid, but not under the
+    // verifier's anchor.
+    let attacker = ed25519_dalek::SigningKey::from_bytes(&[42_u8; 32]);
+    let integrity = fixture_value()["integrity_hash"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let payload = incident_bundle_signature_payload(&integrity);
+    let attacker_signature = hex::encode(attacker.sign(&payload).to_bytes());
+
+    let mut swapped = fixture_value();
+    swapped["signature"]["public_key_hex"] =
+        Value::String(hex::encode(attacker.verifying_key().as_bytes()));
+    swapped["signature"]["signature_hex"] = Value::String(attacker_signature.clone());
+    assert_eq!(
+        verify_incident_bundle(&serde_json::to_vec(&swapped).unwrap(), &anchor()),
+        Err(IncidentBundleError::SignerNotTrusted)
+    );
+
+    // Keeping the trusted public key but substituting the attacker's
+    // signature bytes fails the Ed25519 check itself.
+    let mut forged = fixture_value();
+    forged["signature"]["signature_hex"] = Value::String(attacker_signature);
+    assert_eq!(
+        verify_incident_bundle(&serde_json::to_vec(&forged).unwrap(), &anchor()),
+        Err(IncidentBundleError::SignatureInvalid)
+    );
+}
+
+#[test]
 fn decision_sequence_rederivation_is_load_bearing() {
     let mut value = fixture_value();
     value["manifest"]["decision_sequence_hash"] = Value::String("0".repeat(64));

@@ -4,6 +4,11 @@
 > **📊 Coverage**: 100% of testable requirements (56/56 tests implemented)  
 > **🛡️ Conformance Level**: FULL_CONFORMANCE expected (pending compilation)  
 > **📅 Delivered**: 2026-04-20
+>
+> **Measured 2026-09-28**: the harness (`test-support`-gated, not run by CI)
+> did not compile after the keyed-capsule API change; once repaired it runs 58
+> cases, **54 pass, 4 fail** (VSDK-CAPSULE-5.7, VSDK-INTERFACE-7.3/7.4/7.5,
+> tracked in `bd-wwfh4`). See `tests/COVERAGE.md`.
 
 ## Executive Summary
 
@@ -117,7 +122,7 @@ The conformance tests validate against the frozen specification defined in:
 - Invariants: `INV_CAPSULE_STABLE_SCHEMA`, etc.
 
 **Bundle Format** (`src/bundle.rs`)
-- `REPLAY_BUNDLE_SCHEMA_VERSION: &str = "vsdk-replay-bundle-v1.0"`
+- `REPLAY_BUNDLE_SCHEMA_VERSION: &str = "vsdk-replay-bundle-v2.0"` (v2.0 removed v1.0's unkeyed `signature` field; authenticity is the detached Ed25519 signature)
 - `ReplayBundle` structure with all required fields
 - `BundleHeader`, `TimelineEvent`, `BundleChunk` specifications
 - Ed25519 signature validation and domain separation
