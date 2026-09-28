@@ -7038,6 +7038,9 @@ impl EngineDispatcher {
                 throughput_max_registers: 256,    // Conservative register limit
                 max_call_depth: 32,               // Shallow call stack for safety
                 max_prototype_chain_depth: 8,     // Limited prototype depth
+                // Heap/console limit overrides (franken_engine bd-9vouw.58)
+                // keep each lane's engine default.
+                ..ExecutionConfig::default()
             },
             Profile::Balanced => ExecutionConfig {
                 deterministic_budget: 1_000_000_000,
@@ -7051,6 +7054,9 @@ impl EngineDispatcher {
                 throughput_max_registers: 16384,   // High register limit
                 max_call_depth: 128,               // Deep call stacks allowed
                 max_prototype_chain_depth: 64,     // Extended prototype chains
+                // Heap/console limit overrides (franken_engine bd-9vouw.58)
+                // keep each lane's engine default.
+                ..ExecutionConfig::default()
             },
         };
         // An operator-set `runtime.max_instructions` replaces the profile's
