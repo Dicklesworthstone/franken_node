@@ -3925,6 +3925,21 @@ fn engine_containment_decision(
     }
 }
 
+/// Whether a host I/O error is a TLS certificate refusal: the trust anchors
+/// rejected the peer. The engine's pinned-network path reports it as an
+/// ordinary, guest-catchable `HostIoError::Io` carrying rustls's message, but
+/// in the signed ledger it is a fail-closed trust decision, not a host failure
+/// (bd-3894s, bd-bwn5a).
+#[cfg(feature = "engine")]
+fn is_tls_trust_refusal(error: &HostIoError) -> bool {
+    matches!(
+        error,
+        HostIoError::Io { detail }
+            if detail.contains("invalid peer certificate")
+                || detail.contains("peer sent no certificates")
+    )
+}
+
 /// Decode the output a failed native session reported, under the same size
 /// bound a completed session's output is held to.
 #[cfg(feature = "engine")]
@@ -8060,6 +8075,42 @@ impl EngineDispatcher {
                                 lineage,
                             )
                         }
+                        // The admission and policy let the spawn through and the
+                        // host could not complete it (an I/O error, a timeout
+                        // kill, an unimplemented operation, a stale handle). That
+                        // is a failed effect, not a policy decision (bd-bwn5a),
+                        // exactly as for filesystem and network effects.
+                        Err(
+                            error @ (ProcessSpawnError::Io { .. }
+                            | ProcessSpawnError::TimedOut { .. }
+                            | ProcessSpawnError::NotImplemented { .. }
+                            | ProcessSpawnError::UnknownHandle { .. }
+                            | ProcessSpawnError::InvalidState { .. }),
+                        ) => {
+                            failed_count = failed_count.saturating_add(1);
+                            let lineage = EffectLineageFields {
+                                input_lineage_hash: EFFECT_RECEIPT_EMPTY_LINEAGE_HASH.to_string(),
+                                output_lineage_hash: None,
+                                label_set_commitment: if carries_secret {
+                                    secret_file_label_set_commitment()
+                                } else {
+                                    EFFECT_RECEIPT_EMPTY_LABEL_SET_COMMITMENT.to_string()
+                                },
+                                declassification_ref: None,
+                                flow_policy_verdict: FlowPolicyVerdict::LabelClean,
+                            };
+                            EffectReceipt::failed_with_lineage(
+                                seq,
+                                trace_id,
+                                EffectKind::Spawn,
+                                capability_ref,
+                                error.to_string(),
+                                content_hash(&request_bytes),
+                                args_hash,
+                                recorded_at_millis,
+                                lineage,
+                            )
+                        }
                         Err(error) => {
                             denied_count = denied_count.saturating_add(1);
                             let lineage = if carries_secret
@@ -8272,12 +8323,14 @@ impl EngineDispatcher {
                 // sign a policy decision no gate made, and would feed incident
                 // capture and the sentinel a refusal that never happened. Like an
                 // allowed effect, an attempt that carried the secret keeps its
-                // commitment: an attempt at a sink is not a block.
+                // commitment: an attempt at a sink is not a block. A TLS
+                // certificate refusal is the exception: the trust anchors
+                // refused the peer, so it stays a fail-closed denial below.
                 Err(
                     err @ (HostIoError::Fs { .. }
                     | HostIoError::Io { .. }
                     | HostIoError::NotImplemented { .. }),
-                ) => {
+                ) if !is_tls_trust_refusal(&err) => {
                     failed_count = failed_count.saturating_add(1);
                     let lineage = EffectLineageFields {
                         input_lineage_hash: EFFECT_RECEIPT_EMPTY_LINEAGE_HASH.to_string(),
@@ -14119,6 +14172,87 @@ mod tests {
             &missing_admission.entries[0].receipt.policy_outcome,
             PolicyOutcome::Denied { reason }
                 if reason.starts_with("PROCESS_SPAWN_ADMISSION_MISSING")
+        ));
+    }
+
+    /// bd-bwn5a: an admitted spawn the host could not complete (an I/O error,
+    /// a timeout kill) is a failed effect, not a policy denial; a policy
+    /// violation stays a denial.
+    #[test]
+    #[cfg(feature = "engine")]
+    fn process_spawn_host_failure_is_recorded_as_failed_not_denied_bd_bwn5a() {
+        use crate::runtime::effect_receipt::PolicyOutcome;
+        use frankenengine_extension_host::process_spawn::{
+            ProcessLaunch, ProcessSpawnError, ProcessSpawnRequest,
+        };
+
+        let request = ProcessSpawnRequest::Run {
+            launch: ProcessLaunch {
+                executable: "/usr/bin/printf".to_string(),
+                argv: vec!["hello".to_string()],
+                env: std::collections::BTreeMap::new(),
+                cwd: Some("/work".to_string()),
+                shell: false,
+                stdio: Default::default(),
+            },
+            stdin: Vec::new(),
+            timeout_millis: Some(1_000),
+        };
+        let journal = vec![
+            HostEffectJournalEntry::ProcessSpawn {
+                request: request.clone(),
+                outcome: Err(ProcessSpawnError::Io {
+                    operation: "spawn".to_string(),
+                    detail: "No such file or directory (os error 2)".to_string(),
+                }),
+            },
+            HostEffectJournalEntry::ProcessSpawn {
+                request: request.clone(),
+                outcome: Err(ProcessSpawnError::TimedOut {
+                    runtime_millis: 1_000,
+                }),
+            },
+            HostEffectJournalEntry::ProcessSpawn {
+                request,
+                outcome: Err(ProcessSpawnError::PolicyViolation {
+                    code: "executable_denied".to_string(),
+                    detail: "not signed into the policy".to_string(),
+                }),
+            },
+        ];
+        let admission = ChildProcessSpawnAdmission::verified_for_test(
+            u64::MAX,
+            PathBuf::from("/usr/bin/bwrap"),
+        );
+        let ledger = EngineDispatcher::build_host_effect_journal_ledger(
+            "trace-process-failure-ledger",
+            &journal,
+            Some(&admission),
+            None,
+            &host_effect_ledger_authority_for_test(),
+            SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH),
+        )
+        .expect("sign process host-effect ledger");
+
+        assert_eq!(ledger.effect_count, 3);
+        assert_eq!(ledger.allowed_count, 0);
+        assert_eq!(ledger.failed_count, 2);
+        assert_eq!(ledger.denied_count, 1);
+        for entry in &ledger.entries[..2] {
+            assert!(
+                matches!(
+                    &entry.receipt.policy_outcome,
+                    PolicyOutcome::Failed { capability_ref, .. }
+                        if capability_ref.starts_with("process-spawn:")
+                ),
+                "{:?}",
+                entry.receipt.policy_outcome
+            );
+            assert!(entry.receipt.result_hash.is_none());
+        }
+        assert!(matches!(
+            &ledger.entries[2].receipt.policy_outcome,
+            PolicyOutcome::Denied { .. }
         ));
     }
 

@@ -913,8 +913,13 @@ fn host_io_error_is_recorded_as_failed_not_denied_and_captures_no_incident() {
         Some("host-io:fs_read")
     );
     assert!(receipt["result_hash"].is_null());
-    assert!(
-        !dir.path().join(".franken-node/state/incidents").exists(),
+    // `init` creates the incidents directory; what matters is that the run
+    // captured nothing into it.
+    let captured = std::fs::read_dir(dir.path().join(".franken-node/state/incidents"))
+        .map(|entries| entries.filter_map(Result::ok).count())
+        .unwrap_or(0);
+    assert_eq!(
+        captured, 0,
         "an ordinary I/O error must not be captured as a security incident"
     );
 }
