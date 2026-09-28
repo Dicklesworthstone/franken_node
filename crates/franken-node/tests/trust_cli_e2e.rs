@@ -1241,6 +1241,181 @@ fn run_revocation_frontier_is_signed_data_that_gates_strict_runs() {
     assert_eq!(doctor_check_status(path, "strict", "DR-TRUST-021"), "fail");
 }
 
+/// Denial reasons committed to a run's signed host-effect ledger.
+fn ledger_denial_reasons(payload: &Value) -> Vec<String> {
+    payload["dispatch"]["host_effect_ledger"]["entries"]
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|entry| entry["receipt"]["policy_outcome"]["outcome"] == "denied")
+                .filter_map(|entry| entry["receipt"]["policy_outcome"]["reason"].as_str())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The engine run path records an SSRF-policy refusal only in the signed
+/// host-effect ledger (it emits no telemetry events), and the auto-quarantine
+/// trigger used to read telemetry alone: a balanced run whose guest hit the
+/// cloud-metadata endpoint left `ssrf_violations` empty and quarantined
+/// nothing despite `quarantine_on_high_risk = true`. The workspace keeps its
+/// registry in the durable store only, the layout bd-reality-20260923-26n9r.1
+/// found auto-quarantine silently skipping.
+#[test]
+fn run_ssrf_policy_denial_auto_quarantines_trusted_dependencies_from_durable_store() {
+    use frankenengine_node::supply_chain::trust_card_registry_store::{
+        durable_store_path, registry_snapshot_path,
+    };
+
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let path = workspace.path();
+    log_pipeline_step(
+        1,
+        "bootstrap",
+        "balanced workspace with react trusted in the durable registry",
+    );
+    for (args, context) in [
+        (
+            &["init", "--profile", "balanced", "--out-dir", "."][..],
+            "init",
+        ),
+        (&["trust", "sync", "--force"][..], "trust sync --force"),
+    ] {
+        let output = run_cli_in_workspace(path, args);
+        assert!(
+            output.status.success(),
+            "{context} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    write_pipeline_package_manifest(path, &[("react", "^19.2.0")], &[], &[]);
+    write_pipeline_lockfile(path);
+    let scan = run_cli_in_workspace(path, &["trust", "scan", ".", "--json"]);
+    assert!(
+        scan.status.success(),
+        "trust scan failed: {}",
+        String::from_utf8_lossy(&scan.stderr)
+    );
+    let registry = registry_snapshot_path(path);
+    assert!(
+        durable_store_path(&registry).is_file() && !registry.is_file(),
+        "precondition: the registry lives in the durable store only ({})",
+        registry.display()
+    );
+    let react_status = |payload: &Value| -> Option<String> {
+        payload["preflight"]["verdict"]["results"]
+            .as_array()?
+            .iter()
+            .find(|result| result["extension_id"] == "npm:react")
+            .and_then(|result| result["status"].as_str())
+            .map(str::to_string)
+    };
+
+    log_pipeline_step(
+        2,
+        "operational_refusal",
+        "a DNS failure is a gate refusal, not an SSRF violation, and quarantines nothing",
+    );
+    fs::write(
+        path.join("index.js"),
+        "const http = require(\"http\");\n\
+         const req = http.get(\"http://franken-node-e2e.invalid/\", (res) => {\n\
+         console.log(\"unexpected\", res.statusCode);\n\
+         });\n\
+         req.on(\"error\", () => { console.log(\"egress failed as expected\"); });\n",
+    )
+    .expect("write dns-failure guest");
+    let run = run_cli_in_workspace(path, &["run", "--policy", "balanced", "--json", "."]);
+    let payload = parse_json_stdout(&run, "balanced run with an unresolvable host");
+    assert_eq!(
+        react_status(&payload).as_deref(),
+        Some("trusted"),
+        "{payload}"
+    );
+    let reasons = ledger_denial_reasons(&payload);
+    assert!(
+        !reasons.is_empty()
+            && reasons
+                .iter()
+                .all(|reason| !reason.contains("ssrf: egress to")),
+        "expected an operational (non-policy) refusal in the ledger, got {reasons:?}"
+    );
+    assert_eq!(payload["receipt"]["ssrf_violations"], serde_json::json!([]));
+    assert_eq!(
+        payload["receipt"]["auto_quarantined_extensions"],
+        serde_json::json!([])
+    );
+
+    log_pipeline_step(
+        3,
+        "policy_refusal",
+        "a metadata-endpoint egress is an SSRF violation and quarantines react",
+    );
+    fs::write(
+        path.join("index.js"),
+        "const http = require(\"http\");\n\
+         const req = http.get(\"http://169.254.169.254/latest/meta-data/\", (res) => {\n\
+         console.log(\"unexpected\", res.statusCode);\n\
+         });\n\
+         req.on(\"error\", () => { console.log(\"egress refused as expected\"); });\n",
+    )
+    .expect("write metadata-egress guest");
+    let run = run_cli_in_workspace(path, &["run", "--policy", "balanced", "--json", "."]);
+    assert!(
+        run.status.success(),
+        "a guest that handles the refused egress still completes: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let payload = parse_json_stdout(&run, "balanced run with a metadata-endpoint egress");
+    assert_eq!(
+        react_status(&payload).as_deref(),
+        Some("trusted"),
+        "the DNS-failure run must not have quarantined react: {payload}"
+    );
+    let violations = payload["receipt"]["ssrf_violations"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        violations.iter().any(|violation| violation
+            .as_str()
+            .is_some_and(|text| text.contains("ssrf: egress to 169.254.169.254:80"))),
+        "the ledger's SSRF refusal must reach the receipt: {}",
+        payload["receipt"]
+    );
+    assert_eq!(payload["receipt"]["violation_count"], violations.len());
+    assert_eq!(
+        payload["receipt"]["auto_quarantined_extensions"],
+        serde_json::json!(["npm:react"]),
+        "{}",
+        payload["receipt"]
+    );
+
+    log_pipeline_step(
+        4,
+        "enforced",
+        "the next balanced run is refused before execution",
+    );
+    write_engine_probe_script(path, "index.js", "after-quarantine");
+    let run = run_cli_in_workspace(path, &["run", "--policy", "balanced", "--json", "."]);
+    assert!(
+        !run.status.success(),
+        "balanced must refuse a run whose dependency is quarantined"
+    );
+    let payload = parse_json_stdout(&run, "balanced run after auto-quarantine");
+    assert_eq!(payload["verdict"]["status"], "blocked", "{payload}");
+    assert!(
+        payload["verdict"]["violations"]
+            .as_array()
+            .is_some_and(|violations| violations.iter().any(|violation| {
+                violation["kind"] == "quarantined" && violation["extension_id"] == "npm:react"
+            })),
+        "{payload}"
+    );
+}
+
 #[test]
 fn run_json_fails_closed_when_app_path_missing() {
     let workspace = tempfile::tempdir().expect("tempdir");

@@ -156,7 +156,7 @@ use frankenengine_node::tools::replay_bundle::{fixture_incident_events, generate
 pub use frankenengine_node::{capacity_defaults, connector, control_plane, supply_chain};
 use frankenengine_node::{
     config::{self, CliOverrides, Profile},
-    ops, runtime,
+    migration, ops, runtime,
     security::{
         decision_receipt::{
             DECISION_RECEIPT_CRYPTO_SUITE, DECISION_RECEIPT_SIGNATURE_VERSION, Decision, Receipt,
@@ -215,8 +215,6 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
-
-mod migration;
 
 const PROFILE_EXAMPLES_TEMPLATE: &str =
     include_str!("../../../config/franken_node.profile_examples.toml");
@@ -8313,11 +8311,31 @@ fn value_contains_ssrf_signal(value: &serde_json::Value) -> bool {
     }
 }
 
-fn extract_ssrf_violations(
-    report: Option<&ops::telemetry_bridge::TelemetryRuntimeReport>,
-) -> Vec<String> {
-    let mut violations = report
+/// SSRF-policy refusals committed to the run's signed host-effect ledger. The
+/// native engine path records network effects there and emits no telemetry
+/// events, so reading telemetry alone left the auto-quarantine trigger dead
+/// for every engine run. Operational gate refusals (DNS failure, deadline,
+/// missing TLS pinning) are not violations and are not counted.
+fn extract_ledger_ssrf_violations(
+    ledger: Option<&ops::engine_dispatcher::HostEffectLedger>,
+) -> impl Iterator<Item = String> + '_ {
+    ledger
         .into_iter()
+        .flat_map(|ledger| ledger.entries.iter())
+        .filter_map(|entry| match &entry.receipt.policy_outcome {
+            runtime::effect_receipt::PolicyOutcome::Denied { reason }
+                if reason.contains(ops::ssrf_gated_host_io::SSRF_EGRESS_POLICY_BLOCK_MARKER) =>
+            {
+                Some(reason.clone())
+            }
+            _ => None,
+        })
+}
+
+fn extract_ssrf_violations(dispatch: &ops::engine_dispatcher::RunDispatchReport) -> Vec<String> {
+    let mut violations = dispatch
+        .telemetry
+        .iter()
         .flat_map(|report| report.telemetry_events.iter())
         .filter_map(|event| {
             let payload = &event.payload;
@@ -8365,6 +8383,9 @@ fn extract_ssrf_violations(
                     ),
             )
         })
+        .chain(extract_ledger_ssrf_violations(
+            dispatch.host_effect_ledger.as_ref(),
+        ))
         .collect::<Vec<_>>();
     violations.sort();
     violations.dedup();
@@ -31788,7 +31809,7 @@ fn main() -> Result<()> {
                     return Err(err);
                 }
             };
-            let ssrf_violations = extract_ssrf_violations(dispatch.telemetry.as_ref());
+            let ssrf_violations = extract_ssrf_violations(&dispatch);
             let auto_quarantined_extensions = maybe_auto_quarantine_run_dependencies(
                 &project_root,
                 &resolved.config,
@@ -34040,7 +34061,7 @@ mod run_trust_gate_tests {
             "2026-04-09T15:00:05Z",
             Some(sample_ssrf_telemetry_report()),
         );
-        let ssrf_violations = extract_ssrf_violations(dispatch.telemetry.as_ref());
+        let ssrf_violations = extract_ssrf_violations(&dispatch);
 
         let first = build_run_execution_receipt(
             tmp.path(),

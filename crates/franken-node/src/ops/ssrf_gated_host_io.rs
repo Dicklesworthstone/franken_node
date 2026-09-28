@@ -37,6 +37,13 @@ const MAX_ENDPOINT_LEN: usize = 260;
 #[cfg(feature = "engine")]
 const MAX_RESOLVED_ADDRESSES: usize = 64;
 
+/// Leads the denial reason of every effect the SSRF policy itself refused
+/// (a resolved address in a denied CIDR, metadata endpoints, ...), as opposed
+/// to the gate's operational refusals (DNS failure, deadline, missing TLS
+/// pinning). The run path counts ledger denials carrying it as SSRF violations
+/// for automatic dependency quarantine, so the two must stay one string.
+pub const SSRF_EGRESS_POLICY_BLOCK_MARKER: &str = "ssrf: egress to ";
+
 /// Trusted resolver: returns address evidence, never performs the guest effect.
 /// The default adapter checks before and after a synchronous custom resolution
 /// but cannot interrupt an arbitrary implementation. Custom blocking resolvers
@@ -679,7 +686,7 @@ impl<P: HostIoProvider, R: EndpointResolver> SsrfGatedHostIo<P, R> {
                 Ok((addresses, deadline))
             }
             Ok(Action::Deny) | Err(_) => Err(HostIoError::Denied {
-                reason: format!("ssrf: egress to {host}:{port} blocked by policy"),
+                reason: format!("{SSRF_EGRESS_POLICY_BLOCK_MARKER}{host}:{port} blocked by policy"),
             }),
         }
     }
