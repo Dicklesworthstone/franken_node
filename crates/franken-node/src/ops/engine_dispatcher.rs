@@ -14406,7 +14406,9 @@ mod tests {
         .expect("sign fs-meta host-effect ledger");
         assert_eq!(ledger.effect_count, 3);
         assert_eq!(ledger.allowed_count, 2);
-        assert_eq!(ledger.denied_count, 1);
+        // bd-bwn5a: ENOENT is a host failure, not a policy denial.
+        assert_eq!(ledger.denied_count, 0);
+        assert_eq!(ledger.failed_count, 1);
         assert_eq!(ledger.entries[0].receipt.effect_kind.label(), "fs_read");
         assert_eq!(ledger.entries[1].receipt.effect_kind.label(), "fs_write");
         assert_eq!(ledger.entries[2].receipt.effect_kind.label(), "fs_read");
@@ -14422,11 +14424,15 @@ mod tests {
             content_hash(&append_data),
             "write-class FsMeta data must be the input commitment"
         );
-        assert!(matches!(
-            &ledger.entries[2].receipt.policy_outcome,
-            PolicyOutcome::Denied { reason }
-                if reason == "host filesystem error ENOENT: missing target"
-        ));
+        assert!(
+            matches!(
+                &ledger.entries[2].receipt.policy_outcome,
+                PolicyOutcome::Failed { reason, .. }
+                    if reason == "host filesystem error ENOENT: missing target"
+            ),
+            "{:?}",
+            ledger.entries[2].receipt.policy_outcome
+        );
 
         // Every field is length-prefixed: ambiguous plain concatenations must
         // never collide in the signed args commitment.

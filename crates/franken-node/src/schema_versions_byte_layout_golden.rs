@@ -275,12 +275,14 @@ mod frozen_canonical_byte_layout_golden_tests {
         );
 
         // Golden hash baseline - any change indicates schema registry structure modification
-        // (re-blessed for bd-opsnv: +HOST_EFFECT_LEDGER host-effect-ledger-v2.0
-        // signed runtime-evidence registration; earlier: bd-bg2hy
-        // +run_sentinel_report + three prior additions; see the entry-count
-        // golden above)
+        // (re-blessed for bd-bwn5a / 1005a0135: HOST_EFFECT_LEDGER
+        // host-effect-ledger-v2.0 -> v3.0 for the `failed` policy outcome, the
+        // only registry change since the previous blessing; before that
+        // bd-opsnv: +HOST_EFFECT_LEDGER v2.0 signed runtime-evidence
+        // registration; bd-bg2hy +run_sentinel_report + three prior additions;
+        // see the entry-count golden above)
         let expected_hash =
-            "sha256:f91b4c97ad92f813db45bde3c0e1b166e07df2421be81d6d46cd22ddf892c672";
+            "sha256:2fef7e237af48331575ebfe62cfa3be28091dc62047e46f68f390ebe3ae7eedf";
         assert_eq!(
             structure_hash, expected_hash,
             "Schema registry structure hash changed - this indicates schema modification (add/remove/rename).\
