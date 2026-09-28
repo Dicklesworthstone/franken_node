@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use frankenengine_verifier_sdk::SDK_VERSION;
 use frankenengine_verifier_sdk::bundle::{
-    BundleArtifact, BundleChunk, BundleHeader, REPLAY_BUNDLE_HASH_ALGORITHM,
-    REPLAY_BUNDLE_SCHEMA_VERSION, ReplayBundle, TimelineEvent, hash, seal, serialize,
+    BundleArtifact, BundleChunk, BundleError, BundleHeader, REPLAY_BUNDLE_HASH_ALGORITHM,
+    REPLAY_BUNDLE_SCHEMA_VERSION, ReplayBundle, TimelineEvent, hash, seal, serialize, sign_bundle,
 };
 use frankenengine_verifier_sdk::capsule;
 use frankenengine_verifier_sdk::{
@@ -32,26 +32,33 @@ fn verifier_sdk_facade_verifies_claim_artifact_trust_state_and_session() {
 
     let trust_bundle = canonical_replay_bundle();
     let trust_bundle_bytes = serialize(&trust_bundle).expect("bundle should serialize");
-    let migration_error = sdk
+    // No migration-equivalence capsule inside: the re-derivation has nothing
+    // to prove, so the artifact fails rather than passing on structure alone.
+    let migration_result = sdk
         .verify_migration_artifact(&trust_bundle_bytes)
-        .expect_err("structural-only replay bundles must fail closed as migration artifacts");
-    assert!(matches!(
-        migration_error,
-        VerifierSdkError::UnauthenticatedStructuralBundle {
-            ref bundle_id,
-            ref verifier_identity,
-        } if bundle_id == "facade-bundle-001" && verifier_identity == "verifier://facade-test"
-    ));
+        .expect("a well-formed bundle yields a signed verdict");
+    assert_eq!(migration_result.verdict, VerificationVerdict::Fail);
+    assert!(migration_result.checked_assertions.iter().any(|assertion| {
+        assertion.assertion == "migration_equivalence_capsule_present" && !assertion.passed
+    }));
 
-    let trust_error = sdk
+    // Trust state is content-addressed: it passes only when the caller's
+    // anchor binds the bundle's integrity hash.
+    let trust_result = sdk
         .verify_trust_state(&trust_bundle_bytes, &trust_bundle.integrity_hash)
-        .expect_err("trust-state verification must fail closed on structural-only bundles");
+        .expect("an anchor that binds the bundle must verify");
+    assert_eq!(trust_result.verdict, VerificationVerdict::Pass);
+    assert_eq!(
+        trust_result.artifact_binding_hash,
+        trust_bundle.integrity_hash
+    );
+    let other_anchor = hash(b"another trust state");
+    let mismatch = sdk
+        .verify_trust_state(&trust_bundle_bytes, &other_anchor)
+        .expect_err("an anchor that does not bind the bundle must be refused");
     assert!(matches!(
-        trust_error,
-        VerifierSdkError::UnauthenticatedStructuralBundle {
-            ref bundle_id,
-            ref verifier_identity,
-        } if bundle_id == "facade-bundle-001" && verifier_identity == "verifier://facade-test"
+        mismatch,
+        VerifierSdkError::TrustAnchorMismatch { ref expected, .. } if *expected == other_anchor
     ));
 
     let malformed_anchor_error = sdk
@@ -101,21 +108,31 @@ fn verifier_sdk_facade_validates_bundles_workflows_and_transparency_log() {
     tampered_bundle[tamper_index] = b'8';
     assert!(sdk.validate_bundle(&tampered_bundle).is_err());
 
+    let bundle_signing_key = ed25519_dalek::SigningKey::from_bytes(&[7_u8; 32]);
+    let bundle_signature = sign_bundle(&bundle_signing_key, &bundle).to_bytes();
+    let foreign_key = ed25519_dalek::SigningKey::from_bytes(&[8_u8; 32]).verifying_key();
     for workflow in [
         ValidationWorkflow::ReleaseValidation,
         ValidationWorkflow::IncidentValidation,
         ValidationWorkflow::ComplianceAudit,
     ] {
+        let workflow_result = sdk
+            .execute_workflow(
+                workflow,
+                &bundle_bytes,
+                &bundle_signing_key.verifying_key(),
+                &bundle_signature,
+            )
+            .expect("a bundle signed by the trusted key must pass the workflow");
+        assert_eq!(workflow_result.verdict, VerificationVerdict::Pass);
+
         let workflow_error = sdk
-            .execute_workflow(workflow, &bundle_bytes)
-            .expect_err("workflow execution must preserve structural-bundle guardrails");
-        assert!(matches!(
+            .execute_workflow(workflow, &bundle_bytes, &foreign_key, &bundle_signature)
+            .expect_err("a workflow must not pass under a key that did not sign the bundle");
+        assert_eq!(
             workflow_error,
-            VerifierSdkError::UnauthenticatedStructuralBundle {
-                ref bundle_id,
-                ref verifier_identity,
-            } if bundle_id == "facade-bundle-001" && verifier_identity == "verifier://facade-test"
-        ));
+            VerifierSdkError::Bundle(BundleError::Ed25519SignatureInvalid)
+        );
     }
 
     let claim = capsule::build_reference_capsule();

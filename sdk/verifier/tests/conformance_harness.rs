@@ -248,7 +248,7 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         id: "VSDK-CAPSULE-5.7",
         section: "capsule",
         level: RequirementLevel::Must,
-        description: "Capsule signature verification must be constant-time",
+        description: "Capsule signature verification must refuse tampered and malformed Ed25519 signatures",
         test_fn: test_capsule_signature_constant_time,
     },
     ConformanceCase {
@@ -404,21 +404,21 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         id: "VSDK-INTERFACE-7.3",
         section: "interface",
         level: RequirementLevel::Must,
-        description: "verify_migration_artifact must fail closed on structural-only replay bundles",
+        description: "verify_migration_artifact must not pass a replay bundle that carries no migration-equivalence capsule",
         test_fn: test_verify_migration_artifact_interface,
     },
     ConformanceCase {
         id: "VSDK-INTERFACE-7.4",
         section: "interface",
         level: RequirementLevel::Must,
-        description: "verify_trust_state must validate trust-anchor shape before failing closed on structural-only replay bundles",
+        description: "verify_trust_state must validate trust-anchor shape first and pass only a bundle whose integrity hash the anchor binds",
         test_fn: test_verify_trust_state_interface,
     },
     ConformanceCase {
         id: "VSDK-INTERFACE-7.5",
         section: "interface",
         level: RequirementLevel::Must,
-        description: "ValidationWorkflow execution must preserve structural-bundle authentication guardrails",
+        description: "ValidationWorkflow execution must pass only a bundle carrying an Ed25519 signature from the caller's key",
         test_fn: test_workflow_execution_interface,
     },
     ConformanceCase {
@@ -1051,12 +1051,30 @@ fn test_capsule_signature_constant_time() -> TestResult {
         };
     }
 
-    let mut tampered = capsule;
-    tampered.signature.push('0');
+    // Same-length tamper: flip the first hex digit so the signature still
+    // decodes to 64 bytes and the Ed25519 check itself must refuse it.
+    let mut tampered = capsule.clone();
+    let flipped = if tampered.signature.starts_with('0') {
+        "1"
+    } else {
+        "0"
+    };
+    tampered.signature.replace_range(0..1, flipped);
     match verify_signature(&reference_capsule_verifying_key(), &tampered) {
-        Err(CapsuleError::SignatureInvalid(_)) => TestResult::Pass,
+        Err(CapsuleError::Ed25519SignatureInvalid) => {}
+        other => {
+            return TestResult::Fail {
+                reason: format!("tampered capsule signature was not rejected correctly: {other:?}"),
+            };
+        }
+    }
+
+    let mut extended = capsule;
+    extended.signature.push_str("00");
+    match verify_signature(&reference_capsule_verifying_key(), &extended) {
+        Err(CapsuleError::Ed25519SignatureMalformed { length: 65 }) => TestResult::Pass,
         other => TestResult::Fail {
-            reason: format!("tampered capsule signature was not rejected correctly: {other:?}"),
+            reason: format!("over-long capsule signature was not rejected as malformed: {other:?}"),
         },
     }
 }
@@ -1622,15 +1640,18 @@ fn test_verify_migration_artifact_interface() -> TestResult {
         }
     };
     match sdk.verify_migration_artifact(&bytes) {
-        Err(VerifierSdkError::UnauthenticatedStructuralBundle {
-            bundle_id,
-            verifier_identity,
-        }) if bundle_id == bundle.bundle_id && verifier_identity == bundle.verifier_identity => {
+        Ok(result)
+            if result.verdict == VerificationVerdict::Fail
+                && result.checked_assertions.iter().any(|assertion| {
+                    assertion.assertion == "migration_equivalence_capsule_present"
+                        && !assertion.passed
+                }) =>
+        {
             TestResult::Pass
         }
         other => TestResult::Fail {
             reason: format!(
-                "verify_migration_artifact did not fail closed on structural-only bundle: {other:?}"
+                "verify_migration_artifact must not pass a bundle without a migration capsule: {other:?}"
             ),
         },
     }
@@ -1659,17 +1680,28 @@ fn test_verify_trust_state_interface() -> TestResult {
         }
     }
 
+    let other_anchor = hash(b"a different trust state");
+    match sdk.verify_trust_state(&bytes, &other_anchor) {
+        Err(VerifierSdkError::TrustAnchorMismatch { expected, actual })
+            if expected == other_anchor && actual == bundle.integrity_hash => {}
+        other => {
+            return TestResult::Fail {
+                reason: format!(
+                    "verify_trust_state passed a bundle its anchor does not bind: {other:?}"
+                ),
+            };
+        }
+    }
+
     match sdk.verify_trust_state(&bytes, &bundle.integrity_hash) {
-        Err(VerifierSdkError::UnauthenticatedStructuralBundle {
-            bundle_id,
-            verifier_identity,
-        }) if bundle_id == bundle.bundle_id && verifier_identity == bundle.verifier_identity => {
+        Ok(result)
+            if result.verdict == VerificationVerdict::Pass
+                && result.artifact_binding_hash == bundle.integrity_hash =>
+        {
             TestResult::Pass
         }
         other => TestResult::Fail {
-            reason: format!(
-                "verify_trust_state did not fail closed on structural-only bundle: {other:?}"
-            ),
+            reason: format!("verify_trust_state rejected a bundle its anchor binds: {other:?}"),
         },
     }
 }
@@ -1685,17 +1717,35 @@ fn test_workflow_execution_interface() -> TestResult {
             };
         }
     };
-    match sdk.execute_workflow(ValidationWorkflow::ReleaseValidation, &bytes) {
-        Err(VerifierSdkError::UnauthenticatedStructuralBundle {
-            bundle_id,
-            verifier_identity,
-        }) if bundle_id == bundle.bundle_id && verifier_identity == bundle.verifier_identity => {
-            TestResult::Pass
+    let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+    let signature = sign_bundle(&signing_key, &bundle).to_bytes();
+
+    let foreign_key = SigningKey::from_bytes(&[8_u8; 32]).verifying_key();
+    match sdk.execute_workflow(
+        ValidationWorkflow::ReleaseValidation,
+        &bytes,
+        &foreign_key,
+        &signature,
+    ) {
+        Err(VerifierSdkError::Bundle(BundleError::Ed25519SignatureInvalid)) => {}
+        other => {
+            return TestResult::Fail {
+                reason: format!(
+                    "execute_workflow passed a bundle the caller's key did not sign: {other:?}"
+                ),
+            };
         }
+    }
+
+    match sdk.execute_workflow(
+        ValidationWorkflow::ReleaseValidation,
+        &bytes,
+        &signing_key.verifying_key(),
+        &signature,
+    ) {
+        Ok(result) if result.verdict == VerificationVerdict::Pass => TestResult::Pass,
         other => TestResult::Fail {
-            reason: format!(
-                "execute_workflow did not preserve structural-bundle guardrail: {other:?}"
-            ),
+            reason: format!("execute_workflow rejected a correctly signed bundle: {other:?}"),
         },
     }
 }

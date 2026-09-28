@@ -596,10 +596,6 @@ pub enum VerifierSdkError {
     Capsule(capsule::CapsuleError),
     Bundle(bundle::BundleError),
     CounterfactualCapability(counterfactual::CounterfactualCapabilityError),
-    UnauthenticatedStructuralBundle {
-        bundle_id: String,
-        verifier_identity: String,
-    },
     InvalidVerifierIdentity {
         actual: String,
         reason: String,
@@ -689,13 +685,6 @@ impl fmt::Display for VerifierSdkError {
                     "counterfactual capability validation failed: {source}"
                 )
             }
-            Self::UnauthenticatedStructuralBundle {
-                bundle_id,
-                verifier_identity,
-            } => write!(
-                formatter,
-                "replay bundle {bundle_id} for {verifier_identity} is structural-only and cannot satisfy authenticated verifier provenance"
-            ),
             Self::InvalidVerifierIdentity { actual: _, reason } => {
                 write!(formatter, "verifier identity is invalid: {reason}")
             }
@@ -951,6 +940,11 @@ impl VerifierSdk {
 
     /// Verify a migration artifact as canonical replay bundle bytes.
     ///
+    /// Re-derives the migration-equivalence evidence from the capsule the
+    /// bundle carries; a bundle without that capsule yields verdict `Fail`.
+    /// This proves the capsule's claims hold, not who produced the bundle:
+    /// use `verify_signed_migration_artifact` for provenance.
+    ///
     /// # Examples
     ///
     /// ```rust
@@ -983,6 +977,11 @@ impl VerifierSdk {
     }
 
     /// Verify trust-state bundle bytes against an expected trust anchor hash.
+    ///
+    /// The bundle carries no key, so authenticity comes entirely from the
+    /// anchor: the result is only as trustworthy as the channel that delivered
+    /// `anchor_integrity_hash`. Use `verify_signed_trust_state` when the bundle
+    /// arrives with a detached Ed25519 signature instead.
     ///
     /// # Examples
     ///
@@ -1520,28 +1519,44 @@ impl VerifierSdk {
         Ok(entry)
     }
 
-    /// Execute a documented validation workflow against canonical replay bundle bytes.
+    /// Execute a documented validation workflow against canonical replay bundle
+    /// bytes carrying a detached Ed25519 signature (`bundle::sign_bundle`) from
+    /// a key the caller trusts.
+    ///
+    /// A bundle's `integrity_hash` is an unkeyed digest that anyone can
+    /// recompute for a forged bundle, so the workflow passes only once the
+    /// signature verifies under `verifying_key`.
     ///
     /// # Examples
     ///
     /// ```rust
+    /// use ed25519_dalek::SigningKey;
     /// use frankenengine_verifier_sdk::{ValidationWorkflow, VerifierSdk};
     ///
     /// let sdk = VerifierSdk::new("verifier://docs");
+    /// let verifying_key = SigningKey::from_bytes(&[7_u8; 32]).verifying_key();
     /// assert!(
-    ///     sdk.execute_workflow(ValidationWorkflow::ComplianceAudit, b"not-json")
-    ///         .is_err()
+    ///     sdk.execute_workflow(
+    ///         ValidationWorkflow::ComplianceAudit,
+    ///         b"not-json",
+    ///         &verifying_key,
+    ///         &[0_u8; 64],
+    ///     )
+    ///     .is_err()
     /// );
     /// ```
     pub fn execute_workflow(
         &self,
         workflow: ValidationWorkflow,
         bundle: &[u8],
+        verifying_key: &VerifyingKey,
+        signature_bytes: &[u8],
     ) -> VerifierSdkResult<VerificationResult> {
         check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
         self.validate_current_verifier_identity()?;
         let verified = bundle::verify(bundle)?;
         self.verify_bundle_belongs_to_current_verifier(&verified)?;
+        bundle::verify_signed_bundle(verifying_key, &verified, signature_bytes)?;
 
         let workflow_name = match workflow {
             ValidationWorkflow::ReleaseValidation => "release_validation",
@@ -1556,7 +1571,7 @@ impl VerifierSdk {
                 assertion: format!("{}_workflow_executed", workflow_name),
                 passed: true,
                 detail: format!(
-                    "workflow {} cryptographically verified from bundle {}",
+                    "workflow {} verified bundle {}: integrity and Ed25519 signature",
                     workflow_name, verified.bundle_id
                 ),
             }],
@@ -6102,9 +6117,15 @@ mod tests {
         let mut sdk = create_verifier_sdk("verifier://alpha");
         sdk.sdk_version = "vsdk-v0".to_string();
         let bundle = make_replay_bundle_bytes("verifier://alpha");
+        let (verifying_key, signature) = sign_replay_bundle_bytes(&[7_u8; 32], &bundle);
 
         let err = sdk
-            .execute_workflow(ValidationWorkflow::ReleaseValidation, &bundle)
+            .execute_workflow(
+                ValidationWorkflow::ReleaseValidation,
+                &bundle,
+                &verifying_key,
+                &signature,
+            )
             .expect_err("unsupported sdk version must be rejected before workflow bundle checks");
 
         assert_eq!(
@@ -6113,6 +6134,79 @@ mod tests {
                 "{}: requested=vsdk-v0, supported={}",
                 ERR_SDK_VERSION_UNSUPPORTED, SDK_VERSION
             ))
+        );
+    }
+
+    fn sign_replay_bundle_bytes(seed: &[u8; 32], bytes: &[u8]) -> (VerifyingKey, Vec<u8>) {
+        let signing_key = SigningKey::from_bytes(seed);
+        let replay_bundle = bundle::verify(bytes).expect("test replay bundle should verify");
+        let signature = bundle::sign_bundle(&signing_key, &replay_bundle);
+        (signing_key.verifying_key(), signature.to_bytes().to_vec())
+    }
+
+    #[test]
+    fn execute_workflow_passes_only_under_the_bundle_signing_key() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let bundle = make_replay_bundle_bytes("verifier://alpha");
+        let (verifying_key, signature) = sign_replay_bundle_bytes(&[7_u8; 32], &bundle);
+
+        let result = sdk
+            .execute_workflow(
+                ValidationWorkflow::IncidentValidation,
+                &bundle,
+                &verifying_key,
+                &signature,
+            )
+            .expect("a bundle signed by the trusted key must pass");
+        assert_eq!(result.verdict, VerificationVerdict::Pass);
+        assert_eq!(result.operation, VerificationOperation::Workflow);
+        assert!(
+            result.checked_assertions[0]
+                .detail
+                .contains("Ed25519 signature")
+        );
+
+        let foreign_key = SigningKey::from_bytes(&[8_u8; 32]).verifying_key();
+        let err = sdk
+            .execute_workflow(
+                ValidationWorkflow::IncidentValidation,
+                &bundle,
+                &foreign_key,
+                &signature,
+            )
+            .expect_err("a signature from another key must not pass");
+        assert_eq!(
+            err,
+            VerifierSdkError::Bundle(bundle::BundleError::Ed25519SignatureInvalid)
+        );
+    }
+
+    #[test]
+    fn execute_workflow_rejects_a_forged_bundle_with_a_recomputed_integrity_hash() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let bundle = make_replay_bundle_bytes("verifier://alpha");
+        let (verifying_key, signature) = sign_replay_bundle_bytes(&[7_u8; 32], &bundle);
+
+        // The forger edits the bundle and reseals it: the unkeyed integrity
+        // hash is self-consistent again, so only the signature can catch it.
+        let mut forged = bundle::verify(&bundle).expect("test replay bundle should verify");
+        forged.incident_id = "incident-forged".to_string();
+        bundle::seal(&mut forged).expect("forged bundle should reseal");
+        let forged_bytes = bundle::serialize(&forged).expect("forged bundle should serialize");
+        sdk.validate_bundle(&forged_bytes)
+            .expect("the resealed forgery is structurally valid");
+
+        let err = sdk
+            .execute_workflow(
+                ValidationWorkflow::ReleaseValidation,
+                &forged_bytes,
+                &verifying_key,
+                &signature,
+            )
+            .expect_err("a forged bundle must not pass under the original signature");
+        assert_eq!(
+            err,
+            VerifierSdkError::Bundle(bundle::BundleError::Ed25519SignatureInvalid)
         );
     }
 

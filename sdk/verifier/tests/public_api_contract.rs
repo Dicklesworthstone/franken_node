@@ -208,11 +208,20 @@ fn fixture_object_string<'a>(
         .ok_or_else(|| format!("{context}.{key} must be a string"))
 }
 
-fn is_lower_hex_digest(value: &str) -> bool {
-    value.len() == 64
+fn is_lower_hex_of_len(value: &str, len: usize) -> bool {
+    value.len() == len
         && value
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn is_lower_hex_digest(value: &str) -> bool {
+    is_lower_hex_of_len(value, 64)
+}
+
+/// A detached Ed25519 signature: 64 bytes, bare lowercase hex.
+fn is_lower_hex_ed25519_signature(value: &str) -> bool {
+    is_lower_hex_of_len(value, 128)
 }
 
 fn assert_rfc3339_timestamp(value: &str, context: &str) -> Result<(), String> {
@@ -640,8 +649,8 @@ fn test_verification_result_json_shape() -> Result<(), String> {
         "live result artifact_binding_hash must be a bare lowercase 64-hex digest"
     );
     assert!(
-        is_lower_hex_digest(&result.verifier_signature),
-        "live result verifier_signature must be a bare lowercase 64-hex digest"
+        is_lower_hex_ed25519_signature(&result.verifier_signature),
+        "live result verifier_signature must be a bare lowercase 128-hex Ed25519 signature"
     );
 
     Ok(())
@@ -675,8 +684,8 @@ fn test_verification_result_fixture_matches_live_json_contract() -> Result<(), S
         "facade_result artifact_binding_hash must be a bare lowercase 64-hex digest"
     );
     assert!(
-        is_lower_hex_digest(&fixture.verifier_signature),
-        "facade_result verifier_signature must be a bare lowercase 64-hex digest"
+        is_lower_hex_ed25519_signature(&fixture.verifier_signature),
+        "facade_result verifier_signature must be a bare lowercase 128-hex Ed25519 signature"
     );
     assert_rfc3339_timestamp(
         &fixture.execution_timestamp,
@@ -852,10 +861,6 @@ fn test_verifier_sdk_error_display() -> Result<(), String> {
     let unsupported = VerifierSdkError::UnsupportedSdk("test message".to_string());
     let empty_anchor = VerifierSdkError::EmptyTrustAnchor;
     let session_sealed = VerifierSdkError::SessionSealed("session-123".to_string());
-    let structural_bundle = VerifierSdkError::UnauthenticatedStructuralBundle {
-        bundle_id: "bundle-contract-001".to_string(),
-        verifier_identity: "verifier://alpha".to_string(),
-    };
     let signature_mismatch = VerifierSdkError::ResultSignatureMismatch {
         expected: "expected_sig".to_string(),
         actual: "actual_sig".to_string(),
@@ -872,7 +877,6 @@ fn test_verifier_sdk_error_display() -> Result<(), String> {
         format!("{}", session_sealed),
         "verification session session-123 is sealed"
     );
-    assert!(format!("{}", structural_bundle).contains("structural-only"));
     assert!(format!("{}", signature_mismatch).contains("verifier SDK result signature mismatch"));
     assert!(format!("{}", result_origin_mismatch).contains("result origin mismatch"));
     assert_eq!(
@@ -1188,49 +1192,56 @@ fn test_verifier_sdk_new_rejects_invalid_identities() -> Result<(), String> {
     Ok(())
 }
 
-fn test_verify_migration_artifact_rejects_structural_bundle() -> Result<(), String> {
+fn test_verify_migration_artifact_fails_bundle_without_capsule() -> Result<(), String> {
     let sdk = create_verifier_sdk("verifier://alpha");
     let artifact = make_structural_bundle_bytes("verifier://alpha")?;
 
     match sdk.verify_migration_artifact(&artifact) {
-        Err(VerifierSdkError::UnauthenticatedStructuralBundle {
-            bundle_id,
-            verifier_identity,
-        }) => {
-            assert_eq!(bundle_id, "bundle-contract-001");
-            assert_eq!(verifier_identity, "verifier://alpha");
-            Ok(())
+        Ok(result) if result.verdict == VerificationVerdict::Fail => {
+            if result.checked_assertions.iter().any(|assertion| {
+                assertion.assertion == "migration_equivalence_capsule_present" && !assertion.passed
+            }) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "expected a failed migration_equivalence_capsule_present assertion, got {:?}",
+                    result.checked_assertions
+                ))
+            }
         }
         Ok(result) => Err(format!(
-            "expected structural bundle rejection, got success with verdict {:?}",
+            "a bundle without a migration capsule must not pass, got verdict {:?}",
             result.verdict
         )),
-        Err(other) => Err(format!(
-            "expected UnauthenticatedStructuralBundle, got {other:?}"
-        )),
+        Err(other) => Err(format!("expected a signed Fail verdict, got {other:?}")),
     }
 }
 
-fn test_verify_trust_state_rejects_structural_bundle() -> Result<(), String> {
+fn test_verify_trust_state_is_bound_to_its_anchor() -> Result<(), String> {
     let sdk = create_verifier_sdk("verifier://alpha");
     let state = make_structural_bundle_bytes("verifier://alpha")?;
     let verified = bundle::verify(&state).map_err(|err| err.to_string())?;
 
+    let other_anchor = bundle::hash(b"another trust state");
+    match sdk.verify_trust_state(&state, &other_anchor) {
+        Err(VerifierSdkError::TrustAnchorMismatch { expected, actual }) => {
+            assert_eq!(expected, other_anchor);
+            assert_eq!(actual, verified.integrity_hash);
+        }
+        other => {
+            return Err(format!(
+                "expected TrustAnchorMismatch for an anchor that does not bind the bundle, got {other:?}"
+            ));
+        }
+    }
+
     match sdk.verify_trust_state(&state, &verified.integrity_hash) {
-        Err(VerifierSdkError::UnauthenticatedStructuralBundle {
-            bundle_id,
-            verifier_identity,
-        }) => {
-            assert_eq!(bundle_id, "bundle-contract-001");
-            assert_eq!(verifier_identity, "verifier://alpha");
+        Ok(result) if result.verdict == VerificationVerdict::Pass => {
+            assert_eq!(result.artifact_binding_hash, verified.integrity_hash);
             Ok(())
         }
-        Ok(result) => Err(format!(
-            "expected structural bundle rejection, got success with verdict {:?}",
-            result.verdict
-        )),
-        Err(other) => Err(format!(
-            "expected UnauthenticatedStructuralBundle, got {other:?}"
+        other => Err(format!(
+            "expected Pass for the anchor that binds the bundle, got {other:?}"
         )),
     }
 }
@@ -1353,24 +1364,43 @@ fn test_validate_bundle_rejects_foreign_verifier_bundle() -> Result<(), String> 
     }
 }
 
-fn test_execute_workflow_rejects_structural_bundle() -> Result<(), String> {
+/// Detached Ed25519 signature over canonical bundle bytes, and the key that
+/// verifies it.
+fn sign_bundle_bytes(seed: [u8; 32], bytes: &[u8]) -> Result<(VerifyingKey, Vec<u8>), String> {
+    let signing_key = SigningKey::from_bytes(&seed);
+    let verified = bundle::verify(bytes).map_err(|err| err.to_string())?;
+    let signature = bundle::sign_bundle(&signing_key, &verified);
+    Ok((signing_key.verifying_key(), signature.to_bytes().to_vec()))
+}
+
+fn test_execute_workflow_requires_the_bundle_signing_key() -> Result<(), String> {
     let sdk = create_verifier_sdk("verifier://alpha");
     let bundle = make_structural_bundle_bytes("verifier://alpha")?;
+    let (verifying_key, signature) = sign_bundle_bytes([7_u8; 32], &bundle)?;
+    let foreign_key = SigningKey::from_bytes(&[8_u8; 32]).verifying_key();
 
-    match sdk.execute_workflow(ValidationWorkflow::ReleaseValidation, &bundle) {
-        Err(VerifierSdkError::UnauthenticatedStructuralBundle {
-            bundle_id,
-            verifier_identity,
-        }) => {
-            assert_eq!(bundle_id, "bundle-contract-001");
-            assert_eq!(verifier_identity, "verifier://alpha");
-            Ok(())
-        }
+    match sdk.execute_workflow(
+        ValidationWorkflow::ReleaseValidation,
+        &bundle,
+        &foreign_key,
+        &signature,
+    ) {
+        Err(VerifierSdkError::Bundle(bundle::BundleError::Ed25519SignatureInvalid)) => {}
         Ok(_) => {
-            Err("expected structural bundle rejection, got unexpected workflow success".to_string())
+            return Err("a workflow passed under a key that did not sign the bundle".to_string());
         }
-        Err(other) => Err(format!(
-            "expected UnauthenticatedStructuralBundle, got {other:?}"
+        Err(other) => return Err(format!("expected Ed25519SignatureInvalid, got {other:?}")),
+    }
+
+    match sdk.execute_workflow(
+        ValidationWorkflow::ReleaseValidation,
+        &bundle,
+        &verifying_key,
+        &signature,
+    ) {
+        Ok(result) if result.verdict == VerificationVerdict::Pass => Ok(()),
+        other => Err(format!(
+            "expected Pass for a bundle signed by the caller's key, got {other:?}"
         )),
     }
 }
@@ -1379,8 +1409,14 @@ fn test_execute_workflow_rejects_unsupported_sdk_version() -> Result<(), String>
     let mut sdk = create_verifier_sdk("verifier://alpha");
     sdk.sdk_version = "vsdk-v0".to_string();
     let bundle = make_structural_bundle_bytes("verifier://alpha")?;
+    let (verifying_key, signature) = sign_bundle_bytes([7_u8; 32], &bundle)?;
 
-    match sdk.execute_workflow(ValidationWorkflow::ReleaseValidation, &bundle) {
+    match sdk.execute_workflow(
+        ValidationWorkflow::ReleaseValidation,
+        &bundle,
+        &verifying_key,
+        &signature,
+    ) {
         Err(VerifierSdkError::UnsupportedSdk(message)) => {
             assert_eq!(
                 message,
@@ -1552,15 +1588,15 @@ const API_CONTRACT_TESTS: &[ApiContractTest] = &[
         id: "API-FUNC-003",
         category: TestCategory::Functions,
         level: RequirementLevel::Must,
-        description: "VerifierSdk::verify_migration_artifact must reject structural-only same-verifier bundles",
-        test_fn: test_verify_migration_artifact_rejects_structural_bundle,
+        description: "VerifierSdk::verify_migration_artifact must not pass a bundle without a migration-equivalence capsule",
+        test_fn: test_verify_migration_artifact_fails_bundle_without_capsule,
     },
     ApiContractTest {
         id: "API-FUNC-004",
         category: TestCategory::Functions,
         level: RequirementLevel::Must,
-        description: "VerifierSdk::verify_trust_state must reject structural-only same-verifier bundles",
-        test_fn: test_verify_trust_state_rejects_structural_bundle,
+        description: "VerifierSdk::verify_trust_state must pass only a bundle whose integrity hash the anchor binds",
+        test_fn: test_verify_trust_state_is_bound_to_its_anchor,
     },
     ApiContractTest {
         id: "API-FUNC-005",
@@ -1609,8 +1645,8 @@ const API_CONTRACT_TESTS: &[ApiContractTest] = &[
         id: "API-FUNC-011",
         category: TestCategory::Functions,
         level: RequirementLevel::Must,
-        description: "VerifierSdk::execute_workflow must reject structural-only same-verifier bundles",
-        test_fn: test_execute_workflow_rejects_structural_bundle,
+        description: "VerifierSdk::execute_workflow must pass only a bundle signed by the caller's key",
+        test_fn: test_execute_workflow_requires_the_bundle_signing_key,
     },
     ApiContractTest {
         id: "API-FUNC-012",

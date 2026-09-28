@@ -63,7 +63,7 @@
       "error_data": {
         "actual": "not-a-sha256-digest"
       },
-      "expected_display": "trust anchor must be a canonical lowercase 64-nybble sha256 digest: got not-a-sha256-digest"
+      "expected_display": "trust anchor must be a canonical lowercase 64-nybble sha256 digest"
     },
     {
       "error_type": "SessionSealed",
@@ -76,7 +76,7 @@
         "actual": " verifier://alpha ",
         "reason": "identity must not contain leading or trailing whitespace"
       },
-      "expected_display": "verifier identity is invalid: identity must not contain leading or trailing whitespace: got  verifier://alpha "
+      "expected_display": "verifier identity is invalid: identity must not contain leading or trailing whitespace"
     },
     {
       "error_type": "InvalidSessionId",
@@ -84,7 +84,7 @@
         "actual": " session-alpha ",
         "reason": "session id must not contain leading or trailing whitespace"
       },
-      "expected_display": "verification session id is invalid: session id must not contain leading or trailing whitespace: got  session-alpha "
+      "expected_display": "verification session id is invalid: session id must not contain leading or trailing whitespace"
     },
     {
       "error_type": "SessionVerifierMismatch",
@@ -92,7 +92,7 @@
         "expected": "verifier://alpha",
         "actual": "verifier://beta"
       },
-      "expected_display": "verification session verifier mismatch: expected=verifier://alpha, actual=verifier://beta"
+      "expected_display": "verification session verifier mismatch (expected and actual verifier identities redacted)"
     },
     {
       "error_type": "ResultSignatureMismatch",
@@ -100,7 +100,7 @@
         "expected": "expected_sig_hash",
         "actual": "actual_sig_hash"
       },
-      "expected_display": "verifier SDK result signature mismatch: expected=expected_sig_hash, actual=actual_sig_hash"
+      "expected_display": "verifier SDK result signature mismatch (expected and actual signatures redacted)"
     },
     {
       "error_type": "ResultOriginMismatch",

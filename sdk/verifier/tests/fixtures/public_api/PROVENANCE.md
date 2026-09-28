@@ -18,8 +18,9 @@ The fixtures use stable values, but they must stay in the same wire format that
 the live verifier surfaces enforce:
 
 - **Digests**: bare lowercase 64-hex strings with no `sha256:` prefix
-- **Signatures**: bare lowercase 64-hex strings for
-  `verifier_signature` and `step_signature`. Replay bundles (schema
+- **Signatures**: `verifier_signature` is a detached Ed25519 signature, bare
+  lowercase 128-hex; `step_signature` is a bare lowercase 64-hex digest (it is
+  unkeyed). Replay bundles (schema
   `vsdk-replay-bundle-v2.0`) carry no `signature` field: v1.0's was an unkeyed
   SHA-256 of `integrity_hash`; bundle authenticity is a detached Ed25519
   signature (`sign_bundle` / `verify_signed_bundle`)
@@ -46,6 +47,14 @@ The `execution_timestamp` field is intentionally `${runtime_rfc3339}` so tests
 must materialize a fresh RFC 3339 UTC timestamp before round-tripping the
 fixture.
 
+Every other value was captured on 2026-09-28 from a live
+`create_verifier_sdk("verifier://facade-test").verify_claim(..)` over
+`capsule::build_reference_capsule()` (bd-wwfh4). The `verifier_signature` is
+therefore a real Ed25519 signature, but it does not verify against this
+fixture: the signed payload includes the original run's timestamp and the
+SDK instance's origin nonce, which is never serialized. The fixture pins wire
+shape only.
+
 ### `session_step.json`
 
 Frozen `SessionStep` JSON used to assert the live session-step wire format,
@@ -66,7 +75,13 @@ current bundle parser and validator, not just a documentation sample.
 ### `error_matrix.json`
 
 Expected display strings for public bundle and SDK errors. Keep this aligned
-with the live `Display` output of the public error types.
+with the live `Display` output of the public error types. The
+`MalformedTrustAnchor`, `InvalidVerifierIdentity`, `InvalidSessionId`,
+`SessionVerifierMismatch`, and `ResultSignatureMismatch` displays were
+regenerated on 2026-09-28 (bd-wwfh4) to the security-hardened, value-redacted
+forms the live `Display` now emits; the pre-redaction `: got <actual>` /
+`expected=…, actual=…` strings had drifted here because this suite never
+compiled in CI.
 
 ### `api_manifest.json`
 

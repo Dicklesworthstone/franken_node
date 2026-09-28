@@ -5,10 +5,10 @@
 > **🛡️ Conformance Level**: FULL_CONFORMANCE expected (pending compilation)  
 > **📅 Delivered**: 2026-04-20
 >
-> **Measured 2026-09-28**: the harness (`test-support`-gated, not run by CI)
-> did not compile after the keyed-capsule API change; once repaired it runs 58
-> cases, **54 pass, 4 fail** (VSDK-CAPSULE-5.7, VSDK-INTERFACE-7.3/7.4/7.5,
-> tracked in `bd-wwfh4`). See `tests/COVERAGE.md`.
+> **Measured 2026-09-28**: the harness (`test-support`-gated) did not compile
+> after the keyed-capsule API change; once repaired under bd-wwfh4 it runs 58
+> cases, **58 pass, 0 fail**, and the standalone CI job now runs it under
+> `--all-features`. See `tests/COVERAGE.md`.
 
 ## Executive Summary
 

@@ -1,6 +1,6 @@
 # Verifier SDK Conformance Coverage Matrix
 
-> **Status**: **54/58 (93.1%)** for the spec-derived `conformance_harness.rs` matrix, measured 2026-09-28; 4 MUST failures tracked in `bd-wwfh4`  
+> **Status**: **58/58 (100%)** for the spec-derived `conformance_harness.rs` matrix, measured 2026-09-28; 0 failures after bd-wwfh4  
 > **Last Updated**: 2026-09-28  
 > **Test Suite**: `conformance_harness.rs`
 
@@ -9,7 +9,8 @@
 Measured 2026-09-28 (`cargo test -p frankenengine-verifier-sdk --all-features
 --test conformance_harness`; the harness is `test-support`-gated and did not
 compile from the keyed-capsule API change until then, so earlier "100%" figures
-were never measured). Failures are tracked in `bd-wwfh4`.
+were never measured). After bd-wwfh4 the harness compiles under `--all-features`
+and all 58 requirements pass; the standalone CI job now runs `--all-features`.
 
 | Spec Section | Tested | Passing | Score |
 |-------------|:------:|:-------:|-------|
@@ -17,10 +18,10 @@ were never measured). Failures are tracked in `bd-wwfh4`.
 | Event Codes | 5 | 5 | 100% |
 | Error Codes | 6 | 6 | 100% |
 | Invariants | 4 | 4 | 100% |
-| Capsule Format | 10 | 9 | 90% |
+| Capsule Format | 10 | 10 | 100% |
 | Bundle Format | 16 | 16 | 100% |
-| SDK Interface | 12 | 9 | 75% |
-| **TOTAL** | **58** | **54** | **93.1%** |
+| SDK Interface | 12 | 12 | 100% |
+| **TOTAL** | **58** | **58** | **100%** |
 
 ## Requirement Coverage Detail
 
@@ -74,7 +75,7 @@ were never measured). Failures are tracked in `bd-wwfh4`.
 | VSDK-CAPSULE-5.4 | MUST | CapsuleVerdict must support Pass, Fail, Inconclusive | ✅ PASS |
 | VSDK-CAPSULE-5.5 | MUST | CapsuleReplayResult must include expected/actual hashes | ✅ PASS |
 | VSDK-CAPSULE-5.6 | MUST | CapsuleError must cover all error scenarios | ✅ PASS |
-| VSDK-CAPSULE-5.7 | MUST | Capsule signature verification must be constant-time | ❌ FAIL (tamper yields `Ed25519SignatureMalformed`, not `SignatureInvalid`; bd-wwfh4) |
+| VSDK-CAPSULE-5.7 | MUST | Capsule signature verification must refuse tampered and malformed Ed25519 signatures | ✅ PASS (same-length tamper → `Ed25519SignatureInvalid`; over-long → `Ed25519SignatureMalformed`; bd-wwfh4) |
 | VSDK-CAPSULE-5.8 | MUST | Capsule replay must be deterministic | ✅ PASS |
 | VSDK-CAPSULE-5.9 | SHOULD | Capsule metadata should be preserved during replay | ✅ PASS |
 | VSDK-CAPSULE-5.10 | SHOULD | Capsule inputs should validate against manifest | ✅ PASS |
@@ -105,9 +106,9 @@ were never measured). Failures are tracked in `bd-wwfh4`.
 |---------|-------|-------------|--------|
 | VSDK-INTERFACE-7.1 | MUST | create_verifier_sdk must return configured VerifierSdk | ✅ PASS |
 | VSDK-INTERFACE-7.2 | MUST | verify_claim must validate capsules and return result | ✅ PASS |
-| VSDK-INTERFACE-7.3 | MUST | verify_migration_artifact must fail closed on structural-only replay bundles | ❌ FAIL (returns `Ok` with verdict `Fail`, not `UnauthenticatedStructuralBundle`; bd-wwfh4) |
-| VSDK-INTERFACE-7.4 | MUST | verify_trust_state must validate trust-anchor shape before failing closed on structural-only replay bundles | ❌ FAIL (anchor-bound `Pass`; bd-wwfh4) |
-| VSDK-INTERFACE-7.5 | MUST | ValidationWorkflow execution must preserve structural-bundle authentication guardrails | ❌ FAIL (`execute_workflow` reports "cryptographically verified" for an unkeyed bundle; bd-wwfh4) |
+| VSDK-INTERFACE-7.3 | MUST | verify_migration_artifact must not pass a replay bundle that carries no migration-equivalence capsule | ✅ PASS (verdict `Fail` with a failed `migration_equivalence_capsule_present` assertion; bd-wwfh4) |
+| VSDK-INTERFACE-7.4 | MUST | verify_trust_state must validate trust-anchor shape first and pass only a bundle whose integrity hash the anchor binds | ✅ PASS (anchor mismatch refused, binding anchor accepted; bd-wwfh4) |
+| VSDK-INTERFACE-7.5 | MUST | ValidationWorkflow execution must pass only a bundle carrying an Ed25519 signature from the caller's key | ✅ PASS (foreign-key signature → `Ed25519SignatureInvalid`; bd-wwfh4) |
 | VSDK-INTERFACE-7.6 | MUST | VerificationSession must track steps and seal state | ✅ PASS |
 | VSDK-INTERFACE-7.7 | MUST | create_session must reject malformed session ids | ✅ PASS |
 | VSDK-INTERFACE-7.8 | MUST | TransparencyLogEntry must provide merkle proof chain | ✅ PASS |
@@ -138,8 +139,8 @@ This conformance harness implements **Pattern 4: Spec-Derived Test Matrix** from
 ### Test Coverage Accounting
 
 - **Tested Requirements**: 58
-- **Passing Tests**: 54 (measured 2026-09-28)
-- **Failing Tests**: 4 (VSDK-CAPSULE-5.7, VSDK-INTERFACE-7.3/7.4/7.5; `bd-wwfh4`)
+- **Passing Tests**: 58 (measured 2026-09-28)
+- **Failing Tests**: 0
 - **Expected Failures**: 0
 
 ### CI Integration
@@ -152,13 +153,13 @@ The conformance harness produces structured JSON output for automated reporting:
 
 ## Known Divergences
 
-**Harness Status**: 4 failing MUST clauses (see the table; `bd-wwfh4`). The
-harness is gated on the `test-support` feature and the standalone CI job runs
-`cargo test` without it, so until `bd-wwfh4` flips CI to `--all-features` this
-harness does not run in CI.
+**Harness Status**: all 58 MUST/SHOULD clauses pass under `--all-features`
+(measured 2026-09-28). The harness is gated on the `test-support` feature; after
+bd-wwfh4 the standalone CI job (`verifier-sdk-standalone.yml`) runs
+`--all-features`, so the harness now runs in CI.
 
 **Auxiliary Fixture Drift**:
-- `sdk/verifier/tests/fixtures/public_api/facade_result.json` materializes runtime RFC3339 timestamps during contract checks; facade and transparency fixtures still admit non-live digest semantics. Tracked in `bd-cjo9z`.
+- `sdk/verifier/tests/fixtures/public_api/facade_result.json` was re-captured 2026-09-28 from a live `verify_claim` result (bd-wwfh4): `verifier_signature` is a real 128-hex Ed25519 signature that pins wire shape only (the signed payload's `result_origin_nonce` is never serialized, so it cannot be re-verified against the fixture — see PROVENANCE.md). The stale `error_matrix.json` sdk-error displays were regenerated to the security-hardened (redacted) live forms in the same change.
 - `sdk/verifier/tests/fixtures/public_api/session_step.json` still freezes impossible digest and signature formats. Tracked in `bd-idgvw`.
 - `sdk/verifier/tests/fixtures/public_api/bundle_canonical.json` and adjacent verifier contract checks still hardcode stale bundle digest/signature formats. Tracked in `bd-ebnvk`.
 - `sdk/verifier/tests/fixtures/public_api/PROVENANCE.md` still documents obsolete fake fixture formats and regeneration values. Tracked in `bd-2w7jg` and `bd-3toal`.
@@ -169,8 +170,8 @@ This report summarizes the frozen clauses exercised by `conformance_harness.rs`.
 
 - **Test Updates**: Required only when vsdk specification changes (breaking)
 - **Coverage Review**: Monthly audit to ensure new requirements are tested
-- **Conformance Gate**: none yet: the harness does not run in CI (`bd-wwfh4`)
+- **Conformance Gate**: `verifier-sdk-standalone.yml` runs the harness under `--all-features` (bd-wwfh4)
 
 ---
 
-**Conformance Score**: **93.1%** (54/58 harness requirements pass, measured 2026-09-28)
+**Conformance Score**: **100%** (58/58 harness requirements pass, measured 2026-09-28)

@@ -4,19 +4,19 @@
   "confidence_score": 1.0,
   "checked_assertions": [
     {
-      "assertion": "capsule_signature_valid",
+      "assertion": "capsule_replay_verified",
       "passed": true,
-      "detail": "Capsule signature matches the canonical verifier contract"
+      "detail": "replay output matches expected hash"
     },
     {
-      "assertion": "capsule_verdict_reproduced",
+      "assertion": "capsule_signature_verified",
       "passed": true,
-      "detail": "Replay reproduced the expected pass verdict"
+      "detail": "capsule Ed25519 signature matched"
     }
   ],
   "execution_timestamp": "${runtime_rfc3339}",
   "verifier_identity": "verifier://facade-test",
-  "artifact_binding_hash": "ef5b9576bc8bce8c63a8dff3e66f3beb484c9eeec9a339e85fc222d94dcd7318",
-  "verifier_signature": "ce6ea74c132dca20d2f81466f7f2a72c3d8273916846fd953eee76917c7d49b3",
+  "artifact_binding_hash": "4457543a1abf8ea9784c0e39e54323bd33d4da835039d357d92650699f111c95",
+  "verifier_signature": "d8bb06e0d7158dccfe6c5920137a7ae7e96d411c5609250dbdf94b6067ccc1e42a2f9cb618f0ee4c43b67317bee6864f980e68cabce1f340c3089869979a370e",
   "sdk_version": "vsdk-v1.0"
 }

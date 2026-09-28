@@ -67,5 +67,8 @@ jobs:
             exit 1
           fi
 
+      # --all-features: the conformance_harness, facade and public_api_contract
+      # suites are gated on `test-support`, so a plain `cargo test` never
+      # compiled them and they drifted unnoticed (bd-wwfh4).
       - name: Test the SDK standalone
-        run: cargo test --manifest-path sdk/verifier/Cargo.toml
+        run: cargo test --manifest-path sdk/verifier/Cargo.toml --all-features
