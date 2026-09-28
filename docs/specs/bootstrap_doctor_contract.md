@@ -46,8 +46,11 @@ Runtime metadata (`generated_at_utc`, per-check `duration_ms`) may vary, but doe
 | `DR-ENGINE-014` | `DOC-014` | `engine.binary` | configured engine binary path is a regular executable file | Warn when missing or non-executable; Fail when not a regular file or metadata cannot be read | install `franken_engine`, update `engine.binary_path`, or fix permissions |
 | `DR-BENCH-015` | `DOC-015` | `benchmark.validation` | benchmark threshold artifact exists and thresholds pass | Warn when validation cannot run; Fail when thresholds fail | run category shift validation and fix benchmark regressions |
 
+| `DR-TRUST-021` | `DOC-021` | `trust.revocation_freshness` | the working directory's trust registry holds a signed revocation frontier within the profile tier's max age (strict 300s, balanced 3600s; legacy-risky has no floor) | Fail under strict when the frontier is stale, missing or unauthenticated and the project declares dependencies (strict runs refuse them); Warn otherwise | `franken-node trust sync --force` |
+
 `DR-POLICY-009..011` are emitted only when `--policy-activation-input` is supplied.
 `DR-STORAGE-012`, `DR-SECURITY-013`, and `DR-ENGINE-014` are emitted only when their corresponding config paths are set.
+`DR-TRUST-021` is emitted only when the working directory holds an initialized trust registry.
 
 ## Evidence-Readiness Subcommand
 

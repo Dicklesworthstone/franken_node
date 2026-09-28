@@ -67,13 +67,15 @@ pub fn snapshot_age_secs_for_path(path: &Path, now_secs: u64) -> Option<u64> {
 /// `registry_path` carries a recorded revocation frontier fresh enough for the
 /// tier. Returns the operator-facing denial detail, or `None` when allowed.
 ///
-/// The frontier is the time of the last fully successful network refresh of
-/// the registry's trust signals (`franken-node trust sync --force`); a missing
-/// or unreadable frontier is treated as stale for Risky/Dangerous tiers. The
-/// Standard tier (legacy-risky) has no age floor.
+/// The frontier is the signed record of the last fully successful network
+/// refresh of the registry's trust signals (`franken-node trust sync
+/// --force`), authenticated with the registry key from `trust_config`; a
+/// missing, unreadable or unauthenticated frontier is treated as stale for
+/// Risky/Dangerous tiers. The Standard tier (legacy-risky) has no age floor.
 #[must_use]
 pub fn registry_revocation_freshness_denial(
     registry_path: &Path,
+    trust_config: &crate::config::TrustConfig,
     tier: SafetyTier,
     now_secs: u64,
     action_id: &str,
@@ -85,6 +87,7 @@ pub fn registry_revocation_freshness_denial(
     }
     let age = match crate::supply_chain::trust_card_registry_store::revocation_frontier_age_secs(
         registry_path,
+        trust_config,
         now_secs,
     ) {
         Ok(Some(age)) => age,

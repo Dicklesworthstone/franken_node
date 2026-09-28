@@ -447,7 +447,9 @@ const MIN_CONFIGURED_REGISTRY_KEY_BYTES: usize = 32;
 pub const TRUST_CARD_REGISTRY_SNAPSHOT_SCHEMA: &str = "franken-node/trust-card-registry-state/v1";
 
 /// Get registry signing key from config (fail-closed if not specified).
-fn get_registry_key(config: &crate::config::TrustConfig) -> Result<Vec<u8>, TrustCardError> {
+pub(crate) fn get_registry_key(
+    config: &crate::config::TrustConfig,
+) -> Result<Vec<u8>, TrustCardError> {
     match &config.registry_signing_key {
         Some(key_base64) => {
             if !key_base64.trim().eq(key_base64) || key_base64.is_empty() {

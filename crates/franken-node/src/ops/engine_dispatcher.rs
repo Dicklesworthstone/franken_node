@@ -395,8 +395,10 @@ enum NativeSessionResponse {
         telemetry_report: Box<TelemetryRuntimeReport>,
         host_effect_ledger: Option<HostEffectLedger>,
         evidence_verification_identity: EvidenceVerificationIdentity,
+        // Boxed like `telemetry_report`: it would otherwise make every
+        // response frame the size of the largest variant.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        engine_decision: Option<EngineContainmentDecision>,
+        engine_decision: Option<Box<EngineContainmentDecision>>,
     },
     ExecutionFailed {
         schema_version: String,
@@ -4454,10 +4456,10 @@ impl EngineDispatcher {
         // silently skipped on every real workspace. Resolve the same
         // authoritative registry as the run preflight instead.
         let project_root = project_root_for_path(app_path).to_path_buf();
-        let authoritative_registry = project_root
-            .join(".franken-node")
-            .join("state")
-            .join("trust-card-registry.v1.json");
+        let authoritative_registry =
+            frankenengine_node::supply_chain::trust_card_registry_store::registry_snapshot_path(
+                &project_root,
+            );
         let durable_authoritative =
             frankenengine_node::supply_chain::trust_card_registry_store::durable_store_path(
                 &authoritative_registry,
@@ -4474,6 +4476,7 @@ impl EngineDispatcher {
             && freshness_tier == SafetyTier::Dangerous
             && let Some(detail) = registry_revocation_freshness_denial(
                 &authoritative_registry,
+                &config.trust,
                 freshness_tier,
                 now_secs,
                 "dispatch-run",
@@ -5306,7 +5309,7 @@ impl EngineDispatcher {
                                 telemetry_report: Box::new(telemetry_report),
                                 host_effect_ledger,
                                 evidence_verification_identity,
-                                engine_decision: Some(engine_decision),
+                                engine_decision: Some(Box::new(engine_decision)),
                             }
                         }
                         Err(EngineProcessError::Spawn {
@@ -6563,7 +6566,7 @@ impl EngineDispatcher {
                     host_effect_ledger,
                     expected_evidence_capture,
                     evidence_capture_path,
-                    engine_decision,
+                    engine_decision.map(|decision| *decision),
                 ))
             }
             NativeSessionResponse::ExecutionFailed {
@@ -8330,7 +8333,7 @@ impl EngineDispatcher {
                     err @ (HostIoError::Fs { .. }
                     | HostIoError::Io { .. }
                     | HostIoError::NotImplemented { .. }),
-                ) if !is_tls_trust_refusal(&err) => {
+                ) if !is_tls_trust_refusal(err) => {
                     failed_count = failed_count.saturating_add(1);
                     let lineage = EffectLineageFields {
                         input_lineage_hash: EFFECT_RECEIPT_EMPTY_LINEAGE_HASH.to_string(),
@@ -9690,7 +9693,8 @@ mod tests {
         // signed with the SAME key dispatch_run uses to load it: synthesize a config
         // signing key and build the registry from that config so create/persist and
         // the later load_authoritative_state_from_config agree on the HMAC key.
-        let registry_path = trust_dir.join("trust-card-registry.v1.json");
+        let registry_path =
+            crate::supply_chain::trust_card_registry_store::registry_snapshot_path(project_root);
         let mut config = Config::default();
         config.synthesize_init_security_defaults();
         // bd-o776s: use wall-clock time. With the historical fixed epoch
@@ -9766,7 +9770,9 @@ mod tests {
         // the TOCTOU revocation re-read is the check under test.
         crate::supply_chain::trust_card_registry_store::record_revocation_frontier(
             &registry_path,
+            &config.trust,
             now_secs,
+            "test: trust sync --force",
         )
         .expect("record revocation frontier");
 

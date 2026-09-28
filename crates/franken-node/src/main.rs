@@ -167,7 +167,9 @@ use frankenengine_node::{
             CapabilityGate, CapabilityProvider, RemoteCap, RemoteCapError, RemoteOperation,
             RemoteScope,
         },
-        revocation_freshness::{SafetyTier, registry_revocation_freshness_denial},
+        revocation_freshness::{
+            FreshnessPolicy, SafetyTier, registry_revocation_freshness_denial, snapshot_age_secs,
+        },
     },
     supply_chain::category_shift::validate_benchmark_thresholds,
     supply_chain::{
@@ -289,8 +291,6 @@ const VERIFY_CORPUS_REQUIRED_API_FAMILIES: &[&str] = &[
     "url",
     "zlib",
 ];
-const TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH: &str =
-    ".franken-node/state/trust-card-registry.v1.json";
 const INCIDENT_EVIDENCE_RELATIVE_DIR: &str = ".franken-node/state/incidents";
 const REGISTRY_LOCAL_ARTIFACT_MANIFEST_SCHEMA_VERSION: &str =
     "franken-node/local-registry-artifact-manifest/v1";
@@ -338,6 +338,9 @@ struct TrustCardCliRegistryState {
     path: PathBuf,
     registry: TrustCardRegistry,
     cache_ttl_secs: u64,
+    /// The trust configuration the registry was loaded with; its signing key
+    /// authenticates the revocation frontier `trust sync --force` records.
+    trust_config: config::TrustConfig,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -10620,7 +10623,8 @@ fn quarantine_trusted_run_dependencies(
     trace: &str,
     evidence_refs: Option<Vec<VerifiedEvidenceRef>>,
 ) -> Result<Vec<String>> {
-    let registry_path = project_root.join(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH);
+    let registry_path =
+        supply_chain::trust_card_registry_store::registry_snapshot_path(project_root);
     // The durable store is the authority (the legacy JSON is a one-time import
     // source): keying this on the JSON alone silently disabled auto-quarantine
     // for every durably persisted registry (bd-reality-20260923-26n9r.1).
@@ -12547,6 +12551,82 @@ fn summarize_statuses(checks: &[DoctorCheck]) -> (DoctorStatusCounts, DoctorStat
     (DoctorStatusCounts { pass, warn, fail }, overall)
 }
 
+/// DR-TRUST-021: the signed revocation frontier of the registry at
+/// `registry_path` against the tier `profile`'s runs use. Stale, missing and
+/// unauthenticated frontiers are equally stale to the run gate: strict refuses
+/// a project that declares dependencies (Fail), balanced admits them with a
+/// warning, and legacy-risky has no floor.
+fn evaluate_revocation_frontier_doctor_check(
+    registry_path: &Path,
+    trust_config: &config::TrustConfig,
+    profile: Profile,
+    declares_dependencies: bool,
+    now_secs: u64,
+) -> (DoctorStatus, String, String) {
+    const FIX: &str =
+        "Run `franken-node trust sync --force` to record a fresh, signed revocation frontier.";
+    let tier = SafetyTier::for_policy_mode(&profile.to_string());
+    let max_age_secs = FreshnessPolicy::default_policy().max_age_for_tier(tier);
+    let stale = match supply_chain::trust_card_registry_store::read_revocation_frontier(
+        registry_path,
+        trust_config,
+    ) {
+        Ok(Some(frontier)) => {
+            let age = snapshot_age_secs(frontier.frontier_epoch_secs, now_secs);
+            match max_age_secs {
+                Some(max) if age > max => format!(
+                    "Revocation frontier is {age}s old (recorded by {}), past the {tier} max age of {max}s",
+                    frontier.source
+                ),
+                Some(max) => {
+                    return (
+                        DoctorStatus::Pass,
+                        format!(
+                            "Revocation frontier recorded {age}s ago by {} is within the {tier} max age of {max}s.",
+                            frontier.source
+                        ),
+                        "No action required.".to_string(),
+                    );
+                }
+                None => {
+                    return (
+                        DoctorStatus::Pass,
+                        format!(
+                            "Revocation frontier recorded {age}s ago by {}; the {profile} profile has no freshness floor.",
+                            frontier.source
+                        ),
+                        "No action required.".to_string(),
+                    );
+                }
+            }
+        }
+        Ok(None) => "No revocation frontier has been recorded for the trust registry".to_string(),
+        Err(err) => format!("Revocation frontier is unusable: {err}"),
+    };
+    match (tier, declares_dependencies) {
+        (SafetyTier::Standard, _) => (
+            DoctorStatus::Pass,
+            format!("{stale}; the {profile} profile has no freshness floor."),
+            "No action required.".to_string(),
+        ),
+        (SafetyTier::Dangerous, true) => (
+            DoctorStatus::Fail,
+            format!("{stale}; {profile} runs of this project's dependencies are refused."),
+            FIX.to_string(),
+        ),
+        (SafetyTier::Dangerous, false) => (
+            DoctorStatus::Warn,
+            format!("{stale}; {profile} runs that declare dependencies will be refused."),
+            FIX.to_string(),
+        ),
+        (SafetyTier::Risky, _) => (
+            DoctorStatus::Warn,
+            format!("{stale}; {profile} runs admit trusted dependencies with a warning."),
+            FIX.to_string(),
+        ),
+    }
+}
+
 fn evaluate_doctor_check(
     code: &str,
     event_code: &str,
@@ -12815,6 +12895,7 @@ fn build_doctor_report_with_cwd_and_policy_input(
         ));
     }
 
+    let trust_freshness_root = cwd_result.as_ref().ok().cloned();
     match cwd_result {
         Ok(path) => checks.push(evaluate_doctor_check(
             "DR-ENV-007",
@@ -13264,6 +13345,33 @@ fn build_doctor_report_with_cwd_and_policy_input(
                     },
                 ));
             }
+        }
+    }
+
+    // Revocation frontier freshness of the trust registry in the working
+    // directory, judged by the tier this profile's runs use
+    // (bd-reality-20260923-26n9r.1). Emitted only where a registry exists.
+    if let Some(root) = trust_freshness_root {
+        let registry_path = supply_chain::trust_card_registry_store::registry_snapshot_path(&root);
+        if supply_chain::trust_card_registry_store::durable_store_path(&registry_path).is_file() {
+            let declares_dependencies = collect_run_package_dependencies(&root)
+                .ok()
+                .flatten()
+                .is_some_and(|dependencies| !dependencies.is_empty());
+            checks.push(evaluate_doctor_check(
+                "DR-TRUST-021",
+                "DOC-021",
+                "trust.revocation_freshness",
+                || {
+                    evaluate_revocation_frontier_doctor_check(
+                        &registry_path,
+                        &resolved.config.trust,
+                        resolved.config.profile,
+                        declares_dependencies,
+                        now_unix_secs(),
+                    )
+                },
+            ));
         }
     }
 
@@ -14453,6 +14561,7 @@ mod trust_scan_tests {
             path,
             registry,
             cache_ttl_secs: 60,
+            trust_config: config::Config::for_profile(Profile::Balanced).trust,
         };
 
         let report =
@@ -14507,6 +14616,7 @@ mod trust_scan_tests {
             path,
             registry,
             cache_ttl_secs: 60,
+            trust_config: config::Config::for_profile(Profile::Balanced).trust,
         };
 
         let first_report =
@@ -14563,6 +14673,7 @@ mod trust_scan_tests {
             path,
             registry,
             cache_ttl_secs: 60,
+            trust_config: config::Config::for_profile(Profile::Balanced).trust,
         };
 
         let first_report =
@@ -15304,7 +15415,7 @@ mod trust_command_tests {
         );
         assert!(
             supply_chain::trust_card_registry_store::durable_store_path(
-                &tmp.path().join(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH)
+                &supply_chain::trust_card_registry_store::registry_snapshot_path(tmp.path())
             )
             .is_file()
         );
@@ -17465,9 +17576,28 @@ fn handle_remotecap_issue(args: &RemoteCapIssueArgs) -> Result<()> {
     // the tier allows. The local remotecap revocation list is authoritative,
     // not a replica, so its mtime says nothing about freshness: gating on it
     // passed vacuously before the first revoke and then denied every issue
-    // once that revoke aged past the tier (bd-reality-20260923-26n9r.1).
+    // once that revoke aged past the tier (bd-reality-20260923-26n9r.1). The
+    // frontier is authenticated with the registry key, so a project whose
+    // trust configuration cannot be resolved cannot issue.
+    let project_root = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(err) => return remotecap_fail("remotecap.issue", args.json, err),
+    };
+    let trust_config = match trust_registry_config_for_project(&project_root) {
+        Ok(config) => config.trust,
+        Err(err) => {
+            return remotecap_fail(
+                "remotecap.issue",
+                args.json,
+                format!(
+                    "revocation freshness gate denied remotecap-issue: trust configuration unavailable ({err:#}); run `franken-node init --out-dir .` and `franken-node trust sync --force` here"
+                ),
+            );
+        }
+    };
     if let Some(detail) = registry_revocation_freshness_denial(
-        Path::new(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH),
+        &supply_chain::trust_card_registry_store::registry_snapshot_path(&project_root),
+        &trust_config,
         SafetyTier::Dangerous,
         now_epoch_secs,
         "remotecap-issue",
@@ -17787,7 +17917,7 @@ fn trust_card_cli_registry(now_secs: u64) -> Result<TrustCardCliRegistryState> {
     // The trust-card registry lives next to the config that *resolved*. Use
     // the cwd as the project root: this is where the operator expects the
     // registry to be, and matches `trust scan`'s behavior on the same path.
-    let path = cwd.join(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH);
+    let path = supply_chain::trust_card_registry_store::registry_snapshot_path(&cwd);
     // The durable frankensqlite store is the authority; the legacy JSON pair
     // is only a one-time import source. Either surface counts as initialized.
     let registry_store_path = supply_chain::trust_card_registry_store::durable_store_path(&path);
@@ -17809,6 +17939,7 @@ fn trust_card_cli_registry(now_secs: u64) -> Result<TrustCardCliRegistryState> {
         path,
         registry,
         cache_ttl_secs: cache_ttl,
+        trust_config: config.trust,
     })
 }
 
@@ -18211,7 +18342,7 @@ fn trust_scan_registry_state(
     now_secs: u64,
 ) -> Result<TrustCardCliRegistryState> {
     ensure_state_dir(project_root)?;
-    let path = project_root.join(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH);
+    let path = supply_chain::trust_card_registry_store::registry_snapshot_path(project_root);
     let registry_store_path = supply_chain::trust_card_registry_store::durable_store_path(&path);
     let registry = if path.is_file() || registry_store_path.is_file() {
         TrustCardRegistry::load_authoritative_state_from_config(
@@ -18247,6 +18378,7 @@ fn trust_scan_registry_state(
         path,
         registry,
         cache_ttl_secs: trust_registry_cache_ttl(trust_config),
+        trust_config: trust_config.clone(),
     })
 }
 
@@ -19358,7 +19490,8 @@ fn evaluate_run_trust_preflight(
         },
         Some(dependencies) => {
             ensure_state_dir(&project_root)?;
-            let authoritative_registry = project_root.join(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH);
+            let authoritative_registry =
+                supply_chain::trust_card_registry_store::registry_snapshot_path(&project_root);
             registry_path = Some(authoritative_registry.clone());
 
             // The durable frankensqlite store is the authority; either surface
@@ -19556,6 +19689,7 @@ fn evaluate_run_trust_preflight(
                             .any(|result| result.status == RunDependencyTrustStatus::Trusted)
                             && let Some(detail) = registry_revocation_freshness_denial(
                                 &authoritative_registry,
+                                &config.trust,
                                 policy_tier,
                                 now_secs,
                                 "run-preflight",
@@ -32455,7 +32589,12 @@ fn main() -> Result<()> {
                     if let Err(err) =
                         supply_chain::trust_card_registry_store::record_revocation_frontier(
                             &state.path,
+                            &state.trust_config,
                             now_secs,
+                            &format!(
+                                "trust sync --force ({} trust card(s) refreshed from the network, 0 network errors)",
+                                audit_report.refreshed_count
+                            ),
                         )
                     {
                         return trust_fail(
@@ -33549,7 +33688,7 @@ mod run_trust_gate_tests {
 
     fn write_fixture_registry_to(root: &Path) {
         let registry = fixture_registry(1_000).expect("fixture registry");
-        let path = root.join(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH);
+        let path = supply_chain::trust_card_registry_store::registry_snapshot_path(root);
         registry
             .persist_authoritative_state(&path)
             .expect("persist trust registry");
@@ -33707,7 +33846,8 @@ mod run_trust_gate_tests {
         write_demo_project(tmp.path(), &[("@acme/auth-guard", "^1.4.2")]);
         write_fixture_registry_to(tmp.path());
 
-        let registry_path = tmp.path().join(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH);
+        let registry_path =
+            supply_chain::trust_card_registry_store::registry_snapshot_path(tmp.path());
         let mut registry = TrustCardRegistry::load_authoritative_state(
             &registry_path,
             60,
@@ -33797,7 +33937,8 @@ mod run_trust_gate_tests {
         assert_eq!(second.created_cards, 0);
         assert_eq!(second.skipped_existing, 1);
 
-        let registry_path = tmp.path().join(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH);
+        let registry_path =
+            supply_chain::trust_card_registry_store::registry_snapshot_path(tmp.path());
         let default_config = config::Config::for_profile(Profile::Balanced);
         let default_key_load = TrustCardRegistry::load_authoritative_state_from_config(
             &registry_path,
@@ -33867,7 +34008,8 @@ mod run_trust_gate_tests {
         let tmp = TempDir::new().expect("tempdir");
         write_demo_project(tmp.path(), &[("@acme/auth-guard", "^1.4.2")]);
         ensure_state_dir(tmp.path()).expect("state dir");
-        let registry_path = tmp.path().join(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH);
+        let registry_path =
+            supply_chain::trust_card_registry_store::registry_snapshot_path(tmp.path());
         std::fs::write(&registry_path, "{ definitely not json\n").expect("write corrupt registry");
 
         let report = evaluate_preflight(tmp.path(), Profile::Balanced);
@@ -34118,7 +34260,8 @@ mod run_trust_gate_tests {
 
         assert_eq!(quarantined, vec!["npm:@acme/auth-guard".to_string()]);
 
-        let registry_path = tmp.path().join(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH);
+        let registry_path =
+            supply_chain::trust_card_registry_store::registry_snapshot_path(tmp.path());
         let mut registry = TrustCardRegistry::load_authoritative_state(
             &registry_path,
             60,
@@ -34144,7 +34287,8 @@ mod run_trust_gate_tests {
         let tmp = TempDir::new().expect("tempdir");
         write_demo_project(tmp.path(), &[("@acme/auth-guard", "^1.4.2")]);
         write_fixture_registry_to(tmp.path());
-        let registry_path = tmp.path().join(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH);
+        let registry_path =
+            supply_chain::trust_card_registry_store::registry_snapshot_path(tmp.path());
         let mtime = frankenengine_node::security::revocation_freshness::unix_mtime_epoch_secs(
             &registry_path,
         )

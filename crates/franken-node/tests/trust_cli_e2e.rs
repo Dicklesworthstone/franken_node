@@ -1074,6 +1074,173 @@ fn run_preflight_refuses_high_risk_dependency_under_strict_only() {
     assert_eq!(payload["preflight"]["verdict"]["status"], "passed");
 }
 
+fn doctor_check_status(workspace: &Path, profile: &str, code: &str) -> String {
+    let doctor = run_cli_in_workspace(workspace, &["doctor", "--profile", profile, "--json"]);
+    let report = parse_json_stdout(&doctor, "doctor --json");
+    let check = report["checks"]
+        .as_array()
+        .and_then(|checks| checks.iter().find(|check| check["code"] == code))
+        .unwrap_or_else(|| panic!("doctor --profile {profile} must report {code}: {report}"));
+    tracing::info!(profile, code, check = %check, "doctor check");
+    check["status"].as_str().unwrap_or_default().to_string()
+}
+
+/// bd-reality-20260923-26n9r.1: admitting a trusted dependency under strict
+/// requires a fresh revocation frontier, and the frontier is the SIGNED record
+/// `trust sync --force` writes into the registry store, never a file mtime.
+/// A: the frontier the CLI records admits a strict run. B: the same frontier
+/// 400 days old (re-recorded with this workspace's key through the store API;
+/// the CLI has no clock override) is refused under strict and warned under
+/// balanced. C: a frontier signed with another key is refused as
+/// unauthenticated although it claims to be current. Doctor reports each state
+/// as DR-TRUST-021.
+#[cfg(unix)]
+#[test]
+fn run_revocation_frontier_is_signed_data_that_gates_strict_runs() {
+    use frankenengine_node::supply_chain::trust_card_registry_store::{
+        read_revocation_frontier, record_revocation_frontier, registry_snapshot_path,
+    };
+
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let path = workspace.path();
+    log_pipeline_step(
+        1,
+        "bootstrap",
+        "init + trust sync --force on the empty registry record a signed frontier offline",
+    );
+    for (args, context) in [
+        (
+            &["init", "--profile", "balanced", "--out-dir", "."][..],
+            "init",
+        ),
+        (&["trust", "sync", "--force"][..], "trust sync --force"),
+    ] {
+        let output = run_cli_in_workspace(path, args);
+        assert!(
+            output.status.success(),
+            "{context} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    write_pipeline_package_manifest(path, &[("react", "^19.2.0")], &[], &[]);
+    write_pipeline_lockfile(path);
+    write_engine_probe_script(path, "index.js", "revocation-frontier");
+    let scan = run_cli_in_workspace(path, &["trust", "scan", ".", "--json"]);
+    assert!(
+        scan.status.success(),
+        "trust scan failed: {}",
+        String::from_utf8_lossy(&scan.stderr)
+    );
+
+    let registry = registry_snapshot_path(path);
+    let config = Config::load(&path.join("franken_node.toml")).expect("load workspace config");
+    let recorded = read_revocation_frontier(&registry, &config.trust)
+        .expect("read the recorded frontier")
+        .expect("trust sync --force records a frontier");
+    assert!(
+        recorded.source.starts_with("trust sync --force"),
+        "{recorded:?}"
+    );
+
+    log_pipeline_step(2, "fresh_frontier", "strict admits the trusted dependency");
+    let strict = run_cli_in_workspace(path, &["run", "--policy", "strict", "--json", "."]);
+    let payload = parse_json_stdout(&strict, "A: strict run behind a fresh frontier");
+    assert_eq!(
+        payload["preflight"]["verdict"]["status"], "passed",
+        "{payload}"
+    );
+    assert!(
+        payload["preflight"]["verdict"]["results"]
+            .as_array()
+            .is_some_and(|results| results.iter().any(|result| result["extension_id"]
+                == "npm:react"
+                && result["status"] == "trusted")),
+        "the fresh frontier must admit react as trusted: {payload}"
+    );
+    assert_eq!(doctor_check_status(path, "strict", "DR-TRUST-021"), "pass");
+
+    log_pipeline_step(3, "aged_frontier", "strict refuses, balanced warns");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs();
+    record_revocation_frontier(
+        &registry,
+        &config.trust,
+        now - 400 * 86_400,
+        "test: trust sync --force 400 days ago",
+    )
+    .expect("record aged frontier");
+    let strict = run_cli_in_workspace(path, &["run", "--policy", "strict", "--json", "."]);
+    assert!(
+        !strict.status.success(),
+        "strict must refuse behind a stale frontier"
+    );
+    let payload = parse_json_stdout(&strict, "B: strict run behind an aged frontier");
+    assert_eq!(payload["verdict"]["status"], "blocked", "{payload}");
+    let violation = payload["verdict"]["violations"]
+        .as_array()
+        .and_then(|violations| {
+            violations
+                .iter()
+                .find(|violation| violation["kind"] == "revocation_stale")
+        })
+        .unwrap_or_else(|| panic!("expected a revocation_stale violation, got {payload}"));
+    assert!(
+        violation["detail"].as_str().is_some_and(|detail| {
+            detail.contains("RF_STALE_FRONTIER") && detail.contains("trust sync --force")
+        }),
+        "{violation}"
+    );
+    let balanced = run_cli_in_workspace(path, &["run", "--policy", "balanced", "--json", "."]);
+    let payload = parse_json_stdout(&balanced, "B: balanced run behind an aged frontier");
+    assert_eq!(
+        payload["preflight"]["verdict"]["status"], "passed",
+        "{payload}"
+    );
+    assert!(
+        payload["preflight"]["verdict"]["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|warning| warning
+                .as_str()
+                .is_some_and(|text| text.contains("RF_STALE_FRONTIER")))),
+        "balanced must admit with a stale-frontier warning: {payload}"
+    );
+    assert_eq!(doctor_check_status(path, "strict", "DR-TRUST-021"), "fail");
+    assert_eq!(
+        doctor_check_status(path, "balanced", "DR-TRUST-021"),
+        "warn"
+    );
+
+    log_pipeline_step(
+        4,
+        "forged_frontier",
+        "a frontier signed with another key is refused",
+    );
+    let mut foreign = config.trust.clone();
+    foreign.registry_signing_key = Some(BASE64_STANDARD.encode([0x5a_u8; 32]));
+    record_revocation_frontier(&registry, &foreign, now, "forged: trust sync --force")
+        .expect("record a frontier under a foreign key");
+    let strict = run_cli_in_workspace(path, &["run", "--policy", "strict", "--json", "."]);
+    assert!(
+        !strict.status.success(),
+        "strict must refuse behind a forged frontier"
+    );
+    let payload = parse_json_stdout(&strict, "C: strict run behind a forged frontier");
+    assert!(
+        payload["verdict"]["violations"]
+            .as_array()
+            .is_some_and(|violations| violations.iter().any(|violation| {
+                violation["kind"] == "revocation_stale"
+                    && violation["detail"]
+                        .as_str()
+                        .is_some_and(|detail| detail.contains("failed authentication"))
+            })),
+        "a frontier the registry key did not sign must not count: {payload}"
+    );
+    assert_eq!(doctor_check_status(path, "strict", "DR-TRUST-021"), "fail");
+}
+
 #[test]
 fn run_json_fails_closed_when_app_path_missing() {
     let workspace = tempfile::tempdir().expect("tempdir");

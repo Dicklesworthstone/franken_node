@@ -162,13 +162,19 @@ fn remotecap_issue_denied_when_revocation_frontier_is_stale() {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock after epoch")
         .as_secs();
-    // Re-record the frontier as it would stand one hour after the last clean
-    // `trust sync --force`: past the 300s Dangerous-tier bound.
+    // Re-record the frontier, signed with this workspace's registry key, as it
+    // would stand one hour after the last clean `trust sync --force`: past
+    // the 300s Dangerous-tier bound.
+    let config =
+        frankenengine_node::config::Config::load(&workspace.path().join("franken_node.toml"))
+            .expect("load workspace config");
     frankenengine_node::supply_chain::trust_card_registry_store::record_revocation_frontier(
-        &workspace
-            .path()
-            .join(".franken-node/state/trust-card-registry.v1.json"),
+        &frankenengine_node::supply_chain::trust_card_registry_store::registry_snapshot_path(
+            workspace.path(),
+        ),
+        &config.trust,
         now - 3_600,
+        "test: trust sync --force an hour ago",
     )
     .expect("record aged frontier");
 

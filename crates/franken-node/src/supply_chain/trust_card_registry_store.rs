@@ -26,8 +26,18 @@ use std::sync::Mutex;
 
 use fsqlite::compat::TransactionExt;
 use fsqlite::{Connection, SqliteValue};
+use hmac::{Hmac, KeyInit, Mac};
+use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 
-use crate::supply_chain::trust_card::TrustCardError;
+use crate::config::TrustConfig;
+use crate::security::constant_time;
+use crate::supply_chain::trust_card::{TrustCardError, get_registry_key};
+
+/// Project-relative location of the authoritative trust-card registry
+/// snapshot; its durable store is [`durable_store_path`] of it.
+pub const TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH: &str =
+    ".franken-node/state/trust-card-registry.v1.json";
 
 const REGISTRY_DB_SCHEMA_VERSION: &str = "franken-node/trust-card-registry-durable-store/v1";
 const META_KEY_SCHEMA_VERSION: &str = "schema_version";
@@ -46,52 +56,139 @@ pub fn durable_store_path(snapshot_path: &Path) -> PathBuf {
     snapshot_path.with_extension("db")
 }
 
-/// Registry-meta key recording the revocation frontier: the Unix time of the
-/// last fully successful network refresh of the registry's trust signals.
-const META_KEY_REVOCATION_FRONTIER: &str = "revocation_frontier_epoch_secs";
+/// The trust-card registry snapshot path of the project rooted at
+/// `project_root`. Every consumer (run preflight, the dispatch-time recheck,
+/// auto-quarantine, `remotecap issue`, doctor and the trust commands) resolves
+/// the registry here (bd-reality-20260923-26n9r.1).
+#[must_use]
+pub fn registry_snapshot_path(project_root: &Path) -> PathBuf {
+    project_root.join(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH)
+}
 
-/// Record that the registry's trust signals were refreshed from the network at
-/// `epoch_secs` (bd-reality-20260923-26n9r.1).
-///
-/// The revocation frontier is DATA, not a file mtime: merely opening the
-/// fsqlite store rewrites the database file, so file mtimes advance on
-/// read-only access and cannot witness revocation freshness.
+/// Registry-meta key holding the signed [`RevocationFrontier`] record.
+const META_KEY_REVOCATION_FRONTIER: &str = "revocation_frontier";
+/// Where earlier builds kept an UNSIGNED frontier (bare epoch seconds). It is
+/// never read (anyone able to write the store could forge it) and is removed
+/// whenever a signed frontier is recorded.
+const META_KEY_LEGACY_REVOCATION_FRONTIER: &str = "revocation_frontier_epoch_secs";
+
+pub const REVOCATION_FRONTIER_SCHEMA: &str = "franken-node/revocation-frontier/v1";
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// The revocation frontier: when, and by what, the registry's trust signals
+/// were last refreshed from the network without error
+/// (bd-reality-20260923-26n9r.1). It is DATA, not a file mtime (merely opening
+/// the fsqlite store rewrites the database file), and it is authenticated
+/// with the registry signing key, so editing the store can neither forge a
+/// frontier nor move one forward.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevocationFrontier {
+    pub schema_version: String,
+    /// Unix time of the refresh.
+    pub frontier_epoch_secs: u64,
+    /// The refresh that established it, e.g. `trust sync --force`.
+    pub source: String,
+    /// Hex HMAC-SHA256 under the registry signing key over the schema, the
+    /// frontier time and the length-prefixed source.
+    pub mac: String,
+}
+
+fn revocation_frontier_mac(
+    registry_key: &[u8],
+    frontier_epoch_secs: u64,
+    source: &str,
+) -> Result<String, TrustCardError> {
+    let mut mac =
+        HmacSha256::new_from_slice(registry_key).map_err(|_| TrustCardError::InvalidRegistryKey)?;
+    mac.update(REVOCATION_FRONTIER_SCHEMA.as_bytes());
+    mac.update(&[0]);
+    mac.update(&frontier_epoch_secs.to_be_bytes());
+    mac.update(
+        &u64::try_from(source.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    mac.update(source.as_bytes());
+    Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
+/// Record, signed with the registry key from `trust_config`, that the
+/// registry's trust signals were refreshed from the network at `epoch_secs`
+/// by `source`.
 ///
 /// # Errors
 ///
-/// Returns [`TrustCardError::SnapshotWrite`] when the store cannot be updated.
-pub fn record_revocation_frontier(snapshot_path: &Path, epoch_secs: u64) -> Result<(), TrustCardError> {
+/// Returns [`TrustCardError::InvalidInput`] when the registry signing key is
+/// not configured, and [`TrustCardError::SnapshotWrite`] when the store cannot
+/// be updated.
+pub fn record_revocation_frontier(
+    snapshot_path: &Path,
+    trust_config: &TrustConfig,
+    epoch_secs: u64,
+    source: &str,
+) -> Result<RevocationFrontier, TrustCardError> {
+    let registry_key = get_registry_key(trust_config)?;
+    let frontier = RevocationFrontier {
+        schema_version: REVOCATION_FRONTIER_SCHEMA.to_string(),
+        frontier_epoch_secs: epoch_secs,
+        source: source.to_string(),
+        mac: revocation_frontier_mac(&registry_key, epoch_secs, source)?,
+    };
+    let encoded =
+        serde_json::to_string(&frontier).map_err(|err| TrustCardError::SnapshotWrite {
+            path: PathBuf::from("trust-card-registry-durable-store"),
+            detail: format!("encode revocation frontier: {err}"),
+        })?;
     let store = TrustCardRegistryStore::open(snapshot_path)?;
     store.with_immediate_transaction(|_connection, tx| {
+        fn write_error(err: impl std::fmt::Display) -> TrustCardError {
+            TrustCardError::SnapshotWrite {
+                path: PathBuf::from("trust-card-registry-durable-store"),
+                detail: format!("record revocation frontier: {err}"),
+            }
+        }
         tx.execute_with_params(
             "INSERT INTO registry_meta(key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
             &[
                 SqliteValue::Text(META_KEY_REVOCATION_FRONTIER.into()),
-                SqliteValue::Text(epoch_secs.to_string().into()),
+                SqliteValue::Text(encoded.as_str().into()),
             ],
         )
-        .map_err(|err| TrustCardError::SnapshotWrite {
-            path: PathBuf::from("trust-card-registry-durable-store"),
-            detail: format!("record revocation frontier: {err}"),
-        })?;
+        .map_err(write_error)?;
+        tx.execute_with_params(
+            "DELETE FROM registry_meta WHERE key = ?1;",
+            &[SqliteValue::Text(
+                META_KEY_LEGACY_REVOCATION_FRONTIER.into(),
+            )],
+        )
+        .map_err(write_error)?;
         Ok(())
-    })
+    })?;
+    Ok(frontier)
 }
 
-/// The recorded revocation frontier, or `None` when the durable store does not
-/// exist or no fully successful refresh has ever been recorded.
+/// The recorded revocation frontier, authenticated with the registry key from
+/// `trust_config`, or `None` when the durable store does not exist or no
+/// signed frontier has ever been recorded.
 ///
 /// # Errors
 ///
 /// Returns [`TrustCardError::SnapshotRead`] when an existing store cannot be
-/// read or holds a malformed frontier value.
-pub fn read_revocation_frontier(snapshot_path: &Path) -> Result<Option<u64>, TrustCardError> {
+/// read, or its frontier is malformed or fails authentication (it was not
+/// recorded with this registry's key, or was edited since), and
+/// [`TrustCardError::InvalidInput`] when the registry key is not configured.
+pub fn read_revocation_frontier(
+    snapshot_path: &Path,
+    trust_config: &TrustConfig,
+) -> Result<Option<RevocationFrontier>, TrustCardError> {
     if !durable_store_path(snapshot_path).is_file() {
         return Ok(None);
     }
     let store = TrustCardRegistryStore::open(snapshot_path)?;
-    store.with_connection(|connection| {
+    let encoded = store.with_connection(|connection| {
         let table = connection
             .query_with_params(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'registry_meta';",
@@ -117,18 +214,41 @@ pub fn read_revocation_frontier(snapshot_path: &Path) -> Result<Option<u64>, Tru
             return Ok(None);
         };
         match row.values().first() {
-            Some(SqliteValue::Text(value)) => value.parse::<u64>().map(Some).map_err(|err| {
-                TrustCardError::SnapshotRead {
-                    path: store.db_path.clone(),
-                    detail: format!("malformed revocation frontier `{value}`: {err}"),
-                }
-            }),
+            Some(SqliteValue::Text(value)) => Ok(Some(value.to_string())),
             _ => Err(TrustCardError::SnapshotRead {
                 path: store.db_path.clone(),
                 detail: "revocation frontier is not text".to_string(),
             }),
         }
-    })
+    })?;
+    let Some(encoded) = encoded else {
+        return Ok(None);
+    };
+    let read_error = |detail: String| TrustCardError::SnapshotRead {
+        path: store.db_path.clone(),
+        detail,
+    };
+    let frontier: RevocationFrontier = serde_json::from_str(&encoded)
+        .map_err(|err| read_error(format!("malformed revocation frontier: {err}")))?;
+    if frontier.schema_version != REVOCATION_FRONTIER_SCHEMA {
+        return Err(read_error(format!(
+            "unsupported revocation frontier schema `{}`",
+            frontier.schema_version
+        )));
+    }
+    let registry_key = get_registry_key(trust_config)?;
+    let expected = revocation_frontier_mac(
+        &registry_key,
+        frontier.frontier_epoch_secs,
+        &frontier.source,
+    )?;
+    if !constant_time::ct_eq(&frontier.mac, &expected) {
+        return Err(read_error(
+            "revocation frontier failed authentication: it was not recorded with this registry's signing key, or it was edited since"
+                .to_string(),
+        ));
+    }
+    Ok(Some(frontier))
 }
 
 /// Age in seconds of the recorded revocation frontier at `now_secs` (a clock
@@ -139,10 +259,17 @@ pub fn read_revocation_frontier(snapshot_path: &Path) -> Result<Option<u64>, Tru
 /// Propagates [`read_revocation_frontier`] failures.
 pub fn revocation_frontier_age_secs(
     snapshot_path: &Path,
+    trust_config: &TrustConfig,
     now_secs: u64,
 ) -> Result<Option<u64>, TrustCardError> {
-    Ok(read_revocation_frontier(snapshot_path)?
-        .map(|frontier| crate::security::revocation_freshness::snapshot_age_secs(frontier, now_secs)))
+    Ok(
+        read_revocation_frontier(snapshot_path, trust_config)?.map(|frontier| {
+            crate::security::revocation_freshness::snapshot_age_secs(
+                frontier.frontier_epoch_secs,
+                now_secs,
+            )
+        }),
+    )
 }
 
 /// Read one canonical-JSON slot out of an open connection.
@@ -502,6 +629,138 @@ mod tests {
         let (snapshot, high_water) = store.load_state().expect("reload").expect("rows exist");
         assert_eq!(snapshot, "{\"epoch\":2}");
         assert_eq!(high_water.as_deref(), Some("{\"epoch\":2}"));
+    }
+
+    fn frontier_trust_config(key_byte: u8) -> TrustConfig {
+        use base64::Engine as _;
+        let mut config = crate::config::Config::for_profile(crate::config::Profile::Balanced);
+        config.trust.registry_signing_key =
+            Some(base64::engine::general_purpose::STANDARD.encode([key_byte; 32]));
+        config.trust
+    }
+
+    fn write_meta(path: &Path, key: &str, value: &str) {
+        let store = TrustCardRegistryStore::open(path).expect("open");
+        store
+            .with_immediate_transaction(|_connection, tx| {
+                tx.execute_with_params(
+                    "INSERT INTO registry_meta(key, value) VALUES (?1, ?2)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+                    &[
+                        SqliteValue::Text(key.into()),
+                        SqliteValue::Text(value.into()),
+                    ],
+                )
+                .map_err(|err| TrustCardError::SnapshotWrite {
+                    path: PathBuf::from("test"),
+                    detail: err.to_string(),
+                })?;
+                Ok(())
+            })
+            .expect("write registry meta");
+    }
+
+    #[test]
+    fn revocation_frontier_round_trips_signed_with_the_registry_key() {
+        let (_dir, path) = temp_snapshot_path("frontier");
+        let config = frontier_trust_config(7);
+        assert_eq!(
+            read_revocation_frontier(&path, &config).expect("no store yet"),
+            None
+        );
+        let recorded = record_revocation_frontier(&path, &config, 1_000, "trust sync --force")
+            .expect("record frontier");
+        assert_eq!(recorded.schema_version, REVOCATION_FRONTIER_SCHEMA);
+        assert_eq!(
+            read_revocation_frontier(&path, &config).expect("read frontier"),
+            Some(recorded)
+        );
+        assert_eq!(
+            revocation_frontier_age_secs(&path, &config, 1_300).expect("age"),
+            Some(300)
+        );
+        // A clock behind the frontier saturates to fresh.
+        assert_eq!(
+            revocation_frontier_age_secs(&path, &config, 10).expect("age"),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn revocation_frontier_edited_or_signed_by_another_key_fails_authentication() {
+        let (_dir, path) = temp_snapshot_path("frontier-tamper");
+        let config = frontier_trust_config(7);
+        let recorded = record_revocation_frontier(&path, &config, 1_000, "trust sync --force")
+            .expect("record frontier");
+
+        let mut moved_forward = recorded.clone();
+        moved_forward.frontier_epoch_secs = 9_999;
+        let mut resourced = recorded;
+        resourced.source = "trust sync --force (forged)".to_string();
+        for edited in [moved_forward, resourced] {
+            write_meta(
+                &path,
+                META_KEY_REVOCATION_FRONTIER,
+                &serde_json::to_string(&edited).expect("encode"),
+            );
+            let err = read_revocation_frontier(&path, &config).expect_err("edited frontier");
+            assert!(err.to_string().contains("failed authentication"), "{err}");
+        }
+
+        record_revocation_frontier(
+            &path,
+            &frontier_trust_config(8),
+            1_000,
+            "trust sync --force",
+        )
+        .expect("record under another registry's key");
+        let err = read_revocation_frontier(&path, &config).expect_err("foreign key");
+        assert!(err.to_string().contains("failed authentication"), "{err}");
+
+        write_meta(&path, META_KEY_REVOCATION_FRONTIER, "1000");
+        let err = read_revocation_frontier(&path, &config).expect_err("bare integer");
+        assert!(
+            err.to_string().contains("malformed revocation frontier"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn unsigned_legacy_revocation_frontier_is_ignored_and_removed_on_record() {
+        let (_dir, path) = temp_snapshot_path("frontier-legacy");
+        let config = frontier_trust_config(7);
+        write_meta(&path, META_KEY_LEGACY_REVOCATION_FRONTIER, "99999999999");
+        assert_eq!(
+            read_revocation_frontier(&path, &config).expect("read"),
+            None,
+            "an unsigned frontier anyone could write must not count"
+        );
+        record_revocation_frontier(&path, &config, 5, "trust sync --force").expect("record");
+        let store = TrustCardRegistryStore::open(&path).expect("open");
+        let legacy_rows = store
+            .with_connection(|connection| {
+                connection
+                    .query_with_params(
+                        "SELECT value FROM registry_meta WHERE key = ?1;",
+                        &[SqliteValue::Text(
+                            META_KEY_LEGACY_REVOCATION_FRONTIER.into(),
+                        )],
+                    )
+                    .map_err(|err| TrustCardError::SnapshotRead {
+                        path: PathBuf::from("test"),
+                        detail: err.to_string(),
+                    })
+            })
+            .expect("query legacy key");
+        assert!(legacy_rows.is_empty());
+    }
+
+    #[test]
+    fn registry_snapshot_path_is_the_project_state_location() {
+        assert_eq!(
+            registry_snapshot_path(Path::new("/work/app")),
+            PathBuf::from("/work/app/.franken-node/state/trust-card-registry.v1.json")
+        );
     }
 
     #[test]

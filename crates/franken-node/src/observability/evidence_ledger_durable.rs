@@ -222,7 +222,7 @@ impl DurableEvidenceLedger {
                 .map_err(|err| io::Error::other(format!("read chain head: {err}")))?;
             entry.prev_entry_hash = match rows.first().and_then(|row| row.values().first()) {
                 Some(SqliteValue::Text(previous_json)) => {
-                    let previous: EvidenceEntry = serde_json::from_str(&previous_json.to_string())
+                    let previous: EvidenceEntry = serde_json::from_str(previous_json.as_ref())
                         .map_err(|err| {
                             io::Error::new(
                                 io::ErrorKind::InvalidData,
