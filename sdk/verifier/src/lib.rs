@@ -570,6 +570,12 @@ pub struct SessionStep {
     pub verdict: VerificationVerdict,
     pub artifact_binding_hash: String,
     pub timestamp: String,
+    /// Domain-separated SHA-256 digest binding this step to its session
+    /// (`session_step_signature`). NOTE: this is an UNKEYED digest, not an
+    /// Ed25519 signature — it detects tampering by anyone who does not know the
+    /// session's per-instance nonce, but is not a portable attestation. The
+    /// name is retained for wire compatibility; renaming it to `step_digest`
+    /// is a format change deferred to an owner-approved schema bump (bd-ejuxa).
     pub step_signature: String,
 }
 
@@ -854,10 +860,13 @@ pub struct VerifierSdk {
     pub config: BTreeMap<String, String>,
     #[serde(skip, default = "default_result_origin_nonce")]
     result_origin_nonce: String,
+    // Per-instance Ed25519 key. `#[serde(skip)]` because it is instance-local
+    // secret material; a deserialized SDK is a fresh signing identity. The
+    // matching public key is derived on demand via `verifying_key()` so the two
+    // can never drift, and callers verify a result under THAT key
+    // (`verify_result`), never a world-known constant.
     #[serde(skip, default = "default_signing_key")]
     signing_key: SigningKey,
-    #[serde(skip, default = "default_verifying_key")]
-    verifying_key: VerifyingKey,
 }
 
 impl VerifierSdk {
@@ -873,22 +882,54 @@ impl VerifierSdk {
     /// assert_eq!(sdk.sdk_version, SDK_VERSION);
     /// ```
     pub fn new(verifier_identity: impl Into<String>) -> Self {
+        Self::with_signing_key(verifier_identity, default_signing_key())
+    }
+
+    /// Create a facade that signs results with a caller-supplied key. Use this
+    /// when a result must be verifiable under a known public key across process
+    /// boundaries (export `verifying_key()`); `new` generates a fresh random
+    /// key per instance instead.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use ed25519_dalek::SigningKey;
+    /// use frankenengine_verifier_sdk::VerifierSdk;
+    ///
+    /// let key = SigningKey::from_bytes(&[42_u8; 32]);
+    /// let sdk = VerifierSdk::with_signing_key("verifier://docs", key.clone());
+    /// assert_eq!(sdk.verifying_key(), key.verifying_key());
+    /// ```
+    pub fn with_signing_key(verifier_identity: impl Into<String>, signing_key: SigningKey) -> Self {
         let mut config = BTreeMap::new();
         config.insert("schema_version".to_string(), SDK_VERSION.to_string());
         config.insert(
             "security_posture".to_string(),
             CRYPTOGRAPHIC_SECURITY_POSTURE.to_string(),
         );
-        let signing_key = default_signing_key();
-        let verifying_key = VerifyingKey::from(&signing_key);
         Self {
             verifier_identity: verifier_identity.into(),
             sdk_version: SDK_VERSION.to_string(),
             config,
             result_origin_nonce: default_result_origin_nonce(),
             signing_key,
-            verifying_key,
         }
+    }
+
+    /// The public key that verifies this SDK's `verifier_signature`s. Derived
+    /// from the instance's signing key, so the two can never drift.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use frankenengine_verifier_sdk::VerifierSdk;
+    ///
+    /// let sdk = VerifierSdk::new("verifier://docs");
+    /// let _key = sdk.verifying_key();
+    /// ```
+    #[must_use]
+    pub fn verifying_key(&self) -> VerifyingKey {
+        self.signing_key.verifying_key()
     }
 
     /// Verify a claim capsule through the existing capsule replay verifier.
@@ -1749,59 +1790,35 @@ impl VerifierSdk {
     }
 
     fn verify_result_signature(&self, result: &VerificationResult) -> Result<(), VerifierSdkError> {
-        // Create the same payload that was signed
-        #[derive(Serialize)]
-        struct SignatureView<'a> {
-            operation: &'a VerificationOperation,
-            verdict: &'a VerificationVerdict,
-            confidence_score: f64,
-            checked_assertions: &'a [AssertionResult],
-            execution_timestamp: &'a str,
-            verifier_identity: &'a str,
-            artifact_binding_hash: &'a str,
-            sdk_version: &'a str,
-            result_origin_nonce: &'a str,
-        }
+        verify_result_signature_under_key(&self.verifying_key(), result)
+    }
 
-        let payload = serde_json::to_vec(&SignatureView {
-            operation: &result.operation,
-            verdict: &result.verdict,
-            confidence_score: result.confidence_score,
-            checked_assertions: &result.checked_assertions,
-            execution_timestamp: &result.execution_timestamp,
-            verifier_identity: &result.verifier_identity,
-            artifact_binding_hash: &result.artifact_binding_hash,
-            sdk_version: &result.sdk_version,
-            result_origin_nonce: &result.result_origin_nonce,
-        })
-        .map_err(|source| VerifierSdkError::Json(source.to_string()))?;
-
-        // Decode the signature from hex
-        let signature_bytes = hex::decode(&result.verifier_signature).map_err(|_| {
-            VerifierSdkError::ResultSignatureMismatch {
-                expected: "valid hex signature".to_string(),
-                actual: result.verifier_signature.clone(),
-            }
-        })?;
-
-        if signature_bytes.len() != 64 {
-            return Err(VerifierSdkError::ResultSignatureMismatch {
-                expected: "64-byte signature".to_string(),
-                actual: format!("{}-byte signature", signature_bytes.len()),
-            });
-        }
-
-        let mut signature_array = [0_u8; 64];
-        signature_array.copy_from_slice(&signature_bytes);
-        let signature = ed25519_dalek::Signature::from_bytes(&signature_array);
-
-        // Verify the Ed25519 signature
-        self.verifying_key
-            .verify_strict(&payload, &signature)
-            .map_err(|_| VerifierSdkError::ResultSignatureMismatch {
-                expected: "valid Ed25519 signature".to_string(),
-                actual: result.verifier_signature.clone(),
-            })
+    /// Verify a `VerificationResult` produced by any SDK instance under the
+    /// signer's PUBLIC key, across process boundaries. This is what makes
+    /// `verifier_signature` a real attestation: a result signed by a different
+    /// key (e.g. the old world-known `[1;32]` seed, or any forger) is refused.
+    /// It checks only the detached signature, not instance-local origin.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # #[cfg(feature = "test-support")] {
+    /// use frankenengine_verifier_sdk::{VerifierSdk, capsule::build_reference_capsule};
+    /// use ed25519_dalek::{SigningKey, VerifyingKey};
+    ///
+    /// let sdk = VerifierSdk::new("verifier://docs");
+    /// let capsule_key = VerifyingKey::from(&SigningKey::from_bytes(&[1_u8; 32]));
+    /// let result = sdk.verify_claim(&capsule_key, &build_reference_capsule())?;
+    /// sdk.verify_result(&sdk.verifying_key(), &result)?;
+    /// # }
+    /// # Ok::<(), frankenengine_verifier_sdk::VerifierSdkError>(())
+    /// ```
+    pub fn verify_result(
+        &self,
+        verifying_key: &VerifyingKey,
+        result: &VerificationResult,
+    ) -> VerifierSdkResult<()> {
+        verify_result_signature_under_key(verifying_key, result)
     }
 
     fn verify_result_belongs_to_current_verifier(
@@ -1930,18 +1947,23 @@ pub fn create_verifier_sdk(verifier_identity: impl Into<String>) -> VerifierSdk 
     VerifierSdk::new(verifier_identity)
 }
 
+/// A fresh, unpredictable per-instance Ed25519 signing key. Never a world-known
+/// constant: a `verifier_signature` must attest which key signed it, so the key
+/// cannot be one any forger already holds. Uses the OS CSPRNG (same source as
+/// the result-origin nonce).
 fn default_signing_key() -> SigningKey {
-    SigningKey::from_bytes(&[1_u8; 32])
+    let mut seed = [0_u8; 32];
+    OsRng.fill_bytes(&mut seed);
+    SigningKey::from_bytes(&seed)
 }
 
-fn default_verifying_key() -> VerifyingKey {
-    VerifyingKey::from(&default_signing_key())
-}
-
-fn facade_result_signature(
-    signing_key: &ed25519_dalek::SigningKey,
-    result: &VerificationResult,
-) -> Result<String, VerifierSdkError> {
+/// The exact bytes a `verifier_signature` attests over. It deliberately
+/// EXCLUDES `result_origin_nonce` (a per-instance secret, `#[serde(skip)]`, that
+/// an external verifier never sees) so a result is verifiable across process
+/// boundaries under the signer's public key (`verify_result`). Instance
+/// binding is enforced separately by the constant-time nonce check in
+/// `verify_result_belongs_to_current_verifier`.
+fn facade_result_signed_payload(result: &VerificationResult) -> Result<Vec<u8>, VerifierSdkError> {
     #[derive(Serialize)]
     struct SignatureView<'a> {
         operation: &'a VerificationOperation,
@@ -1952,10 +1974,9 @@ fn facade_result_signature(
         verifier_identity: &'a str,
         artifact_binding_hash: &'a str,
         sdk_version: &'a str,
-        result_origin_nonce: &'a str,
     }
 
-    let payload = serde_json::to_vec(&SignatureView {
+    serde_json::to_vec(&SignatureView {
         operation: &result.operation,
         verdict: &result.verdict,
         confidence_score: result.confidence_score,
@@ -1964,13 +1985,45 @@ fn facade_result_signature(
         verifier_identity: &result.verifier_identity,
         artifact_binding_hash: &result.artifact_binding_hash,
         sdk_version: &result.sdk_version,
-        result_origin_nonce: &result.result_origin_nonce,
     })
-    .map_err(|source| VerifierSdkError::Json(source.to_string()))?;
+    .map_err(|source| VerifierSdkError::Json(source.to_string()))
+}
 
-    // Create detached Ed25519 attestation over the result payload
+fn facade_result_signature(
+    signing_key: &ed25519_dalek::SigningKey,
+    result: &VerificationResult,
+) -> Result<String, VerifierSdkError> {
+    let payload = facade_result_signed_payload(result)?;
     let signature = signing_key.sign(&payload);
     Ok(hex::encode(signature.to_bytes()))
+}
+
+/// Verify a result's detached `verifier_signature` under `verifying_key`.
+fn verify_result_signature_under_key(
+    verifying_key: &VerifyingKey,
+    result: &VerificationResult,
+) -> Result<(), VerifierSdkError> {
+    let payload = facade_result_signed_payload(result)?;
+    let signature_bytes =
+        hex::decode(&result.verifier_signature).map_err(|_| VerifierSdkError::ResultSignatureMismatch {
+            expected: "valid hex signature".to_string(),
+            actual: result.verifier_signature.clone(),
+        })?;
+    let signature_array: [u8; 64] =
+        signature_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| VerifierSdkError::ResultSignatureMismatch {
+                expected: "64-byte signature".to_string(),
+                actual: format!("{}-byte signature", signature_bytes.len()),
+            })?;
+    let signature = ed25519_dalek::Signature::from_bytes(&signature_array);
+    verifying_key
+        .verify_strict(&payload, &signature)
+        .map_err(|_| VerifierSdkError::ResultSignatureMismatch {
+            expected: "valid Ed25519 signature".to_string(),
+            actual: result.verifier_signature.clone(),
+        })
 }
 
 fn default_result_origin_nonce() -> String {
@@ -4681,6 +4734,62 @@ mod tests {
     }
 
     #[test]
+    fn verify_result_is_bound_to_the_instances_own_random_key_not_a_world_known_seed() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        // The per-instance key is unpredictable, never the old world-known seed.
+        let world_known = SigningKey::from_bytes(&[1_u8; 32]);
+        assert_ne!(sdk.verifying_key(), world_known.verifying_key());
+
+        // A genuine result from this instance verifies under its own public key.
+        let capsule = capsule::build_reference_capsule();
+        let result = sdk
+            .verify_claim(&world_known.verifying_key(), &capsule)
+            .expect("reference claim verifies (capsule is signed by the [1;32] seed)");
+        sdk.verify_result(&sdk.verifying_key(), &result)
+            .expect("a result verifies under the signer's own public key");
+
+        // Forging the signature with the world-known seed is refused under the
+        // instance's real key -- the signature is a genuine attestation now.
+        let mut forged = result.clone();
+        forged.verifier_signature = facade_result_signature(&world_known, &forged)
+            .expect("forged signature computes");
+        let err = sdk
+            .verify_result(&sdk.verifying_key(), &forged)
+            .expect_err("a result signed by the world-known key must be refused");
+        assert!(matches!(err, VerifierSdkError::ResultSignatureMismatch { .. }));
+
+        // A second instance signs with a different key, so its result does not
+        // verify under this instance's key.
+        let other = create_verifier_sdk("verifier://alpha");
+        let other_result = other
+            .verify_claim(&world_known.verifying_key(), &capsule)
+            .expect("other instance verifies the reference claim");
+        assert!(
+            sdk.verify_result(&sdk.verifying_key(), &other_result)
+                .is_err()
+        );
+        other
+            .verify_result(&other.verifying_key(), &other_result)
+            .expect("each instance's result verifies under its own key");
+    }
+
+    #[test]
+    fn with_signing_key_makes_results_verifiable_under_the_supplied_public_key() {
+        let key = SigningKey::from_bytes(&[42_u8; 32]);
+        let sdk = VerifierSdk::with_signing_key("verifier://alpha", key.clone());
+        assert_eq!(sdk.verifying_key(), key.verifying_key());
+        let capsule = capsule::build_reference_capsule();
+        let result = sdk
+            .verify_claim(
+                &SigningKey::from_bytes(&[1_u8; 32]).verifying_key(),
+                &capsule,
+            )
+            .expect("reference claim verifies");
+        sdk.verify_result(&key.verifying_key(), &result)
+            .expect("result verifies under the caller-supplied public key");
+    }
+
+    #[test]
     fn record_session_step_rejects_when_step_cap_is_reached() {
         let sdk = create_verifier_sdk("verifier://alpha");
         let mut session = sdk
@@ -6049,7 +6158,10 @@ mod tests {
         let capsule = capsule::build_reference_capsule();
 
         let err = sdk
-            .verify_claim(&default_verifying_key(), &capsule)
+            .verify_claim(
+                &VerifyingKey::from(&SigningKey::from_bytes(&[1_u8; 32])),
+                &capsule,
+            )
             .expect_err("whitespace-only verifier identity must be rejected");
 
         assert!(matches!(
