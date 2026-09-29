@@ -722,8 +722,24 @@ fn a_failed_run_still_surfaces_the_denied_effect_receipt_bd_muy9u() {
     });
     assert_eq!(
         evidence["schema_version"].as_str(),
-        Some("franken-node/run-failure-effect-evidence/v1"),
+        Some("franken-node/run-failure-effect-evidence/v2"),
         "failure evidence must be self-describing; got=\n{}",
+        serde_json::to_string_pretty(&evidence).unwrap_or_default()
+    );
+    // bd-uqz71: the v2 envelope carries the failure reason and the guest's
+    // captured console, not just the ledger, so a --json consumer never has to
+    // scrape the human `Error:` line off stderr.
+    assert!(
+        evidence["error"]
+            .as_str()
+            .is_some_and(|reason| !reason.trim().is_empty()),
+        "failure evidence must carry a non-empty error reason; got=\n{}",
+        serde_json::to_string_pretty(&evidence).unwrap_or_default()
+    );
+    assert!(
+        evidence["captured_output"]["stdout"].is_string()
+            && evidence["captured_output"]["stderr"].is_string(),
+        "failure evidence must carry the guest's captured_output; got=\n{}",
         serde_json::to_string_pretty(&evidence).unwrap_or_default()
     );
 
@@ -768,6 +784,59 @@ fn a_failed_run_still_surfaces_the_denied_effect_receipt_bd_muy9u() {
             .is_some_and(|head| head.starts_with("sha256:")),
         "recovered evidence is still chain-committed; got ledger=\n{}",
         serde_json::to_string_pretty(ledger).unwrap_or_default()
+    );
+}
+
+/// bd-uqz71: a --json run that fails AFTER the guest printed must surface both
+/// the printed console and the failure reason in the evidence envelope, not
+/// drop them (v1 emitted only the ledger, forcing consumers to scrape the human
+/// `Error:` line off stderr).
+#[test]
+fn failed_run_json_envelope_carries_guest_console_and_error_bd_uqz71() {
+    // Print a marker, THEN attempt a filesystem write that balanced refuses.
+    const MARK_THEN_DENIED_WRITE_APP: &str = "console.log(\"UQZ71_MARKER\");\n\
+        require(\"fs\").writeFileSync(\"uqz71-out.txt\", \"x\");\n";
+
+    let (_dir, outcome) = run_app(MARK_THEN_DENIED_WRITE_APP, &["--json"]);
+
+    assert_ne!(
+        outcome.exit_code,
+        Some(0),
+        "a refused write must fail the run; stdout=\n{}\nstderr=\n{}",
+        outcome.stdout,
+        outcome.stderr
+    );
+
+    let evidence: Value = serde_json::from_str(&outcome.stdout).unwrap_or_else(|e| {
+        panic!(
+            "--json failure must emit a self-describing envelope on stdout: {e}\nexit={:?}\nstdout=\n{}\nstderr=\n{}",
+            outcome.exit_code, outcome.stdout, outcome.stderr
+        )
+    });
+    assert_eq!(
+        evidence["schema_version"].as_str(),
+        Some("franken-node/run-failure-effect-evidence/v2"),
+    );
+    assert!(
+        evidence["captured_output"]["stdout"]
+            .as_str()
+            .is_some_and(|stdout| stdout.contains("UQZ71_MARKER")),
+        "the guest's pre-failure console must survive in the envelope, not be dropped; got=\n{}",
+        serde_json::to_string_pretty(&evidence).unwrap_or_default()
+    );
+    assert!(
+        evidence["error"]
+            .as_str()
+            .is_some_and(|reason| reason.to_ascii_lowercase().contains("fs:write")
+                || reason.to_ascii_lowercase().contains("capability")),
+        "the envelope must name the failure reason (the refused fs:write), not leave it only on stderr; got=\n{}",
+        serde_json::to_string_pretty(&evidence).unwrap_or_default()
+    );
+    // The human `Error:` line must NOT also be appended after the JSON document.
+    assert!(
+        !outcome.stdout.trim_end().ends_with("fix_command="),
+        "the --json path must not append a human error line after the envelope; stdout=\n{}",
+        outcome.stdout
     );
 }
 

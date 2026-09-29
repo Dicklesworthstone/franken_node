@@ -11208,16 +11208,24 @@ fn render_run_execution_receipt_summary(
 // self-describing envelope is that home: it exists only on the failure path and
 // carries the identical, SDK-verifiable `HostEffectLedger` shape, so a denial
 // stays visible instead of vanishing because the program aborted afterwards.
-const RUN_FAILURE_EFFECT_EVIDENCE_SCHEMA: &str = "franken-node/run-failure-effect-evidence/v1";
+// v2 (bd-uqz71): the JSON envelope also carries `error` (why the run failed)
+// and `captured_output` (what the guest printed before failing). v1 dropped
+// both in --json mode -- a scripted consumer saw only the ledger and had to
+// scrape the human `Error:` line off stderr to learn the failure reason.
+const RUN_FAILURE_EFFECT_EVIDENCE_SCHEMA: &str = "franken-node/run-failure-effect-evidence/v2";
 
-/// Surface the host-effect ledger recovered from a failed native run.
+/// Surface the host-effect ledger recovered from a failed native run, plus the
+/// failure reason and the guest's captured output.
 ///
-/// The run stays failed; this only stops its receipts from being discarded.
-/// Console-only mode emits nothing, for the same reason it suppresses the
-/// preflight banner: anything beyond the guest's own streams registers as
-/// behavioral divergence when a reference runtime is compared in lockstep.
+/// The run stays failed; this only stops its receipts (and, in --json mode, the
+/// reason and console) from being discarded. Console-only mode emits nothing,
+/// for the same reason it suppresses the preflight banner: anything beyond the
+/// guest's own streams registers as behavioral divergence when a reference
+/// runtime is compared in lockstep.
 fn emit_failed_run_effect_evidence(
-    ledger: &ops::engine_dispatcher::HostEffectLedger,
+    ledger: Option<&ops::engine_dispatcher::HostEffectLedger>,
+    guest_output: &ops::engine_dispatcher::CapturedProcessOutput,
+    error: &str,
     json: bool,
     console_only: bool,
 ) -> Result<()> {
@@ -11227,6 +11235,11 @@ fn emit_failed_run_effect_evidence(
     if json {
         let evidence = serde_json::json!({
             "schema_version": RUN_FAILURE_EFFECT_EVIDENCE_SCHEMA,
+            "error": error,
+            "captured_output": {
+                "stdout": guest_output.stdout,
+                "stderr": guest_output.stderr,
+            },
             "host_effect_ledger": ledger,
         });
         println!(
@@ -11236,10 +11249,12 @@ fn emit_failed_run_effect_evidence(
         );
         return Ok(());
     }
-    println!(
-        "run failed after host effects were already recorded; the signed ledger below is complete for the attempt"
-    );
-    println!("{}", render_host_effect_ledger_human(ledger));
+    if let Some(ledger) = ledger {
+        println!(
+            "run failed after host effects were already recorded; the signed ledger below is complete for the attempt"
+        );
+        println!("{}", render_host_effect_ledger_human(ledger));
+    }
     Ok(())
 }
 
@@ -31760,11 +31775,11 @@ fn main() -> Result<()> {
                     if let Some(failure) =
                         err.downcast_ref::<ops::engine_dispatcher::NativeRunFailure>()
                     {
+                        let guest_output = failure.guest_output();
                         // What the program printed before failing reaches the
                         // operator's streams first, as it does for a completed
                         // run (and under Node).
                         if !json {
-                            let guest_output = failure.guest_output();
                             if !guest_output.stdout.is_empty() {
                                 print!("{}", guest_output.stdout);
                             }
@@ -31772,9 +31787,18 @@ fn main() -> Result<()> {
                                 eprint!("{}", guest_output.stderr);
                             }
                         }
-                        if let Some(ledger) = failure.host_effect_ledger() {
-                            emit_failed_run_effect_evidence(ledger, json, console_only)?;
-                        }
+                        // bd-uqz71: emit the v2 evidence envelope even when the
+                        // attempt recorded no host-effect ledger (e.g. a pure
+                        // compute throw), so a --json consumer still sees the
+                        // failure reason and the guest's captured console
+                        // instead of only a human `Error:` line on stderr.
+                        emit_failed_run_effect_evidence(
+                            failure.host_effect_ledger(),
+                            guest_output,
+                            &failure.to_string(),
+                            json,
+                            console_only,
+                        )?;
                     }
                     #[cfg(feature = "engine")]
                     if let Some(interruption) =
