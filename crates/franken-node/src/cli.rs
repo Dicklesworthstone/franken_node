@@ -2543,6 +2543,11 @@ pub enum DoctorCommand {
     /// Validate the Linux Bubblewrap backend required for process spawning.
     #[command(name = "process-spawn-readiness")]
     ProcessSpawnReadiness(DoctorProcessSpawnReadinessArgs),
+
+    /// Rank workspace-pressure findings by expected loss (IBD-8) using the
+    /// copilot value-of-information engine.
+    #[command(name = "expected-loss-actions")]
+    ExpectedLossActions(DoctorExpectedLossActionsArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -2612,6 +2617,35 @@ pub struct DoctorProcessSpawnReadinessArgs {
     /// Emit the readiness report as machine-readable JSON.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct DoctorExpectedLossActionsArgs {
+    /// Rank a previously emitted `doctor workspace-pressure --json` report
+    /// instead of collecting live workspace state. The file must be a
+    /// DoctorOutput JSON document.
+    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    pub from_report: Option<PathBuf>,
+
+    /// Emit the ranked recommendation envelope as JSON to stdout.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Maximum number of ranked recommendations to return.
+    #[arg(long, default_value_t = 5)]
+    pub top_k: usize,
+
+    /// Operator identity recorded in the recommendation audit trail.
+    #[arg(long, default_value = "operator://local")]
+    pub operator: String,
+
+    /// Use conservative pressure thresholds when collecting live state.
+    #[arg(long)]
+    pub conservative: bool,
+
+    /// Use permissive pressure thresholds when collecting live state.
+    #[arg(long)]
+    pub permissive: bool,
 }
 
 #[derive(Debug, Parser)]

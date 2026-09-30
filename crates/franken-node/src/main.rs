@@ -109,17 +109,18 @@ use crate::api::{
 use crate::cli::{
     BenchCommand, Cli, Command, DebugCommand, DebugEvidenceArgs, DebugEvidenceKind,
     DebugExplainArgs, DebugTraceArgs, DoctorCloseConditionArgs, DoctorCommand,
-    DoctorEvidenceReadinessArgs, DoctorPolicyActivationInput, DoctorProcessSpawnReadinessArgs,
-    DoctorWorkspacePressureArgs, FleetAgentArgs, FleetCommand, IncidentCommand, LtvCommand,
-    MigrateCommand, MigrateReportArgs, OpsCommand, OpsCompatCorpusRunArgs, OpsConfigAuditArgs,
-    OpsMetricsFormat, OpsProofCarryingEvidenceArgs, OpsResourceGovernorArgs,
-    OpsValidationCloseoutArgs, OpsValidationReadinessArgs, ProofQueueCommand, ProofQueueStatusArgs,
-    ProofWorkersCommand, ProofWorkersRestartArgs, ProofsCommand, RegistryCommand, RemoteCapCommand,
-    RemoteCapIssueArgs, RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand,
-    RuntimeLaneCommand, SafeModeCommand, SafeModeEnterArgs, SafeModeExitArgs, SafeModeStatusArgs,
-    TrustCardCommand, TrustCommand, VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs,
-    VerifyMigrationArgs, VerifyModuleArgs, VerifyRecoveryRunbookArgs, VerifyReleaseArgs,
-    VerifyTransparencyLogArgs, load_doctor_policy_activation_input,
+    DoctorEvidenceReadinessArgs, DoctorExpectedLossActionsArgs, DoctorPolicyActivationInput,
+    DoctorProcessSpawnReadinessArgs, DoctorWorkspacePressureArgs, FleetAgentArgs, FleetCommand,
+    IncidentCommand, LtvCommand, MigrateCommand, MigrateReportArgs, OpsCommand,
+    OpsCompatCorpusRunArgs, OpsConfigAuditArgs, OpsMetricsFormat, OpsProofCarryingEvidenceArgs,
+    OpsResourceGovernorArgs, OpsValidationCloseoutArgs, OpsValidationReadinessArgs,
+    ProofQueueCommand, ProofQueueStatusArgs, ProofWorkersCommand, ProofWorkersRestartArgs,
+    ProofsCommand, RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs, RemoteCapRevokeArgs,
+    RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand, SafeModeCommand,
+    SafeModeEnterArgs, SafeModeExitArgs, SafeModeStatusArgs, TrustCardCommand, TrustCommand,
+    VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs,
+    VerifyModuleArgs, VerifyRecoveryRunbookArgs, VerifyReleaseArgs, VerifyTransparencyLogArgs,
+    load_doctor_policy_activation_input,
 };
 use crate::ops::workspace_pressure_policy::WorkspacePressureInputs;
 use crate::policy::{
@@ -7129,6 +7130,115 @@ fn handle_doctor_workspace_pressure(
     }
 
     Ok(())
+}
+
+/// IBD-8: rank the workspace-pressure doctor's findings by expected loss via the
+/// copilot value-of-information engine. Sources findings either from a saved
+/// `doctor workspace-pressure --json` report (`--from-report`) or a live probe.
+fn handle_doctor_expected_loss_actions(
+    args: &DoctorExpectedLossActionsArgs,
+    trace_id: &str,
+    parent_json: bool,
+) -> Result<()> {
+    use crate::ops::doctor::{
+        DOCTOR_EXPECTED_LOSS_ACTIONS_SCHEMA_VERSION, DoctorOutput, WorkspacePressureDoctor,
+        rank_doctor_actions_by_expected_loss,
+    };
+    use crate::ops::workspace_pressure_policy::PolicyThresholds;
+
+    let json = args.json || parent_json;
+
+    // Source the doctor findings: either a saved report or a live probe.
+    let report: DoctorOutput = if let Some(path) = &args.from_report {
+        let validated = cli::validate_user_content_pathbuf(path)
+            .with_context(|| format!("invalid --from-report path: {:?}", path))?;
+        let raw = std::fs::read_to_string(&validated)
+            .with_context(|| format!("failed to read --from-report file: {:?}", validated))?;
+        serde_json::from_str(&raw).with_context(|| {
+            "--from-report must be a doctor workspace-pressure JSON report".to_owned()
+        })?
+    } else {
+        let coordination_report = collect_coordination_health();
+        if !json && !coordination_report.is_healthy() {
+            eprintln!(
+                "Warning: Agent coordination degraded: {}",
+                coordination_report.reason
+            );
+        }
+        let inputs =
+            collect_workspace_pressure_inputs_with_coordination(coordination_report.is_healthy())?;
+        let doctor = if args.conservative {
+            WorkspacePressureDoctor::with_thresholds(PolicyThresholds::conservative())
+        } else if args.permissive {
+            WorkspacePressureDoctor::with_thresholds(PolicyThresholds::permissive())
+        } else {
+            WorkspacePressureDoctor::new()
+        };
+        doctor.generate_report_with_agent_mail_coordination(
+            &inputs,
+            coordination_report.agent_mail_coordination,
+        )
+    };
+
+    let recommendation_id = Uuid::new_v4().to_string();
+    let effective_trace = if trace_id.is_empty() {
+        Uuid::new_v4().to_string()
+    } else {
+        trace_id.to_owned()
+    };
+
+    let response = rank_doctor_actions_by_expected_loss(
+        &report,
+        &args.operator,
+        &recommendation_id,
+        &effective_trace,
+        args.top_k,
+    );
+
+    if json {
+        let envelope = serde_json::json!({
+            "schema_version": DOCTOR_EXPECTED_LOSS_ACTIONS_SCHEMA_VERSION,
+            "source": if args.from_report.is_some() { "report" } else { "live" },
+            "doctor_status": report.status.as_str(),
+            "response": response,
+        });
+        println!("{}", serde_json::to_string_pretty(&envelope)?);
+    } else {
+        print_expected_loss_actions_human(&report, &response);
+    }
+
+    Ok(())
+}
+
+fn print_expected_loss_actions_human(
+    report: &crate::ops::doctor::DoctorOutput,
+    response: &crate::security::copilot_engine::CopilotResponse,
+) {
+    println!(
+        "Expected-loss action ranking (status: {}, recommendation {})",
+        report.status.as_str(),
+        response.recommendation_id
+    );
+    if let Some(warning) = &response.degraded_warning {
+        println!("  WARNING: {}", warning.message);
+    }
+    if response.recommendations.is_empty() {
+        println!("  No actions recommended -- workspace healthy.");
+        return;
+    }
+    for (rank, rec) in response.recommendations.iter().enumerate() {
+        println!(
+            "  {}. [VoI {:.2}] {} -- dominant: {} loss",
+            rank + 1,
+            rec.voi_score,
+            rec.display_name,
+            rec.expected_loss.dominant_dimension(),
+        );
+        println!("     {}", rec.rationale);
+        if rec.degraded_confidence {
+            println!("     (confidence widened: system degraded)");
+        }
+    }
 }
 
 fn collect_workspace_pressure_inputs() -> Result<WorkspacePressureInputs> {
@@ -33254,6 +33364,20 @@ fn main() -> Result<()> {
                                 DOCTOR_ERROR_CLI_SCHEMA_VERSION,
                                 "doctor.process-spawn-readiness",
                                 readiness_args.json || args.json,
+                                err,
+                            );
+                        }
+                    }
+                    DoctorCommand::ExpectedLossActions(action_args) => {
+                        if let Err(err) = handle_doctor_expected_loss_actions(
+                            action_args,
+                            &args.trace_id,
+                            args.json,
+                        ) {
+                            return named_cli_fail(
+                                DOCTOR_ERROR_CLI_SCHEMA_VERSION,
+                                "doctor.expected-loss-actions",
+                                action_args.json || args.json,
                                 err,
                             );
                         }

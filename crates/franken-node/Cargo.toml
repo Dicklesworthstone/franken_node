@@ -280,6 +280,12 @@ path = "tests/run_console_exit_e2e.rs"
 name = "run_language_semantics_e2e"
 path = "tests/run_language_semantics_e2e.rs"
 
+# bd-reality-20260923-26n9r.14 (IBD-8): proves security::copilot_engine is wired
+# into the `doctor expected-loss-actions` CLI command (was a library island).
+[[test]]
+name = "doctor_expected_loss_actions_e2e"
+path = "tests/doctor_expected_loss_actions_e2e.rs"
+
 # bd-f5b04.8.1: master mock-free TNR pipeline e2e (one trace-id across
 # run -> effect ledger -> structured logs -> incident replay chain ->
 # verifier SDK -> LTV witness leg). Lane wrapper: scripts/run_tnr_full_pipeline.sh
