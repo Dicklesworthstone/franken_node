@@ -1,12 +1,17 @@
 //! Cross-implementation conformance: the independent verifier SDK verifies a
 //! bundle produced by the real `franken-node incident bundle` CLI.
 //!
-//! Fixture provenance (`fixtures/cli_incident_bundle/INC-SDK-FIXTURE-1.fnbundle`):
-//! produced by `franken-node incident bundle --id INC-SDK-FIXTURE-1 --verify
-//! --receipt-signing-key <seed>` (release build of franken_node 8b8b45311)
-//! where `<seed>` is the RFC 8032 section 7.1 TEST 1 secret key. The trust
-//! anchor below is that test vector's published public key, so the anchor is
-//! independent of anything embedded in the bundle.
+//! Fixture provenance — REPRODUCIBLE via `scripts/regen_cli_incident_bundle_fixture.sh`
+//! from checked-in inputs (bd-reality-20260923-26n9r.7 D3):
+//!   - evidence: `fixtures/cli_incident_bundle/INC-SDK-FIXTURE-1.evidence.json`
+//!   - signing seed: `fixtures/cli_incident_bundle/rfc8032_test1_seed.hex`
+//!     (the RFC 8032 section 7.1 TEST 1 secret key)
+//! The script runs the real `franken-node incident bundle --evidence-path …
+//! --receipt-signing-key …`. The bundle is deterministic (created_at derived
+//! from the timeline, deterministic bundle_id, deterministic Ed25519 signing),
+//! so the output is byte-reproducible from those two inputs. The trust anchor
+//! below is that test vector's PUBLISHED public key, so it is independent of
+//! anything embedded in the bundle.
 
 use ed25519_dalek::VerifyingKey;
 use frankenengine_verifier_sdk::incident_bundle::{
@@ -46,7 +51,7 @@ fn reseal_integrity(value: &mut Value) {
 fn sdk_verifies_real_cli_incident_bundle_under_independent_anchor() {
     let verified = verify_incident_bundle(FIXTURE, &anchor()).expect("CLI bundle must verify");
     assert_eq!(verified.incident_id, "INC-SDK-FIXTURE-1");
-    assert_eq!(verified.event_count, 2);
+    assert_eq!(verified.event_count, 3);
     assert_eq!(verified.signer_public_key_hex, RFC8032_TEST1_PUBLIC_KEY_HEX);
     assert_eq!(
         verified.integrity_hash,

@@ -1,0 +1,46 @@
+{
+  "schema_version": "franken-node/incident-evidence-source/v1",
+  "incident_id": "INC-SDK-FIXTURE-1",
+  "collected_at": "2026-02-20T10:05:00.000000Z",
+  "trace_id": "trace-sdk-conformance-fixture-1",
+  "severity": "high",
+  "incident_type": "security",
+  "detector": "sdk-conformance-fixture",
+  "policy_version": "1.2.3",
+  "initial_state_snapshot": { "epoch": 7, "mode": "strict" },
+  "events": [
+    {
+      "event_id": "evt-001",
+      "timestamp": "2026-02-20T10:00:00.000100Z",
+      "event_type": "external_signal",
+      "payload": { "signal": "anomaly", "severity": "high" },
+      "provenance_ref": "refs/logs/event-001.json"
+    },
+    {
+      "event_id": "evt-002",
+      "timestamp": "2026-02-20T10:00:00.000200Z",
+      "event_type": "policy_eval",
+      "payload": { "decision": "quarantine", "confidence": 91 },
+      "provenance_ref": "refs/logs/event-002.json",
+      "parent_event_id": "evt-001"
+    },
+    {
+      "event_id": "evt-003",
+      "timestamp": "2026-02-20T10:00:00.000300Z",
+      "event_type": "operator_action",
+      "payload": { "action": "seal", "result": "accepted" },
+      "provenance_ref": "refs/logs/event-003.json",
+      "parent_event_id": "evt-002"
+    }
+  ],
+  "evidence_refs": [
+    "refs/logs/event-001.json",
+    "refs/logs/event-002.json",
+    "refs/logs/event-003.json"
+  ],
+  "metadata": {
+    "title": "Verifier SDK cross-implementation conformance fixture",
+    "affected_components": ["runtime", "control-plane"],
+    "tags": ["sdk", "conformance", "incident-bundle"]
+  }
+}
