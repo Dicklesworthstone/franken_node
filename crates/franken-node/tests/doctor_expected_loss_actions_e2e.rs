@@ -37,6 +37,22 @@ fn run(args: &[&str]) -> (bool, String, String) {
     )
 }
 
+/// Run with a working directory. Content-path CLI args (`--from-report`) reject
+/// absolute paths by design (the `validate_user_content_path` security guard), so
+/// callers pass a relative filename resolved against `cwd`.
+fn run_in(cwd: &std::path::Path, args: &[&str]) -> (bool, String, String) {
+    let output = Command::new(franken_node_bin())
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("spawn franken-node");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
 #[test]
 fn live_expected_loss_actions_is_reachable_and_well_formed() {
     let (ok, stdout, stderr) = run(&["doctor", "expected-loss-actions", "--json", "--top-k", "3"]);
@@ -123,21 +139,28 @@ fn from_report_ranks_controlled_findings_by_expected_loss() {
     report["resources"]["target_dir_bytes"] = serde_json::json!(1_000_000_000u64);
     report["resources"]["free_disk_bytes"] = serde_json::json!(1_000_000_000u64);
 
-    // 3. Write the fixture and rank it through the wired copilot engine.
+    // 3. Write the fixture and rank it through the wired copilot engine. The
+    //    content-path guard rejects absolute paths, so run from the tempdir and
+    //    pass a relative filename.
     let dir = tempfile::TempDir::new().expect("tempdir");
-    let fixture = dir.path().join("report.json");
-    std::fs::write(&fixture, serde_json::to_string_pretty(&report).unwrap())
-        .expect("write fixture");
+    std::fs::write(
+        dir.path().join("report.json"),
+        serde_json::to_string_pretty(&report).unwrap(),
+    )
+    .expect("write fixture");
 
-    let (ok, stdout, stderr) = run(&[
-        "doctor",
-        "expected-loss-actions",
-        "--from-report",
-        fixture.to_str().unwrap(),
-        "--json",
-        "--top-k",
-        "5",
-    ]);
+    let (ok, stdout, stderr) = run_in(
+        dir.path(),
+        &[
+            "doctor",
+            "expected-loss-actions",
+            "--from-report",
+            "report.json",
+            "--json",
+            "--top-k",
+            "5",
+        ],
+    );
     assert!(ok, "--from-report run must exit 0; stderr=\n{stderr}");
 
     let envelope: serde_json::Value =
@@ -191,15 +214,21 @@ fn from_report_human_output_is_readable() {
     ]);
 
     let dir = tempfile::TempDir::new().unwrap();
-    let fixture = dir.path().join("report.json");
-    std::fs::write(&fixture, serde_json::to_string(&report).unwrap()).unwrap();
+    std::fs::write(
+        dir.path().join("report.json"),
+        serde_json::to_string(&report).unwrap(),
+    )
+    .unwrap();
 
-    let (ok, stdout, stderr) = run(&[
-        "doctor",
-        "expected-loss-actions",
-        "--from-report",
-        fixture.to_str().unwrap(),
-    ]);
+    let (ok, stdout, stderr) = run_in(
+        dir.path(),
+        &[
+            "doctor",
+            "expected-loss-actions",
+            "--from-report",
+            "report.json",
+        ],
+    );
     assert!(ok, "human run must exit 0; stderr=\n{stderr}");
     assert!(
         stdout.contains("Expected-loss action ranking"),

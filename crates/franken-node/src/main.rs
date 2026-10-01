@@ -7180,9 +7180,9 @@ fn handle_doctor_expected_loss_actions(
         )
     };
 
-    let recommendation_id = Uuid::new_v4().to_string();
+    let recommendation_id = Uuid::now_v7().to_string();
     let effective_trace = if trace_id.is_empty() {
-        Uuid::new_v4().to_string()
+        Uuid::now_v7().to_string()
     } else {
         trace_id.to_owned()
     };
@@ -7212,7 +7212,7 @@ fn handle_doctor_expected_loss_actions(
 
 fn print_expected_loss_actions_human(
     report: &crate::ops::doctor::DoctorOutput,
-    response: &crate::security::copilot_engine::CopilotResponse,
+    response: &frankenengine_node::security::copilot_engine::CopilotResponse,
 ) {
     println!(
         "Expected-loss action ranking (status: {}, recommendation {})",
