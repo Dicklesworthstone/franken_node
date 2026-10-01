@@ -1,0 +1,5 @@
+{
+  "schema": "franken-node/reachability-census/v1",
+  "island_line_ceiling": 71592,
+  "note": "Max non-test lines in default-compiled, reference-unreachable modules (library islands). May only DECREASE. Lower it with `scripts/check_reachability.py --update-ceiling` after wiring or gating an island; CI never raises it."
+}
