@@ -66,6 +66,8 @@ MOD_DECL_RE = re.compile(
 )
 ATTR_RE = re.compile(r"^[ \t]*#!?\[(?P<body>.+)\][ \t]*$")
 FEATURE_RE = re.compile(r'feature[ \t]*=[ \t]*"(?P<feat>[^"]+)"')
+# `#[path = "some/file.rs"]` — links a non-sibling file under an alias mod name.
+PATH_ATTR_RE = re.compile(r'path[ \t]*=[ \t]*"(?P<rel>[^"]+\.rs)"')
 
 # Files that are roots / declaration hubs, never "island" leaves themselves.
 ROOT_FILES = {"lib.rs", "main.rs"}
@@ -202,6 +204,18 @@ def parse_mod_feature_gates(text: str) -> Dict[str, bool]:
     """Map `mod NAME` -> opt-in-gated? for declarations in one file, carrying the
     run of `#[cfg(...)]`/attributes immediately above each declaration."""
     gates: Dict[str, bool] = {}
+    for name, _path_rel, gated in parse_declarations(text):
+        gates[name] = gates.get(name, True) and gated if name in gates else gated
+    return gates
+
+
+def parse_declarations(text: str) -> List[Tuple[str, Optional[str], bool]]:
+    """Each `(pub) mod NAME;`/`{` declaration in one file as
+    (ref_name, path_rel, opt_in), carrying the attribute run above it. `ref_name`
+    is the alias the module is reached by (`NAME`). `path_rel` is the
+    `#[path="..."]` target (relative to the declaring file's dir) when present,
+    else None (a sibling `NAME.rs` / `NAME/mod.rs`)."""
+    decls: List[Tuple[str, Optional[str], bool]] = []
     pending: List[str] = []
     for line in text.splitlines():
         attr = ATTR_RE.match(line)
@@ -212,14 +226,18 @@ def parse_mod_feature_gates(text: str) -> Dict[str, bool]:
         if m:
             name = m.group("name")
             gated = opt_in_feature_gated(pending)
-            # If the same name is declared twice, opt-in anywhere wins only if
-            # EVERY declaration is gated (a default-compiled copy makes it live).
-            gates[name] = gates.get(name, True) and gated if name in gates else gated
+            path_rel = None
+            for body in pending:
+                pm = PATH_ATTR_RE.search(body)
+                if pm:
+                    path_rel = pm.group("rel")
+                    break
+            decls.append((name, path_rel, gated))
             pending = []
             continue
         if line.strip() and not line.strip().startswith("//"):
             pending = []
-    return gates
+    return decls
 
 
 # Identifiers that appear adjacent to `::` are path references (`foo::bar`,
@@ -282,13 +300,29 @@ def _subtree_of(rel: str) -> str:
     return rel[:-3] if rel.endswith(".rs") else rel
 
 
+def _resolve_mod_target(decl_dir: str, name: str, all_rels: Set[str]) -> Optional[str]:
+    """Resolve a sibling `mod NAME;` to its file: `<dir>/NAME.rs` or
+    `<dir>/NAME/mod.rs`, whichever exists."""
+    cand_file = os.path.normpath(os.path.join(decl_dir, name + ".rs")) if decl_dir else name + ".rs"
+    cand_mod = (
+        os.path.normpath(os.path.join(decl_dir, name, "mod.rs"))
+        if decl_dir
+        else os.path.join(name, "mod.rs")
+    )
+    if cand_file in all_rels:
+        return cand_file
+    if cand_mod in all_rels:
+        return cand_mod
+    return None
+
+
 def run_census(repo_root: str, crate_dir: str) -> Tuple[Census, Dict[str, str]]:
     src_dir = os.path.join(repo_root, crate_dir, "src")
     abs_files = collect_src_files(src_dir)
 
     raw_by_rel: Dict[str, str] = {}
     refs_by_rel: Dict[str, Set[str]] = {}
-    gates: Dict[str, bool] = {}
+    decls_by_rel: Dict[str, List[Tuple[str, Optional[str], bool]]] = {}
     for ap in abs_files:
         with open(ap, "r", encoding="utf-8", errors="replace") as fh:
             raw = fh.read()
@@ -297,18 +331,42 @@ def run_census(repo_root: str, crate_dir: str) -> Tuple[Census, Dict[str, str]]:
         # Path references are collected from TEST-STRIPPED text so a module used
         # only by #[cfg(test)] code still reads as an island.
         refs_by_rel[rel] = path_referenced_idents(strip_test_regions(raw))
-        for name, gated in parse_mod_feature_gates(raw).items():
-            gates[name] = gates.get(name, True) and gated if name in gates else gated
+        decls_by_rel[rel] = parse_declarations(raw)
 
-    declared = set(gates.keys())
+    all_rels = set(raw_by_rel)
+
+    # Resolve every declaration to the file it compiles, learning each file's
+    # reference-name(s) (the alias it is reached by: `mod NAME` -> NAME; a
+    # `#[path="x.rs"] mod ALIAS` -> ALIAS) and whether it is opt-in gated.
+    names_for_file: Dict[str, Set[str]] = {}
+    gate_for_file: Dict[str, bool] = {}
+    for decl_rel, decls in decls_by_rel.items():
+        decl_dir = os.path.dirname(decl_rel)
+        for ref_name, path_rel, gated in decls:
+            if path_rel is not None:
+                target = os.path.normpath(os.path.join(decl_dir, path_rel))
+            else:
+                target = _resolve_mod_target(decl_dir, ref_name, all_rels)
+            if target is None or target not in all_rels:
+                continue
+            names_for_file.setdefault(target, set()).add(ref_name)
+            # Opt-in only if EVERY declaration of the file is gated (a single
+            # default-compiled declaration makes the file live by default).
+            gate_for_file[target] = (
+                gate_for_file.get(target, True) and gated
+                if target in gate_for_file
+                else gated
+            )
+
     census = Census()
     for rel in sorted(raw_by_rel):
         census.scanned_files += 1
         name = module_name_for(rel)
         if name is None:
             continue
-        if name not in declared:
-            # No `mod NAME` anywhere -> file is never compiled (dead file).
+        ref_names = names_for_file.get(rel)
+        if not ref_names:
+            # No declaration anywhere resolves to this file -> never compiled.
             mf = ModuleFile(
                 rel_path=rel,
                 name=name,
@@ -321,19 +379,19 @@ def run_census(repo_root: str, crate_dir: str) -> Tuple[Census, Dict[str, str]]:
             continue
         own_subtree = _subtree_of(rel)
         # Reachable if some file OUTSIDE this module's own subtree path-references
-        # the module name.
+        # ANY of the names it is reached by.
         reachable = False
         for other_rel, ids in refs_by_rel.items():
             if other_rel == rel:
                 continue
             if other_rel == own_subtree + ".rs" or other_rel.startswith(own_subtree + os.sep):
                 continue  # self-reference within the module's own subtree
-            if name in ids:
+            if ids & ref_names:
                 reachable = True
                 break
         if reachable:
             continue
-        opt_in = gates.get(name, False)
+        opt_in = gate_for_file.get(rel, False)
         mf = ModuleFile(
             rel_path=rel,
             name=name,
