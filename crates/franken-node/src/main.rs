@@ -7152,7 +7152,7 @@ fn handle_doctor_expected_loss_actions(
     let report: DoctorOutput = if let Some(path) = &args.from_report {
         let validated = cli::validate_user_content_pathbuf(path)
             .with_context(|| format!("invalid --from-report path: {:?}", path))?;
-        let raw = std::fs::read_to_string(&validated)
+        let raw = std::fs::read_to_string(validated)
             .with_context(|| format!("failed to read --from-report file: {:?}", validated))?;
         serde_json::from_str(&raw).with_context(|| {
             "--from-report must be a doctor workspace-pressure JSON report".to_owned()
