@@ -2004,19 +2004,18 @@ fn verify_result_signature_under_key(
     result: &VerificationResult,
 ) -> Result<(), VerifierSdkError> {
     let payload = facade_result_signed_payload(result)?;
-    let signature_bytes =
-        hex::decode(&result.verifier_signature).map_err(|_| VerifierSdkError::ResultSignatureMismatch {
+    let signature_bytes = hex::decode(&result.verifier_signature).map_err(|_| {
+        VerifierSdkError::ResultSignatureMismatch {
             expected: "valid hex signature".to_string(),
             actual: result.verifier_signature.clone(),
-        })?;
-    let signature_array: [u8; 64] =
-        signature_bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| VerifierSdkError::ResultSignatureMismatch {
-                expected: "64-byte signature".to_string(),
-                actual: format!("{}-byte signature", signature_bytes.len()),
-            })?;
+        }
+    })?;
+    let signature_array: [u8; 64] = signature_bytes.as_slice().try_into().map_err(|_| {
+        VerifierSdkError::ResultSignatureMismatch {
+            expected: "64-byte signature".to_string(),
+            actual: format!("{}-byte signature", signature_bytes.len()),
+        }
+    })?;
     let signature = ed25519_dalek::Signature::from_bytes(&signature_array);
     verifying_key
         .verify_strict(&payload, &signature)
@@ -4751,12 +4750,15 @@ mod tests {
         // Forging the signature with the world-known seed is refused under the
         // instance's real key -- the signature is a genuine attestation now.
         let mut forged = result.clone();
-        forged.verifier_signature = facade_result_signature(&world_known, &forged)
-            .expect("forged signature computes");
+        forged.verifier_signature =
+            facade_result_signature(&world_known, &forged).expect("forged signature computes");
         let err = sdk
             .verify_result(&sdk.verifying_key(), &forged)
             .expect_err("a result signed by the world-known key must be refused");
-        assert!(matches!(err, VerifierSdkError::ResultSignatureMismatch { .. }));
+        assert!(matches!(
+            err,
+            VerifierSdkError::ResultSignatureMismatch { .. }
+        ));
 
         // A second instance signs with a different key, so its result does not
         // verify under this instance's key.

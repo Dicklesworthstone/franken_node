@@ -45,7 +45,9 @@ impl SyntaxStatistics {
         self.accepted += other.accepted;
         self.skipped += other.skipped;
         self.truncated_passes += other.truncated_passes;
-        if other.last_skip.is_some() { self.last_skip = other.last_skip; }
+        if other.last_skip.is_some() {
+            self.last_skip = other.last_skip;
+        }
     }
 }
 
@@ -70,33 +72,55 @@ enum Replacement {
     Literal(&'static str),
     // Retain coordinates, not copied expression strings. A 1 MiB expression
     // must not be cloned into each of the 4,096 possible proposals.
-    Source { start: usize, end: usize, parenthesized: bool },
+    Source {
+        start: usize,
+        end: usize,
+        parenthesized: bool,
+    },
 }
 
 impl Replacement {
     fn len(&self) -> usize {
         match self {
             Self::Literal(text) => text.len(),
-            Self::Source { start, end, parenthesized } => end - start + if *parenthesized { 2 } else { 0 },
+            Self::Source {
+                start,
+                end,
+                parenthesized,
+            } => end - start + if *parenthesized { 2 } else { 0 },
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct Edit { start: usize, end: usize, replacement: Replacement }
+struct Edit {
+    start: usize,
+    end: usize,
+    replacement: Replacement,
+}
 
 impl Edit {
-    fn saving(&self) -> usize { self.end - self.start - self.replacement.len() }
+    fn saving(&self) -> usize {
+        self.end - self.start - self.replacement.len()
+    }
 
     fn apply(&self, source: &[u8]) -> Vec<u8> {
         let mut output = Vec::with_capacity(source.len() - self.saving());
         output.extend_from_slice(&source[..self.start]);
         match &self.replacement {
             Replacement::Literal(text) => output.extend_from_slice(text.as_bytes()),
-            Replacement::Source { start, end, parenthesized } => {
-                if *parenthesized { output.push(b'('); }
+            Replacement::Source {
+                start,
+                end,
+                parenthesized,
+            } => {
+                if *parenthesized {
+                    output.push(b'(');
+                }
                 output.extend_from_slice(&source[*start..*end]);
-                if *parenthesized { output.push(b')'); }
+                if *parenthesized {
+                    output.push(b')');
+                }
             }
         }
         output.extend_from_slice(&source[self.end..]);
@@ -104,7 +128,10 @@ impl Edit {
     }
 }
 
-struct Plan { edits: Vec<Edit>, complete: bool }
+struct Plan {
+    edits: Vec<Edit>,
+    complete: bool,
+}
 
 fn parser() -> Result<Parser> {
     let mut parser = Parser::new();
@@ -121,11 +148,19 @@ fn parse(parser: &mut Parser, source: &[u8], deadline: Instant) -> Result<Option
     // candidate is independent; never resume an earlier candidate's parse.
     parser.reset();
     let mut progress = |_: &tree_sitter::ParseState| {
-        if Instant::now() >= deadline { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+        if Instant::now() >= deadline {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
     };
     let mut input = |offset: usize, _| source.get(offset..).unwrap_or_default();
-    let tree = parser.parse_with_options(&mut input, None,
-        Some(ParseOptions::new().progress_callback(&mut progress)))
+    let tree = parser
+        .parse_with_options(
+            &mut input,
+            None,
+            Some(ParseOptions::new().progress_callback(&mut progress)),
+        )
         .ok_or_else(|| anyhow::anyhow!("syntax parsing budget exhausted"))?;
     ensure!(Instant::now() < deadline, "syntax parsing budget exhausted");
     Ok((!tree.root_node().has_error()).then_some(tree))
@@ -135,11 +170,25 @@ fn insert(edits: &mut BTreeSet<Edit>, range: Range<usize>, replacement: &'static
     insert_replacement(edits, range, Replacement::Literal(replacement))
 }
 
-fn insert_replacement(edits: &mut BTreeSet<Edit>, range: Range<usize>, replacement: Replacement) -> bool {
-    if range.len() <= replacement.len() { return true; }
-    let edit = Edit { start: range.start, end: range.end, replacement };
-    if edits.contains(&edit) { return true; }
-    if edits.len() == MAX_PROPOSALS { return false; }
+fn insert_replacement(
+    edits: &mut BTreeSet<Edit>,
+    range: Range<usize>,
+    replacement: Replacement,
+) -> bool {
+    if range.len() <= replacement.len() {
+        return true;
+    }
+    let edit = Edit {
+        start: range.start,
+        end: range.end,
+        replacement,
+    };
+    if edits.contains(&edit) {
+        return true;
+    }
+    if edits.len() == MAX_PROPOSALS {
+        return false;
+    }
     edits.insert(edit);
     true
 }
@@ -151,25 +200,44 @@ fn siblings(node: Node<'_>, bindings: bool, edits: &mut BTreeSet<Edit>) -> bool 
     let mut cursor = node.walk();
     let mut ranges = Vec::new();
     for child in node.named_children(&mut cursor) {
-        if child.kind() == "comment" || child.kind() == "hash_bang_line"
-            || (bindings && child.kind() != "variable_declarator") { continue; }
-        if ranges.len() == MAX_SIBLINGS { return false; }
+        if child.kind() == "comment"
+            || child.kind() == "hash_bang_line"
+            || (bindings && child.kind() != "variable_declarator")
+        {
+            continue;
+        }
+        if ranges.len() == MAX_SIBLINGS {
+            return false;
+        }
         ranges.push(child.byte_range());
     }
-    if ranges.is_empty() { return true; }
-    if !bindings && !insert(edits, ranges[0].start..ranges[ranges.len() - 1].end, "") { return false; }
+    if ranges.is_empty() {
+        return true;
+    }
+    if !bindings && !insert(edits, ranges[0].start..ranges[ranges.len() - 1].end, "") {
+        return false;
+    }
     let mut granularity = 2_usize.min(ranges.len());
     loop {
         for part in 0..granularity {
             let first = part * ranges.len() / granularity;
             let last = (part + 1) * ranges.len() / granularity;
-            let range = if !bindings { ranges[first].start..ranges[last - 1].end }
-                else if last < ranges.len() { ranges[first].start..ranges[last].start }
-                else if first > 0 { ranges[first - 1].end..ranges[last - 1].end }
-                else { continue; };
-            if !insert(edits, range, "") { return false; }
+            let range = if !bindings {
+                ranges[first].start..ranges[last - 1].end
+            } else if last < ranges.len() {
+                ranges[first].start..ranges[last].start
+            } else if first > 0 {
+                ranges[first - 1].end..ranges[last - 1].end
+            } else {
+                continue;
+            };
+            if !insert(edits, range, "") {
+                return false;
+            }
         }
-        if granularity == ranges.len() { break; }
+        if granularity == ranges.len() {
+            break;
+        }
         granularity = (granularity * 2).min(ranges.len());
     }
     true
@@ -182,22 +250,39 @@ fn siblings(node: Node<'_>, bindings: bool, edits: &mut BTreeSet<Edit>) -> bool 
 // Empty lists are useful proposals too, but the full-suite oracle still decides
 // whether deleting an argument, accessor, spread or array hole is admissible.
 fn list_elements(node: Node<'_>, edits: &mut BTreeSet<Edit>) -> bool {
-    let Some(open) = node.child(0) else { return true; };
-    let Ok(last) = u32::try_from(node.child_count().saturating_sub(1)) else { return false; };
-    let Some(close) = node.child(last) else { return false; };
-    if !matches!((open.kind(), close.kind()), ("(", ")") | ("[", "]") | ("{", "}")) {
+    let Some(open) = node.child(0) else {
+        return true;
+    };
+    let Ok(last) = u32::try_from(node.child_count().saturating_sub(1)) else {
+        return false;
+    };
+    let Some(close) = node.child(last) else {
+        return false;
+    };
+    if !matches!(
+        (open.kind(), close.kind()),
+        ("(", ")") | ("[", "]") | ("{", "}")
+    ) {
         return true;
     }
-    if !insert(edits, open.end_byte()..close.start_byte(), "") { return false; }
+    if !insert(edits, open.end_byte()..close.start_byte(), "") {
+        return false;
+    }
 
     let mut cursor = node.walk();
     let mut ranges = Vec::new();
     for child in node.named_children(&mut cursor) {
-        if child.kind() == "comment" { continue; }
-        if ranges.len() == MAX_SIBLINGS { return false; }
+        if child.kind() == "comment" {
+            continue;
+        }
+        if ranges.len() == MAX_SIBLINGS {
+            return false;
+        }
         ranges.push(child.byte_range());
     }
-    if ranges.is_empty() { return true; }
+    if ranges.is_empty() {
+        return true;
+    }
 
     // As with statements, attempt groups before individual elements. Keeping
     // every non-selected element allows reductions when emptying the entire
@@ -214,9 +299,13 @@ fn list_elements(node: Node<'_>, edits: &mut BTreeSet<Edit>) -> bool {
             } else {
                 ranges[first].start..ranges[last - 1].end
             };
-            if !insert(edits, range, "") { return false; }
+            if !insert(edits, range, "") {
+                return false;
+            }
         }
-        if granularity == ranges.len() { break; }
+        if granularity == ranges.len() {
+            break;
+        }
         granularity = (granularity * 2).min(ranges.len());
     }
     true
@@ -227,16 +316,36 @@ fn lift_expression(outer: Node<'_>, inner: Node<'_>, edits: &mut BTreeSet<Edit>)
     // parentheses so lifting a+b out of a larger operand does not turn its
     // surrounding multiplication into a+b*c. Object/function/class literals
     // also need parentheses when moved into statement position.
-    let parenthesized = !matches!(inner.kind(),
-        "identifier" | "number" | "string" | "regex" | "true" | "false"
-        | "null" | "this" | "array" | "parenthesized_expression");
+    let parenthesized = !matches!(
+        inner.kind(),
+        "identifier"
+            | "number"
+            | "string"
+            | "regex"
+            | "true"
+            | "false"
+            | "null"
+            | "this"
+            | "array"
+            | "parenthesized_expression"
+    );
     let retained = inner.byte_range();
     let replaced = outer.byte_range();
-    if retained.start < replaced.start || retained.end > replaced.end
-        || retained.start >= retained.end { return true; }
-    insert_replacement(edits, replaced, Replacement::Source {
-        start: retained.start, end: retained.end, parenthesized,
-    })
+    if retained.start < replaced.start
+        || retained.end > replaced.end
+        || retained.start >= retained.end
+    {
+        return true;
+    }
+    insert_replacement(
+        edits,
+        replaced,
+        Replacement::Source {
+            start: retained.start,
+            end: retained.end,
+            parenthesized,
+        },
+    )
 }
 
 // These are reduction proposals, not optimizer identities. Removing a call,
@@ -251,15 +360,23 @@ fn expressions(node: Node<'_>, edits: &mut BTreeSet<Edit>) -> bool {
         "subscript_expression" => &["object", "index"],
         "unary_expression" | "update_expression" => &["argument"],
         "call_expression" | "new_expression" => {
-            let Some(arguments) = node.child_by_field_name("arguments") else { return true; };
+            let Some(arguments) = node.child_by_field_name("arguments") else {
+                return true;
+            };
             // Tagged templates are not a parenthesized argument list.
-            if arguments.kind() != "arguments" { return true; }
+            if arguments.kind() != "arguments" {
+                return true;
+            }
             let mut cursor = arguments.walk();
             let mut count = 0;
             for argument in arguments.named_children(&mut cursor) {
-                if matches!(argument.kind(), "comment" | "spread_element") { continue; }
+                if matches!(argument.kind(), "comment" | "spread_element") {
+                    continue;
+                }
                 count += 1;
-                if count > MAX_SIBLINGS || !lift_expression(node, argument, edits) { return false; }
+                if count > MAX_SIBLINGS || !lift_expression(node, argument, edits) {
+                    return false;
+                }
             }
             return true;
         }
@@ -267,9 +384,13 @@ fn expressions(node: Node<'_>, edits: &mut BTreeSet<Edit>) -> bool {
             let mut cursor = node.walk();
             let mut count = 0;
             for child in node.named_children(&mut cursor) {
-                if child.kind() == "comment" { continue; }
+                if child.kind() == "comment" {
+                    continue;
+                }
                 count += 1;
-                if count > MAX_SIBLINGS || !lift_expression(node, child, edits) { return false; }
+                if count > MAX_SIBLINGS || !lift_expression(node, child, edits) {
+                    return false;
+                }
             }
             return true;
         }
@@ -277,7 +398,10 @@ fn expressions(node: Node<'_>, edits: &mut BTreeSet<Edit>) -> bool {
     };
     for field in fields {
         if let Some(child) = node.child_by_field_name(*field)
-            && !lift_expression(node, child, edits) { return false; }
+            && !lift_expression(node, child, edits)
+        {
+            return false;
+        }
     }
     true
 }
@@ -288,9 +412,15 @@ fn plan(tree: &Tree, deadline: Instant) -> Result<Plan> {
     let mut visited = 0;
     let mut complete = true;
     'walk: loop {
-        ensure!(Instant::now() < deadline, "syntax traversal budget exhausted");
+        ensure!(
+            Instant::now() < deadline,
+            "syntax traversal budget exhausted"
+        );
         visited += 1;
-        if visited > MAX_NODES { complete = false; break; }
+        if visited > MAX_NODES {
+            complete = false;
+            break;
+        }
         let node = cursor.node();
         let within_limit = match node.kind() {
             "program" | "statement_block" | "class_body" => siblings(node, false, &mut edits),
@@ -299,23 +429,39 @@ fn plan(tree: &Tree, deadline: Instant) -> Result<Plan> {
             "template_string" => insert(&mut edits, node.byte_range(), "``"),
             "number" => insert(&mut edits, node.byte_range(), "0"),
             "arguments" => list_elements(node, &mut edits),
-            "array" => insert(&mut edits, node.byte_range(), "[]")
-                && list_elements(node, &mut edits),
-            "object" => insert(&mut edits, node.byte_range(), "{}")
-                && list_elements(node, &mut edits),
+            "array" => {
+                insert(&mut edits, node.byte_range(), "[]") && list_elements(node, &mut edits)
+            }
+            "object" => {
+                insert(&mut edits, node.byte_range(), "{}") && list_elements(node, &mut edits)
+            }
             _ => true,
         };
-        if !within_limit || !expressions(node, &mut edits) { complete = false; break; }
-        if cursor.goto_first_child() { continue; }
+        if !within_limit || !expressions(node, &mut edits) {
+            complete = false;
+            break;
+        }
+        if cursor.goto_first_child() {
+            continue;
+        }
         loop {
-            if cursor.goto_next_sibling() { break; }
-            if !cursor.goto_parent() { break 'walk; }
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                break 'walk;
+            }
         }
     }
     let mut edits: Vec<_> = edits.into_iter().collect();
     // Largest byte savings first; exact byte coordinates break ties. Neither
     // filesystem enumeration order nor randomized hash iteration affects it.
-    edits.sort_by(|left, right| right.saving().cmp(&left.saving()).then_with(|| left.cmp(right)));
+    edits.sort_by(|left, right| {
+        right
+            .saving()
+            .cmp(&left.saving())
+            .then_with(|| left.cmp(right))
+    });
     Ok(Plan { edits, complete })
 }
 
@@ -325,12 +471,24 @@ fn plan(tree: &Tree, deadline: Instant) -> Result<Plan> {
 /// native_minimizer::reduce_inputs does. `complete` describes uncapped syntax
 /// coverage, not a per-source fixed point. A skipped/limited parse still marks
 /// search incomplete; mandatory fresh final confirmations remain the parent's.
-pub(super) fn reduce(source: Vec<u8>, search_deadline: Instant,
-    mut evaluate: impl FnMut(Vec<u8>) -> Result<Trial>) -> Result<Progress> {
-    let mut progress = Progress { complete: true, stopped: false, statistics: SyntaxStatistics::default() };
+pub(super) fn reduce(
+    source: Vec<u8>,
+    search_deadline: Instant,
+    mut evaluate: impl FnMut(Vec<u8>) -> Result<Trial>,
+) -> Result<Progress> {
+    let mut progress = Progress {
+        complete: true,
+        stopped: false,
+        statistics: SyntaxStatistics::default(),
+    };
     let mut parser = match parser() {
         Ok(parser) => parser,
-        Err(error) => return Ok(progress.skip(format!("syntax parser unavailable: {error:#}"), search_deadline)),
+        Err(error) => {
+            return Ok(progress.skip(
+                format!("syntax parser unavailable: {error:#}"),
+                search_deadline,
+            ));
+        }
     };
     if !source.is_empty() {
         let phase_deadline = search_deadline.min(Instant::now() + PARSE_BUDGET);
@@ -354,9 +512,16 @@ pub(super) fn reduce(source: Vec<u8>, search_deadline: Instant,
         for edit in proposals.edits {
             let candidate = edit.apply(&source);
             progress.statistics.candidates_checked += 1;
-            match parse(&mut parser, &candidate, search_deadline.min(Instant::now() + PARSE_BUDGET)) {
+            match parse(
+                &mut parser,
+                &candidate,
+                search_deadline.min(Instant::now() + PARSE_BUDGET),
+            ) {
                 Ok(Some(_)) => {}
-                Ok(None) => { progress.statistics.parse_rejections += 1; continue; }
+                Ok(None) => {
+                    progress.statistics.parse_rejections += 1;
+                    continue;
+                }
                 Err(error) => return Ok(progress.skip(format!("{error:#}"), search_deadline)),
             }
             match evaluate(candidate)? {
@@ -365,7 +530,11 @@ pub(super) fn reduce(source: Vec<u8>, search_deadline: Instant,
                     return Ok(progress);
                 }
                 Trial::Reject => {}
-                Trial::Stop => { progress.complete = false; progress.stopped = true; return Ok(progress); }
+                Trial::Stop => {
+                    progress.complete = false;
+                    progress.stopped = true;
+                    return Ok(progress);
+                }
             }
         }
     }
@@ -376,47 +545,83 @@ pub(super) fn reduce(source: Vec<u8>, search_deadline: Instant,
 mod tests {
     use super::*;
 
-    fn deadline() -> Instant { Instant::now() + Duration::from_secs(10) }
+    fn deadline() -> Instant {
+        Instant::now() + Duration::from_secs(10)
+    }
     fn proposals(source: &str) -> Plan {
-        let tree = parse(&mut parser().unwrap(), source.as_bytes(), deadline()).unwrap().unwrap();
+        let tree = parse(&mut parser().unwrap(), source.as_bytes(), deadline())
+            .unwrap()
+            .unwrap();
         plan(&tree, deadline()).unwrap()
     }
     fn includes_edit(source: &str, expected: &str) -> bool {
-        proposals(source).edits.iter().any(|edit| edit.apply(source.as_bytes()) == expected.as_bytes())
+        proposals(source)
+            .edits
+            .iter()
+            .any(|edit| edit.apply(source.as_bytes()) == expected.as_bytes())
     }
 
     // Drive the same repeated-sweep contract as the production parent when a
     // test needs a fixed point for one source. Every acceptance is still made
     // by the supplied oracle; no assertion or observation is relaxed.
-    fn reduce_all(mut source: Vec<u8>, deadline: Instant,
-        mut evaluate: impl FnMut(Vec<u8>) -> Result<Trial>) -> Result<Progress> {
-        let mut total = Progress { complete: true, stopped: false, statistics: SyntaxStatistics::default() };
+    fn reduce_all(
+        mut source: Vec<u8>,
+        deadline: Instant,
+        mut evaluate: impl FnMut(Vec<u8>) -> Result<Trial>,
+    ) -> Result<Progress> {
+        let mut total = Progress {
+            complete: true,
+            stopped: false,
+            statistics: SyntaxStatistics::default(),
+        };
         loop {
             let before = source.len();
             let progress = reduce(source.clone(), deadline, |candidate| {
                 let result = evaluate(candidate.clone())?;
-                if result == Trial::Accept { source = candidate; }
+                if result == Trial::Accept {
+                    source = candidate;
+                }
                 Ok(result)
             })?;
             total.complete &= progress.complete;
             total.stopped |= progress.stopped;
             total.statistics.merge(progress.statistics);
-            if total.stopped || source.len() == before { return Ok(total); }
+            if total.stopped || source.len() == before {
+                return Ok(total);
+            }
         }
     }
 
     #[test]
     fn minified_statements_and_nested_function_bodies_have_structural_candidates() {
-        assert!(includes_edit("const unused=123;console.log(42);", "console.log(42);"));
-        assert!(includes_edit("(()=>{const unused=123;console.log(42);})();", "(()=>{console.log(42);})();"));
-        assert!(includes_edit("class A{unused(){return 1;}live(){return 42;}}", "class A{live(){return 42;}}"));
+        assert!(includes_edit(
+            "const unused=123;console.log(42);",
+            "console.log(42);"
+        ));
+        assert!(includes_edit(
+            "(()=>{const unused=123;console.log(42);})();",
+            "(()=>{console.log(42);})();"
+        ));
+        assert!(includes_edit(
+            "class A{unused(){return 1;}live(){return 42;}}",
+            "class A{live(){return 42;}}"
+        ));
     }
 
     #[test]
     fn declarators_consume_commas_without_removing_the_live_declaration_keyword() {
-        assert!(includes_edit("const unused=1,live=42;console.log(live);", "const live=42;console.log(live);"));
-        assert!(includes_edit("let live=42,unused=1;console.log(live);", "let live=42;console.log(live);"));
-        assert!(includes_edit("for(let unused=1,i=0;i<2;i++)work(i);", "for(let i=0;i<2;i++)work(i);"));
+        assert!(includes_edit(
+            "const unused=1,live=42;console.log(live);",
+            "const live=42;console.log(live);"
+        ));
+        assert!(includes_edit(
+            "let live=42,unused=1;console.log(live);",
+            "let live=42;console.log(live);"
+        ));
+        assert!(includes_edit(
+            "for(let unused=1,i=0;i<2;i++)work(i);",
+            "for(let i=0;i<2;i++)work(i);"
+        ));
     }
 
     #[test]
@@ -435,7 +640,10 @@ mod tests {
     #[test]
     fn byte_ranges_preserve_hashbang_unicode_crlf_and_unterminated_suffix() {
         let source = "#!/usr/bin/env node\r\nconst unused='π';console.log('🦀')";
-        assert!(includes_edit(source, "#!/usr/bin/env node\r\nconsole.log('🦀')"));
+        assert!(includes_edit(
+            source,
+            "#!/usr/bin/env node\r\nconsole.log('🦀')"
+        ));
         for edit in proposals(source).edits {
             let output = edit.apply(source.as_bytes());
             assert!(output.starts_with(b"#!/usr/bin/env node\r\n"));
@@ -450,20 +658,38 @@ mod tests {
         let first = proposals(source);
         assert_eq!(first.edits, proposals(source).edits);
         assert!(first.complete);
-        assert_eq!(first.edits.iter().collect::<BTreeSet<_>>().len(), first.edits.len());
-        assert!(first.edits.windows(2).all(|pair| pair[0].saving() >= pair[1].saving()));
+        assert_eq!(
+            first.edits.iter().collect::<BTreeSet<_>>().len(),
+            first.edits.len()
+        );
+        assert!(
+            first
+                .edits
+                .windows(2)
+                .all(|pair| pair[0].saving() >= pair[1].saving())
+        );
     }
 
     #[test]
     fn accepted_offsets_are_rebuilt_and_every_evaluated_candidate_parses() {
         let mut best = b"const unused=123;(()=>{const dead=456;console.log(42);})();".to_vec();
         let result = reduce_all(best.clone(), deadline(), |candidate| {
-            assert!(parse(&mut parser().unwrap(), &candidate, deadline()).unwrap().is_some());
-            if candidate.windows(b"console.log(42)".len()).any(|bytes| bytes == b"console.log(42)") {
+            assert!(
+                parse(&mut parser().unwrap(), &candidate, deadline())
+                    .unwrap()
+                    .is_some()
+            );
+            if candidate
+                .windows(b"console.log(42)".len())
+                .any(|bytes| bytes == b"console.log(42)")
+            {
                 best = candidate;
                 Ok(Trial::Accept)
-            } else { Ok(Trial::Reject) }
-        }).unwrap();
+            } else {
+                Ok(Trial::Reject)
+            }
+        })
+        .unwrap();
         assert!(result.complete && !result.stopped);
         assert!(result.statistics.accepted >= 2);
         assert!(!String::from_utf8(best).unwrap().contains("const"));
@@ -472,12 +698,18 @@ mod tests {
     #[test]
     fn unsupported_syntax_and_expired_deadlines_never_invoke_the_behavioral_oracle() {
         for source in ["const x: number=1;", "const x=;"] {
-            let result = reduce(source.as_bytes().to_vec(), deadline(), |_| panic!("unsupported source")).unwrap();
+            let result = reduce(source.as_bytes().to_vec(), deadline(), |_| {
+                panic!("unsupported source")
+            })
+            .unwrap();
             assert!(!result.complete);
             assert_eq!(result.statistics.skipped, 1);
             assert_eq!(result.statistics.candidates_checked, 0);
         }
-        let result = reduce(b"console.log(42);".to_vec(), Instant::now(), |_| panic!("expired budget")).unwrap();
+        let result = reduce(b"console.log(42);".to_vec(), Instant::now(), |_| {
+            panic!("expired budget")
+        })
+        .unwrap();
         assert!(result.stopped && !result.complete);
         assert_eq!(result.statistics.skipped, 1);
     }
@@ -496,12 +728,23 @@ mod tests {
     fn stopped_or_fatal_evaluations_are_never_adopted() {
         let source = b"console.log(42);".to_vec();
         let mut calls = 0;
-        let result = reduce(source.clone(), deadline(), |_| { calls += 1; Ok(Trial::Stop) }).unwrap();
+        let result = reduce(source.clone(), deadline(), |_| {
+            calls += 1;
+            Ok(Trial::Stop)
+        })
+        .unwrap();
         assert_eq!(calls, 1);
         assert!(result.stopped && !result.complete);
         assert_eq!(result.statistics.accepted, 0);
-        assert!(reduce(source, deadline(), |_| anyhow::bail!("runtime identity changed"))
-            .err().unwrap().to_string().contains("runtime identity changed"));
+        assert!(
+            reduce(source, deadline(), |_| anyhow::bail!(
+                "runtime identity changed"
+            ))
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("runtime identity changed")
+        );
     }
 
     #[test]
@@ -521,7 +764,10 @@ mod tests {
             ("const xs=[first,second,third];", "const xs=[first,second];"),
             ("const xs={dead:1,live:42};", "const xs={live:42};"),
             ("const xs={live:42,dead:1};", "const xs={live:42};"),
-            ("const xs={get live(){return 42},dead:1};", "const xs={get live(){return 42}};"),
+            (
+                "const xs={get live(){return 42},dead:1};",
+                "const xs={get live(){return 42}};",
+            ),
         ] {
             assert!(includes_edit(source, expected), "{source} -> {expected}");
         }
@@ -534,21 +780,34 @@ mod tests {
             ("work(/a,b/,tail);", "work(/a,b/);"),
             ("work(head, /* comma , */ ...tail,);", "work(head,);"),
             ("work(head,// comment ,\n tail);", "work(head);"),
-            ("const xs=[first,,second,,third,];", "const xs=[first,,third,];"),
+            (
+                "const xs=[first,,second,,third,];",
+                "const xs=[first,,third,];",
+            ),
             ("const xs=[,,];", "const xs=[];"),
             ("const xs={['a,b']:1,...tail,};", "const xs={['a,b']:1,};"),
             ("work(/* before */ only /* after */);", "work();"),
         ] {
             assert!(includes_edit(source, expected), "{source} -> {expected}");
-            assert!(parse(&mut parser().unwrap(), expected.as_bytes(), deadline()).unwrap().is_some());
+            assert!(
+                parse(&mut parser().unwrap(), expected.as_bytes(), deadline())
+                    .unwrap()
+                    .is_some()
+            );
         }
     }
 
     #[test]
     fn list_reduction_does_not_treat_patterns_as_collection_literals() {
         let source = "const [first,second]=input;const {a,b}=object;";
-        assert!(!includes_edit(source, "const [second]=input;const {a,b}=object;"));
-        assert!(!includes_edit(source, "const [first,second]=input;const {b}=object;"));
+        assert!(!includes_edit(
+            source,
+            "const [second]=input;const {a,b}=object;"
+        ));
+        assert!(!includes_edit(
+            source,
+            "const [first,second]=input;const {b}=object;"
+        ));
     }
 
     #[test]
@@ -564,21 +823,37 @@ mod tests {
         // Execute pure, finite programs with no filesystem/network effects.
         // This is the actual Rust reducer with a process-backed test oracle,
         // not a claim about Franken/Node parity or the product's full oracle.
-        let run = |source: &[u8]| std::process::Command::new("node")
-            .args(["--input-type=commonjs", "-e", std::str::from_utf8(source).unwrap()])
-            .output().expect("Node is required for the process-backed reducer test");
+        let run = |source: &[u8]| {
+            std::process::Command::new("node")
+                .args([
+                    "--input-type=commonjs",
+                    "-e",
+                    std::str::from_utf8(source).unwrap(),
+                ])
+                .output()
+                .expect("Node is required for the process-backed reducer test")
+        };
         let mut best = b"function keep(value){console.log(value)}keep(42,400,500);".to_vec();
         let expected = run(&best);
         assert!(expected.status.success());
         assert_eq!(expected.stdout, b"42\n");
-        let result = reduce_all(best.clone(), Instant::now() + Duration::from_secs(30), |candidate| {
-            let observed = run(&candidate);
-            if observed.status == expected.status && observed.stdout == expected.stdout
-                && observed.stderr == expected.stderr {
-                best = candidate;
-                Ok(Trial::Accept)
-            } else { Ok(Trial::Reject) }
-        }).unwrap();
+        let result = reduce_all(
+            best.clone(),
+            Instant::now() + Duration::from_secs(30),
+            |candidate| {
+                let observed = run(&candidate);
+                if observed.status == expected.status
+                    && observed.stdout == expected.stdout
+                    && observed.stderr == expected.stderr
+                {
+                    best = candidate;
+                    Ok(Trial::Accept)
+                } else {
+                    Ok(Trial::Reject)
+                }
+            },
+        )
+        .unwrap();
         assert!(result.complete && !result.stopped);
         assert!(result.statistics.accepted > 0);
         assert!(!best.contains(&b','), "{}", String::from_utf8_lossy(&best));
@@ -591,13 +866,20 @@ mod tests {
             ("const x=a+b+unused;", "const x=(a+b);"),
             ("const x=(a+b)+unused;", "const x=(a+b);"),
             ("const x=choose?leftValue:rightValue;", "const x=leftValue;"),
-            ("const x=choose?leftValue:rightValue;", "const x=rightValue;"),
+            (
+                "const x=choose?leftValue:rightValue;",
+                "const x=rightValue;",
+            ),
             ("const x=identity('🦀,\\u03c0');", "const x='🦀,\\u03c0';"),
             ("const x=identity({live:42});", "const x=({live:42});"),
             ("const x=new Box(value);", "const x=value;"),
         ] {
             assert!(includes_edit(source, expected), "{source} -> {expected}");
-            assert!(parse(&mut parser().unwrap(), expected.as_bytes(), deadline()).unwrap().is_some());
+            assert!(
+                parse(&mut parser().unwrap(), expected.as_bytes(), deadline())
+                    .unwrap()
+                    .is_some()
+            );
         }
     }
 
@@ -609,7 +891,10 @@ mod tests {
             ("const x=object.property;", "const x=object;"),
             ("const x=object[index];", "const x=index;"),
             ("const x=void payload;", "const x=payload;"),
-            ("async function f(){return await value;}", "async function f(){return value;}"),
+            (
+                "async function f(){return await value;}",
+                "async function f(){return value;}",
+            ),
             ("const x=(42);", "const x=42;"),
         ] {
             assert!(includes_edit(source, expected), "{source} -> {expected}");
@@ -619,9 +904,16 @@ mod tests {
     #[test]
     fn lifted_source_is_not_regenerated_and_cannot_escape_its_parent_span() {
         let source = "#!/usr/bin/env node\r\nconst x=call(/*keep*/'π\\n🦀');";
-        assert!(includes_edit(source, "#!/usr/bin/env node\r\nconst x='π\\n🦀';"));
+        assert!(includes_edit(
+            source,
+            "#!/usr/bin/env node\r\nconst x='π\\n🦀';"
+        ));
         let plan = proposals(source);
-        assert!(plan.edits.iter().any(|edit| matches!(edit.replacement, Replacement::Source { .. })));
+        assert!(
+            plan.edits
+                .iter()
+                .any(|edit| matches!(edit.replacement, Replacement::Source { .. }))
+        );
         for edit in &plan.edits {
             if let Replacement::Source { start, end, .. } = edit.replacement {
                 assert!(edit.start <= start && start < end && end <= edit.end);
@@ -636,19 +928,36 @@ mod tests {
 
     #[test]
     fn lifted_expressions_store_ranges_instead_of_copies_of_large_inputs() {
-        let source = format!("consume({},{});", "name".repeat(40_000), "value".repeat(40_000));
+        let source = format!(
+            "consume({},{});",
+            "name".repeat(40_000),
+            "value".repeat(40_000)
+        );
         let plan = proposals(&source);
         assert!(plan.complete);
         assert!(std::mem::size_of::<Edit>() <= 128);
-        assert!(plan.edits.iter().any(|edit| matches!(edit.replacement, Replacement::Source { .. })));
-        for edit in plan.edits { assert!(edit.apply(source.as_bytes()).len() < source.len()); }
+        assert!(
+            plan.edits
+                .iter()
+                .any(|edit| matches!(edit.replacement, Replacement::Source { .. }))
+        );
+        for edit in plan.edits {
+            assert!(edit.apply(source.as_bytes()).len() < source.len());
+        }
     }
 
     #[test]
     fn real_execution_reduces_nested_expressions_but_rejects_lost_side_effects() {
-        let run = |source: &[u8]| std::process::Command::new("node")
-            .args(["--input-type=commonjs", "-e", std::str::from_utf8(source).unwrap()])
-            .output().expect("Node is required for the process-backed reducer test");
+        let run = |source: &[u8]| {
+            std::process::Command::new("node")
+                .args([
+                    "--input-type=commonjs",
+                    "-e",
+                    std::str::from_utf8(source).unwrap(),
+                ])
+                .output()
+                .expect("Node is required for the process-backed reducer test")
+        };
         for source in [
             b"console.log((false?300:42)+0);".as_slice(),
             b"let n=0;console.log((n=7,42),n);".as_slice(),
@@ -656,14 +965,23 @@ mod tests {
             let expected = run(source);
             assert!(expected.status.success());
             let mut best = source.to_vec();
-            let result = reduce_all(best.clone(), Instant::now() + Duration::from_secs(30), |candidate| {
-                let observed = run(&candidate);
-                if observed.status == expected.status && observed.stdout == expected.stdout
-                    && observed.stderr == expected.stderr {
-                    best = candidate;
-                    Ok(Trial::Accept)
-                } else { Ok(Trial::Reject) }
-            }).unwrap();
+            let result = reduce_all(
+                best.clone(),
+                Instant::now() + Duration::from_secs(30),
+                |candidate| {
+                    let observed = run(&candidate);
+                    if observed.status == expected.status
+                        && observed.stdout == expected.stdout
+                        && observed.stderr == expected.stderr
+                    {
+                        best = candidate;
+                        Ok(Trial::Accept)
+                    } else {
+                        Ok(Trial::Reject)
+                    }
+                },
+            )
+            .unwrap();
             assert!(result.complete && !result.stopped);
             if expected.stdout == b"42\n" {
                 assert_eq!(best, b"console.log(42);");
@@ -684,14 +1002,19 @@ mod tests {
         let mut accepted = false;
         let mut best = b"const unused=123;console.log(42+0);".to_vec();
         let result = reduce(best.clone(), deadline(), |candidate| {
-            if accepted { calls_after_accept += 1; }
+            if accepted {
+                calls_after_accept += 1;
+            }
             let text = std::str::from_utf8(&candidate).unwrap();
             if text.contains("console.log(") && text.contains("42") {
                 accepted = true;
                 best = candidate;
                 Ok(Trial::Accept)
-            } else { Ok(Trial::Reject) }
-        }).unwrap();
+            } else {
+                Ok(Trial::Reject)
+            }
+        })
+        .unwrap();
         assert!(accepted);
         assert_eq!(result.statistics.accepted, 1);
         assert_eq!(calls_after_accept, 0);
@@ -701,8 +1024,11 @@ mod tests {
             if text.contains("console.log(") && text.contains("42") {
                 best = candidate;
                 Ok(Trial::Accept)
-            } else { Ok(Trial::Reject) }
-        }).unwrap();
+            } else {
+                Ok(Trial::Reject)
+            }
+        })
+        .unwrap();
         assert!(next.statistics.accepted > 0);
         assert_eq!(best, b"console.log(42);");
     }

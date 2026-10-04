@@ -12,7 +12,11 @@ use tree_sitter::{Language, ParseOptions, Parser, Tree};
 const MAX_SOURCE_BYTES: usize = 10 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
-pub(super) enum Syntax { JavaScript, TypeScript, Tsx }
+pub(super) enum Syntax {
+    JavaScript,
+    TypeScript,
+    Tsx,
+}
 
 impl Syntax {
     fn language(self) -> Language {
@@ -40,22 +44,33 @@ pub(super) fn parse(source: &str, syntax: Syntax, deadline: Instant) -> Result<T
         return Err("migration syntax parsing budget exhausted".into());
     }
     let mut parser = Parser::new();
-    parser.set_language(&syntax.language())
+    parser
+        .set_language(&syntax.language())
         .map_err(|error| format!("{} migration parser unavailable: {error}", syntax.name()))?;
     let bytes = source.as_bytes();
     let mut input = |offset: usize, _| bytes.get(offset..).unwrap_or_default();
     let mut progress = |_: &tree_sitter::ParseState| {
-        if Instant::now() >= deadline { ControlFlow::Break(()) }
-        else { ControlFlow::Continue(()) }
+        if Instant::now() >= deadline {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
     };
-    let tree = parser.parse_with_options(&mut input, None,
-        Some(ParseOptions::new().progress_callback(&mut progress)))
+    let tree = parser
+        .parse_with_options(
+            &mut input,
+            None,
+            Some(ParseOptions::new().progress_callback(&mut progress)),
+        )
         .ok_or_else(|| "migration syntax parsing budget exhausted".to_owned())?;
     if Instant::now() >= deadline {
         return Err("migration syntax parsing budget exhausted".into());
     }
     if tree.root_node().has_error() {
-        return Err(format!("{} parser rejected source; no partial source rewrite applied", syntax.name()));
+        return Err(format!(
+            "{} parser rejected source; no partial source rewrite applied",
+            syntax.name()
+        ));
     }
     Ok(tree)
 }
@@ -65,16 +80,33 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    fn deadline() -> Instant { Instant::now() + Duration::from_secs(5) }
+    fn deadline() -> Instant {
+        Instant::now() + Duration::from_secs(5)
+    }
 
     #[test]
     fn complete_typed_programs_parse_without_erasing_source_bytes() {
         for (syntax, source) in [
-            (Syntax::TypeScript, "import type {Stats} from 'fs'; interface Input {path:string}; const n: number = 42;"),
-            (Syntax::TypeScript, "type Result<T> = T extends string ? T[] : never; const f = <T>(x:T):T => x;"),
-            (Syntax::Tsx, "import {sep} from 'path'; type Props={name:string}; const el=<span title='fs'>{sep}</span>;"),
-            (Syntax::TypeScript, "const n = <number>42; namespace Local { export interface Shape {value:number} }"),
-            (Syntax::TypeScript, "import fs = require('fs'); export = fs;"),
+            (
+                Syntax::TypeScript,
+                "import type {Stats} from 'fs'; interface Input {path:string}; const n: number = 42;",
+            ),
+            (
+                Syntax::TypeScript,
+                "type Result<T> = T extends string ? T[] : never; const f = <T>(x:T):T => x;",
+            ),
+            (
+                Syntax::Tsx,
+                "import {sep} from 'path'; type Props={name:string}; const el=<span title='fs'>{sep}</span>;",
+            ),
+            (
+                Syntax::TypeScript,
+                "const n = <number>42; namespace Local { export interface Shape {value:number} }",
+            ),
+            (
+                Syntax::TypeScript,
+                "import fs = require('fs'); export = fs;",
+            ),
         ] {
             let tree = parse(source, syntax, deadline()).unwrap();
             assert!(!tree.root_node().has_error(), "{source}");
@@ -85,7 +117,11 @@ mod tests {
     #[test]
     fn recovery_trees_are_never_returned_as_successful_parses() {
         for syntax in [Syntax::JavaScript, Syntax::TypeScript, Syntax::Tsx] {
-            for source in ["import fs from 'fs';const n = ;", "interface X { value: }", "const el=<div>"] {
+            for source in [
+                "import fs from 'fs';const n = ;",
+                "interface X { value: }",
+                "const el=<div>",
+            ] {
                 assert!(parse(source, syntax, deadline()).is_err(), "{source}");
             }
         }
@@ -94,20 +130,34 @@ mod tests {
     #[test]
     fn expired_and_oversized_inputs_are_refused_before_parsing() {
         for syntax in [Syntax::JavaScript, Syntax::TypeScript, Syntax::Tsx] {
-            assert!(parse("const n: number=42;", syntax, Instant::now()).unwrap_err().contains("budget"));
-            assert!(parse(&" ".repeat(MAX_SOURCE_BYTES + 1), syntax, deadline()).unwrap_err().contains("10 MiB"));
+            assert!(
+                parse("const n: number=42;", syntax, Instant::now())
+                    .unwrap_err()
+                    .contains("budget")
+            );
+            assert!(
+                parse(&" ".repeat(MAX_SOURCE_BYTES + 1), syntax, deadline())
+                    .unwrap_err()
+                    .contains("10 MiB")
+            );
         }
     }
 
     #[test]
     fn javascript_tree_and_byte_coordinates_remain_unchanged() {
-        let source = "#!/usr/bin/env node\r\n// π\r\nimport fs from 'fs';const view=<span>fs</span>;";
+        let source =
+            "#!/usr/bin/env node\r\n// π\r\nimport fs from 'fs';const view=<span>fs</span>;";
         let mut original = Parser::new();
-        original.set_language(&tree_sitter_javascript::LANGUAGE.into()).unwrap();
+        original
+            .set_language(&tree_sitter_javascript::LANGUAGE.into())
+            .unwrap();
         let expected = original.parse(source, None).unwrap();
         let actual = parse(source, Syntax::JavaScript, deadline()).unwrap();
         assert_eq!(actual.root_node().to_sexp(), expected.root_node().to_sexp());
-        assert_eq!(actual.root_node().byte_range(), expected.root_node().byte_range());
+        assert_eq!(
+            actual.root_node().byte_range(),
+            expected.root_node().byte_range()
+        );
     }
 
     #[test]

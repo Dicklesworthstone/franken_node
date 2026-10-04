@@ -490,7 +490,11 @@ mod flow_gate_regressions {
             matches!(&outcome, Err(HostIoError::Denied { reason }) if reason.starts_with("flow_policy:")),
             "expected flow-policy denial, got {outcome:?}"
         );
-        assert_eq!(calls.load(Ordering::SeqCst), before, "denied effect delegated");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            before,
+            "denied effect delegated"
+        );
     }
 
     fn assert_probe_reached(
@@ -647,7 +651,9 @@ mod flow_gate_regressions {
         std::fs::write(root.path().join(".env"), b"unread-secret").expect("unread secret");
         assert!(matches!(
             gate.perform(
-                &HostIoRequest::FsRead { path: ".env".into() },
+                &HostIoRequest::FsRead {
+                    path: ".env".into()
+                },
                 &[],
             ),
             Err(HostIoError::CapabilityMissing { .. })
@@ -816,10 +822,7 @@ mod flow_gate_regressions {
         std::fs::write(root.path().join(".env"), secret).expect("secret fixture");
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
         listener.set_nonblocking(true).expect("bounded accept");
-        let endpoint = listener
-            .local_addr()
-            .expect("listener address")
-            .to_string();
+        let endpoint = listener.local_addr().expect("listener address").to_string();
         let inner = SandboxedHostIo::with_root(root.path()).expect("real provider");
         let gate = FlowGatedHostIo::new(
             SsrfGatedHostIo::with_policy(inner, permissive_template(), "endpoint-allowed"),
@@ -853,7 +856,9 @@ mod flow_gate_regressions {
             .set_read_timeout(Some(Duration::from_secs(5)))
             .expect("bounded read");
         let mut received = Vec::new();
-        stream.read_to_end(&mut received).expect("read public bytes");
+        stream
+            .read_to_end(&mut received)
+            .expect("read public bytes");
         assert_eq!(received.as_slice(), public);
     }
 }

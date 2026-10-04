@@ -6,9 +6,11 @@
 //! No source code, package manager, network, semver solver or live loader runs.
 //! Legacy requires records cannot prove modern dependency-kind completeness.
 
-use super::{DependencyKind, LockfileDetails, ModuleResolutionGraph,
-    ModuleResolutionGraphError, ModuleResolutionGraphResult, build_graph_parts,
-    enforce_len, invalid_metadata, manifest_directory, nearest_lockfile_pin};
+use super::{
+    DependencyKind, LockfileDetails, ModuleResolutionGraph, ModuleResolutionGraphError,
+    ModuleResolutionGraphResult, build_graph_parts, enforce_len, invalid_metadata,
+    manifest_directory, nearest_lockfile_pin,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -22,7 +24,11 @@ const MAX_TEXT_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PackageSource { Manifest, Lockfile, WorkspaceLink }
+pub enum PackageSource {
+    Manifest,
+    Lockfile,
+    WorkspaceLink,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PackageLocation {
@@ -37,7 +43,11 @@ pub struct PackageLocation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Selection { Lockfile, WorkspaceIntent, Unresolved }
+pub enum Selection {
+    Lockfile,
+    WorkspaceIntent,
+    Unresolved,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Requirement {
@@ -114,7 +124,11 @@ pub fn build(project_root: impl AsRef<Path>) -> ModuleResolutionGraphResult<Depe
 
 fn location(manifest: &str) -> String {
     let directory = manifest_directory(manifest);
-    if directory.is_empty() { ".".into() } else { directory.into() }
+    if directory.is_empty() {
+        ".".into()
+    } else {
+        directory.into()
+    }
 }
 
 fn reserve_text(used: &mut usize, bytes: usize) -> ModuleResolutionGraphResult<()> {
@@ -122,18 +136,28 @@ fn reserve_text(used: &mut usize, bytes: usize) -> ModuleResolutionGraphResult<(
     enforce_len("dependency topology text bytes", *used, MAX_TEXT_BYTES)
 }
 
-fn from_parts(graph: &ModuleResolutionGraph, details: &LockfileDetails) -> ModuleResolutionGraphResult<DependencyTopology> {
+fn from_parts(
+    graph: &ModuleResolutionGraph,
+    details: &LockfileDetails,
+) -> ModuleResolutionGraphResult<DependencyTopology> {
     let mut nodes = BTreeMap::new();
     let mut package_ids = BTreeMap::new();
     let mut text_bytes = 0;
     for package in &graph.packages {
         let loc = location(&package.relative_manifest_path);
         package_ids.insert(package.package_id.as_str(), loc.clone());
-        nodes.insert(loc.clone(), PackageLocation {
-            location: loc, manifest_path: package.relative_manifest_path.clone(),
-            name: package.name.clone(), version: package.version.clone(),
-            source: PackageSource::Manifest, link_target: None, dependency_kinds_complete: true,
-        });
+        nodes.insert(
+            loc.clone(),
+            PackageLocation {
+                location: loc,
+                manifest_path: package.relative_manifest_path.clone(),
+                name: package.name.clone(),
+                version: package.version.clone(),
+                source: PackageSource::Manifest,
+                link_target: None,
+                dependency_kinds_complete: true,
+            },
+        );
     }
     for pin in &graph.lockfile_pins {
         let link_target = details.links.get(&pin.package_path).cloned();
@@ -141,15 +165,28 @@ fn from_parts(graph: &ModuleResolutionGraph, details: &LockfileDetails) -> Modul
             if !nodes.contains_key(target) {
                 return invalid_metadata("topology link target is not a captured workspace");
             }
-            if details.requirements.get(&pin.package_path).is_some_and(|requirements| !requirements.is_empty()) {
-                return invalid_metadata("workspace link cannot carry conflicting installed dependency requirements");
+            if details
+                .requirements
+                .get(&pin.package_path)
+                .is_some_and(|requirements| !requirements.is_empty())
+            {
+                return invalid_metadata(
+                    "workspace link cannot carry conflicting installed dependency requirements",
+                );
             }
         }
         let node = PackageLocation {
-            location: pin.package_path.clone(), manifest_path: format!("{}/package.json", pin.package_path),
-            name: Some(pin.package_name.clone()), version: pin.version.clone(),
-            source: if link_target.is_some() { PackageSource::WorkspaceLink } else { PackageSource::Lockfile },
-            dependency_kinds_complete: details.dependency_kinds_complete, link_target,
+            location: pin.package_path.clone(),
+            manifest_path: format!("{}/package.json", pin.package_path),
+            name: Some(pin.package_name.clone()),
+            version: pin.version.clone(),
+            source: if link_target.is_some() {
+                PackageSource::WorkspaceLink
+            } else {
+                PackageSource::Lockfile
+            },
+            dependency_kinds_complete: details.dependency_kinds_complete,
+            link_target,
         };
         if nodes.insert(pin.package_path.clone(), node).is_some() {
             return invalid_metadata("installed location collides with a captured manifest");
@@ -157,74 +194,148 @@ fn from_parts(graph: &ModuleResolutionGraph, details: &LockfileDetails) -> Modul
     }
     enforce_len("dependency topology nodes", nodes.len(), MAX_NODES)?;
     for node in nodes.values() {
-        reserve_text(&mut text_bytes, node.location.len() + node.manifest_path.len()
-            + node.name.as_ref().map_or(0, String::len) + node.version.as_ref().map_or(0, String::len)
-            + node.link_target.as_ref().map_or(0, String::len))?;
+        reserve_text(
+            &mut text_bytes,
+            node.location.len()
+                + node.manifest_path.len()
+                + node.name.as_ref().map_or(0, String::len)
+                + node.version.as_ref().map_or(0, String::len)
+                + node.link_target.as_ref().map_or(0, String::len),
+        )?;
     }
     let mut edges = Vec::new();
     let mut append = |edge: Requirement| -> ModuleResolutionGraphResult<()> {
-        reserve_text(&mut text_bytes, edge.importer.len() + edge.dependency_name.len()
-            + edge.requested_range.len() + edge.target.as_ref().map_or(0, String::len))?;
+        reserve_text(
+            &mut text_bytes,
+            edge.importer.len()
+                + edge.dependency_name.len()
+                + edge.requested_range.len()
+                + edge.target.as_ref().map_or(0, String::len),
+        )?;
         enforce_len("dependency topology edges", edges.len() + 1, MAX_EDGES)?;
         edges.push(edge);
         Ok(())
     };
     for edge in &graph.dependency_edges {
-        let importer = package_ids.get(edge.from_package_id.as_str()).ok_or_else(||
-            ModuleResolutionGraphError::InvalidMetadata { detail: "dependency importer missing from graph".into() })?;
-        let target = edge.lockfile_package_path.clone().or_else(|| edge.target_package_id.as_deref()
-            .and_then(|id| package_ids.get(id).cloned()));
-        let selection = if edge.lockfile_package_path.is_some() { Selection::Lockfile }
-            else if target.is_some() { Selection::WorkspaceIntent } else { Selection::Unresolved };
-        append(Requirement { importer: importer.clone(), dependency_name: edge.dependency_name.clone(),
-            requested_range: edge.requested_range.clone(), dependency_kind: Some(edge.dependency_kind),
-            optional: edge.optional, target, selection })?;
+        let importer = package_ids
+            .get(edge.from_package_id.as_str())
+            .ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
+                detail: "dependency importer missing from graph".into(),
+            })?;
+        let target = edge.lockfile_package_path.clone().or_else(|| {
+            edge.target_package_id
+                .as_deref()
+                .and_then(|id| package_ids.get(id).cloned())
+        });
+        let selection = if edge.lockfile_package_path.is_some() {
+            Selection::Lockfile
+        } else if target.is_some() {
+            Selection::WorkspaceIntent
+        } else {
+            Selection::Unresolved
+        };
+        append(Requirement {
+            importer: importer.clone(),
+            dependency_name: edge.dependency_name.clone(),
+            requested_range: edge.requested_range.clone(),
+            dependency_kind: Some(edge.dependency_kind),
+            optional: edge.optional,
+            target,
+            selection,
+        })?;
     }
-    let pins = graph.lockfile_pins.iter().map(|pin| (pin.package_path.as_str(), pin)).collect();
+    let pins = graph
+        .lockfile_pins
+        .iter()
+        .map(|pin| (pin.package_path.as_str(), pin))
+        .collect();
     for (importer, requirements) in &details.requirements {
-        if details.links.contains_key(importer) { continue; }
+        if details.links.contains_key(importer) {
+            continue;
+        }
         for requirement in requirements {
             let selected = nearest_lockfile_pin(importer, &requirement.name, &pins);
-            append(Requirement { importer: importer.clone(), dependency_name: requirement.name.clone(),
+            append(Requirement {
+                importer: importer.clone(),
+                dependency_name: requirement.name.clone(),
                 requested_range: requirement.requested_range.clone(),
-                dependency_kind: details.dependency_kinds_complete.then_some(requirement.kind),
-                optional: requirement.optional, target: selected.map(|pin| pin.package_path.clone()),
-                selection: if selected.is_some() { Selection::Lockfile } else { Selection::Unresolved } })?;
+                dependency_kind: details
+                    .dependency_kinds_complete
+                    .then_some(requirement.kind),
+                optional: requirement.optional,
+                target: selected.map(|pin| pin.package_path.clone()),
+                selection: if selected.is_some() {
+                    Selection::Lockfile
+                } else {
+                    Selection::Unresolved
+                },
+            })?;
         }
     }
-    edges.sort_by(|left, right| (&left.importer, &left.dependency_kind, &left.dependency_name)
-        .cmp(&(&right.importer, &right.dependency_kind, &right.dependency_name)));
+    edges.sort_by(|left, right| {
+        (&left.importer, &left.dependency_kind, &left.dependency_name).cmp(&(
+            &right.importer,
+            &right.dependency_kind,
+            &right.dependency_name,
+        ))
+    });
     let nodes: Vec<_> = nodes.into_values().collect();
-    let locations: BTreeMap<_, _> = nodes.iter().enumerate().map(|(index, node)| (node.location.clone(), index)).collect();
+    let locations: BTreeMap<_, _> = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.location.clone(), index))
+        .collect();
     let mut forward = vec![BTreeSet::new(); nodes.len()];
     let mut reverse = forward.clone();
     let mut connect = |from: &str, to: &str| -> ModuleResolutionGraphResult<()> {
-        let source = locations.get(from).ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
-            detail: format!("topology importer {from:?} is unavailable"),
-        })?;
-        let target = locations.get(to).ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
-            detail: format!("topology target {to:?} is unavailable"),
-        })?;
+        let source =
+            locations
+                .get(from)
+                .ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
+                    detail: format!("topology importer {from:?} is unavailable"),
+                })?;
+        let target =
+            locations
+                .get(to)
+                .ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
+                    detail: format!("topology target {to:?} is unavailable"),
+                })?;
         forward[*source].insert(*target);
         reverse[*target].insert(*source);
         Ok(())
     };
     for node in &nodes {
-        if let Some(target) = &node.link_target { connect(&node.location, target)?; }
+        if let Some(target) = &node.link_target {
+            connect(&node.location, target)?;
+        }
     }
     for edge in &edges {
-        if let Some(target) = &edge.target { connect(&edge.importer, target)?; }
+        if let Some(target) = &edge.target {
+            connect(&edge.importer, target)?;
+        }
     }
     let mut topology = DependencyTopology {
-        schema_version: SCHEMA, source_graph_hash: graph.canonical_hash.clone(), canonical_hash: String::new(),
-        nodes, edges, locations,
-        forward: forward.into_iter().map(|row| row.into_iter().collect()).collect(),
-        reverse: reverse.into_iter().map(|row| row.into_iter().collect()).collect(),
+        schema_version: SCHEMA,
+        source_graph_hash: graph.canonical_hash.clone(),
+        canonical_hash: String::new(),
+        nodes,
+        edges,
+        locations,
+        forward: forward
+            .into_iter()
+            .map(|row| row.into_iter().collect())
+            .collect(),
+        reverse: reverse
+            .into_iter()
+            .map(|row| row.into_iter().collect())
+            .collect(),
     };
     // Empty hash is a fixed sentinel in the preimage, not a recursive hash.
-    let bytes = serde_json::to_vec(&topology).map_err(|source| ModuleResolutionGraphError::Json {
-        path: "<dependency-topology>".into(), source,
-    })?;
+    let bytes =
+        serde_json::to_vec(&topology).map_err(|source| ModuleResolutionGraphError::Json {
+            path: "<dependency-topology>".into(),
+            source,
+        })?;
     let mut hash = Sha256::new();
     hash.update(HASH_DOMAIN);
     hash.update((bytes.len() as u64).to_le_bytes());
@@ -234,13 +345,21 @@ fn from_parts(graph: &ModuleResolutionGraph, details: &LockfileDetails) -> Modul
 }
 
 impl DependencyTopology {
-    pub fn canonical_hash(&self) -> &str { &self.canonical_hash }
-    pub fn nodes(&self) -> &[PackageLocation] { &self.nodes }
-    pub fn edges(&self) -> &[Requirement] { &self.edges }
+    pub fn canonical_hash(&self) -> &str {
+        &self.canonical_hash
+    }
+    pub fn nodes(&self) -> &[PackageLocation] {
+        &self.nodes
+    }
+    pub fn edges(&self) -> &[Requirement] {
+        &self.edges
+    }
 
     fn index(&self, location: &str) -> ModuleResolutionGraphResult<usize> {
-        self.locations.get(location).copied().ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
-            detail: format!("unknown exact package location {location:?}"),
+        self.locations.get(location).copied().ok_or_else(|| {
+            ModuleResolutionGraphError::InvalidMetadata {
+                detail: format!("unknown exact package location {location:?}"),
+            }
         })
     }
 
@@ -248,21 +367,53 @@ impl DependencyTopology {
     /// Traversal is iterative and visits each location once, including cycles.
     pub fn closure(&self, start: &str) -> ModuleResolutionGraphResult<Closure> {
         let (visited, _) = self.walk(self.index(start)?, &self.forward);
-        let reachable = self.nodes.iter().enumerate().filter(|(index, _)| visited[*index])
-            .map(|(_, node)| node.location.clone()).collect();
-        let metadata_complete = self.nodes.iter().enumerate()
+        let reachable = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| visited[*index])
+            .map(|(_, node)| node.location.clone())
+            .collect();
+        let metadata_complete = self
+            .nodes
+            .iter()
+            .enumerate()
             .all(|(index, node)| !visited[index] || node.dependency_kinds_complete);
-        let unresolved_edges: Vec<_> = self.edges.iter().enumerate().filter(|(_, edge)|
-            visited[self.locations[&edge.importer]] && edge.selection == Selection::Unresolved)
-            .map(|(index, _)| index).collect();
-        let unresolved_optional_edges = unresolved_edges.iter().filter(|index| self.edges[**index].optional).count();
-        let intent_only_edges: Vec<_> = self.edges.iter().enumerate().filter(|(_, edge)|
-            visited[self.locations[&edge.importer]] && edge.selection == Selection::WorkspaceIntent)
-            .map(|(index, _)| index).collect();
-        Ok(Closure { start: start.into(), reachable, metadata_complete,
-            fully_resolved: metadata_complete && unresolved_edges.is_empty() && intent_only_edges.is_empty(),
+        let unresolved_edges: Vec<_> = self
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(_, edge)| {
+                visited[self.locations[&edge.importer]] && edge.selection == Selection::Unresolved
+            })
+            .map(|(index, _)| index)
+            .collect();
+        let unresolved_optional_edges = unresolved_edges
+            .iter()
+            .filter(|index| self.edges[**index].optional)
+            .count();
+        let intent_only_edges: Vec<_> = self
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(_, edge)| {
+                visited[self.locations[&edge.importer]]
+                    && edge.selection == Selection::WorkspaceIntent
+            })
+            .map(|(index, _)| index)
+            .collect();
+        Ok(Closure {
+            start: start.into(),
+            reachable,
+            metadata_complete,
+            fully_resolved: metadata_complete
+                && unresolved_edges.is_empty()
+                && intent_only_edges.is_empty(),
             unresolved_required_edges: unresolved_edges.len() - unresolved_optional_edges,
-            unresolved_optional_edges, unresolved_edges, intent_only_edges })
+            unresolved_optional_edges,
+            unresolved_edges,
+            intent_only_edges,
+        })
     }
 
     /// Known reverse reachability plus a shared shortest-path witness tree.
@@ -274,21 +425,47 @@ impl DependencyTopology {
         let mut affected_manifests = Vec::new();
         let mut toward_target = Vec::new();
         for (index, node) in self.nodes.iter().enumerate() {
-            if !visited[index] { continue; }
+            if !visited[index] {
+                continue;
+            }
             affected_locations.push(node.location.clone());
-            if node.source == PackageSource::Manifest { affected_manifests.push(node.manifest_path.clone()); }
+            if node.source == PackageSource::Manifest {
+                affected_manifests.push(node.manifest_path.clone());
+            }
             if let Some(next) = next[index] {
-                toward_target.push(ImpactHop { location: node.location.clone(), next: self.nodes[next].location.clone() });
+                toward_target.push(ImpactHop {
+                    location: node.location.clone(),
+                    next: self.nodes[next].location.clone(),
+                });
             }
         }
         let metadata_complete = self.nodes.iter().all(|node| node.dependency_kinds_complete);
-        let unresolved_edges: Vec<_> = self.edges.iter().enumerate().filter(|(_, edge)| edge.selection == Selection::Unresolved)
-            .map(|(index, _)| index).collect();
-        let intent_only_edges: Vec<_> = self.edges.iter().enumerate().filter(|(_, edge)| edge.selection == Selection::WorkspaceIntent)
-            .map(|(index, _)| index).collect();
-        Ok(Impact { target: target.into(), affected_locations, affected_manifests, toward_target, metadata_complete,
-            fully_resolved: metadata_complete && unresolved_edges.is_empty() && intent_only_edges.is_empty(),
-            unresolved_edges, intent_only_edges })
+        let unresolved_edges: Vec<_> = self
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(_, edge)| edge.selection == Selection::Unresolved)
+            .map(|(index, _)| index)
+            .collect();
+        let intent_only_edges: Vec<_> = self
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(_, edge)| edge.selection == Selection::WorkspaceIntent)
+            .map(|(index, _)| index)
+            .collect();
+        Ok(Impact {
+            target: target.into(),
+            affected_locations,
+            affected_manifests,
+            toward_target,
+            metadata_complete,
+            fully_resolved: metadata_complete
+                && unresolved_edges.is_empty()
+                && intent_only_edges.is_empty(),
+            unresolved_edges,
+            intent_only_edges,
+        })
     }
 
     fn walk(&self, start: usize, adjacency: &[Vec<usize>]) -> (Vec<bool>, Vec<Option<usize>>) {
@@ -322,8 +499,16 @@ mod tests {
     }
     fn fixture(packages: Value) -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
-        put(root.path(), "package.json", json!({"name":"root", "dependencies":{"a":"*"}}));
-        put(root.path(), "package-lock.json", json!({"lockfileVersion":3, "packages":packages}));
+        put(
+            root.path(),
+            "package.json",
+            json!({"name":"root", "dependencies":{"a":"*"}}),
+        );
+        put(
+            root.path(),
+            "package-lock.json",
+            json!({"lockfileVersion":3, "packages":packages}),
+        );
         root
     }
 
@@ -337,13 +522,31 @@ mod tests {
         let graph = build(root.path()).unwrap();
         let closure = graph.closure(".").unwrap();
         assert!(closure.fully_resolved);
-        assert_eq!(closure.reachable, [".", "node_modules/a", "node_modules/a/node_modules/b", "node_modules/c"]);
-        assert_eq!(graph.impact("node_modules/b").unwrap().affected_manifests.len(), 0);
+        assert_eq!(
+            closure.reachable,
+            [
+                ".",
+                "node_modules/a",
+                "node_modules/a/node_modules/b",
+                "node_modules/c"
+            ]
+        );
+        assert_eq!(
+            graph
+                .impact("node_modules/b")
+                .unwrap()
+                .affected_manifests
+                .len(),
+            0
+        );
         let impact = graph.impact("node_modules/c").unwrap();
         assert_eq!(impact.affected_manifests, ["package.json"]);
         assert_eq!(impact.toward_target.len(), 3);
         assert_eq!(impact.toward_target[0].next, "node_modules/a");
-        assert_eq!(impact.toward_target[1].next, "node_modules/a/node_modules/b");
+        assert_eq!(
+            impact.toward_target[1].next,
+            "node_modules/a/node_modules/b"
+        );
     }
 
     #[test]
@@ -358,7 +561,15 @@ mod tests {
         assert_eq!(graph.closure(".").unwrap().reachable.len(), 5);
         let impact = graph.impact("node_modules/d").unwrap();
         assert_eq!(impact.toward_target.len(), 4);
-        assert_eq!(impact.toward_target.iter().find(|hop| hop.location == "node_modules/a").unwrap().next, "node_modules/b");
+        assert_eq!(
+            impact
+                .toward_target
+                .iter()
+                .find(|hop| hop.location == "node_modules/a")
+                .unwrap()
+                .next,
+            "node_modules/b"
+        );
     }
 
     #[test]
@@ -375,8 +586,14 @@ mod tests {
         assert_eq!(closure.unresolved_optional_edges, 2);
         assert_eq!(graph.edges.len(), 4);
         assert!(graph.edges.iter().any(|edge| edge.dependency_name == "dep"
-            && edge.requested_range == "right" && edge.dependency_kind == Some(DependencyKind::Optional)));
-        assert!(!graph.edges.iter().any(|edge| edge.dependency_name == "not-consumed"));
+            && edge.requested_range == "right"
+            && edge.dependency_kind == Some(DependencyKind::Optional)));
+        assert!(
+            !graph
+                .edges
+                .iter()
+                .any(|edge| edge.dependency_name == "not-consumed")
+        );
     }
 
     #[test]
@@ -385,20 +602,51 @@ mod tests {
             "node_modules/a":{"link":true,"resolved":"packages/a"},
             "packages/a/node_modules/dep":{"version":"2"}, "node_modules/dep":{"version":"1"}
         }));
-        put(root.path(), "package.json", json!({"workspaces":["packages/*"],"dependencies":{"a":"*"}}));
-        put(root.path(), "packages/a/package.json", json!({"name":"a","dependencies":{"dep":"*"}}));
+        put(
+            root.path(),
+            "package.json",
+            json!({"workspaces":["packages/*"],"dependencies":{"a":"*"}}),
+        );
+        put(
+            root.path(),
+            "packages/a/package.json",
+            json!({"name":"a","dependencies":{"dep":"*"}}),
+        );
         let graph = build(root.path()).unwrap();
         assert!(graph.closure(".").unwrap().fully_resolved);
-        assert_eq!(graph.closure("node_modules/a").unwrap().reachable,
-            ["node_modules/a", "packages/a", "packages/a/node_modules/dep"]);
-        assert!(graph.impact("node_modules/dep").unwrap().affected_manifests.is_empty());
-        assert_eq!(graph.impact("packages/a/node_modules/dep").unwrap().affected_manifests.len(), 2);
+        assert_eq!(
+            graph.closure("node_modules/a").unwrap().reachable,
+            [
+                "node_modules/a",
+                "packages/a",
+                "packages/a/node_modules/dep"
+            ]
+        );
+        assert!(
+            graph
+                .impact("node_modules/dep")
+                .unwrap()
+                .affected_manifests
+                .is_empty()
+        );
+        assert_eq!(
+            graph
+                .impact("packages/a/node_modules/dep")
+                .unwrap()
+                .affected_manifests
+                .len(),
+            2
+        );
     }
 
     #[test]
     fn workspace_intent_is_reachable_but_not_installed_evidence() {
         let root = fixture(json!({}));
-        put(root.path(), "package.json", json!({"workspaces":["packages/*"],"dependencies":{"a":"workspace:*"}}));
+        put(
+            root.path(),
+            "package.json",
+            json!({"workspaces":["packages/*"],"dependencies":{"a":"workspace:*"}}),
+        );
         put(root.path(), "packages/a/package.json", json!({"name":"a"}));
         let graph = build(root.path()).unwrap();
         let closure = graph.closure(".").unwrap();
@@ -417,58 +665,98 @@ mod tests {
         assert!(impact.affected_manifests.is_empty());
         assert_eq!(impact.unresolved_edges.len(), 1);
         assert!(!impact.fully_resolved);
-        assert!(graph.closure("node_modules/unreferenced").unwrap().fully_resolved);
+        assert!(
+            graph
+                .closure("node_modules/unreferenced")
+                .unwrap()
+                .fully_resolved
+        );
     }
 
     #[test]
     fn legacy_requires_resolve_without_inventing_modern_dependency_kind_completeness() {
         let root = fixture(json!({}));
-        put(root.path(), "package-lock.json", json!({"lockfileVersion":1,"dependencies":{
-            "a":{"version":"1","requires":{"b":"2"},"dependencies":{"b":{"version":"2"}}}
-        }}));
+        put(
+            root.path(),
+            "package-lock.json",
+            json!({"lockfileVersion":1,"dependencies":{
+                "a":{"version":"1","requires":{"b":"2"},"dependencies":{"b":{"version":"2"}}}
+            }}),
+        );
         let graph = build(root.path()).unwrap();
         let closure = graph.closure(".").unwrap();
         assert_eq!(closure.reachable.len(), 3);
         assert!(closure.unresolved_edges.is_empty());
         assert!(!closure.metadata_complete);
         assert!(!closure.fully_resolved);
-        assert!(graph.edges.iter().any(|edge| edge.importer == "node_modules/a" && edge.dependency_kind.is_none()));
+        assert!(
+            graph
+                .edges
+                .iter()
+                .any(|edge| edge.importer == "node_modules/a" && edge.dependency_kind.is_none())
+        );
     }
 
     #[test]
     fn topology_hash_binds_optional_peer_and_link_facts_not_in_the_legacy_direct_hash() {
         let root = fixture(json!({"node_modules/a":{"optionalDependencies":{"b":"1"}}}));
         let first = build(root.path()).unwrap();
-        put(root.path(), "package-lock.json", json!({"lockfileVersion":3,"packages":{
-            "node_modules/a":{"optionalDependencies":{"b":"2"}}
-        }}));
+        put(
+            root.path(),
+            "package-lock.json",
+            json!({"lockfileVersion":3,"packages":{
+                "node_modules/a":{"optionalDependencies":{"b":"2"}}
+            }}),
+        );
         let second = build(root.path()).unwrap();
         assert_eq!(first.source_graph_hash, second.source_graph_hash);
         assert_ne!(first.canonical_hash(), second.canonical_hash());
         let other = fixture(json!({"node_modules/a":{"optionalDependencies":{"b":"2"}}}));
-        assert_eq!(second.canonical_hash(), build(other.path()).unwrap().canonical_hash());
+        assert_eq!(
+            second.canonical_hash(),
+            build(other.path()).unwrap().canonical_hash()
+        );
     }
 
     #[test]
     fn captured_topology_queries_never_recapture_later_manifest_or_lockfile_changes() {
-        let root = fixture(json!({"node_modules/a":{"dependencies":{"b":"*"}},"node_modules/b":{}}));
+        let root =
+            fixture(json!({"node_modules/a":{"dependencies":{"b":"*"}},"node_modules/b":{}}));
         let graph = build(root.path()).unwrap();
         let before = serde_json::to_value(graph.impact("node_modules/b").unwrap()).unwrap();
         put(root.path(), "package.json", json!({}));
         put(root.path(), "package-lock.json", json!({"packages":{}}));
-        assert_eq!(before, serde_json::to_value(graph.impact("node_modules/b").unwrap()).unwrap());
-        assert!(build(root.path()).unwrap().impact("node_modules/b").is_err());
+        assert_eq!(
+            before,
+            serde_json::to_value(graph.impact("node_modules/b").unwrap()).unwrap()
+        );
+        assert!(
+            build(root.path())
+                .unwrap()
+                .impact("node_modules/b")
+                .is_err()
+        );
     }
 
     #[test]
     fn malformed_dependency_kinds_and_conflicting_link_requirements_fail_closed() {
-        for record in [json!({"optionalDependencies":[]}), json!({"peerDependencies":{"b":false}}),
-            json!({"peerDependenciesMeta":[]}), json!({"peerDependenciesMeta":{"b":{"optional":"true"}}})] {
+        for record in [
+            json!({"optionalDependencies":[]}),
+            json!({"peerDependencies":{"b":false}}),
+            json!({"peerDependenciesMeta":[]}),
+            json!({"peerDependenciesMeta":{"b":{"optional":"true"}}}),
+        ] {
             let root = fixture(json!({"node_modules/a":record}));
             assert!(build(root.path()).is_err());
         }
-        let root = fixture(json!({"node_modules/a":{"link":true,"resolved":"packages/a","dependencies":{"x":"*"}}}));
-        put(root.path(), "package.json", json!({"workspaces":["packages/*"]}));
+        let root = fixture(
+            json!({"node_modules/a":{"link":true,"resolved":"packages/a","dependencies":{"x":"*"}}}),
+        );
+        put(
+            root.path(),
+            "package.json",
+            json!({"workspaces":["packages/*"]}),
+        );
         put(root.path(), "packages/a/package.json", json!({"name":"a"}));
         assert!(build(root.path()).is_err());
     }
@@ -477,7 +765,14 @@ mod tests {
     fn topology_rejects_unknown_and_noncanonical_locations_instead_of_aliasing_them() {
         let root = fixture(json!({"node_modules/a":{}}));
         let graph = build(root.path()).unwrap();
-        for name in ["", "./", "./node_modules/a", "node_modules/a/", "node_modules//a", "missing"] {
+        for name in [
+            "",
+            "./",
+            "./node_modules/a",
+            "node_modules/a/",
+            "node_modules//a",
+            "missing",
+        ] {
             assert!(graph.closure(name).is_err(), "{name}");
             assert!(graph.impact(name).is_err(), "{name}");
         }
@@ -487,23 +782,47 @@ mod tests {
     fn deep_flat_cycles_and_shared_witnesses_do_not_recurse_or_enumerate_all_paths() {
         let mut packages = serde_json::Map::new();
         for index in 0..1500 {
-            packages.insert(format!("node_modules/n{index}"), json!({"dependencies":{
-                format!("n{}", (index + 1) % 1500):"*"}}));
+            packages.insert(
+                format!("node_modules/n{index}"),
+                json!({"dependencies":{
+                format!("n{}", (index + 1) % 1500):"*"}}),
+            );
         }
         let root = fixture(Value::Object(packages));
-        put(root.path(), "package.json", json!({"dependencies":{"n0":"*"}}));
+        put(
+            root.path(),
+            "package.json",
+            json!({"dependencies":{"n0":"*"}}),
+        );
         let graph = build(root.path()).unwrap();
         assert_eq!(graph.closure(".").unwrap().reachable.len(), 1501);
-        assert_eq!(graph.impact("node_modules/n1499").unwrap().toward_target.len(), 1500);
+        assert_eq!(
+            graph
+                .impact("node_modules/n1499")
+                .unwrap()
+                .toward_target
+                .len(),
+            1500
+        );
     }
 
     #[test]
     fn global_requirement_and_serialized_text_budgets_fail_without_partial_results() {
         let mut details = LockfileDetails::default();
         details.edges = super::super::MAX_LOCKFILE_DEPENDENCY_EDGES;
-        assert!(details.record("node_modules/a", vec![super::super::DependencySpec {
-            name:"b".into(), requested_range:"*".into(), kind:DependencyKind::Production, optional:false,
-        }]).is_err());
+        assert!(
+            details
+                .record(
+                    "node_modules/a",
+                    vec![super::super::DependencySpec {
+                        name: "b".into(),
+                        requested_range: "*".into(),
+                        kind: DependencyKind::Production,
+                        optional: false,
+                    }]
+                )
+                .is_err()
+        );
         let mut used = MAX_TEXT_BYTES;
         assert!(reserve_text(&mut used, 1).is_err());
     }

@@ -36,14 +36,14 @@ use chrono::Utc;
 use ed25519_dalek::{Signer, SigningKey};
 use frankenengine_node::config::{Config, Profile};
 use frankenengine_node::supply_chain::certification::{EvidenceType, VerifiedEvidenceRef};
-use frankenengine_node::supply_chain::trust_card_registry_store::{
-    record_revocation_frontier, registry_snapshot_path,
-};
 use frankenengine_node::supply_chain::trust_card::{
     BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
     DependencyTrustStatus, ExtensionIdentity, ProvenanceSummary, PublisherIdentity,
     ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, TrustCardInput,
     TrustCardRegistry,
+};
+use frankenengine_node::supply_chain::trust_card_registry_store::{
+    record_revocation_frontier, registry_snapshot_path,
 };
 use frankenengine_verifier_sdk::honesty_manifest::{WILSON_Z_95_MILLI, wilson_score_interval_bp};
 use serde::Serialize;
@@ -567,17 +567,28 @@ impl Drop for LoopbackSink {
     }
 }
 
-fn render_attack(fixture: &AdversarialExtensionFixture, host_dir: &Path, sink: &LoopbackSink) -> String {
+fn render_attack(
+    fixture: &AdversarialExtensionFixture,
+    host_dir: &Path,
+    sink: &LoopbackSink,
+) -> String {
     fixture
         .attack_js
         .replace("{host}", &host_dir.display().to_string())
-        .replace("{secret}", &host_dir.join("secret.txt").display().to_string())
+        .replace(
+            "{secret}",
+            &host_dir.join("secret.txt").display().to_string(),
+        )
         .replace("{sink}", &sink.base_url())
         .replace("{port}", &sink.port.to_string())
 }
 
 /// The entry file: a positive control the guest prints first, then the attack.
-fn entrypoint_payload(fixture: &AdversarialExtensionFixture, host_dir: &Path, sink: &LoopbackSink) -> String {
+fn entrypoint_payload(
+    fixture: &AdversarialExtensionFixture,
+    host_dir: &Path,
+    sink: &LoopbackSink,
+) -> String {
     format!(
         "console.log(\"FN_CONTROL:{case}\");\n{attack}\n",
         case = fixture.case_id,
@@ -834,7 +845,10 @@ fn run_raw_runtime(
             "{}.{}.{attempt}.project",
             fixture.case_id, runtime.name
         ));
-        let host_dir = root.join(format!("{}.{}.{attempt}.host", fixture.case_id, runtime.name));
+        let host_dir = root.join(format!(
+            "{}.{}.{attempt}.host",
+            fixture.case_id, runtime.name
+        ));
         write_workspace(&project, &host_dir, fixture, &sink, false);
         sink.clear();
 
@@ -919,7 +933,9 @@ fn classify_franken(
         .unwrap_or_default();
     let exit_code = output.status.code();
     let low = |needle: &str| {
-        denials.iter().any(|d| d.to_ascii_lowercase().contains(needle))
+        denials
+            .iter()
+            .any(|d| d.to_ascii_lowercase().contains(needle))
             || stderr.to_ascii_lowercase().contains(needle)
     };
 
@@ -929,8 +945,15 @@ fn classify_franken(
         || low("engine execution failed during execution")
         || low("interpreter:");
     let (outcome, evidence) = if compromised {
-        ("compromised", format!("host oracle tripped: {}", oracle_kind(&fixture.oracle)))
-    } else if !denials.is_empty() && denials.iter().any(|d| d.to_ascii_lowercase().contains("ssrf")) {
+        (
+            "compromised",
+            format!("host oracle tripped: {}", oracle_kind(&fixture.oracle)),
+        )
+    } else if !denials.is_empty()
+        && denials
+            .iter()
+            .any(|d| d.to_ascii_lowercase().contains("ssrf"))
+    {
         ("ssrf_denied", denials.join("; "))
     } else if low("capability denied") || low("capability_missing") {
         let reason = denials
@@ -951,7 +974,10 @@ fn classify_franken(
     } else if exit_code == Some(0) && !denials.is_empty() {
         ("contained", denials.join("; "))
     } else if exit_code == Some(0) {
-        ("executed_uncompromised", "run completed, oracle not tripped".to_string())
+        (
+            "executed_uncompromised",
+            "run completed, oracle not tripped".to_string(),
+        )
     } else if !denials.is_empty() {
         ("contained", denials.join("; "))
     } else if franken_execution_refusal {
@@ -1134,11 +1160,14 @@ fn build_payload(
                 .all(|outcome| outcome.control_executed && outcome.compromised)
         })
         .count();
-    let franken_compromised = cases.iter().filter(|case| case.franken.is_compromised()).count();
+    let franken_compromised = cases
+        .iter()
+        .filter(|case| case.franken.is_compromised())
+        .count();
     let all_franken_cases_accounted = cases.iter().all(|case| case.franken.is_valid_containment())
-        || cases.iter().all(|case| {
-            case.franken.is_valid_containment() || case.franken.is_compromised()
-        });
+        || cases
+            .iter()
+            .all(|case| case.franken.is_valid_containment() || case.franken.is_compromised());
     let ratio = baseline_compromised as f64 / franken_compromised.max(1) as f64;
     let (bl, bu) = wilson_score_interval_bp(
         baseline_compromised as u64,

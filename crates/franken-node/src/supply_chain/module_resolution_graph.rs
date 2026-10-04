@@ -17,11 +17,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-#[path = "package_target_resolution.rs"]
-pub mod package_targets;
 #[cfg(unix)]
 #[path = "module_file_resolution.rs"]
 pub mod file_resolution;
+#[path = "package_target_resolution.rs"]
+pub mod package_targets;
 
 #[path = "module_dependency_topology.rs"]
 pub mod dependency_topology;
@@ -87,7 +87,9 @@ impl fmt::Display for ModuleResolutionGraphError {
             Self::InvalidWorkspacePattern { pattern } => {
                 write!(formatter, "unsupported workspace pattern `{pattern}`")
             }
-            Self::InvalidMetadata { detail } => write!(formatter, "invalid package metadata: {detail}"),
+            Self::InvalidMetadata { detail } => {
+                write!(formatter, "invalid package metadata: {detail}")
+            }
             Self::BoundExceeded { bound, limit } => {
                 write!(formatter, "{bound} exceeds deterministic bound of {limit}")
             }
@@ -253,17 +255,24 @@ fn build_graph_parts(
     let mut workspace_by_path = BTreeMap::new();
     for package in packages.iter().filter(|package| package.workspace) {
         if let Some(name) = &package.name
-            && workspace_by_name.insert(name.clone(), package.package_id.clone()).is_some()
+            && workspace_by_name
+                .insert(name.clone(), package.package_id.clone())
+                .is_some()
         {
             return invalid_metadata(format!("duplicate workspace package name {name:?}"));
         }
         workspace_by_path.insert(manifest_directory(&package.relative_manifest_path), package);
     }
 
-    let Lockfile { pins: lockfile_pins, details } = read_package_lock(project_root)?;
+    let Lockfile {
+        pins: lockfile_pins,
+        details,
+    } = read_package_lock(project_root)?;
     for (path, target) in &details.links {
         if !workspace_by_path.contains_key(target.as_str()) {
-            return invalid_metadata(format!("lockfile link {path:?} targets an uncaptured workspace {target:?}"));
+            return invalid_metadata(format!(
+                "lockfile link {path:?} targets an uncaptured workspace {target:?}"
+            ));
         }
     }
     let lockfile_by_path = lockfile_pins
@@ -283,7 +292,9 @@ fn build_graph_parts(
             // Explicit workspace: requests express workspace intent; ordinary
             // version ranges bind only through a captured lockfile link.
             let target_package_id = if let Some(pin) = selected {
-                details.links.get(&pin.package_path)
+                details
+                    .links
+                    .get(&pin.package_path)
                     .and_then(|target| workspace_by_path.get(target.as_str()))
                     .map(|package| package.package_id.clone())
             } else if dependency.requested_range.starts_with("workspace:") {
@@ -331,15 +342,18 @@ fn build_graph_parts(
     let bytes = serialize_payload(&payload)?;
     let canonical_hash = canonical_hash(&bytes);
 
-    Ok((ModuleResolutionGraph {
-        schema_version: payload.schema_version,
-        project_root: payload.project_root,
-        root_package_id: payload.root_package_id,
-        packages: payload.packages,
-        dependency_edges: payload.dependency_edges,
-        lockfile_pins: payload.lockfile_pins,
-        canonical_hash,
-    }, details))
+    Ok((
+        ModuleResolutionGraph {
+            schema_version: payload.schema_version,
+            project_root: payload.project_root,
+            root_package_id: payload.root_package_id,
+            packages: payload.packages,
+            dependency_edges: payload.dependency_edges,
+            lockfile_pins: payload.lockfile_pins,
+            canonical_hash,
+        },
+        details,
+    ))
 }
 
 pub fn canonical_module_resolution_graph_bytes(
@@ -379,7 +393,9 @@ fn parse_manifest(
             source,
         })?;
 
-    if !value.is_object() { return invalid_metadata("package manifest must contain an object"); }
+    if !value.is_object() {
+        return invalid_metadata("package manifest must contain an object");
+    }
 
     let relative_manifest_path = relative_display(project_root, manifest_path);
     let manifest_dir = manifest_path.parent().unwrap_or(project_root);
@@ -419,7 +435,10 @@ fn parse_manifest(
     })
 }
 
-fn effective_dependencies(value: &Value, development: bool) -> ModuleResolutionGraphResult<Vec<DependencySpec>> {
+fn effective_dependencies(
+    value: &Value,
+    development: bool,
+) -> ModuleResolutionGraphResult<Vec<DependencySpec>> {
     let mut dependencies = Vec::new();
     collect_dependencies(
         value,
@@ -428,13 +447,15 @@ fn effective_dependencies(value: &Value, development: bool) -> ModuleResolutionG
         false,
         &mut dependencies,
     )?;
-    if development { collect_dependencies(
-        value,
-        "devDependencies",
-        DependencyKind::Development,
-        false,
-        &mut dependencies,
-    )?; }
+    if development {
+        collect_dependencies(
+            value,
+            "devDependencies",
+            DependencyKind::Development,
+            false,
+            &mut dependencies,
+        )?;
+    }
     collect_dependencies(
         value,
         "peerDependencies",
@@ -451,25 +472,33 @@ fn effective_dependencies(value: &Value, development: bool) -> ModuleResolutionG
     )?;
     // npm optionalDependencies override same-name production requirements.
     // Installed development requirements are not part of the consumer graph.
-    let optional: BTreeSet<_> = dependencies.iter()
+    let optional: BTreeSet<_> = dependencies
+        .iter()
         .filter(|dependency| dependency.kind == DependencyKind::Optional)
-        .map(|dependency| dependency.name.clone()).collect();
-    dependencies.retain(|dependency| dependency.kind != DependencyKind::Production
-        || !optional.contains(&dependency.name));
+        .map(|dependency| dependency.name.clone())
+        .collect();
+    dependencies.retain(|dependency| {
+        dependency.kind != DependencyKind::Production || !optional.contains(&dependency.name)
+    });
     if let Some(meta) = value.get("peerDependenciesMeta") {
-        let meta = meta.as_object().ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
-            detail: "peerDependenciesMeta must be an object".into(),
-        })?;
+        let meta = meta
+            .as_object()
+            .ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
+                detail: "peerDependenciesMeta must be an object".into(),
+            })?;
         for (name, attributes) in meta {
             validate_package_name(name)?;
-            if !attributes.is_object() { return invalid_metadata("peer dependency metadata must be an object"); }
+            if !attributes.is_object() {
+                return invalid_metadata("peer dependency metadata must be an object");
+            }
             let optional = match attributes.get("optional") {
                 Some(Value::Bool(value)) => *value,
                 None => false,
                 Some(_) => return invalid_metadata("peer dependency optional must be a boolean"),
             };
-            for dependency in dependencies.iter_mut().filter(|dependency|
-                dependency.kind == DependencyKind::Peer && dependency.name == *name) {
+            for dependency in dependencies.iter_mut().filter(|dependency| {
+                dependency.kind == DependencyKind::Peer && dependency.name == *name
+            }) {
                 dependency.optional = optional;
             }
         }
@@ -492,15 +521,22 @@ fn collect_dependencies(
     optional: bool,
     dependencies: &mut Vec<DependencySpec>,
 ) -> ModuleResolutionGraphResult<()> {
-    let Some(value) = manifest.get(field) else { return Ok(()); };
-    let entries = value.as_object().ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
-        detail: format!("manifest {field} must be an object"),
-    })?;
+    let Some(value) = manifest.get(field) else {
+        return Ok(());
+    };
+    let entries = value
+        .as_object()
+        .ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
+            detail: format!("manifest {field} must be an object"),
+        })?;
     for (name, range) in entries {
         validate_package_name(name)?;
-        let requested_range = range.as_str().ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
-            detail: format!("{field} range for {name:?} must be a string"),
-        })?;
+        let requested_range =
+            range
+                .as_str()
+                .ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
+                    detail: format!("{field} range for {name:?} must be a string"),
+                })?;
         dependencies.push(DependencySpec {
             name: name.clone(),
             requested_range: requested_range.to_string(),
@@ -717,16 +753,26 @@ struct LockfileDetails {
 }
 
 impl LockfileDetails {
-    fn record(&mut self, path: &str, requirements: Vec<DependencySpec>) -> ModuleResolutionGraphResult<()> {
+    fn record(
+        &mut self,
+        path: &str,
+        requirements: Vec<DependencySpec>,
+    ) -> ModuleResolutionGraphResult<()> {
         self.edges = self.edges.saturating_add(requirements.len());
-        enforce_len("lockfile dependency edges", self.edges, MAX_LOCKFILE_DEPENDENCY_EDGES)?;
+        enforce_len(
+            "lockfile dependency edges",
+            self.edges,
+            MAX_LOCKFILE_DEPENDENCY_EDGES,
+        )?;
         self.requirements.insert(path.to_owned(), requirements);
         Ok(())
     }
 }
 
 fn invalid_metadata<T>(detail: impl Into<String>) -> ModuleResolutionGraphResult<T> {
-    Err(ModuleResolutionGraphError::InvalidMetadata { detail: detail.into() })
+    Err(ModuleResolutionGraphError::InvalidMetadata {
+        detail: detail.into(),
+    })
 }
 
 fn manifest_directory(path: &str) -> &str {
@@ -739,9 +785,18 @@ fn validate_package_name(name: &str) -> ModuleResolutionGraphResult<()> {
     let valid = name.len() <= 214
         && components.len() == if scoped { 2 } else { 1 }
         && components.iter().enumerate().all(|(index, part)| {
-            let part: &str = if scoped && index == 0 { &part[1..] } else { part };
-            !part.is_empty() && part != "." && part != ".." && part != "node_modules"
-                && part.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.~".contains(&byte))
+            let part: &str = if scoped && index == 0 {
+                &part[1..]
+            } else {
+                part
+            };
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && part != "node_modules"
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_.~".contains(&byte))
         });
     if !valid {
         return invalid_metadata(format!("unsupported or unsafe dependency name {name:?}"));
@@ -750,10 +805,17 @@ fn validate_package_name(name: &str) -> ModuleResolutionGraphResult<()> {
 }
 
 fn validate_lock_path(path: &str) -> ModuleResolutionGraphResult<()> {
-    if path.len() > 4096 || path.contains(['\\', ':']) || path.chars().any(char::is_control)
-        || (!path.is_empty() && path.split('/').any(|part| part.is_empty() || part == "." || part == ".."))
+    if path.len() > 4096
+        || path.contains(['\\', ':'])
+        || path.chars().any(char::is_control)
+        || (!path.is_empty()
+            && path
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == ".."))
     {
-        return invalid_metadata(format!("lockfile location must be canonical and project-relative: {path:?}"));
+        return invalid_metadata(format!(
+            "lockfile location must be canonical and project-relative: {path:?}"
+        ));
     }
     Ok(())
 }
@@ -776,7 +838,9 @@ fn nearest_lockfile_pin<'a>(
                 return Some(*pin);
             }
         }
-        if directory.is_empty() { return None; }
+        if directory.is_empty() {
+            return None;
+        }
         directory = directory.rsplit_once('/').map_or("", |(parent, _)| parent);
     }
 }
@@ -818,21 +882,31 @@ fn read_package_lock(project_root: &Path) -> ModuleResolutionGraphResult<Lockfil
     let mut lockfile = Lockfile::default();
     if let Some(packages_value) = value.get("packages") {
         lockfile.details.dependency_kinds_complete = true;
-        let packages = packages_value.as_object().ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
-            detail: "lockfile packages must be an object".into(),
+        let packages = packages_value.as_object().ok_or_else(|| {
+            ModuleResolutionGraphError::InvalidMetadata {
+                detail: "lockfile packages must be an object".into(),
+            }
         })?;
-        enforce_len("lockfile package records", packages.len(), MAX_LOCKFILE_PACKAGES + 1)?;
+        enforce_len(
+            "lockfile package records",
+            packages.len(),
+            MAX_LOCKFILE_PACKAGES + 1,
+        )?;
         for (package_path, package) in packages {
             validate_lock_path(package_path)?;
             if !package.is_object() {
-                return invalid_metadata(format!("lockfile record {package_path:?} must be an object"));
+                return invalid_metadata(format!(
+                    "lockfile record {package_path:?} must be an object"
+                ));
             }
             if package_path.is_empty() {
                 continue;
             }
             let Some(package_name) = package_name_from_lock_path(package_path) else {
                 if package_path.split('/').any(|part| part == "node_modules") {
-                    return invalid_metadata(format!("invalid installed package location {package_path:?}"));
+                    return invalid_metadata(format!(
+                        "invalid installed package location {package_path:?}"
+                    ));
                 }
                 continue;
             };
@@ -842,16 +916,23 @@ fn read_package_lock(project_root: &Path) -> ModuleResolutionGraphResult<Lockfil
             let resolved = optional_string(package, "resolved")?;
             match package.get("link") {
                 Some(Value::Bool(true)) => {
-                    let target = resolved.as_ref().ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
-                        detail: format!("lockfile link {package_path:?} has no target"),
+                    let target = resolved.as_ref().ok_or_else(|| {
+                        ModuleResolutionGraphError::InvalidMetadata {
+                            detail: format!("lockfile link {package_path:?} has no target"),
+                        }
                     })?;
                     validate_lock_path(target)?;
-                    lockfile.details.links.insert(package_path.clone(), target.clone());
+                    lockfile
+                        .details
+                        .links
+                        .insert(package_path.clone(), target.clone());
                 }
                 None | Some(Value::Bool(false)) => {}
                 Some(_) => return invalid_metadata("lockfile link must be a boolean"),
             }
-            lockfile.details.record(package_path, effective_dependencies(package, false)?)?;
+            lockfile
+                .details
+                .record(package_path, effective_dependencies(package, false)?)?;
             lockfile.pins.push(LockfilePin {
                 package_path: package_path.clone(),
                 package_name,
@@ -860,16 +941,26 @@ fn read_package_lock(project_root: &Path) -> ModuleResolutionGraphResult<Lockfil
                 integrity: optional_string(package, "integrity")?,
                 dependencies: lockfile_dependencies(package.get("dependencies"))?,
             });
-            enforce_len("lockfile packages", lockfile.pins.len(), MAX_LOCKFILE_PACKAGES)?;
+            enforce_len(
+                "lockfile packages",
+                lockfile.pins.len(),
+                MAX_LOCKFILE_PACKAGES,
+            )?;
         }
-    } else if value.get("lockfileVersion").and_then(Value::as_u64).is_some_and(|version| version >= 2) {
+    } else if value
+        .get("lockfileVersion")
+        .and_then(Value::as_u64)
+        .is_some_and(|version| version >= 2)
+    {
         return invalid_metadata("modern lockfile is missing its authoritative packages object");
     } else {
         // npm v1 records an installation hierarchy, not a global version map.
         // A modern packages map wins over its redundant legacy dependencies.
         read_legacy_packages(value.get("dependencies"), "", 0, &mut lockfile)?;
     }
-    lockfile.pins.sort_by(|left, right| left.package_path.cmp(&right.package_path));
+    lockfile
+        .pins
+        .sort_by(|left, right| left.package_path.cmp(&right.package_path));
     Ok(lockfile)
 }
 
@@ -880,29 +971,52 @@ fn read_legacy_packages(
     lockfile: &mut Lockfile,
 ) -> ModuleResolutionGraphResult<()> {
     enforce_len("legacy lockfile nesting", depth, 64)?;
-    let Some(dependencies) = dependencies else { return Ok(()); };
-    let entries = dependencies.as_object().ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
-        detail: "legacy lockfile dependencies must be an object".into(),
-    })?;
+    let Some(dependencies) = dependencies else {
+        return Ok(());
+    };
+    let entries =
+        dependencies
+            .as_object()
+            .ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
+                detail: "legacy lockfile dependencies must be an object".into(),
+            })?;
     for (name, package) in entries {
         validate_package_name(name)?;
-        if !package.is_object() { return invalid_metadata("legacy package record must be an object"); }
-        let path = if parent.is_empty() { format!("node_modules/{name}") }
-            else { format!("{parent}/node_modules/{name}") };
+        if !package.is_object() {
+            return invalid_metadata("legacy package record must be an object");
+        }
+        let path = if parent.is_empty() {
+            format!("node_modules/{name}")
+        } else {
+            format!("{parent}/node_modules/{name}")
+        };
         validate_lock_path(&path)?;
         let requirements = lockfile_dependencies(package.get("requires"))?;
-        lockfile.details.record(&path, requirements.iter().map(|dependency| DependencySpec {
-            name: dependency.name.clone(), requested_range: dependency.requested_range.clone(),
-            kind: DependencyKind::Production, optional: false,
-        }).collect())?;
+        lockfile.details.record(
+            &path,
+            requirements
+                .iter()
+                .map(|dependency| DependencySpec {
+                    name: dependency.name.clone(),
+                    requested_range: dependency.requested_range.clone(),
+                    kind: DependencyKind::Production,
+                    optional: false,
+                })
+                .collect(),
+        )?;
         lockfile.pins.push(LockfilePin {
-            package_path: path.clone(), package_name: name.clone(),
+            package_path: path.clone(),
+            package_name: name.clone(),
             version: optional_string(package, "version")?,
             resolved: optional_string(package, "resolved")?,
             integrity: optional_string(package, "integrity")?,
             dependencies: requirements,
         });
-        enforce_len("lockfile packages", lockfile.pins.len(), MAX_LOCKFILE_PACKAGES)?;
+        enforce_len(
+            "lockfile packages",
+            lockfile.pins.len(),
+            MAX_LOCKFILE_PACKAGES,
+        )?;
         read_legacy_packages(package.get("dependencies"), &path, depth + 1, lockfile)?;
     }
     Ok(())
@@ -913,14 +1027,22 @@ fn lockfile_dependencies(
 ) -> ModuleResolutionGraphResult<Vec<LockfileDependency>> {
     let mut dependencies = Vec::new();
     if let Some(value) = value {
-        let object = value.as_object().ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
-            detail: "lockfile dependency requirements must be an object".into(),
-        })?;
+        let object =
+            value
+                .as_object()
+                .ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
+                    detail: "lockfile dependency requirements must be an object".into(),
+                })?;
         for (name, range) in object {
             validate_package_name(name)?;
-            let requested_range = range.as_str().ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
-                detail: format!("lockfile dependency requirement for {name:?} must be a string"),
-            })?;
+            let requested_range =
+                range
+                    .as_str()
+                    .ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
+                        detail: format!(
+                            "lockfile dependency requirement for {name:?} must be a string"
+                        ),
+                    })?;
             dependencies.push(LockfileDependency {
                 name: name.clone(),
                 requested_range: requested_range.to_string(),

@@ -1354,7 +1354,12 @@ fn corpus_process_authority(
 ) -> Result<CorpusProcessAuthority> {
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (template_config_path, canonical_run_root, case_timeout, policy);
+        let _ = (
+            template_config_path,
+            canonical_run_root,
+            case_timeout,
+            policy,
+        );
         bail!("corpus child-process authority is supported only on Linux");
     }
 
@@ -1633,9 +1638,13 @@ fn resolve_reference_executable(runtime: &str) -> Result<PathBuf> {
 #[cfg(feature = "engine")]
 fn run_probe(command: &mut Command) -> Result<Output> {
     #[cfg(target_os = "linux")]
-    { corpus_process::probe(command, Duration::from_secs(10)) }
+    {
+        corpus_process::probe(command, Duration::from_secs(10))
+    }
     #[cfg(not(target_os = "linux"))]
-    { command.output().context("execute runtime probe") }
+    {
+        command.output().context("execute runtime probe")
+    }
 }
 
 #[cfg(feature = "engine")]
@@ -1654,12 +1663,11 @@ fn runtime_version(executable: &Path, runtime: &str) -> Result<String> {
 
 #[cfg(feature = "engine")]
 fn validate_node_identity(executable: &Path) -> Result<()> {
-    let output = run_probe(Command::new(executable)
-        .args([
-            "-e",
-            "process.stdout.write(`${process.release?.name}|${typeof Bun}`)",
-        ]))
-        .context("execute Node.js identity probe")?;
+    let output = run_probe(Command::new(executable).args([
+        "-e",
+        "process.stdout.write(`${process.release?.name}|${typeof Bun}`)",
+    ]))
+    .context("execute Node.js identity probe")?;
     let identity = String::from_utf8_lossy(&output.stdout);
     if !output.status.success() || identity != "node|undefined" {
         bail!(
@@ -1722,8 +1730,9 @@ fn run_leg_after_spawn(
     timeout: Duration,
     after_spawn: impl FnOnce(u32) -> Result<()>,
 ) -> Result<LegCapture> {
-    let captured = corpus_process::capture(command, timeout, MAX_LEG_OUTPUT_BYTES,
-        |pid| after_spawn(pid).context("authenticate corpus process-authority child"))?;
+    let captured = corpus_process::capture(command, timeout, MAX_LEG_OUTPUT_BYTES, |pid| {
+        after_spawn(pid).context("authenticate corpus process-authority child")
+    })?;
     let timed_out = captured.timed_out;
     let exit_code = captured.status.code();
     let convert = |stream: corpus_process::CapturedStream| PipeDrainResult {
@@ -1744,9 +1753,14 @@ fn run_leg_after_spawn(
             stdout_truncated: stdout.capture_truncated,
             stderr_truncated: stderr.capture_truncated,
             exit_code,
-            termination_kind: if timed_out { "timed_out" } else if exit_code.is_some() {
+            termination_kind: if timed_out {
+                "timed_out"
+            } else if exit_code.is_some() {
                 "exited"
-            } else { "signal_or_unknown" }.to_owned(),
+            } else {
+                "signal_or_unknown"
+            }
+            .to_owned(),
             timed_out,
             elapsed_ms: captured.elapsed_ms,
         },
@@ -1903,10 +1917,12 @@ pub fn run_corpus(
     // need the same visible filesystem scaffold so guest `readdir('.')`
     // observations compare runtime semantics rather than different sandboxes.
     let template = tempfile::TempDir::new().context("create workspace template dir")?;
-    let init = run_probe(Command::new(&current_exe)
-        .args(["init", "--profile", "balanced", "--out-dir", "."])
-        .current_dir(template.path()))
-        .context("bootstrap workspace template via init")?;
+    let init = run_probe(
+        Command::new(&current_exe)
+            .args(["init", "--profile", "balanced", "--out-dir", "."])
+            .current_dir(template.path()),
+    )
+    .context("bootstrap workspace template via init")?;
     if !init.status.success() {
         bail!(
             "workspace template init failed (exit {:?}): {}",
@@ -2323,11 +2339,20 @@ fn lockstep_case_passed(
     // Agreement proves equality, not success: matching crashes and
     // policy refusals are failures. Share the artifact admission rule.
     let mut observations = BTreeMap::from([
-        ("bun".to_string(), LockstepObservationKey::from(&bun.observation)),
-        ("franken-engine-native".to_string(), LockstepObservationKey::from(&franken.observation)),
+        (
+            "bun".to_string(),
+            LockstepObservationKey::from(&bun.observation),
+        ),
+        (
+            "franken-engine-native".to_string(),
+            LockstepObservationKey::from(&franken.observation),
+        ),
     ]);
     if let Some(node) = node {
-        observations.insert("node".to_string(), LockstepObservationKey::from(&node.observation));
+        observations.insert(
+            "node".to_string(),
+            LockstepObservationKey::from(&node.observation),
+        );
     }
     let reference = node.unwrap_or(bun);
     reference.comparison == franken.comparison
@@ -2413,9 +2438,10 @@ pub(crate) fn passing_lockstep_observations_are_consistent(
     let Some(bun) = observations.get("bun") else {
         return Err("cannot pass without the bun reference".to_string());
     };
-    if observations.keys().any(|id| {
-        !matches!(id.as_str(), "bun" | "node" | "franken-engine-native")
-    }) {
+    if observations
+        .keys()
+        .any(|id| !matches!(id.as_str(), "bun" | "node" | "franken-engine-native"))
+    {
         return Err("cannot pass with an unrecognized runtime identity".to_string());
     }
     // This also protects callers outside the outer digest verifier.
@@ -2432,8 +2458,10 @@ pub(crate) fn passing_lockstep_observations_are_consistent(
         }
         return Err("cannot pass with divergent evidence".to_string());
     }
-    if reference.exit_code != Some(0) || franken.exit_code != Some(0)
-        || reference.termination_kind != "exited" || franken.termination_kind != "exited"
+    if reference.exit_code != Some(0)
+        || franken.exit_code != Some(0)
+        || reference.termination_kind != "exited"
+        || franken.termination_kind != "exited"
     {
         return Err("cannot pass without successful reference and franken exits".to_string());
     }
@@ -3478,7 +3506,13 @@ mod snapshot_staging_tests {
             lockstep_case_passed(true, false, &bun, Some(&node), &franken),
             "matching Node is a pass when Bun disagrees"
         );
-        assert!(!lockstep_case_passed(false, false, &bun, Some(&node), &franken));
+        assert!(!lockstep_case_passed(
+            false,
+            false,
+            &bun,
+            Some(&node),
+            &franken
+        ));
         let incomplete_reason = classify_failure(&bun, Some(&node), &franken);
         assert!(
             incomplete_reason.contains("franken matched node"),
@@ -4151,30 +4185,54 @@ mod lockstep_pass_policy_tests {
         }
     }
 
-    fn matching_observations(triad: bool, exit_code: Option<i32>) -> BTreeMap<String, RuntimeLegObservation> {
+    fn matching_observations(
+        triad: bool,
+        exit_code: Option<i32>,
+    ) -> BTreeMap<String, RuntimeLegObservation> {
         let mut captured = observation('a', 1);
         captured.exit_code = exit_code;
-        captured.termination_kind = if exit_code.is_some() { "exited" } else { "signal_or_unknown" }.into();
+        captured.termination_kind = if exit_code.is_some() {
+            "exited"
+        } else {
+            "signal_or_unknown"
+        }
+        .into();
         let mut observations = BTreeMap::from([
             ("bun".to_string(), captured.clone()),
             ("franken-engine-native".to_string(), captured.clone()),
         ]);
-        if triad { observations.insert("node".into(), captured); }
+        if triad {
+            observations.insert("node".into(), captured);
+        }
         observations
     }
 
-    fn fingerprints(observations: &BTreeMap<String, RuntimeLegObservation>) -> BTreeMap<String, LockstepObservationKey> {
-        observations.iter().map(|(id, value)| (id.clone(), LockstepObservationKey::from(value))).collect()
+    fn fingerprints(
+        observations: &BTreeMap<String, RuntimeLegObservation>,
+    ) -> BTreeMap<String, LockstepObservationKey> {
+        observations
+            .iter()
+            .map(|(id, value)| (id.clone(), LockstepObservationKey::from(value)))
+            .collect()
     }
 
     #[test]
     fn writer_rejects_matching_nonzero_or_signal_exits_as_pass() {
         for triad in [false, true] {
             for exit in [Some(-1), Some(1), Some(7), Some(137), None] {
-                let result = build_corpus_results_document_with_references(None,
-                    &[outcome("pass", matching_observations(triad, exit))], "test-corpus",
-                    "1.3.14-test", triad.then_some("v22.14.0"), "2026-08-21T00:00:00Z", "corpus");
-                assert!(result.is_err(), "matching failures passed: triad={triad} exit={exit:?}");
+                let result = build_corpus_results_document_with_references(
+                    None,
+                    &[outcome("pass", matching_observations(triad, exit))],
+                    "test-corpus",
+                    "1.3.14-test",
+                    triad.then_some("v22.14.0"),
+                    "2026-08-21T00:00:00Z",
+                    "corpus",
+                );
+                assert!(
+                    result.is_err(),
+                    "matching failures passed: triad={triad} exit={exit:?}"
+                );
             }
         }
     }
@@ -4183,10 +4241,16 @@ mod lockstep_pass_policy_tests {
     fn writer_preserves_matching_failures_as_measured_failures() {
         for triad in [false, true] {
             for exit in [Some(1), Some(7), None] {
-                let document = build_corpus_results_document_with_references(None,
-                    &[outcome("fail", matching_observations(triad, exit))], "test-corpus",
-                    "1.3.14-test", triad.then_some("v22.14.0"), "2026-08-21T00:00:00Z", "corpus")
-                    .expect("measured failures remain publishable");
+                let document = build_corpus_results_document_with_references(
+                    None,
+                    &[outcome("fail", matching_observations(triad, exit))],
+                    "test-corpus",
+                    "1.3.14-test",
+                    triad.then_some("v22.14.0"),
+                    "2026-08-21T00:00:00Z",
+                    "corpus",
+                )
+                .expect("measured failures remain publishable");
                 assert_eq!(document["totals"]["passed_test_cases"], 0);
                 assert_eq!(document["totals"]["failed_test_cases"], 1);
                 assert_eq!(document["per_test_results"][0]["status"], "fail");
@@ -4201,12 +4265,17 @@ mod lockstep_pass_policy_tests {
             for triad in [false, true] {
                 let mut observations = matching_observations(triad, Some(0));
                 observations.remove(missing);
-                assert!(passing_lockstep_observations_are_consistent(&fingerprints(&observations)).is_err());
+                assert!(
+                    passing_lockstep_observations_are_consistent(&fingerprints(&observations))
+                        .is_err()
+                );
             }
         }
         let mut observations = matching_observations(false, Some(0));
         observations.insert("unknown-runtime".into(), observation('a', 1));
-        assert!(passing_lockstep_observations_are_consistent(&fingerprints(&observations)).is_err());
+        assert!(
+            passing_lockstep_observations_are_consistent(&fingerprints(&observations)).is_err()
+        );
         assert!(passing_lockstep_observations_are_consistent(&BTreeMap::new()).is_err());
     }
 
@@ -4216,10 +4285,16 @@ mod lockstep_pass_policy_tests {
             for field in 0..3 {
                 let mut observations = matching_observations(triad, Some(0));
                 for observation in observations.values_mut() {
-                    match field { 0 => observation.timed_out = true,
-                        1 => observation.stdout_truncated = true, _ => observation.stderr_truncated = true }
+                    match field {
+                        0 => observation.timed_out = true,
+                        1 => observation.stdout_truncated = true,
+                        _ => observation.stderr_truncated = true,
+                    }
                 }
-                assert!(passing_lockstep_observations_are_consistent(&fingerprints(&observations)).is_err());
+                assert!(
+                    passing_lockstep_observations_are_consistent(&fingerprints(&observations))
+                        .is_err()
+                );
             }
         }
     }
@@ -4228,8 +4303,12 @@ mod lockstep_pass_policy_tests {
     fn pass_helper_requires_normal_termination_not_only_a_zero_code() {
         for termination in ["signal_or_unknown", "timed_out", "unknown", ""] {
             let mut observations = matching_observations(false, Some(0));
-            for observation in observations.values_mut() { observation.termination_kind = termination.into(); }
-            assert!(passing_lockstep_observations_are_consistent(&fingerprints(&observations)).is_err());
+            for observation in observations.values_mut() {
+                observation.termination_kind = termination.into();
+            }
+            assert!(
+                passing_lockstep_observations_are_consistent(&fingerprints(&observations)).is_err()
+            );
         }
     }
 
@@ -4240,15 +4319,27 @@ mod lockstep_pass_policy_tests {
         bun.exit_code = Some(7);
         bun.stdout_digest = format!("sha256:{}", "b".repeat(64));
         assert!(passing_lockstep_observations_are_consistent(&fingerprints(&observations)).is_ok());
-        let document = build_corpus_results_document_with_references(None, &[outcome("pass", observations)],
-            "test-corpus", "1.3.14-test", Some("v22.14.0"), "2026-08-21T00:00:00Z", "corpus").unwrap();
+        let document = build_corpus_results_document_with_references(
+            None,
+            &[outcome("pass", observations)],
+            "test-corpus",
+            "1.3.14-test",
+            Some("v22.14.0"),
+            "2026-08-21T00:00:00Z",
+            "corpus",
+        )
+        .unwrap();
         assert_eq!(document["totals"]["passed_test_cases"], 1);
     }
 
     #[cfg(feature = "engine")]
     fn leg(observation: RuntimeLegObservation) -> LegCapture {
-        LegCapture { comparison: b"matching-comparison".to_vec(), observation,
-            stdout_excerpt: String::new(), stderr_excerpt: String::new() }
+        LegCapture {
+            comparison: b"matching-comparison".to_vec(),
+            observation,
+            stdout_excerpt: String::new(),
+            stderr_excerpt: String::new(),
+        }
     }
 
     #[cfg(feature = "engine")]
@@ -4260,7 +4351,13 @@ mod lockstep_pass_policy_tests {
             let node = leg(observations["node"].clone());
             let native = leg(observations["franken-engine-native"].clone());
             assert!(!lockstep_case_passed(true, true, &bun, None, &native));
-            assert!(!lockstep_case_passed(true, true, &bun, Some(&node), &native));
+            assert!(!lockstep_case_passed(
+                true,
+                true,
+                &bun,
+                Some(&node),
+                &native
+            ));
         }
     }
 
@@ -4270,7 +4367,13 @@ mod lockstep_pass_policy_tests {
         let bun = leg(observation('b', 1));
         let native = leg(observation('b', 2));
         let node = leg(observation('a', 3));
-        assert!(!lockstep_case_passed(true, true, &bun, Some(&node), &native));
+        assert!(!lockstep_case_passed(
+            true,
+            true,
+            &bun,
+            Some(&node),
+            &native
+        ));
     }
 
     #[cfg(feature = "engine")]

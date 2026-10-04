@@ -103,11 +103,19 @@ mod tests {
     #[test]
     fn ordinary_public_ipv6_is_not_confused_with_private_or_special_space() {
         for address in [
-            "2001:4860:4860::8888", "2606:4700:4700::1111",
-            "2620:fe::fe", "2a00:1450:4001::200e", "2400:cb00::1",
-            "2000::", "2001:200::", "2001:db7:ffff:ffff:ffff:ffff:ffff:ffff",
-            "2001:db9::", "2003::", "3ffd:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
-            "3fff:1000::", "3fff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+            "2001:4860:4860::8888",
+            "2606:4700:4700::1111",
+            "2620:fe::fe",
+            "2a00:1450:4001::200e",
+            "2400:cb00::1",
+            "2000::",
+            "2001:200::",
+            "2001:db7:ffff:ffff:ffff:ffff:ffff:ffff",
+            "2001:db9::",
+            "2003::",
+            "3ffd:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+            "3fff:1000::",
+            "3fff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
         ] {
             assert_eq!(classified(address), Destination::PublicUnicast, "{address}");
         }
@@ -116,38 +124,77 @@ mod tests {
     #[test]
     fn local_special_documentation_and_transition_ranges_stay_denied() {
         for address in [
-            "::", "::1", "::127.0.0.1", "::8.8.8.8",
-            "64:ff9b:1::1", "64:ff9b:0:0:0:1::", "100::1", "100:0:0:1::1",
-            "2001::", "2001:0:4136:e378:8000:63bf:3fff:fdd2",
-            "2001:1::1", "2001:2::1", "2001:10::1", "2001:20::1",
-            "2001:1ff:ffff:ffff:ffff:ffff:ffff:ffff", "2001:db8::",
-            "2001:db8:ffff:ffff:ffff:ffff:ffff:ffff", "2002:7f00:1::1",
-            "2002:808:808::1", "3ffe::1", "3fff::", "3fff:fff:ffff:ffff:ffff:ffff:ffff:ffff",
-            "4000::1", "5f00::1", "fc00::", "fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
-            "fe80::1", "febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
-            "fec0::1", "feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "ff02::1", "ffff::1",
+            "::",
+            "::1",
+            "::127.0.0.1",
+            "::8.8.8.8",
+            "64:ff9b:1::1",
+            "64:ff9b:0:0:0:1::",
+            "100::1",
+            "100:0:0:1::1",
+            "2001::",
+            "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+            "2001:1::1",
+            "2001:2::1",
+            "2001:10::1",
+            "2001:20::1",
+            "2001:1ff:ffff:ffff:ffff:ffff:ffff:ffff",
+            "2001:db8::",
+            "2001:db8:ffff:ffff:ffff:ffff:ffff:ffff",
+            "2002:7f00:1::1",
+            "2002:808:808::1",
+            "3ffe::1",
+            "3fff::",
+            "3fff:fff:ffff:ffff:ffff:ffff:ffff:ffff",
+            "4000::1",
+            "5f00::1",
+            "fc00::",
+            "fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+            "fe80::1",
+            "febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+            "fec0::1",
+            "feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+            "ff02::1",
+            "ffff::1",
         ] {
-            assert!(matches!(classified(address), Destination::Denied(_)), "{address}");
+            assert!(
+                matches!(classified(address), Destination::Denied(_)),
+                "{address}"
+            );
         }
     }
 
     #[test]
     fn mapped_and_well_known_nat64_addresses_require_the_embedded_ipv4_policy() {
         for address in [
-            Ipv4Addr::UNSPECIFIED, Ipv4Addr::LOCALHOST,
-            Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(169, 254, 169, 254),
-            Ipv4Addr::new(100, 100, 100, 100), Ipv4Addr::new(8, 8, 8, 8),
+            Ipv4Addr::UNSPECIFIED,
+            Ipv4Addr::LOCALHOST,
+            Ipv4Addr::new(10, 0, 0, 1),
+            Ipv4Addr::new(169, 254, 169, 254),
+            Ipv4Addr::new(100, 100, 100, 100),
+            Ipv4Addr::new(8, 8, 8, 8),
             Ipv4Addr::BROADCAST,
         ] {
             let [a, b, c, d] = address.octets();
-            let nat64 = Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 0,
-                u16::from_be_bytes([a, b]), u16::from_be_bytes([c, d]));
+            let nat64 = Ipv6Addr::new(
+                0x64,
+                0xff9b,
+                0,
+                0,
+                0,
+                0,
+                u16::from_be_bytes([a, b]),
+                u16::from_be_bytes([c, d]),
+            );
             for ip in [address.to_ipv6_mapped(), nat64] {
                 assert_eq!(classify(ip), Destination::EmbeddedIpv4(address));
             }
         }
         // A similar-looking translation prefix is not the well-known /96.
-        assert!(matches!(classified("64:ff9b:1::808:808"), Destination::Denied(_)));
+        assert!(matches!(
+            classified("64:ff9b:1::808:808"),
+            Destination::Denied(_)
+        ));
     }
 
     #[test]
@@ -158,16 +205,31 @@ mod tests {
             ("::ffff:127.0.0.1", "0:0:0:0:0:FFFF:7F00:0001"),
         ] {
             assert_eq!(classified(short), classified(expanded));
-            assert_eq!(parse_literal(short), parse_literal(&format!("[{expanded}]")));
+            assert_eq!(
+                parse_literal(short),
+                parse_literal(&format!("[{expanded}]"))
+            );
         }
     }
 
     #[test]
     fn literal_parser_never_repairs_malformed_brackets_scopes_or_hostnames() {
         for host in [
-            "", "host.example", "127.0.0.1", "[127.0.0.1]", "[[::1]]", "[::1",
-            "::1]", "[::1]:443", "[::1].", "::1%3", "[fe80::1%eth0]",
-            " ::1", "::1 ", "[::1\0]", "[2001:4860::1]]",
+            "",
+            "host.example",
+            "127.0.0.1",
+            "[127.0.0.1]",
+            "[[::1]]",
+            "[::1",
+            "::1]",
+            "[::1]:443",
+            "[::1].",
+            "::1%3",
+            "[fe80::1%eth0]",
+            " ::1",
+            "::1 ",
+            "[::1\0]",
+            "[2001:4860::1]]",
         ] {
             assert!(parse_literal(host).is_none(), "{host:?}");
         }

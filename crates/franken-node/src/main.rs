@@ -32165,7 +32165,8 @@ fn main() -> Result<()> {
                             Ok(path) => path,
                             Err(err) => return migrate_fail("migrate.rewrite", args.json, err),
                         };
-                        let report = migration::verified_rewrite::run(&args.project_path, &executable);
+                        let report =
+                            migration::verified_rewrite::run(&args.project_path, &executable);
                         if let Err(err) = emit_json_or_human(&report, args.json, || {
                             migration::verified_rewrite::render(&report)
                         }) {
@@ -32174,13 +32175,23 @@ fn main() -> Result<()> {
                         if !report.is_success() {
                             // The full checked report has already been emitted;
                             // keep both JSON and human failures to one payload.
-                            let code = if report.status == migration::verified_rewrite::CheckedRewriteStatus::Error { 2 } else { 1 };
+                            let code = if report.status
+                                == migration::verified_rewrite::CheckedRewriteStatus::Error
+                            {
+                                2
+                            } else {
+                                1
+                            };
                             fail_closed_after_json_with_code(code);
                         }
                         return Ok(());
                     }
                     #[cfg(not(target_os = "linux"))]
-                    return migrate_fail("migrate.rewrite", args.json, "--verify currently requires Linux");
+                    return migrate_fail(
+                        "migrate.rewrite",
+                        args.json,
+                        "--verify currently requires Linux",
+                    );
                 }
                 let report = match migration::run_rewrite(&args.project_path, args.apply)
                     .with_context(|| {
@@ -32246,12 +32257,22 @@ fn main() -> Result<()> {
             }
             MigrateCommand::Rollback(args) => {
                 if args.project_path.as_os_str().is_empty() {
-                    return migrate_fail("migrate.rollback", args.json, "`migrate rollback` requires a project path");
+                    return migrate_fail(
+                        "migrate.rollback",
+                        args.json,
+                        "`migrate rollback` requires a project path",
+                    );
                 }
                 #[cfg(target_os = "linux")]
                 {
-                    let report = migration::rollback::run(&args.project_path, args.transaction.as_deref(), args.apply);
-                    if let Err(err) = emit_json_or_human(&report, args.json, || migration::rollback::render(&report)) {
+                    let report = migration::rollback::run(
+                        &args.project_path,
+                        args.transaction.as_deref(),
+                        args.apply,
+                    );
+                    if let Err(err) = emit_json_or_human(&report, args.json, || {
+                        migration::rollback::render(&report)
+                    }) {
                         return migrate_fail("migrate.rollback", args.json, err);
                     }
                     let code = report.exit_code();
@@ -32262,7 +32283,11 @@ fn main() -> Result<()> {
                     }
                 }
                 #[cfg(not(target_os = "linux"))]
-                return migrate_fail("migrate.rollback", args.json, "native rewrite rollback currently requires Linux");
+                return migrate_fail(
+                    "migrate.rollback",
+                    args.json,
+                    "native rewrite rollback currently requires Linux",
+                );
             }
             MigrateCommand::Validate(args) => {
                 if args.project_path.as_os_str().is_empty() {
@@ -32346,7 +32371,10 @@ fn main() -> Result<()> {
                     ..Default::default()
                 };
 
-                let target_stage = args.stage.as_deref().and_then(migration::rollout::RolloutStage::parse);
+                let target_stage = args
+                    .stage
+                    .as_deref()
+                    .and_then(migration::rollout::RolloutStage::parse);
 
                 let report = match args.action.as_str() {
                     "status" => manager.status().map_err(|e| e.to_string()),

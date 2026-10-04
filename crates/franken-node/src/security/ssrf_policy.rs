@@ -496,21 +496,41 @@ impl SsrfPolicyTemplate {
         if let Some(address) = ipv6::parse_literal(host) {
             let label = self.resolved_ip_block_label(IpAddr::V6(address));
             let allowlisted = label.is_some() && self.find_allowlist(host, port).is_some();
-            let action = if label.is_none() || allowlisted { Action::Allow } else { Action::Deny };
+            let action = if label.is_none() || allowlisted {
+                Action::Allow
+            } else {
+                Action::Deny
+            };
             self.emit_audit(
-                host, port, action, label.as_deref(), allowlisted, trace_id, timestamp,
+                host,
+                port,
+                action,
+                label.as_deref(),
+                allowlisted,
+                trace_id,
+                timestamp,
             );
             return match (action, label) {
                 (Action::Deny, Some(cidr)) => Err(SsrfError::SsrfDenied {
-                    host: host.to_string(), cidr,
+                    host: host.to_string(),
+                    cidr,
                 }),
                 _ => Ok(Action::Allow),
             };
         }
         if host.contains(':') {
-            self.emit_audit(host, port, Action::Deny, Some("invalid_ip_format"),
-                false, trace_id, timestamp);
-            return Err(SsrfError::SsrfInvalidIp { host: host.to_string() });
+            self.emit_audit(
+                host,
+                port,
+                Action::Deny,
+                Some("invalid_ip_format"),
+                false,
+                trace_id,
+                timestamp,
+            );
+            return Err(SsrfError::SsrfInvalidIp {
+                host: host.to_string(),
+            });
         }
         if let Some(label) = blocked_hostname_label(host) {
             if self.find_allowlist(host, port).is_some() {
