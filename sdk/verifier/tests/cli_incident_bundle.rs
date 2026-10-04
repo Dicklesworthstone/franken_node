@@ -6,6 +6,7 @@
 //!   - evidence: `fixtures/cli_incident_bundle/INC-SDK-FIXTURE-1.evidence.json`
 //!   - signing seed: `fixtures/cli_incident_bundle/rfc8032_test1_seed.hex`
 //!     (the RFC 8032 section 7.1 TEST 1 secret key)
+//!
 //! The script runs the real `franken-node incident bundle --evidence-path …
 //! --receipt-signing-key …`. The bundle is deterministic (created_at derived
 //! from the timeline, deterministic bundle_id, deterministic Ed25519 signing),

@@ -20,6 +20,10 @@
 //!   timeout instead of the ad-hoc flock sidecar file;
 //! * the legacy JSON pair remains readable exactly once as a one-time import
 //!   source (`import_legacy_state`); deleting the database rolls back to it.
+//!   The import-once decision is made inside the transaction that would seed
+//!   the store, and the import only ever INSERTs: it can never overwrite a
+//!   snapshot or high-water row that a concurrent first load (or any later
+//!   revoke/quarantine) already committed (franken_node#4).
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -328,6 +332,37 @@ pub(crate) fn upsert_slot(
     Ok(())
 }
 
+/// Insert one canonical-JSON slot inside the caller's transaction, failing
+/// (never updating) when the slot already holds a row.
+fn insert_new_slot(
+    tx: &fsqlite::compat::Transaction<'_>,
+    slot: &str,
+    encoded: &str,
+) -> Result<(), TrustCardError> {
+    tx.execute_with_params(
+        "INSERT INTO registry_state(slot, canonical_json) VALUES (?1, ?2);",
+        &[
+            SqliteValue::Text(slot.into()),
+            SqliteValue::Text(encoded.into()),
+        ],
+    )
+    .map_err(|err| TrustCardError::SnapshotWrite {
+        path: PathBuf::from("trust-card-registry-durable-store"),
+        detail: format!("insert slot {slot}: {err}"),
+    })?;
+    Ok(())
+}
+
+/// What [`TrustCardRegistryStore::import_legacy_state`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegacyImportOutcome {
+    /// The store was empty and now holds the imported legacy state.
+    Imported,
+    /// The store already held state (or had already imported once), so
+    /// nothing was written; the stored rows stay authoritative.
+    AlreadySeeded,
+}
+
 /// Durable WAL-backed store for the trust-card registry state.
 pub struct TrustCardRegistryStore {
     db_path: PathBuf,
@@ -441,26 +476,50 @@ impl TrustCardRegistryStore {
 
     /// Import validated legacy JSON content once.
     ///
-    /// Callers MUST have validated both payloads before handing them over;
-    /// this function stores them verbatim in one atomic transaction and
-    /// records the import marker.
+    /// Callers MUST have validated both payloads before handing them over.
+    /// Inside ONE transaction this checks whether the store already holds a
+    /// snapshot (or has already imported once); only when it holds neither
+    /// does it store the payloads verbatim and record the import marker.
+    /// Rows are only ever inserted, never updated, so a stale importer can
+    /// never move the snapshot or the signed high-water mark backwards over
+    /// state another process committed after this caller read the legacy
+    /// files (franken_node#4): it gets [`LegacyImportOutcome::AlreadySeeded`]
+    /// (or, if it loses a race to a concurrent importer's commit, an error)
+    /// and must load the stored state instead.
     ///
     /// # Errors
     ///
-    /// Returns [`TrustCardError::SnapshotWrite`] when the transaction fails.
+    /// Returns [`TrustCardError::SnapshotWrite`] when the transaction fails,
+    /// including when a concurrent importer inserted the rows first.
     pub fn import_legacy_state(
         &self,
         snapshot_json: &str,
         high_water_json: Option<&str>,
-    ) -> Result<(), TrustCardError> {
-        self.with_immediate_transaction(|_connection, tx| {
-            upsert_slot(tx, SLOT_SNAPSHOT, snapshot_json)?;
+    ) -> Result<LegacyImportOutcome, TrustCardError> {
+        self.with_immediate_transaction(|connection, tx| {
+            if read_slot(connection, SLOT_SNAPSHOT)?.is_some()
+                || legacy_import_recorded(connection)?
+            {
+                return Ok(LegacyImportOutcome::AlreadySeeded);
+            }
+            insert_new_slot(tx, SLOT_SNAPSHOT, snapshot_json)?;
             if let Some(encoded) = high_water_json {
-                upsert_slot(tx, SLOT_HIGH_WATER, encoded)?;
+                insert_new_slot(tx, SLOT_HIGH_WATER, encoded)?;
             }
             mark_legacy_import(tx, "imported on first durable load")?;
-            Ok(())
+            Ok(LegacyImportOutcome::Imported)
         })
+    }
+
+    /// Overwrite one slot verbatim: a test-only stand-in for an attacker or
+    /// operator editing the database directly.
+    #[cfg(test)]
+    pub(crate) fn overwrite_slot_for_tests(
+        &self,
+        slot: &str,
+        encoded: &str,
+    ) -> Result<(), TrustCardError> {
+        self.with_immediate_transaction(|_connection, tx| upsert_slot(tx, slot, encoded))
     }
 
     fn with_connection<T>(
@@ -510,6 +569,20 @@ fn ensure_schema(tx: &fsqlite::compat::Transaction<'_>) -> Result<(), TrustCardE
         detail: format!("record schema version: {err}"),
     })?;
     Ok(())
+}
+
+/// Whether the legacy JSON import marker is recorded.
+fn legacy_import_recorded(connection: &Connection) -> Result<bool, TrustCardError> {
+    let rows = connection
+        .query_with_params(
+            "SELECT value FROM registry_meta WHERE key = ?1;",
+            &[SqliteValue::Text(META_KEY_LEGACY_JSON_IMPORT.into())],
+        )
+        .map_err(|err| TrustCardError::SnapshotRead {
+            path: PathBuf::from("trust-card-registry-durable-store"),
+            detail: format!("read legacy import marker: {err}"),
+        })?;
+    Ok(!rows.is_empty())
 }
 
 fn mark_legacy_import(
@@ -616,19 +689,59 @@ mod tests {
         assert_eq!(schema_version.len(), 1);
     }
 
+    /// franken_node#4: a second (stale) import never overwrites the first.
     #[test]
-    fn import_overwrites_previous_content_idempotently() {
+    fn import_happens_once_and_never_overwrites_seeded_rows() {
         let (_dir, path) = temp_snapshot_path("idempotent");
         let store = TrustCardRegistryStore::open(&path).expect("open");
-        store
-            .import_legacy_state("{\"epoch\":1}", None)
-            .expect("first import");
-        store
-            .import_legacy_state("{\"epoch\":2}", Some("{\"epoch\":2}"))
-            .expect("second import");
+        assert_eq!(
+            store
+                .import_legacy_state("{\"epoch\":2}", Some("{\"hw\":2}"))
+                .expect("first import"),
+            LegacyImportOutcome::Imported
+        );
+        assert_eq!(
+            store
+                .import_legacy_state("{\"epoch\":1}", Some("{\"hw\":1}"))
+                .expect("second import"),
+            LegacyImportOutcome::AlreadySeeded
+        );
         let (snapshot, high_water) = store.load_state().expect("reload").expect("rows exist");
         assert_eq!(snapshot, "{\"epoch\":2}");
-        assert_eq!(high_water.as_deref(), Some("{\"epoch\":2}"));
+        assert_eq!(high_water.as_deref(), Some("{\"hw\":2}"));
+    }
+
+    /// State written by the normal persist path (no import marker) also
+    /// blocks the import, and so does the marker alone.
+    #[test]
+    fn import_is_skipped_when_rows_or_the_marker_exist() {
+        let (_dir, path) = temp_snapshot_path("seeded");
+        let store = TrustCardRegistryStore::open(&path).expect("open");
+        store
+            .overwrite_slot_for_tests(SLOT_SNAPSHOT, "{\"epoch\":5}")
+            .expect("seed snapshot");
+        assert_eq!(
+            store
+                .import_legacy_state("{\"epoch\":1}", Some("{\"hw\":1}"))
+                .expect("import"),
+            LegacyImportOutcome::AlreadySeeded
+        );
+        let (snapshot, high_water) = store.load_state().expect("reload").expect("rows exist");
+        assert_eq!(snapshot, "{\"epoch\":5}");
+        assert_eq!(high_water, None);
+
+        let (_dir, path) = temp_snapshot_path("marker");
+        let store = TrustCardRegistryStore::open(&path).expect("open");
+        store
+            .with_immediate_transaction(|_connection, tx| mark_legacy_import(tx, "earlier"))
+            .expect("mark");
+        assert_eq!(
+            store
+                .import_legacy_state("{\"epoch\":1}", None)
+                .expect("import"),
+            LegacyImportOutcome::AlreadySeeded
+        );
+        assert!(store.load_state().expect("reload").is_none());
     }
 
     fn frontier_trust_config(key_byte: u8) -> TrustConfig {

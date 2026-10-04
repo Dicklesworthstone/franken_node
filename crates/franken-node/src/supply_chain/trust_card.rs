@@ -21,8 +21,8 @@ use sha2::{Digest, Sha256};
 
 use super::certification::{DerivationMetadata, VerifiedEvidenceRef};
 use super::trust_card_registry_store::{
-    SLOT_HIGH_WATER, SLOT_SNAPSHOT, TrustCardRegistryStore, durable_store_path, read_slot,
-    upsert_slot,
+    LegacyImportOutcome, SLOT_HIGH_WATER, SLOT_SNAPSHOT, TrustCardRegistryStore,
+    durable_store_path, read_slot, upsert_slot,
 };
 use crate::connector::canonical_serializer::canonical_bytes;
 use crate::push_bounded;
@@ -1092,6 +1092,38 @@ impl TrustCardRegistrySnapshot {
     }
 }
 
+/// The durable snapshot hash a registry was loaded from or last persisted
+/// (franken_node#4 follow-up). Interior-mutable so the `&self` persist path
+/// can advance it; cloning copies the value.
+#[derive(Debug, Default)]
+struct DurableBase(std::sync::Mutex<Option<String>>);
+
+impl DurableBase {
+    fn new(hash: Option<String>) -> Self {
+        Self(std::sync::Mutex::new(hash))
+    }
+
+    fn get(&self) -> Option<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn set(&self, hash: String) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hash);
+    }
+}
+
+impl Clone for DurableBase {
+    fn clone(&self) -> Self {
+        Self::new(self.get())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TrustCardRegistry {
     cards_by_extension: BTreeMap<String, Vec<TrustCard>>,
@@ -1102,6 +1134,9 @@ pub struct TrustCardRegistry {
     snapshot_epoch: u64,
     previous_snapshot_hash: Option<String>,
     last_snapshot_hash: Option<String>,
+    /// The stored snapshot this in-memory state derives from: only a stored
+    /// head equal to it may be re-chained onto at persist time.
+    durable_base: DurableBase,
 }
 
 impl Default for TrustCardRegistry {
@@ -1133,6 +1168,7 @@ impl TrustCardRegistry {
             snapshot_epoch: 0,
             previous_snapshot_hash: None,
             last_snapshot_hash: None,
+            durable_base: DurableBase::default(),
         }
     }
 
@@ -1246,6 +1282,7 @@ impl TrustCardRegistry {
         verify_snapshot_signature(&snapshot, registry_key)?;
         registry.snapshot_epoch = snapshot.snapshot_epoch;
         registry.previous_snapshot_hash = snapshot.previous_snapshot_hash;
+        registry.durable_base = DurableBase::new(Some(snapshot.snapshot_hash.clone()));
         registry.last_snapshot_hash = Some(snapshot.snapshot_hash);
 
         Ok(registry)
@@ -1288,10 +1325,20 @@ impl TrustCardRegistry {
     ///
     /// Resolution order:
     /// 1. the durable frankensqlite store (`<path-with-db-extension>`) when
-    ///    present — the authoritative surface;
+    ///    it holds a snapshot — the authoritative surface;
     /// 2. a one-time import of the legacy JSON pair (`path` plus its
     ///    `.high-water.json` sidecar), which seeds the store; the files are
     ///    then only a rollback source (deleting the database re-imports).
+    ///
+    /// The import never moves durable state backwards (franken_node#4): the
+    /// legacy pair is read and validated outside any transaction, so another
+    /// process may import it and then revoke or quarantine before this one
+    /// writes. The import-once decision is therefore made inside the seeding
+    /// transaction, it only inserts, and every importer (winner or loser)
+    /// returns the registry re-loaded and re-validated from the durable store,
+    /// never the in-memory legacy registry it built earlier. A store file
+    /// without a snapshot row (a first import still in flight elsewhere, or
+    /// one that crashed before committing) falls through to the import.
     ///
     /// # Errors
     ///
@@ -1308,16 +1355,17 @@ impl TrustCardRegistry {
         let db_path = durable_store_path(path);
         if db_path.is_file() {
             let store = TrustCardRegistryStore::open(path)?;
-            return load_registry_from_durable_store(
-                &store,
-                path,
-                registry_key,
-                cache_ttl_secs,
-                loaded_at_secs,
-                source_context,
-            );
-        }
-        if !path.is_file() {
+            if !path.is_file() || store.load_state()?.is_some() {
+                return load_registry_from_durable_store(
+                    &store,
+                    path,
+                    registry_key,
+                    cache_ttl_secs,
+                    loaded_at_secs,
+                    source_context,
+                );
+            }
+        } else if !path.is_file() {
             return Err(TrustCardError::SnapshotRead {
                 path: path.to_path_buf(),
                 detail: format!(
@@ -1328,8 +1376,30 @@ impl TrustCardRegistry {
             });
         }
 
-        // Legacy import: validate exactly as before, then seed the durable
-        // store so every later operation is DB-backed.
+        let snapshot = Self::read_validated_legacy_snapshot(
+            path,
+            registry_key,
+            loaded_at_secs,
+            source_context,
+        )?;
+        Self::finish_legacy_import(
+            path,
+            &snapshot,
+            registry_key,
+            cache_ttl_secs,
+            loaded_at_secs,
+            source_context,
+        )
+    }
+
+    /// First half of the legacy import: read and validate the legacy JSON
+    /// pair exactly as before the durable store existed. Nothing is written.
+    fn read_validated_legacy_snapshot(
+        path: &Path,
+        registry_key: &[u8],
+        loaded_at_secs: u64,
+        source_context: SnapshotSourceContext,
+    ) -> Result<TrustCardRegistrySnapshot, TrustCardError> {
         let raw = std::fs::read_to_string(path).map_err(|err| TrustCardError::SnapshotRead {
             path: path.to_path_buf(),
             detail: err.to_string(),
@@ -1339,12 +1409,40 @@ impl TrustCardRegistry {
             .map_err(|err| sanitize_error_for_source_context(source_context, err))?;
         validate_snapshot_high_water(path, &snapshot, high_water.as_ref())
             .map_err(|err| sanitize_error_for_source_context(source_context, err))?;
-        let mut registry = Self::from_snapshot(snapshot.clone(), registry_key, loaded_at_secs)
+        // The snapshot must also rebuild into a registry before it may seed
+        // the store.
+        Self::from_snapshot(snapshot.clone(), registry_key, loaded_at_secs)
             .map_err(|err| sanitize_error_for_source_context(source_context, err))?;
-        registry.cache_ttl_secs = cache_ttl_secs.max(1);
+        Ok(snapshot)
+    }
+
+    /// Second half of the legacy import: seed the store with `snapshot` only
+    /// if it is still empty, then load the durable state, whoever wrote it.
+    fn finish_legacy_import(
+        path: &Path,
+        snapshot: &TrustCardRegistrySnapshot,
+        registry_key: &[u8],
+        cache_ttl_secs: u64,
+        loaded_at_secs: u64,
+        source_context: SnapshotSourceContext,
+    ) -> Result<Self, TrustCardError> {
         let store = TrustCardRegistryStore::open(path)?;
-        import_validated_state(&store, &snapshot, registry_key)?;
-        Ok(registry)
+        if let Err(err) = import_validated_state(&store, snapshot, registry_key) {
+            // A concurrent importer can commit between our in-transaction
+            // check and our insert; its rows are then authoritative. Any
+            // other failure leaves the store empty and is reported.
+            if store.load_state()?.is_none() {
+                return Err(err);
+            }
+        }
+        load_registry_from_durable_store(
+            &store,
+            path,
+            registry_key,
+            cache_ttl_secs,
+            loaded_at_secs,
+            source_context,
+        )
     }
 
     /// Load authoritative trust-card state from disk using configuration for signing key.
@@ -1415,6 +1513,25 @@ impl TrustCardRegistry {
                     .as_deref()
                     .is_some_and(|previous| constant_time::ct_eq(previous, &current.snapshot_hash))
             {
+                // Several mutations in one session chain through in-memory
+                // intermediate snapshots, so the persisted snapshot is
+                // re-chained onto the stored head. That is only sound when
+                // the stored head is the state this registry was loaded from
+                // (or last persisted): a registry loaded before another
+                // writer committed (a revoke, a quarantine) must not silently
+                // overwrite that decision with its stale copy (franken_node#4
+                // follow-up). Such a writer fails closed and must reload.
+                let base_matches = self
+                    .durable_base
+                    .get()
+                    .is_some_and(|base| constant_time::ct_eq(&base, &current.snapshot_hash));
+                if !base_matches {
+                    return Err(TrustCardError::InvalidSnapshot(format!(
+                        "concurrent trust-card registry update rejected for {}: the stored registry advanced to epoch {} after this registry was loaded; reload and retry",
+                        path.display(),
+                        current.snapshot_epoch
+                    )));
+                }
                 snapshot.previous_snapshot_hash = Some(current.snapshot_hash.clone());
                 sign_snapshot_in_place(&mut snapshot, &self.registry_key)?;
             }
@@ -1425,7 +1542,9 @@ impl TrustCardRegistry {
             upsert_slot(tx, SLOT_SNAPSHOT, &encoded)?;
             upsert_slot(tx, SLOT_HIGH_WATER, &high_water_encoded)?;
             Ok(())
-        })
+        })?;
+        self.durable_base.set(snapshot.snapshot_hash);
+        Ok(())
     }
 
     /// Derive, sign, and store the next trust-card version for an extension.
@@ -3287,7 +3406,7 @@ fn persist_high_water_if_newer_in_store(
     current: Option<&TrustCardRegistrySnapshotHighWater>,
     registry_key: &[u8],
 ) -> Result<(), TrustCardError> {
-    let should_write = match current {
+    let advances = |current: Option<&TrustCardRegistrySnapshotHighWater>| match current {
         None => true,
         Some(current) => {
             snapshot.snapshot_epoch > current.snapshot_epoch
@@ -3295,20 +3414,32 @@ fn persist_high_water_if_newer_in_store(
                     && !constant_time::ct_eq(&snapshot.snapshot_hash, &current.snapshot_hash))
         }
     };
-    if !should_write {
+    if !advances(current) {
         return Ok(());
     }
     let next = signed_snapshot_high_water(snapshot, registry_key)?;
     let encoded = to_canonical_json(&next)?;
-    store.with_immediate_transaction(|_connection, tx| upsert_slot(tx, SLOT_HIGH_WATER, &encoded))
+    store.with_immediate_transaction(|connection, tx| {
+        // Decide again against the row as it is inside this transaction:
+        // another process may have advanced the high-water since `current`
+        // was read, and this write must never move it backwards.
+        let stored = read_slot(connection, SLOT_HIGH_WATER)?
+            .map(|raw| validated_high_water_from_raw(&raw, registry_key))
+            .transpose()?;
+        if !advances(stored.as_ref()) {
+            return Ok(());
+        }
+        upsert_slot(tx, SLOT_HIGH_WATER, &encoded)
+    })
 }
 
-/// Seed the durable store with an already-validated legacy state.
+/// Seed the durable store with an already-validated legacy state, unless it
+/// already holds state (see [`TrustCardRegistryStore::import_legacy_state`]).
 fn import_validated_state(
     store: &TrustCardRegistryStore,
     snapshot: &TrustCardRegistrySnapshot,
     registry_key: &[u8],
-) -> Result<(), TrustCardError> {
+) -> Result<LegacyImportOutcome, TrustCardError> {
     let encoded = to_canonical_json(snapshot)?;
     let high_water = signed_snapshot_high_water(snapshot, registry_key)?;
     let high_water_encoded = to_canonical_json(&high_water)?;
@@ -4974,7 +5105,7 @@ mod tests {
         let store = TrustCardRegistryStore::open(&path).expect("open durable store");
         let older_json = to_canonical_json(&older_snapshot).expect("encode older snapshot");
         store
-            .import_legacy_state(&older_json, None)
+            .overwrite_slot_for_tests(SLOT_SNAPSHOT, &older_json)
             .expect("install older snapshot row");
 
         let err = TrustCardRegistry::load_authoritative_state(
@@ -6068,6 +6199,439 @@ mod tests {
         assert_eq!(final1.certification_level, final2.certification_level);
     }
 
+    // === franken_node#4: legacy import never rolls durable state back ===
+
+    /// Write the legacy JSON pair (snapshot plus signed high-water sidecar)
+    /// an older franken-node would have left behind, with one active card.
+    fn write_legacy_pair(dir: &TempDir) -> PathBuf {
+        let path = dir
+            .path()
+            .join(".franken-node/state/trust-card-registry.v1.json");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("state dir");
+        let mut registry = TrustCardRegistry::default();
+        registry
+            .create(sample_input(), 1_000, "trace-legacy")
+            .expect("create");
+        let snapshot = registry.snapshot().expect("snapshot");
+        std::fs::write(&path, to_canonical_json(&snapshot).expect("encode")).expect("write");
+        let high_water =
+            signed_snapshot_high_water(&snapshot, DEFAULT_REGISTRY_KEY).expect("high-water");
+        std::fs::write(
+            legacy_high_water_path(&path),
+            to_canonical_json(&high_water).expect("encode high-water"),
+        )
+        .expect("write high-water");
+        path
+    }
+
+    fn load_default(path: &Path) -> Result<TrustCardRegistry, TrustCardError> {
+        TrustCardRegistry::load_authoritative_state(
+            path,
+            60,
+            2_000,
+            SnapshotSourceContext::TrustedFile,
+        )
+    }
+
+    fn durable_rows(path: &Path) -> (String, Option<String>) {
+        TrustCardRegistryStore::open(path)
+            .expect("open")
+            .load_state()
+            .expect("load rows")
+            .expect("rows exist")
+    }
+
+    fn stored_high_water_epoch(path: &Path) -> u64 {
+        let (_, high_water) = durable_rows(path);
+        serde_json::from_str::<TrustCardRegistrySnapshotHighWater>(
+            &high_water.expect("high-water row"),
+        )
+        .expect("parse high-water")
+        .snapshot_epoch
+    }
+
+    fn quarantine_only_mutation() -> TrustCardMutation {
+        TrustCardMutation {
+            certification_level: None,
+            revocation_status: None,
+            active_quarantine: Some(true),
+            reputation_score_basis_points: None,
+            reputation_trend: None,
+            user_facing_risk_assessment: None,
+            last_verified_timestamp: None,
+            evidence_refs: None,
+        }
+    }
+
+    fn revoke_mutation() -> TrustCardMutation {
+        TrustCardMutation {
+            revocation_status: Some(RevocationStatus::Revoked {
+                reason: "revoked between the stale read and its import".to_string(),
+                revoked_at: "2026-01-01T00:01:00Z".to_string(),
+            }),
+            ..quarantine_only_mutation()
+        }
+    }
+
+    /// The issue's interleaving, step for step: process B reads and validates
+    /// the legacy pair (DB absent), process A imports it and commits a
+    /// mutation, then B finishes its import. B must neither overwrite the
+    /// durable snapshot nor the signed high-water mark, and must hand back
+    /// A's state, not its stale legacy registry.
+    fn assert_stale_import_cannot_roll_back(
+        mutation: TrustCardMutation,
+        check: impl Fn(&TrustCard),
+    ) {
+        let dir = TempDir::new().expect("tempdir");
+        let path = write_legacy_pair(&dir);
+        let extension_id = sample_input().extension.extension_id;
+        assert!(!durable_store_path(&path).exists());
+
+        // B: DB absent, legacy pair read and validated, then delayed.
+        let stale = TrustCardRegistry::read_validated_legacy_snapshot(
+            &path,
+            DEFAULT_REGISTRY_KEY,
+            2_000,
+            SnapshotSourceContext::TrustedFile,
+        )
+        .expect("B validates the legacy pair");
+
+        // A: first load imports, then the operator decision is persisted.
+        let mut a = load_default(&path).expect("A imports");
+        let legacy_epoch = stored_high_water_epoch(&path);
+        a.update(&extension_id, mutation, 1_100, "trace-a")
+            .expect("A mutates");
+        a.persist_authoritative_state(&path).expect("A persists");
+        let after_a = durable_rows(&path);
+        let advanced_epoch = stored_high_water_epoch(&path);
+        assert!(advanced_epoch > legacy_epoch, "A advanced the high-water");
+
+        // B resumes after A fully committed.
+        let mut b = TrustCardRegistry::finish_legacy_import(
+            &path,
+            &stale,
+            DEFAULT_REGISTRY_KEY,
+            60,
+            2_000,
+            SnapshotSourceContext::TrustedFile,
+        )
+        .expect("B's late import resolves to the stored state");
+
+        assert_eq!(durable_rows(&path), after_a, "rows unchanged byte for byte");
+        assert_eq!(stored_high_water_epoch(&path), advanced_epoch);
+        check(
+            &b.read(&extension_id, 2_000, "trace-b")
+                .expect("B reads")
+                .expect("card"),
+        );
+        let mut later = load_default(&path).expect("later load");
+        check(
+            &later
+                .read(&extension_id, 2_000, "trace-later")
+                .expect("later reads")
+                .expect("card"),
+        );
+    }
+
+    #[test]
+    fn stale_legacy_import_after_revoke_keeps_the_revocation() {
+        assert_stale_import_cannot_roll_back(revoke_mutation(), |card| {
+            assert!(
+                matches!(card.revocation_status, RevocationStatus::Revoked { .. }),
+                "revocation lost: {:?}",
+                card.revocation_status
+            );
+            assert!(card.active_quarantine);
+        });
+    }
+
+    #[test]
+    fn stale_legacy_import_after_quarantine_keeps_the_quarantine() {
+        assert_stale_import_cannot_roll_back(quarantine_only_mutation(), |card| {
+            assert!(card.active_quarantine, "quarantine lost");
+            assert!(matches!(card.revocation_status, RevocationStatus::Active));
+        });
+    }
+
+    /// A first import that crashed (or is still in flight) after creating
+    /// the database file but before committing leaves a store without rows:
+    /// the next load retries the import instead of failing forever, and a
+    /// retried import after a successful one changes nothing.
+    #[test]
+    fn interrupted_first_import_is_retried_and_retries_are_idempotent() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = write_legacy_pair(&dir);
+        drop(TrustCardRegistryStore::open(&path).expect("crashed importer created the file"));
+        assert!(durable_store_path(&path).is_file());
+
+        let mut first = load_default(&path).expect("retry imports the legacy pair");
+        let extension_id = sample_input().extension.extension_id;
+        assert!(
+            first
+                .read(&extension_id, 2_000, "trace-retry")
+                .expect("read")
+                .is_some()
+        );
+        let seeded = durable_rows(&path);
+        load_default(&path).expect("second load");
+        let stale = TrustCardRegistry::read_validated_legacy_snapshot(
+            &path,
+            DEFAULT_REGISTRY_KEY,
+            2_000,
+            SnapshotSourceContext::TrustedFile,
+        )
+        .expect("legacy pair still validates");
+        TrustCardRegistry::finish_legacy_import(
+            &path,
+            &stale,
+            DEFAULT_REGISTRY_KEY,
+            60,
+            2_000,
+            SnapshotSourceContext::TrustedFile,
+        )
+        .expect("repeat import");
+        assert_eq!(durable_rows(&path), seeded);
+
+        // An empty store with no legacy pair is still an error, not a
+        // silently empty registry.
+        let empty = TempDir::new().expect("tempdir");
+        let empty_path = empty
+            .path()
+            .join(".franken-node/state/trust-card-registry.v1.json");
+        drop(TrustCardRegistryStore::open(&empty_path).expect("open"));
+        assert!(load_default(&empty_path).is_err());
+    }
+
+    /// Two real threads race the first post-upgrade load while a third
+    /// revokes as soon as any import lands; whatever the interleaving, the
+    /// revocation survives every importer.
+    #[test]
+    fn concurrent_first_loads_never_resurrect_a_revoked_card() {
+        for _round in 0..8 {
+            let dir = TempDir::new().expect("tempdir");
+            let path = write_legacy_pair(&dir);
+            let extension_id = sample_input().extension.extension_id;
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+            let loaders: Vec<_> = (0..2)
+                .map(|_| {
+                    let path = path.clone();
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        let stale = TrustCardRegistry::read_validated_legacy_snapshot(
+                            &path,
+                            DEFAULT_REGISTRY_KEY,
+                            2_000,
+                            SnapshotSourceContext::TrustedFile,
+                        )
+                        .expect("validate legacy");
+                        barrier.wait();
+                        TrustCardRegistry::finish_legacy_import(
+                            &path,
+                            &stale,
+                            DEFAULT_REGISTRY_KEY,
+                            60,
+                            2_000,
+                            SnapshotSourceContext::TrustedFile,
+                        )
+                        .map(|_| ())
+                    })
+                })
+                .collect();
+            barrier.wait();
+            // The revoker is an ordinary first load too; under contention a
+            // store-level error is retried (bounded), never papered over.
+            let mut attempts = 0;
+            loop {
+                attempts += 1;
+                let outcome = load_default(&path).and_then(|mut revoker| {
+                    revoker.update(&extension_id, revoke_mutation(), 1_100, "trace-revoke")?;
+                    revoker.persist_authoritative_state(&path)
+                });
+                match outcome {
+                    Ok(()) => break,
+                    Err(err) if attempts < 200 => {
+                        let _ = err;
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(err) => panic!("revoke never committed: {err:?}"),
+                }
+            }
+            for loader in loaders {
+                // A loader may lose the race with a store-level error; it
+                // must never succeed by writing stale state.
+                let _ = loader.join().expect("loader thread");
+            }
+            let mut after = load_default(&path).expect("final load");
+            let card = after
+                .read(&extension_id, 2_000, "trace-final")
+                .expect("read")
+                .expect("card");
+            assert!(
+                matches!(card.revocation_status, RevocationStatus::Revoked { .. }),
+                "revocation resurrected"
+            );
+        }
+    }
+
+    /// franken_node#4 follow-up: a registry loaded before another writer
+    /// committed must not re-chain its stale multi-mutation snapshot onto
+    /// that writer's state (which would silently un-revoke a card).
+    #[test]
+    fn stale_multi_mutation_persist_cannot_overwrite_a_newer_revocation() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir
+            .path()
+            .join(".franken-node/state/trust-card-registry.v1.json");
+        let mut seed = TrustCardRegistry::default();
+        seed.create(sample_input(), 1_000, "trace-seed")
+            .expect("create");
+        seed.persist_authoritative_state(&path)
+            .expect("seed persist");
+        let extension_id = sample_input().extension.extension_id;
+
+        let mut stale = load_default(&path).expect("stale writer loads epoch N");
+        let mut revoker = load_default(&path).expect("revoker loads epoch N");
+        revoker
+            .update(&extension_id, revoke_mutation(), 1_100, "trace-revoke")
+            .expect("revoke");
+        revoker
+            .persist_authoritative_state(&path)
+            .expect("revoke persists");
+        let after_revoke = durable_rows(&path);
+
+        // Two mutations (epoch N+2 > N+1) used to be re-chained onto the
+        // revoker's head and overwrite it.
+        for (index, score) in [(1_u64, 4_000_u16), (2, 3_000)] {
+            stale
+                .update(
+                    &extension_id,
+                    TrustCardMutation {
+                        reputation_score_basis_points: Some(score),
+                        ..quarantine_only_mutation()
+                    },
+                    1_100 + index,
+                    "trace-stale",
+                )
+                .expect("stale in-memory update");
+        }
+        let err = stale
+            .persist_authoritative_state(&path)
+            .expect_err("a stale writer must not overwrite the revocation");
+        assert!(
+            matches!(err, TrustCardError::InvalidSnapshot(ref detail) if detail.contains("concurrent trust-card registry update rejected")),
+            "unexpected error: {err:?}"
+        );
+        assert_eq!(durable_rows(&path), after_revoke);
+
+        // A single stale mutation is rejected by the high-water check.
+        let mut stale_one = TrustCardRegistry::from_snapshot(
+            serde_json::from_str(&after_revoke.0).expect("snapshot"),
+            DEFAULT_REGISTRY_KEY,
+            1_000,
+        )
+        .expect("from snapshot");
+        let mut newer = load_default(&path).expect("newer");
+        newer
+            .update(
+                &extension_id,
+                TrustCardMutation {
+                    reputation_score_basis_points: Some(50),
+                    ..quarantine_only_mutation()
+                },
+                1_200,
+                "trace-newer",
+            )
+            .expect("newer update");
+        newer
+            .persist_authoritative_state(&path)
+            .expect("newer persists");
+        let after_newer = durable_rows(&path);
+        stale_one
+            .update(
+                &extension_id,
+                TrustCardMutation {
+                    reputation_score_basis_points: Some(60),
+                    ..quarantine_only_mutation()
+                },
+                1_201,
+                "trace-stale-one",
+            )
+            .expect("stale update");
+        assert!(stale_one.persist_authoritative_state(&path).is_err());
+        assert_eq!(durable_rows(&path), after_newer);
+
+        let mut reloaded = load_default(&path).expect("reload");
+        let card = reloaded
+            .read(&extension_id, 2_000, "trace-final")
+            .expect("read")
+            .expect("card");
+        assert!(matches!(
+            card.revocation_status,
+            RevocationStatus::Revoked { .. }
+        ));
+        assert!(card.active_quarantine);
+    }
+
+    /// The legitimate cases keep working: one session making several
+    /// mutations persists (re-chained onto the head it loaded), and the same
+    /// in-memory registry can persist, mutate and persist again.
+    #[test]
+    fn non_concurrent_multi_mutation_and_repeated_persists_still_work() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir
+            .path()
+            .join(".franken-node/state/trust-card-registry.v1.json");
+        let mut registry = TrustCardRegistry::default();
+        registry
+            .create(sample_input(), 1_000, "trace")
+            .expect("create");
+        registry
+            .persist_authoritative_state(&path)
+            .expect("persist 1");
+        let extension_id = sample_input().extension.extension_id;
+        for round in 0..3_u64 {
+            for step in 0..2_u64 {
+                registry
+                    .update(
+                        &extension_id,
+                        TrustCardMutation {
+                            reputation_score_basis_points: Some(
+                                u16::try_from(1_000 + round * 10 + step).expect("fits"),
+                            ),
+                            ..quarantine_only_mutation()
+                        },
+                        1_100 + round * 10 + step,
+                        "trace-same-session",
+                    )
+                    .expect("update");
+            }
+            registry
+                .persist_authoritative_state(&path)
+                .expect("repeated persist from the same registry");
+        }
+        let epoch_before = stored_high_water_epoch(&path);
+        let mut loaded = load_default(&path).expect("load");
+        for step in 0..2_u64 {
+            loaded
+                .update(
+                    &extension_id,
+                    TrustCardMutation {
+                        reputation_score_basis_points: Some(
+                            u16::try_from(2_000 + step).expect("fits"),
+                        ),
+                        ..quarantine_only_mutation()
+                    },
+                    1_500 + step,
+                    "trace-loaded",
+                )
+                .expect("update");
+        }
+        loaded
+            .persist_authoritative_state(&path)
+            .expect("loaded multi-mutation persist");
+        assert!(stored_high_water_epoch(&path) > epoch_before);
+    }
+
     // === GOLDEN ARTIFACT TESTING ===
     // Golden file tests for trust-card outputs with canonicalization
 
@@ -6697,8 +7261,13 @@ mod tests {
         stored.registry_signature = "tampered_signature".to_string();
         let tampered_json = serde_json::to_string_pretty(&stored).expect("serialize");
         store
-            .import_legacy_state(&tampered_json, high_water_raw.as_deref())
+            .overwrite_slot_for_tests(SLOT_SNAPSHOT, &tampered_json)
             .expect("install tampered snapshot row");
+        assert_eq!(
+            store.load_state().expect("reload").map(|(_, hw)| hw),
+            Some(high_water_raw),
+            "the stored high-water row stays intact"
+        );
 
         // Trusted context should allow parsing but fail later during signature verification
         // This tests that lazy validation parses first, validates later
