@@ -2028,7 +2028,7 @@ dependencies = [
 
 [[package]]
 name = "franken-security-macros"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hex",
  "proc-macro2",
@@ -2145,7 +2145,7 @@ dependencies = [
 
 [[package]]
 name = "frankenengine-node"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arbitrary",

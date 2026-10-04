@@ -12,7 +12,7 @@ resolver = "2"
 
 [workspace.package]
 edition = "2024"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Franken Node Contributors"]
 # The project ships the "MIT License (with OpenAI/Anthropic Rider)" (see ./LICENSE),
 # NOT permissive MIT — the rider grants no rights to OpenAI/Anthropic (or anyone acting
