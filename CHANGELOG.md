@@ -54,6 +54,10 @@ Windows x86_64 MSVC.
     "concurrent trust-card registry update rejected ... reload and retry".
   - The high-water refresh on the load path is re-decided inside its own
     transaction.
+- **macOS builds again.** Linux-only containment and corpus helpers no
+  longer leak into the non-Linux build (a missing `Instant` import and a
+  Linux-only timeout constant), and the module-file identity check handles
+  the `st_dev` width difference on Apple platforms.
 - Regression tests replay the exact interleavings:
   - stale import after revoke, and after quarantine
   - crash and retry of the first import

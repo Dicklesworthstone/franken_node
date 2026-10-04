@@ -5758,6 +5758,7 @@ impl EngineDispatcher {
             Ok(())
         }
 
+        #[cfg(target_os = "linux")]
         fn wait_for_outer_supervisor(child: &mut std::process::Child) -> io::Result<()> {
             let started = Instant::now();
             loop {

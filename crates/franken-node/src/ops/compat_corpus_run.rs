@@ -44,6 +44,8 @@ use std::process::Command;
 #[cfg(all(feature = "engine", not(target_os = "linux")))]
 use std::process::Stdio;
 use std::time::Duration;
+#[cfg(all(feature = "engine", not(target_os = "linux")))]
+use std::time::Instant;
 
 #[cfg(all(feature = "engine", target_os = "linux"))]
 #[path = "corpus_process.rs"]

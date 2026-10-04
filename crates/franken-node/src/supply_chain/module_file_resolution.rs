@@ -496,7 +496,10 @@ impl Resolver {
                             .map_err(|e| io_error(path, e))?,
                     );
                     let before = file.metadata().map_err(|e| io_error(path, e))?;
-                    if before.dev() != info.st_dev
+                    // `st_dev` is i32 on Apple platforms and u64 on Linux.
+                    #[allow(clippy::unnecessary_cast, clippy::cast_sign_loss)]
+                    let info_dev = info.st_dev as u64;
+                    if before.dev() != info_dev
                         || before.ino() != info.st_ino
                         || before.is_dir() != (kind == FileType::Directory)
                         || (!before.is_file() && !before.is_dir())
