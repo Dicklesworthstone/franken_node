@@ -19,7 +19,7 @@ mod smoke_supervisor;
 pub mod validation_suite;
 
 #[derive(Parser)]
-#[command(version, about = "Sign freshly executed, passing Node/Bun/Franken project validation")]
+#[command(version, about = "Attest freshly executed Node/Bun/Franken project validation")]
 struct Args {
     #[command(subcommand)]
     command: Action,
@@ -38,6 +38,10 @@ struct Selection {
     /// Independently reviewed candidate hash. For one tree repeat the original hash.
     #[arg(long, requires = "expected_input_sha256")]
     expected_candidate_input_sha256: Option<String>,
+    /// Also retain a signed complete native FAIL with successful agreeing references.
+    /// Validation still exits nonzero. Never signs ERROR or INCONCLUSIVE evidence.
+    #[arg(long)]
+    attest_regression: bool,
 }
 
 #[derive(Subcommand)]
@@ -51,7 +55,7 @@ enum Action {
         #[arg(long)]
         public_key: PathBuf,
     },
-    /// Execute original Node/Bun and candidate Franken, then attest a complete passing cohort.
+    /// Execute original Node/Bun and candidate Franken, then attest the permitted measured result.
     Run {
         #[command(flatten)]
         inputs: Selection,
@@ -231,8 +235,18 @@ mod linux {
         )?;
         let report = admitted.run_product(native, bun, true)?;
         let tests = current_inventory(&original, &candidate, &original_pin, &candidate_pin, deadline)?;
-        report.check_admission(&original_pin, &candidate_pin, &tests)
-            .with_context(|| format!("refusing to attest a nonpassing or incomplete live suite ({})", report.verdict))?;
+        let regression = inputs.attest_regression && report.verdict == "FAIL";
+        if regression {
+            // Reuse the replay verifier's complete observation reconstruction.
+            // This is signed negative evidence, never an approval or a PASS
+            // projection of a failed/incomplete measurement.
+            native_replay::failure_capture::product::check_native_regression(
+                &report, &original_pin, &candidate_pin, &tests,
+            ).context("refusing to attest incomplete or inconsistent native regression evidence")?;
+        } else {
+            report.check_admission(&original_pin, &candidate_pin, &tests)
+                .with_context(|| format!("refusing to attest a nonpassing or incomplete live suite ({})", report.verdict))?;
+        }
         ensure!(report.native_runtime.sha256 != report.node_runtime.sha256
             && report.native_runtime.sha256 != report.bun_runtime.sha256,
             "attestation requires three distinct runtime executable hashes");
@@ -259,8 +273,14 @@ mod linux {
             "candidate_input_sha256": report.candidate_input_sha256,
             "total_tests": report.total_tests,
             "verdict": report.verdict,
+            "regression_attested": regression,
             "release_certification": false
         }));
+        // The artifact's successful publication must not make a failed suite
+        // succeed in a shell/CI pipeline. The signed FAIL remains available for
+        // an explicitly invoked rollout decision or offline investigation.
+        ensure!(!regression,
+            "native regression attested; validation remains FAIL; signed evidence was published");
         Ok(())
     }
 
@@ -281,6 +301,7 @@ mod linux {
             Selection {
                 project: project.into(), migrated_project: None,
                 expected_input_sha256: None, expected_candidate_input_sha256: None,
+                attest_regression: false,
             }
         }
 
@@ -305,6 +326,7 @@ mod linux {
                 expected_input_sha256: Some(pin(&original)),
                 expected_candidate_input_sha256: Some(pin(&candidate)),
                 project: original, migrated_project: Some(candidate),
+                attest_regression: false,
             };
             (selection, secret, root.join("signed.json"))
         }
@@ -513,6 +535,80 @@ mod linux {
             assert_eq!(pin(&inputs.project), inputs.expected_input_sha256.unwrap());
             assert_eq!(pin(inputs.migrated_project.as_ref().unwrap()), inputs.expected_candidate_input_sha256.unwrap());
         }
+
+        #[test]
+        fn native_regression_requires_opt_in_and_keeps_a_signed_fail_nonzero() {
+            // Real production execution with Node plus intentionally selected
+            // true/false test executables. This proves the evidence pipeline,
+            // not Bun/Franken compatibility or runtime-brand authenticity.
+            let root = tempfile::tempdir().unwrap();
+            let (mut inputs, secret, out) = pair(root.path());
+            let candidate = inputs.migrated_project.as_ref().unwrap().clone();
+            for project in [&inputs.project, &candidate] {
+                fs::write(project.join("case.test.js"), "globalThis.answer = 42;\n").unwrap();
+            }
+            inputs.expected_input_sha256 = Some(pin(&inputs.project));
+            inputs.expected_candidate_input_sha256 = Some(pin(&candidate));
+            let invoke = |inputs: &Selection| execute(inputs, Path::new("/bin/false"),
+                Path::new("/bin/true"), &secret, &out, true);
+            assert!(invoke(&inputs).is_err());
+            assert!(!out.exists());
+            inputs.attest_regression = true;
+            let error = invoke(&inputs).unwrap_err();
+            assert!(error.to_string().contains("native regression attested"), "{error:#}");
+            let envelope = fs::read(&out).unwrap();
+            let body = report_attestation::verify(&envelope,
+                &report_attestation::project_key(&candidate).unwrap()).unwrap();
+            let report: validation_suite::product_oracle::ProductReport =
+                serde_json::from_slice(&body).unwrap();
+            assert_eq!(report.verdict, "FAIL");
+            assert_eq!(report.native_divergences, 1);
+            assert_eq!(report.reference_failures, 0);
+            assert_eq!(report.reference_divergences, 0);
+            assert!(report.check_admission(inputs.expected_input_sha256.as_ref().unwrap(),
+                inputs.expected_candidate_input_sha256.as_ref().unwrap(),
+                &[PathBuf::from("case.test.js")]).is_err());
+            assert_eq!(pin(&inputs.project), inputs.expected_input_sha256.as_ref().unwrap().as_str());
+            assert_eq!(pin(&candidate), inputs.expected_candidate_input_sha256.as_ref().unwrap().as_str());
+            assert!(invoke(&inputs).unwrap_err().to_string().contains("already exists"));
+            assert_eq!(fs::read(out).unwrap(), envelope);
+        }
+
+        #[test]
+        fn regression_opt_in_never_signs_reference_disagreement_or_incomplete_runs() {
+            for source in [
+                "console.log('reference disagreement');\n",
+                "process.stdout.write('x'.repeat(17 * 1024 * 1024));\n",
+            ] {
+                let root = tempfile::tempdir().unwrap();
+                let (mut inputs, secret, out) = pair(root.path());
+                let candidate = inputs.migrated_project.as_ref().unwrap();
+                for project in [&inputs.project, candidate] {
+                    fs::write(project.join("case.test.js"), source).unwrap();
+                }
+                inputs.expected_input_sha256 = Some(pin(&inputs.project));
+                inputs.expected_candidate_input_sha256 = Some(pin(candidate));
+                inputs.attest_regression = true;
+                let error = execute(&inputs, Path::new("/bin/false"), Path::new("/bin/true"),
+                    &secret, &out, true).unwrap_err();
+                assert!(error.to_string().contains("nonpassing or incomplete"), "{error:#}");
+                assert!(!out.exists());
+            }
+        }
+
+        #[test]
+        fn regression_flag_does_not_replace_execution_consent() {
+            let base = ["attest", "run", "/project", "--native-bin", "/native",
+                "--bun-bin", "/bun", "--signing-key", "/key", "--out", "/out",
+                "--attest-regression"];
+            assert!(Args::try_parse_from(base).is_err());
+            let mut approved = base.to_vec();
+            approved.push("--execute");
+            let args = Args::try_parse_from(approved).unwrap();
+            assert!(matches!(args.command, Action::Run {
+                inputs: Selection { attest_regression: true, .. }, execute: true, ..
+            }));
+        }
     }
 }
 
@@ -522,7 +618,7 @@ fn main() -> ExitCode {
     match linux::run(args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("migration attestation refused: {error:#}");
+            eprintln!("migration validation: {error:#}");
             ExitCode::from(1)
         }
     }

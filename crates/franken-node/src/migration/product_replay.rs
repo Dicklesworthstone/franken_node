@@ -110,12 +110,34 @@ fn summary(capsule: &Capsule) -> CapsuleSummary {
 // summary, including reference disagreement and native differences together.
 fn complete(report: &ProductReport, original: &Snapshot, candidate: &Snapshot) -> Result<()> {
     let tests = matched_tests(original, candidate)?;
+    check_complete_evidence(report, &original.digest, &candidate.digest, &tests)
+}
+
+/// Reconstruct a complete measured result against independently captured input
+/// identities and the exact sorted test inventory. Shared by capsule replay and
+/// authenticated rollout evidence; this does not authenticate an imported report
+/// or authorize execution, installation, promotion or source restoration itself.
+/// Incomplete measurements remain errors, not negative evidence about a runtime.
+pub fn check_complete_evidence(
+    report: &ProductReport,
+    original_sha256: &str,
+    candidate_sha256: &str,
+    tests: &[PathBuf],
+) -> Result<()> {
+    ensure!(
+        is_hash(original_sha256)
+            && is_hash(candidate_sha256)
+            && !tests.is_empty()
+            && tests.len() <= super::super::super::MAX_TESTS
+            && tests.windows(2).all(|pair| pair[0] < pair[1]),
+        "product evidence requires valid input pins and a bounded, unique sorted inventory"
+    );
     ensure!(
         report.schema_version == "franken-node/product-validation-suite/v1"
             && report.oracle == "L1-node-bun-franken-node"
             && !report.release_certification
-            && report.input_sha256 == original.digest
-            && report.candidate_input_sha256 == candidate.digest,
+            && report.input_sha256 == original_sha256
+            && report.candidate_input_sha256 == candidate_sha256,
         "product capsule input identity or schema mismatch"
     );
     let exclusions: Vec<String> = if report.filesystem_comparison {
@@ -255,6 +277,34 @@ fn complete(report: &ProductReport, original: &Snapshot, candidate: &Snapshot) -
         "product capsule summary disagrees with measured cases"
     );
     Ok(())
+}
+
+/// Accept only a complete native regression with successful agreeing references
+/// and the full persistent-workspace scope. Never project failures into a PASS
+/// or let a caller-supplied summary determine whether recovery is warranted.
+/// The caller must authenticate report bytes and bind the current candidate
+/// before using this classification for a state-changing operation.
+pub fn check_native_regression(
+    report: &ProductReport,
+    original_sha256: &str,
+    candidate_sha256: &str,
+    tests: &[PathBuf],
+) -> Result<usize> {
+    check_complete_evidence(report, original_sha256, candidate_sha256, tests)?;
+    ensure!(
+        report.filesystem_comparison
+            && report.native_runtime.sha256 != report.node_runtime.sha256
+            && report.native_runtime.sha256 != report.bun_runtime.sha256,
+        "native regression evidence requires filesystem comparison and three distinct executables"
+    );
+    ensure!(
+        report.verdict == "FAIL"
+            && report.native_divergences > 0
+            && report.reference_failures == 0
+            && report.reference_divergences == 0,
+        "native regression requires complete failing native cases with successful agreeing references"
+    );
+    Ok(report.native_divergences)
 }
 
 fn stored(
@@ -1019,5 +1069,60 @@ mod tests {
                 .contains("not replayable")
         );
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn regression_evidence_reconstructs_every_case_and_rejects_summary_substitution() {
+        let (_root, _out, path, _) = fixture("globalThis.answer = 42;", true);
+        let capsule: Capsule = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        let original = capsule.payload.expected;
+        let tests = [PathBuf::from("case.test.js")];
+        let check = |report: &ProductReport| check_native_regression(report,
+            &original.input_sha256, &original.candidate_input_sha256, &tests);
+        assert_eq!(check(&original).unwrap(), 1);
+        for mutation in 0..13 {
+            let mut changed = original.clone();
+            match mutation {
+                0 => changed.verdict = "PASS".into(),
+                1 => changed.native_divergences = 0,
+                2 => changed.cases[0].outcome = CaseOutcome::Match,
+                3 => changed.cases[0].divergences.clear(),
+                4 => changed.cases[0].bun = None,
+                5 => changed.cases[0].native.as_mut().unwrap().exit_code = Some(0),
+                6 => changed.cases[0].node.as_mut().unwrap().exit_code = Some(1),
+                7 => changed.cases[0].bun.as_mut().unwrap().stdout.sha256 = "d".repeat(64),
+                8 => changed.skipped = 1,
+                9 => changed.errors.push("runtime identity changed".into()),
+                10 => changed.native_runtime.sha256 = changed.node_runtime.sha256.clone(),
+                11 => changed.filesystem_exclusions.push("**/*".into()),
+                12 => changed.cases[0].native.as_mut().unwrap().workspace_delta = None,
+                _ => unreachable!(),
+            }
+            assert!(check(&changed).is_err(), "{mutation}");
+        }
+        assert!(check_native_regression(&original, &"0".repeat(64),
+            &original.candidate_input_sha256, &tests).is_err());
+        assert!(check_native_regression(&original, &original.input_sha256,
+            &original.candidate_input_sha256, &[]).is_err());
+        assert!(check_native_regression(&original, &original.input_sha256,
+            &original.candidate_input_sha256, &[tests[0].clone(), tests[0].clone()]).is_err());
+    }
+
+    #[test]
+    fn replayable_reference_failures_and_narrow_scope_are_not_regression_authority() {
+        for (source, filesystem) in [
+            ("console.log('reference disagreement');", true),
+            ("process.exit(3);", true),
+            ("globalThis.answer = 42;", false),
+        ] {
+            let (_root, _out, path, _) = fixture(source, filesystem);
+            let capsule: Capsule = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            let report = capsule.payload.expected;
+            let tests = [PathBuf::from("case.test.js")];
+            check_complete_evidence(&report, &report.input_sha256,
+                &report.candidate_input_sha256, &tests).unwrap();
+            assert!(check_native_regression(&report, &report.input_sha256,
+                &report.candidate_input_sha256, &tests).is_err());
+        }
     }
 }

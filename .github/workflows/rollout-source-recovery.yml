@@ -121,6 +121,7 @@ jobs:
           mkdir -p evidence
           cargo +stable test --manifest-path tools/migration-validator/Cargo.toml --bin franken-migration-attest report_attestation:: -- --nocapture 2>&1 | tee evidence/attestation-tests.log
           cargo +stable test --manifest-path tools/migration-validator/Cargo.toml --bin franken-migration-attest linux::tests:: -- --nocapture --test-threads=2 2>&1 | tee evidence/attestation-operator-tests.log
+          cargo +stable test --manifest-path tools/migration-validator/Cargo.toml --bin franken-migration-attest failure_capture::product::tests:: -- --nocapture --test-threads=2 2>&1 | tee evidence/product-regression-tests.log
           cargo +stable clippy --manifest-path tools/migration-validator/Cargo.toml --bin franken-migration-attest -- -D warnings 2>&1 | tee evidence/attestation-clippy.log
       - name: Retain exact source and recovery execution evidence
         if: always()
