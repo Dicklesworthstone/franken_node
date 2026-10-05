@@ -21,7 +21,56 @@ tracker (`br-…` / `bd-…` IDs stored under `.beads/`).
 | Version | Kind | Date | Summary |
 |---------|------|------|---------|
 | `main` @ [`07d1e66af`](https://github.com/Dicklesworthstone/franken_node/commit/07d1e66afbe026718fc853b7f5bc55cbb74a5110) | Unreleased `main` tip (not a tag, not a Release) | 2026-08-19 | Current window: lockstep observations, host-effect ledger v2, janitor docs-reorg. |
+| [`v0.2.0`](https://github.com/Dicklesworthstone/franken_node/releases/tag/v0.2.0) | Published GitHub Release | 2026-10-04 | Everything on `main` since v0.1.0, plus the trust-registry anti-rollback fixes below; built against franken_engine v0.2.0. |
 | [`v0.1.0`](https://github.com/Dicklesworthstone/franken_node/releases/tag/v0.1.0) | Published GitHub Release | 2026-05-29 | Only GitHub Release in this repo. Tag points at [`08e1edf11`](https://github.com/Dicklesworthstone/franken_node/commit/08e1edf11f262693202d6466ba2392de9f3f3e4b). |
+
+## [0.2.0] - 2026-10-04
+
+First GitHub Release since `v0.1.0`. It ships everything on `main` up to the
+release tag, including the [Unreleased] windows below, and is built against
+franken_engine `v0.2.0`. The release ships the same three native archives as
+`v0.1.0`, each with a `.sha256` sidecar: Linux x86_64 GNU, macOS arm64 and
+Windows x86_64 MSVC.
+
+### Fixed: release blockers found by independent review against `v0.1.0`
+
+- **A legacy trust-registry import can no longer roll back durable state
+  ([#4](https://github.com/Dicklesworthstone/franken_node/issues/4)).**
+  - The one-time import of the legacy trust-card JSON pair decides
+    "import once" inside the transaction that seeds the store, and only ever
+    INSERTs. It can never overwrite a snapshot or signed high-water row that
+    another process committed after a revoke or quarantine.
+  - Every importer, winner or loser, returns the state re-loaded and
+    re-validated from the durable store.
+  - A store file with no snapshot row (a crashed or still-running first
+    import) now retries the import instead of failing forever.
+- **A stale writer can no longer overwrite a newer revoke or quarantine.**
+  - `persist_authoritative_state` used to re-chain any multi-mutation
+    snapshot onto whatever head was stored. A `trust sync`, `trust scan`,
+    fleet action or `run` auto-quarantine that loaded before a concurrent
+    `trust revoke` could therefore silently un-revoke the card.
+  - It now re-chains only onto the exact stored state the registry was
+    loaded from or last persisted. Otherwise it fails closed with
+    "concurrent trust-card registry update rejected ... reload and retry".
+  - The high-water refresh on the load path is re-decided inside its own
+    transaction.
+- Regression tests replay the exact interleavings:
+  - stale import after revoke, and after quarantine
+  - crash and retry of the first import
+  - a threaded first-load race
+  - a stale multi-mutation persist after revoke
+
+### Known issues (not regressions in shipped behaviour)
+
+- Some inline library tests depend on the host environment or on timing:
+  real Node/tsc migration validation, setsid namespace teardown, and
+  constant-time variance probes. They can fail on loaded or unprivileged
+  build hosts.
+- The legacy JSON pair is not retired after import. Deleting the `.db`
+  re-imports the pre-upgrade state, as documented.
+- `trust quarantine` records its fleet incident before persisting the
+  registry, so a rejected concurrent persist leaves the incident without a
+  registry change.
 
 ## [Unreleased]
 
