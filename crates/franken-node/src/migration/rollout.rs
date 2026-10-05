@@ -8,6 +8,9 @@
 //! during promotion. Malformed, foreign or reference-disagreement evidence
 //! blocks promotion without restoring sources. Evidence is trusted local input;
 //! structural consistency does not authenticate it or cover unmeasured modules.
+//! Captured three-runtime project cohorts additionally bind the current tree
+//! and quantify sample-size uncertainty. Single-entry lockstep reports do not
+//! establish that confidence; default promotion requires the cohort report.
 //!
 //! Rollout stages are local control state, not a traffic-routing implementation.
 //! Unbound rollouts can be aborted but never claim to restore source files.
@@ -24,6 +27,9 @@ use std::path::{Path, PathBuf};
 #[path = "rollout_store.rs"]
 mod store;
 use store::{Store, invalid};
+
+#[path = "rollout_cohort.rs"]
+pub mod cohort;
 
 pub const ROLLOUT_STATE_SCHEMA_VERSION: &str = "franken-node/migration-rollout-state/v1";
 pub const ROLLOUT_REPORT_SCHEMA_VERSION: &str = "franken-node/migrate-rollout-cli/v1";
@@ -129,6 +135,10 @@ pub struct RolloutState {
     /// An ID without a pin is refused, never repaired by trusting new metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rollback_journal_sha256: Option<String>,
+    /// Last admitted cohort, not reusable authorization for another promotion.
+    /// confidence_score remains a separate operator-supplied health ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_confidence: Option<cohort::CohortConfidence>,
     pub history: Vec<RolloutTransitionEvent>,
     pub created_at: String,
     pub updated_at: String,
@@ -148,6 +158,7 @@ impl RolloutState {
             lockstep_verified: false,
             rollback_plan_id: None,
             rollback_journal_sha256: None,
+            validation_confidence: None,
             history: Vec::new(),
             created_at: now.clone(),
             updated_at: now,
@@ -170,6 +181,10 @@ impl RolloutState {
                 hasher.update((value.len() as u64).to_le_bytes());
                 hasher.update(value.as_bytes());
             }
+        }
+        hasher.update([u8::from(self.validation_confidence.is_some())]);
+        if let Some(confidence) = &self.validation_confidence {
+            confidence.update_digest(&mut hasher);
         }
         hex::encode(hasher.finalize())
     }
@@ -199,6 +214,8 @@ pub struct RolloutReport {
     pub rollback_triggered: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_rollback: Option<SourceRollbackSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_confidence: Option<cohort::CohortConfidence>,
     pub message: String,
     pub history: Vec<RolloutTransitionEvent>,
 }
@@ -230,7 +247,14 @@ impl RolloutReport {
         writeln!(out, "  Project:            {}", self.project_path).unwrap();
         writeln!(out, "  Stage:              {} ({})", self.stage, self.status).unwrap();
         writeln!(out, "  Progress:           {}", bar).unwrap();
-        writeln!(out, "  Confidence Score:   {:.2}%", self.confidence_score * 100.0).unwrap();
+        writeln!(out, "  Operator ceiling:   {:.2}%", self.confidence_score * 100.0).unwrap();
+        if let Some(confidence) = &self.validation_confidence {
+            writeln!(out, "  Measured cohort:    {}/{} matched", confidence.matched_tests, confidence.total_tests).unwrap();
+            writeln!(out, "  conditional Wilson 95%: [{:.2}%, {:.2}%]", confidence.wilson_lower_95 * 100.0, confidence.wilson_upper_95 * 100.0).unwrap();
+            writeln!(out, "  Sampling independence: not verified; not a production-safety probability").unwrap();
+        } else {
+            writeln!(out, "  Measured cohort:    unavailable (operator ceiling is not measured confidence)").unwrap();
+        }
         writeln!(out, "  Lockstep Verified:  {}", self.lockstep_verified).unwrap();
         writeln!(out, "  Rollback Triggered: {}", self.rollback_triggered).unwrap();
         if let Some(source) = &self.source_rollback {
@@ -253,6 +277,8 @@ impl RolloutReport {
 #[derive(Debug, Clone)]
 pub struct RolloutConfig {
     pub ramp_step_pct: u8,
+    /// Minimum conditional Wilson lower bound AND operator health ceiling.
+    /// Zero explicitly disables quantified admission for legacy entry reports.
     pub min_confidence_score: f64,
     pub require_lockstep_evidence: bool,
     /// Restore the bound native transaction on low confidence or a complete
@@ -316,17 +342,20 @@ fn lockstep_input_payload(project: &Path) -> io::Result<Vec<u8>> {
 
 /// Validate the existing lockstep report contract. Source rollback binding is
 /// independent of this evidence and does not upgrade it to release certification.
-/// This checks unsigned report consistency and the harness's explicit input,
-/// not authenticity, executable identity, or transitive module coverage.
+/// A project-cohort report binds the full captured input; legacy reports bind
+/// only the harness's explicit input. Neither authenticates a producer or proves
+/// executable brands, statistical sampling assumptions or transitive execution.
 pub fn verify_lockstep_evidence(project: &Path, report_path: &Path) -> Result<String, String> {
     match assess_lockstep_evidence(project, report_path)? {
         LockstepEvidence::Passed(digest) => Ok(digest),
+        LockstepEvidence::Measured(confidence) => Ok(format!("sha256:{}", confidence.evidence_sha256)),
         LockstepEvidence::Regressed(reason) => Err(reason),
     }
 }
 
 enum LockstepEvidence {
     Passed(String),
+    Measured(cohort::CohortConfidence),
     Regressed(String),
 }
 
@@ -342,6 +371,15 @@ fn assess_lockstep_evidence(project: &Path, report_path: &Path) -> Result<Lockst
 
     let raw = read_lockstep_file(report_path)
         .map_err(|e| format!("cannot read lockstep report {}: {e}", report_path.display()))?;
+    #[derive(Deserialize)]
+    struct Header { schema_version: String }
+    let header: Header = serde_json::from_slice(&raw)
+        .map_err(|error| format!("invalid rollout evidence header: {error}"))?;
+    if header.schema_version == cohort::REPORT_SCHEMA {
+        // The producer's real capture/hash/admission implementation supplies
+        // the tree identity and inventory. No summary-only PASS projection.
+        return cohort::assess(project, &raw).map(LockstepEvidence::Measured);
+    }
     let report: DivergenceReport = serde_json::from_slice(&raw)
         .map_err(|e| format!("lockstep report is not a `verify lockstep --json` report: {e}"))?;
     if report.schema_version != SCHEMA_VERSION || report.trace_id.trim().is_empty() {
@@ -526,6 +564,12 @@ impl RolloutManager {
         if !stage_consistent {
             return Err(invalid("rollout stage, status and percentage disagree"));
         }
+        if let Some(confidence) = &state.validation_confidence {
+            confidence.validate().map_err(invalid)?;
+            if !state.lockstep_verified {
+                return Err(invalid("unverified rollout cannot retain an admitted cohort"));
+            }
+        }
         match (&state.rollback_plan_id, &state.rollback_journal_sha256) {
             (None, None) if !state.migration_id.starts_with("txn-") => {}
             (Some(id), Some(pin)) if id == &state.migration_id
@@ -669,6 +713,7 @@ impl RolloutManager {
             lockstep_verified: state.lockstep_verified,
             rollback_triggered: state.current_stage == RolloutStage::Aborted,
             source_rollback,
+            validation_confidence: state.validation_confidence,
             message,
             history: state.history,
         }
@@ -774,12 +819,28 @@ impl RolloutManager {
             Some(report_path) => {
                 match assess_lockstep_evidence(&self.project_path, report_path)? {
                     LockstepEvidence::Passed(digest) => {
+                        if !config.force && config.min_confidence_score > 0.0 {
+                            return Err("single-entry lockstep evidence has no measured cohort confidence; use a captured Node/Bun/Franken project report with filesystem comparison, or explicitly set the confidence threshold to zero".into());
+                        }
                         state.lockstep_verified = true;
+                        state.validation_confidence = None;
                         evidence_note = Some(format!("lockstep evidence {digest}"));
+                    }
+                    LockstepEvidence::Measured(confidence) => {
+                        if !config.force && confidence.wilson_lower_95 < config.min_confidence_score {
+                            // Too few successful observations is not a workload
+                            // regression and must not authorize source recovery.
+                            return Err(format!("insufficient cohort evidence: {}/{} matched, conditional Wilson lower bound {:.6} below {:.6}; rollout unchanged, no source restoration", confidence.matched_tests, confidence.total_tests, confidence.wilson_lower_95, config.min_confidence_score));
+                        }
+                        evidence_note = Some(format!("cohort evidence sha256:{}; {}/{} matched; conditional Wilson 95% [{:.6},{:.6}]; independent sampling not verified{}", confidence.evidence_sha256, confidence.matched_tests, confidence.total_tests, confidence.wilson_lower_95, confidence.wilson_upper_95,
+                            if config.force { "; forced admission threshold override" } else { "" }));
+                        state.lockstep_verified = true;
+                        state.validation_confidence = Some(confidence);
                     }
                     LockstepEvidence::Regressed(reason) => {
                         if config.auto_rollback_on_failure && !config.force {
                             state.lockstep_verified = false;
+                            state.validation_confidence = None;
                             return match self.rollback_locked(&store, state, &reason) {
                                 Ok(report) => Err(format!("{reason}; {}", report.message)),
                                 Err(error) => Err(format!("{reason}; automatic rollback did not complete: {error}")),
@@ -790,9 +851,12 @@ impl RolloutManager {
                 }
             }
             None if config.require_lockstep_evidence && !config.force => {
-                return Err(format!("promotion requires lockstep evidence: run `franken-node verify lockstep {} --json > lockstep.json` and pass --lockstep-report lockstep.json", self.project_path.display()));
+                return Err("promotion requires lockstep evidence: measure captured Node/Bun/Franken project tests with filesystem comparison and pass --lockstep-report /outside/project/cohort.json; see docs/migration_rollout_source_recovery.md".into());
             }
-            None => state.lockstep_verified = false,
+            None => {
+                state.lockstep_verified = false;
+                state.validation_confidence = None;
+            }
         }
         // Successful progression still requires the exact admitted candidate.
         // Recovery checks its own pinned transaction and preserves conflicting
@@ -870,6 +934,8 @@ impl RolloutManager {
             state.current_stage = RolloutStage::Aborted;
             state.status = RolloutStatus::Failed;
             state.ramp_pct = 0;
+            state.lockstep_verified = false;
+            state.validation_confidence = None;
             state.updated_at = now;
             state.history.push(event);
             self.persist_locked(store, &state).map_err(|e| e.to_string())?;
@@ -1011,6 +1077,7 @@ mod tests {
         let manager = RolloutManager::new(root.path(), Some("fresh-evidence"));
         let config = RolloutConfig {
             lockstep_report: Some(write_lockstep_report(root.path(), &input, false)),
+            min_confidence_score: 0.0, // Isolate the legacy input/evidence gate.
             ..RolloutConfig::default()
         };
         manager.promote(&config, None, None).unwrap();
@@ -1030,6 +1097,7 @@ mod tests {
         let manager = RolloutManager::new(root.path(), Some("forced-followup"));
         let mut config = RolloutConfig {
             lockstep_report: Some(write_lockstep_report(root.path(), &input, false)),
+            min_confidence_score: 0.0,
             ..RolloutConfig::default()
         };
         manager.promote(&config, None, None).unwrap();
@@ -1052,6 +1120,7 @@ mod tests {
         let manager = RolloutManager::new(root.path(), Some("unverified-policy"));
         manager.promote(&RolloutConfig {
             lockstep_report: Some(write_lockstep_report(root.path(), &input, false)),
+            min_confidence_score: 0.0,
             ..RolloutConfig::default()
         }, None, None).unwrap();
         let report = manager.promote(&RolloutConfig {
@@ -1144,7 +1213,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let manifest = project_with_manifest(dir.path());
         let mgr = RolloutManager::new(dir.path(), Some("mig-test-02"));
-        let cfg = RolloutConfig { lockstep_report: Some(write_lockstep_report(dir.path(), &manifest, false)), ..RolloutConfig::default() };
+        let cfg = RolloutConfig { lockstep_report: Some(write_lockstep_report(dir.path(), &manifest, false)), min_confidence_score: 0.0, ..RolloutConfig::default() };
         let rep1 = mgr.promote(&cfg, None, None).unwrap();
         assert_eq!(rep1.stage, RolloutStage::Canary);
         assert_eq!(rep1.ramp_pct, 5);
@@ -1194,7 +1263,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let manifest = project_with_manifest(dir.path());
         let mgr1 = RolloutManager::new(dir.path(), Some("mig-test-05"));
-        let cfg = RolloutConfig { lockstep_report: Some(write_lockstep_report(dir.path(), &manifest, false)), ..RolloutConfig::default() };
+        let cfg = RolloutConfig { lockstep_report: Some(write_lockstep_report(dir.path(), &manifest, false)), min_confidence_score: 0.0, ..RolloutConfig::default() };
         mgr1.promote(&cfg, None, None).unwrap();
         let mgr2 = RolloutManager::new(dir.path(), Some("mig-test-05"));
         let status = mgr2.status().unwrap();
@@ -1211,6 +1280,7 @@ mod tests {
             migration_id: "mig-test-render".to_string(), project_path: "/test/project".to_string(),
             stage: RolloutStage::Canary, status: RolloutStatus::Active, ramp_pct: 5,
             confidence_score: 0.98, lockstep_verified: true, rollback_triggered: false,
+            validation_confidence: None,
             source_rollback: None, message: "canary running smoothly".to_string(), history: vec![],
         };
         let human = rep.render_human();
@@ -1424,6 +1494,7 @@ mod tests {
         let manager = RolloutManager::new(root.path(), Some(&id));
         let mut config = RolloutConfig {
             lockstep_report: Some(write_lockstep_report(root.path(), &input, false)),
+            min_confidence_score: 0.0,
             ..RolloutConfig::default()
         };
         manager.promote(&config, None, None).unwrap();
@@ -1576,5 +1647,27 @@ mod tests {
         let status = manager.status().unwrap();
         assert_eq!(status.stage, RolloutStage::Aborted);
         assert!(status.source_rollback.is_none());
+    }
+
+    #[test]
+    fn default_promotion_needs_measured_cohort_not_a_single_entry_pass() {
+        let root = tempdir().unwrap();
+        let input = project_with_manifest(root.path());
+        let manager = RolloutManager::new(root.path(), Some("cohort-required"));
+        let before = manager.load_or_init().unwrap();
+        let mut config = RolloutConfig {
+            lockstep_report: Some(write_lockstep_report(root.path(), &input, false)),
+            ..RolloutConfig::default()
+        };
+        let error = manager.promote(&config, None, None).unwrap_err();
+        assert!(error.contains("no measured cohort confidence"), "{error}");
+        assert_eq!(manager.load_or_init().unwrap(), before);
+        // Explicit zero waives quantified admission, not the existing oracle
+        // consistency checks, and cannot invent a measured confidence record.
+        config.min_confidence_score = 0.0;
+        let report = manager.promote(&config, None, None).unwrap();
+        assert!(report.lockstep_verified);
+        assert!(report.validation_confidence.is_none());
+        assert!(report.render_human().contains("unavailable"));
     }
 }

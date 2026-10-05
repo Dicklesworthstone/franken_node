@@ -4,18 +4,14 @@ on:
   push:
     branches: [main]
     paths:
-      - 'crates/franken-node/src/migration/rollout*.rs'
-      - 'crates/franken-node/src/migration/rewrite_transaction.rs'
-      - 'crates/franken-node/src/migration/rewrite_rollback.rs'
+      - 'crates/franken-node/src/migration/**'
       - 'crates/franken-node/src/runtime/nversion_oracle.rs'
       - 'crates/franken-node/src/security/constant_time.rs'
       - 'crates/franken-node/src/lib.rs'
       - '.github/workflows/rollout-source-recovery.yml'
   pull_request:
     paths:
-      - 'crates/franken-node/src/migration/rollout*.rs'
-      - 'crates/franken-node/src/migration/rewrite_transaction.rs'
-      - 'crates/franken-node/src/migration/rewrite_rollback.rs'
+      - 'crates/franken-node/src/migration/**'
       - '.github/workflows/rollout-source-recovery.yml'
   workflow_dispatch:
 
@@ -57,6 +53,8 @@ jobs:
           tempfile = "3"
           subtle = "2.6.1"
           proptest = "1.6"
+          tree-sitter = "0.26.8"
+          tree-sitter-javascript = "0.25.0"
           rustix = { version = "1.1.4", default-features = false, features = ["std", "fs", "process"] }
           TOML
           # Import exact production helper definitions. The oracle's inline
@@ -84,6 +82,10 @@ jobs:
           pub mod production_oracle;
           pub mod runtime { pub use crate::production_oracle as nversion_oracle; }
           pub mod migration {
+              #[path = "$source/migration/smoke_supervisor.rs"]
+              pub mod smoke_supervisor;
+              #[path = "$source/migration/validation_suite.rs"]
+              pub mod validation_suite;
               #[path = "$source/migration/rewrite_transaction.rs"]
               pub mod rewrite_transaction;
               pub use rewrite_transaction::rollback;
@@ -93,11 +95,15 @@ jobs:
           RUST
           git rev-parse HEAD > evidence/revision.txt
           rustc +stable --version > evidence/rust-version.txt
-          git ls-tree HEAD crates/franken-node/src/migration/ crates/franken-node/src/runtime/nversion_oracle.rs crates/franken-node/src/security/constant_time.rs crates/franken-node/src/lib.rs > evidence/source-blobs.txt
+          node --version > evidence/node-version.txt
+          git ls-tree -r HEAD crates/franken-node/src/migration/ crates/franken-node/src/runtime/nversion_oracle.rs crates/franken-node/src/security/constant_time.rs crates/franken-node/src/lib.rs > evidence/source-blobs.txt
           cargo +stable check --manifest-path "$harness/Cargo.toml" --lib 2>&1 | tee evidence/check.log
-          cargo +stable test --manifest-path "$harness/Cargo.toml" migration:: -- --nocapture --test-threads=2 2>&1 | tee evidence/recovery-tests.log
+          # Preserve both original module test sets. The newly imported full
+          # validation suite compiles too; its own workflow executes that suite.
+          cargo +stable test --manifest-path "$harness/Cargo.toml" migration::rollout:: -- --nocapture --test-threads=2 2>&1 | tee evidence/recovery-tests.log
+          cargo +stable test --manifest-path "$harness/Cargo.toml" migration::rewrite_transaction:: -- --nocapture --test-threads=2 2>&1 | tee evidence/transaction-tests.log
           cargo +stable clippy --manifest-path "$harness/Cargo.toml" --lib -- -D warnings 2>&1 | tee evidence/clippy.log
-          for file in rollout.rs rollout_store.rs rollout_recovery_tests.rs rewrite_rollback.rs; do
+          for file in rollout.rs rollout_cohort.rs rollout_store.rs rollout_recovery_tests.rs rewrite_rollback.rs; do
             rustfmt +stable --edition 2024 --config skip_children=true --emit stdout "$source/migration/$file" > "evidence/$file"
           done
       - name: Retain exact source and recovery execution evidence
@@ -109,8 +115,4 @@ jobs:
           if-no-files-found: error
           path: |
             evidence/
-            crates/franken-node/src/migration/rollout.rs
-            crates/franken-node/src/migration/rollout_store.rs
-            crates/franken-node/src/migration/rollout_recovery_tests.rs
-            crates/franken-node/src/migration/rewrite_transaction.rs
-            crates/franken-node/src/migration/rewrite_rollback.rs
+            crates/franken-node/src/migration/
