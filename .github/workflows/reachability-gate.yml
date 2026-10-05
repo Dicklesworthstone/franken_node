@@ -1,0 +1,41 @@
+# Library-island reachability gate (bd-reality-20260923-26n9r.14).
+#
+# The 2026-09-23 reality check found ~57% of non-test product code under
+# crates/franken-node/src/** was unreachable from the binary (DGIS/BPET/VEF/
+# time-travel/copilot_engine/reputation_graph_apis were "library islands":
+# compiled and unit-tested, but reached from no CLI path). Charter §4 forbids
+# "decorative controls without measurable behavior", so an unreachable primitive
+# is decorative however well tested. This gate stops the island surface from
+# GROWING again: the measured count of non-test lines in default-compiled,
+# reference-unreachable modules may only go DOWN (slack absorbs routine churn).
+#
+# PURE STATIC (no cargo/toolchain), therefore cheap. The method is a
+# reference-based reachability PROXY (a module is reachable when some non-test
+# file outside its own subtree path-references its name); it is deliberately
+# conservative — it under-reports islands rather than false-flag live code, so
+# the gate never blocks legitimate work.
+#
+# To land a legitimate change: wire the new module to a product flow (so it is
+# path-referenced), opt-in-feature-gate it (features other than
+# engine/http-client/external-commands are exempt by construction), or — only
+# when the island surface legitimately SHRANK — lower the ceiling with
+# `python3 scripts/check_reachability.py --update-ceiling`.
+name: reachability-gate
+
+on:
+  pull_request:
+    paths:
+      - 'crates/franken-node/src/**'
+      - 'scripts/check_reachability.py'
+      - 'scripts/reachability_ceiling.json'
+  workflow_dispatch: {}
+
+jobs:
+  reachability-ceiling:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Gate unit tests (census logic must be correct first)
+        run: python3 scripts/test_check_reachability.py
+      - name: Enforce island-line ceiling (can only go down)
+        run: python3 scripts/check_reachability.py --json
