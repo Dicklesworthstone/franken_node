@@ -34,7 +34,7 @@ use frankenengine_node::supply_chain::trust_card::{
     RiskAssessment, RiskLevel,
 };
 use frankenengine_node::supply_chain::trust_card::{
-    SnapshotSourceContext, TrustCardInput, TrustCardListFilter, TrustCardMutation,
+    SnapshotSourceContext, TrustCardError, TrustCardInput, TrustCardListFilter, TrustCardMutation,
     TrustCardRegistry,
 };
 use frankenengine_node::supply_chain::trust_card_registry_store::TrustCardRegistryStore;
@@ -201,9 +201,21 @@ fn stored_high_water_rejects_older_snapshot_row_tamper() {
             .expect("epoch-1 snapshot"),
     )
     .expect("encode older snapshot");
+    // The attacker edits the database directly (the one-time legacy importer
+    // never overwrites existing rows, franken_node#4).
     let store = TrustCardRegistryStore::open(&path).expect("open store");
     store
-        .import_legacy_state(&older_json, None)
+        .with_immediate_transaction(|_connection, tx| {
+            tx.execute_with_params(
+                "UPDATE registry_state SET canonical_json = ?1 WHERE slot = 'snapshot';",
+                &[fsqlite::SqliteValue::Text(older_json.as_str().into())],
+            )
+            .map_err(|err| TrustCardError::SnapshotWrite {
+                path: path.clone(),
+                detail: err.to_string(),
+            })?;
+            Ok(())
+        })
         .expect("install older snapshot row");
 
     let err = load(&path).expect_err("older signed snapshot must be rejected");
