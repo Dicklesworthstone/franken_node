@@ -59,12 +59,20 @@ jobs:
           proptest = "1.6"
           rustix = { version = "1.1.4", default-features = false, features = ["std", "fs", "process"] }
           TOML
-          # Import the actual shared helper, not an independently maintained
-          # implementation. This copies a read-only source range into the temp
-          # host; no repository source, gate or threshold is rewritten.
-          sed -n '/^pub(crate) fn push_bounded<T>/,/^}/p' "$source/lib.rs" > "$harness/bounded.rs"
+          # Import exact production helper definitions. The oracle's inline
+          # tests need the real poisoning/error behavior of lock_utils too.
+          # No repository source, test filter or assertion is rewritten.
+          {
+            sed -n '/^const MAX_HELP_URLS:/p' "$source/lib.rs"
+            sed -n '/^pub(crate) fn push_bounded<T>/,/^}/p' "$source/lib.rs"
+            sed -n '/^#\[derive(Debug, Clone, PartialEq, Eq, Hash)\]/,/^impl std::error::Error for ActionableError {}/p' "$source/lib.rs"
+            sed -n '/^pub mod lock_utils {/,/^}/p' "$source/lib.rs"
+          } > "$harness/bounded.rs"
+          test "$(grep -c '^const MAX_HELP_URLS:' "$harness/bounded.rs")" = 1
           test "$(grep -c '^pub(crate) fn push_bounded<T>' "$harness/bounded.rs")" = 1
-          test "$(grep -c '^}' "$harness/bounded.rs")" = 1
+          test "$(grep -c '^pub struct ActionableError' "$harness/bounded.rs")" = 1
+          test "$(grep -c '^impl std::error::Error for ActionableError' "$harness/bounded.rs")" = 1
+          test "$(grep -c '^pub mod lock_utils' "$harness/bounded.rs")" = 1
           cat > "$harness/lib.rs" <<RUST
           #![forbid(unsafe_code)]
           extern crate self as frankenengine_node;
