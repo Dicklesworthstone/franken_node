@@ -1,13 +1,15 @@
 //! Serialized, durable rollout intent storage. The project-wide advisory lock
 //! is held across state transitions AND native source restoration. On Unix,
 //! metadata is opened relative to pinned, no-follow directory descriptors.
-//! This coordinates cooperating operators; local state is not authenticated.
+//! Projects with an independently installed operator key require authenticated
+//! state on every load and sign every durable revision. Existing projects remain
+//! explicitly legacy until provisioned BEFORE rollout initialization.
 
 use std::fs::File;
 #[cfg(not(unix))]
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -17,10 +19,16 @@ use rustix::fs::{Mode, OFlags, mkdirat, open, openat, renameat};
 use rustix::io::Errno;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
-#[cfg(not(unix))]
-use std::path::PathBuf;
 
-pub(super) const MAX_STATE_BYTES: usize = 2 * 1024 * 1024;
+use super::cohort::attestation::rollout_receipt as receipt;
+#[cfg(unix)]
+#[path = "rollout_store_signing.rs"]
+mod signing;
+
+const SIGNING_KEY_ENV: &str = "FRANKEN_NODE_ROLLOUT_SIGNING_KEY";
+const EXPECTED_HEAD_ENV: &str = "FRANKEN_NODE_ROLLOUT_EXPECTED_HEAD_SHA256";
+
+pub(super) const MAX_STATE_BYTES: usize = receipt::MAX_STATE_BYTES;
 
 pub(super) struct Store {
     #[cfg(unix)]
@@ -28,6 +36,8 @@ pub(super) struct Store {
     #[cfg(not(unix))]
     directory: PathBuf,
     lock: File,
+    #[cfg(unix)]
+    signing: signing::Policy,
 }
 
 pub(super) fn invalid(message: impl Into<String>) -> io::Error {
@@ -62,13 +72,22 @@ fn child_directory(parent: &File, name: &str) -> io::Result<File> {
 
 impl Store {
     pub(super) fn open(project: &Path) -> io::Result<Self> {
+        let selected = std::env::var_os(SIGNING_KEY_ENV).map(PathBuf::from);
+        let expected = match std::env::var(EXPECTED_HEAD_ENV) {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(error) => return Err(invalid(error.to_string())),
+        };
+        Self::open_with_key(project, selected.as_deref(), expected.as_deref())
+    }
+
+    fn open_with_key(project: &Path, selected: Option<&Path>, expected: Option<&str>) -> io::Result<Self> {
+        #[cfg(unix)]
+        let root = File::from(open(project,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty())?);
         #[cfg(unix)]
         let directory = {
-            let root = File::from(open(
-                project,
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-            )?);
             let config = child_directory(&root, ".franken-node")?;
             let state = child_directory(&config, "state")?;
             child_directory(&state, "rollout")?
@@ -104,10 +123,31 @@ impl Store {
         fs2::FileExt::try_lock_exclusive(&lock).map_err(|error| {
             io::Error::new(error.kind(), format!("another rollout operation holds the project lock: {error}"))
         })?;
-        Ok(Self { directory, lock })
+        #[cfg(unix)]
+        let signing = signing::Policy::open(&root, project, selected, expected)?;
+        #[cfg(not(unix))]
+        if selected.is_some() || expected.is_some() || project.join(".franken-node/keys/migration-rollout.pub").symlink_metadata().is_ok() {
+            return Err(invalid("operator-signed rollout storage is supported on Unix only"));
+        }
+        Ok(Self { directory, lock, #[cfg(unix)] signing })
     }
 
     pub(super) fn read(&self, name: &str) -> io::Result<Option<Vec<u8>>> {
+        #[cfg(unix)]
+        self.signing.recheck()?;
+        let raw = self.read_raw(name)?;
+        #[cfg(unix)]
+        self.signing.observe_head(name, raw.as_deref())?;
+        raw.map(|raw| {
+            #[cfg(unix)]
+            { self.signing.decode(name, &raw) }
+            #[cfg(not(unix))]
+            { if raw.len() > MAX_STATE_BYTES { return Err(invalid("rollout state exceeds metadata byte budget")); }
+              Ok(raw) }
+        }).transpose()
+    }
+
+    fn read_raw(&self, name: &str) -> io::Result<Option<Vec<u8>>> {
         validate_name(name)?;
         #[cfg(unix)]
         let opened = openat(
@@ -124,7 +164,7 @@ impl Store {
             Err(error) => return Err(error),
         };
         let metadata = file.metadata()?;
-        if !metadata.is_file() || metadata.len() > MAX_STATE_BYTES as u64 {
+        if !metadata.is_file() || metadata.len() > receipt::MAX_RECEIPT_BYTES as u64 {
             return Err(invalid("rollout state must be a bounded regular file"));
         }
         #[cfg(unix)]
@@ -132,9 +172,9 @@ impl Store {
             return Err(invalid("rollout state must not have hardlink aliases"));
         }
         let mut bytes = Vec::new();
-        file.take(MAX_STATE_BYTES as u64 + 1).read_to_end(&mut bytes)?;
-        if bytes.len() > MAX_STATE_BYTES {
-            return Err(invalid("rollout state exceeds metadata byte budget"));
+        file.take(receipt::MAX_RECEIPT_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+        if bytes.len() > receipt::MAX_RECEIPT_BYTES {
+            return Err(invalid("rollout receipt exceeds metadata byte budget"));
         }
         Ok(Some(bytes))
     }
@@ -143,6 +183,63 @@ impl Store {
         validate_name(name)?;
         if bytes.len() > MAX_STATE_BYTES {
             return Err(invalid("rollout state exceeds metadata byte budget"));
+        }
+        #[cfg(unix)]
+        {
+            let previous = self.read_raw(name)?;
+            // Authenticate the predecessor even when the authority is absent:
+            // removing a key must not silently turn a signed state into plain JSON.
+            let decoded = previous.as_deref().map(|raw| self.signing.decode(name, raw)).transpose()?;
+            self.signing.recheck()?;
+            self.signing.observe_head(name, previous.as_deref())?;
+            if self.signing.required() {
+                if decoded.as_deref() == Some(bytes) { return Ok(()); }
+                let sealed = self.signing.seal(name, bytes, previous.as_deref())?;
+                // Archive before publishing the new head. A crash can leave an
+                // unused signed receipt, never an unsigned or fabricated head.
+                if let Some(previous) = previous {
+                    self.archive(&previous)?;
+                }
+                self.archive(&sealed)?;
+                self.signing.recheck()?;
+                self.write_raw(name, &sealed)?;
+                self.signing.published(name, &sealed);
+                return Ok(());
+            }
+        }
+        self.write_raw(name, bytes)
+    }
+
+    #[cfg(unix)]
+    fn archive(&self, bytes: &[u8]) -> io::Result<()> {
+        let name = receipt::receipt_name(&receipt::sha256(bytes)).map_err(|e| invalid(e.to_string()))?;
+        let opened = openat(&self.directory, name.as_str(),
+            OFlags::CREATE | OFlags::EXCL | OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o600));
+        match opened {
+            Ok(fd) => {
+                let mut file = File::from(fd);
+                file.write_all(bytes)?;
+                file.sync_all()?;
+            }
+            Err(Errno::EXIST) => {
+                if self.read_raw(&name)?.as_deref() != Some(bytes) {
+                    return Err(invalid("existing signed receipt differs; refusing to overwrite recovery evidence"));
+                }
+                let file = File::from(openat(&self.directory, name.as_str(),
+                    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC, Mode::empty())?);
+                file.sync_all()?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+        self.directory.sync_all()?;
+        Ok(())
+    }
+
+    fn write_raw(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
+        validate_name(name)?;
+        if bytes.len() > receipt::MAX_RECEIPT_BYTES {
+            return Err(invalid("rollout receipt exceeds metadata byte budget"));
         }
         // Exclusive creation, not a shared truncating .tmp file. Failed writes
         // leave recovery material intact; no source or metadata cleanup occurs.
@@ -163,9 +260,11 @@ impl Store {
         drop(file);
         #[cfg(unix)]
         {
+            self.signing.recheck()?;
             renameat(&self.directory, temp.as_str(), &self.directory, name)?;
             // A completed write means the directory entry is durable too.
             self.directory.sync_all()?;
+            self.signing.recheck()?;
         }
         #[cfg(not(unix))]
         std::fs::rename(self.directory.join(temp), self.directory.join(name))?;
@@ -228,3 +327,7 @@ mod tests {
         assert!(store.read("mig-link.json").is_err());
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "rollout_signing_tests.rs"]
+mod signing_tests;

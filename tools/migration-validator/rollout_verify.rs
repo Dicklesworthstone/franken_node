@@ -102,3 +102,64 @@ fn main() -> ExitCode {
         ExitCode::from(2)
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+    use std::fs;
+    use std::os::unix::fs::symlink;
+
+    fn fixture() -> (tempfile::TempDir, Args, Vec<u8>) {
+        let root = tempfile::tempdir().unwrap();
+        let key = SigningKey::from_bytes(&[7;32]);
+        let project = root.path().join("not-a-workspace").to_str().unwrap().to_owned();
+        let state = serde_json::to_vec(&serde_json::json!({"schema_version":rollout_receipt::STATE_SCHEMA,
+            "migration_id":"mig-one", "project_path":project, "history":[]})).unwrap();
+        let first = rollout_receipt::seal(&state, &key, &project, "mig-one.json", None).unwrap();
+        let head = rollout_receipt::seal(&state, &key, &project, "mig-one.json", Some(&first)).unwrap();
+        fs::write(root.path().join(rollout_receipt::receipt_name(&rollout_receipt::sha256(&first)).unwrap()), first).unwrap();
+        let path = root.path().join("head.json");
+        fs::write(&path, &head).unwrap();
+        let args = Args { state: path, public_key: hex::encode(key.verifying_key().to_bytes()),
+            project, migration_id: "mig-one".into(),
+            expected_head_sha256: Some(rollout_receipt::sha256(&head)), receipts_dir: None, include_state: true };
+        (root, args, head)
+    }
+
+    #[test]
+    fn offline_operator_verifies_a_complete_chain_without_modifying_inputs() {
+        let (root, args, head) = fixture();
+        let before = fs::read_dir(root.path()).unwrap().count();
+        run(args).unwrap();
+        assert_eq!(fs::read(root.path().join("head.json")).unwrap(), head);
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), before);
+        assert!(!root.path().join("not-a-workspace").exists());
+    }
+
+    #[test]
+    fn offline_operator_refuses_missing_history_wrong_pins_and_linked_heads() {
+        let (root, mut args, _) = fixture();
+        args.expected_head_sha256 = Some("0".repeat(64));
+        assert!(run(args).unwrap_err().to_string().contains("checkpoint"));
+        let (_root, mut args, _) = fixture();
+        args.receipts_dir = Some(root.path().join("missing"));
+        assert!(run(args).is_err());
+        let (_root, mut args, _) = fixture();
+        let link = root.path().join("linked-head");
+        symlink(&args.state, &link).unwrap();
+        args.state = link;
+        assert!(run(args).is_err());
+    }
+
+    #[test]
+    fn offline_cli_requires_independent_authority_and_has_no_execution_option() {
+        assert!(Args::try_parse_from(["verify", "head.json"]).is_err());
+        let public = hex::encode(SigningKey::from_bytes(&[7;32]).verifying_key().to_bytes());
+        let mut args = vec!["verify", "head.json", "--public-key", &public,
+            "--project", "/signed/project", "--migration-id", "mig-one"];
+        assert!(Args::try_parse_from(&args).is_ok());
+        args.push("--execute");
+        assert!(Args::try_parse_from(&args).is_err());
+    }
+}

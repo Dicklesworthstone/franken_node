@@ -9,6 +9,9 @@ use anyhow::{Context, Result, ensure};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
+#[path = "rollout_receipt.rs"]
+pub mod rollout_receipt;
+
 pub const SCHEMA: &str = "franken-node/signed-product-validation/v1";
 pub const PRODUCT_SCHEMA: &str = "franken-node/product-validation-suite/v1";
 pub const MAX_BYTES: usize = 16 * 1024 * 1024;
