@@ -19,6 +19,10 @@ path = "main.rs"
 name = "franken-migration-attest"
 path = "attest.rs"
 
+[[bin]]
+name = "franken-rollout-verify"
+path = "rollout_verify.rs"
+
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
