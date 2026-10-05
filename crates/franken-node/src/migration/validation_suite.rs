@@ -129,7 +129,10 @@ struct Snapshot {
 }
 
 fn budget(deadline: Instant) -> Result<()> {
-    ensure!(Instant::now() < deadline, "native validation total budget exhausted");
+    ensure!(
+        Instant::now() < deadline,
+        "native validation total budget exhausted"
+    );
     Ok(())
 }
 
@@ -139,27 +142,50 @@ fn excluded_from_discovery(path: &Path) -> bool {
 }
 
 fn is_test(path: &Path) -> bool {
-    if excluded_from_discovery(path) { return false; }
-    let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+    if excluded_from_discovery(path) {
+        return false;
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
     let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
     let supported = ["js", "mjs", "cjs", "ts", "mts", "cts"].contains(&extension);
-    supported && (name.strip_suffix(extension).is_some_and(|stem|
-        stem.ends_with(".test.") || stem.ends_with(".spec."))
-        || path.parent().is_some_and(|parent| parent.components().any(|part|
-            matches!(part, Component::Normal(name) if name == "test" || name == "__tests__"))))
+    supported
+        && (name
+            .strip_suffix(extension)
+            .is_some_and(|stem| stem.ends_with(".test.") || stem.ends_with(".spec."))
+            || path.parent().is_some_and(|parent| {
+                parent.components().any(|part|
+            matches!(part, Component::Normal(name) if name == "test" || name == "__tests__"))
+            }))
 }
 
 fn same_file_version(left: &Metadata, right: &Metadata) -> bool {
-    left.dev() == right.dev() && left.ino() == right.ino()
-        && left.size() == right.size() && left.mode() == right.mode()
-        && left.mtime() == right.mtime() && left.mtime_nsec() == right.mtime_nsec()
-        && left.ctime() == right.ctime() && left.ctime_nsec() == right.ctime_nsec()
+    left.dev() == right.dev()
+        && left.ino() == right.ino()
+        && left.size() == right.size()
+        && left.mode() == right.mode()
+        && left.mtime() == right.mtime()
+        && left.mtime_nsec() == right.mtime_nsec()
+        && left.ctime() == right.ctime()
+        && left.ctime_nsec() == right.ctime_nsec()
 }
 
 fn open_regular(path: &Path) -> Result<File> {
-    let file = File::from(open(path, OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::empty()).with_context(|| format!("open {}", path.display()))?);
-    ensure!(file.metadata()?.is_file(), "nonregular input: {}", path.display());
+    let file = File::from(
+        open(
+            path,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .with_context(|| format!("open {}", path.display()))?,
+    );
+    ensure!(
+        file.metadata()?.is_file(),
+        "nonregular input: {}",
+        path.display()
+    );
     Ok(file)
 }
 
@@ -167,23 +193,39 @@ fn open_regular(path: &Path) -> Result<File> {
 // Absolute internal links are made relative to the captured project root.
 fn captured_link(root: &Path, path: &Path) -> Result<PathBuf> {
     let resolved = path.canonicalize()?;
-    let relative = resolved.strip_prefix(root).context("external workspace symlink refused")?;
-    ensure!(!relative.components().any(|part| part.as_os_str() == ".git"), "link into excluded .git refused");
+    let relative = resolved
+        .strip_prefix(root)
+        .context("external workspace symlink refused")?;
+    ensure!(
+        !relative.components().any(|part| part.as_os_str() == ".git"),
+        "link into excluded .git refused"
+    );
     let raw = fs::read_link(path)?;
     let parent = path.parent().context("symlink parent missing")?;
     let mut lexical = PathBuf::new();
     for part in parent.join(&raw).components() {
         match part {
-            Component::ParentDir => { ensure!(lexical.pop(), "symlink escapes filesystem root"); }
+            Component::ParentDir => {
+                ensure!(lexical.pop(), "symlink escapes filesystem root");
+            }
             Component::CurDir => {}
             _ => lexical.push(part.as_os_str()),
         }
     }
-    let target = lexical.strip_prefix(root).context("external lexical symlink refused")?;
-    ensure!(!target.components().any(|part| part.as_os_str() == ".git"), "link into excluded .git refused");
-    if raw.is_relative() { return Ok(raw); }
+    let target = lexical
+        .strip_prefix(root)
+        .context("external lexical symlink refused")?;
+    ensure!(
+        !target.components().any(|part| part.as_os_str() == ".git"),
+        "link into excluded .git refused"
+    );
+    if raw.is_relative() {
+        return Ok(raw);
+    }
     let mut rebased = PathBuf::new();
-    for _ in parent.strip_prefix(root)?.components() { rebased.push(".."); }
+    for _ in parent.strip_prefix(root)?.components() {
+        rebased.push("..");
+    }
     rebased.push(target);
     Ok(rebased)
 }
@@ -191,7 +233,10 @@ fn captured_link(root: &Path, path: &Path) -> Result<PathBuf> {
 impl Snapshot {
     fn capture(root: &Path, deadline: Instant) -> Result<Self> {
         let root = root.canonicalize()?;
-        ensure!(root.is_dir(), "native validation project must be a directory");
+        ensure!(
+            root.is_dir(),
+            "native validation project must be a directory"
+        );
         let mut entries = BTreeMap::new();
         let mut pending = vec![root.clone()];
         let mut total_bytes = 0_usize;
@@ -200,10 +245,17 @@ impl Snapshot {
             for item in fs::read_dir(directory)? {
                 budget(deadline)?;
                 let path = item?.path();
-                if path.file_name().is_some_and(|name| name == ".git") { continue; }
-                ensure!(entries.len() < MAX_ENTRIES, "native validation entry limit exceeded");
+                if path.file_name().is_some_and(|name| name == ".git") {
+                    continue;
+                }
+                ensure!(
+                    entries.len() < MAX_ENTRIES,
+                    "native validation entry limit exceeded"
+                );
                 let relative = path.strip_prefix(&root)?.to_path_buf();
-                let text = relative.to_str().context("non-UTF-8 workspace path refused")?;
+                let text = relative
+                    .to_str()
+                    .context("non-UTF-8 workspace path refused")?;
                 ensure!(text.len() <= MAX_PATH_BYTES, "workspace path too long");
                 let metadata = fs::symlink_metadata(&path)?;
                 let data = if metadata.is_symlink() {
@@ -212,29 +264,54 @@ impl Snapshot {
                     pending.push(path.clone());
                     EntryData::Directory
                 } else if metadata.is_file() {
-                    ensure!(metadata.nlink() == 1, "hard-linked workspace files require explicit isolation");
+                    ensure!(
+                        metadata.nlink() == 1,
+                        "hard-linked workspace files require explicit isolation"
+                    );
                     let mut file = open_regular(&path)?;
                     let before = file.metadata()?;
-                    ensure!(same_file_version(&metadata, &before), "input changed before capture");
+                    ensure!(
+                        same_file_version(&metadata, &before),
+                        "input changed before capture"
+                    );
                     let remaining = MAX_PROJECT_BYTES - total_bytes;
-                    ensure!(before.len() <= remaining as u64, "native validation input byte limit exceeded");
+                    ensure!(
+                        before.len() <= remaining as u64,
+                        "native validation input byte limit exceeded"
+                    );
                     let mut bytes = Vec::new();
                     let mut chunk = [0_u8; 65536];
                     loop {
                         budget(deadline)?;
-                        let request = chunk.len().min(remaining.saturating_sub(bytes.len()).saturating_add(1));
+                        let request = chunk
+                            .len()
+                            .min(remaining.saturating_sub(bytes.len()).saturating_add(1));
                         let read = file.read(&mut chunk[..request])?;
-                        if read == 0 { break; }
-                        ensure!(bytes.len() + read <= remaining, "native validation input byte limit exceeded");
+                        if read == 0 {
+                            break;
+                        }
+                        ensure!(
+                            bytes.len() + read <= remaining,
+                            "native validation input byte limit exceeded"
+                        );
                         bytes.extend_from_slice(&chunk[..read]);
                     }
-                    ensure!(same_file_version(&before, &file.metadata()?), "input changed during capture");
+                    ensure!(
+                        same_file_version(&before, &file.metadata()?),
+                        "input changed during capture"
+                    );
                     total_bytes += bytes.len();
                     EntryData::File(bytes)
                 } else {
                     bail!("nonregular workspace input refused: {}", relative.display());
                 };
-                entries.insert(relative, Entry { mode: metadata.mode() & 0o777, data });
+                entries.insert(
+                    relative,
+                    Entry {
+                        mode: metadata.mode() & 0o777,
+                        data,
+                    },
+                );
             }
         }
         Ok(Self::from_entries(entries))
@@ -251,15 +328,25 @@ impl Snapshot {
                 EntryData::File(bytes) => (b'f', bytes.as_slice()),
                 EntryData::Link(target) => (b'l', target.as_os_str().as_encoded_bytes()),
             };
-            for part in [path.as_os_str().as_encoded_bytes(), &entry.mode.to_le_bytes(), &[kind], bytes] {
+            for part in [
+                path.as_os_str().as_encoded_bytes(),
+                &entry.mode.to_le_bytes(),
+                &[kind],
+                bytes,
+            ] {
                 hash.update((part.len() as u64).to_le_bytes());
                 hash.update(part);
             }
         }
-        Self { entries, digest: hex::encode(hash.finalize()) }
+        Self {
+            entries,
+            digest: hex::encode(hash.finalize()),
+        }
     }
 
-    fn tests(&self) -> Result<Vec<PathBuf>> { test_inventory::discover(&self.entries) }
+    fn tests(&self) -> Result<Vec<PathBuf>> {
+        test_inventory::discover(&self.entries)
+    }
 
     fn stage(&self, destination: &Path, deadline: Instant) -> Result<()> {
         fs::create_dir(destination)?;
@@ -277,7 +364,10 @@ impl Snapshot {
         }
         for (relative, entry) in self.entries.iter().rev() {
             if matches!(entry.data, EntryData::Directory) {
-                fs::set_permissions(destination.join(relative), fs::Permissions::from_mode(entry.mode))?;
+                fs::set_permissions(
+                    destination.join(relative),
+                    fs::Permissions::from_mode(entry.mode),
+                )?;
             }
         }
         Ok(())
@@ -295,27 +385,52 @@ impl Invocation {
     fn identity(&self, deadline: Instant) -> Result<RuntimeIdentity> {
         let mut file = open_regular(&self.executable)?;
         let before = file.metadata()?;
-        ensure!(before.len() <= MAX_EXECUTABLE_BYTES, "runtime binary too large");
+        ensure!(
+            before.len() <= MAX_EXECUTABLE_BYTES,
+            "runtime binary too large"
+        );
         let mut hash = Sha256::new();
         let mut total = 0_u64;
         let mut buffer = [0_u8; 65536];
         loop {
             budget(deadline)?;
             let count = file.read(&mut buffer)?;
-            if count == 0 { break; }
+            if count == 0 {
+                break;
+            }
             total += count as u64;
-            ensure!(total <= MAX_EXECUTABLE_BYTES, "runtime binary grew beyond limit");
+            ensure!(
+                total <= MAX_EXECUTABLE_BYTES,
+                "runtime binary grew beyond limit"
+            );
             hash.update(&buffer[..count]);
         }
-        ensure!(same_file_version(&before, &file.metadata()?), "runtime binary changed during hashing");
-        Ok(RuntimeIdentity { executable: self.executable.clone(), sha256: hex::encode(hash.finalize()),
-            arguments_before_test: self.before.clone(), arguments_after_test: self.after.clone() })
+        ensure!(
+            same_file_version(&before, &file.metadata()?),
+            "runtime binary changed during hashing"
+        );
+        Ok(RuntimeIdentity {
+            executable: self.executable.clone(),
+            sha256: hex::encode(hash.finalize()),
+            arguments_before_test: self.before.clone(),
+            arguments_after_test: self.after.clone(),
+        })
     }
 
-    fn command(&self, test: &Path, workspace: &Path, environment: &BTreeMap<OsString, OsString>) -> Command {
+    fn command(
+        &self,
+        test: &Path,
+        workspace: &Path,
+        environment: &BTreeMap<OsString, OsString>,
+    ) -> Command {
         let mut command = Command::new(&self.executable);
-        command.args(&self.before).arg(Path::new(".").join(test)).args(&self.after)
-            .current_dir(workspace).env_clear().envs(environment)
+        command
+            .args(&self.before)
+            .arg(Path::new(".").join(test))
+            .args(&self.after)
+            .current_dir(workspace)
+            .env_clear()
+            .envs(environment)
             .env_remove("FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK")
             .env_remove(native_replay::failure_capture::DIRECTORY_ENV);
         command
@@ -325,86 +440,175 @@ impl Invocation {
 fn node_on_path() -> Result<PathBuf> {
     for directory in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
         // Never search a staged project or an implicit current-directory PATH.
-        if !directory.is_absolute() { continue; }
+        if !directory.is_absolute() {
+            continue;
+        }
         let candidate = directory.join("node");
         if let Ok(metadata) = fs::metadata(&candidate)
-            && metadata.is_file() && metadata.mode() & 0o111 != 0 {
-            return candidate.canonicalize().context("resolve reference Node executable");
+            && metadata.is_file()
+            && metadata.mode() & 0o111 != 0
+        {
+            return candidate
+                .canonicalize()
+                .context("resolve reference Node executable");
         }
     }
-    bail!("project test validation requires Node on an absolute PATH entry; native success alone is not equivalence")
+    bail!(
+        "project test validation requires Node on an absolute PATH entry; native success alone is not equivalence"
+    )
 }
 
 fn observe(output: &Output) -> RunObservation {
-    let stream = |bytes: &[u8]| StreamObservation { bytes: bytes.len(), sha256: hex::encode(Sha256::digest(bytes)) };
-    RunObservation { exit_code: output.status.code(), signal: output.status.signal(),
-        stdout: stream(&output.stdout), stderr: stream(&output.stderr), workspace_delta: None }
+    let stream = |bytes: &[u8]| StreamObservation {
+        bytes: bytes.len(),
+        sha256: hex::encode(Sha256::digest(bytes)),
+    };
+    RunObservation {
+        exit_code: output.status.code(),
+        signal: output.status.signal(),
+        stdout: stream(&output.stdout),
+        stderr: stream(&output.stderr),
+        workspace_delta: None,
+    }
 }
 
 #[cfg(test)]
-fn execute_suite(snapshot: &Snapshot, reference: &Invocation, native: &Invocation,
-    deadline: Instant, leg_timeout: Duration) -> Result<SuiteReport> {
-    execute_suite_pair(snapshot, snapshot, reference, native, deadline, leg_timeout, false)
+fn execute_suite(
+    snapshot: &Snapshot,
+    reference: &Invocation,
+    native: &Invocation,
+    deadline: Instant,
+    leg_timeout: Duration,
+) -> Result<SuiteReport> {
+    execute_suite_pair(
+        snapshot,
+        snapshot,
+        reference,
+        native,
+        deadline,
+        leg_timeout,
+        false,
+    )
 }
 
 fn matched_tests(reference: &Snapshot, candidate: &Snapshot) -> Result<Vec<PathBuf>> {
     let tests = reference.tests()?;
     let candidate_tests = candidate.tests()?;
-    ensure!(tests == candidate_tests,
+    ensure!(
+        tests == candidate_tests,
         "test inventories differ: original has {} cases and candidate has {}; added or removed test counterparts cannot be ignored",
-        tests.len(), candidate_tests.len());
+        tests.len(),
+        candidate_tests.len()
+    );
     ensure!(!tests.is_empty(), "empty test suite cannot pass");
     test_inventory::matched_execution(reference, candidate)?;
     Ok(tests)
 }
 
-fn execute_suite_pair(reference_snapshot: &Snapshot, candidate_snapshot: &Snapshot,
-    reference: &Invocation, native: &Invocation, deadline: Instant,
-    leg_timeout: Duration, compare_filesystem: bool) -> Result<SuiteReport> {
+fn execute_suite_pair(
+    reference_snapshot: &Snapshot,
+    candidate_snapshot: &Snapshot,
+    reference: &Invocation,
+    native: &Invocation,
+    deadline: Instant,
+    leg_timeout: Duration,
+    compare_filesystem: bool,
+) -> Result<SuiteReport> {
     let tests = matched_tests(reference_snapshot, candidate_snapshot)?;
     let mut report = SuiteReport {
         schema_version: "franken-node/native-validation-suite/v1".into(),
-        scope: if compare_filesystem { "captured-test-process-and-workspace-delta" }
-            else { "captured-test-process-stdout-stderr-exit" }.into(),
-        release_certification: false, input_sha256: reference_snapshot.digest.clone(),
-        candidate_input_sha256: candidate_snapshot.digest.clone(), filesystem_comparison: compare_filesystem,
+        scope: if compare_filesystem {
+            "captured-test-process-and-workspace-delta"
+        } else {
+            "captured-test-process-stdout-stderr-exit"
+        }
+        .into(),
+        release_certification: false,
+        input_sha256: reference_snapshot.digest.clone(),
+        candidate_input_sha256: candidate_snapshot.digest.clone(),
+        filesystem_comparison: compare_filesystem,
         filesystem_exclusions: if compare_filesystem {
-            workspace_effects::EXCLUSIONS.iter().map(|path| (*path).to_owned()).collect()
-        } else { Vec::new() },
+            workspace_effects::EXCLUSIONS
+                .iter()
+                .map(|path| (*path).to_owned())
+                .collect()
+        } else {
+            Vec::new()
+        },
         reference_runtime: reference.identity(deadline)?,
-        native_runtime: native.identity(deadline)?, total_tests: tests.len(), passed: 0, failed: 0,
-        errored: 0, skipped: tests.len(), verdict: "ERROR".into(), cases: Vec::new(), errors: Vec::new(),
+        native_runtime: native.identity(deadline)?,
+        total_tests: tests.len(),
+        passed: 0,
+        failed: 0,
+        errored: 0,
+        skipped: tests.len(),
+        verdict: "ERROR".into(),
+        cases: Vec::new(),
+        errors: Vec::new(),
         failure_capture: None,
     };
     let environment = std::env::vars_os().collect();
     for test in tests {
-        if let Err(error) = budget(deadline) { report.errors.push(error.to_string()); break; }
-        let mut row = TestCaseResult { test: test.to_string_lossy().into_owned(), status: "ERROR".into(),
-            reference: None, native: None, divergences: Vec::new(), errors: Vec::new() };
+        if let Err(error) = budget(deadline) {
+            report.errors.push(error.to_string());
+            break;
+        }
+        let mut row = TestCaseResult {
+            test: test.to_string_lossy().into_owned(),
+            status: "ERROR".into(),
+            reference: None,
+            native: None,
+            divergences: Vec::new(),
+            errors: Vec::new(),
+        };
         let result = (|| -> Result<()> {
-            let case = tempfile::Builder::new().prefix("franken-native-validation-")
-                .permissions(fs::Permissions::from_mode(0o700)).tempdir()?;
+            let case = tempfile::Builder::new()
+                .prefix("franken-native-validation-")
+                .permissions(fs::Permissions::from_mode(0o700))
+                .tempdir()?;
             let mut outputs = Vec::new();
             let mut deltas = Vec::new();
-            for (name, snapshot, invocation) in [("reference", reference_snapshot, reference),
-                                                 ("native", candidate_snapshot, native)] {
+            for (name, snapshot, invocation) in [
+                ("reference", reference_snapshot, reference),
+                ("native", candidate_snapshot, native),
+            ] {
                 let workspace = case.path().join(name);
                 snapshot.stage(&workspace, deadline)?;
-                ensure!(workspace.join(&test).is_file(), "discovered test is not a file");
+                ensure!(
+                    workspace.join(&test).is_file(),
+                    "discovered test is not a file"
+                );
                 let before = if compare_filesystem {
-                    Some(workspace_effects::observe(&workspace, deadline)
-                        .with_context(|| format!("{name} initial workspace observation failed"))?)
-                } else { None };
+                    Some(
+                        workspace_effects::observe(&workspace, deadline).with_context(|| {
+                            format!("{name} initial workspace observation failed")
+                        })?,
+                    )
+                } else {
+                    None
+                };
                 budget(deadline)?;
                 let timeout = leg_timeout.min(deadline.saturating_duration_since(Instant::now()));
-                let output = test_inventory::run_test(snapshot, invocation, &test, &workspace,
-                    &environment, (timeout, DRAIN_TIMEOUT))
-                    .with_context(|| format!("{name} execution failed"))?;
-                let observation = if name == "reference" { &mut row.reference } else { &mut row.native };
+                let output = test_inventory::run_test(
+                    snapshot,
+                    invocation,
+                    &test,
+                    &workspace,
+                    &environment,
+                    (timeout, DRAIN_TIMEOUT),
+                )
+                .with_context(|| format!("{name} execution failed"))?;
+                let observation = if name == "reference" {
+                    &mut row.reference
+                } else {
+                    &mut row.native
+                };
                 // Persist process evidence BEFORE filesystem observation so an
                 // unreadable/oversized output cannot erase completed execution.
                 let observation = observation.insert(observe(&output));
-                if !output.status.success() { row.divergences.push(format!("{name}:unsuccessful_exit")); }
+                if !output.status.success() {
+                    row.divergences.push(format!("{name}:unsuccessful_exit"));
+                }
                 if let Some(before) = before {
                     let after = workspace_effects::observe(&workspace, deadline)
                         .with_context(|| format!("{name} final workspace observation failed"))?;
@@ -414,31 +618,58 @@ fn execute_suite_pair(reference_snapshot: &Snapshot, candidate_snapshot: &Snapsh
                 }
                 outputs.push(output);
             }
-            if outputs[0].stdout != outputs[1].stdout { row.divergences.push("stdout:byte_mismatch".into()); }
-            if outputs[0].stderr != outputs[1].stderr { row.divergences.push("stderr:byte_mismatch".into()); }
+            if outputs[0].stdout != outputs[1].stdout {
+                row.divergences.push("stdout:byte_mismatch".into());
+            }
+            if outputs[0].stderr != outputs[1].stderr {
+                row.divergences.push("stderr:byte_mismatch".into());
+            }
             if compare_filesystem && deltas[0] != deltas[1] {
-                row.divergences.push("filesystem:workspace_delta_mismatch".into());
+                row.divergences
+                    .push("filesystem:workspace_delta_mismatch".into());
             }
             Ok(())
         })();
         report.skipped -= 1;
         match result {
-            Err(error) => { row.errors.push(format!("{error:#}")); report.errored += 1; }
-            Ok(()) if row.divergences.is_empty() => { row.status = "PASS".into(); report.passed += 1; }
-            Ok(()) => { row.status = "FAIL".into(); report.failed += 1; }
+            Err(error) => {
+                row.errors.push(format!("{error:#}"));
+                report.errored += 1;
+            }
+            Ok(()) if row.divergences.is_empty() => {
+                row.status = "PASS".into();
+                report.passed += 1;
+            }
+            Ok(()) => {
+                row.status = "FAIL".into();
+                report.failed += 1;
+            }
         }
         report.cases.push(row);
     }
     // Identity checks after execution are mandatory, even when all cases agree.
-    for (invocation, before) in [(reference, &report.reference_runtime), (native, &report.native_runtime)] {
+    for (invocation, before) in [
+        (reference, &report.reference_runtime),
+        (native, &report.native_runtime),
+    ] {
         match invocation.identity(deadline) {
             Ok(after) if &after == before => {}
-            Ok(_) => report.errors.push("runtime executable changed during validation".into()),
-            Err(error) => report.errors.push(format!("runtime identity recheck failed: {error:#}")),
+            Ok(_) => report
+                .errors
+                .push("runtime executable changed during validation".into()),
+            Err(error) => report
+                .errors
+                .push(format!("runtime identity recheck failed: {error:#}")),
         }
     }
-    report.verdict = if report.errored > 0 || report.skipped > 0 || !report.errors.is_empty() { "ERROR" }
-        else if report.failed > 0 { "FAIL" } else { "PASS" }.into();
+    report.verdict = if report.errored > 0 || report.skipped > 0 || !report.errors.is_empty() {
+        "ERROR"
+    } else if report.failed > 0 {
+        "FAIL"
+    } else {
+        "PASS"
+    }
+    .into();
     Ok(report)
 }
 
@@ -446,18 +677,33 @@ fn execute_suite_pair(reference_snapshot: &Snapshot, candidate_snapshot: &Snapsh
 /// Caller-selected failure storage is reserved before runtime dispatch. Neither
 /// capture errors nor an empty inventory may become a fabricated suite PASS.
 pub fn run_if_present(project: &Path) -> Result<Option<SuiteReport>> {
-    run_if_present_with(project, || Ok(std::env::current_exe()?),
-        || FailureArchive::from_environment([project, project]))
+    run_if_present_with(
+        project,
+        || Ok(std::env::current_exe()?),
+        || FailureArchive::from_environment([project, project]),
+    )
 }
 
-fn run_if_present_with(project: &Path, native: impl FnOnce() -> Result<PathBuf>,
-    archive: impl FnOnce() -> Result<Option<FailureArchive>>) -> Result<Option<SuiteReport>> {
+fn run_if_present_with(
+    project: &Path,
+    native: impl FnOnce() -> Result<PathBuf>,
+    archive: impl FnOnce() -> Result<Option<FailureArchive>>,
+) -> Result<Option<SuiteReport>> {
     let deadline = Instant::now() + TOTAL_TIMEOUT;
     let snapshot = Snapshot::capture(project, deadline)?;
-    if snapshot.tests()?.is_empty() { return Ok(None); }
+    if snapshot.tests()?.is_empty() {
+        return Ok(None);
+    }
     let archive = archive()?;
-    run_captured_with_archive((project, project), (&snapshot, &snapshot),
-        &native()?, deadline, false, archive).map(Some)
+    run_captured_with_archive(
+        (project, project),
+        (&snapshot, &snapshot),
+        &native()?,
+        deadline,
+        false,
+        archive,
+    )
+    .map(Some)
 }
 
 /// Execute a nonempty captured project suite using an explicitly selected
@@ -471,11 +717,18 @@ pub fn run_project(project: &Path, native_executable: &Path) -> Result<SuiteRepo
 /// native Franken. Capture BOTH trees before execution and reject mismatched
 /// test inventories. Only final workspace changes in the reported scope are
 /// compared; unchanged rewritten sources are not mistaken for runtime effects.
-pub fn run_project_comparison(project: &Path, migrated_project: Option<&Path>,
-    native_executable: &Path, compare_filesystem: bool) -> Result<SuiteReport> {
+pub fn run_project_comparison(
+    project: &Path,
+    migrated_project: Option<&Path>,
+    native_executable: &Path,
+    compare_filesystem: bool,
+) -> Result<SuiteReport> {
     let deadline = Instant::now() + TOTAL_TIMEOUT;
-    CapturedInputs::capture(project, migrated_project, deadline)?
-        .execute(native_executable, deadline, compare_filesystem)
+    CapturedInputs::capture(project, migrated_project, deadline)?.execute(
+        native_executable,
+        deadline,
+        compare_filesystem,
+    )
 }
 
 /// A one-use comparison of exactly the two project inventories approved by a
@@ -498,22 +751,40 @@ impl ApprovedInputs {
     /// immutable inputs for execution. For a same-tree comparison supply the
     /// same independently trusted digest for both roles. A missing or partial
     /// approval is never inferred from the project being measured.
-    pub fn capture(project: &Path, migrated_project: Option<&Path>,
-        expected_input_sha256: &str, expected_candidate_input_sha256: &str) -> Result<Self> {
-        for (role, pin) in [("original", expected_input_sha256),
-            ("candidate", expected_candidate_input_sha256)] {
-            ensure!(pin.len() == 64 && pin.bytes().all(|byte|
-                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-                "{role} input approval must be 64 lowercase hexadecimal characters");
+    pub fn capture(
+        project: &Path,
+        migrated_project: Option<&Path>,
+        expected_input_sha256: &str,
+        expected_candidate_input_sha256: &str,
+    ) -> Result<Self> {
+        for (role, pin) in [
+            ("original", expected_input_sha256),
+            ("candidate", expected_candidate_input_sha256),
+        ] {
+            ensure!(
+                pin.len() == 64
+                    && pin
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+                "{role} input approval must be 64 lowercase hexadecimal characters"
+            );
         }
         let deadline = Instant::now() + TOTAL_TIMEOUT;
         let inputs = CapturedInputs::capture(project, migrated_project, deadline)?;
-        ensure!(inputs.reference.digest == expected_input_sha256,
-            "original captured input does not match the independently approved SHA-256; no runtime was resolved or executed");
-        ensure!(inputs.candidate_snapshot().digest == expected_candidate_input_sha256,
-            "candidate captured input does not match the independently approved SHA-256; no runtime was resolved or executed");
+        ensure!(
+            inputs.reference.digest == expected_input_sha256,
+            "original captured input does not match the independently approved SHA-256; no runtime was resolved or executed"
+        );
+        ensure!(
+            inputs.candidate_snapshot().digest == expected_candidate_input_sha256,
+            "candidate captured input does not match the independently approved SHA-256; no runtime was resolved or executed"
+        );
         budget(deadline)?;
-        Ok(Self { inputs, deadline, failure_archive: None })
+        Ok(Self {
+            inputs,
+            deadline,
+            failure_archive: None,
+        })
     }
 
     /// Opt in to retaining an eligible failed measurement from these approved
@@ -532,9 +803,14 @@ impl ApprovedInputs {
     /// capsule contains sensitive source bytes, including the rejected candidate.
     pub fn retain_failures(mut self, directory: &Path) -> Result<Self> {
         budget(self.deadline)?;
-        ensure!(self.failure_archive.is_none(), "failure retention was already configured");
-        let archive = FailureArchive::reserve(directory,
-            [&self.inputs.reference_root, &self.inputs.candidate_root])?;
+        ensure!(
+            self.failure_archive.is_none(),
+            "failure retention was already configured"
+        );
+        let archive = FailureArchive::reserve(
+            directory,
+            [&self.inputs.reference_root, &self.inputs.candidate_root],
+        )?;
         budget(self.deadline)?;
         self.failure_archive = Some(archive);
         Ok(self)
@@ -543,25 +819,46 @@ impl ApprovedInputs {
     /// Run the already-approved original/candidate pair, never a second capture
     /// of live project paths. The original total deadline includes time spent
     /// holding this value; approval does not start a fresh execution allowance.
-    pub fn run_pair(self, native_executable: &Path, compare_filesystem: bool) -> Result<SuiteReport> {
+    pub fn run_pair(
+        self,
+        native_executable: &Path,
+        compare_filesystem: bool,
+    ) -> Result<SuiteReport> {
         budget(self.deadline)?;
         run_captured_with_archive(
             (&self.inputs.reference_root, &self.inputs.candidate_root),
             (&self.inputs.reference, self.inputs.candidate_snapshot()),
-            native_executable, self.deadline, compare_filesystem, self.failure_archive)
+            native_executable,
+            self.deadline,
+            compare_filesystem,
+            self.failure_archive,
+        )
     }
 
     /// Require both references on the same approved original inputs. Missing
     /// or aliased Bun still fails closed; no pairwise downgrade is available.
-    pub fn run_product(self, native_executable: &Path, bun_executable: &Path,
-        compare_filesystem: bool) -> Result<product_oracle::ProductReport> {
+    pub fn run_product(
+        self,
+        native_executable: &Path,
+        bun_executable: &Path,
+        compare_filesystem: bool,
+    ) -> Result<product_oracle::ProductReport> {
         budget(self.deadline)?;
-        let mut report = product_oracle::run_captured([&self.inputs.reference_root, &self.inputs.candidate_root],
+        let mut report = product_oracle::run_captured(
+            [&self.inputs.reference_root, &self.inputs.candidate_root],
             [&self.inputs.reference, self.inputs.candidate_snapshot()],
-            native_executable, bun_executable, self.deadline, compare_filesystem)?;
+            native_executable,
+            bun_executable,
+            self.deadline,
+            compare_filesystem,
+        )?;
         if let Some(archive) = self.failure_archive {
-            report.failure_capture = archive.finish_product(&report, &self.inputs.reference,
-                self.inputs.candidate_snapshot(), self.deadline);
+            report.failure_capture = archive.finish_product(
+                &report,
+                &self.inputs.reference,
+                self.inputs.candidate_snapshot(),
+                self.deadline,
+            );
         }
         Ok(report)
     }
@@ -580,46 +877,110 @@ impl CapturedInputs {
     fn capture(project: &Path, migrated_project: Option<&Path>, deadline: Instant) -> Result<Self> {
         let reference_root = project.canonicalize()?;
         let candidate_root = migrated_project.unwrap_or(project).canonicalize()?;
-        ensure!(reference_root == candidate_root || (!reference_root.starts_with(&candidate_root)
-            && !candidate_root.starts_with(&reference_root)), "distinct input projects must not be nested");
+        ensure!(
+            reference_root == candidate_root
+                || (!reference_root.starts_with(&candidate_root)
+                    && !candidate_root.starts_with(&reference_root)),
+            "distinct input projects must not be nested"
+        );
         let reference = Snapshot::capture(&reference_root, deadline)?;
-        ensure!(!reference.tests()?.is_empty(), "no tests discovered; an empty suite cannot pass");
-        let candidate = if reference_root == candidate_root { None }
-            else { Some(Snapshot::capture(&candidate_root, deadline)?) };
+        ensure!(
+            !reference.tests()?.is_empty(),
+            "no tests discovered; an empty suite cannot pass"
+        );
+        let candidate = if reference_root == candidate_root {
+            None
+        } else {
+            Some(Snapshot::capture(&candidate_root, deadline)?)
+        };
         matched_tests(&reference, candidate.as_ref().unwrap_or(&reference))?;
-        Ok(Self { reference_root, candidate_root, reference, candidate })
+        Ok(Self {
+            reference_root,
+            candidate_root,
+            reference,
+            candidate,
+        })
     }
 
-    fn candidate_snapshot(&self) -> &Snapshot { self.candidate.as_ref().unwrap_or(&self.reference) }
+    fn candidate_snapshot(&self) -> &Snapshot {
+        self.candidate.as_ref().unwrap_or(&self.reference)
+    }
 
-    fn execute(&self, native: &Path, deadline: Instant, compare_filesystem: bool) -> Result<SuiteReport> {
-        run_captured((&self.reference_root, &self.candidate_root), (&self.reference, self.candidate_snapshot()),
-            native, deadline, compare_filesystem)
+    fn execute(
+        &self,
+        native: &Path,
+        deadline: Instant,
+        compare_filesystem: bool,
+    ) -> Result<SuiteReport> {
+        run_captured(
+            (&self.reference_root, &self.candidate_root),
+            (&self.reference, self.candidate_snapshot()),
+            native,
+            deadline,
+            compare_filesystem,
+        )
     }
 }
 
 fn runtime_invocations(native_executable: &Path) -> Result<(Invocation, Invocation)> {
     let executable = native_executable.canonicalize()?;
-    let native = Invocation { executable: executable.clone(), before: vec!["run".into()],
-        after: vec!["--runtime".into(), "franken-engine".into(), "--engine-bin".into(),
-            executable.into_os_string(), "--console-only".into()] };
-    let reference = Invocation { executable: node_on_path()?, before: vec![], after: vec![] };
+    let native = Invocation {
+        executable: executable.clone(),
+        before: vec!["run".into()],
+        after: vec![
+            "--runtime".into(),
+            "franken-engine".into(),
+            "--engine-bin".into(),
+            executable.into_os_string(),
+            "--console-only".into(),
+        ],
+    };
+    let reference = Invocation {
+        executable: node_on_path()?,
+        before: vec![],
+        after: vec![],
+    };
     Ok((reference, native))
 }
 
-fn run_captured(projects: (&Path, &Path), snapshots: (&Snapshot, &Snapshot), native_executable: &Path,
-    deadline: Instant, compare_filesystem: bool) -> Result<SuiteReport> {
+fn run_captured(
+    projects: (&Path, &Path),
+    snapshots: (&Snapshot, &Snapshot),
+    native_executable: &Path,
+    deadline: Instant,
+    compare_filesystem: bool,
+) -> Result<SuiteReport> {
     let (reference, native) = runtime_invocations(native_executable)?;
     for project in [projects.0, projects.1] {
         let project = project.canonicalize()?;
-        ensure!(!reference.executable.starts_with(&project), "reference runtime must be outside both measured projects");
-        ensure!(!native.executable.starts_with(&project), "native runtime must be outside both measured projects");
+        ensure!(
+            !reference.executable.starts_with(&project),
+            "reference runtime must be outside both measured projects"
+        );
+        ensure!(
+            !native.executable.starts_with(&project),
+            "native runtime must be outside both measured projects"
+        );
     }
-    execute_suite_pair(snapshots.0, snapshots.1, &reference, &native, deadline, LEG_TIMEOUT, compare_filesystem)
+    execute_suite_pair(
+        snapshots.0,
+        snapshots.1,
+        &reference,
+        &native,
+        deadline,
+        LEG_TIMEOUT,
+        compare_filesystem,
+    )
 }
 
-fn run_captured_with_archive(projects: (&Path, &Path), snapshots: (&Snapshot, &Snapshot), native: &Path,
-    deadline: Instant, compare_filesystem: bool, archive: Option<FailureArchive>) -> Result<SuiteReport> {
+fn run_captured_with_archive(
+    projects: (&Path, &Path),
+    snapshots: (&Snapshot, &Snapshot),
+    native: &Path,
+    deadline: Instant,
+    compare_filesystem: bool,
+    archive: Option<FailureArchive>,
+) -> Result<SuiteReport> {
     let mut report = run_captured(projects, snapshots, native, deadline, compare_filesystem)?;
     if let Some(archive) = archive {
         report.failure_capture = archive.finish(&report, snapshots.0, snapshots.1, deadline);
@@ -631,7 +992,9 @@ fn run_captured_with_archive(projects: (&Path, &Path), snapshots: (&Snapshot, &S
 mod tests {
     use super::*;
 
-    fn fixture() -> tempfile::TempDir { tempfile::tempdir().expect("project") }
+    fn fixture() -> tempfile::TempDir {
+        tempfile::tempdir().expect("project")
+    }
 
     fn write(root: &Path, path: &str, source: &str) {
         let path = root.join(path);
@@ -640,14 +1003,28 @@ mod tests {
     }
 
     fn node(candidate: bool) -> Invocation {
-        Invocation { executable: node_on_path().expect("real Node required"), before: Vec::new(),
-            after: if candidate { vec!["candidate".into()] } else { Vec::new() } }
+        Invocation {
+            executable: node_on_path().expect("real Node required"),
+            before: Vec::new(),
+            after: if candidate {
+                vec!["candidate".into()]
+            } else {
+                Vec::new()
+            },
+        }
     }
 
     fn measured(root: &Path) -> SuiteReport {
         let deadline = Instant::now() + Duration::from_secs(20);
         let snapshot = Snapshot::capture(root, deadline).expect("capture");
-        execute_suite(&snapshot, &node(false), &node(true), deadline, Duration::from_secs(3)).expect("execute")
+        execute_suite(
+            &snapshot,
+            &node(false),
+            &node(true),
+            deadline,
+            Duration::from_secs(3),
+        )
+        .expect("execute")
     }
 
     // All process tests name real Node executables for BOTH roles. They prove
@@ -658,20 +1035,36 @@ mod tests {
         write(project.path(), "ok.test.js", "console.log('ok');");
         let report = measured(project.path());
         assert_eq!(report.verdict, "PASS");
-        assert_eq!((report.total_tests, report.passed, report.failed, report.errored, report.skipped), (1, 1, 0, 0, 0));
+        assert_eq!(
+            (
+                report.total_tests,
+                report.passed,
+                report.failed,
+                report.errored,
+                report.skipped
+            ),
+            (1, 1, 0, 0, 0)
+        );
         let row = &report.cases[0];
         assert_eq!(row.reference, row.native);
         assert_eq!(row.native.as_ref().unwrap().stdout.bytes, 3);
         assert!(!report.release_certification);
         assert_eq!(report.reference_runtime.executable, node(false).executable);
         let encoded = serde_json::to_vec(&report).expect("serialize");
-        assert_eq!(serde_json::from_slice::<SuiteReport>(&encoded).unwrap(), report);
+        assert_eq!(
+            serde_json::from_slice::<SuiteReport>(&encoded).unwrap(),
+            report
+        );
     }
 
     #[test]
     fn stdout_difference_blocks_the_suite() {
         let project = fixture();
-        write(project.path(), "case.test.js", "console.log(process.argv.includes('candidate') ? 'wrong' : 'right');");
+        write(
+            project.path(),
+            "case.test.js",
+            "console.log(process.argv.includes('candidate') ? 'wrong' : 'right');",
+        );
         let report = measured(project.path());
         assert_eq!(report.verdict, "FAIL");
         assert_eq!(report.cases[0].divergences, ["stdout:byte_mismatch"]);
@@ -680,7 +1073,11 @@ mod tests {
     #[test]
     fn stderr_difference_is_not_hidden_by_equal_stdout() {
         let project = fixture();
-        write(project.path(), "case.test.js", "console.log('same'); console.error(process.argv.includes('candidate') ? 'wrong' : 'right');");
+        write(
+            project.path(),
+            "case.test.js",
+            "console.log('same'); console.error(process.argv.includes('candidate') ? 'wrong' : 'right');",
+        );
         let report = measured(project.path());
         assert_eq!(report.verdict, "FAIL");
         assert_eq!(report.cases[0].divergences, ["stderr:byte_mismatch"]);
@@ -692,7 +1089,10 @@ mod tests {
         write(project.path(), "case.test.js", "process.exit(7);");
         let report = measured(project.path());
         assert_eq!(report.verdict, "FAIL");
-        assert_eq!(report.cases[0].reference.as_ref().unwrap().exit_code, Some(7));
+        assert_eq!(
+            report.cases[0].reference.as_ref().unwrap().exit_code,
+            Some(7)
+        );
         assert_eq!(report.cases[0].native.as_ref().unwrap().exit_code, Some(7));
         assert_eq!(report.cases[0].divergences.len(), 2);
     }
@@ -700,7 +1100,11 @@ mod tests {
     #[test]
     fn matching_signals_never_pass() {
         let project = fixture();
-        write(project.path(), "case.test.js", "process.kill(process.pid,'SIGTERM');");
+        write(
+            project.path(),
+            "case.test.js",
+            "process.kill(process.pid,'SIGTERM');",
+        );
         let report = measured(project.path());
         assert_eq!(report.verdict, "FAIL");
         assert!(report.cases[0].reference.as_ref().unwrap().signal.is_some());
@@ -727,9 +1131,15 @@ mod tests {
         let report = measured(project.path());
         assert_eq!(report.verdict, "PASS");
         for row in &report.cases {
-            assert_eq!(row.reference.as_ref().unwrap().stdout.sha256, hex::encode(Sha256::digest(b"original\n")));
+            assert_eq!(
+                row.reference.as_ref().unwrap().stdout.sha256,
+                hex::encode(Sha256::digest(b"original\n"))
+            );
         }
-        assert_eq!(fs::read_to_string(project.path().join("value.txt")).unwrap(), "original");
+        assert_eq!(
+            fs::read_to_string(project.path().join("value.txt")).unwrap(),
+            "original"
+        );
     }
 
     #[test]
@@ -743,18 +1153,43 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(60);
         let snapshot = Snapshot::capture(project.path(), deadline).unwrap();
         write(project.path(), "case.test.js", "process.exit(99);");
-        let report = execute_suite(&snapshot, &node(false), &node(true), deadline, Duration::from_secs(3)).unwrap();
-        assert_eq!(report.verdict, "PASS", "captured-source evidence: {report:#?}");
+        let report = execute_suite(
+            &snapshot,
+            &node(false),
+            &node(true),
+            deadline,
+            Duration::from_secs(3),
+        )
+        .unwrap();
+        assert_eq!(
+            report.verdict, "PASS",
+            "captured-source evidence: {report:#?}"
+        );
         assert_eq!(report.cases[0].native.as_ref().unwrap().stdout.bytes, 9);
-        assert_eq!(fs::read_to_string(project.path().join("case.test.js")).unwrap(), "process.exit(99);");
+        assert_eq!(
+            fs::read_to_string(project.path().join("case.test.js")).unwrap(),
+            "process.exit(99);"
+        );
     }
 
     #[test]
     fn dependencies_are_staged_without_running_vendor_tests() {
         let project = fixture();
-        write(project.path(), "node_modules/pkg/index.js", "module.exports=42;");
-        write(project.path(), "node_modules/pkg/vendor.test.js", "process.exit(8);");
-        write(project.path(), "case.test.js", "console.log(require('pkg'));");
+        write(
+            project.path(),
+            "node_modules/pkg/index.js",
+            "module.exports=42;",
+        );
+        write(
+            project.path(),
+            "node_modules/pkg/vendor.test.js",
+            "process.exit(8);",
+        );
+        write(
+            project.path(),
+            "case.test.js",
+            "console.log(require('pkg'));",
+        );
         let report = measured(project.path());
         assert_eq!(report.verdict, "PASS");
         assert_eq!(report.total_tests, 1);
@@ -762,9 +1197,11 @@ mod tests {
 
     #[test]
     fn exact_bytes_preserve_newline_and_invalid_utf8_differences() {
-        for source in ["process.stdout.write(process.argv.includes('candidate') ? 'ok' : 'ok\\n');",
+        for source in [
+            "process.stdout.write(process.argv.includes('candidate') ? 'ok' : 'ok\\n');",
             "process.stdout.write(Buffer.from([process.argv.includes('candidate') ? 255 : 254]));",
-            "console.log(process.argv.includes('candidate') ? 'pid=2' : 'pid=1');"] {
+            "console.log(process.argv.includes('candidate') ? 'pid=2' : 'pid=1');",
+        ] {
             let project = fixture();
             write(project.path(), "case.test.js", source);
             assert_eq!(measured(project.path()).verdict, "FAIL");
@@ -774,7 +1211,11 @@ mod tests {
     #[test]
     fn metacharacters_in_case_names_are_literal_arguments() {
         let project = fixture();
-        write(project.path(), "case;touch NEVER.test.js", "console.log('literal');");
+        write(
+            project.path(),
+            "case;touch NEVER.test.js",
+            "console.log('literal');",
+        );
         assert_eq!(measured(project.path()).verdict, "PASS");
         assert!(!project.path().join("NEVER.test.js").exists());
     }
@@ -782,10 +1223,21 @@ mod tests {
     #[test]
     fn timeout_retains_reference_measurement_and_never_passes() {
         let project = fixture();
-        write(project.path(), "case.test.js", "console.log('start'); if(process.argv.includes('candidate')) setInterval(()=>{},1000);");
+        write(
+            project.path(),
+            "case.test.js",
+            "console.log('start'); if(process.argv.includes('candidate')) setInterval(()=>{},1000);",
+        );
         let deadline = Instant::now() + Duration::from_secs(10);
         let snapshot = Snapshot::capture(project.path(), deadline).unwrap();
-        let report = execute_suite(&snapshot, &node(false), &node(true), deadline, Duration::from_millis(300)).unwrap();
+        let report = execute_suite(
+            &snapshot,
+            &node(false),
+            &node(true),
+            deadline,
+            Duration::from_millis(300),
+        )
+        .unwrap();
         assert_eq!(report.verdict, "ERROR");
         assert_eq!(report.errored, 1);
         assert!(report.cases[0].reference.is_some());
@@ -796,7 +1248,11 @@ mod tests {
     #[test]
     fn output_overflow_is_not_a_truncated_prefix_pass() {
         let project = fixture();
-        write(project.path(), "case.test.js", "process.stdout.write('x'.repeat(17*1024*1024));");
+        write(
+            project.path(),
+            "case.test.js",
+            "process.stdout.write('x'.repeat(17*1024*1024));",
+        );
         let report = measured(project.path());
         assert_eq!(report.verdict, "ERROR");
         assert_eq!(report.passed, 0);
@@ -806,7 +1262,11 @@ mod tests {
     #[test]
     fn infrastructure_error_does_not_erase_remaining_cases() {
         let project = fixture();
-        write(project.path(), "a.test.js", "process.stdout.write('x'.repeat(17*1024*1024));");
+        write(
+            project.path(),
+            "a.test.js",
+            "process.stdout.write('x'.repeat(17*1024*1024));",
+        );
         write(project.path(), "b.test.js", "console.log('ok');");
         let report = measured(project.path());
         assert_eq!((report.errored, report.passed, report.skipped), (1, 1, 0));
@@ -816,11 +1276,28 @@ mod tests {
     #[test]
     fn missing_executable_is_an_error_before_guest_execution() {
         let project = fixture();
-        write(project.path(), "case.test.js", "require('fs').writeFileSync('never','ran');");
+        write(
+            project.path(),
+            "case.test.js",
+            "require('fs').writeFileSync('never','ran');",
+        );
         let deadline = Instant::now() + Duration::from_secs(10);
         let snapshot = Snapshot::capture(project.path(), deadline).unwrap();
-        let absent = Invocation { executable: project.path().join("absent"), before: vec![], after: vec![] };
-        assert!(execute_suite(&snapshot, &absent, &node(true), deadline, Duration::from_secs(1)).is_err());
+        let absent = Invocation {
+            executable: project.path().join("absent"),
+            before: vec![],
+            after: vec![],
+        };
+        assert!(
+            execute_suite(
+                &snapshot,
+                &absent,
+                &node(true),
+                deadline,
+                Duration::from_secs(1)
+            )
+            .is_err()
+        );
         assert!(!project.path().join("never").exists());
         assert!(run_project(project.path(), &absent.executable).is_err());
     }
@@ -832,26 +1309,60 @@ mod tests {
         assert!(run_if_present(project.path()).unwrap().is_none());
         let deadline = Instant::now() + Duration::from_secs(5);
         let snapshot = Snapshot::capture(project.path(), deadline).unwrap();
-        assert!(execute_suite(&snapshot, &node(false), &node(true), deadline, Duration::from_secs(1)).is_err());
+        assert!(
+            execute_suite(
+                &snapshot,
+                &node(false),
+                &node(true),
+                deadline,
+                Duration::from_secs(1)
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn discovery_is_sorted_and_excludes_state_and_backups() {
         let project = fixture();
-        for path in ["z.spec.mjs", "test/plain.js", "a.test.ts", "__tests__/nested/x.cjs",
-            "node_modules/pkg/x.test.js", ".migrate-backup/a.test.js", ".franken-node/x.test.js", "helper.js", "name.test.helper.js"] {
+        for path in [
+            "z.spec.mjs",
+            "test/plain.js",
+            "a.test.ts",
+            "__tests__/nested/x.cjs",
+            "node_modules/pkg/x.test.js",
+            ".migrate-backup/a.test.js",
+            ".franken-node/x.test.js",
+            "helper.js",
+            "name.test.helper.js",
+        ] {
             write(project.path(), path, "//fixture");
         }
-        let snapshot = Snapshot::capture(project.path(), Instant::now() + Duration::from_secs(5)).unwrap();
-        let found: Vec<_> = snapshot.tests().unwrap().into_iter().map(|path| path.to_string_lossy().into_owned()).collect();
-        assert_eq!(found, ["__tests__/nested/x.cjs", "a.test.ts", "test/plain.js", "z.spec.mjs"]);
+        let snapshot =
+            Snapshot::capture(project.path(), Instant::now() + Duration::from_secs(5)).unwrap();
+        let found: Vec<_> = snapshot
+            .tests()
+            .unwrap()
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            found,
+            [
+                "__tests__/nested/x.cjs",
+                "a.test.ts",
+                "test/plain.js",
+                "z.spec.mjs"
+            ]
+        );
     }
 
     #[test]
     fn external_symlinks_are_refused() {
         let project = fixture();
         symlink("/etc/passwd", project.path().join("external")).unwrap();
-        assert!(Snapshot::capture(project.path(), Instant::now() + Duration::from_secs(5)).is_err());
+        assert!(
+            Snapshot::capture(project.path(), Instant::now() + Duration::from_secs(5)).is_err()
+        );
     }
 
     #[test]
@@ -859,7 +1370,9 @@ mod tests {
         let project = fixture();
         write(project.path(), ".git/config", "sensitive");
         symlink(".git/config", project.path().join("alias")).unwrap();
-        assert!(Snapshot::capture(project.path(), Instant::now() + Duration::from_secs(5)).is_err());
+        assert!(
+            Snapshot::capture(project.path(), Instant::now() + Duration::from_secs(5)).is_err()
+        );
     }
 
     #[test]
@@ -869,11 +1382,21 @@ mod tests {
         write(project.path(), "second", "second");
         symlink("first", project.path().join("middle")).unwrap();
         symlink(project.path().join("middle"), project.path().join("alias")).unwrap();
-        write(project.path(), "case.test.js", "const fs=require('fs'); fs.unlinkSync('middle'); fs.symlinkSync('second','middle'); console.log(fs.readFileSync('alias','utf8'));");
+        write(
+            project.path(),
+            "case.test.js",
+            "const fs=require('fs'); fs.unlinkSync('middle'); fs.symlinkSync('second','middle'); console.log(fs.readFileSync('alias','utf8'));",
+        );
         let report = measured(project.path());
         assert_eq!(report.verdict, "PASS");
-        assert_eq!(report.cases[0].native.as_ref().unwrap().stdout.sha256, hex::encode(Sha256::digest(b"second\n")));
-        assert_eq!(fs::read_link(project.path().join("middle")).unwrap(), Path::new("first"));
+        assert_eq!(
+            report.cases[0].native.as_ref().unwrap().stdout.sha256,
+            hex::encode(Sha256::digest(b"second\n"))
+        );
+        assert_eq!(
+            fs::read_link(project.path().join("middle")).unwrap(),
+            Path::new("first")
+        );
     }
 
     #[test]
@@ -881,32 +1404,54 @@ mod tests {
         let project = fixture();
         write(project.path(), "first", "bytes");
         fs::hard_link(project.path().join("first"), project.path().join("second")).unwrap();
-        assert!(Snapshot::capture(project.path(), Instant::now() + Duration::from_secs(5)).is_err());
+        assert!(
+            Snapshot::capture(project.path(), Instant::now() + Duration::from_secs(5)).is_err()
+        );
     }
 
     #[test]
     fn special_files_cannot_block_capture() {
         let project = fixture();
-        let _listener = std::os::unix::net::UnixListener::bind(project.path().join("socket")).unwrap();
-        assert!(Snapshot::capture(project.path(), Instant::now() + Duration::from_secs(5)).is_err());
+        let _listener =
+            std::os::unix::net::UnixListener::bind(project.path().join("socket")).unwrap();
+        assert!(
+            Snapshot::capture(project.path(), Instant::now() + Duration::from_secs(5)).is_err()
+        );
     }
 
     #[test]
     fn oversized_sparse_file_is_refused_before_allocating_its_contents() {
         let project = fixture();
-        File::create(project.path().join("huge")).unwrap().set_len(MAX_PROJECT_BYTES as u64 + 1).unwrap();
-        assert!(Snapshot::capture(project.path(), Instant::now() + Duration::from_secs(5)).is_err());
+        File::create(project.path().join("huge"))
+            .unwrap()
+            .set_len(MAX_PROJECT_BYTES as u64 + 1)
+            .unwrap();
+        assert!(
+            Snapshot::capture(project.path(), Instant::now() + Duration::from_secs(5)).is_err()
+        );
     }
 
     #[test]
     fn capture_identity_binds_file_content_and_permissions() {
         let project = fixture();
         write(project.path(), "case.test.js", "console.log('ok');");
-        fs::set_permissions(project.path().join("case.test.js"), fs::Permissions::from_mode(0o644)).unwrap();
-        let capture = || Snapshot::capture(project.path(), Instant::now() + Duration::from_secs(5)).unwrap().digest;
+        fs::set_permissions(
+            project.path().join("case.test.js"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        let capture = || {
+            Snapshot::capture(project.path(), Instant::now() + Duration::from_secs(5))
+                .unwrap()
+                .digest
+        };
         let original = capture();
         assert_eq!(original, capture());
-        fs::set_permissions(project.path().join("case.test.js"), fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(
+            project.path().join("case.test.js"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
         assert_ne!(original, capture());
         let changed_mode = capture();
         write(project.path(), "case.test.js", "console.log('changed');");
@@ -918,19 +1463,57 @@ mod tests {
         let project = fixture();
         write(project.path(), "case.test.js", "console.log('ok');");
         assert!(Snapshot::capture(project.path(), Instant::now()).is_err());
-        let snapshot = Snapshot::capture(project.path(), Instant::now() + Duration::from_secs(5)).unwrap();
-        assert!(execute_suite(&snapshot, &node(false), &node(true), Instant::now(), Duration::from_secs(1)).is_err());
+        let snapshot =
+            Snapshot::capture(project.path(), Instant::now() + Duration::from_secs(5)).unwrap();
+        assert!(
+            execute_suite(
+                &snapshot,
+                &node(false),
+                &node(true),
+                Instant::now(),
+                Duration::from_secs(1)
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn native_command_uses_relative_case_and_disables_degraded_fallback() {
-        let invocation = Invocation { executable: PathBuf::from("/trusted/native"), before: vec!["run".into()],
-            after: vec!["--runtime".into(), "franken-engine".into(), "--console-only".into()] };
-        let environment = BTreeMap::from([("FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK".into(), "1".into())]);
-        let command = invocation.command(Path::new("tests/a.test.js"), Path::new("/workspace"), &environment);
-        let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
-        assert_eq!(args, ["run", "./tests/a.test.js", "--runtime", "franken-engine", "--console-only"]);
-        assert!(command.get_envs().all(|(key, value)| key != "FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK" || value.is_none()));
+        let invocation = Invocation {
+            executable: PathBuf::from("/trusted/native"),
+            before: vec!["run".into()],
+            after: vec![
+                "--runtime".into(),
+                "franken-engine".into(),
+                "--console-only".into(),
+            ],
+        };
+        let environment = BTreeMap::from([(
+            "FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK".into(),
+            "1".into(),
+        )]);
+        let command = invocation.command(
+            Path::new("tests/a.test.js"),
+            Path::new("/workspace"),
+            &environment,
+        );
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "run",
+                "./tests/a.test.js",
+                "--runtime",
+                "franken-engine",
+                "--console-only"
+            ]
+        );
+        assert!(command.get_envs().all(|(key, value)| key
+            != "FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK"
+            || value.is_none()));
     }
 
     #[test]
@@ -938,33 +1521,63 @@ mod tests {
         let project = fixture();
         let output = fixture();
         let marker = output.path().join("executions");
-        let source = format!("require('fs').appendFileSync({},'run\\n'); console.log('reference');",
-            serde_json::to_string(&marker).unwrap());
+        let source = format!(
+            "require('fs').appendFileSync({},'run\\n'); console.log('reference');",
+            serde_json::to_string(&marker).unwrap()
+        );
         write(project.path(), "case.test.js", &source);
-        let report = run_if_present_with(project.path(), || Ok("/bin/false".into()),
-            || FailureArchive::reserve(output.path(), [project.path(), project.path()]).map(Some)).unwrap().unwrap();
+        let report = run_if_present_with(
+            project.path(),
+            || Ok("/bin/false".into()),
+            || FailureArchive::reserve(output.path(), [project.path(), project.path()]).map(Some),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(report.verdict, "FAIL");
         assert_eq!(report.total_tests, 1);
         assert_eq!(fs::read_to_string(marker).unwrap(), "run\n");
-        let Some(FailureCapture::Saved { capsule_path, content_sha256 }) = &report.failure_capture else { panic!("{report:#?}") };
+        let Some(FailureCapture::Saved {
+            capsule_path,
+            content_sha256,
+        }) = &report.failure_capture
+        else {
+            panic!("{report:#?}")
+        };
         let captured = native_replay::inspect(capsule_path).unwrap();
         assert_eq!(captured.content_sha256, *content_sha256);
         assert_eq!(captured.input_sha256, report.input_sha256);
         assert_eq!(captured.captured_verdict, "FAIL");
-        assert_eq!(fs::read_to_string(project.path().join("case.test.js")).unwrap(), source);
+        assert_eq!(
+            fs::read_to_string(project.path().join("case.test.js")).unwrap(),
+            source
+        );
         let value = serde_json::to_value(&report).unwrap();
         assert_eq!(value["failure_capture"]["status"], "SAVED");
-        assert_eq!(serde_json::from_value::<SuiteReport>(value).unwrap(), report);
+        assert_eq!(
+            serde_json::from_value::<SuiteReport>(value).unwrap(),
+            report
+        );
     }
 
     #[test]
     fn archive_preflight_precedes_runtime_resolution_but_empty_inventory_allocates_nothing() {
         let project = fixture();
-        assert!(run_if_present_with(project.path(), || panic!("empty suite resolves no runtime"),
-            || panic!("empty suite reserves no storage")).unwrap().is_none());
+        assert!(
+            run_if_present_with(
+                project.path(),
+                || panic!("empty suite resolves no runtime"),
+                || panic!("empty suite reserves no storage")
+            )
+            .unwrap()
+            .is_none()
+        );
         write(project.path(), "case.test.js", "console.log('reference');");
-        let error = run_if_present_with(project.path(), || panic!("invalid archive must precede runtime resolution"),
-            || FailureArchive::reserve(project.path(), [project.path(), project.path()]).map(Some)).unwrap_err();
+        let error = run_if_present_with(
+            project.path(),
+            || panic!("invalid archive must precede runtime resolution"),
+            || FailureArchive::reserve(project.path(), [project.path(), project.path()]).map(Some),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("outside"));
     }
 
@@ -972,24 +1585,41 @@ mod tests {
     fn unrequested_retention_preserves_the_existing_report_wire_shape() {
         let project = fixture();
         write(project.path(), "case.test.js", "console.log('reference');");
-        let report = run_if_present_with(project.path(), || Ok("/bin/false".into()), || Ok(None)).unwrap().unwrap();
+        let report = run_if_present_with(project.path(), || Ok("/bin/false".into()), || Ok(None))
+            .unwrap()
+            .unwrap();
         assert_eq!(report.verdict, "FAIL");
         assert!(report.failure_capture.is_none());
         let encoded = serde_json::to_value(&report).unwrap();
         assert!(encoded.get("failure_capture").is_none());
-        assert_eq!(serde_json::from_value::<SuiteReport>(encoded).unwrap(), report);
+        assert_eq!(
+            serde_json::from_value::<SuiteReport>(encoded).unwrap(),
+            report
+        );
     }
 
     #[test]
     fn incomplete_primary_failure_reports_unavailable_capture_without_losing_errors() {
         let project = fixture();
         let output = fixture();
-        write(project.path(), "case.test.js", "process.stdout.write('x'.repeat(17*1024*1024));");
-        let report = run_if_present_with(project.path(), || Ok("/bin/false".into()),
-            || FailureArchive::reserve(output.path(), [project.path(), project.path()]).map(Some)).unwrap().unwrap();
+        write(
+            project.path(),
+            "case.test.js",
+            "process.stdout.write('x'.repeat(17*1024*1024));",
+        );
+        let report = run_if_present_with(
+            project.path(),
+            || Ok("/bin/false".into()),
+            || FailureArchive::reserve(output.path(), [project.path(), project.path()]).map(Some),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(report.verdict, "ERROR");
         assert!(!report.cases[0].errors.is_empty());
-        assert!(matches!(report.failure_capture, Some(FailureCapture::Unavailable { .. })));
+        assert!(matches!(
+            report.failure_capture,
+            Some(FailureCapture::Unavailable { .. })
+        ));
         assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0);
     }
 
@@ -998,14 +1628,30 @@ mod tests {
         let key = native_replay::failure_capture::DIRECTORY_ENV;
         let environment = BTreeMap::from([(key.into(), "/private/captures".into())]);
         let workspace = fixture();
-        write(workspace.path(), "test.js", &format!(
-            "if(Object.hasOwn(process.env,{}))process.exit(91);console.log('clean');", serde_json::to_string(key).unwrap()));
+        write(
+            workspace.path(),
+            "test.js",
+            &format!(
+                "if(Object.hasOwn(process.env,{}))process.exit(91);console.log('clean');",
+                serde_json::to_string(key).unwrap()
+            ),
+        );
         for invocation in [node(false), node(true)] {
-            let mut command = invocation.command(Path::new("test.js"), workspace.path(), &environment);
+            let mut command =
+                invocation.command(Path::new("test.js"), workspace.path(), &environment);
             // After env_clear, env_remove can omit the mapping entirely; it
             // need not retain a tombstone in Command's explicit environment.
-            assert!(command.get_envs().all(|(name, value)| name != key || value.is_none()));
-            let output = smoke_supervisor::run_command_with_timeout(&mut command, Duration::from_secs(5), DRAIN_TIMEOUT).unwrap();
+            assert!(
+                command
+                    .get_envs()
+                    .all(|(name, value)| name != key || value.is_none())
+            );
+            let output = smoke_supervisor::run_command_with_timeout(
+                &mut command,
+                Duration::from_secs(5),
+                DRAIN_TIMEOUT,
+            )
+            .unwrap();
             assert!(output.status.success());
             assert_eq!(output.stdout, b"clean\n");
         }
@@ -1014,25 +1660,50 @@ mod tests {
     #[test]
     fn captured_sources_are_staged_beneath_an_owner_only_directory() {
         let project = fixture();
-        write(project.path(), "case.test.js", "const fs=require('fs'); const p=require('path'); console.log(fs.statSync(p.dirname(process.cwd())).mode & 0o077);");
+        write(
+            project.path(),
+            "case.test.js",
+            "const fs=require('fs'); const p=require('path'); console.log(fs.statSync(p.dirname(process.cwd())).mode & 0o077);",
+        );
         let report = measured(project.path());
         assert_eq!(report.verdict, "PASS");
-        assert_eq!(report.cases[0].reference.as_ref().unwrap().stdout.sha256, hex::encode(Sha256::digest(b"0\n")));
+        assert_eq!(
+            report.cases[0].reference.as_ref().unwrap().stdout.sha256,
+            hex::encode(Sha256::digest(b"0\n"))
+        );
     }
 
     fn reviewed_hash(root: &Path) -> String {
-        Snapshot::capture(root, Instant::now() + Duration::from_secs(30)).unwrap().digest
+        Snapshot::capture(root, Instant::now() + Duration::from_secs(30))
+            .unwrap()
+            .digest
     }
 
     #[test]
     fn input_approval_rejects_noncanonical_pins_before_project_access() {
         let valid = "a".repeat(64);
-        for invalid in [String::new(), "a".repeat(63), "a".repeat(65), "A".repeat(64),
-            "g".repeat(64), format!("sha256:{valid}"), format!(" {valid}")] {
+        for invalid in [
+            String::new(),
+            "a".repeat(63),
+            "a".repeat(65),
+            "A".repeat(64),
+            "g".repeat(64),
+            format!("sha256:{valid}"),
+            format!(" {valid}"),
+        ] {
             for (original, candidate) in [(&invalid, &valid), (&valid, &invalid)] {
-                let error = ApprovedInputs::capture(Path::new("/definitely/absent-approved-project"),
-                    None, original, candidate).err().expect("invalid approval");
-                assert!(error.to_string().contains("64 lowercase hexadecimal"), "{error:#}");
+                let error = ApprovedInputs::capture(
+                    Path::new("/definitely/absent-approved-project"),
+                    None,
+                    original,
+                    candidate,
+                )
+                .err()
+                .expect("invalid approval");
+                assert!(
+                    error.to_string().contains("64 lowercase hexadecimal"),
+                    "{error:#}"
+                );
             }
         }
     }
@@ -1043,11 +1714,17 @@ mod tests {
         write(project.path(), "case.test.js", "console.log('approved');");
         let pin = reviewed_hash(project.path());
         let wrong = "0".repeat(64);
-        for (original, candidate, role) in [(&wrong, &pin, "original"), (&pin, &wrong, "candidate")] {
+        for (original, candidate, role) in [(&wrong, &pin, "original"), (&pin, &wrong, "candidate")]
+        {
             let error = ApprovedInputs::capture(project.path(), None, original, candidate)
-                .err().expect("mismatched approval");
+                .err()
+                .expect("mismatched approval");
             assert!(error.to_string().starts_with(role));
-            assert!(error.to_string().contains("no runtime was resolved or executed"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("no runtime was resolved or executed")
+            );
         }
         ApprovedInputs::capture(project.path(), None, &pin, &pin).unwrap();
     }
@@ -1056,9 +1733,17 @@ mod tests {
     fn input_approval_detects_dependency_bytes_and_modes_not_only_entrypoints() {
         let project = fixture();
         write(project.path(), "case.test.js", "console.log('approved');");
-        write(project.path(), "node_modules/vendor/index.js", "module.exports=1;");
+        write(
+            project.path(),
+            "node_modules/vendor/index.js",
+            "module.exports=1;",
+        );
         let pin = reviewed_hash(project.path());
-        write(project.path(), "node_modules/vendor/index.js", "module.exports=2;");
+        write(
+            project.path(),
+            "node_modules/vendor/index.js",
+            "module.exports=2;",
+        );
         assert!(ApprovedInputs::capture(project.path(), None, &pin, &pin).is_err());
         let pin = reviewed_hash(project.path());
         let path = project.path().join("case.test.js");
@@ -1072,19 +1757,49 @@ mod tests {
         let original = fixture();
         let candidate = fixture();
         write(original.path(), "case.test.js", "console.log('original');");
-        write(candidate.path(), "case.test.js", "console.log('candidate');");
+        write(
+            candidate.path(),
+            "case.test.js",
+            "console.log('candidate');",
+        );
         let original_pin = reviewed_hash(original.path());
         let candidate_pin = reviewed_hash(candidate.path());
         assert_ne!(original_pin, candidate_pin);
-        ApprovedInputs::capture(original.path(), Some(candidate.path()), &original_pin, &candidate_pin).unwrap();
-        write(candidate.path(), "case.test.js", "console.log('replacement');");
-        let error = ApprovedInputs::capture(original.path(), Some(candidate.path()), &original_pin, &candidate_pin)
-            .err().expect("candidate changed");
+        ApprovedInputs::capture(
+            original.path(),
+            Some(candidate.path()),
+            &original_pin,
+            &candidate_pin,
+        )
+        .unwrap();
+        write(
+            candidate.path(),
+            "case.test.js",
+            "console.log('replacement');",
+        );
+        let error = ApprovedInputs::capture(
+            original.path(),
+            Some(candidate.path()),
+            &original_pin,
+            &candidate_pin,
+        )
+        .err()
+        .expect("candidate changed");
         assert!(error.to_string().starts_with("candidate"));
         let candidate_pin = reviewed_hash(candidate.path());
-        write(original.path(), "case.test.js", "console.log('later-original');");
-        let error = ApprovedInputs::capture(original.path(), Some(candidate.path()), &original_pin, &candidate_pin)
-            .err().expect("original changed");
+        write(
+            original.path(),
+            "case.test.js",
+            "console.log('later-original');",
+        );
+        let error = ApprovedInputs::capture(
+            original.path(),
+            Some(candidate.path()),
+            &original_pin,
+            &candidate_pin,
+        )
+        .err()
+        .expect("original changed");
         assert!(error.to_string().starts_with("original"));
     }
 
@@ -1096,11 +1811,20 @@ mod tests {
             write(root, "case.test.js", "console.log('approved');");
             write(root, "request.bin", "request");
         }
-        write(original.path(), ".franken-node/migration-tests.json",
-            r#"{"schema_version":"franken-node/migration-tests/v1","tests":["case.test.js"],"execution":{"case.test.js":{"stdin":"request.bin","stdin_mode":"pipe"}}}"#);
+        write(
+            original.path(),
+            ".franken-node/migration-tests.json",
+            r#"{"schema_version":"franken-node/migration-tests/v1","tests":["case.test.js"],"execution":{"case.test.js":{"stdin":"request.bin","stdin_mode":"pipe"}}}"#,
+        );
         // Even independently pinned inputs must represent the SAME request.
-        let error = ApprovedInputs::capture(original.path(), Some(candidate.path()),
-            &reviewed_hash(original.path()), &reviewed_hash(candidate.path())).err().expect("settings differ");
+        let error = ApprovedInputs::capture(
+            original.path(),
+            Some(candidate.path()),
+            &reviewed_hash(original.path()),
+            &reviewed_hash(candidate.path()),
+        )
+        .err()
+        .expect("settings differ");
         assert!(error.to_string().contains("execution settings differ"));
         let empty = fixture();
         let pin = reviewed_hash(empty.path());
@@ -1111,13 +1835,35 @@ mod tests {
     fn approved_pair_executes_immutable_bytes_after_both_live_trees_change() {
         let original = fixture();
         let candidate = fixture();
-        write(original.path(), "case.test.js", "console.log('reviewed');require('fs').writeFileSync('artifact','reviewed');");
-        write(candidate.path(), "case.test.js", "console.log('candidate');");
+        write(
+            original.path(),
+            "case.test.js",
+            "console.log('reviewed');require('fs').writeFileSync('artifact','reviewed');",
+        );
+        write(
+            candidate.path(),
+            "case.test.js",
+            "console.log('candidate');",
+        );
         let original_pin = reviewed_hash(original.path());
         let candidate_pin = reviewed_hash(candidate.path());
-        let approved = ApprovedInputs::capture(original.path(), Some(candidate.path()), &original_pin, &candidate_pin).unwrap();
-        write(original.path(), "case.test.js", "throw new Error('later original must not run');");
-        write(candidate.path(), "case.test.js", "throw new Error('later candidate must not run');");
+        let approved = ApprovedInputs::capture(
+            original.path(),
+            Some(candidate.path()),
+            &original_pin,
+            &candidate_pin,
+        )
+        .unwrap();
+        write(
+            original.path(),
+            "case.test.js",
+            "throw new Error('later original must not run');",
+        );
+        write(
+            candidate.path(),
+            "case.test.js",
+            "throw new Error('later candidate must not run');",
+        );
         // Deliberately failing native executable proves admission/retention,
         // not successful native FrankenEngine semantics.
         let report = approved.run_pair(Path::new("/bin/false"), true).unwrap();
@@ -1126,7 +1872,10 @@ mod tests {
         assert_eq!(report.candidate_input_sha256, candidate_pin);
         let reference = report.cases[0].reference.as_ref().unwrap();
         assert_eq!(reference.exit_code, Some(0));
-        assert_eq!(reference.stdout.sha256, hex::encode(Sha256::digest(b"reviewed\n")));
+        assert_eq!(
+            reference.stdout.sha256,
+            hex::encode(Sha256::digest(b"reviewed\n"))
+        );
         assert_eq!(reference.workspace_delta.as_ref().unwrap().changed_paths, 1);
         assert_eq!(report.cases[0].native.as_ref().unwrap().exit_code, Some(1));
         assert!(!original.path().join("artifact").exists());
@@ -1143,13 +1892,17 @@ mod tests {
         write(project.path(), "case.test.js", "process.exit(99);");
         // /bin/false is an explicitly failing role, never an independent
         // reference brand or successful native implementation claim.
-        let report = approved.run_product(Path::new("/bin/false"), Path::new("/bin/false"), false).unwrap();
+        let report = approved
+            .run_product(Path::new("/bin/false"), Path::new("/bin/false"), false)
+            .unwrap();
         assert_eq!(report.verdict, "INCONCLUSIVE", "{report:#?}");
         assert_eq!(report.input_sha256, pin);
         assert_eq!(report.candidate_input_sha256, pin);
         assert_eq!(report.cases[0].node.as_ref().unwrap().exit_code, Some(0));
-        assert_eq!(report.cases[0].node.as_ref().unwrap().stdout.sha256,
-            hex::encode(Sha256::digest(b"reviewed\n")));
+        assert_eq!(
+            report.cases[0].node.as_ref().unwrap().stdout.sha256,
+            hex::encode(Sha256::digest(b"reviewed\n"))
+        );
         assert_eq!(report.cases[0].bun.as_ref().unwrap().exit_code, Some(1));
         assert!(!report.release_certification);
     }
@@ -1164,7 +1917,10 @@ mod tests {
             approved.deadline = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
             let missing = Path::new("/definitely/missing-approved-runtime");
             let error = if product {
-                approved.run_product(missing, missing, false).err().expect("expired")
+                approved
+                    .run_product(missing, missing, false)
+                    .err()
+                    .expect("expired")
             } else {
                 approved.run_pair(missing, false).err().expect("expired")
             };
@@ -1173,8 +1929,15 @@ mod tests {
     }
 
     fn saved_failure(report: &SuiteReport) -> (&Path, &str) {
-        match report.failure_capture.as_ref().expect("retention requested") {
-            FailureCapture::Saved { capsule_path, content_sha256 } => (capsule_path, content_sha256),
+        match report
+            .failure_capture
+            .as_ref()
+            .expect("retention requested")
+        {
+            FailureCapture::Saved {
+                capsule_path,
+                content_sha256,
+            } => (capsule_path, content_sha256),
             other => panic!("expected saved failure, got {other:?}"),
         }
     }
@@ -1185,15 +1948,30 @@ mod tests {
         let candidate = fixture();
         let output = fixture();
         let marker = output.path().join("executions");
-        let source = format!("require('fs').appendFileSync({},'once\\n');console.log('reviewed');",
-            serde_json::to_string(&marker).unwrap());
+        let source = format!(
+            "require('fs').appendFileSync({},'once\\n');console.log('reviewed');",
+            serde_json::to_string(&marker).unwrap()
+        );
         let replacement = "console.log('reviewed candidate');";
         write(original.path(), "case.test.js", &source);
         write(candidate.path(), "case.test.js", replacement);
-        let pins = [reviewed_hash(original.path()), reviewed_hash(candidate.path())];
-        let approved = ApprovedInputs::capture(original.path(), Some(candidate.path()), &pins[0], &pins[1]).unwrap();
-        write(original.path(), "case.test.js", "throw Error('unreviewed original');");
-        write(candidate.path(), "case.test.js", "throw Error('unreviewed candidate');");
+        let pins = [
+            reviewed_hash(original.path()),
+            reviewed_hash(candidate.path()),
+        ];
+        let approved =
+            ApprovedInputs::capture(original.path(), Some(candidate.path()), &pins[0], &pins[1])
+                .unwrap();
+        write(
+            original.path(),
+            "case.test.js",
+            "throw Error('unreviewed original');",
+        );
+        write(
+            candidate.path(),
+            "case.test.js",
+            "throw Error('unreviewed candidate');",
+        );
         let approved = approved.retain_failures(output.path()).unwrap();
         // A real Node reference and deliberately failing native role exercise
         // capture/reexecution, not successful FrankenEngine compatibility.
@@ -1204,21 +1982,33 @@ mod tests {
         assert_eq!(report.candidate_input_sha256, pins[1]);
         let (path, pin) = saved_failure(&report);
         assert_eq!(fs::metadata(path).unwrap().mode() & 0o777, 0o600);
-        assert_eq!(fs::metadata(path.parent().unwrap()).unwrap().mode() & 0o777, 0o700);
+        assert_eq!(
+            fs::metadata(path.parent().unwrap()).unwrap().mode() & 0o777,
+            0o700
+        );
         let summary = native_replay::inspect(path).unwrap();
         assert_eq!(summary.input_sha256, pins[0]);
         assert_eq!(summary.candidate_input_sha256, pins[1]);
         let exported = output.path().join("exported");
         native_replay::failure_capture::product::export_any(path, pin, &exported).unwrap();
-        assert_eq!(fs::read_to_string(exported.join("original/case.test.js")).unwrap(), source);
-        assert_eq!(fs::read_to_string(exported.join("candidate/case.test.js")).unwrap(), replacement);
+        assert_eq!(
+            fs::read_to_string(exported.join("original/case.test.js")).unwrap(),
+            source
+        );
+        assert_eq!(
+            fs::read_to_string(exported.join("candidate/case.test.js")).unwrap(),
+            replacement
+        );
         assert_eq!(fs::read_to_string(&marker).unwrap(), "once\n");
         let replayed = native_replay::replay(path, pin, Path::new("/bin/false"), false).unwrap();
         assert_eq!(replayed.verdict, "REPRODUCED");
         assert_eq!(replayed.validation.verdict, "FAIL");
         assert_eq!(replayed.validation.cases, report.cases);
         assert_eq!(fs::read_to_string(&marker).unwrap(), "once\nonce\n");
-        assert_eq!(fs::read_to_string(original.path().join("case.test.js")).unwrap(), "throw Error('unreviewed original');");
+        assert_eq!(
+            fs::read_to_string(original.path().join("case.test.js")).unwrap(),
+            "throw Error('unreviewed original');"
+        );
         assert!(!report.release_certification);
     }
 
@@ -1226,11 +2016,20 @@ mod tests {
     fn approved_retention_is_private_before_execution_and_dropped_approval_releases_it() {
         let project = fixture();
         let output = fixture();
-        write(project.path(), "case.test.js", "console.log('not executed');");
+        write(
+            project.path(),
+            "case.test.js",
+            "console.log('not executed');",
+        );
         let pin = reviewed_hash(project.path());
-        let approved = ApprovedInputs::capture(project.path(), None, &pin, &pin).unwrap()
-            .retain_failures(output.path()).unwrap();
-        let entries = fs::read_dir(output.path()).unwrap().collect::<std::io::Result<Vec<_>>>().unwrap();
+        let approved = ApprovedInputs::capture(project.path(), None, &pin, &pin)
+            .unwrap()
+            .retain_failures(output.path())
+            .unwrap();
+        let entries = fs::read_dir(output.path())
+            .unwrap()
+            .collect::<std::io::Result<Vec<_>>>()
+            .unwrap();
         assert_eq!(entries.len(), 1);
         let reservation = entries[0].path();
         assert_eq!(fs::metadata(&reservation).unwrap().mode() & 0o777, 0o700);
@@ -1245,13 +2044,30 @@ mod tests {
         let original = fixture();
         let candidate = fixture();
         let output = fixture();
-        for root in [original.path(), candidate.path()] { write(root, "case.test.js", "void 0;"); }
-        let pins = [reviewed_hash(original.path()), reviewed_hash(candidate.path())];
+        for root in [original.path(), candidate.path()] {
+            write(root, "case.test.js", "void 0;");
+        }
+        let pins = [
+            reviewed_hash(original.path()),
+            reviewed_hash(candidate.path()),
+        ];
         let link = output.path().join("alias");
         symlink(output.path(), &link).unwrap();
-        for path in [PathBuf::from("relative"), original.path().into(), candidate.path().into(),
-            output.path().join("absent"), original.path().join("case.test.js"), link] {
-            let approved = ApprovedInputs::capture(original.path(), Some(candidate.path()), &pins[0], &pins[1]).unwrap();
+        for path in [
+            PathBuf::from("relative"),
+            original.path().into(),
+            candidate.path().into(),
+            output.path().join("absent"),
+            original.path().join("case.test.js"),
+            link,
+        ] {
+            let approved = ApprovedInputs::capture(
+                original.path(),
+                Some(candidate.path()),
+                &pins[0],
+                &pins[1],
+            )
+            .unwrap();
             assert!(approved.retain_failures(&path).is_err(), "{path:?}");
         }
         assert_eq!(fs::read_dir(output.path()).unwrap().count(), 1);
@@ -1266,13 +2082,27 @@ mod tests {
         let pin = reviewed_hash(project.path());
         let mut expired = ApprovedInputs::capture(project.path(), None, &pin, &pin).unwrap();
         expired.deadline = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
-        assert!(expired.retain_failures(first.path()).err().unwrap().to_string().contains("total budget exhausted"));
+        assert!(
+            expired
+                .retain_failures(first.path())
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("total budget exhausted")
+        );
         assert_eq!(fs::read_dir(first.path()).unwrap().count(), 0);
         let approved = ApprovedInputs::capture(project.path(), None, &pin, &pin).unwrap();
         let deadline = approved.deadline;
         let retained = approved.retain_failures(first.path()).unwrap();
         assert_eq!(retained.deadline, deadline);
-        assert!(retained.retain_failures(second.path()).err().unwrap().to_string().contains("already configured"));
+        assert!(
+            retained
+                .retain_failures(second.path())
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("already configured")
+        );
         assert_eq!(fs::read_dir(first.path()).unwrap().count(), 0);
         assert_eq!(fs::read_dir(second.path()).unwrap().count(), 0);
     }
@@ -1285,13 +2115,22 @@ mod tests {
         let pin = reviewed_hash(project.path());
         for product in [false, true] {
             for expire in [false, true] {
-                let mut approved = ApprovedInputs::capture(project.path(), None, &pin, &pin).unwrap()
-                    .retain_failures(output.path()).unwrap();
-                if expire { approved.deadline = Instant::now().checked_sub(Duration::from_secs(1)).unwrap(); }
+                let mut approved = ApprovedInputs::capture(project.path(), None, &pin, &pin)
+                    .unwrap()
+                    .retain_failures(output.path())
+                    .unwrap();
+                if expire {
+                    approved.deadline = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+                }
                 let missing = Path::new("/definitely/missing-retained-runtime");
-                let error = if product { approved.run_product(missing, missing, false).unwrap_err() }
-                    else { approved.run_pair(missing, false).unwrap_err() };
-                if expire { assert!(error.to_string().contains("total budget exhausted")); }
+                let error = if product {
+                    approved.run_product(missing, missing, false).unwrap_err()
+                } else {
+                    approved.run_pair(missing, false).unwrap_err()
+                };
+                if expire {
+                    assert!(error.to_string().contains("total budget exhausted"));
+                }
                 assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0);
             }
         }
@@ -1304,12 +2143,16 @@ mod tests {
         write(project.path(), "case.test.js", "void 0;");
         let pin = reviewed_hash(project.path());
         for product in [false, true] {
-            let approved = ApprovedInputs::capture(project.path(), None, &pin, &pin).unwrap()
-                .retain_failures(output.path()).unwrap();
+            let approved = ApprovedInputs::capture(project.path(), None, &pin, &pin)
+                .unwrap()
+                .retain_failures(output.path())
+                .unwrap();
             // No-op process roles prove storage lifecycle only. They do not
             // stand in for genuine Bun/Franken semantic implementations.
             if product {
-                let report = approved.run_product(Path::new("/bin/true"), Path::new("/bin/true"), false).unwrap();
+                let report = approved
+                    .run_product(Path::new("/bin/true"), Path::new("/bin/true"), false)
+                    .unwrap();
                 assert_eq!(report.verdict, "PASS");
                 assert!(report.failure_capture.is_none());
             } else {
@@ -1325,17 +2168,39 @@ mod tests {
     fn approved_product_retention_keeps_all_three_roles_and_reference_failure() {
         let project = fixture();
         let output = fixture();
-        write(project.path(), "case.test.js", "console.log('reviewed reference');");
+        write(
+            project.path(),
+            "case.test.js",
+            "console.log('reviewed reference');",
+        );
         let pin = reviewed_hash(project.path());
-        let approved = ApprovedInputs::capture(project.path(), None, &pin, &pin).unwrap()
-            .retain_failures(output.path()).unwrap();
-        let report = approved.run_product(Path::new("/bin/false"), Path::new("/bin/false"), false).unwrap();
+        let approved = ApprovedInputs::capture(project.path(), None, &pin, &pin)
+            .unwrap()
+            .retain_failures(output.path())
+            .unwrap();
+        let report = approved
+            .run_product(Path::new("/bin/false"), Path::new("/bin/false"), false)
+            .unwrap();
         assert_eq!(report.verdict, "INCONCLUSIVE");
-        let FailureCapture::Saved { capsule_path, content_sha256 } = report.failure_capture.as_ref().unwrap()
-            else { panic!("{report:#?}") };
-        assert!(native_replay::inspect(capsule_path).is_err(), "product evidence must not become a pair capsule");
-        let replayed = native_replay::failure_capture::product::replay(capsule_path, content_sha256,
-            Path::new("/bin/false"), Path::new("/bin/false"), false).unwrap();
+        let FailureCapture::Saved {
+            capsule_path,
+            content_sha256,
+        } = report.failure_capture.as_ref().unwrap()
+        else {
+            panic!("{report:#?}")
+        };
+        assert!(
+            native_replay::inspect(capsule_path).is_err(),
+            "product evidence must not become a pair capsule"
+        );
+        let replayed = native_replay::failure_capture::product::replay(
+            capsule_path,
+            content_sha256,
+            Path::new("/bin/false"),
+            Path::new("/bin/false"),
+            false,
+        )
+        .unwrap();
         assert_eq!(replayed.verdict, "REPRODUCED");
         assert_eq!(replayed.validation.verdict, "INCONCLUSIVE");
         assert_eq!(replayed.validation.cases, report.cases);
@@ -1346,17 +2211,34 @@ mod tests {
     fn post_execution_retention_failure_keeps_the_measured_native_failure() {
         let project = fixture();
         let output = fixture();
-        write(project.path(), "case.test.js", "console.log('evidence survives');");
+        write(
+            project.path(),
+            "case.test.js",
+            "console.log('evidence survives');",
+        );
         let pin = reviewed_hash(project.path());
-        let approved = ApprovedInputs::capture(project.path(), None, &pin, &pin).unwrap()
-            .retain_failures(output.path()).unwrap();
-        let reservation = fs::read_dir(output.path()).unwrap().next().unwrap().unwrap().path();
+        let approved = ApprovedInputs::capture(project.path(), None, &pin, &pin)
+            .unwrap()
+            .retain_failures(output.path())
+            .unwrap();
+        let reservation = fs::read_dir(output.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
         fs::create_dir(reservation.join("failure.json")).unwrap();
         let report = approved.run_pair(Path::new("/bin/false"), false).unwrap();
         assert_eq!(report.verdict, "FAIL");
-        assert_eq!(report.cases[0].reference.as_ref().unwrap().exit_code, Some(0));
+        assert_eq!(
+            report.cases[0].reference.as_ref().unwrap().exit_code,
+            Some(0)
+        );
         assert_eq!(report.cases[0].native.as_ref().unwrap().exit_code, Some(1));
-        assert!(matches!(report.failure_capture, Some(FailureCapture::Unavailable { .. })));
+        assert!(matches!(
+            report.failure_capture,
+            Some(FailureCapture::Unavailable { .. })
+        ));
         assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0);
     }
 
@@ -1364,12 +2246,23 @@ mod tests {
     fn incomplete_approved_execution_is_not_published_as_replayable() {
         let project = fixture();
         let output = fixture();
-        write(project.path(), "case.test.js", "process.stdout.write('x'.repeat(17*1024*1024));");
+        write(
+            project.path(),
+            "case.test.js",
+            "process.stdout.write('x'.repeat(17*1024*1024));",
+        );
         let pin = reviewed_hash(project.path());
-        let report = ApprovedInputs::capture(project.path(), None, &pin, &pin).unwrap()
-            .retain_failures(output.path()).unwrap().run_pair(Path::new("/bin/false"), false).unwrap();
+        let report = ApprovedInputs::capture(project.path(), None, &pin, &pin)
+            .unwrap()
+            .retain_failures(output.path())
+            .unwrap()
+            .run_pair(Path::new("/bin/false"), false)
+            .unwrap();
         assert_eq!(report.verdict, "ERROR");
-        assert!(matches!(report.failure_capture, Some(FailureCapture::Unavailable { .. })));
+        assert!(matches!(
+            report.failure_capture,
+            Some(FailureCapture::Unavailable { .. })
+        ));
         assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0);
     }
 }

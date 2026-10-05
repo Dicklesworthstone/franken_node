@@ -46,7 +46,10 @@ struct OwnedSmokeChild {
 
 impl OwnedSmokeChild {
     fn spawn(command: &mut Command, input: Stdio) -> Result<Self> {
-        command.stdin(input).stdout(Stdio::piped()).stderr(Stdio::piped());
+        command
+            .stdin(input)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         command.process_group(0);
         let mut child = command
             .spawn()
@@ -225,7 +228,10 @@ impl<'a, W: Write> PipeInput<'a, W> {
         };
         let end = self.bytes.len().min(self.queued.saturating_add(64 * 1024));
         match pipe.write(&self.bytes[self.queued..end]) {
-            Ok(0) => Err(io::Error::new(io::ErrorKind::WriteZero, "runtime stdin made no progress")),
+            Ok(0) => Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "runtime stdin made no progress",
+            )),
             Ok(count) => {
                 self.queued += count;
                 if self.queued == self.bytes.len() {
@@ -239,7 +245,14 @@ impl<'a, W: Write> PipeInput<'a, W> {
                 self.close();
                 Ok(true)
             }
-            Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted) => Ok(false),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
+                Ok(false)
+            }
             Err(error) => Err(error),
         }
     }
@@ -310,7 +323,13 @@ pub(super) fn run_command_with_input(
     pipe_drain_timeout: Duration,
     input: Option<&[u8]>,
 ) -> Result<Output> {
-    run_bounded_input(command, timeout, pipe_drain_timeout, MAX_STREAM_BYTES, input)
+    run_bounded_input(
+        command,
+        timeout,
+        pipe_drain_timeout,
+        MAX_STREAM_BYTES,
+        input,
+    )
 }
 
 /// Supply a bounded immutable request through a real pipe, multiplexed with
@@ -323,11 +342,22 @@ pub(super) fn run_command_with_pipe_input(
     pipe_drain_timeout: Duration,
     input: &[u8],
 ) -> Result<Output> {
-    capture_command(command, timeout, pipe_drain_timeout, MAX_STREAM_BYTES, InputTransport::Pipe(input))
+    capture_command(
+        command,
+        timeout,
+        pipe_drain_timeout,
+        MAX_STREAM_BYTES,
+        InputTransport::Pipe(input),
+    )
 }
 
 #[cfg(test)]
-fn run_bounded(command: &mut Command, timeout: Duration, drain_timeout: Duration, limit: usize) -> Result<Output> {
+fn run_bounded(
+    command: &mut Command,
+    timeout: Duration,
+    drain_timeout: Duration,
+    limit: usize,
+) -> Result<Output> {
     run_bounded_input(command, timeout, drain_timeout, limit, None)
 }
 
@@ -341,17 +371,31 @@ fn run_bounded_input(
     if timeout.is_zero() || drain_timeout.is_zero() || limit == 0 || limit > MAX_STREAM_BYTES {
         bail!("runtime smoke requires positive bounded time and output limits");
     }
-    let deadline = Instant::now().checked_add(timeout).context("runtime smoke deadline overflow")?;
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .context("runtime smoke deadline overflow")?;
     let stdin = if let Some(bytes) = input {
-        if bytes.len() > MAX_INPUT_BYTES { bail!("captured stdin exceeds 1 MiB"); }
+        if bytes.len() > MAX_INPUT_BYTES {
+            bail!("captured stdin exceeds 1 MiB");
+        }
         let mut file = tempfile::tempfile().context("create private captured stdin")?;
         file.write_all(bytes).context("stage captured stdin")?;
         file.rewind().context("rewind captured stdin")?;
         Stdio::from(file)
-    } else { Stdio::null() };
+    } else {
+        Stdio::null()
+    };
     let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() { bail!("runtime smoke timed out preparing captured stdin"); }
-    capture_command(command, remaining, drain_timeout, limit, InputTransport::Redirected(stdin))
+    if remaining.is_zero() {
+        bail!("runtime smoke timed out preparing captured stdin");
+    }
+    capture_command(
+        command,
+        remaining,
+        drain_timeout,
+        limit,
+        InputTransport::Redirected(stdin),
+    )
 }
 
 fn capture_command(
@@ -368,13 +412,22 @@ fn capture_command(
         InputTransport::Pipe(bytes) => Some(bytes.len()),
         InputTransport::Redirected(_) => None,
     };
-    let mut stdout = BoundedBytes { bytes: Vec::new(), limit, label: "stdout" };
-    let mut stderr = BoundedBytes { bytes: Vec::new(), limit, label: "stderr" };
+    let mut stdout = BoundedBytes {
+        bytes: Vec::new(),
+        limit,
+        label: "stdout",
+    };
+    let mut stderr = BoundedBytes {
+        bytes: Vec::new(),
+        limit,
+        label: "stderr",
+    };
     let observer = |stream, bytes: &[u8]| match stream {
         Stream::Stdout => stdout.receive(bytes),
         Stream::Stderr => stderr.receive(bytes),
     };
-    let (completion, queued) = supervise_with_input(command, timeout, drain_timeout, input, |_| Ok(()), observer)?;
+    let (completion, queued) =
+        supervise_with_input(command, timeout, drain_timeout, input, |_| Ok(()), observer)?;
     match completion.reason {
         StopReason::RuntimeTimeout => bail!(
             "runtime smoke command timed out after {}ms",
@@ -389,7 +442,9 @@ fn capture_command(
                 && completion.status.success()
                 && queued != requested
             {
-                bail!("runtime exited zero before complete stdin delivery: queued {queued} of {requested} bytes");
+                bail!(
+                    "runtime exited zero before complete stdin delivery: queued {queued} of {requested} bytes"
+                );
             }
             Ok(Output {
                 status: completion.status,
@@ -416,8 +471,15 @@ pub(crate) fn supervise_with_observer(
     after_spawn: impl FnOnce(u32) -> Result<()>,
     observe: impl FnMut(Stream, &[u8]) -> io::Result<()>,
 ) -> Result<Completion> {
-    supervise_with_input(command, timeout, drain_timeout, InputTransport::Redirected(Stdio::null()), after_spawn, observe)
-        .map(|(completion, _)| completion)
+    supervise_with_input(
+        command,
+        timeout,
+        drain_timeout,
+        InputTransport::Redirected(Stdio::null()),
+        after_spawn,
+        observe,
+    )
+    .map(|(completion, _)| completion)
 }
 
 fn supervise_with_input(
@@ -461,7 +523,11 @@ fn supervise_with_input(
         let mut stdout = PipeCapture::new(stdout);
         let mut stderr = PipeCapture::new(stderr);
         let mut input = if let Some(bytes) = pipe_bytes {
-            let pipe = owned.child.stdin.take().context("runtime smoke stdin pipe unavailable")?;
+            let pipe = owned
+                .child
+                .stdin
+                .take()
+                .context("runtime smoke stdin pipe unavailable")?;
             nonblocking(&pipe).context("configure runtime smoke stdin")?;
             Some(PipeInput::new(pipe, bytes))
         } else {
@@ -568,18 +634,29 @@ mod tests {
 
     #[test]
     fn nonzero_exit_is_not_replaced_by_cleanup_status() {
-        assert_eq!(run("exit 7").expect("nonzero process").status.code(), Some(7));
+        assert_eq!(
+            run("exit 7").expect("nonzero process").status.code(),
+            Some(7)
+        );
     }
 
     #[test]
     fn signal_exit_is_not_replaced_by_cleanup_status() {
-        assert_eq!(run("kill -TERM $$").expect("signal exit").status.signal(), Some(Signal::TERM.as_raw()));
+        assert_eq!(
+            run("kill -TERM $$").expect("signal exit").status.signal(),
+            Some(Signal::TERM.as_raw())
+        );
     }
 
     #[test]
     fn both_streams_allow_the_exact_limit() {
-        let output = run_bounded(&mut shell("printf 1234; printf 5678 >&2"),
-            Duration::from_secs(3), Duration::from_secs(1), 4).expect("exact output caps");
+        let output = run_bounded(
+            &mut shell("printf 1234; printf 5678 >&2"),
+            Duration::from_secs(3),
+            Duration::from_secs(1),
+            4,
+        )
+        .expect("exact output caps");
         assert_eq!(output.stdout, b"1234");
         assert_eq!(output.stderr, b"5678");
     }
@@ -587,8 +664,13 @@ mod tests {
     #[test]
     fn overflow_on_either_stream_is_not_truncated_success() {
         for (source, label) in [("printf 12345", "stdout"), ("printf 12345 >&2", "stderr")] {
-            let error = run_bounded(&mut shell(source), Duration::from_secs(3), Duration::from_secs(1), 4)
-                .expect_err("overflow");
+            let error = run_bounded(
+                &mut shell(source),
+                Duration::from_secs(3),
+                Duration::from_secs(1),
+                4,
+            )
+            .expect_err("overflow");
             let message = format!("{error:#}");
             assert!(message.contains(label), "{message}");
             assert!(message.contains("exceeds 4 bytes"), "{message}");
@@ -598,8 +680,13 @@ mod tests {
     #[test]
     fn flood_is_stopped_before_the_runtime_deadline() {
         let started = Instant::now();
-        let error = run_bounded(&mut shell("while :; do printf abcdefgh; done"),
-            Duration::from_secs(30), Duration::from_secs(1), 64).expect_err("flood must terminate");
+        let error = run_bounded(
+            &mut shell("while :; do printf abcdefgh; done"),
+            Duration::from_secs(30),
+            Duration::from_secs(1),
+            64,
+        )
+        .expect_err("flood must terminate");
         assert!(format!("{error:#}").contains("exceeds 64 bytes"));
         assert!(started.elapsed() < Duration::from_secs(3));
     }
@@ -607,8 +694,13 @@ mod tests {
     #[test]
     fn closed_pipes_do_not_hide_a_running_child() {
         let started = Instant::now();
-        let error = run_bounded(&mut shell("exec 1>&- 2>&-; exec /bin/sleep 60"),
-            Duration::from_millis(150), Duration::from_secs(1), 64).expect_err("running child");
+        let error = run_bounded(
+            &mut shell("exec 1>&- 2>&-; exec /bin/sleep 60"),
+            Duration::from_millis(150),
+            Duration::from_secs(1),
+            64,
+        )
+        .expect_err("running child");
         assert!(error.to_string().contains("timed out"));
         assert!(started.elapsed() < Duration::from_secs(3));
     }
@@ -623,16 +715,29 @@ mod tests {
 
     #[test]
     fn ignored_sigterm_does_not_prevent_cleanup() {
-        let error = run_bounded(&mut shell("trap '' TERM; exec /bin/sleep 60"),
-            Duration::from_millis(150), Duration::from_secs(1), 64).expect_err("deadline");
+        let error = run_bounded(
+            &mut shell("trap '' TERM; exec /bin/sleep 60"),
+            Duration::from_millis(150),
+            Duration::from_secs(1),
+            64,
+        )
+        .expect_err("deadline");
         assert!(error.to_string().contains("timed out"));
         assert!(!format!("{error:#}").contains("cleanup also failed"));
     }
 
     #[test]
     fn reserved_and_caller_group_ids_are_rejected_without_signalling() {
-        for raw in [0, 1, u32::MAX, u32::try_from(getpgrp().as_raw_pid()).expect("positive group")] {
-            assert_eq!(checked_group(raw).expect_err("unsafe group").kind(), io::ErrorKind::InvalidInput);
+        for raw in [
+            0,
+            1,
+            u32::MAX,
+            u32::try_from(getpgrp().as_raw_pid()).expect("positive group"),
+        ] {
+            assert_eq!(
+                checked_group(raw).expect_err("unsafe group").kind(),
+                io::ErrorKind::InvalidInput
+            );
         }
     }
 
@@ -651,24 +756,44 @@ mod tests {
 
     #[test]
     fn owner_drop_terminates_and_reaps_child() {
-        let owned = OwnedSmokeChild::spawn(&mut shell("exec /bin/sleep 60"), Stdio::null()).expect("child");
+        let owned =
+            OwnedSmokeChild::spawn(&mut shell("exec /bin/sleep 60"), Stdio::null()).expect("child");
         let pid = owned.group;
         drop(owned);
-        assert!(matches!(waitid(WaitId::Pid(pid), WaitIdOptions::EXITED | WaitIdOptions::NOHANG), Err(Errno::CHILD)));
+        assert!(matches!(
+            waitid(
+                WaitId::Pid(pid),
+                WaitIdOptions::EXITED | WaitIdOptions::NOHANG
+            ),
+            Err(Errno::CHILD)
+        ));
     }
 
     #[test]
     fn success_still_stops_background_group_members() {
-        let output = run("/bin/sleep 60 >/dev/null 2>&1 & printf '%s' \"$!\"; exit 0").expect("background child");
+        let output = run("/bin/sleep 60 >/dev/null 2>&1 & printf '%s' \"$!\"; exit 0")
+            .expect("background child");
         assert!(output.status.success());
-        let pid: u32 = std::str::from_utf8(&output.stdout).expect("pid output").parse().expect("pid");
+        let pid: u32 = std::str::from_utf8(&output.stdout)
+            .expect("pid output")
+            .parse()
+            .expect("pid");
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => break,
-                Ok(stat) if stat.rsplit_once(") ").is_some_and(|(_, rest)| rest.starts_with('Z') || rest.starts_with('X')) => break,
+                Ok(stat)
+                    if stat.rsplit_once(") ").is_some_and(|(_, rest)| {
+                        rest.starts_with('Z') || rest.starts_with('X')
+                    }) =>
+                {
+                    break;
+                }
                 _ => {
-                    assert!(Instant::now() < deadline, "background group member still running");
+                    assert!(
+                        Instant::now() < deadline,
+                        "background group member still running"
+                    );
                     thread::sleep(POLL_INTERVAL);
                 }
             }
@@ -678,29 +803,46 @@ mod tests {
     #[test]
     fn invalid_budget_is_refused_before_spawn() {
         let mut command = Command::new("/definitely/missing/native-smoke-executable");
-        let error = run_command_with_timeout(&mut command, Duration::ZERO, Duration::from_secs(1)).expect_err("zero budget");
+        let error = run_command_with_timeout(&mut command, Duration::ZERO, Duration::from_secs(1))
+            .expect_err("zero budget");
         assert!(error.to_string().contains("positive bounded"));
     }
 
     #[test]
     fn capture_never_retains_the_overflow_probe_byte() {
         let mut capture = PipeCapture::new(Cursor::new(b"12345"));
-        let mut retained = BoundedBytes { bytes: Vec::new(), limit: 4, label: "stdout" };
+        let mut retained = BoundedBytes {
+            bytes: Vec::new(),
+            limit: 4,
+            label: "stdout",
+        };
         assert!(capture.pump(&mut |bytes| retained.receive(bytes)).is_err());
         assert!(retained.bytes.len() <= 4);
         let mut empty = PipeCapture::new(io::empty());
-        assert!(empty.pump(&mut |bytes| retained.receive(bytes)).expect("EOF"));
+        assert!(
+            empty
+                .pump(&mut |bytes| retained.receive(bytes))
+                .expect("EOF")
+        );
         assert!(empty.eof);
     }
 
     #[test]
     fn observer_keeps_timeout_distinct_from_a_successful_leader_exit() {
         let mut bytes = Vec::new();
-        let result = supervise_with_observer(&mut shell("printf captured; /bin/sleep 60 & exit 0"),
-            Duration::from_secs(3), Duration::from_millis(100), |_| Ok(()), |stream, chunk| {
-                if stream == Stream::Stdout { bytes.extend_from_slice(chunk); }
+        let result = supervise_with_observer(
+            &mut shell("printf captured; /bin/sleep 60 & exit 0"),
+            Duration::from_secs(3),
+            Duration::from_millis(100),
+            |_| Ok(()),
+            |stream, chunk| {
+                if stream == Stream::Stdout {
+                    bytes.extend_from_slice(chunk);
+                }
                 Ok(())
-            }).unwrap();
+            },
+        )
+        .unwrap();
         assert_eq!(result.reason, StopReason::PipeTimeout);
         assert_eq!(result.status.code(), Some(0));
         assert_eq!(bytes, b"captured");
@@ -709,10 +851,17 @@ mod tests {
     #[test]
     fn startup_time_consumes_the_original_leg_deadline() {
         let started = Instant::now();
-        let result = supervise_with_observer(&mut shell("exec /bin/sleep 0.4"),
-            Duration::from_millis(150), Duration::from_millis(100), |_| {
-                thread::sleep(Duration::from_millis(300)); Ok(())
-            }, |_, _| Ok(())).unwrap();
+        let result = supervise_with_observer(
+            &mut shell("exec /bin/sleep 0.4"),
+            Duration::from_millis(150),
+            Duration::from_millis(100),
+            |_| {
+                thread::sleep(Duration::from_millis(300));
+                Ok(())
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap();
         assert_eq!(result.reason, StopReason::RuntimeTimeout);
         assert!(started.elapsed() < Duration::from_secs(2));
     }
@@ -721,24 +870,50 @@ mod tests {
     fn startup_failure_cleans_up_without_joining_inherited_pipes() {
         let mut pid = None;
         let started = Instant::now();
-        let error = supervise_with_observer(&mut shell("/bin/sleep 60 & wait"),
-            Duration::from_secs(3), Duration::from_millis(100), |raw| {
-                pid = Pid::from_raw(i32::try_from(raw).unwrap()); bail!("rejected authority");
-            }, |_, _| Ok(())).unwrap_err();
+        let error = supervise_with_observer(
+            &mut shell("/bin/sleep 60 & wait"),
+            Duration::from_secs(3),
+            Duration::from_millis(100),
+            |raw| {
+                pid = Pid::from_raw(i32::try_from(raw).unwrap());
+                bail!("rejected authority");
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap_err();
         assert!(format!("{error:#}").contains("rejected authority"));
         assert!(started.elapsed() < Duration::from_secs(2));
-        assert!(matches!(waitid(WaitId::Pid(pid.unwrap()), WaitIdOptions::EXITED | WaitIdOptions::NOHANG), Err(Errno::CHILD)));
+        assert!(matches!(
+            waitid(
+                WaitId::Pid(pid.unwrap()),
+                WaitIdOptions::EXITED | WaitIdOptions::NOHANG
+            ),
+            Err(Errno::CHILD)
+        ));
     }
 
     #[test]
     fn observer_failure_also_terminates_and_reaps_the_leader() {
         let mut pid = None;
-        let error = supervise_with_observer(&mut shell("while :; do printf output; done"),
-            Duration::from_secs(3), Duration::from_millis(100), |raw| {
-                pid = Pid::from_raw(i32::try_from(raw).unwrap()); Ok(())
-            }, |_, _| Err(io::Error::other("observer refused bytes"))).unwrap_err();
+        let error = supervise_with_observer(
+            &mut shell("while :; do printf output; done"),
+            Duration::from_secs(3),
+            Duration::from_millis(100),
+            |raw| {
+                pid = Pid::from_raw(i32::try_from(raw).unwrap());
+                Ok(())
+            },
+            |_, _| Err(io::Error::other("observer refused bytes")),
+        )
+        .unwrap_err();
         assert!(format!("{error:#}").contains("observer refused bytes"));
-        assert!(matches!(waitid(WaitId::Pid(pid.unwrap()), WaitIdOptions::EXITED | WaitIdOptions::NOHANG), Err(Errno::CHILD)));
+        assert!(matches!(
+            waitid(
+                WaitId::Pid(pid.unwrap()),
+                WaitIdOptions::EXITED | WaitIdOptions::NOHANG
+            ),
+            Err(Errno::CHILD)
+        ));
     }
 
     #[test]
@@ -746,26 +921,54 @@ mod tests {
         let input = [0, 255, b'x', b'\n', b'\n'];
         let mut command = Command::new("/bin/cat");
         for _ in 0..2 {
-            let output = run_command_with_input(&mut command, Duration::from_secs(3),
-                Duration::from_secs(1), Some(&input)).unwrap();
+            let output = run_command_with_input(
+                &mut command,
+                Duration::from_secs(3),
+                Duration::from_secs(1),
+                Some(&input),
+            )
+            .unwrap();
             assert!(output.status.success());
             assert_eq!(output.stdout, input);
         }
-        assert!(run_command_with_input(&mut command, Duration::from_secs(3),
-            Duration::from_secs(1), Some(&[])).unwrap().stdout.is_empty());
-        assert!(run_command_with_timeout(&mut command, Duration::from_secs(3),
-            Duration::from_secs(1)).unwrap().stdout.is_empty());
+        assert!(
+            run_command_with_input(
+                &mut command,
+                Duration::from_secs(3),
+                Duration::from_secs(1),
+                Some(&[])
+            )
+            .unwrap()
+            .stdout
+            .is_empty()
+        );
+        assert!(
+            run_command_with_timeout(&mut command, Duration::from_secs(3), Duration::from_secs(1))
+                .unwrap()
+                .stdout
+                .is_empty()
+        );
     }
 
     #[test]
     fn full_input_does_not_block_a_guest_that_never_reads_or_exits_early() {
         let input = vec![b'x'; MAX_INPUT_BYTES];
-        let output = run_command_with_input(&mut Command::new("/bin/true"), Duration::from_secs(3),
-            Duration::from_secs(1), Some(&input)).unwrap();
+        let output = run_command_with_input(
+            &mut Command::new("/bin/true"),
+            Duration::from_secs(3),
+            Duration::from_secs(1),
+            Some(&input),
+        )
+        .unwrap();
         assert!(output.status.success());
         let started = Instant::now();
-        let error = run_command_with_input(&mut shell("exec /bin/sleep 60"), Duration::from_millis(150),
-            Duration::from_secs(1), Some(&input)).unwrap_err();
+        let error = run_command_with_input(
+            &mut shell("exec /bin/sleep 60"),
+            Duration::from_millis(150),
+            Duration::from_secs(1),
+            Some(&input),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("timed out"));
         assert!(started.elapsed() < Duration::from_secs(3));
     }
@@ -773,42 +976,70 @@ mod tests {
     #[test]
     fn exact_input_limit_round_trips_and_oversize_never_spawns() {
         let input = vec![b'x'; MAX_INPUT_BYTES];
-        let output = run_command_with_input(&mut Command::new("/bin/cat"), Duration::from_secs(5),
-            Duration::from_secs(1), Some(&input)).unwrap();
+        let output = run_command_with_input(
+            &mut Command::new("/bin/cat"),
+            Duration::from_secs(5),
+            Duration::from_secs(1),
+            Some(&input),
+        )
+        .unwrap();
         assert_eq!(output.stdout, input);
-        let error = run_command_with_input(&mut Command::new("/definitely/absent"), Duration::from_secs(3),
-            Duration::from_secs(1), Some(&vec![b'x'; MAX_INPUT_BYTES + 1])).unwrap_err();
+        let error = run_command_with_input(
+            &mut Command::new("/definitely/absent"),
+            Duration::from_secs(3),
+            Duration::from_secs(1),
+            Some(&vec![b'x'; MAX_INPUT_BYTES + 1]),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("stdin exceeds"));
     }
 
     #[test]
     fn captured_input_keeps_output_limits_and_pipe_cleanup_mandatory() {
-        let error = run_bounded_input(&mut Command::new("/bin/cat"), Duration::from_secs(3),
-            Duration::from_secs(1), 4, Some(b"12345")).unwrap_err();
+        let error = run_bounded_input(
+            &mut Command::new("/bin/cat"),
+            Duration::from_secs(3),
+            Duration::from_secs(1),
+            4,
+            Some(b"12345"),
+        )
+        .unwrap_err();
         assert!(format!("{error:#}").contains("exceeds 4 bytes"));
-        let error = run_command_with_input(&mut shell("/bin/cat; /bin/sleep 60 & exit 0"),
-            Duration::from_secs(3), Duration::from_millis(100), Some(b"input")).unwrap_err();
+        let error = run_command_with_input(
+            &mut shell("/bin/cat; /bin/sleep 60 & exit 0"),
+            Duration::from_secs(3),
+            Duration::from_millis(100),
+            Some(b"input"),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("output pipes remained open"));
     }
 
     fn pipe_run(source: &str, input: &[u8]) -> Result<Output> {
         run_command_with_pipe_input(
-            &mut shell(source), Duration::from_secs(5), Duration::from_millis(100), input,
+            &mut shell(source),
+            Duration::from_secs(5),
+            Duration::from_millis(100),
+            input,
         )
     }
 
     #[test]
     fn pipe_input_preserves_transport_binary_bytes_and_empty_eof() {
         for input in [&[0, 255, b'x', b'\n', b'\n'][..], &[][..]] {
-            let output = pipe_run("test -p /proc/self/fd/0 || exit 9; exec /bin/cat", input).unwrap();
+            let output =
+                pipe_run("test -p /proc/self/fd/0 || exit 9; exec /bin/cat", input).unwrap();
             assert!(output.status.success());
             assert_eq!(output.stdout, input);
             assert!(output.stderr.is_empty());
         }
         let file = run_command_with_input(
             &mut shell("test -f /proc/self/fd/0 || exit 9; exec /bin/cat"),
-            Duration::from_secs(3), Duration::from_secs(1), Some(b"file mode"),
-        ).unwrap();
+            Duration::from_secs(3),
+            Duration::from_secs(1),
+            Some(b"file mode"),
+        )
+        .unwrap();
         assert!(file.status.success());
         assert_eq!(file.stdout, b"file mode");
     }
@@ -821,8 +1052,11 @@ mod tests {
         assert_eq!(output.stdout, input);
         let error = run_command_with_pipe_input(
             &mut Command::new("/definitely/missing-pipe-input-executable"),
-            Duration::from_secs(3), Duration::from_secs(1), &vec![0; MAX_INPUT_BYTES + 1],
-        ).unwrap_err();
+            Duration::from_secs(3),
+            Duration::from_secs(1),
+            &vec![0; MAX_INPUT_BYTES + 1],
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("stdin exceeds"));
     }
 
@@ -833,7 +1067,8 @@ mod tests {
             "/bin/dd if=/dev/zero bs=65536 count=8 2>/dev/null; \
              /bin/dd if=/dev/zero bs=65536 count=8 >&2 2>/dev/null; exec /bin/cat",
             &input,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout, [vec![0; 512 * 1024], input].concat());
         assert_eq!(output.stderr, vec![0; 512 * 1024]);
@@ -845,21 +1080,34 @@ mod tests {
         let mut pid = None;
         let started = Instant::now();
         let (completion, queued) = supervise_with_input(
-            &mut shell("exec /bin/sleep 60"), Duration::from_millis(150),
-            Duration::from_millis(100), InputTransport::Pipe(&input),
-            |raw| { pid = Pid::from_raw(i32::try_from(raw).unwrap()); Ok(()) },
+            &mut shell("exec /bin/sleep 60"),
+            Duration::from_millis(150),
+            Duration::from_millis(100),
+            InputTransport::Pipe(&input),
+            |raw| {
+                pid = Pid::from_raw(i32::try_from(raw).unwrap());
+                Ok(())
+            },
             |_, _| Ok(()),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(completion.reason, StopReason::RuntimeTimeout);
         assert!(queued < input.len());
         assert!(started.elapsed() < Duration::from_secs(3));
-        assert!(matches!(waitid(WaitId::Pid(pid.unwrap()), WaitIdOptions::EXITED | WaitIdOptions::NOHANG), Err(Errno::CHILD)));
+        assert!(matches!(
+            waitid(
+                WaitId::Pid(pid.unwrap()),
+                WaitIdOptions::EXITED | WaitIdOptions::NOHANG
+            ),
+            Err(Errno::CHILD)
+        ));
     }
 
     #[test]
     fn pipe_input_early_close_rejects_zero_but_preserves_native_failure() {
         let input = vec![0; MAX_INPUT_BYTES];
-        let error = pipe_run("exec 0<&-; printf early; /bin/sleep 0.05; exit 0", &input).unwrap_err();
+        let error =
+            pipe_run("exec 0<&-; printf early; /bin/sleep 0.05; exit 0", &input).unwrap_err();
         assert!(error.to_string().contains("before complete stdin delivery"));
         let output = pipe_run("exec 0<&-; printf failed >&2; exit 7", &input).unwrap();
         assert_eq!(output.status.code(), Some(7));
@@ -869,9 +1117,12 @@ mod tests {
     #[test]
     fn pipe_input_timeout_is_not_relabelled_as_incomplete_input() {
         let error = run_command_with_pipe_input(
-            &mut shell("exec 0<&-; exec /bin/sleep 60"), Duration::from_millis(150),
-            Duration::from_millis(100), &vec![0; MAX_INPUT_BYTES],
-        ).unwrap_err();
+            &mut shell("exec 0<&-; exec /bin/sleep 60"),
+            Duration::from_millis(150),
+            Duration::from_millis(100),
+            &vec![0; MAX_INPUT_BYTES],
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("timed out"));
         assert!(!error.to_string().contains("complete stdin delivery"));
     }
@@ -879,9 +1130,13 @@ mod tests {
     #[test]
     fn pipe_input_keeps_stream_quotas_and_inherited_pipe_deadlines() {
         let error = capture_command(
-            &mut Command::new("/bin/cat"), Duration::from_secs(3),
-            Duration::from_millis(100), 4, InputTransport::Pipe(b"12345"),
-        ).unwrap_err();
+            &mut Command::new("/bin/cat"),
+            Duration::from_secs(3),
+            Duration::from_millis(100),
+            4,
+            InputTransport::Pipe(b"12345"),
+        )
+        .unwrap_err();
         assert!(format!("{error:#}").contains("exceeds 4 bytes"));
         let error = pipe_run("/bin/cat; /bin/sleep 60 & exit 0", b"input").unwrap_err();
         assert!(error.to_string().contains("output pipes remained open"));
@@ -891,26 +1146,53 @@ mod tests {
     fn pipe_input_startup_rejection_never_feeds_request_and_reaps_child() {
         let mut pid = None;
         let error = supervise_with_input(
-            &mut shell("exec /bin/cat"), Duration::from_secs(3), Duration::from_millis(100),
+            &mut shell("exec /bin/cat"),
+            Duration::from_secs(3),
+            Duration::from_millis(100),
             InputTransport::Pipe(b"request must not be delivered"),
-            |raw| { pid = Pid::from_raw(i32::try_from(raw).unwrap()); bail!("admission refused") },
-            |_, bytes| { assert!(bytes.is_empty()); Ok(()) },
-        ).unwrap_err();
+            |raw| {
+                pid = Pid::from_raw(i32::try_from(raw).unwrap());
+                bail!("admission refused")
+            },
+            |_, bytes| {
+                assert!(bytes.is_empty());
+                Ok(())
+            },
+        )
+        .unwrap_err();
         assert!(format!("{error:#}").contains("admission refused"));
-        assert!(matches!(waitid(WaitId::Pid(pid.unwrap()), WaitIdOptions::EXITED | WaitIdOptions::NOHANG), Err(Errno::CHILD)));
+        assert!(matches!(
+            waitid(
+                WaitId::Pid(pid.unwrap()),
+                WaitIdOptions::EXITED | WaitIdOptions::NOHANG
+            ),
+            Err(Errno::CHILD)
+        ));
     }
 
     #[test]
     fn pipe_input_observer_failure_still_reaps_the_owned_scope() {
         let mut pid = None;
         let error = supervise_with_input(
-            &mut shell("printf output; exec /bin/sleep 60"), Duration::from_secs(3),
-            Duration::from_millis(100), InputTransport::Pipe(b"request"),
-            |raw| { pid = Pid::from_raw(i32::try_from(raw).unwrap()); Ok(()) },
+            &mut shell("printf output; exec /bin/sleep 60"),
+            Duration::from_secs(3),
+            Duration::from_millis(100),
+            InputTransport::Pipe(b"request"),
+            |raw| {
+                pid = Pid::from_raw(i32::try_from(raw).unwrap());
+                Ok(())
+            },
             |_, _| Err(io::Error::other("observer refused pipe run")),
-        ).unwrap_err();
+        )
+        .unwrap_err();
         assert!(format!("{error:#}").contains("observer refused pipe run"));
-        assert!(matches!(waitid(WaitId::Pid(pid.unwrap()), WaitIdOptions::EXITED | WaitIdOptions::NOHANG), Err(Errno::CHILD)));
+        assert!(matches!(
+            waitid(
+                WaitId::Pid(pid.unwrap()),
+                WaitIdOptions::EXITED | WaitIdOptions::NOHANG
+            ),
+            Err(Errno::CHILD)
+        ));
     }
 
     #[derive(Default)]
@@ -934,24 +1216,35 @@ mod tests {
 
     impl Write for WriteProbe {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.largest_request.set(self.largest_request.get().max(bytes.len()));
+            self.largest_request
+                .set(self.largest_request.get().max(bytes.len()));
             let count = self.actions.pop_front().unwrap_or(Ok(bytes.len()))?;
             assert!(count <= bytes.len());
-            self.received.borrow_mut().extend_from_slice(&bytes[..count]);
+            self.received
+                .borrow_mut()
+                .extend_from_slice(&bytes[..count]);
             Ok(count)
         }
 
-        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
 
     impl Drop for WriteProbe {
-        fn drop(&mut self) { self.dropped.set(true); }
+        fn drop(&mut self) {
+            self.dropped.set(true);
+        }
     }
 
     #[test]
     fn pipe_input_short_writes_and_retryable_errors_preserve_every_byte() {
-        let probe = WriteProbe::with_actions([Ok(2), Err(io::ErrorKind::WouldBlock.into()),
-            Err(io::ErrorKind::Interrupted.into()), Ok(1)]);
+        let probe = WriteProbe::with_actions([
+            Ok(2),
+            Err(io::ErrorKind::WouldBlock.into()),
+            Err(io::ErrorKind::Interrupted.into()),
+            Ok(1),
+        ]);
         let received = probe.received.clone();
         let dropped = probe.dropped.clone();
         let mut input = PipeInput::new(probe, b"abcdef");

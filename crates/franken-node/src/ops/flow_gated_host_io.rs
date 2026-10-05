@@ -152,13 +152,20 @@ impl FileLineage {
         if left == right {
             return;
         }
-        if self.aliases.get(&left).is_some_and(|neighbors| neighbors.contains(&right)) {
+        if self
+            .aliases
+            .get(&left)
+            .is_some_and(|neighbors| neighbors.contains(&right))
+        {
             return;
         }
         if self.alias_edge_count >= MAX_FILE_ALIAS_EDGES {
             self.incomplete = true;
         } else {
-            self.aliases.entry(left.clone()).or_default().insert(right.clone());
+            self.aliases
+                .entry(left.clone())
+                .or_default()
+                .insert(right.clone());
             self.aliases.entry(right).or_default().insert(left);
             self.alias_edge_count += 1;
         }
@@ -207,7 +214,9 @@ struct SecretSamples {
 fn slice_contains(haystack: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty()
         && needle.len() <= haystack.len()
-        && haystack.windows(needle.len()).any(|window| window == needle)
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
 }
 
 /// Match the host provider's first `fd=` argument semantics, including refusing
@@ -337,9 +346,10 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
                     .and_then(|fd| descriptors.get(&fd))
                     .is_some_and(|source| {
                         !source.sensitive_at_open
-                            && source.name.as_ref().is_some_and(|name| {
-                                !lineage.is_sensitive(name)
-                            })
+                            && source
+                                .name
+                                .as_ref()
+                                .is_some_and(|name| !lineage.is_sensitive(name))
                     });
                 if !known_public {
                     self.record_secret(bytes);
@@ -480,7 +490,10 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
             return Err(HostIoError::CapabilityMissing { capability });
         }
         let mut lineage = self.lineage.lock().map_err(|_| HostIoError::Denied {
-            reason: format!("flow_policy: file lineage lock poisoned ({})", self.trace_id),
+            reason: format!(
+                "flow_policy: file lineage lock poisoned ({})",
+                self.trace_id
+            ),
         })?;
         match request {
             // Check both channels before the effect: a hostname can disclose
@@ -511,7 +524,8 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
                 outcome
             }
             HostIoRequest::FsMeta {
-                operation: operation @ (FsOperation::Open | FsOperation::ReadFd | FsOperation::CloseFd),
+                operation:
+                    operation @ (FsOperation::Open | FsOperation::ReadFd | FsOperation::CloseFd),
                 path,
                 arguments,
                 ..
@@ -519,7 +533,8 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
                 dispatch(request, granted)
             }),
             HostIoRequest::FsMeta {
-                operation: operation @ (FsOperation::CopyFile | FsOperation::Rename | FsOperation::Symlink),
+                operation:
+                    operation @ (FsOperation::CopyFile | FsOperation::Rename | FsOperation::Symlink),
                 path,
                 arguments,
                 ..
@@ -578,7 +593,13 @@ mod tests {
         for length in [1, MIN_SECRET_SAMPLE_LEN - 1, MAX_SECRET_SAMPLE_LEN + 1] {
             let gate = gate();
             gate.record_secret(&vec![b'x'; length]);
-            assert!(gate.secrets.lock().expect("sample state").samples.is_empty());
+            assert!(
+                gate.secrets
+                    .lock()
+                    .expect("sample state")
+                    .samples
+                    .is_empty()
+            );
             assert_denied(&gate, b"unrelated public payload");
             assert_denied(&gate, b"");
             gate.record_secret(b"");
@@ -663,7 +684,10 @@ mod tests {
             None
         );
         assert_eq!(descriptor_argument(&["fd=-1".into()]), None);
-        assert_eq!(descriptor_argument(&["fd=18446744073709551616".into()]), None);
+        assert_eq!(
+            descriptor_argument(&["fd=18446744073709551616".into()]),
+            None
+        );
     }
 
     #[test]
@@ -814,7 +838,13 @@ mod tests {
             gate.perform(&request, &[]),
             Err(HostIoError::CapabilityMissing { .. })
         ));
-        assert!(!gate.lineage.lock().expect("lineage").is_sensitive("otherwise-public"));
+        assert!(
+            !gate
+                .lineage
+                .lock()
+                .expect("lineage")
+                .is_sensitive("otherwise-public")
+        );
     }
 
     #[test]

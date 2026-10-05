@@ -8,13 +8,13 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs::File;
-use std::io::{self, Read};
 #[cfg(any(test, not(target_os = "linux")))]
 use std::io::Write as _;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
 #[cfg(not(target_os = "linux"))]
 use std::process::{Child, Stdio};
+use std::process::{Command, Output};
 #[cfg(not(target_os = "linux"))]
 use std::sync::mpsc::{self, Receiver};
 #[cfg(not(target_os = "linux"))]
@@ -689,7 +689,9 @@ pub fn run_audit(project_path: &Path) -> anyhow::Result<MigrationAuditReport> {
                 "js" | "cjs" | "mjs" | "jsx" => {
                     summary.js_files = summary.js_files.saturating_add(1)
                 }
-                "ts" | "tsx" | "mts" | "cts" => summary.ts_files = summary.ts_files.saturating_add(1),
+                "ts" | "tsx" | "mts" | "cts" => {
+                    summary.ts_files = summary.ts_files.saturating_add(1)
+                }
                 _ => {}
             }
         }
@@ -728,12 +730,23 @@ fn record_rewrite_rollback_entry(
     entries: &mut Vec<MigrationRollbackEntry>,
     entry: MigrationRollbackEntry,
 ) -> anyhow::Result<()> {
-    anyhow::ensure!(entries.len() < MAX_TOTAL_FINDINGS, "rewrite plan exceeds entry limit");
-    let total = entries.iter().chain(std::iter::once(&entry)).try_fold(0_usize, |total, item| {
-        total.checked_add(item.original_content.len())
-            .and_then(|value| value.checked_add(item.rewritten_content.len()))
-    }).ok_or_else(|| anyhow::anyhow!("rewrite plan byte count overflow"))?;
-    anyhow::ensure!(total <= 256 * 1024 * 1024, "rewrite plan exceeds total byte budget");
+    anyhow::ensure!(
+        entries.len() < MAX_TOTAL_FINDINGS,
+        "rewrite plan exceeds entry limit"
+    );
+    let total = entries
+        .iter()
+        .chain(std::iter::once(&entry))
+        .try_fold(0_usize, |total, item| {
+            total
+                .checked_add(item.original_content.len())
+                .and_then(|value| value.checked_add(item.rewritten_content.len()))
+        })
+        .ok_or_else(|| anyhow::anyhow!("rewrite plan byte count overflow"))?;
+    anyhow::ensure!(
+        total <= 256 * 1024 * 1024,
+        "rewrite plan exceeds total byte budget"
+    );
     entries.push(entry);
     Ok(())
 }
@@ -1036,11 +1049,14 @@ pub fn run_rewrite(project_path: &Path, apply: bool) -> anyhow::Result<Migration
 
     #[cfg(target_os = "linux")]
     if let Some(transaction) = transaction {
-        let plan = rollback_entries.iter().map(|entry| rewrite_transaction::Edit {
-            path: &entry.path,
-            before: entry.original_content.as_bytes(),
-            after: entry.rewritten_content.as_bytes(),
-        }).collect::<Vec<_>>();
+        let plan = rollback_entries
+            .iter()
+            .map(|entry| rewrite_transaction::Edit {
+                path: &entry.path,
+                before: entry.original_content.as_bytes(),
+                after: entry.rewritten_content.as_bytes(),
+            })
+            .collect::<Vec<_>>();
         transaction.apply(&plan)?;
     }
 
@@ -1183,9 +1199,13 @@ fn native_migration_smoke_command(
     let relative = smoke_target
         .entry_path
         .strip_prefix(&smoke_target.working_dir)
-        .map_err(|err| anyhow::anyhow!("smoke entrypoint is outside its working directory: {err}"))?;
+        .map_err(|err| {
+            anyhow::anyhow!("smoke entrypoint is outside its working directory: {err}")
+        })?;
     if relative.as_os_str().is_empty()
-        || relative.components().any(|part| !matches!(part, std::path::Component::Normal(_)))
+        || relative
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
     {
         anyhow::bail!("smoke entrypoint must be a file beneath its working directory");
     }
@@ -1526,7 +1546,10 @@ mod native_migration_smoke_command_tests {
         .collect();
         assert_eq!(command.get_program(), executable.as_os_str());
         assert_eq!(arguments, expected);
-        assert_eq!(command.get_current_dir(), Some(target.working_dir.as_path()));
+        assert_eq!(
+            command.get_current_dir(),
+            Some(target.working_dir.as_path())
+        );
         assert!(command.get_envs().any(|(key, value)| {
             key == std::ffi::OsStr::new("FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK")
                 && value.is_none()
@@ -1542,13 +1565,23 @@ mod native_migration_smoke_command_tests {
         };
         let command = native_migration_smoke_command(Path::new("/trusted/native"), &target)
             .expect("contained target");
-        assert_eq!(command.get_args().nth(1), Some(std::ffi::OsStr::new("./src/app.js")));
-        assert_eq!(command.get_current_dir(), Some(target.working_dir.as_path()));
+        assert_eq!(
+            command.get_args().nth(1),
+            Some(std::ffi::OsStr::new("./src/app.js"))
+        );
+        assert_eq!(
+            command.get_current_dir(),
+            Some(target.working_dir.as_path())
+        );
     }
 
     #[test]
     fn smoke_target_outside_working_directory_is_refused() {
-        for entry in ["/outside/app.js", "/workspace/project/../app.js", "/workspace/project"] {
+        for entry in [
+            "/outside/app.js",
+            "/workspace/project/../app.js",
+            "/workspace/project",
+        ] {
             let target = MigrationRuntimeSmokeTarget {
                 working_dir: PathBuf::from("/workspace/project"),
                 entry_path: PathBuf::from(entry),
@@ -1694,7 +1727,10 @@ mod migration_smoke_output_tests {
     fn exact_output_cap_is_allowed() {
         let bytes = read_to_end(io::repeat(b'x').take(MIGRATION_SMOKE_MAX_STREAM_BYTES))
             .expect("exact cap");
-        assert_eq!(u64::try_from(bytes.len()).expect("bounded length"), MIGRATION_SMOKE_MAX_STREAM_BYTES);
+        assert_eq!(
+            u64::try_from(bytes.len()).expect("bounded length"),
+            MIGRATION_SMOKE_MAX_STREAM_BYTES
+        );
     }
 
     #[test]
@@ -2495,9 +2531,14 @@ fn is_migration_source_file(path: &Path) -> bool {
 }
 
 fn is_typescript_source_file(path: &Path) -> bool {
-    path.extension().and_then(std::ffi::OsStr::to_str)
-        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(),
-            "ts" | "tsx" | "mts" | "cts"))
+    path.extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "ts" | "tsx" | "mts" | "cts"
+            )
+        })
 }
 
 fn classify_source_module_format(project_path: &Path, source_path: &Path) -> SourceModuleFormat {
@@ -3057,10 +3098,14 @@ fn prove_commonjs_to_esm_precondition(
 
 fn rewrite_esm_imports(source: &str, path: &Path) -> EsmImportRewrite {
     let rewrite = if is_typescript_source_file(path) {
-        let tsx = path.extension().and_then(std::ffi::OsStr::to_str)
+        let tsx = path
+            .extension()
+            .and_then(std::ffi::OsStr::to_str)
             .is_some_and(|extension| extension.eq_ignore_ascii_case("tsx"));
         module_specifiers::rewrite_typescript(source, tsx)
-    } else { module_specifiers::rewrite_esm(source) };
+    } else {
+        module_specifiers::rewrite_esm(source)
+    };
     EsmImportRewrite {
         rewritten_content: rewrite.rewritten_content,
         rewrite_count: rewrite.rewrite_count,

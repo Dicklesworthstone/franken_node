@@ -12,8 +12,7 @@ use serde_json::json;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-const TEST_BUNDLE_HASH: &str =
-    "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+const TEST_BUNDLE_HASH: &str = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
 
 #[test]
 fn counterfactual_receipt_roundtrip_and_tamper_detection() -> TestResult {

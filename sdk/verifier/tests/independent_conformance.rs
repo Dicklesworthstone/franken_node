@@ -15,12 +15,12 @@ use std::collections::BTreeMap;
 use ed25519_dalek::{Signer, SigningKey};
 use serde_json::json;
 
+use frankenengine_verifier_sdk::SDK_VERSION;
 use frankenengine_verifier_sdk::bundle::{BundleError, verify_ed25519_signature};
 use frankenengine_verifier_sdk::capsule::{CapsuleError, CapsuleManifest, validate_manifest};
 use frankenengine_verifier_sdk::counterfactual::{
     CounterfactualReceiptError, verify_counterfactual_receipt,
 };
-use frankenengine_verifier_sdk::SDK_VERSION;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 

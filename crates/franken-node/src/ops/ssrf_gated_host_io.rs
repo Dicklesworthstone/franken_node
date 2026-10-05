@@ -206,7 +206,11 @@ impl PinnedNetworkProvider for SandboxedHostIo {
         deadline: Instant,
     ) -> HostIoOutcome {
         SandboxedHostIo::perform_pinned_network_candidates(
-            self, request, granted, destinations, deadline,
+            self,
+            request,
+            granted,
+            destinations,
+            deadline,
         )
     }
 
@@ -257,9 +261,10 @@ fn validate_pinned_candidates(
     };
     let (host, port) = split_host_port(endpoint).ok_or_else(invalid)?;
     let literal = literal_ip(host);
-    if destinations.iter().any(|address| {
-        address.port() != port || literal.is_some_and(|ip| ip != address.ip())
-    }) {
+    if destinations
+        .iter()
+        .any(|address| address.port() != port || literal.is_some_and(|ip| ip != address.ip()))
+    {
         return Err(invalid());
     }
     Ok(destinations[0])
@@ -415,16 +420,21 @@ fn split_host_port(endpoint: &str) -> Option<(&str, u16)> {
                 || bytes.len() > 63
                 || !bytes[0].is_ascii_alphanumeric()
                 || !bytes[bytes.len() - 1].is_ascii_alphanumeric()
-                || !bytes.iter().all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+                || !bytes
+                    .iter()
+                    .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
             {
                 return None;
             }
         }
         let numeric_alias = canonical.split('.').all(|label| {
             label.bytes().all(|byte| byte.is_ascii_digit())
-                || label.strip_prefix("0x").or_else(|| label.strip_prefix("0X"))
-                    .is_some_and(|digits| !digits.is_empty()
-                        && digits.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                || label
+                    .strip_prefix("0x")
+                    .or_else(|| label.strip_prefix("0X"))
+                    .is_some_and(|digits| {
+                        !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
         });
         if numeric_alias && host.parse::<Ipv4Addr>().is_err() {
             return None;
@@ -706,7 +716,9 @@ impl<P: HostIoProvider, R: EndpointResolver> HostIoProvider for SsrfGatedHostIo<
         let (endpoint, use_tls) = match request {
             HostIoRequest::NetworkSend { endpoint, .. }
             | HostIoRequest::NetworkRecv { endpoint, .. } => (endpoint, false),
-            HostIoRequest::NetworkRequest { endpoint, use_tls, .. } => (endpoint, *use_tls),
+            HostIoRequest::NetworkRequest {
+                endpoint, use_tls, ..
+            } => (endpoint, *use_tls),
             HostIoRequest::FsRead { .. }
             | HostIoRequest::FsWrite { .. }
             | HostIoRequest::FsMeta { .. }
@@ -729,7 +741,9 @@ impl<P: HostIoProvider, R: EndpointResolver> HostIoProvider for SsrfGatedHostIo<
         let (endpoint, use_tls) = match request {
             HostIoRequest::NetworkSend { endpoint, .. }
             | HostIoRequest::NetworkRecv { endpoint, .. } => (endpoint, false),
-            HostIoRequest::NetworkRequest { endpoint, use_tls, .. } => (endpoint, *use_tls),
+            HostIoRequest::NetworkRequest {
+                endpoint, use_tls, ..
+            } => (endpoint, *use_tls),
             HostIoRequest::FsRead { .. }
             | HostIoRequest::FsWrite { .. }
             | HostIoRequest::FsMeta { .. }
@@ -812,12 +826,21 @@ mod tests {
         );
         let original = request("service.example:80", false);
         let before = original.clone();
-        assert!(gate.perform(&original, &[HostIoCapability::NetworkSend]).is_ok());
+        assert!(
+            gate.perform(&original, &[HostIoCapability::NetworkSend])
+                .is_ok()
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(original, before);
-        assert_eq!(*seen.lock().unwrap(), vec![request("93.184.216.34:80", false)]);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![request("93.184.216.34:80", false)]
+        );
         assert_eq!(gate.audit_records()[0].host, "service.example");
-        assert!(gate.perform(&original, &[HostIoCapability::NetworkSend]).is_err());
+        assert!(
+            gate.perform(&original, &[HostIoCapability::NetworkSend])
+                .is_err()
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(seen.lock().unwrap().len(), 1);
     }
@@ -839,8 +862,13 @@ mod tests {
                     first: addresses.iter().map(|ip| ip.parse().unwrap()).collect(),
                 },
             );
-            assert!(gate.perform(&request("service.example:80", false),
-                &[HostIoCapability::NetworkSend]).is_err());
+            assert!(
+                gate.perform(
+                    &request("service.example:80", false),
+                    &[HostIoCapability::NetworkSend]
+                )
+                .is_err()
+            );
             assert!(seen.lock().unwrap().is_empty());
         }
     }
@@ -853,16 +881,24 @@ mod tests {
             RecordingInner(Arc::clone(&seen)),
             SsrfPolicyTemplate::default_template("tls".into()),
             "tls",
-            Answers { calls: Arc::clone(&calls), first: Vec::new() },
+            Answers {
+                calls: Arc::clone(&calls),
+                first: Vec::new(),
+            },
         );
-        let outcome = gate.perform(&request("service.example:443", true),
-            &[HostIoCapability::NetworkSend]);
+        let outcome = gate.perform(
+            &request("service.example:443", true),
+            &[HostIoCapability::NetworkSend],
+        );
         assert!(matches!(outcome, Err(HostIoError::Denied { reason })
             if reason.contains("tls_address_pinning_unavailable")));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert!(seen.lock().unwrap().is_empty());
         let numeric = request("93.184.216.34:443", true);
-        assert!(gate.perform(&numeric, &[HostIoCapability::NetworkSend]).is_ok());
+        assert!(
+            gate.perform(&numeric, &[HostIoCapability::NetworkSend])
+                .is_ok()
+        );
         assert_eq!(*seen.lock().unwrap(), vec![numeric]);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
@@ -880,8 +916,12 @@ mod tests {
                 first: vec!["93.184.216.34".parse().unwrap()],
             },
         );
-        assert!(matches!(gate.perform(&request("service.example:80", false), &[]),
-            Err(HostIoError::CapabilityMissing { capability: HostIoCapability::NetworkSend })));
+        assert!(matches!(
+            gate.perform(&request("service.example:80", false), &[]),
+            Err(HostIoError::CapabilityMissing {
+                capability: HostIoCapability::NetworkSend
+            })
+        ));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert!(seen.lock().unwrap().is_empty());
         assert_eq!(gate.audit_records()[0].action, Action::Deny);
@@ -890,18 +930,44 @@ mod tests {
     #[test]
     fn socket_endpoint_parser_rejects_ambiguous_or_non_socket_inputs() {
         for endpoint in [
-            "", "service.example", ":80", "host:0", "host:+80", "host:65536",
-            "http://host:80", "user@host:80", "host/path:80", "host\\path:80",
-            " host:80", "host :80", "host\r\n:80", "host\0:80", "a..b:80",
-            "host..:80", "[127.0.0.1]:80", "::1:80", "[::1:80", "::1]:80",
-            "[fe80::1%eth0]:80", "127.1:80", "2130706433:80", "0x7f000001:80",
-            "0177.0.0.1:80", "127.0.0.1.:80", "-host:80", "host-:80",
+            "",
+            "service.example",
+            ":80",
+            "host:0",
+            "host:+80",
+            "host:65536",
+            "http://host:80",
+            "user@host:80",
+            "host/path:80",
+            "host\\path:80",
+            " host:80",
+            "host :80",
+            "host\r\n:80",
+            "host\0:80",
+            "a..b:80",
+            "host..:80",
+            "[127.0.0.1]:80",
+            "::1:80",
+            "[::1:80",
+            "::1]:80",
+            "[fe80::1%eth0]:80",
+            "127.1:80",
+            "2130706433:80",
+            "0x7f000001:80",
+            "0177.0.0.1:80",
+            "127.0.0.1.:80",
+            "-host:80",
+            "host-:80",
         ] {
             assert!(split_host_port(endpoint).is_none(), "{endpoint:?}");
         }
         for endpoint in [
-            "service.example:80", "Service.Example.:443", "localhost:1",
-            "93.184.216.34:65535", "[::1]:443", "[2001:4860:4860::8888]:53",
+            "service.example:80",
+            "Service.Example.:443",
+            "localhost:1",
+            "93.184.216.34:65535",
+            "[::1]:443",
+            "[2001:4860:4860::8888]:53",
         ] {
             assert!(split_host_port(endpoint).is_some(), "{endpoint:?}");
         }
@@ -912,7 +978,9 @@ mod tests {
         #[derive(Debug)]
         struct EntropyOnly;
         impl HostIoProvider for EntropyOnly {
-            fn name(&self) -> &str { "entropy-only" }
+            fn name(&self) -> &str {
+                "entropy-only"
+            }
             fn perform(&self, request: &HostIoRequest, _: &[HostIoCapability]) -> HostIoOutcome {
                 match request {
                     HostIoRequest::RandomRead { byte_len } => Ok(HostIoResponse::RandomRead {
@@ -923,8 +991,13 @@ mod tests {
             }
         }
         let gate = SsrfGatedHostIo::new(EntropyOnly, "generic-provider");
-        assert_eq!(gate.perform(&HostIoRequest::RandomRead { byte_len: 2 },
-            &[HostIoCapability::RandomRead]), Ok(HostIoResponse::RandomRead { bytes: vec![9, 9] }));
+        assert_eq!(
+            gate.perform(
+                &HostIoRequest::RandomRead { byte_len: 2 },
+                &[HostIoCapability::RandomRead]
+            ),
+            Ok(HostIoResponse::RandomRead { bytes: vec![9, 9] })
+        );
         assert!(matches!(gate.perform(&request("service.invalid:443", true),
             &[HostIoCapability::NetworkSend]), Err(HostIoError::Denied { reason })
             if reason.contains("tls_address_pinning_unavailable")));
@@ -936,9 +1009,16 @@ mod tests {
         let provider = RecordingInner(Arc::clone(&seen));
         let original = request("93.184.216.34:443", true);
         for address in ["93.184.216.34:80", "127.0.0.1:443"] {
-            assert!(perform_numeric_network(&provider, &original,
-                &[HostIoCapability::NetworkSend], address.parse().unwrap(),
-                Instant::now() + Duration::from_secs(1)).is_err());
+            assert!(
+                perform_numeric_network(
+                    &provider,
+                    &original,
+                    &[HostIoCapability::NetworkSend],
+                    address.parse().unwrap(),
+                    Instant::now() + Duration::from_secs(1)
+                )
+                .is_err()
+            );
         }
         assert!(seen.lock().unwrap().is_empty());
     }

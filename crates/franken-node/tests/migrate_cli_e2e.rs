@@ -110,14 +110,25 @@ mod native_smoke_admission_regressions {
                 bin.display(),
                 std::env::var("PATH").unwrap_or_default()
             );
-            Self { root, project, marker, path }
+            Self {
+                root,
+                project,
+                marker,
+                path,
+            }
         }
 
         fn environment(&self) -> [(&'static str, String); 3] {
             [
                 ("PATH", self.path.clone()),
-                ("FN_TEST_REFERENCE_MARKER", self.marker.to_string_lossy().into_owned()),
-                ("FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK", "1".to_string()),
+                (
+                    "FN_TEST_REFERENCE_MARKER",
+                    self.marker.to_string_lossy().into_owned(),
+                ),
+                (
+                    "FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK",
+                    "1".to_string(),
+                ),
             ]
         }
     }
@@ -125,14 +136,32 @@ mod native_smoke_admission_regressions {
     fn assert_native_failure(report: &serde_json::Value) {
         assert_eq!(report["status"], "fail", "{report}");
         let checks = report["checks"].as_array().expect("validation checks");
-        for id in ["mig-validate-001", "mig-validate-002", "mig-validate-003", "mig-validate-004"] {
-            let check = checks.iter().find(|check| check["id"] == id).expect("static check");
-            assert_eq!(check["passed"], true, "must reach native execution: {check}");
+        for id in [
+            "mig-validate-001",
+            "mig-validate-002",
+            "mig-validate-003",
+            "mig-validate-004",
+        ] {
+            let check = checks
+                .iter()
+                .find(|check| check["id"] == id)
+                .expect("static check");
+            assert_eq!(
+                check["passed"], true,
+                "must reach native execution: {check}"
+            );
         }
-        let smoke = checks.iter().find(|check| check["id"] == "mig-validate-005")
+        let smoke = checks
+            .iter()
+            .find(|check| check["id"] == "mig-validate-005")
             .expect("runtime check");
         assert_eq!(smoke["passed"], false);
-        assert!(smoke["message"].as_str().expect("smoke message").contains("native runtime"));
+        assert!(
+            smoke["message"]
+                .as_str()
+                .expect("smoke message")
+                .contains("native runtime")
+        );
     }
 
     #[test]
@@ -145,10 +174,13 @@ mod native_smoke_admission_regressions {
             &fixture.environment(),
         );
         assert!(!output.status.success());
-        let report: serde_json::Value = serde_json::from_slice(&output.stdout)
-            .expect("native validation JSON");
+        let report: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("native validation JSON");
         assert_native_failure(&report);
-        assert!(!fixture.marker.exists(), "reference code must never execute");
+        assert!(
+            !fixture.marker.exists(),
+            "reference code must never execute"
+        );
     }
 
     #[test]
@@ -160,14 +192,21 @@ mod native_smoke_admission_regressions {
             Duration::from_secs(30),
             &fixture.environment(),
         );
-        let report: serde_json::Value = serde_json::from_slice(&output.stdout)
-            .expect("native migration report JSON");
+        let report: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("native migration report JSON");
         assert_native_failure(&report["validation"]);
         assert_eq!(report["executive_summary"]["go_no_go"], "no_go");
-        let rollout = report["rollout_plan"]["phases"].as_array().expect("rollout phases")
-            .iter().find(|phase| phase["name"] == "rollout").expect("rollout phase");
+        let rollout = report["rollout_plan"]["phases"]
+            .as_array()
+            .expect("rollout phases")
+            .iter()
+            .find(|phase| phase["name"] == "rollout")
+            .expect("rollout phase");
         assert_eq!(rollout["status"], "blocked");
-        assert!(!fixture.marker.exists(), "report must not try reference fallbacks");
+        assert!(
+            !fixture.marker.exists(),
+            "report must not try reference fallbacks"
+        );
     }
 
     #[test]
@@ -185,13 +224,26 @@ mod native_smoke_admission_regressions {
             .envs(fixture.environment())
             .output()
             .expect("renamed native validation");
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
-        let report: serde_json::Value = serde_json::from_slice(&output.stdout)
-            .expect("renamed validation JSON");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let report: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("renamed validation JSON");
         assert_eq!(report["status"], "pass");
-        let smoke = report["checks"].as_array().expect("checks")
-            .iter().find(|check| check["id"] == "mig-validate-005").expect("native smoke");
-        assert!(smoke["message"].as_str().expect("message").contains("runtime=franken-node"));
+        let smoke = report["checks"]
+            .as_array()
+            .expect("checks")
+            .iter()
+            .find(|check| check["id"] == "mig-validate-005")
+            .expect("native smoke");
+        assert!(
+            smoke["message"]
+                .as_str()
+                .expect("message")
+                .contains("runtime=franken-node")
+        );
         assert!(!fixture.marker.exists());
     }
 }
@@ -2134,7 +2186,10 @@ fn migrate_validate_native_failure_never_launches_hanging_reference() {
             Duration::from_secs(20),
             &[
                 ("PATH", shimmed_path),
-                ("FN_TEST_REFERENCE_MARKER", marker.to_string_lossy().into_owned()),
+                (
+                    "FN_TEST_REFERENCE_MARKER",
+                    marker.to_string_lossy().into_owned(),
+                ),
             ],
         );
 
@@ -2149,6 +2204,9 @@ fn migrate_validate_native_failure_never_launches_hanging_reference() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("[mig-validate-005] FAIL"));
         assert!(stdout.contains("native runtime `franken-node` exited"));
-        assert!(!marker.exists(), "the hanging reference must not be launched");
+        assert!(
+            !marker.exists(),
+            "the hanging reference must not be launched"
+        );
     }
 }

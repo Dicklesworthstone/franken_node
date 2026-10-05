@@ -7,6 +7,7 @@ pub mod extension_registry;
 pub mod manifest;
 pub mod migration_kit;
 pub mod module_resolution_graph;
+pub mod npm_registry_signals;
 pub mod project_scanner;
 pub mod provenance;
 pub mod provenance_gate;
@@ -18,7 +19,6 @@ pub mod revocation_registry;
 pub mod transparency_verifier;
 pub mod trust_card;
 pub mod trust_card_registry_store;
-pub mod npm_registry_signals;
 pub mod typosquat;
 
 #[cfg(all(test, feature = "engine"))]

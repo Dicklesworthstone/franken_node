@@ -5,7 +5,9 @@
 //! syscall trace. Transient/external effects and the named exclusions are out
 //! of scope. The caller must finish process cleanup before observing a tree.
 
-use super::{MAX_ENTRIES, MAX_PATH_BYTES, MAX_PROJECT_BYTES, budget, open_regular, same_file_version};
+use super::{
+    MAX_ENTRIES, MAX_PATH_BYTES, MAX_PROJECT_BYTES, budget, open_regular, same_file_version,
+};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -23,7 +25,11 @@ const PREVIEW_LIMIT: usize = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum NodeKind { File, Directory, Symlink }
+pub enum NodeKind {
+    File,
+    Directory,
+    Symlink,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeState {
@@ -35,7 +41,11 @@ pub struct NodeState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ChangeKind { Created, Modified, Removed }
+pub enum ChangeKind {
+    Created,
+    Modified,
+    Removed,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Change {
@@ -71,61 +81,126 @@ pub fn observe(root: &Path, deadline: Instant) -> Result<State> {
     let mut total_bytes = 0_usize;
     while let Some(relative) = pending.pop() {
         budget(deadline)?;
-        if excluded(&relative) { continue; }
-        ensure!(state.len() < MAX_ENTRIES, "workspace observation entry limit exceeded");
-        let text = if relative.as_os_str().is_empty() { "." } else {
-            relative.to_str().context("non-UTF-8 workspace output path refused")?
+        if excluded(&relative) {
+            continue;
+        }
+        ensure!(
+            state.len() < MAX_ENTRIES,
+            "workspace observation entry limit exceeded"
+        );
+        let text = if relative.as_os_str().is_empty() {
+            "."
+        } else {
+            relative
+                .to_str()
+                .context("non-UTF-8 workspace output path refused")?
         };
-        ensure!(text.len() <= MAX_PATH_BYTES, "workspace output path too long");
-        let path = if relative.as_os_str().is_empty() { root.clone() }
-            else { root.join(&relative) };
+        ensure!(
+            text.len() <= MAX_PATH_BYTES,
+            "workspace output path too long"
+        );
+        let path = if relative.as_os_str().is_empty() {
+            root.clone()
+        } else {
+            root.join(&relative)
+        };
         let metadata = fs::symlink_metadata(&path)?;
         let (kind, length, sha256) = if metadata.is_symlink() {
-            ensure!(!relative.as_os_str().is_empty(), "workspace root was replaced by a symlink");
+            ensure!(
+                !relative.as_os_str().is_empty(),
+                "workspace root was replaced by a symlink"
+            );
             let target = fs::read_link(&path)?;
             let bytes = target.as_os_str().as_encoded_bytes();
-            ensure!(bytes.len() <= MAX_PATH_BYTES, "workspace link target too long");
-            (NodeKind::Symlink, bytes.len() as u64, Some(hex::encode(Sha256::digest(bytes))))
+            ensure!(
+                bytes.len() <= MAX_PATH_BYTES,
+                "workspace link target too long"
+            );
+            (
+                NodeKind::Symlink,
+                bytes.len() as u64,
+                Some(hex::encode(Sha256::digest(bytes))),
+            )
         } else if metadata.is_dir() {
             for child in fs::read_dir(&path)? {
                 budget(deadline)?;
                 let child = child?;
                 let child_relative = relative.join(child.file_name());
-                if excluded(&child_relative) { continue; }
-                ensure!(state.len() + pending.len() + 1 < MAX_ENTRIES,
-                    "workspace observation entry limit exceeded");
+                if excluded(&child_relative) {
+                    continue;
+                }
+                ensure!(
+                    state.len() + pending.len() + 1 < MAX_ENTRIES,
+                    "workspace observation entry limit exceeded"
+                );
                 pending.push(child_relative);
             }
             (NodeKind::Directory, 0, None)
         } else if metadata.is_file() {
-            ensure!(!relative.as_os_str().is_empty(), "workspace root is no longer a directory");
-            ensure!(metadata.nlink() == 1, "hard-linked workspace outputs are not supported");
+            ensure!(
+                !relative.as_os_str().is_empty(),
+                "workspace root is no longer a directory"
+            );
+            ensure!(
+                metadata.nlink() == 1,
+                "hard-linked workspace outputs are not supported"
+            );
             let mut file = open_regular(&path)?;
             let before = file.metadata()?;
-            ensure!(same_file_version(&metadata, &before), "workspace output changed before observation");
+            ensure!(
+                same_file_version(&metadata, &before),
+                "workspace output changed before observation"
+            );
             let remaining = MAX_PROJECT_BYTES - total_bytes;
-            ensure!(before.len() <= remaining as u64, "workspace output byte limit exceeded");
+            ensure!(
+                before.len() <= remaining as u64,
+                "workspace output byte limit exceeded"
+            );
             let mut size = 0_usize;
             let mut hash = Sha256::new();
             let mut chunk = [0_u8; 65536];
             loop {
                 budget(deadline)?;
-                let request = chunk.len().min(remaining.saturating_sub(size).saturating_add(1));
+                let request = chunk
+                    .len()
+                    .min(remaining.saturating_sub(size).saturating_add(1));
                 let count = file.read(&mut chunk[..request])?;
-                if count == 0 { break; }
-                ensure!(size + count <= remaining, "workspace output byte limit exceeded");
+                if count == 0 {
+                    break;
+                }
+                ensure!(
+                    size + count <= remaining,
+                    "workspace output byte limit exceeded"
+                );
                 size += count;
                 hash.update(&chunk[..count]);
             }
-            ensure!(same_file_version(&before, &file.metadata()?), "workspace output changed during observation");
+            ensure!(
+                same_file_version(&before, &file.metadata()?),
+                "workspace output changed during observation"
+            );
             total_bytes += size;
-            (NodeKind::File, size as u64, Some(hex::encode(hash.finalize())))
+            (
+                NodeKind::File,
+                size as u64,
+                Some(hex::encode(hash.finalize())),
+            )
         } else {
             bail!("nonregular workspace output refused: {text}");
         };
-        ensure!(same_file_version(&metadata, &fs::symlink_metadata(&path)?),
-            "workspace output changed during observation");
-        state.insert(text.to_owned(), NodeState { kind, mode: metadata.mode() & 0o7777, length, sha256 });
+        ensure!(
+            same_file_version(&metadata, &fs::symlink_metadata(&path)?),
+            "workspace output changed during observation"
+        );
+        state.insert(
+            text.to_owned(),
+            NodeState {
+                kind,
+                mode: metadata.mode() & 0o7777,
+                length,
+                sha256,
+            },
+        );
     }
     Ok(state)
 }
@@ -135,12 +210,21 @@ pub fn observe(root: &Path, deadline: Instant) -> Result<State> {
 /// of a final-state effect, whereas the resulting bytes of a write are.
 pub fn delta(before: &State, after: &State) -> Vec<Change> {
     let paths: BTreeSet<_> = before.keys().chain(after.keys()).collect();
-    paths.into_iter().filter(|path| before.get(*path) != after.get(*path)).map(|path| Change {
-        path: path.clone(),
-        change: if !before.contains_key(path) { ChangeKind::Created }
-            else if !after.contains_key(path) { ChangeKind::Removed } else { ChangeKind::Modified },
-        after: after.get(path).cloned(),
-    }).collect()
+    paths
+        .into_iter()
+        .filter(|path| before.get(*path) != after.get(*path))
+        .map(|path| Change {
+            path: path.clone(),
+            change: if !before.contains_key(path) {
+                ChangeKind::Created
+            } else if !after.contains_key(path) {
+                ChangeKind::Removed
+            } else {
+                ChangeKind::Modified
+            },
+            after: after.get(path).cloned(),
+        })
+        .collect()
 }
 
 pub fn summarize(changes: &[Change]) -> Result<DeltaSummary> {
@@ -152,9 +236,12 @@ pub fn summarize(changes: &[Change]) -> Result<DeltaSummary> {
         hash.update((bytes.len() as u64).to_le_bytes());
         hash.update(bytes);
     }
-    Ok(DeltaSummary { sha256: hex::encode(hash.finalize()), changed_paths: changes.len(),
+    Ok(DeltaSummary {
+        sha256: hex::encode(hash.finalize()),
+        changed_paths: changes.len(),
         changes: changes.iter().take(PREVIEW_LIMIT).cloned().collect(),
-        details_truncated: changes.len() > PREVIEW_LIMIT })
+        details_truncated: changes.len() > PREVIEW_LIMIT,
+    })
 }
 
 #[cfg(test)]
@@ -163,7 +250,9 @@ mod tests {
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::time::Duration;
 
-    fn deadline() -> Instant { Instant::now() + Duration::from_secs(10) }
+    fn deadline() -> Instant {
+        Instant::now() + Duration::from_secs(10)
+    }
 
     #[test]
     fn captures_writes_deletions_permissions_and_root_changes_without_file_bytes() {
@@ -192,7 +281,10 @@ mod tests {
         symlink("/unreadable/outside", root.path().join("external")).unwrap();
         let state = observe(root.path(), deadline()).unwrap();
         assert_eq!(state["dangling"].kind, NodeKind::Symlink);
-        assert_eq!(state["external"].sha256, Some(hex::encode(Sha256::digest(b"/unreadable/outside"))));
+        assert_eq!(
+            state["external"].sha256,
+            Some(hex::encode(Sha256::digest(b"/unreadable/outside")))
+        );
     }
 
     #[test]
@@ -203,7 +295,10 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         let before = observe(root.path(), deadline()).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(delta(&before, &observe(root.path(), deadline()).unwrap()).len(), 1);
+        assert_eq!(
+            delta(&before, &observe(root.path(), deadline()).unwrap()).len(),
+            1
+        );
         fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();
         let changes = delta(&before, &observe(root.path(), deadline()).unwrap());
@@ -230,8 +325,16 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         assert!(observe(root.path(), Instant::now()).is_err());
         let output = root.path().join("oversized");
-        fs::File::create(&output).unwrap().set_len(MAX_PROJECT_BYTES as u64 + 1).unwrap();
-        assert!(observe(root.path(), deadline()).unwrap_err().to_string().contains("byte limit"));
+        fs::File::create(&output)
+            .unwrap()
+            .set_len(MAX_PROJECT_BYTES as u64 + 1)
+            .unwrap();
+        assert!(
+            observe(root.path(), deadline())
+                .unwrap_err()
+                .to_string()
+                .contains("byte limit")
+        );
     }
 
     #[test]
@@ -239,7 +342,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         fs::write(root.path().join("a"), "data").unwrap();
         fs::hard_link(root.path().join("a"), root.path().join("b")).unwrap();
-        assert!(observe(root.path(), deadline()).unwrap_err().to_string().contains("hard-linked"));
+        assert!(
+            observe(root.path(), deadline())
+                .unwrap_err()
+                .to_string()
+                .contains("hard-linked")
+        );
     }
 
     #[test]
@@ -248,19 +356,34 @@ mod tests {
         let alias = root.path().join("alias");
         symlink(root.path(), &alias).unwrap();
         for path in [&alias, &alias.join(""), &alias.join(".")] {
-            assert!(observe(path, deadline()).unwrap_err().to_string().contains("root"));
+            assert!(
+                observe(path, deadline())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("root")
+            );
         }
         // A real root remains observable in all equivalent lexical forms.
         let expected = observe(root.path(), deadline()).unwrap();
-        assert_eq!(expected, observe(&root.path().join(""), deadline()).unwrap());
-        assert_eq!(expected, observe(&root.path().join("."), deadline()).unwrap());
+        assert_eq!(
+            expected,
+            observe(&root.path().join(""), deadline()).unwrap()
+        );
+        assert_eq!(
+            expected,
+            observe(&root.path().join("."), deadline()).unwrap()
+        );
     }
 
     #[test]
     fn full_delta_hash_covers_changes_beyond_preview() {
-        let changes: Vec<_> = (0..25).map(|i| Change {
-            path: format!("file-{i:02}"), change: ChangeKind::Removed, after: None,
-        }).collect();
+        let changes: Vec<_> = (0..25)
+            .map(|i| Change {
+                path: format!("file-{i:02}"),
+                change: ChangeKind::Removed,
+                after: None,
+            })
+            .collect();
         let first = summarize(&changes).unwrap();
         let mut changed = changes;
         changed[24].path = "different-last-path".into();
