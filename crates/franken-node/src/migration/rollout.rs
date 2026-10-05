@@ -4,6 +4,10 @@
 //! existing native rewrite's `txn-...` as the migration ID binds source recovery
 //! to that exact journal. Rollback persists intent before restoring files and
 //! records completion only after the native recovery protocol succeeds.
+//! A complete blocking lockstep regression can trigger that same recovery path
+//! during promotion. Malformed, foreign or reference-disagreement evidence
+//! blocks promotion without restoring sources. Evidence is trusted local input;
+//! structural consistency does not authenticate it or cover unmeasured modules.
 //!
 //! Rollout stages are local control state, not a traffic-routing implementation.
 //! Unbound rollouts can be aborted but never claim to restore source files.
@@ -251,6 +255,8 @@ pub struct RolloutConfig {
     pub ramp_step_pct: u8,
     pub min_confidence_score: f64,
     pub require_lockstep_evidence: bool,
+    /// Restore the bound native transaction on low confidence or a complete
+    /// current-input blocking regression. Invalid evidence never triggers it.
     pub auto_rollback_on_failure: bool,
     pub force: bool,
     pub lockstep_report: Option<PathBuf>,
@@ -313,22 +319,33 @@ fn lockstep_input_payload(project: &Path) -> io::Result<Vec<u8>> {
 /// This checks unsigned report consistency and the harness's explicit input,
 /// not authenticity, executable identity, or transitive module coverage.
 pub fn verify_lockstep_evidence(project: &Path, report_path: &Path) -> Result<String, String> {
+    match assess_lockstep_evidence(project, report_path)? {
+        LockstepEvidence::Passed(digest) => Ok(digest),
+        LockstepEvidence::Regressed(reason) => Err(reason),
+    }
+}
+
+enum LockstepEvidence {
+    Passed(String),
+    Regressed(String),
+}
+
+/// A report rejection is not necessarily evidence of a workload regression.
+/// Only complete current-input product/reference disagreements may authorize
+/// automatic source recovery. Parse errors, foreign evidence, incomplete legs,
+/// inconsistent summaries and reference disagreement must not restore files.
+fn assess_lockstep_evidence(project: &Path, report_path: &Path) -> Result<LockstepEvidence, String> {
     use frankenengine_node::runtime::nversion_oracle::{
         CheckOutcome, DivergenceReport, OracleVerdict, SCHEMA_VERSION,
     };
+    use std::collections::BTreeMap;
 
     let raw = read_lockstep_file(report_path)
         .map_err(|e| format!("cannot read lockstep report {}: {e}", report_path.display()))?;
     let report: DivergenceReport = serde_json::from_slice(&raw)
         .map_err(|e| format!("lockstep report is not a `verify lockstep --json` report: {e}"))?;
-    if report.verdict != OracleVerdict::Pass {
-        return Err(format!("lockstep report verdict is {:?}, not Pass; resolve divergences before promotion", report.verdict));
-    }
     if report.schema_version != SCHEMA_VERSION || report.trace_id.trim().is_empty() {
         return Err("lockstep report has an unsupported schema or missing trace identity".into());
-    }
-    if !report.divergences.is_empty() {
-        return Err("lockstep report contains divergences despite its declared Pass verdict".into());
     }
     if report.checks.is_empty() {
         return Err("lockstep report contains no cross-runtime checks".to_string());
@@ -352,19 +369,98 @@ pub fn verify_lockstep_evidence(project: &Path, report_path: &Path) -> Result<St
     let expected = lockstep_input_payload(project)
         .map_err(|e| format!("cannot read current lockstep input: {e}"))?;
     let mut checks = BTreeSet::new();
+    let mut divergent_checks = BTreeMap::new();
     for check in &report.checks {
         if check.check_id.trim().is_empty()
             || !checks.insert(&check.check_id)
             || check.trace_id != report.trace_id
-            || !matches!(check.outcome.as_ref(), Some(CheckOutcome::Agree { .. }))
         {
-            return Err("lockstep report has duplicate, foreign, unfinished or divergent checks".into());
+            return Err("lockstep report has duplicate or foreign checks".into());
         }
         if check.input != expected {
             return Err(format!("lockstep report check {} was produced for different input than this project's current state; re-run `franken-node verify lockstep {} --json`", check.check_id, project.display()));
         }
+        match check.outcome.as_ref() {
+            Some(CheckOutcome::Agree { .. }) => {}
+            Some(CheckOutcome::Diverge { outputs }) => {
+                if outputs.len() != report.runtimes.len()
+                    || !outputs.keys().eq(report.runtimes.keys())
+                {
+                    return Err("lockstep divergence has missing or unknown runtime outputs".into());
+                }
+                let mut references = report.runtimes.iter()
+                    .filter(|(_, runtime)| runtime.is_reference)
+                    .map(|(id, _)| &outputs[id]);
+                let reference = references.next().ok_or("missing reference observation")?;
+                if references.any(|output| output != reference) {
+                    return Err("reference runtimes disagree; automatic source recovery is not authorized".into());
+                }
+                if report.runtimes.iter()
+                    .filter(|(_, runtime)| !runtime.is_reference)
+                    .all(|(id, _)| &outputs[id] == reference)
+                {
+                    return Err("declared divergence contains agreeing product and reference outputs".into());
+                }
+                divergent_checks.insert(check.check_id.as_str(), (check.boundary_scope, outputs));
+            }
+            None => return Err("lockstep report contains unfinished checks".into()),
+        }
     }
-    Ok(format!("sha256:{}", hex::encode(Sha256::digest(&raw))))
+    let digest = format!("sha256:{}", hex::encode(Sha256::digest(&raw)));
+    if report.verdict == OracleVerdict::Pass {
+        if !report.divergences.is_empty() || !divergent_checks.is_empty() {
+            return Err("lockstep report contains divergences despite its declared Pass verdict".into());
+        }
+        return Ok(LockstepEvidence::Passed(digest));
+    }
+    if divergent_checks.is_empty() {
+        return Err("lockstep report is not Pass but contains no measured product divergence".into());
+    }
+    let mut divergence_ids = BTreeSet::new();
+    let mut blocking_ids = BTreeSet::new();
+    let mut classified_checks = BTreeSet::new();
+    for divergence in &report.divergences {
+        let Some((scope, outputs)) = divergent_checks.get(divergence.check_id.as_str()) else {
+            return Err("lockstep classification has no corresponding divergent check".into());
+        };
+        if divergence.divergence_id.trim().is_empty()
+            || !divergence_ids.insert(divergence.divergence_id.as_str())
+            || divergence.boundary_scope != *scope
+            || &divergence.runtime_outputs != *outputs
+        {
+            return Err("lockstep divergence classifications disagree with measured checks".into());
+        }
+        if !divergence.resolved && divergence.risk_tier.blocks_release() {
+            blocking_ids.insert(divergence.divergence_id.as_str());
+        }
+        classified_checks.insert(divergence.check_id.as_str());
+    }
+    if classified_checks.len() != divergent_checks.len() {
+        return Err("lockstep report has unclassified divergent checks".into());
+    }
+    let declared_ids = match &report.verdict {
+        OracleVerdict::BlockRelease { blocking_divergence_ids } => blocking_divergence_ids,
+        OracleVerdict::RequiresReceipt { .. } => {
+            return Err("lockstep report is not Pass: policy receipt required; automatic source recovery is not authorized".into());
+        }
+        OracleVerdict::Pass => unreachable!(),
+    };
+    let mut verdict_ids = BTreeSet::new();
+    if declared_ids.is_empty() || declared_ids.iter().any(|id| {
+        !divergence_ids.contains(id.as_str()) || !verdict_ids.insert(id.as_str())
+            || !blocking_ids.contains(id.as_str())
+    }) {
+        return Err("lockstep blocking verdict names missing, duplicate or nonblocking divergences".into());
+    }
+    if verdict_ids != blocking_ids {
+        return Err("lockstep blocking verdict omits unresolved blocking divergences".into());
+    }
+    // Never embed guest bytes or arbitrarily long identifiers in the recovery
+    // reason. The digest binds the exact admitted report instead.
+    Ok(LockstepEvidence::Regressed(format!(
+        "lockstep report is not Pass: {} current-input product/reference divergence(s); evidence {digest}",
+        divergent_checks.len()
+    )))
 }
 
 pub struct RolloutManager {
@@ -374,10 +470,14 @@ pub struct RolloutManager {
 
 impl RolloutManager {
     pub fn new(project_path: &Path, migration_id: Option<&str>) -> Self {
+        // Keep store and native recovery on the same existing project even if
+        // its caller-visible alias is subsequently retargeted.
+        let project_path = project_path.canonicalize()
+            .unwrap_or_else(|_| project_path.to_path_buf());
         Self {
-            project_path: project_path.to_path_buf(),
             migration_id: migration_id.map(str::to_owned)
-                .unwrap_or_else(|| Self::discover_or_generate_id(project_path)),
+                .unwrap_or_else(|| Self::discover_or_generate_id(&project_path)),
+            project_path,
         }
     }
 
@@ -410,6 +510,21 @@ impl RolloutManager {
             || state.ramp_pct > 100
         {
             return Err(invalid("rollout state identity, schema, confidence or percentage is invalid"));
+        }
+        let stage_consistent = match state.current_stage {
+            RolloutStage::Shadow => state.ramp_pct == 0
+                && matches!(state.status, RolloutStatus::Pending | RolloutStatus::Active | RolloutStatus::Failed),
+            RolloutStage::Canary => state.ramp_pct == 5
+                && matches!(state.status, RolloutStatus::Active | RolloutStatus::Failed),
+            RolloutStage::Ramp => state.ramp_pct > 0
+                && matches!(state.status, RolloutStatus::Active | RolloutStatus::Failed),
+            RolloutStage::Default => state.ramp_pct == 100
+                && state.status == RolloutStatus::Completed,
+            RolloutStage::Aborted => state.ramp_pct == 0
+                && matches!(state.status, RolloutStatus::Failed | RolloutStatus::RolledBack),
+        };
+        if !stage_consistent {
+            return Err(invalid("rollout stage, status and percentage disagree"));
         }
         match (&state.rollback_plan_id, &state.rollback_journal_sha256) {
             (None, None) if !state.migration_id.starts_with("txn-") => {}
@@ -599,6 +714,31 @@ impl RolloutManager {
         if next_stage == RolloutStage::Aborted {
             return Err("use the rollback action to abort; promotion cannot bypass source recovery".into());
         }
+        if matches!((from_stage, next_stage),
+            (RolloutStage::Default, RolloutStage::Shadow | RolloutStage::Canary | RolloutStage::Ramp)
+            | (RolloutStage::Ramp, RolloutStage::Shadow | RolloutStage::Canary)
+            | (RolloutStage::Canary, RolloutStage::Shadow | RolloutStage::Canary))
+        {
+            return Err("promotion cannot reverse or repeat a canary; use rollback for recovery".into());
+        }
+        // Invalid requests must fail before confidence-triggered restoration.
+        // Force may waive a forward stage, not percentage bounds or recovery.
+        if target_ramp_pct.is_some() && next_stage != RolloutStage::Ramp {
+            return Err("ramp_pct applies only to the Ramp stage".into());
+        }
+        let new_ramp_pct = match next_stage {
+            RolloutStage::Shadow => 0,
+            RolloutStage::Canary => 5,
+            RolloutStage::Ramp => {
+                let pct = target_ramp_pct.unwrap_or_else(|| state.ramp_pct.saturating_add(config.ramp_step_pct).min(100));
+                if pct > 100 || pct <= state.ramp_pct {
+                    return Err("ramp percentage must increase and cannot exceed 100%".into());
+                }
+                pct
+            }
+            RolloutStage::Default => 100,
+            RolloutStage::Aborted => unreachable!(),
+        };
         if !config.force {
             if next_stage == RolloutStage::Default && from_stage == RolloutStage::Shadow {
                 return Err("cannot skip from Shadow directly to Default; requires Canary and Ramp validation".into());
@@ -622,42 +762,42 @@ impl RolloutManager {
                 return Err(reason);
             }
         }
-        self.verify_bound_source(&state)?;
-        if target_ramp_pct.is_some() && next_stage != RolloutStage::Ramp {
-            return Err("ramp_pct applies only to the Ramp stage".into());
-        }
-        let new_ramp_pct = match next_stage {
-            RolloutStage::Shadow => 0,
-            RolloutStage::Canary => 5,
-            RolloutStage::Ramp => {
-                let pct = target_ramp_pct.unwrap_or_else(|| state.ramp_pct.saturating_add(config.ramp_step_pct).min(100));
-                if pct > 100 || (!config.force && pct <= state.ramp_pct) {
-                    return Err("ramp percentage must increase and cannot exceed 100%".into());
-                }
-                pct
-            }
-            RolloutStage::Default => 100,
-            RolloutStage::Aborted => unreachable!(),
-        };
         if from_stage == next_stage && matches!(next_stage, RolloutStage::Shadow | RolloutStage::Default) {
+            self.verify_bound_source(&state)?;
             return Ok(Self::report(state, true, "requested rollout stage already recorded; no transition performed".into()));
         }
         let mut evidence_note = None;
         // A previously verified decision cannot authorize a later promotion.
-        // Keep source transaction validation above; neither evidence path is a
-        // substitute for the other. Invalid supplied reports fail even if forced.
-        state.lockstep_verified = false;
+        // Source transaction validation remains independent of this evidence;
+        // invalid supplied reports fail even if forced.
         match config.lockstep_report.as_deref() {
             Some(report_path) => {
-                let digest = verify_lockstep_evidence(&self.project_path, report_path)?;
-                state.lockstep_verified = true;
-                evidence_note = Some(format!("lockstep evidence {digest}"));
+                match assess_lockstep_evidence(&self.project_path, report_path)? {
+                    LockstepEvidence::Passed(digest) => {
+                        state.lockstep_verified = true;
+                        evidence_note = Some(format!("lockstep evidence {digest}"));
+                    }
+                    LockstepEvidence::Regressed(reason) => {
+                        if config.auto_rollback_on_failure && !config.force {
+                            state.lockstep_verified = false;
+                            return match self.rollback_locked(&store, state, &reason) {
+                                Ok(report) => Err(format!("{reason}; {}", report.message)),
+                                Err(error) => Err(format!("{reason}; automatic rollback did not complete: {error}")),
+                            };
+                        }
+                        return Err(reason);
+                    }
+                }
             }
             None if config.require_lockstep_evidence && !config.force => {
                 return Err(format!("promotion requires lockstep evidence: run `franken-node verify lockstep {} --json > lockstep.json` and pass --lockstep-report lockstep.json", self.project_path.display()));
             }
-            None => {}
+            None => state.lockstep_verified = false,
         }
+        // Successful progression still requires the exact admitted candidate.
+        // Recovery checks its own pinned transaction and preserves conflicting
+        // user edits, so a failed recovery remains durably aborted/retryable.
+        self.verify_bound_source(&state)?;
         let mut reason = if from_stage == next_stage && next_stage == RolloutStage::Ramp {
             format!("stepped rollout ramp to {new_ramp_pct}%")
         } else {
@@ -965,7 +1105,7 @@ mod tests {
         let manifest = project_with_manifest(dir.path());
         let mgr = RolloutManager::new(dir.path(), Some("mig-evidence-02"));
         let diverged = write_lockstep_report(dir.path(), &manifest, true);
-        let cfg = RolloutConfig { lockstep_report: Some(diverged), ..RolloutConfig::default() };
+        let cfg = RolloutConfig { lockstep_report: Some(diverged), auto_rollback_on_failure: false, ..RolloutConfig::default() };
         let err = mgr.promote(&cfg, None, None).unwrap_err();
         assert!(err.contains("not Pass"), "{err}");
         let foreign = write_lockstep_report(dir.path(), b"{\"name\":\"other-project\"}", false);
@@ -1165,5 +1305,276 @@ mod tests {
         admitted.confidence_score = 0.6;
         manager.persist(&admitted).unwrap();
         assert_eq!(manager.load_or_init().unwrap(), admitted);
+    }
+
+    #[test]
+    fn force_cannot_reverse_stages_repeat_canaries_or_reduce_the_ramp() {
+        let root = tempdir().unwrap();
+        let manager = RolloutManager::new(root.path(), Some("force-bounds"));
+        let config = RolloutConfig { force: true, ..RolloutConfig::default() };
+        manager.promote(&config, None, None).unwrap();
+        let canary = manager.load_or_init().unwrap();
+        for stage in [RolloutStage::Shadow, RolloutStage::Canary, RolloutStage::Aborted] {
+            assert!(manager.promote(&config, Some(stage), None).is_err());
+            assert_eq!(manager.load_or_init().unwrap(), canary);
+        }
+        manager.promote(&config, None, None).unwrap();
+        let ramp = manager.load_or_init().unwrap();
+        for pct in [0, 1, ramp.ramp_pct, 101, 255] {
+            assert!(manager.promote(&config, Some(RolloutStage::Ramp), Some(pct)).is_err());
+            assert_eq!(manager.load_or_init().unwrap(), ramp);
+        }
+        manager.promote(&config, Some(RolloutStage::Default), None).unwrap();
+        let completed = manager.load_or_init().unwrap();
+        for stage in [RolloutStage::Shadow, RolloutStage::Canary, RolloutStage::Ramp] {
+            assert!(manager.promote(&config, Some(stage), None).is_err());
+            assert_eq!(manager.load_or_init().unwrap(), completed);
+        }
+    }
+
+    #[test]
+    fn malformed_state_stage_status_and_percentage_fail_before_progression() {
+        let root = tempdir().unwrap();
+        let manager = RolloutManager::new(root.path(), Some("inconsistent-stage"));
+        let original = manager.load_or_init().unwrap();
+        for (stage, status, pct) in [
+            (RolloutStage::Shadow, RolloutStatus::Pending, 5),
+            (RolloutStage::Canary, RolloutStatus::Active, 1),
+            (RolloutStage::Ramp, RolloutStatus::Active, 0),
+            (RolloutStage::Default, RolloutStatus::Active, 100),
+            (RolloutStage::Default, RolloutStatus::Completed, 99),
+        ] {
+            let mut invalid = original.clone();
+            invalid.current_stage = stage;
+            invalid.status = status;
+            invalid.ramp_pct = pct;
+            let raw = serde_json::to_vec(&invalid).unwrap();
+            {
+                let store = manager.open_store().unwrap();
+                store.write(&manager.state_name(), &raw).unwrap();
+            }
+            assert!(manager.load_or_init().is_err());
+            assert!(manager.promote(&RolloutConfig { force: true, ..RolloutConfig::default() }, None, None).is_err());
+            let store = manager.open_store().unwrap();
+            assert_eq!(store.read(&manager.state_name()).unwrap().unwrap(), raw);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn store_and_recovery_keep_the_original_project_when_its_alias_is_retargeted() {
+        use std::os::unix::fs::symlink;
+        let root = tempdir().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        let alias = root.path().join("alias");
+        symlink(&first, &alias).unwrap();
+        let manager = RolloutManager::new(&alias, Some("pinned-project"));
+        fs::rename(&alias, root.path().join("original-alias")).unwrap();
+        symlink(&second, &alias).unwrap();
+        let state = manager.load_or_init().unwrap();
+        assert_eq!(PathBuf::from(&state.project_path), first.canonicalize().unwrap());
+        assert!(first.join(".franken-node/state/rollout/pinned-project.json").is_file());
+        assert!(!second.join(".franken-node").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    fn applied_regression_project() -> (tempfile::TempDir, String, Vec<u8>) {
+        use super::super::rewrite_transaction::{Edit, RewriteTransaction};
+        use super::super::rollback::{self, TransactionState};
+        let root = tempdir().unwrap();
+        let input = project_with_manifest(root.path());
+        fs::write(root.path().join("app.js"), b"original").unwrap();
+        RewriteTransaction::open(root.path()).unwrap().apply(&[
+            Edit { path: "app.js", before: b"original", after: b"candidate" },
+        ]).unwrap();
+        let history = rollback::run(root.path(), None, false);
+        let id = history.history.iter()
+            .find(|entry| entry.state == TransactionState::Applied).unwrap().transaction_id.clone();
+        (root, id, input)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn invalid_ramp_requests_cannot_trigger_automatic_recovery_side_effects() {
+        let (root, id, _) = applied_regression_project();
+        let manager = RolloutManager::new(root.path(), Some(&id));
+        manager.promote(&RolloutConfig { force: true, ..RolloutConfig::default() }, None, None).unwrap();
+        let mut low_confidence = manager.load_or_init().unwrap();
+        low_confidence.confidence_score = 0.5;
+        manager.persist(&low_confidence).unwrap();
+        for pct in [0, 255] {
+            let error = manager.promote(&RolloutConfig::default(), Some(RolloutStage::Ramp), Some(pct)).unwrap_err();
+            assert!(error.contains("percentage"), "{error}");
+            assert_eq!(manager.load_or_init().unwrap(), low_confidence);
+            assert_eq!(fs::read(root.path().join("app.js")).unwrap(), b"candidate");
+        }
+        let error = manager.promote(&RolloutConfig::default(), None, None).unwrap_err();
+        assert!(error.contains("below minimum threshold"), "{error}");
+        assert_eq!(manager.status().unwrap().status, RolloutStatus::RolledBack);
+        assert_eq!(fs::read(root.path().join("app.js")).unwrap(), b"original");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn blocking_current_evidence_restores_the_bound_native_transaction() {
+        let (root, id, input) = applied_regression_project();
+        let manager = RolloutManager::new(root.path(), Some(&id));
+        let mut config = RolloutConfig {
+            lockstep_report: Some(write_lockstep_report(root.path(), &input, false)),
+            ..RolloutConfig::default()
+        };
+        manager.promote(&config, None, None).unwrap();
+        config.lockstep_report = Some(write_lockstep_report(root.path(), &input, true));
+        let error = manager.promote(&config, None, None).unwrap_err();
+        assert!(error.contains("not Pass") && error.contains("Restored native rewrite"), "{error}");
+        assert_eq!(fs::read(root.path().join("app.js")).unwrap(), b"original");
+        let reopened = RolloutManager::new(root.path(), Some(&id));
+        let state = reopened.load_or_init().unwrap();
+        assert_eq!(state.current_stage, RolloutStage::Aborted);
+        assert_eq!(state.status, RolloutStatus::RolledBack);
+        assert!(!state.lockstep_verified);
+        assert_eq!(state.history.len(), 3);
+        assert!(state.history[1].reason.contains("evidence sha256:"));
+        assert_eq!(state.history[1].action, "rollback_started");
+        assert!(reopened.status().unwrap().source_rollback.unwrap().restoration_recorded);
+        assert!(reopened.promote(&RolloutConfig { force: true, ..config }, None, None).is_err());
+        fs::write(root.path().join("app.js"), b"later work").unwrap();
+        reopened.rollback("retry completed recovery").unwrap();
+        assert_eq!(fs::read(root.path().join("app.js")).unwrap(), b"later work");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn incomplete_foreign_or_inconsistent_reports_never_restore_sources() {
+        let (root, id, input) = applied_regression_project();
+        let manager = RolloutManager::new(root.path(), Some(&id));
+        manager.promote(&RolloutConfig { force: true, ..RolloutConfig::default() }, None, None).unwrap();
+        let before = manager.load_or_init().unwrap();
+        let path = write_lockstep_report(root.path(), &input, true);
+        let original: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        for mutation in 0..10 {
+            let mut changed = original.clone();
+            match mutation {
+                0 => changed["checks"][0]["input"] = serde_json::json!([0]),
+                1 => changed["verdict"] = "Pass".into(),
+                2 => changed["checks"][0]["outcome"] = serde_json::Value::Null,
+                3 => { changed["checks"][0]["outcome"]["Diverge"]["outputs"].as_object_mut().unwrap().remove("node"); }
+                4 => changed["divergences"] = serde_json::json!([]),
+                5 => changed["divergences"][0]["runtime_outputs"]["node"] = serde_json::json!([1]),
+                6 => changed["verdict"]["BlockRelease"]["blocking_divergence_ids"] = serde_json::json!(["unknown"]),
+                7 => changed["divergences"][0]["resolved"] = true.into(),
+                8 => changed["checks"][0]["trace_id"] = "foreign".into(),
+                9 => {
+                    let mut omitted = changed["divergences"][0].clone();
+                    omitted["divergence_id"] = "omitted-blocker".into();
+                    changed["divergences"].as_array_mut().unwrap().push(omitted);
+                }
+                _ => unreachable!(),
+            }
+            fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+            let config = RolloutConfig { lockstep_report: Some(path.clone()), ..RolloutConfig::default() };
+            assert!(manager.promote(&config, None, None).is_err(), "{mutation}");
+            assert_eq!(manager.load_or_init().unwrap(), before, "{mutation}");
+            assert_eq!(fs::read(root.path().join("app.js")).unwrap(), b"candidate");
+        }
+        fs::write(&path, b"not JSON").unwrap();
+        assert!(manager.promote(&RolloutConfig { lockstep_report: Some(path), ..RolloutConfig::default() }, None, None).is_err());
+        assert_eq!(manager.load_or_init().unwrap(), before);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reference_disagreement_and_receipt_review_do_not_authorize_restoration() {
+        let (root, id, input) = applied_regression_project();
+        let manager = RolloutManager::new(root.path(), Some(&id));
+        manager.promote(&RolloutConfig { force: true, ..RolloutConfig::default() }, None, None).unwrap();
+        let before = manager.load_or_init().unwrap();
+        let path = write_lockstep_report(root.path(), &input, true);
+        let original: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let mut changed = original.clone();
+        changed["runtimes"]["bun"] = serde_json::json!({"runtime_id":"bun", "runtime_name":"bun", "version":"test", "is_reference":true});
+        changed["checks"][0]["outcome"]["Diverge"]["outputs"]["bun"] = serde_json::json!([7]);
+        changed["divergences"][0]["runtime_outputs"]["bun"] = serde_json::json!([7]);
+        fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+        let config = RolloutConfig { lockstep_report: Some(path.clone()), ..RolloutConfig::default() };
+        let error = manager.promote(&config, None, None).unwrap_err();
+        assert!(error.contains("reference runtimes disagree"), "{error}");
+        assert_eq!(manager.load_or_init().unwrap(), before);
+        let mut changed = original;
+        changed["divergences"][0]["risk_tier"] = "Low".into();
+        changed["verdict"] = serde_json::json!({"RequiresReceipt":{"pending_divergence_ids":["div-1"]}});
+        fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+        let error = manager.promote(&config, None, None).unwrap_err();
+        assert!(error.contains("policy receipt required"), "{error}");
+        assert_eq!(manager.load_or_init().unwrap(), before);
+        assert_eq!(fs::read(root.path().join("app.js")).unwrap(), b"candidate");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn regression_recovery_respects_explicit_disable_and_force_without_claiming_pass() {
+        for force in [false, true] {
+            let (root, id, input) = applied_regression_project();
+            let manager = RolloutManager::new(root.path(), Some(&id));
+            manager.promote(&RolloutConfig { force: true, ..RolloutConfig::default() }, None, None).unwrap();
+            let before = manager.load_or_init().unwrap();
+            let config = RolloutConfig {
+                force, auto_rollback_on_failure: force,
+                lockstep_report: Some(write_lockstep_report(root.path(), &input, true)),
+                ..RolloutConfig::default()
+            };
+            assert!(manager.promote(&config, None, None).unwrap_err().contains("not Pass"));
+            assert_eq!(manager.load_or_init().unwrap(), before);
+            assert_eq!(fs::read(root.path().join("app.js")).unwrap(), b"candidate");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn regression_recovery_conflicts_are_durable_retryable_and_preserve_user_work() {
+        let (root, id, input) = applied_regression_project();
+        let manager = RolloutManager::new(root.path(), Some(&id));
+        manager.promote(&RolloutConfig { force: true, ..RolloutConfig::default() }, None, None).unwrap();
+        fs::write(root.path().join("app.js"), b"independent user work").unwrap();
+        let config = RolloutConfig {
+            lockstep_report: Some(write_lockstep_report(root.path(), &input, true)),
+            ..RolloutConfig::default()
+        };
+        let error = manager.promote(&config, None, None).unwrap_err();
+        assert!(error.contains("automatic rollback did not complete"), "{error}");
+        assert_eq!(fs::read(root.path().join("app.js")).unwrap(), b"independent user work");
+        let reopened = RolloutManager::new(root.path(), Some(&id));
+        let status = reopened.status().unwrap();
+        assert_eq!(status.stage, RolloutStage::Aborted);
+        assert_eq!(status.status, RolloutStatus::Failed);
+        assert!(!status.source_rollback.unwrap().restoration_recorded);
+        assert!(reopened.promote(&RolloutConfig { force: true, ..config }, None, None).is_err());
+        // The operator explicitly resolves this fixture's conflict; recovery
+        // must never substitute this write for preserving the user's work.
+        fs::write(root.path().join("app.js"), b"candidate").unwrap();
+        reopened.rollback("resolved conflict; retry original transaction").unwrap();
+        assert_eq!(fs::read(root.path().join("app.js")).unwrap(), b"original");
+    }
+
+    #[test]
+    fn unbound_regression_stops_progress_without_claiming_source_restoration() {
+        let root = tempdir().unwrap();
+        let input = project_with_manifest(root.path());
+        fs::write(root.path().join("app.js"), b"unbound source").unwrap();
+        let manager = RolloutManager::new(root.path(), Some("unbound-regression"));
+        manager.promote(&RolloutConfig { force: true, ..RolloutConfig::default() }, None, None).unwrap();
+        let config = RolloutConfig {
+            lockstep_report: Some(write_lockstep_report(root.path(), &input, true)),
+            ..RolloutConfig::default()
+        };
+        let error = manager.promote(&config, None, None).unwrap_err();
+        assert!(error.contains("no source files restored"), "{error}");
+        assert_eq!(fs::read(root.path().join("app.js")).unwrap(), b"unbound source");
+        let status = manager.status().unwrap();
+        assert_eq!(status.stage, RolloutStage::Aborted);
+        assert!(status.source_rollback.is_none());
     }
 }
