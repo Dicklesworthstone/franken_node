@@ -28,18 +28,22 @@ sources. Missing, interrupted, conflicting or already-restored transactions
 cannot be admitted for a new rollout; inspect/recover them through the explicit
 `migrate rollback` command first.
 
-Default promotion now requires a **captured three-runtime project-cohort
-report**, not just a single-entry `verify lockstep` report. Generate it through
-the existing standalone migration operator after initializing rollout status:
+Default promotion requires an **authenticated captured three-runtime cohort**,
+not an unsigned project report or a single-entry `verify lockstep` report.
+Provision the independent `.franken-node/keys/migration-validation.pub` anchor
+and external dedicated private key as described in
+[migration_validation_attestation.md](migration_validation_attestation.md).
+Then generate evidence from the live validator after initializing rollout:
 
 ```sh
-cargo +stable run --manifest-path tools/migration-validator/Cargo.toml -- \
-  ./project --native-bin /absolute/path/to/franken-node \
-  --bun-bin /absolute/path/to/bun --compare-filesystem --execute \
-  --out /absolute/path/outside-project/cohort-canary.json
+cargo +stable run --manifest-path tools/migration-validator/Cargo.toml \
+  --bin franken-migration-attest -- run ./project \
+  --native-bin /absolute/path/to/franken-node --bun-bin /absolute/path/to/bun \
+  --signing-key /absolute/private/validator/migration.seed --execute \
+  --out /absolute/path/outside-project/cohort-canary.signed.json
 
 franken-node migrate rollout ./project --migration-id txn-CHOSEN-ID \
-  --action promote --lockstep-report /absolute/path/outside-project/cohort-canary.json --json
+  --action promote --lockstep-report /absolute/path/outside-project/cohort-canary.signed.json --json
 ```
 
 Replace executable and report paths with real absolute paths. Node must also
@@ -49,17 +53,21 @@ sandbox. This command measures the current project under all three runtimes;
 its passing result is not a promise that an arbitrary installed engine supports
 all selected tests. A failed or inconclusive suite remains a failed admission.
 
-The report must be outside the project. Admission reuses the producer's full
-captured-input digest and exact test inventory, including dependencies,
-configuration, fixtures and rollout metadata. Writing evidence into that same
-tree, changing a dependency, or changing the test selection invalidates the
-binding. A successful promotion changes rollout state, so measure again into a
-**new report path** before the next promotion. Reusing a previous report does
-not accumulate observations. The count remains the current cohort's count.
+The report must be outside the project. Admission authenticates its exact
+payload under the independently installed public key before trusting report
+fields. It then reuses the producer's full captured-input digest and exact test
+inventory, including dependencies, configuration, fixtures, the public trust
+anchor and rollout metadata. Writing evidence into that same tree, changing a
+dependency, or changing the test selection invalidates the binding. A successful
+promotion changes rollout state, so measure again into a **new report path**
+before the next promotion. Reusing a previous report does not accumulate
+observations. The count remains the current cohort's count.
 
 Every promotion of a bound rollout also checks that its exact rewrite remains
 fully applied. `--force` does not bypass the source-transaction binding and
 cannot resurrect an aborted rollout or use promotion as a rollback substitute.
+It also cannot bypass signature verification of a supplied cohort. Unsigned,
+foreign-signer and tampered cohorts are rejected without source restoration.
 
 Restore through the rollout:
 
@@ -69,11 +77,13 @@ franken-node migrate rollout ./project --migration-id txn-CHOSEN-ID --action rol
 
 Operator-health-triggered automatic rollback in `promote` follows the same
 source recovery path. Complete current-input blocking regressions in the
-legacy lockstep format also use that path. It is not a background confidence
-monitor. Restoration failure is included in the returned promotion error, not
-silently discarded. An incomplete, malformed, failing or inconclusive project
-cohort refuses promotion without authorizing restoration; neither insufficient
-samples nor invalid evidence proves a workload regression.
+legacy lockstep format also use that path. That legacy format retains its
+trusted-local, unsigned contract; cohort signatures do not authenticate it.
+It is not a background confidence monitor. Restoration failure is included in
+the returned promotion error, not silently discarded. An incomplete, malformed,
+failing or inconclusive project cohort refuses promotion without authorizing
+restoration; neither insufficient samples nor invalid evidence proves a
+workload regression.
 
 ## What the confidence fields mean
 
@@ -88,7 +98,7 @@ An admitted cohort adds `validation_confidence` to state and JSON reports:
 ```json
 {
   "schema_version": "franken-node/rollout-cohort-confidence/v1",
-  "evidence_sha256": "64 lowercase hexadecimal characters",
+  "evidence_sha256": "SHA-256 of the complete authenticated envelope",
   "candidate_input_sha256": "64 lowercase hexadecimal characters",
   "total_tests": 40,
   "matched_tests": 40,
@@ -184,10 +194,11 @@ certification of current source bytes. An unbound cancellation has no
 This restores only files retained in the selected native rewrite transaction,
 including their recorded modes. It does not stop running applications, change
 fleet traffic, undo database writes, revoke credentials, or reverse external
-side effects. Rollout stages remain local control state. Journals, cohort
-reports and state pins assume trusted local evidence; consistency checks and
-executable hashes do not authenticate a remote producer or prove runtime brands.
-They are not a sandbox or an atomic filesystem snapshot against a privileged
-actor. The legacy `receipt_signature` field continues to contain a digest, not
-a cryptographic signature. Broader fleet transport, keyed transitions and the
-charter's migration-quality KPI remain separate incomplete work.
+side effects. Rollout stages remain local control state. Cohort signatures
+now authenticate an independently configured validator key; key custody,
+local trust configuration and the validator's honesty remain assumptions.
+Executable hashes do not prove runtime brands. Journals and state pins are
+still trusted local metadata, not a sandbox or an atomic filesystem snapshot
+against a privileged actor. The legacy `receipt_signature` field continues to
+contain a digest, not a cryptographic signature. Broader fleet transport,
+keyed transitions and the charter's migration-quality KPI remain incomplete.

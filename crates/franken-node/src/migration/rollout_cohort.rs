@@ -3,14 +3,19 @@
 //! One selected test is one observation, not one observation per output stream
 //! or runtime. Wilson bounds are conditional on an independent, representative
 //! Bernoulli sampling model; this module does NOT establish that model or turn
-//! a curated deterministic suite into a production-safety probability. Reports
-//! are trusted local evidence, not authenticated remote approval tokens.
+//! a curated deterministic suite into a production-safety probability. Cohort
+//! reports require an Ed25519 signature under an independently installed local
+//! validator key. Authentication does not establish honest measurement or
+//! independence; the signer and local trust configuration remain authorities.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-pub const REPORT_SCHEMA: &str = "franken-node/product-validation-suite/v1";
+#[path = "report_attestation.rs"]
+pub mod attestation;
+
+pub const REPORT_SCHEMA: &str = attestation::SCHEMA;
 const CONFIDENCE_SCHEMA: &str = "franken-node/rollout-cohort-confidence/v1";
 const MAX_TESTS: u32 = 1024;
 const Z_95: f64 = 1.959_963_984_540_054;
@@ -128,7 +133,13 @@ pub fn assess(project: &Path, raw: &[u8]) -> Result<CohortConfidence, String> {
     if raw.len() > 16 * 1024 * 1024 {
         return Err("cohort report exceeds 16 MiB".into());
     }
-    let report: ProductReport = serde_json::from_slice(raw)
+    // Authenticate the exact payload before inspecting any of its purported
+    // observations. The report's own public key is never a trust anchor.
+    let trusted = attestation::project_key(project)
+        .map_err(|error| format!("cohort trust anchor unavailable: {error:#}"))?;
+    let authenticated = attestation::verify(raw, &trusted)
+        .map_err(|error| format!("cohort authentication refused: {error:#}"))?;
+    let report: ProductReport = serde_json::from_slice(&authenticated)
         .map_err(|error| format!("invalid product cohort report: {error}"))?;
     let deadline = Instant::now() + Duration::from_secs(30);
     let captured = RewriteCandidate::capture(project, deadline)
@@ -147,6 +158,11 @@ pub fn assess(project: &Path, raw: &[u8]) -> Result<CohortConfidence, String> {
     }
     captured.ensure_source_unchanged()
         .map_err(|error| format!("project changed during cohort admission: {error:#}"))?;
+    if attestation::project_key(project)
+        .map_err(|error| format!("cannot recheck cohort trust anchor: {error:#}"))? != trusted
+    {
+        return Err("cohort trust anchor changed during admission".into());
+    }
     let total = u32::try_from(tests.len()).map_err(|_| "cohort test count overflow")?;
     // A partial or failing cohort never reaches this boundary. In particular,
     // ERROR/INCONCLUSIVE is not evidence authorizing destructive restoration.
@@ -242,10 +258,23 @@ mod admission_tests {
 
     fn project(n: usize) -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".franken-node/keys")).unwrap();
+        fs::write(root.path().join(attestation::PUBLIC_KEY_PATH),
+            hex::encode(signing_key().verifying_key().to_bytes())).unwrap();
         for index in 0..n {
             fs::write(root.path().join(format!("case-{index:04}.test.js")), "console.log(42);\n").unwrap();
         }
         root
+    }
+
+    // Explicit test authority over constructed wire fixtures. This is not a
+    // claim that the fixture observations came from live runtime execution.
+    fn signing_key() -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[7; 32])
+    }
+
+    fn signed(raw: &[u8]) -> Vec<u8> {
+        attestation::seal(raw, &signing_key()).unwrap()
     }
 
     /// Constructed wire-admission fixtures, NOT claims of live Node/Bun/Franken
@@ -270,7 +299,7 @@ mod admission_tests {
             }),
         };
         ProductReport {
-            schema_version: REPORT_SCHEMA.into(),
+            schema_version: attestation::PRODUCT_SCHEMA.into(),
             scope: "captured-test-process-and-workspace-delta".into(),
             oracle: "L1-node-bun-franken-node".into(), release_certification: false,
             input_sha256: captured.input_sha256().into(),
@@ -292,14 +321,14 @@ mod admission_tests {
 
     fn write_report(report: &ProductReport, out: &Path) -> PathBuf {
         let path = out.join("cohort.json");
-        fs::write(&path, serde_json::to_vec(report).unwrap()).unwrap();
+        fs::write(&path, signed(&serde_json::to_vec(report).unwrap())).unwrap();
         path
     }
 
     #[test]
     fn cohort_measurement_binds_captured_inputs_and_unique_test_inventory() {
         let root = project(40);
-        let raw = serde_json::to_vec(&fixture(root.path())).unwrap();
+        let raw = signed(&serde_json::to_vec(&fixture(root.path())).unwrap());
         let confidence = assess(root.path(), &raw).unwrap();
         assert_eq!(confidence.total_tests, 40);
         assert_eq!(confidence.matched_tests, 40);
@@ -331,7 +360,8 @@ mod admission_tests {
                 11 => changed.passed = 1,
                 _ => unreachable!(),
             }
-            assert!(assess(root.path(), &serde_json::to_vec(&changed).unwrap()).is_err(), "{mutation}");
+            let authenticated = signed(&serde_json::to_vec(&changed).unwrap());
+            assert!(assess(root.path(), &authenticated).unwrap_err().contains("cohort admission refused"), "{mutation}");
         }
     }
 
@@ -342,12 +372,13 @@ mod admission_tests {
         for alias in ["a", "b"] {
             let mut changed = original.clone();
             changed.native_runtime.sha256 = alias.repeat(64);
-            assert!(assess(root.path(), &serde_json::to_vec(&changed).unwrap()).is_err());
+            assert!(assess(root.path(), &signed(&serde_json::to_vec(&changed).unwrap()))
+                .unwrap_err().contains("three distinct executable hashes"));
         }
         let mut raw = serde_json::to_value(original).unwrap();
         raw["confidence_score"] = 1.0.into();
         raw["sample_count"] = 999999.into();
-        let actual = assess(root.path(), &serde_json::to_vec(&raw).unwrap()).unwrap();
+        let actual = assess(root.path(), &signed(&serde_json::to_vec(&raw).unwrap())).unwrap();
         assert_eq!(actual.total_tests, 1);
         assert!(actual.wilson_lower_95 < 0.21);
     }
@@ -459,5 +490,79 @@ mod admission_tests {
         assert!(!aborted.lockstep_verified);
         assert!(aborted.validation_confidence.is_none());
         assert!(manager.status().unwrap().validation_confidence.is_none());
+    }
+
+    #[test]
+    fn unsigned_and_foreign_signers_cannot_authorize_even_forced_promotion() {
+        let root = project(40);
+        let output = tempfile::tempdir().unwrap();
+        let manager = RolloutManager::new(root.path(), Some("authenticated-only"));
+        let before = manager.load_or_init().unwrap();
+        let raw = serde_json::to_vec(&fixture(root.path())).unwrap();
+        let attacker = ed25519_dalek::SigningKey::from_bytes(&[8; 32]);
+        for bytes in [raw.clone(), attestation::seal(&raw, &attacker).unwrap()] {
+            assert!(assess(root.path(), &bytes).unwrap_err().contains("authentication refused"));
+            let path = output.path().join("untrusted.json");
+            fs::write(&path, &bytes).unwrap();
+            for force in [false, true] {
+                assert!(manager.promote(&RolloutConfig {
+                    force, lockstep_report: Some(path.clone()), ..RolloutConfig::default()
+                }, None, None).is_err());
+                assert_eq!(manager.load_or_init().unwrap(), before);
+            }
+        }
+    }
+
+    #[test]
+    fn authenticated_payload_tampering_never_starts_native_source_recovery() {
+        use super::super::super::rewrite_transaction::{Edit, RewriteTransaction};
+        use super::super::super::rollback;
+        let root = project(40);
+        fs::write(root.path().join("app.js"), b"original").unwrap();
+        RewriteTransaction::open(root.path()).unwrap().apply(&[
+            Edit { path: "app.js", before: b"original", after: b"candidate" },
+        ]).unwrap();
+        let history = rollback::run(root.path(), None, false);
+        let manager = RolloutManager::new(root.path(), Some(&history.history[0].transaction_id));
+        let before = manager.load_or_init().unwrap();
+        let original = signed(&serde_json::to_vec(&fixture(root.path())).unwrap());
+        let mut tampered: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        let mut payload: serde_json::Value = serde_json::from_str(tampered["report_json"].as_str().unwrap()).unwrap();
+        payload["verdict"] = "FAIL".into();
+        tampered["report_json"] = serde_json::to_string(&payload).unwrap().into();
+        let output = tempfile::tempdir().unwrap();
+        let path = output.path().join("tampered.json");
+        fs::write(&path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+        let error = manager.promote(&RolloutConfig {
+            lockstep_report: Some(path), ..RolloutConfig::default()
+        }, None, None).unwrap_err();
+        assert!(error.contains("signature verification failed"), "{error}");
+        assert_eq!(manager.load_or_init().unwrap(), before);
+        assert_eq!(fs::read(root.path().join("app.js")).unwrap(), b"candidate");
+        assert!(!manager.status().unwrap().source_rollback.unwrap().restoration_recorded);
+    }
+
+    #[test]
+    fn missing_or_rotated_trust_anchors_do_not_accept_the_envelope_key() {
+        let root = project(40);
+        let raw = signed(&serde_json::to_vec(&fixture(root.path())).unwrap());
+        let anchor = root.path().join(attestation::PUBLIC_KEY_PATH);
+        let retained = tempfile::tempdir().unwrap();
+        fs::rename(&anchor, retained.path().join("original-anchor")).unwrap();
+        assert!(assess(root.path(), &raw).unwrap_err().contains("trust anchor unavailable"));
+        assert!(!anchor.exists());
+        fs::write(&anchor, hex::encode(ed25519_dalek::SigningKey::from_bytes(&[8; 32]).verifying_key().to_bytes())).unwrap();
+        assert!(assess(root.path(), &raw).unwrap_err().contains("independently trusted validation key"));
+    }
+
+    #[test]
+    fn signature_failure_precedes_report_interpretation_and_project_capture() {
+        let root = project(0);
+        let valid_json = format!(r#"{{"schema_version":"{}"}}"#, attestation::PRODUCT_SCHEMA);
+        let mut envelope: serde_json::Value = serde_json::from_slice(&signed(valid_json.as_bytes())).unwrap();
+        envelope["report_json"] = "not even JSON".into();
+        let error = assess(root.path(), &serde_json::to_vec(&envelope).unwrap()).unwrap_err();
+        assert!(error.contains("signature verification failed"), "{error}");
+        assert!(!error.contains("capture current rollout"));
     }
 }

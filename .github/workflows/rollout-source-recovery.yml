@@ -8,10 +8,12 @@ on:
       - 'crates/franken-node/src/runtime/nversion_oracle.rs'
       - 'crates/franken-node/src/security/constant_time.rs'
       - 'crates/franken-node/src/lib.rs'
+      - 'tools/migration-validator/**'
       - '.github/workflows/rollout-source-recovery.yml'
   pull_request:
     paths:
       - 'crates/franken-node/src/migration/**'
+      - 'tools/migration-validator/**'
       - '.github/workflows/rollout-source-recovery.yml'
   workflow_dispatch:
 
@@ -53,6 +55,7 @@ jobs:
           tempfile = "3"
           subtle = "2.6.1"
           proptest = "1.6"
+          ed25519-dalek = "2.1.1"
           tree-sitter = "0.26.8"
           tree-sitter-javascript = "0.25.0"
           rustix = { version = "1.1.4", default-features = false, features = ["std", "fs", "process"] }
@@ -96,14 +99,17 @@ jobs:
           git rev-parse HEAD > evidence/revision.txt
           rustc +stable --version > evidence/rust-version.txt
           node --version > evidence/node-version.txt
-          git ls-tree -r HEAD crates/franken-node/src/migration/ crates/franken-node/src/runtime/nversion_oracle.rs crates/franken-node/src/security/constant_time.rs crates/franken-node/src/lib.rs > evidence/source-blobs.txt
+          git ls-tree -r HEAD crates/franken-node/src/migration/ crates/franken-node/src/runtime/nversion_oracle.rs crates/franken-node/src/security/constant_time.rs crates/franken-node/src/lib.rs tools/migration-validator/ > evidence/source-blobs.txt
           cargo +stable check --manifest-path "$harness/Cargo.toml" --lib 2>&1 | tee evidence/check.log
           # Preserve both original module test sets. The newly imported full
           # validation suite compiles too; its own workflow executes that suite.
           cargo +stable test --manifest-path "$harness/Cargo.toml" migration::rollout:: -- --nocapture --test-threads=2 2>&1 | tee evidence/recovery-tests.log
           cargo +stable test --manifest-path "$harness/Cargo.toml" migration::rewrite_transaction:: -- --nocapture --test-threads=2 2>&1 | tee evidence/transaction-tests.log
           cargo +stable clippy --manifest-path "$harness/Cargo.toml" --lib -- -D warnings 2>&1 | tee evidence/clippy.log
-          for file in rollout.rs rollout_cohort.rs rollout_store.rs rollout_recovery_tests.rs rewrite_rollback.rs; do
+          cargo +stable test --manifest-path tools/migration-validator/Cargo.toml --bin franken-migration-attest report_attestation:: -- --nocapture 2>&1 | tee evidence/attestation-tests.log
+          cargo +stable test --manifest-path tools/migration-validator/Cargo.toml --bin franken-migration-attest linux::tests:: -- --nocapture --test-threads=2 2>&1 | tee evidence/attestation-operator-tests.log
+          cargo +stable clippy --manifest-path tools/migration-validator/Cargo.toml --bin franken-migration-attest -- -D warnings 2>&1 | tee evidence/attestation-clippy.log
+          for file in rollout.rs rollout_cohort.rs report_attestation.rs rollout_store.rs rollout_recovery_tests.rs rewrite_rollback.rs; do
             rustfmt +stable --edition 2024 --config skip_children=true --emit stdout "$source/migration/$file" > "evidence/$file"
           done
       - name: Retain exact source and recovery execution evidence
@@ -116,3 +122,5 @@ jobs:
           path: |
             evidence/
             crates/franken-node/src/migration/
+            tools/migration-validator/attest.rs
+            tools/migration-validator/Cargo.toml
