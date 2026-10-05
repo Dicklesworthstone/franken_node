@@ -49,7 +49,7 @@ pub(super) enum StdinMode {
 #[derive(Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Settings {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "literal_arguments")]
     pub(super) arguments: Vec<String>,
     #[serde(default)]
     pub(super) cwd: Option<String>,
@@ -76,6 +76,18 @@ impl fmt::Debug for Settings {
 const MAX_ARGUMENTS: usize = 128;
 const MAX_ARGUMENT_BYTES: usize = 4096;
 const MAX_ARGV_BYTES: usize = 32 * 1024;
+
+fn literal_arguments<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    // Do not let serde echo a mistakenly supplied secret string into a parse
+    // diagnostic. This is still a strict vector: null, shell strings, numbers
+    // and nested objects are errors, never coerced into application arguments.
+    Vec::<String>::deserialize(deserializer).map_err(|_| {
+        serde::de::Error::custom("test arguments must be an array of UTF-8 strings")
+    })
+}
 
 fn validate_arguments(arguments: &[String]) -> Result<()> {
     ensure!(
@@ -465,6 +477,18 @@ mod tests {
     }
 
     #[test]
+    fn malformed_argument_vectors_do_not_echo_private_values_in_parse_errors() {
+        let error = serde_json::from_str::<Settings>(
+            r#"{"arguments":"private-request-token"}"#,
+        ).unwrap_err().to_string();
+        assert!(error.contains("array of UTF-8 strings"));
+        assert!(!error.contains("private-request-token"));
+        let error = validate_arguments(&[format!("private-request-token{}", "x".repeat(4096))])
+            .unwrap_err().to_string();
+        assert!(!error.contains("private-request-token"));
+    }
+
+    #[test]
     fn omitted_and_empty_argument_vectors_have_the_same_execution_contract() {
         let original = fixture();
         let candidate = fixture();
@@ -538,6 +562,197 @@ mod tests {
         assert!(output.stderr.is_empty());
         assert_eq!(serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(), expected);
         assert!(!root.path().join("packages/api/must-not-execute").exists());
+    }
+
+    const ARGUMENT_PROGRAM: &[u8] = br#"
+const fs = require('fs');
+const answer = 21 + 21;
+const args = process.argv.slice(2);
+if (args[0] !== 'emit' || args[1] !== 'artifact') throw new Error('wrong request');
+const result = JSON.stringify([args, [...fs.readFileSync(0)], process.env.APP_MODE,
+    fs.readFileSync('local.txt', 'utf8'), answer]);
+fs.writeFileSync(args[1], result);
+process.stdout.write(result);
+"#;
+
+    fn argument_request() -> serde_json::Value {
+        serde_json::json!(["emit", "artifact", "--eval", "process.exit(99)", "", "λ a", "--", "--runtime", "node"])
+    }
+
+    fn argument_fixture() -> tempfile::TempDir {
+        let root = fixture();
+        put(root.path(), TEST, ARGUMENT_PROGRAM);
+        manifest(root.path(), serde_json::json!({(TEST):{
+            "arguments":argument_request(), "cwd":"packages/api",
+            "stdin":"fixtures/input.bin", "stdin_mode":"pipe",
+            "environment":{"APP_MODE":"captured"}
+        }}));
+        root
+    }
+
+    fn expected_argument_output() -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!([
+            argument_request(), [0, 255, 120, 10], "captured", "package-local", 42
+        ])).unwrap()
+    }
+
+    #[test]
+    fn argument_requests_compose_with_pipe_cwd_environment_and_file_assertions() {
+        let root = argument_fixture();
+        let expected = expected_argument_output();
+        put(root.path(), "fixtures/argv.stdout", &expected);
+        put(root.path(), "fixtures/empty.bin", b"");
+        let manifest_path = root.path().join(".franken-node/migration-tests.json");
+        let mut raw: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        raw["expectations"] = serde_json::json!({(TEST):{
+            "stdout":"fixtures/argv.stdout", "stderr":"fixtures/empty.bin",
+            "files":{"packages/api/artifact":"fixtures/argv.stdout"}
+        }});
+        fs::write(&manifest_path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        let captured = snapshot(root.path());
+        let output = execute_captured(&captured);
+        assert!(output.status.success());
+        assert_eq!(output.stdout, expected);
+        assert!(output.stderr.is_empty());
+        assert!(!root.path().join("packages/api/artifact").exists());
+    }
+
+    #[test]
+    fn argument_order_empty_values_and_omission_cannot_change_between_roles() {
+        use super::super::super::ApprovedInputs;
+        let original = argument_fixture();
+        let original_pin = snapshot(original.path()).digest;
+        for arguments in [
+            serde_json::json!([]),
+            serde_json::json!(["artifact", "emit"]),
+            serde_json::json!(["emit", "artifact", ""]),
+            serde_json::json!(["emit", "artifact"]),
+        ] {
+            let candidate = argument_fixture();
+            let manifest_path = candidate.path().join(".franken-node/migration-tests.json");
+            let mut changed: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+            changed["execution"][TEST]["arguments"] = arguments;
+            fs::write(&manifest_path, serde_json::to_vec(&changed).unwrap()).unwrap();
+            let candidate_pin = snapshot(candidate.path()).digest;
+            // Both pins are correct: refusal must come from request mismatch,
+            // before any runtime can be selected, not from a stale hash.
+            let error = ApprovedInputs::capture(
+                original.path(), Some(candidate.path()), &original_pin, &candidate_pin,
+            ).err().expect("different application requests must not be admitted");
+            assert!(format!("{error:#}").contains("execution settings differ"), "{error:#}");
+            assert!(!candidate.path().join("packages/api/artifact").exists());
+        }
+    }
+
+    #[test]
+    fn argv_is_identical_in_pair_and_three_role_process_and_filesystem_evidence() {
+        use sha2::Digest;
+        let root = argument_fixture();
+        let captured = snapshot(root.path());
+        let runtime = node();
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let expected_hash = hex::encode(sha2::Sha256::digest(expected_argument_output()));
+        let pair = execute_suite_pair(
+            &captured, &captured, &runtime, &runtime, deadline, Duration::from_secs(5), true,
+        ).unwrap();
+        assert_eq!(pair.verdict, "PASS", "{pair:#?}");
+        assert_eq!(pair.cases[0].reference.as_ref().unwrap().stdout.sha256, expected_hash);
+        assert_eq!(pair.cases[0].reference, pair.cases[0].native);
+        let identity = runtime.identity(deadline).unwrap();
+        // Same installed Node in all roles tests the shared execution path;
+        // it deliberately cannot establish three-runtime admission or parity.
+        let product = product_oracle::execute(
+            &captured, &captured, [&runtime, &runtime, &runtime],
+            [identity.clone(), identity.clone(), identity], deadline, Duration::from_secs(5), true,
+        ).unwrap();
+        assert_eq!(product.verdict, "PASS", "{product:#?}");
+        assert!(!product.distinct_reference_binaries);
+        for observed in [&product.cases[0].node, &product.cases[0].bun, &product.cases[0].native] {
+            let observed = observed.as_ref().unwrap();
+            assert_eq!(observed.stdout.sha256, expected_hash);
+            assert_eq!(observed.workspace_delta.as_ref().unwrap().changed_paths, 1);
+        }
+        assert!(!root.path().join("packages/api/artifact").exists());
+    }
+
+    #[test]
+    fn checked_rewrites_validate_the_argv_selected_behavior_and_keep_sources_unchanged() {
+        let root = argument_fixture();
+        let mut candidate = RewriteCandidate::capture(
+            root.path(), Instant::now() + Duration::from_secs(120),
+        ).unwrap();
+        let rewritten = String::from_utf8(ARGUMENT_PROGRAM.to_vec()).unwrap()
+            .replace("const answer = 21 + 21;", "const answer = 42;");
+        candidate.prepare(&[Replacement {
+            path: TEST, before: ARGUMENT_PROGRAM, after: rewritten.as_bytes(),
+        }]).unwrap();
+        let report = candidate.validate_node_pair().unwrap();
+        assert_eq!(report.verdict, "PASS", "{report:#?}");
+        candidate.check_validation(&report).unwrap();
+        candidate.ensure_source_unchanged().unwrap();
+        assert_eq!(fs::read(root.path().join(TEST)).unwrap(), ARGUMENT_PROGRAM);
+        assert!(!root.path().join("packages/api/artifact").exists());
+    }
+
+    #[test]
+    fn changing_only_argv_invalidates_the_captured_project_and_checked_admission() {
+        let root = argument_fixture();
+        let before = RewriteCandidate::capture(
+            root.path(), Instant::now() + Duration::from_secs(60),
+        ).unwrap();
+        let path = root.path().join(".franken-node/migration-tests.json");
+        let mut changed: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        changed["execution"][TEST]["arguments"][2] = "different request".into();
+        fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+        let after = RewriteCandidate::capture(
+            root.path(), Instant::now() + Duration::from_secs(60),
+        ).unwrap();
+        assert_ne!(before.input_sha256(), after.input_sha256());
+        assert!(before.ensure_source_unchanged().is_err());
+        assert!(!root.path().join("packages/api/artifact").exists());
+    }
+
+    #[test]
+    fn pair_and_product_replay_recover_original_argv_not_later_manifest_arguments() {
+        use native_replay::failure_capture::product;
+        for three_roles in [false, true] {
+            let root = argument_fixture();
+            let output = tempfile::tempdir().unwrap();
+            let path = output.path().join("argument-capsule.json");
+            // Deliberate failing/empty executables only: these tests are about
+            // replaying the measured failure, NOT passing Bun/Franken parity.
+            let (pin, cases) = if three_roles {
+                let measured = product::capture_project(
+                    root.path(), None, Path::new("/bin/false"), Path::new("/bin/true"), true,
+                ).unwrap();
+                assert_eq!(measured.report.verdict, "INCONCLUSIVE");
+                (measured.write_capsule(&path).unwrap().content_sha256,
+                    serde_json::to_value(&measured.report.cases).unwrap())
+            } else {
+                let measured = native_replay::capture_project(
+                    root.path(), None, Path::new("/bin/false"), true,
+                ).unwrap();
+                assert_eq!(measured.report.verdict, "FAIL");
+                (measured.write_capsule(&path).unwrap().content_sha256,
+                    serde_json::to_value(&measured.report.cases).unwrap())
+            };
+            let changed = serde_json::json!({(TEST):{"arguments":["must not be executed"]}});
+            manifest(root.path(), changed);
+            let current_manifest = fs::read(root.path().join(".franken-node/migration-tests.json")).unwrap();
+            let replayed = if three_roles {
+                serde_json::to_value(product::replay(
+                    &path, &pin, Path::new("/bin/false"), Path::new("/bin/true"), false,
+                ).unwrap()).unwrap()
+            } else {
+                serde_json::to_value(native_replay::replay(
+                    &path, &pin, Path::new("/bin/false"), false,
+                ).unwrap()).unwrap()
+            };
+            assert_eq!(replayed["verdict"], "REPRODUCED");
+            assert_eq!(replayed["validation"]["cases"], cases);
+            assert_eq!(fs::read(root.path().join(".franken-node/migration-tests.json")).unwrap(), current_manifest);
+            assert!(!root.path().join("packages/api/artifact").exists());
+        }
     }
 
     #[test]
