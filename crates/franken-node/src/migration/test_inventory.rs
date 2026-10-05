@@ -27,13 +27,150 @@ struct Manifest {
     tests: Vec<String>,
     #[serde(default, deserialize_with = "execution::unique_map")]
     execution: BTreeMap<String, execution::Settings>,
+    #[serde(default, deserialize_with = "execution::unique_map")]
+    expectations: BTreeMap<String, Expectations>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct TestSettings {
+    execution: execution::Settings,
+    expectations: Expectations,
+}
+
+/// An independent, captured oracle. Agreement between two runtimes alone can
+/// otherwise accept two implementations that produce the same wrong output.
+/// Missing fields preserve comparison-only behavior; an explicit expectation
+/// must name at least one regular, bounded fixture. Null is not an assertion.
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct Expectations {
+    #[serde(default, deserialize_with = "expectation_field")]
+    stdout: Option<String>,
+    #[serde(default, deserialize_with = "expectation_field")]
+    stderr: Option<String>,
+}
+
+fn expectation_field<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Some)
+}
+
+const MAX_EXPECTATION_BYTES: usize = 1024 * 1024;
+
+fn expectation_path(name: &str) -> Result<&Path> {
+    let path = Path::new(name);
+    ensure!(
+        !name.is_empty()
+            && name.len() <= MAX_PATH_BYTES
+            && !name.contains('\\')
+            && !name.chars().any(char::is_control)
+            && path
+                .components()
+                .all(|part| matches!(part, Component::Normal(_)))
+            && path
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/")
+                == name,
+        "expectation paths must be canonical project-relative paths"
+    );
+    ensure!(
+        !excluded_from_discovery(path)
+            && !path.components().any(|part| matches!(
+                part.as_os_str().to_str(),
+                Some(".franken-rewrite" | ".beads")
+            )),
+        "expectations cannot select dependencies, backups or reserved state"
+    );
+    Ok(path)
+}
+
+fn expectation_bytes<'a>(entries: &'a BTreeMap<PathBuf, Entry>, name: &str) -> Result<&'a [u8]> {
+    let path = expectation_path(name)?;
+    for parent in path
+        .ancestors()
+        .skip(1)
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        ensure!(
+            matches!(
+                entries.get(parent).map(|entry| &entry.data),
+                Some(EntryData::Directory)
+            ),
+            "expectation fixtures must have ordinary captured directory parents"
+        );
+    }
+    let Some(Entry {
+        data: EntryData::File(bytes),
+        ..
+    }) = entries.get(path)
+    else {
+        bail!("expectation fixture must be a regular captured file");
+    };
+    ensure!(
+        bytes.len() <= MAX_EXPECTATION_BYTES,
+        "captured expectation fixture exceeds 1 MiB"
+    );
+    Ok(bytes)
+}
+
+impl Expectations {
+    fn fixtures(&self) -> impl Iterator<Item = (&'static str, &str)> {
+        [("stdout", self.stdout.as_deref()), ("stderr", self.stderr.as_deref())]
+            .into_iter()
+            .filter_map(|(stream, path)| path.map(|path| (stream, path)))
+    }
+
+    fn validate(&self, entries: &BTreeMap<PathBuf, Entry>) -> Result<()> {
+        ensure!(
+            self.stdout.is_some() || self.stderr.is_some(),
+            "explicit output expectations must not be empty"
+        );
+        for (_, name) in self.fixtures() {
+            expectation_bytes(entries, name)?;
+        }
+        Ok(())
+    }
+
+    fn matched(&self, original: &Snapshot, candidate: &Snapshot) -> Result<()> {
+        for (stream, name) in self.fixtures() {
+            ensure!(
+                expectation_bytes(&original.entries, name)?
+                    == expectation_bytes(&candidate.entries, name)?,
+                "captured {stream} expectation bytes differ between original and candidate"
+            );
+        }
+        Ok(())
+    }
+
+    fn check(&self, snapshot: &Snapshot, output: &Output) -> Result<()> {
+        for (stream, name, actual) in [
+            ("stdout", self.stdout.as_deref(), output.stdout.as_slice()),
+            ("stderr", self.stderr.as_deref(), output.stderr.as_slice()),
+        ] {
+            if let Some(name) = name {
+                // Deliberately do not put expected or actual bytes in errors:
+                // stdout/stderr can contain credentials or private input data.
+                ensure!(
+                    expectation_bytes(&snapshot.entries, name)? == actual,
+                    "test {stream} does not match its captured output expectation"
+                );
+            }
+        }
+        // Do not normalize exit status or streams. The existing paired oracle
+        // must still reject failed processes and any cross-runtime divergence.
+        Ok(())
+    }
 }
 
 pub(super) fn discover(entries: &BTreeMap<PathBuf, Entry>) -> Result<Vec<PathBuf>> {
     Ok(inventory(entries)?.into_keys().collect())
 }
 
-fn inventory(entries: &BTreeMap<PathBuf, Entry>) -> Result<BTreeMap<PathBuf, execution::Settings>> {
+fn inventory(entries: &BTreeMap<PathBuf, Entry>) -> Result<BTreeMap<PathBuf, TestSettings>> {
     // Capture deliberately does not descend through symlinks. Do not silently
     // ignore a manifest hidden behind a linked configuration directory.
     ensure!(
@@ -46,7 +183,7 @@ fn inventory(entries: &BTreeMap<PathBuf, Entry>) -> Result<BTreeMap<PathBuf, exe
         let tests: BTreeMap<_, _> = entries
             .iter()
             .filter(|(path, entry)| !matches!(entry.data, EntryData::Directory) && is_test(path))
-            .map(|(path, _)| (path.clone(), execution::Settings::default()))
+            .map(|(path, _)| (path.clone(), TestSettings::default()))
             .collect();
         ensure!(
             tests.len() <= MAX_TESTS,
@@ -115,7 +252,7 @@ fn inventory(entries: &BTreeMap<PathBuf, Entry>) -> Result<BTreeMap<PathBuf, exe
         );
         ensure!(
             selected
-                .insert(path.to_path_buf(), execution::Settings::default())
+                .insert(path.to_path_buf(), TestSettings::default())
                 .is_none(),
             "duplicate migration test entrypoint: {name}"
         );
@@ -141,7 +278,15 @@ fn inventory(entries: &BTreeMap<PathBuf, Entry>) -> Result<BTreeMap<PathBuf, exe
             .get_mut(path)
             .context("execution settings refer to an unselected test")?;
         execution::validate(&mut settings, entries, path)?;
-        *target = settings;
+        target.execution = settings;
+    }
+    for (name, expectations) in manifest.expectations {
+        let path = expectation_path(&name)?;
+        let target = selected
+            .get_mut(path)
+            .context("output expectations refer to an unselected test")?;
+        expectations.validate(entries)?;
+        target.expectations = expectations;
     }
     Ok(selected)
 }
@@ -158,9 +303,11 @@ pub(super) fn matched_execution(original: &Snapshot, candidate: &Snapshot) -> Re
     );
     for settings in reference.values() {
         ensure!(
-            execution::input(settings, original)? == execution::input(settings, candidate)?,
+            execution::input(&settings.execution, original)?
+                == execution::input(&settings.execution, candidate)?,
             "captured test stdin bytes differ between original and candidate"
         );
+        settings.expectations.matched(original, candidate)?;
     }
     Ok(())
 }
@@ -180,16 +327,22 @@ pub(super) fn run_test(
     let settings = tests
         .get(test)
         .context("test is not present in the captured execution inventory")?;
-    execution::run(
+    let output = execution::run(
         snapshot,
-        settings,
+        &settings.execution,
         test,
         invocation,
         workspace,
         environment,
         (deadline, timing.1),
-    )
+    )?;
+    settings.expectations.check(snapshot, &output)?;
+    Ok(output)
 }
+
+#[cfg(test)]
+#[path = "test_expectations_tests.rs"]
+mod expectation_tests;
 
 #[cfg(test)]
 mod tests {
