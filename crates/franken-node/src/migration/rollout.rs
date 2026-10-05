@@ -461,20 +461,21 @@ impl RolloutManager {
         self.load_or_init_locked(&store)
     }
 
-    /// Explicit state updates still cannot change the admitted recovery identity
-    /// or resurrect an aborted migration. Lifecycle methods retain the lock
-    /// across read/modify/write and use persist_locked instead.
+    /// Persist a confidence observation against the current lifecycle state.
+    /// Initialization and lifecycle transitions must use their admission and
+    /// recovery methods, never this observation API. In particular, callers
+    /// cannot declare restoration complete without executing native recovery,
+    /// alter trust/binding/history fields, or replay an earlier rollout stage.
     pub fn persist(&self, state: &RolloutState) -> io::Result<()> {
         let store = self.open_store()?;
-        if let Some(previous) = self.load_existing(&store)? {
-            if previous.rollback_plan_id != state.rollback_plan_id
-                || previous.rollback_journal_sha256 != state.rollback_journal_sha256
-                || (previous.current_stage == RolloutStage::Aborted && state.current_stage != RolloutStage::Aborted)
-            {
-                return Err(invalid("cannot replace a bound recovery plan or revive an aborted rollout"));
-            }
-        } else if state.rollback_plan_id.is_some() || self.migration_id.starts_with("txn-") {
-            return Err(invalid("initialize and admit the native transaction before updating rollout state"));
+        let mut observed = self.load_existing(&store)?.ok_or_else(|| {
+            invalid("initialize and admit the rollout before recording confidence observations")
+        })?;
+        observed.confidence_score = state.confidence_score;
+        if observed != *state {
+            return Err(invalid(
+                "state observations may update only confidence; lifecycle state changed or update attempts to bypass promotion/recovery",
+            ));
         }
         self.persist_locked(&store, state)
     }
@@ -886,5 +887,93 @@ mod tests {
         assert!(human.contains("mig-test-render"));
         assert!(human.contains("Canary"));
         assert!(human.contains("98.00%"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn observations_cannot_forge_completed_native_restoration() {
+        use super::super::rewrite_transaction::{Edit, RewriteTransaction};
+        use super::super::rollback::{self, RollbackStatus};
+        let root = tempdir().unwrap();
+        fs::write(root.path().join("app.js"), b"original").unwrap();
+        RewriteTransaction::open(root.path()).unwrap().apply(&[Edit {
+            path: "app.js", before: b"original", after: b"rewritten",
+        }]).unwrap();
+        let history = rollback::run(root.path(), None, false);
+        assert_eq!(history.status, RollbackStatus::History);
+        let id = &history.history[0].transaction_id;
+        let manager = RolloutManager::new(root.path(), Some(id));
+        let before = manager.load_or_init().unwrap();
+        let mut forged = before.clone();
+        forged.current_stage = RolloutStage::Aborted;
+        forged.status = RolloutStatus::RolledBack;
+        forged.ramp_pct = 0;
+        let error = manager.persist(&forged).unwrap_err();
+        assert!(error.to_string().contains("only confidence"));
+        assert_eq!(manager.load_or_init().unwrap(), before);
+        assert_eq!(fs::read(root.path().join("app.js")).unwrap(), b"rewritten");
+        assert!(!manager.status().unwrap().source_rollback.unwrap().restoration_recorded);
+        let restored = manager.rollback("actual restoration required").unwrap();
+        assert!(restored.source_rollback.unwrap().restoration_recorded);
+        assert_eq!(fs::read(root.path().join("app.js")).unwrap(), b"original");
+    }
+
+    #[test]
+    fn stale_confidence_observation_cannot_overwrite_a_newer_promotion() {
+        let root = tempdir().unwrap();
+        let manager = RolloutManager::new(root.path(), Some("mig-stale-observation"));
+        let mut stale = manager.load_or_init().unwrap();
+        let config = RolloutConfig { force: true, ..RolloutConfig::default() };
+        manager.promote(&config, None, None).unwrap();
+        let promoted = manager.load_or_init().unwrap();
+        stale.confidence_score = 0.2;
+        assert!(manager.persist(&stale).is_err());
+        assert_eq!(manager.load_or_init().unwrap(), promoted);
+        let mut fresh = promoted;
+        fresh.confidence_score = 0.75;
+        manager.persist(&fresh).unwrap();
+        assert_eq!(manager.load_or_init().unwrap(), fresh);
+    }
+
+    #[test]
+    fn observations_cannot_replace_trust_fields_or_transition_history() {
+        let root = tempdir().unwrap();
+        let manager = RolloutManager::new(root.path(), Some("mig-observation-fields"));
+        let original = manager.load_or_init().unwrap();
+        let mut forged = original.clone();
+        forged.lockstep_verified = true;
+        assert!(manager.persist(&forged).is_err());
+        let mut forged = original.clone();
+        forged.updated_at = "forged timestamp".into();
+        assert!(manager.persist(&forged).is_err());
+        let mut forged = original.clone();
+        forged.history.push(RolloutTransitionEvent {
+            from_stage: RolloutStage::Shadow,
+            to_stage: RolloutStage::Default,
+            action: "promote".into(),
+            reason: "not executed".into(),
+            timestamp_utc: original.updated_at.clone(),
+            confidence_score: 1.0,
+            ramp_pct: 100,
+            receipt_signature: None,
+        });
+        assert!(manager.persist(&forged).is_err());
+        assert_eq!(manager.load_or_init().unwrap(), original);
+    }
+
+    #[test]
+    fn confidence_observations_require_the_initialization_admission_path() {
+        let root = tempdir().unwrap();
+        let manager = RolloutManager::new(root.path(), Some("mig-init-observation"));
+        let state = RolloutState::new(
+            "mig-init-observation".into(),
+            root.path().to_string_lossy().into_owned(),
+        );
+        assert!(manager.persist(&state).unwrap_err().to_string().contains("initialize"));
+        assert!(!root.path().join(".franken-node/state/rollout/mig-init-observation.json").exists());
+        let mut admitted = manager.load_or_init().unwrap();
+        admitted.confidence_score = 0.6;
+        manager.persist(&admitted).unwrap();
+        assert_eq!(manager.load_or_init().unwrap(), admitted);
     }
 }
