@@ -408,6 +408,7 @@ pub(super) fn execute(
     filesystem: bool,
 ) -> Result<ProductReport> {
     let tests = matched_tests(original, candidate)?;
+    let concurrency = test_inventory::concurrency(original)?;
     let [node_runtime, bun_runtime, native_runtime] = identities;
     let distinct_reference_binaries = node_runtime.sha256 != bun_runtime.sha256;
     let mut report = ProductReport {
@@ -449,38 +450,30 @@ pub(super) fn execute(
         failure_capture: None,
     };
     let environment = std::env::vars_os().collect();
-    for test in tests {
-        if let Err(error) = budget(deadline) {
-            report.errors.push(error.to_string());
-            break;
-        }
-        let case = match tempfile::Builder::new()
+    let completed = test_inventory::run_scheduled(&tests, concurrency, deadline, |test| {
+        budget(deadline)?;
+        let case = tempfile::Builder::new()
             .prefix("franken-product-oracle-")
             .permissions(fs::Permissions::from_mode(0o700))
             .tempdir()
-        {
-            Ok(case) => case,
-            Err(error) => {
-                report
-                    .errors
-                    .push(format!("create private comparison workspace: {error}"));
-                break;
-            }
-        };
+            .context("create private comparison workspace")?;
         let mut legs: [Leg; 3] = std::array::from_fn(|_| Leg::default());
         for (index, invocation) in runtimes.iter().enumerate() {
             let snapshot = if index == 2 { candidate } else { original };
             legs[index] = measure(
                 snapshot,
                 invocation,
-                &test,
+                test,
                 &case.path().join(ROLES[index]),
                 &environment,
                 (deadline, leg_timeout),
                 filesystem,
             );
         }
-        let row = classify(&test, legs, filesystem);
+        Ok(classify(test, legs, filesystem))
+    })?;
+    report.errors.extend(completed.errors);
+    for row in completed.rows {
         report.skipped -= 1;
         match row.outcome {
             CaseOutcome::Match => report.passed += 1,
@@ -574,6 +567,150 @@ mod tests {
             filesystem,
         )
         .unwrap()
+    }
+
+    fn concurrent_manifest(root: &Path, tests: &[&str], limit: usize) {
+        write(root, ".franken-node/migration-tests.json", &serde_json::json!({
+            "schema_version": "franken-node/migration-tests/v1",
+            "tests": tests,
+            "max_concurrent_tests": limit,
+        }).to_string());
+    }
+
+    #[test]
+    fn concurrent_cases_use_the_captured_plan_and_execute_every_role_once() {
+        // Actual Node processes in all roles exercise scheduling, capture and
+        // cleanup, NOT a claim that Node is an independent Bun/native oracle.
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let log = outside.path().join("runs");
+        write(root.path(), "dependency", "captured");
+        for name in ["a", "b"] {
+            write(root.path(), &format!("{name}.test.js"), &format!(r#"
+const fs = require('fs');
+const role = process.argv[2];
+const marker = {} + '/' + role;
+(async () => {{
+    if ('{name}' === 'a') {{
+        const deadline = Date.now() + 4000;
+        while (!fs.existsSync(marker) && Date.now() < deadline)
+            await new Promise(resolve => setTimeout(resolve, 5));
+        if (!fs.existsSync(marker)) throw new Error('concurrent peer did not execute');
+    }} else fs.writeFileSync(marker, 'ready');
+    const value = fs.readFileSync('dependency');
+    fs.writeFileSync('artifact', value);
+    fs.writeFileSync('dependency', 'guest mutation');
+    fs.appendFileSync({}, '{name}:' + role + '\n');
+    process.stdout.write(value);
+}})().catch(error => {{ console.error(error.message); process.exitCode = 1; }});
+"#, serde_json::to_string(outside.path()).unwrap(), serde_json::to_string(&log).unwrap()));
+        }
+        concurrent_manifest(root.path(), &["a.test.js", "b.test.js"], 2);
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let inputs = CapturedInputs::capture(root.path(), None, deadline).unwrap();
+        concurrent_manifest(root.path(), &["a.test.js", "b.test.js"], 1);
+        write(root.path(), "dependency", "later source");
+        let report = measured_inputs(&inputs, true, deadline, Duration::from_secs(8));
+        assert_eq!(report.verdict, "PASS", "{report:#?}");
+        assert_eq!((report.passed, report.errored, report.skipped), (2, 0, 0));
+        assert_eq!(report.cases.iter().map(|row| row.test.as_str()).collect::<Vec<_>>(),
+            ["a.test.js", "b.test.js"]);
+        let runs = fs::read_to_string(log).unwrap();
+        assert_eq!(runs.lines().count(), 6);
+        for name in ["a", "b"] {
+            assert_eq!(runs.lines().filter(|line| line.starts_with(name)).collect::<Vec<_>>(),
+                [format!("{name}:node"), format!("{name}:bun"), format!("{name}:native")]);
+        }
+        for row in &report.cases {
+            assert_eq!(row.node, row.bun);
+            assert_eq!(row.node, row.native);
+            assert_eq!(row.node.as_ref().unwrap().stdout.bytes, 8);
+        }
+        assert_eq!(fs::read(root.path().join("dependency")).unwrap(), b"later source");
+        assert!(!root.path().join("artifact").exists());
+    }
+
+    #[test]
+    fn concurrent_failures_keep_all_reference_native_and_error_classifications() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), "a.test.js", "console.log(process.argv.includes('native')?'bad':'ok');");
+        write(root.path(), "b.test.js", "console.log(process.argv.includes('bun')?'bad':'ok');");
+        write(root.path(), "c.test.js", "console.log('not the expected bytes');");
+        write(root.path(), "expected.txt", "ok\n");
+        write(root.path(), ".franken-node/migration-tests.json", &serde_json::json!({
+            "schema_version": "franken-node/migration-tests/v1",
+            "tests": ["a.test.js", "b.test.js", "c.test.js"],
+            "max_concurrent_tests": 3,
+            "expectations": {"c.test.js": {"stdout": "expected.txt"}},
+        }).to_string());
+        let report = measured(root.path(), None, true);
+        assert_eq!(report.verdict, "ERROR", "{report:#?}");
+        assert_eq!((report.passed, report.native_divergences, report.reference_divergences,
+            report.errored, report.skipped), (0, 1, 1, 1, 0));
+        assert_eq!(report.cases[0].outcome, CaseOutcome::NativeDivergence);
+        assert_eq!(report.cases[1].outcome, CaseOutcome::ReferenceDivergence);
+        assert_eq!(report.cases[2].outcome, CaseOutcome::Error);
+        for row in &report.cases[..2] {
+            assert!(row.node.is_some() && row.bun.is_some() && row.native.is_some());
+        }
+        assert_eq!(report.cases[2].errors.len(), 6);
+        for role in ROLES {
+            assert!(report.cases[2].errors.contains(&format!("{role}: incomplete observation")));
+        }
+    }
+
+    #[test]
+    fn a_concurrent_timeout_keeps_peer_cases_and_other_runtime_observations() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), "a.test.js",
+            "if(process.argv.includes('bun'))setInterval(()=>{},1000);else console.log(42);");
+        write(root.path(), "b.test.js", "console.log(42);");
+        concurrent_manifest(root.path(), &["a.test.js", "b.test.js"], 2);
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let inputs = CapturedInputs::capture(root.path(), None, deadline).unwrap();
+        let report = measured_inputs(&inputs, true, deadline, Duration::from_secs(1));
+        assert_eq!(report.verdict, "ERROR");
+        assert_eq!((report.passed, report.errored, report.skipped), (1, 1, 0));
+        assert!(report.cases[0].node.is_some());
+        assert!(report.cases[0].bun.is_none());
+        assert!(report.cases[0].native.is_some());
+        assert_eq!(report.cases[1].outcome, CaseOutcome::Match);
+    }
+
+    #[test]
+    fn parallel_and_serial_runs_preserve_binary_stdin_cwd_and_golden_file_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("nested")).unwrap();
+        fs::write(root.path().join("request.bin"), [0, 255, 1, 10]).unwrap();
+        for name in ["a", "b", "c"] {
+            write(root.path(), &format!("{name}.test.js"),
+                "const fs=require('fs');const b=fs.readFileSync(0);fs.writeFileSync('result.bin',b);process.stdout.write(b);");
+        }
+        let mut manifest = serde_json::json!({
+            "schema_version": "franken-node/migration-tests/v1",
+            "tests": ["a.test.js", "b.test.js", "c.test.js"],
+            "max_concurrent_tests": 1,
+            "execution": {}, "expectations": {},
+        });
+        for name in ["a.test.js", "b.test.js", "c.test.js"] {
+            manifest["execution"][name] = serde_json::json!({
+                "cwd": "nested", "stdin": "request.bin", "stdin_mode": "pipe",
+            });
+            manifest["expectations"][name] = serde_json::json!({
+                "stdout": "request.bin", "files": {"nested/result.bin": "request.bin"},
+            });
+        }
+        write(root.path(), ".franken-node/migration-tests.json", &manifest.to_string());
+        let serial = measured(root.path(), None, true);
+        manifest["max_concurrent_tests"] = 3.into();
+        write(root.path(), ".franken-node/migration-tests.json", &manifest.to_string());
+        let parallel = measured(root.path(), None, true);
+        assert_eq!(serial.verdict, "PASS", "{serial:#?}");
+        assert_eq!(parallel.verdict, "PASS", "{parallel:#?}");
+        assert_eq!(serial.cases, parallel.cases);
+        assert_ne!(serial.input_sha256, parallel.input_sha256);
+        assert_eq!(fs::read(root.path().join("request.bin")).unwrap(), [0, 255, 1, 10]);
+        assert!(!root.path().join("nested/result.bin").exists());
     }
 
     #[test]

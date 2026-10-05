@@ -19,6 +19,14 @@ use std::time::{Duration, Instant};
 #[path = "test_execution.rs"]
 mod execution;
 
+pub(super) use scheduler::run_scheduled;
+
+pub(super) const MAX_CONCURRENT_TESTS: usize = 4;
+
+fn sequential() -> usize {
+    1
+}
+
 const MANIFEST_PATH: &str = ".franken-node/migration-tests.json";
 const MANIFEST_SCHEMA: &str = "franken-node/migration-tests/v1";
 const MAX_MANIFEST_BYTES: usize = 64 * 1024;
@@ -28,6 +36,10 @@ const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 struct Manifest {
     schema_version: String,
     tests: Vec<String>,
+    /// Explicit permission to overlap independent tests, not proof that their
+    /// external effects are isolated. Omission keeps historical serial order.
+    #[serde(default = "sequential")]
+    max_concurrent_tests: usize,
     #[serde(default, deserialize_with = "execution::unique_map")]
     execution: BTreeMap<String, execution::Settings>,
     #[serde(default, deserialize_with = "execution::unique_map")]
@@ -38,6 +50,12 @@ struct Manifest {
 struct TestSettings {
     execution: execution::Settings,
     expectations: Expectations,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Inventory {
+    tests: BTreeMap<PathBuf, TestSettings>,
+    max_concurrent_tests: usize,
 }
 
 /// An independent, captured oracle. Agreement between two runtimes alone can
@@ -283,10 +301,16 @@ fn check_output_file(workspace: &File, name: &str, expected: &[u8], deadline: In
 }
 
 pub(super) fn discover(entries: &BTreeMap<PathBuf, Entry>) -> Result<Vec<PathBuf>> {
-    Ok(inventory(entries)?.into_keys().collect())
+    Ok(inventory(entries)?.tests.into_keys().collect())
 }
 
-fn inventory(entries: &BTreeMap<PathBuf, Entry>) -> Result<BTreeMap<PathBuf, TestSettings>> {
+/// Read the execution bound from the same immutable manifest as the inventory.
+/// Never consult an environment variable or recapture a mutable manifest.
+pub(super) fn concurrency(snapshot: &Snapshot) -> Result<usize> {
+    Ok(inventory(&snapshot.entries)?.max_concurrent_tests)
+}
+
+fn inventory(entries: &BTreeMap<PathBuf, Entry>) -> Result<Inventory> {
     // Capture deliberately does not descend through symlinks. Do not silently
     // ignore a manifest hidden behind a linked configuration directory.
     ensure!(
@@ -305,7 +329,10 @@ fn inventory(entries: &BTreeMap<PathBuf, Entry>) -> Result<BTreeMap<PathBuf, Tes
             tests.len() <= MAX_TESTS,
             "native validation test limit exceeded"
         );
-        return Ok(tests);
+        return Ok(Inventory {
+            tests,
+            max_concurrent_tests: 1,
+        });
     };
     let EntryData::File(bytes) = &entry.data else {
         bail!("migration test manifest must be a regular captured file");
@@ -319,6 +346,10 @@ fn inventory(entries: &BTreeMap<PathBuf, Entry>) -> Result<BTreeMap<PathBuf, Tes
     ensure!(
         manifest.schema_version == MANIFEST_SCHEMA,
         "unsupported migration test manifest schema"
+    );
+    ensure!(
+        (1..=MAX_CONCURRENT_TESTS).contains(&manifest.max_concurrent_tests),
+        "max_concurrent_tests must be in 1..=4"
     );
     ensure!(
         !manifest.tests.is_empty(),
@@ -404,7 +435,10 @@ fn inventory(entries: &BTreeMap<PathBuf, Entry>) -> Result<BTreeMap<PathBuf, Tes
         expectations.validate(entries)?;
         target.expectations = expectations;
     }
-    Ok(selected)
+    Ok(Inventory {
+        tests: selected,
+        max_concurrent_tests: manifest.max_concurrent_tests,
+    })
 }
 
 /// Identical test paths are not sufficient: a candidate cannot change the
@@ -417,7 +451,7 @@ pub(super) fn matched_execution(original: &Snapshot, candidate: &Snapshot) -> Re
         reference == native,
         "test execution settings differ between original and candidate"
     );
-    for settings in reference.values() {
+    for settings in reference.tests.values() {
         ensure!(
             execution::input(&settings.execution, original)?
                 == execution::input(&settings.execution, candidate)?,
@@ -440,7 +474,7 @@ pub(super) fn run_test(
         .checked_add(timing.0)
         .context("test execution deadline overflow")?;
     let tests = inventory(&snapshot.entries)?;
-    let settings = tests
+    let settings = tests.tests
         .get(test)
         .context("test is not present in the captured execution inventory")?;
     let output_workspace = settings.expectations.pin_workspace(workspace)?;
@@ -494,6 +528,66 @@ mod tests {
             })
             .to_string(),
         );
+    }
+
+    #[test]
+    fn concurrency_defaults_to_serial_and_requires_a_bounded_explicit_integer() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), "a.test.js", "console.log(42);");
+        assert_eq!(concurrency(&snapshot(root.path())).unwrap(), 1);
+        manifest(root.path(), &["a.test.js"]);
+        assert_eq!(concurrency(&snapshot(root.path())).unwrap(), 1);
+        for limit in 1..=MAX_CONCURRENT_TESTS {
+            write(root.path(), MANIFEST_PATH, &format!(
+                r#"{{"schema_version":"{MANIFEST_SCHEMA}","tests":["a.test.js"],"max_concurrent_tests":{limit}}}"#
+            ));
+            assert_eq!(concurrency(&snapshot(root.path())).unwrap(), limit);
+        }
+        for value in ["0", "5", "-1", "1.5", "null", "true", "\"2\"", "18446744073709551616"] {
+            write(root.path(), MANIFEST_PATH, &format!(
+                r#"{{"schema_version":"{MANIFEST_SCHEMA}","tests":["a.test.js"],"max_concurrent_tests":{value}}}"#
+            ));
+            assert!(discover(&snapshot(root.path()).entries).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn candidate_cannot_change_the_captured_concurrency_grant() {
+        let original = tempfile::tempdir().unwrap();
+        let candidate = tempfile::tempdir().unwrap();
+        for root in [original.path(), candidate.path()] {
+            write(root, "a.test.js", "console.log(42);");
+            manifest(root, &["a.test.js"]);
+        }
+        let reference = snapshot(original.path());
+        assert!(matched_tests(&reference, &snapshot(candidate.path())).is_ok());
+        write(candidate.path(), MANIFEST_PATH, &format!(
+            r#"{{"schema_version":"{MANIFEST_SCHEMA}","tests":["a.test.js"],"max_concurrent_tests":2}}"#
+        ));
+        assert!(matched_tests(&reference, &snapshot(candidate.path())).is_err());
+        // Explicit one and an omitted bound have the same execution policy.
+        write(candidate.path(), MANIFEST_PATH, &format!(
+            r#"{{"schema_version":"{MANIFEST_SCHEMA}","tests":["a.test.js"],"max_concurrent_tests":1}}"#
+        ));
+        assert!(matched_tests(&reference, &snapshot(candidate.path())).is_ok());
+    }
+
+    #[test]
+    fn concurrency_is_immutable_and_duplicate_grants_fail_closed() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), "a.test.js", "console.log(42);");
+        write(root.path(), MANIFEST_PATH, &format!(
+            r#"{{"schema_version":"{MANIFEST_SCHEMA}","tests":["a.test.js"],"max_concurrent_tests":3}}"#
+        ));
+        let captured = snapshot(root.path());
+        manifest(root.path(), &["a.test.js"]);
+        assert_eq!(concurrency(&captured).unwrap(), 3);
+        assert_eq!(concurrency(&snapshot(root.path())).unwrap(), 1);
+        assert_ne!(captured.digest, snapshot(root.path()).digest);
+        write(root.path(), MANIFEST_PATH, &format!(
+            r#"{{"schema_version":"{MANIFEST_SCHEMA}","tests":["a.test.js"],"max_concurrent_tests":1,"max_concurrent_tests":4}}"#
+        ));
+        assert!(discover(&snapshot(root.path()).entries).is_err());
     }
 
     fn snapshot(root: &Path) -> Snapshot {
@@ -805,5 +899,212 @@ mod tests {
                 .to_string()
                 .contains("reserved metadata")
         );
+    }
+}
+
+/// Bounded, ordered case execution. Keeping the scheduler beside the captured
+/// settings also binds its implementation into the existing replay source hash.
+mod scheduler {
+    use super::MAX_CONCURRENT_TESTS;
+    use anyhow::{Result, ensure};
+    use std::thread;
+    use std::time::Instant;
+
+    pub(in super::super) struct Scheduled<T> {
+        pub(in super::super) rows: Vec<T>,
+        pub(in super::super) errors: Vec<String>,
+    }
+
+    /// Each task owns a complete case, whose runtime legs remain sequential.
+    /// Tasks borrow immutable captures and must enforce the original deadline;
+    /// the scheduler never grants a fresh time allowance. Batches bound active
+    /// work and preserve inventory order independent of completion order.
+    pub(in super::super) fn run_scheduled<T: Sync, R: Send>(
+        items: &[T],
+        concurrency: usize,
+        deadline: Instant,
+        task: impl Fn(&T) -> Result<R> + Sync,
+    ) -> Result<Scheduled<R>> {
+        ensure!(
+            (1..=MAX_CONCURRENT_TESTS).contains(&concurrency),
+            "max_concurrent_tests must be in 1..=4"
+        );
+        let mut completed = Scheduled {
+            rows: Vec::new(),
+            errors: Vec::new(),
+        };
+        for batch in items.chunks(concurrency) {
+            if Instant::now() >= deadline {
+                completed.errors.push("native validation total budget exhausted".into());
+                break;
+            }
+            if concurrency == 1 {
+                // No thread or scheduling change for existing serial suites.
+                match task(&batch[0]) {
+                    Ok(row) => completed.rows.push(row),
+                    Err(error) => completed.errors.push(format!("test scheduling failed: {error:#}")),
+                }
+            } else {
+                thread::scope(|scope| {
+                    let mut handles = Vec::with_capacity(batch.len());
+                    let mut launch_error = None;
+                    for item in batch {
+                        if Instant::now() >= deadline {
+                            launch_error = Some("native validation total budget exhausted".into());
+                            break;
+                        }
+                        let task = &task;
+                        match thread::Builder::new()
+                            .name("franken-validation-case".into())
+                            .spawn_scoped(scope, move || task(item))
+                        {
+                            Ok(handle) => handles.push(handle),
+                            Err(error) => {
+                                launch_error = Some(format!("cannot start validation worker: {error}"));
+                                break;
+                            }
+                        }
+                    }
+                    // Always join all started workers, even after a launch
+                    // failure or worker panic. A panic becomes an incomplete
+                    // suite, never a fabricated row or a detached process.
+                    for handle in handles {
+                        match handle.join() {
+                            Ok(Ok(row)) => completed.rows.push(row),
+                            Ok(Err(error)) => completed.errors.push(format!("test scheduling failed: {error:#}")),
+                            Err(_) => completed.errors.push("validation worker panicked; incomplete suite".into()),
+                        }
+                    }
+                    if let Some(error) = launch_error {
+                        completed.errors.push(error);
+                    }
+                });
+            }
+            if !completed.errors.is_empty() {
+                break;
+            }
+        }
+        Ok(completed)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Condvar, Mutex};
+        use std::time::Duration;
+
+        fn deadline() -> Instant {
+            Instant::now() + Duration::from_secs(30)
+        }
+
+        #[test]
+        fn serial_default_uses_the_caller_thread_and_inventory_order() {
+            let caller = thread::current().id();
+            let seen = Mutex::new(Vec::new());
+            let result = run_scheduled(&[0, 1, 2], 1, deadline(), |item| {
+                assert_eq!(thread::current().id(), caller);
+                seen.lock().unwrap().push(*item);
+                Ok(*item)
+            }).unwrap();
+            assert_eq!(result.rows, [0, 1, 2]);
+            assert_eq!(*seen.lock().unwrap(), [0, 1, 2]);
+            assert!(result.errors.is_empty());
+        }
+
+        #[test]
+        fn cases_actually_overlap_but_results_keep_inventory_order() {
+            // A bounded handshake proves overlap without a timing speedup
+            // assertion. Serial dispatch cannot satisfy the first case.
+            let second_finished = (Mutex::new(false), Condvar::new());
+            let result = run_scheduled(&[0, 1], 2, deadline(), |item| {
+                if *item == 0 {
+                    let (finished, _) = second_finished.1.wait_timeout_while(
+                        second_finished.0.lock().unwrap(),
+                        Duration::from_secs(5),
+                        |finished| !*finished,
+                    ).unwrap();
+                    ensure!(*finished, "second case did not overlap the first");
+                } else {
+                    *second_finished.0.lock().unwrap() = true;
+                    second_finished.1.notify_all();
+                }
+                Ok(*item)
+            }).unwrap();
+            assert_eq!(result.rows, [0, 1]);
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+        }
+
+        #[test]
+        fn concurrency_is_bounded_and_every_case_executes_once() {
+            let active = AtomicUsize::new(0);
+            let peak = AtomicUsize::new(0);
+            let seen: Vec<AtomicUsize> = (0..17).map(|_| AtomicUsize::new(0)).collect();
+            let items: Vec<usize> = (0..seen.len()).collect();
+            let result = run_scheduled(&items, 4, deadline(), |item| {
+                let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(count, Ordering::SeqCst);
+                seen[*item].fetch_add(1, Ordering::SeqCst);
+                thread::yield_now();
+                active.fetch_sub(1, Ordering::SeqCst);
+                Ok(*item)
+            }).unwrap();
+            assert_eq!(result.rows, items);
+            assert!(result.errors.is_empty());
+            assert!((1..=4).contains(&peak.load(Ordering::SeqCst)));
+            assert_eq!(active.load(Ordering::SeqCst), 0);
+            assert!(seen.iter().all(|count| count.load(Ordering::SeqCst) == 1));
+        }
+
+        #[test]
+        fn a_failed_worker_retains_other_results_and_stops_later_batches() {
+            let seen = Mutex::new(Vec::new());
+            let result = run_scheduled(&[0, 1, 2, 3], 2, deadline(), |item| {
+                seen.lock().unwrap().push(*item);
+                ensure!(*item != 0, "case setup failed");
+                Ok(*item)
+            }).unwrap();
+            assert_eq!(result.rows, [1]);
+            assert_eq!(result.errors.len(), 1);
+            assert!(result.errors[0].contains("case setup failed"));
+            let mut seen = seen.into_inner().unwrap();
+            seen.sort();
+            assert_eq!(seen, [0, 1]);
+        }
+
+        #[test]
+        fn a_panicked_worker_is_joined_without_erasing_its_peers() {
+            let finished = AtomicUsize::new(0);
+            let result = run_scheduled(&[0, 1, 2, 3], 2, deadline(), |item| {
+                if *item == 0 {
+                    panic!("injected worker panic");
+                }
+                finished.fetch_add(1, Ordering::SeqCst);
+                Ok(*item)
+            }).unwrap();
+            assert_eq!(result.rows, [1]);
+            assert_eq!(finished.load(Ordering::SeqCst), 1);
+            assert_eq!(result.errors, ["validation worker panicked; incomplete suite"]);
+        }
+
+        #[test]
+        fn invalid_limits_and_expired_budgets_never_dispatch_a_task() {
+            let calls = AtomicUsize::new(0);
+            for limit in [0, MAX_CONCURRENT_TESTS + 1, usize::MAX] {
+                assert!(run_scheduled(&[0], limit, deadline(), |_| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }).is_err());
+            }
+            for limit in [1, 4] {
+                let result = run_scheduled(&[0, 1], limit, Instant::now(), |_| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }).unwrap();
+                assert!(result.rows.is_empty());
+                assert_eq!(result.errors, ["native validation total budget exhausted"]);
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+        }
     }
 }
