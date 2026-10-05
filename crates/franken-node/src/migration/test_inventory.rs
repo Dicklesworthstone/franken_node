@@ -6,9 +6,12 @@ use super::{
     is_test,
 };
 use anyhow::{Context, Result, bail, ensure};
+use rustix::fs::{Mode, OFlags, open, openat};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::fs::File;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::Output;
 use std::time::{Duration, Instant};
@@ -48,6 +51,8 @@ struct Expectations {
     stdout: Option<String>,
     #[serde(default, deserialize_with = "expectation_field")]
     stderr: Option<String>,
+    #[serde(default, deserialize_with = "execution::unique_map")]
+    files: BTreeMap<String, String>,
 }
 
 fn expectation_field<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
@@ -58,6 +63,7 @@ where
 }
 
 const MAX_EXPECTATION_BYTES: usize = 1024 * 1024;
+const MAX_EXPECTED_FILES: usize = 64;
 
 fn expectation_path(name: &str) -> Result<&Path> {
     let path = Path::new(name);
@@ -119,16 +125,29 @@ fn expectation_bytes<'a>(entries: &'a BTreeMap<PathBuf, Entry>, name: &str) -> R
 
 impl Expectations {
     fn fixtures(&self) -> impl Iterator<Item = (&'static str, &str)> {
-        [("stdout", self.stdout.as_deref()), ("stderr", self.stderr.as_deref())]
-            .into_iter()
-            .filter_map(|(stream, path)| path.map(|path| (stream, path)))
+        [
+            ("stdout", self.stdout.as_deref()),
+            ("stderr", self.stderr.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(stream, path)| path.map(|path| (stream, path)))
+        .chain(self.files.values().map(|path| ("file", path.as_str())))
     }
 
     fn validate(&self, entries: &BTreeMap<PathBuf, Entry>) -> Result<()> {
         ensure!(
-            self.stdout.is_some() || self.stderr.is_some(),
+            self.stdout.is_some() || self.stderr.is_some() || !self.files.is_empty(),
             "explicit output expectations must not be empty"
         );
+        ensure!(
+            self.files.len() <= MAX_EXPECTED_FILES,
+            "at most 64 file output expectations per test"
+        );
+        for target in self.files.keys() {
+            // Targets are workspace-root-relative, not relative to a harness's
+            // cwd. They may be created by the guest, so need not be captured.
+            expectation_path(target)?;
+        }
         for (_, name) in self.fixtures() {
             expectation_bytes(entries, name)?;
         }
@@ -164,6 +183,103 @@ impl Expectations {
         // must still reject failed processes and any cross-runtime divergence.
         Ok(())
     }
+
+    fn pin_workspace(&self, workspace: &Path) -> Result<Option<File>> {
+        if self.files.is_empty() {
+            return Ok(None);
+        }
+        // Pin the directory BEFORE guest execution. A later rename or symlink
+        // at the workspace pathname must not redirect our verification reads.
+        let fd = open(
+            workspace,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .context("pin output expectation workspace")?;
+        Ok(Some(File::from(fd)))
+    }
+
+    fn check_files(
+        &self,
+        snapshot: &Snapshot,
+        workspace: Option<&File>,
+        deadline: Instant,
+    ) -> Result<()> {
+        if self.files.is_empty() {
+            return Ok(());
+        }
+        let workspace = workspace.context("output expectation workspace was not pinned")?;
+        for (target, fixture) in &self.files {
+            let expected = expectation_bytes(&snapshot.entries, fixture)?;
+            check_output_file(workspace, target, expected, deadline)
+                .with_context(|| format!("file output expectation failed: {target}"))?;
+        }
+        Ok(())
+    }
+}
+
+fn check_output_file(workspace: &File, name: &str, expected: &[u8], deadline: Instant) -> Result<()> {
+    let path = expectation_path(name)?;
+    let mut parent = workspace.try_clone()?;
+    let mut parts = path.components().peekable();
+    while let Some(part) = parts.next() {
+        ensure!(
+            Instant::now() < deadline,
+            "file output expectation budget exhausted"
+        );
+        let last = parts.peek().is_none();
+        let mut flags = OFlags::RDONLY
+            | OFlags::NOFOLLOW
+            | OFlags::CLOEXEC
+            | OFlags::NONBLOCK
+            | OFlags::NOCTTY;
+        if !last {
+            flags |= OFlags::DIRECTORY;
+        }
+        // Open one component at a time relative to an already-open directory.
+        // NOFOLLOW on the leaf alone would still follow a replaced parent.
+        let fd = openat(&parent, part.as_os_str(), flags, Mode::empty())
+            .context("file output must exist without traversing symlinks")?;
+        let mut file = File::from(fd);
+        if !last {
+            parent = file;
+            continue;
+        }
+        let before = file.metadata()?;
+        ensure!(before.is_file(), "file output must be a regular file");
+        ensure!(
+            before.len() == expected.len() as u64,
+            "file output length differs from captured expectation"
+        );
+        let mut offset = 0_usize;
+        let mut chunk = [0_u8; 8192];
+        loop {
+            ensure!(
+                Instant::now() < deadline,
+                "file output expectation budget exhausted"
+            );
+            let count = file.read(&mut chunk).context("read file output")?;
+            if count == 0 {
+                break;
+            }
+            ensure!(
+                count <= expected.len().saturating_sub(offset)
+                    && expected[offset..offset + count] == chunk[..count],
+                "file output does not match its captured expectation"
+            );
+            offset += count;
+        }
+        ensure!(
+            offset == expected.len(),
+            "file output ended before captured expectation"
+        );
+        ensure!(
+            super::same_file_version(&before, &file.metadata()?),
+            "file output changed while checking its expectation"
+        );
+        return Ok(());
+    }
+    bail!("file output requires a nonempty relative path")
 }
 
 pub(super) fn discover(entries: &BTreeMap<PathBuf, Entry>) -> Result<Vec<PathBuf>> {
@@ -327,6 +443,7 @@ pub(super) fn run_test(
     let settings = tests
         .get(test)
         .context("test is not present in the captured execution inventory")?;
+    let output_workspace = settings.expectations.pin_workspace(workspace)?;
     let output = execution::run(
         snapshot,
         &settings.execution,
@@ -337,12 +454,19 @@ pub(super) fn run_test(
         (deadline, timing.1),
     )?;
     settings.expectations.check(snapshot, &output)?;
+    settings
+        .expectations
+        .check_files(snapshot, output_workspace.as_ref(), deadline)?;
     Ok(output)
 }
 
 #[cfg(test)]
 #[path = "test_expectations_tests.rs"]
 mod expectation_tests;
+
+#[cfg(test)]
+#[path = "file_expectations_tests.rs"]
+mod file_expectation_tests;
 
 #[cfg(test)]
 mod tests {
