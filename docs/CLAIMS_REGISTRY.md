@@ -126,27 +126,35 @@ Each claim entry uses this structure:
 - **Claim**: franken-node achieves ≥10× reduction in successful host
   compromise vs. baseline runtimes, measured via adversarial extension
   campaigns on an instrumented test harness.
-- **Evidence artifact**: `artifacts/adversarial/compromise_reduction_v2.json`,
-  `artifacts/13/compromise_reduction_report.json`,
-  `crates/franken-node/tests/compromise_reduction_baseline_bench.rs`
-  (all three are invalid as a measurement; see Notes)
+- **Evidence artifact**: `artifacts/adversarial/compromise_reduction_v2.json`
+  (measured), `crates/franken-node/tests/compromise_reduction_baseline_bench.rs`
+  (the honest harness), `scripts/check_compromise_reduction_gate.py` (the
+  franken-honesty gate)
 - **Verification command**:
-  `cargo test -p frankenengine-node --test 'adversarial_*' --release` then
-  aggregate via the harness in
-  `tests/security/exfiltration_sentinel_scenarios.rs`
-- **Last verified**: 2026-05-20T00:00:00Z (registry backfill)
-- **Status**: pending
-- **Notes**: The v2 bench's franken leg never executes the payload
-  (bd-reality-20260923-26n9r.3). It pre-installs a revoked trust card for the
-  dependency and runs `run .` (a directory, which the runtime could not run
-  until 2026-09-24). So every franken case was refused or errored before
-  guest code ran: all 20 recorded exit 1 with no typed error. The 20.0× ratio
-  therefore measures "an app whose dependency is already known-revoked is
-  refused", not containment of an executing payload.
-  `scripts/check_compromise_reduction_gate.py` also pins the exact values
-  20/0/20.0 in the bench source. The claim stays unmeasured until the
-  campaign runs each payload under each profile with a positive control
-  proving guest code executed.
+  `cargo test -p frankenengine-node --features extended-surfaces,test-support
+  --test compromise_reduction_baseline_bench
+  compromise_reduction_v2_measures_raw_runtime_baseline_against_strict_policy`
+  (requires local `node` + `bun`; writes the measured artifact) then
+  `python3 scripts/check_compromise_reduction_gate.py`
+- **Last verified**: 2026-09-29T00:00:00Z
+- **Status**: verified
+- **Notes**: Re-measured honestly under bd-reality-20260923-26n9r.3. The
+  rewritten harness registers each dependency as **Trusted** (not revoked),
+  records a fresh signed revocation frontier so the run reaches execution, and
+  runs the entry **file** with a per-case positive control (`FN_CONTROL:<case>`)
+  proving guest code ran, plus a genuine host-compromise oracle per vector (a
+  file written outside the project root, or bytes delivered to a loopback TCP
+  sink the harness owns). Measured 2026-09-29 on a machine with `node` v22.2.0 +
+  `bun` 1.4.2: all 20 vectors compromise BOTH raw runtimes (baseline 20/20);
+  franken-node strict contains all 20 (franken 0/20) with typed outcomes —
+  15 `capability_denied`, 4 `blocked_at_lowering`, 1 `executed_uncompromised` —
+  ratio 20.0×, Wilson-95 baseline lower bound 83.9%, franken upper bound 16.1%.
+  The gate now REJECTS the pre-2.1.0 tautological artifact (every franken case
+  an identical non-zero exit with no typed evidence) and requires each baseline
+  runtime to have executed the control and been compromised. CI runs the gate
+  (Python) but the bench's baseline leg needs `node`+`bun`, absent on the rch
+  workers, so the bench fail-closes to `status: baseline_unavailable` there and
+  the committed artifact is the local measurement snapshot.
 
 ### CLAIM-004: 100% deterministic replay for high-severity incidents
 

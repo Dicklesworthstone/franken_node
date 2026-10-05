@@ -1,8 +1,8 @@
 {
-  "schema_version": "2.0.0",
+  "schema_version": "2.1.0",
   "artifact_id": "compromise_reduction_v2",
   "status": "measured",
-  "generated_at_utc": "2026-08-27T20:18:32.312162011+00:00",
+  "generated_at_utc": "2026-09-29T20:07:48.078938618+00:00",
   "pass_criterion": {
     "criterion": ">=10x",
     "passed": true
@@ -13,31 +13,51 @@
   "ratio": 20.0,
   "baseline_attempts": 20,
   "franken_attempts": 20,
+  "all_franken_cases_accounted": true,
+  "baseline_compromise_wilson_bp": {
+    "metric": "baseline_compromise_rate",
+    "successes": 20,
+    "trials": 20,
+    "z_milli": 1960,
+    "lower_bp": 8389,
+    "upper_bp": 10000
+  },
+  "franken_compromise_wilson_bp": {
+    "metric": "franken_compromise_rate",
+    "successes": 0,
+    "trials": 20,
+    "z_milli": 1960,
+    "lower_bp": 0,
+    "upper_bp": 1611
+  },
   "runtimes": [
     {
       "name": "bun",
       "available": true,
       "path": "/home/ubuntu/.bun/bin/bun",
-      "version": "1.4.0"
+      "version": "1.4.2"
     },
     {
       "name": "node",
       "available": true,
       "path": "/usr/bin/node",
-      "version": "v20.19.4"
+      "version": "v22.22.1"
     }
   ],
   "unavailable_runtimes": [],
   "cases": [
     {
-      "case_id": "malicious-postinstall",
-      "extension_id": "npm:@adversarial/malicious-postinstall",
-      "attack_vector": "malicious package postinstall hook",
+      "case_id": "rce-postinstall-fs-write",
+      "extension_id": "npm:@adversarial/rce-postinstall",
+      "attack_class": "rce_dependency",
+      "attack_vector": "malicious dependency writes a file outside the project root at import",
+      "oracle_kind": "file_outside_root:pwned-rce-postinstall",
       "raw_runtimes": [
         {
           "runtime": "bun",
           "available": true,
-          "version": "1.4.0",
+          "version": "1.4.2",
+          "control_executed": true,
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
@@ -45,30 +65,115 @@
         {
           "runtime": "node",
           "available": true,
-          "version": "v20.19.4",
+          "version": "v22.22.1",
+          "control_executed": true,
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
         }
       ],
       "franken": {
+        "outcome": "capability_denied",
+        "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: fs:write; execution cell close succeeded. telemetry bridge stopped after native execution fail",
+        "control_executed": false,
         "compromised": false,
-        "blocked": false,
-        "contained": false,
-        "exit_code": 1,
-        "typed_errors": [],
-        "result_statuses": []
-      }
+        "blocked": true,
+        "contained": true,
+        "exit_code": 1
+      },
+      "franken_other_profiles": [
+        {
+          "profile": "balanced",
+          "outcome": "capability_denied",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: fs:write; execution cell close succeeded. telemetry bridge stopped after native execution fail",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        },
+        {
+          "profile": "legacy-risky",
+          "outcome": "capability_denied",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: filesystem error ENOENT: resolve parent for <workspace>/rce-postinstall-fs-write.franken-legacy-risky.ho",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        }
+      ]
     },
     {
-      "case_id": "prototype-pollution",
+      "case_id": "rce-dynamic-import-fs",
+      "extension_id": "npm:@adversarial/rce-dynamic-import",
+      "attack_class": "rce_dependency",
+      "attack_vector": "dependency uses dynamic import() to reach fs and write outside root",
+      "oracle_kind": "file_outside_root:pwned-dynamic-import",
+      "raw_runtimes": [
+        {
+          "runtime": "bun",
+          "available": true,
+          "version": "1.4.2",
+          "control_executed": true,
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        },
+        {
+          "runtime": "node",
+          "available": true,
+          "version": "v22.22.1",
+          "control_executed": true,
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        }
+      ],
+      "franken": {
+        "outcome": "blocked_at_lowering",
+        "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: import is not defined; execution cell close succeeded. telemetry bridge stopped after native execution failure in",
+        "control_executed": false,
+        "compromised": false,
+        "blocked": true,
+        "contained": true,
+        "exit_code": 1
+      },
+      "franken_other_profiles": [
+        {
+          "profile": "balanced",
+          "outcome": "blocked_at_lowering",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: import is not defined; execution cell close succeeded. telemetry bridge stopped after native execution failure in",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        },
+        {
+          "profile": "legacy-risky",
+          "outcome": "blocked_at_lowering",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: import is not defined; execution cell close succeeded. telemetry bridge stopped after native execution failure in",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        }
+      ]
+    },
+    {
+      "case_id": "prototype-pollution-to-write",
       "extension_id": "npm:@adversarial/prototype-pollution",
-      "attack_vector": "Object prototype pollution during extension bootstrap",
+      "attack_class": "prototype_pollution",
+      "attack_vector": "Object.prototype pollution steers a later fs write target outside root",
+      "oracle_kind": "file_outside_root:pwned-pollution",
       "raw_runtimes": [
         {
           "runtime": "bun",
           "available": true,
-          "version": "1.4.0",
+          "version": "1.4.2",
+          "control_executed": true,
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
@@ -76,30 +181,57 @@
         {
           "runtime": "node",
           "available": true,
-          "version": "v20.19.4",
+          "version": "v22.22.1",
+          "control_executed": true,
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
         }
       ],
       "franken": {
+        "outcome": "capability_denied",
+        "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: fs:write; execution cell close succeeded. telemetry bridge stopped after native execution fail",
+        "control_executed": false,
         "compromised": false,
-        "blocked": false,
-        "contained": false,
-        "exit_code": 1,
-        "typed_errors": [],
-        "result_statuses": []
-      }
+        "blocked": true,
+        "contained": true,
+        "exit_code": 1
+      },
+      "franken_other_profiles": [
+        {
+          "profile": "balanced",
+          "outcome": "capability_denied",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: fs:write; execution cell close succeeded. telemetry bridge stopped after native execution fail",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        },
+        {
+          "profile": "legacy-risky",
+          "outcome": "capability_denied",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: filesystem error ENOENT: resolve parent for <workspace>/prototype-pollution-to-write.franken-legacy-risk",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        }
+      ]
     },
     {
-      "case_id": "ambient-authority-abuse",
-      "extension_id": "npm:@adversarial/ambient-authority-abuse",
-      "attack_vector": "ambient filesystem and environment authority abuse",
+      "case_id": "prototype-pollution-constructor",
+      "extension_id": "npm:@adversarial/pollution-constructor",
+      "attack_class": "prototype_pollution",
+      "attack_vector": "recursive merge pollutes Object.prototype to steer a later fs write target",
+      "oracle_kind": "file_outside_root:pwned-pollution-ctor",
       "raw_runtimes": [
         {
           "runtime": "bun",
           "available": true,
-          "version": "1.4.0",
+          "version": "1.4.2",
+          "control_executed": true,
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
@@ -107,247 +239,57 @@
         {
           "runtime": "node",
           "available": true,
-          "version": "v20.19.4",
+          "version": "v22.22.1",
+          "control_executed": true,
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
         }
       ],
       "franken": {
+        "outcome": "capability_denied",
+        "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: fs:write; execution cell close succeeded. telemetry bridge stopped after native execution fail",
+        "control_executed": false,
         "compromised": false,
-        "blocked": false,
-        "contained": false,
-        "exit_code": 1,
-        "typed_errors": [],
-        "result_statuses": []
-      }
-    },
-    {
-      "case_id": "egress-to-unknown-host",
-      "extension_id": "npm:@adversarial/egress-to-unknown-host",
-      "attack_vector": "network egress to an undeclared external host",
-      "raw_runtimes": [
+        "blocked": true,
+        "contained": true,
+        "exit_code": 1
+      },
+      "franken_other_profiles": [
         {
-          "runtime": "bun",
-          "available": true,
-          "version": "1.4.0",
-          "compromised": true,
-          "exit_code": 0,
-          "timed_out": false
+          "profile": "balanced",
+          "outcome": "capability_denied",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: fs:write; execution cell close succeeded. telemetry bridge stopped after native execution fail",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
         },
         {
-          "runtime": "node",
-          "available": true,
-          "version": "v20.19.4",
-          "compromised": true,
-          "exit_code": 0,
-          "timed_out": false
+          "profile": "legacy-risky",
+          "outcome": "capability_denied",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: internal interpreter invariant violated: host effect dispatch failed for fs:write: Capability denied: EffectCapab",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
         }
-      ],
-      "franken": {
-        "compromised": false,
-        "blocked": false,
-        "contained": false,
-        "exit_code": 1,
-        "typed_errors": [],
-        "result_statuses": []
-      }
+      ]
     },
     {
-      "case_id": "memory-exhaust",
-      "extension_id": "npm:@adversarial/memory-exhaust",
-      "attack_vector": "unbounded heap allocation during extension init",
-      "raw_runtimes": [
-        {
-          "runtime": "bun",
-          "available": true,
-          "version": "1.4.0",
-          "compromised": true,
-          "exit_code": 0,
-          "timed_out": false
-        },
-        {
-          "runtime": "node",
-          "available": true,
-          "version": "v20.19.4",
-          "compromised": true,
-          "exit_code": 0,
-          "timed_out": false
-        }
-      ],
-      "franken": {
-        "compromised": false,
-        "blocked": false,
-        "contained": false,
-        "exit_code": 1,
-        "typed_errors": [],
-        "result_statuses": []
-      }
-    },
-    {
-      "case_id": "infinite-eval-loop",
-      "extension_id": "npm:@adversarial/infinite-eval-loop",
-      "attack_vector": "non-terminating eval loop",
-      "raw_runtimes": [
-        {
-          "runtime": "bun",
-          "available": true,
-          "version": "1.4.0",
-          "compromised": true,
-          "exit_code": null,
-          "timed_out": true
-        },
-        {
-          "runtime": "node",
-          "available": true,
-          "version": "v20.19.4",
-          "compromised": true,
-          "exit_code": null,
-          "timed_out": true
-        }
-      ],
-      "franken": {
-        "compromised": false,
-        "blocked": false,
-        "contained": false,
-        "exit_code": 1,
-        "typed_errors": [],
-        "result_statuses": []
-      }
-    },
-    {
-      "case_id": "trust-card-forgery-attempt",
-      "extension_id": "npm:@adversarial/trust-card-forgery-attempt",
-      "attack_vector": "forged trust-card metadata shipped inside the extension",
-      "raw_runtimes": [
-        {
-          "runtime": "bun",
-          "available": true,
-          "version": "1.4.0",
-          "compromised": true,
-          "exit_code": 0,
-          "timed_out": false
-        },
-        {
-          "runtime": "node",
-          "available": true,
-          "version": "v20.19.4",
-          "compromised": true,
-          "exit_code": 0,
-          "timed_out": false
-        }
-      ],
-      "franken": {
-        "compromised": false,
-        "blocked": false,
-        "contained": false,
-        "exit_code": 1,
-        "typed_errors": [],
-        "result_statuses": []
-      }
-    },
-    {
-      "case_id": "unsigned-artifact",
-      "extension_id": "npm:@adversarial/unsigned-artifact",
-      "attack_vector": "extension artifact without provenance signature",
-      "raw_runtimes": [
-        {
-          "runtime": "bun",
-          "available": true,
-          "version": "1.4.0",
-          "compromised": true,
-          "exit_code": 0,
-          "timed_out": false
-        },
-        {
-          "runtime": "node",
-          "available": true,
-          "version": "v20.19.4",
-          "compromised": true,
-          "exit_code": 0,
-          "timed_out": false
-        }
-      ],
-      "franken": {
-        "compromised": false,
-        "blocked": false,
-        "contained": false,
-        "exit_code": 1,
-        "typed_errors": [],
-        "result_statuses": []
-      }
-    },
-    {
-      "case_id": "stale-revocation-exploit",
-      "extension_id": "npm:@adversarial/stale-revocation-exploit",
-      "attack_vector": "attempt to rely on stale revocation state",
-      "raw_runtimes": [
-        {
-          "runtime": "bun",
-          "available": true,
-          "version": "1.4.0",
-          "compromised": true,
-          "exit_code": 0,
-          "timed_out": false
-        },
-        {
-          "runtime": "node",
-          "available": true,
-          "version": "v20.19.4",
-          "compromised": true,
-          "exit_code": 0,
-          "timed_out": false
-        }
-      ],
-      "franken": {
-        "compromised": false,
-        "blocked": false,
-        "contained": false,
-        "exit_code": 1,
-        "typed_errors": [],
-        "result_statuses": []
-      }
-    },
-    {
-      "case_id": "mislabeled-mime",
-      "extension_id": "npm:@adversarial/mislabeled-mime",
-      "attack_vector": "JavaScript payload mislabeled as a benign MIME type",
-      "raw_runtimes": [
-        {
-          "runtime": "bun",
-          "available": true,
-          "version": "1.4.0",
-          "compromised": true,
-          "exit_code": 0,
-          "timed_out": false
-        },
-        {
-          "runtime": "node",
-          "available": true,
-          "version": "v20.19.4",
-          "compromised": true,
-          "exit_code": 0,
-          "timed_out": false
-        }
-      ],
-      "franken": {
-        "compromised": false,
-        "blocked": false,
-        "contained": false,
-        "exit_code": 1,
-        "typed_errors": [],
-        "result_statuses": []
-      }
-    },
-    {
-      "case_id": "path-traversal",
+      "case_id": "path-traversal-write",
       "extension_id": "npm:@adversarial/path-traversal",
-      "attack_vector": "crafted path traversal outside trusted root",
+      "attack_class": "path_traversal",
+      "attack_vector": "an absolute path escapes the project root to write into a sibling directory",
+      "oracle_kind": "file_outside_root:pwned-traversal",
       "raw_runtimes": [
         {
           "runtime": "bun",
           "available": true,
-          "version": "1.4.0",
+          "version": "1.4.2",
+          "control_executed": true,
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
@@ -355,30 +297,57 @@
         {
           "runtime": "node",
           "available": true,
-          "version": "v20.19.4",
+          "version": "v22.22.1",
+          "control_executed": true,
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
         }
       ],
       "franken": {
+        "outcome": "capability_denied",
+        "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: fs:write; execution cell close succeeded. telemetry bridge stopped after native execution fail",
+        "control_executed": false,
         "compromised": false,
-        "blocked": false,
-        "contained": false,
-        "exit_code": 1,
-        "typed_errors": [],
-        "result_statuses": []
-      }
+        "blocked": true,
+        "contained": true,
+        "exit_code": 1
+      },
+      "franken_other_profiles": [
+        {
+          "profile": "balanced",
+          "outcome": "capability_denied",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: fs:write; execution cell close succeeded. telemetry bridge stopped after native execution fail",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        },
+        {
+          "profile": "legacy-risky",
+          "outcome": "capability_denied",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: filesystem error ENOENT: resolve parent for <workspace>/path-traversal-write.franken-legacy-risky.host/p",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        }
+      ]
     },
     {
-      "case_id": "ssrf",
-      "extension_id": "npm:@adversarial/ssrf",
-      "attack_vector": "internal metadata service SSRF pivot",
+      "case_id": "path-traversal-symlink",
+      "extension_id": "npm:@adversarial/path-traversal-symlink",
+      "attack_class": "path_traversal",
+      "attack_vector": "symlink escape then write through the link to outside root",
+      "oracle_kind": "file_outside_root:pwned-symlink",
       "raw_runtimes": [
         {
           "runtime": "bun",
           "available": true,
-          "version": "1.4.0",
+          "version": "1.4.2",
+          "control_executed": true,
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
@@ -386,92 +355,173 @@
         {
           "runtime": "node",
           "available": true,
-          "version": "v20.19.4",
+          "version": "v22.22.1",
+          "control_executed": true,
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
         }
       ],
       "franken": {
+        "outcome": "capability_denied",
+        "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: fs:write; execution cell close succeeded. telemetry bridge stopped after native execution fail",
+        "control_executed": false,
         "compromised": false,
-        "blocked": false,
-        "contained": false,
-        "exit_code": 1,
-        "typed_errors": [],
-        "result_statuses": []
-      }
+        "blocked": true,
+        "contained": true,
+        "exit_code": 1
+      },
+      "franken_other_profiles": [
+        {
+          "profile": "balanced",
+          "outcome": "capability_denied",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: fs:write; execution cell close succeeded. telemetry bridge stopped after native execution fail",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        },
+        {
+          "profile": "legacy-risky",
+          "outcome": "capability_denied",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: internal interpreter invariant violated: host effect dispatch failed for fs:write: Capability denied: EffectCapab",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        }
+      ]
     },
     {
-      "case_id": "deserialization",
-      "extension_id": "npm:@adversarial/deserialization",
-      "attack_vector": "arbitrary object construction via deserialization",
+      "case_id": "ssrf-metadata-http",
+      "extension_id": "npm:@adversarial/ssrf-metadata",
+      "attack_class": "ssrf",
+      "attack_vector": "http.get to the loopback sink standing in for the cloud metadata endpoint",
+      "oracle_kind": "loopback_sink:/ssrf-metadata",
       "raw_runtimes": [
         {
           "runtime": "bun",
           "available": true,
-          "version": "1.4.0",
+          "version": "1.4.2",
+          "control_executed": true,
           "compromised": true,
-          "exit_code": 0,
-          "timed_out": false
+          "exit_code": null,
+          "timed_out": true
         },
         {
           "runtime": "node",
           "available": true,
-          "version": "v20.19.4",
+          "version": "v22.22.1",
+          "control_executed": true,
           "compromised": true,
-          "exit_code": 0,
-          "timed_out": false
+          "exit_code": null,
+          "timed_out": true
         }
       ],
       "franken": {
+        "outcome": "capability_denied",
+        "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: builtin:HttpGet; execution cell close succeeded. telemetry bridge stopped after native executi",
+        "control_executed": false,
         "compromised": false,
-        "blocked": false,
-        "contained": false,
-        "exit_code": 1,
-        "typed_errors": [],
-        "result_statuses": []
-      }
+        "blocked": true,
+        "contained": true,
+        "exit_code": 1
+      },
+      "franken_other_profiles": [
+        {
+          "profile": "balanced",
+          "outcome": "ssrf_denied",
+          "evidence": "host I/O denied: ssrf: egress to 127.0.0.1:31651 blocked by policy",
+          "control_executed": true,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 0
+        },
+        {
+          "profile": "legacy-risky",
+          "outcome": "ssrf_denied",
+          "evidence": "host I/O denied: ssrf: egress to 127.0.0.1:8905 blocked by policy",
+          "control_executed": true,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 0
+        }
+      ]
     },
     {
-      "case_id": "privilege-escalation",
-      "extension_id": "npm:@adversarial/privilege-escalation",
-      "attack_vector": "stale admin session privilege escalation",
+      "case_id": "ssrf-fetch",
+      "extension_id": "npm:@adversarial/ssrf-fetch",
+      "attack_class": "ssrf",
+      "attack_vector": "fetch() beacon to the loopback sink",
+      "oracle_kind": "loopback_sink:/ssrf-fetch",
       "raw_runtimes": [
         {
           "runtime": "bun",
           "available": true,
-          "version": "1.4.0",
+          "version": "1.4.2",
+          "control_executed": true,
           "compromised": true,
-          "exit_code": 0,
-          "timed_out": false
+          "exit_code": null,
+          "timed_out": true
         },
         {
           "runtime": "node",
           "available": true,
-          "version": "v20.19.4",
+          "version": "v22.22.1",
+          "control_executed": true,
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
         }
       ],
       "franken": {
+        "outcome": "capability_denied",
+        "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: net:request; execution cell close succeeded. telemetry bridge stopped after native execution f",
+        "control_executed": false,
         "compromised": false,
-        "blocked": false,
-        "contained": false,
-        "exit_code": 1,
-        "typed_errors": [],
-        "result_statuses": []
-      }
+        "blocked": true,
+        "contained": true,
+        "exit_code": 1
+      },
+      "franken_other_profiles": [
+        {
+          "profile": "balanced",
+          "outcome": "ssrf_denied",
+          "evidence": "host I/O denied: ssrf: egress to 127.0.0.1:13441 blocked by policy",
+          "control_executed": true,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 0
+        },
+        {
+          "profile": "legacy-risky",
+          "outcome": "ssrf_denied",
+          "evidence": "host I/O denied: ssrf: egress to 127.0.0.1:25725 blocked by policy",
+          "control_executed": true,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 0
+        }
+      ]
     },
     {
-      "case_id": "sandbox-escape",
-      "extension_id": "npm:@adversarial/sandbox-escape",
-      "attack_vector": "native host bridge escape attempt",
+      "case_id": "deserialization-eval-write",
+      "extension_id": "npm:@adversarial/deser-eval",
+      "attack_class": "deserialization",
+      "attack_vector": "deserialized gadget builds a Function constructor that writes outside root",
+      "oracle_kind": "file_outside_root:pwned-eval",
       "raw_runtimes": [
         {
           "runtime": "bun",
           "available": true,
-          "version": "1.4.0",
+          "version": "1.4.2",
+          "control_executed": true,
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
@@ -479,30 +529,57 @@
         {
           "runtime": "node",
           "available": true,
-          "version": "v20.19.4",
+          "version": "v22.22.1",
+          "control_executed": true,
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
         }
       ],
       "franken": {
+        "outcome": "capability_denied",
+        "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: module_load; execution cell close succeeded. telemetry bridge stopped after native execution f",
+        "control_executed": false,
         "compromised": false,
-        "blocked": false,
-        "contained": false,
-        "exit_code": 1,
-        "typed_errors": [],
-        "result_statuses": []
-      }
+        "blocked": true,
+        "contained": true,
+        "exit_code": 1
+      },
+      "franken_other_profiles": [
+        {
+          "profile": "balanced",
+          "outcome": "capability_denied",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: module_load; execution cell close succeeded. telemetry bridge stopped after native execution f",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        },
+        {
+          "profile": "legacy-risky",
+          "outcome": "capability_denied",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: module_load; execution cell close succeeded. telemetry bridge stopped after native execution f",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        }
+      ]
     },
     {
-      "case_id": "command-injection",
-      "extension_id": "npm:@adversarial/command-injection",
-      "attack_vector": "injected shell metacharacters in CLI path",
+      "case_id": "deserialization-json-reviver",
+      "extension_id": "npm:@adversarial/deser-reviver",
+      "attack_class": "deserialization",
+      "attack_vector": "JSON.parse reviver triggers a side-effecting write outside root",
+      "oracle_kind": "file_outside_root:pwned-reviver",
       "raw_runtimes": [
         {
           "runtime": "bun",
           "available": true,
-          "version": "1.4.0",
+          "version": "1.4.2",
+          "control_executed": true,
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
@@ -510,30 +587,57 @@
         {
           "runtime": "node",
           "available": true,
-          "version": "v20.19.4",
+          "version": "v22.22.1",
+          "control_executed": true,
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
         }
       ],
       "franken": {
+        "outcome": "capability_denied",
+        "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: fs:write; execution cell close succeeded. telemetry bridge stopped after native execution fail",
+        "control_executed": false,
         "compromised": false,
-        "blocked": false,
-        "contained": false,
-        "exit_code": 1,
-        "typed_errors": [],
-        "result_statuses": []
-      }
+        "blocked": true,
+        "contained": true,
+        "exit_code": 1
+      },
+      "franken_other_profiles": [
+        {
+          "profile": "balanced",
+          "outcome": "capability_denied",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: fs:write; execution cell close succeeded. telemetry bridge stopped after native execution fail",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        },
+        {
+          "profile": "legacy-risky",
+          "outcome": "capability_denied",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: uncaught exception: Error: filesystem error ENOENT: resolve parent for <workspace>/deserialization-json-",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        }
+      ]
     },
     {
-      "case_id": "token-theft",
-      "extension_id": "npm:@adversarial/token-theft",
-      "attack_vector": "exfiltrate long-lived process environment token",
+      "case_id": "supply-chain-transitive-write",
+      "extension_id": "npm:@adversarial/supply-chain",
+      "attack_class": "supply_chain_injection",
+      "attack_vector": "transitive dependency writes a backdoor file outside root",
+      "oracle_kind": "file_outside_root:pwned-supply-chain",
       "raw_runtimes": [
         {
           "runtime": "bun",
           "available": true,
-          "version": "1.4.0",
+          "version": "1.4.2",
+          "control_executed": true,
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
@@ -541,61 +645,115 @@
         {
           "runtime": "node",
           "available": true,
-          "version": "v20.19.4",
+          "version": "v22.22.1",
+          "control_executed": true,
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
         }
       ],
       "franken": {
+        "outcome": "capability_denied",
+        "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: fs:write; execution cell close succeeded. telemetry bridge stopped after native execution fail",
+        "control_executed": false,
         "compromised": false,
-        "blocked": false,
-        "contained": false,
-        "exit_code": 1,
-        "typed_errors": [],
-        "result_statuses": []
-      }
+        "blocked": true,
+        "contained": true,
+        "exit_code": 1
+      },
+      "franken_other_profiles": [
+        {
+          "profile": "balanced",
+          "outcome": "capability_denied",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: fs:write; execution cell close succeeded. telemetry bridge stopped after native execution fail",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        },
+        {
+          "profile": "legacy-risky",
+          "outcome": "capability_denied",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: filesystem error ENOENT: resolve parent for <workspace>/supply-chain-transitive-write.franken-legacy-ris",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        }
+      ]
     },
     {
-      "case_id": "build-poisoning",
-      "extension_id": "npm:@adversarial/build-poisoning",
-      "attack_vector": "poisoned build cache artifact injection",
+      "case_id": "supply-chain-secret-exfil",
+      "extension_id": "npm:@adversarial/supply-chain-exfil",
+      "attack_class": "supply_chain_injection",
+      "attack_vector": "injected code reads a host secret and exfiltrates it to the loopback sink",
+      "oracle_kind": "loopback_sink:fn-campaign-host-secret-7f3a9c2b",
       "raw_runtimes": [
         {
           "runtime": "bun",
           "available": true,
-          "version": "1.4.0",
+          "version": "1.4.2",
+          "control_executed": true,
           "compromised": true,
-          "exit_code": 0,
-          "timed_out": false
+          "exit_code": null,
+          "timed_out": true
         },
         {
           "runtime": "node",
           "available": true,
-          "version": "v20.19.4",
+          "version": "v22.22.1",
+          "control_executed": true,
           "compromised": true,
-          "exit_code": 0,
-          "timed_out": false
+          "exit_code": null,
+          "timed_out": true
         }
       ],
       "franken": {
+        "outcome": "blocked_at_lowering",
+        "evidence": "Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 1: Secret -> Internal (artifact_id=sha256:8ad43f1650d3059886f2a7195091ff7d33c81a980",
+        "control_executed": false,
         "compromised": false,
-        "blocked": false,
-        "contained": false,
-        "exit_code": 1,
-        "typed_errors": [],
-        "result_statuses": []
-      }
+        "blocked": true,
+        "contained": true,
+        "exit_code": 1
+      },
+      "franken_other_profiles": [
+        {
+          "profile": "balanced",
+          "outcome": "blocked_at_lowering",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 1: Secret -> Internal (artifact_id=sha256:d819ee14f26ceb859671c6e3cd86fe6298ff5698c",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        },
+        {
+          "profile": "legacy-risky",
+          "outcome": "blocked_at_lowering",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 1: Secret -> Internal (artifact_id=sha256:7f2c647b1c6524d9b790f567b9830e8a5d0970fb0",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        }
+      ]
     },
     {
-      "case_id": "registry-spoofing",
-      "extension_id": "npm:@adversarial/registry-spoofing",
-      "attack_vector": "spoofed registry endpoint returning unsigned payload",
+      "case_id": "privilege-escalation-passwd",
+      "extension_id": "npm:@adversarial/priv-esc-passwd",
+      "attack_class": "privilege_escalation",
+      "attack_vector": "read /etc/passwd and exfiltrate it to the loopback sink",
+      "oracle_kind": "loopback_sink:root:",
       "raw_runtimes": [
         {
           "runtime": "bun",
           "available": true,
-          "version": "1.4.0",
+          "version": "1.4.2",
+          "control_executed": true,
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
@@ -603,30 +761,57 @@
         {
           "runtime": "node",
           "available": true,
-          "version": "v20.19.4",
+          "version": "v22.22.1",
+          "control_executed": true,
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
         }
       ],
       "franken": {
+        "outcome": "capability_denied",
+        "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: filesystem error ENOENT: resolve parent for /etc/passwd: No such file or directory (os error 2); execution cell c",
+        "control_executed": false,
         "compromised": false,
-        "blocked": false,
-        "contained": false,
-        "exit_code": 1,
-        "typed_errors": [],
-        "result_statuses": []
-      }
+        "blocked": true,
+        "contained": true,
+        "exit_code": 1
+      },
+      "franken_other_profiles": [
+        {
+          "profile": "balanced",
+          "outcome": "capability_denied",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: filesystem error ENOENT: resolve parent for /etc/passwd: No such file or directory (os error 2); execution cell c",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        },
+        {
+          "profile": "legacy-risky",
+          "outcome": "capability_denied",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: filesystem error ENOENT: resolve parent for /etc/passwd: No such file or directory (os error 2); execution cell c",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        }
+      ]
     },
     {
-      "case_id": "credential-stuffing",
-      "extension_id": "npm:@adversarial/credential-stuffing",
-      "attack_vector": "leaked credential replay against operator endpoint",
+      "case_id": "privilege-escalation-process-binding",
+      "extension_id": "npm:@adversarial/priv-esc-binding",
+      "attack_class": "privilege_escalation",
+      "attack_vector": "process.binding('fs') reaches the raw filesystem binding to write outside root",
+      "oracle_kind": "file_outside_root:pwned-binding",
       "raw_runtimes": [
         {
           "runtime": "bun",
           "available": true,
-          "version": "1.4.0",
+          "version": "1.4.2",
+          "control_executed": true,
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
@@ -634,27 +819,399 @@
         {
           "runtime": "node",
           "available": true,
-          "version": "v20.19.4",
+          "version": "v22.22.1",
+          "control_executed": true,
           "compromised": true,
           "exit_code": 0,
           "timed_out": false
         }
       ],
       "franken": {
+        "outcome": "blocked_at_lowering",
+        "evidence": "Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'process' requires effect 'runtime.global' but caller's profile '∅' does not ",
+        "control_executed": false,
+        "compromised": false,
+        "blocked": true,
+        "contained": true,
+        "exit_code": 1
+      },
+      "franken_other_profiles": [
+        {
+          "profile": "balanced",
+          "outcome": "blocked_at_lowering",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'process' requires effect 'runtime.global' but caller's profile '∅' does not ",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        },
+        {
+          "profile": "legacy-risky",
+          "outcome": "blocked_at_lowering",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'process' requires effect 'runtime.global' but caller's profile '{process.sha",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        }
+      ]
+    },
+    {
+      "case_id": "sandbox-escape-create-require",
+      "extension_id": "npm:@adversarial/sandbox-create-require",
+      "attack_class": "sandbox_escape",
+      "attack_vector": "module.createRequire rebuilds a privileged require to reach fs",
+      "oracle_kind": "file_outside_root:pwned-create-require",
+      "raw_runtimes": [
+        {
+          "runtime": "bun",
+          "available": true,
+          "version": "1.4.2",
+          "control_executed": true,
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        },
+        {
+          "runtime": "node",
+          "available": true,
+          "version": "v22.22.1",
+          "control_executed": true,
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        }
+      ],
+      "franken": {
+        "outcome": "blocked_at_lowering",
+        "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: module resolution failed for 'module': `module` is a Node core module; its recognized call forms are lowered, but",
+        "control_executed": false,
+        "compromised": false,
+        "blocked": true,
+        "contained": true,
+        "exit_code": 1
+      },
+      "franken_other_profiles": [
+        {
+          "profile": "balanced",
+          "outcome": "blocked_at_lowering",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: module resolution failed for 'module': `module` is a Node core module; its recognized call forms are lowered, but",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        },
+        {
+          "profile": "legacy-risky",
+          "outcome": "blocked_at_lowering",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: module resolution failed for 'module': `module` is a Node core module; its recognized call forms are lowered, but",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        }
+      ]
+    },
+    {
+      "case_id": "sandbox-escape-raw-socket",
+      "extension_id": "npm:@adversarial/sandbox-raw-socket",
+      "attack_class": "sandbox_escape",
+      "attack_vector": "net.connect opens a raw socket to the loopback sink, bypassing http",
+      "oracle_kind": "loopback_sink:/raw-socket",
+      "raw_runtimes": [
+        {
+          "runtime": "bun",
+          "available": true,
+          "version": "1.4.2",
+          "control_executed": true,
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        },
+        {
+          "runtime": "node",
+          "available": true,
+          "version": "v22.22.1",
+          "control_executed": true,
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        }
+      ],
+      "franken": {
+        "outcome": "executed_uncompromised",
+        "evidence": "run completed, oracle not tripped",
+        "control_executed": true,
         "compromised": false,
         "blocked": false,
         "contained": false,
-        "exit_code": 1,
-        "typed_errors": [],
-        "result_statuses": []
-      }
+        "exit_code": 0
+      },
+      "franken_other_profiles": [
+        {
+          "profile": "balanced",
+          "outcome": "executed_uncompromised",
+          "evidence": "run completed, oracle not tripped",
+          "control_executed": true,
+          "compromised": false,
+          "blocked": false,
+          "contained": false,
+          "exit_code": 0
+        },
+        {
+          "profile": "legacy-risky",
+          "outcome": "executed_uncompromised",
+          "evidence": "run completed, oracle not tripped",
+          "control_executed": true,
+          "compromised": false,
+          "blocked": false,
+          "contained": false,
+          "exit_code": 0
+        }
+      ]
+    },
+    {
+      "case_id": "memory-corruption-buffer-alloc-unsafe",
+      "extension_id": "npm:@adversarial/mem-buffer-unsafe",
+      "attack_class": "memory_corruption",
+      "attack_vector": "Buffer.allocUnsafe leaks uninitialized memory then persists it outside root",
+      "oracle_kind": "file_outside_root:pwned-buffer-unsafe",
+      "raw_runtimes": [
+        {
+          "runtime": "bun",
+          "available": true,
+          "version": "1.4.2",
+          "control_executed": true,
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        },
+        {
+          "runtime": "node",
+          "available": true,
+          "version": "v22.22.1",
+          "control_executed": true,
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        }
+      ],
+      "franken": {
+        "outcome": "capability_denied",
+        "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: fs:write; execution cell close succeeded. telemetry bridge stopped after native execution fail",
+        "control_executed": false,
+        "compromised": false,
+        "blocked": true,
+        "contained": true,
+        "exit_code": 1
+      },
+      "franken_other_profiles": [
+        {
+          "profile": "balanced",
+          "outcome": "capability_denied",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: fs:write; execution cell close succeeded. telemetry bridge stopped after native execution fail",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        },
+        {
+          "profile": "legacy-risky",
+          "outcome": "capability_denied",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: filesystem error ENOENT: resolve parent for <workspace>/memory-corruption-buffer-alloc-unsafe.franken-le",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        }
+      ]
+    },
+    {
+      "case_id": "memory-corruption-arraybuffer",
+      "extension_id": "npm:@adversarial/mem-arraybuffer",
+      "attack_class": "memory_corruption",
+      "attack_vector": "typed-array over an ArrayBuffer is flushed to a file outside root",
+      "oracle_kind": "file_outside_root:pwned-arraybuffer",
+      "raw_runtimes": [
+        {
+          "runtime": "bun",
+          "available": true,
+          "version": "1.4.2",
+          "control_executed": true,
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        },
+        {
+          "runtime": "node",
+          "available": true,
+          "version": "v22.22.1",
+          "control_executed": true,
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        }
+      ],
+      "franken": {
+        "outcome": "capability_denied",
+        "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: fs:write; execution cell close succeeded. telemetry bridge stopped after native execution fail",
+        "control_executed": false,
+        "compromised": false,
+        "blocked": true,
+        "contained": true,
+        "exit_code": 1
+      },
+      "franken_other_profiles": [
+        {
+          "profile": "balanced",
+          "outcome": "capability_denied",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: fs:write; execution cell close succeeded. telemetry bridge stopped after native execution fail",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        },
+        {
+          "profile": "legacy-risky",
+          "outcome": "capability_denied",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: filesystem error ENOENT: resolve parent for <workspace>/memory-corruption-arraybuffer.franken-legacy-ris",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        }
+      ]
+    },
+    {
+      "case_id": "command-injection-exec",
+      "extension_id": "npm:@adversarial/cmd-injection-exec",
+      "attack_class": "command_injection",
+      "attack_vector": "child_process.execSync spawns a shell that touches a file outside root",
+      "oracle_kind": "file_outside_root:pwned-exec",
+      "raw_runtimes": [
+        {
+          "runtime": "bun",
+          "available": true,
+          "version": "1.4.2",
+          "control_executed": true,
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        },
+        {
+          "runtime": "node",
+          "available": true,
+          "version": "v22.22.1",
+          "control_executed": true,
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        }
+      ],
+      "franken": {
+        "outcome": "capability_denied",
+        "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: process_spawn; execution cell close succeeded. telemetry bridge stopped after native execution",
+        "control_executed": false,
+        "compromised": false,
+        "blocked": true,
+        "contained": true,
+        "exit_code": 1
+      },
+      "franken_other_profiles": [
+        {
+          "profile": "balanced",
+          "outcome": "capability_denied",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: process_spawn; execution cell close succeeded. telemetry bridge stopped after native execution",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        },
+        {
+          "profile": "legacy-risky",
+          "outcome": "capability_denied",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: process_spawn; execution cell close succeeded. telemetry bridge stopped after native execution",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        }
+      ]
+    },
+    {
+      "case_id": "command-injection-spawn",
+      "extension_id": "npm:@adversarial/cmd-injection-spawn",
+      "attack_class": "command_injection",
+      "attack_vector": "child_process.spawnSync runs touch to create a file outside root",
+      "oracle_kind": "file_outside_root:pwned-spawn",
+      "raw_runtimes": [
+        {
+          "runtime": "bun",
+          "available": true,
+          "version": "1.4.2",
+          "control_executed": true,
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        },
+        {
+          "runtime": "node",
+          "available": true,
+          "version": "v22.22.1",
+          "control_executed": true,
+          "compromised": true,
+          "exit_code": 0,
+          "timed_out": false
+        }
+      ],
+      "franken": {
+        "outcome": "capability_denied",
+        "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: process_spawn; execution cell close succeeded. telemetry bridge stopped after native execution",
+        "control_executed": false,
+        "compromised": false,
+        "blocked": true,
+        "contained": true,
+        "exit_code": 1
+      },
+      "franken_other_profiles": [
+        {
+          "profile": "balanced",
+          "outcome": "capability_denied",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: process_spawn; execution cell close succeeded. telemetry bridge stopped after native execution",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        },
+        {
+          "profile": "legacy-risky",
+          "outcome": "capability_denied",
+          "evidence": "Error: Engine execution failed during execution: Native execution failed: interpreter: capability denied: process_spawn; execution cell close succeeded. telemetry bridge stopped after native execution",
+          "control_executed": false,
+          "compromised": false,
+          "blocked": true,
+          "contained": true,
+          "exit_code": 1
+        }
+      ]
     }
   ],
   "signature": {
     "algorithm": "ed25519-fixture-v1",
-    "key_id": "adversarial-extension-baseline-bench-v2",
+    "key_id": "adversarial-extension-runtime-bench-v2",
     "public_key": "22fc297792f0b6ffc0bfcfdb7edb0c0aa14e025a365ec0e342e86e3829cb74b6",
-    "payload_sha256": "sha256:51277d2719810520ca754c264f23a997d69f4b6a85a0fd0837b7c0cb3097da60",
-    "value": "ed25519:71fd89d17549d03af25f5a7aa41a3560c17d69717fec6e44ceb30640d1a51a2b3d052f0bfb955cccc727c3862b51153ca44aa6f427de865a763739da7fb45c05"
+    "payload_sha256": "sha256:50ce7f151cb53ad758f19ec6c747cea1bb79db57f9b782ed4c0909f691618568",
+    "value": "ed25519:aeb22655850b816898c50ccec7bf81732ad462798be12727a257df981e15e69a57e281db67d4ee19e9540624e5b0e3b3e2fd94c47b8a7c759f1ad4a7892b1e01"
   }
 }

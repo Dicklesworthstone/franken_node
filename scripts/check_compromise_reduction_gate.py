@@ -56,6 +56,116 @@ REQUIRED_EVENT_CODES = {
 ALLOWED_BASELINE_OUTCOMES = {"compromised", "blocked"}
 ALLOWED_HARDENED_OUTCOMES = {"compromised", "blocked", "contained"}
 
+# Typed franken outcomes the measured v2 artifact (schema >= 2.1.0) may carry.
+# `invalid` is the OLD tautological signature (exit non-zero for a harness
+# reason, no security denial, no fired control) and must never appear.
+VALID_FRANKEN_OUTCOMES = {
+    "blocked_at_lowering",
+    "capability_denied",
+    "ssrf_denied",
+    "ifc_denied",
+    "contained",
+    "executed_uncompromised",
+    "compromised",
+}
+
+
+def franken_case_honesty_errors(artifact: dict[str, Any]) -> list[str]:
+    """Reject the tautological measured artifact (bd-...26n9r.3).
+
+    The pre-2.1.0 artifact recorded every franken case as an immediate exit-1
+    with no typed outcome, no evidence, and no executed control -- a run that
+    never executed the payload scored `franken_compromised == 0` for free. A
+    HONEST artifact must show, per case: the baseline runtimes really executed
+    (control fired) and were compromised, and the franken leg is a TYPED
+    containment outcome with evidence -- either a runtime denial with the
+    control fired, or a lowering refusal naming the refused construct. Any case
+    that is a bare non-zero exit with neither is `invalid` and fails the gate.
+    """
+    errors: list[str] = []
+    cases = artifact.get("cases")
+    if not isinstance(cases, list) or not cases:
+        return ["measured artifact has no cases[] to audit for honesty"]
+
+    all_franken_exit_codes: set[Any] = set()
+    typed_evidence_seen = False
+    for idx, case in enumerate(cases):
+        if not isinstance(case, dict):
+            errors.append(f"cases[{idx}] must be an object")
+            continue
+        case_id = case.get("case_id", f"index-{idx}")
+
+        raw = case.get("raw_runtimes")
+        if not isinstance(raw, list) or not raw:
+            errors.append(f"{case_id}: raw_runtimes[] missing")
+        else:
+            for runtime in raw:
+                if not isinstance(runtime, dict):
+                    continue
+                if not runtime.get("control_executed"):
+                    errors.append(
+                        f"{case_id}: raw runtime {runtime.get('runtime')!r} did not execute the "
+                        "positive control (baseline never ran the payload)"
+                    )
+                if not runtime.get("compromised"):
+                    errors.append(
+                        f"{case_id}: raw runtime {runtime.get('runtime')!r} was not compromised "
+                        "(baseline oracle did not fire)"
+                    )
+
+        franken = case.get("franken")
+        if not isinstance(franken, dict):
+            errors.append(f"{case_id}: franken outcome object missing")
+            continue
+        outcome = franken.get("outcome")
+        evidence = franken.get("evidence")
+        all_franken_exit_codes.add(franken.get("exit_code"))
+        if outcome == "invalid":
+            errors.append(
+                f"{case_id}: franken outcome is `invalid` -- a non-security exit with no typed "
+                f"denial and no fired control (the pre-2.1.0 tautological signature): {evidence!r}"
+            )
+            continue
+        if outcome not in VALID_FRANKEN_OUTCOMES:
+            errors.append(
+                f"{case_id}: franken outcome {outcome!r} is not a typed containment outcome "
+                f"(expected one of {sorted(VALID_FRANKEN_OUTCOMES)})"
+            )
+            continue
+        if not isinstance(evidence, str) or not evidence.strip():
+            errors.append(f"{case_id}: franken outcome {outcome!r} carries no evidence string")
+        else:
+            typed_evidence_seen = True
+        if franken.get("compromised"):
+            errors.append(f"{case_id}: franken leg tripped the host-compromise oracle")
+        # `executed_uncompromised` means the guest ran to a clean exit (exit 0,
+        # captured_output present) yet the oracle did not fire -- there the
+        # positive control MUST have fired, or the run never executed. Every
+        # other outcome is a refusal (lowering / capability / ssrf / ifc) whose
+        # run exits non-zero, and `run --json` currently drops the guest console
+        # on the failure path (bd-uqz71), so the control legitimately cannot be
+        # observed there; the typed denial reason in `evidence` is the proof.
+        if outcome == "executed_uncompromised" and not franken.get("control_executed"):
+            errors.append(
+                f"{case_id}: franken outcome {outcome!r} exited cleanly without the positive "
+                "control -- the guest never executed"
+            )
+
+    # The old artifact's franken cases were ALL an identical non-zero exit with
+    # no typed evidence anywhere -- reject that shape explicitly.
+    if not typed_evidence_seen and len(all_franken_exit_codes) == 1:
+        only = next(iter(all_franken_exit_codes))
+        if only not in (0, None):
+            errors.append(
+                "every franken case is the same non-zero exit code with no typed evidence "
+                f"(exit_code={only}); this is the tautological pre-2.1.0 signature"
+            )
+
+    if artifact.get("all_franken_cases_accounted") is not True:
+        errors.append("measured artifact must set all_franken_cases_accounted=true")
+
+    return errors
+
 CHECKS: list[dict[str, Any]] = []
 
 
@@ -321,6 +431,11 @@ def _validate_benchmark_proof(report: dict[str, Any]) -> list[str]:
         ]
         if artifact_runtimes != EXPECTED_RAW_BASELINE_RUNTIMES:
             errors.append("benchmark proof artifact must cite bun and node raw runtimes")
+
+        # bd-...26n9r.3: the measured artifact must prove the franken leg
+        # actually executed the payload and contained it with typed evidence,
+        # not exit 1 before running. Rejects the pre-2.1.0 tautological shape.
+        errors.extend(franken_case_honesty_errors(artifact))
 
     return errors
 
@@ -809,7 +924,57 @@ def self_test() -> bool:
         report.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
         fail_result = run_checks(spec_path=spec, report_path=report)
-        return fail_result["verdict"] == "FAIL"
+        if fail_result["verdict"] != "FAIL":
+            return False
+
+        # bd-...26n9r.3: the franken-case honesty check must REJECT the old
+        # tautological measured artifact (every franken case an identical
+        # non-zero exit, no typed outcome/evidence, no fired control) and ACCEPT
+        # an honest one (baseline executed + compromised; franken typed +
+        # contained with evidence).
+        old_signature = {
+            "all_franken_cases_accounted": False,
+            "cases": [
+                {
+                    "case_id": f"legacy-{i}",
+                    "raw_runtimes": [
+                        {"runtime": "bun", "control_executed": True, "compromised": True},
+                        {"runtime": "node", "control_executed": True, "compromised": True},
+                    ],
+                    "franken": {"exit_code": 1, "compromised": False, "typed_errors": []},
+                }
+                for i in range(20)
+            ],
+        }
+        if not franken_case_honesty_errors(old_signature):
+            return False
+
+        honest = {
+            "all_franken_cases_accounted": True,
+            "cases": [
+                {
+                    "case_id": f"honest-{i}",
+                    "raw_runtimes": [
+                        {"runtime": "bun", "control_executed": True, "compromised": True},
+                        {"runtime": "node", "control_executed": True, "compromised": True},
+                    ],
+                    "franken": {
+                        "outcome": "capability_denied" if i % 2 else "blocked_at_lowering",
+                        "evidence": "capability denied: fs:write"
+                        if i % 2
+                        else "interpreter: ambient authority refused at lowering",
+                        "control_executed": bool(i % 2),
+                        "compromised": False,
+                        "exit_code": 1,
+                    },
+                }
+                for i in range(20)
+            ],
+        }
+        if franken_case_honesty_errors(honest):
+            return False
+
+        return True
 
 
 def main() -> int:
