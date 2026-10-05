@@ -11,6 +11,11 @@
 //! only its delivery transport changes. Omitted mode is `file`. Pipe input
 //! supports EOF-terminated byte requests, not an interactive terminal or a
 //! conversation protocol. Queuing all bytes does not prove guest consumption.
+//!
+//! `arguments` is a literal, bounded application argv vector. Its values are
+//! never shell-expanded or interpreted as runtime flags. The native invocation
+//! puts its own option terminator before them; Node/Bun receive them after the
+//! script. Argument values can contain secrets and are omitted from Debug.
 
 use super::super::{
     Entry, EntryData, Invocation, MAX_PATH_BYTES, Snapshot, excluded_from_discovery,
@@ -26,7 +31,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::marker::PhantomData;
 use std::path::{Component, Path, PathBuf};
-use std::process::Output;
+use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 /// Transport is observable to the guest and therefore part of the captured
@@ -45,6 +50,8 @@ pub(super) enum StdinMode {
 #[serde(deny_unknown_fields)]
 pub(super) struct Settings {
     #[serde(default)]
+    pub(super) arguments: Vec<String>,
+    #[serde(default)]
     pub(super) cwd: Option<String>,
     #[serde(default)]
     pub(super) stdin: Option<String>,
@@ -57,12 +64,37 @@ pub(super) struct Settings {
 impl fmt::Debug for Settings {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Settings")
+            .field("argument_count", &self.arguments.len())
             .field("cwd", &self.cwd)
             .field("stdin", &self.stdin)
             .field("stdin_mode", &self.stdin_mode)
             .field("environment_count", &self.environment.len())
             .finish_non_exhaustive()
     }
+}
+
+const MAX_ARGUMENTS: usize = 128;
+const MAX_ARGUMENT_BYTES: usize = 4096;
+const MAX_ARGV_BYTES: usize = 32 * 1024;
+
+fn validate_arguments(arguments: &[String]) -> Result<()> {
+    ensure!(
+        arguments.len() <= MAX_ARGUMENTS,
+        "at most 128 application arguments per test"
+    );
+    let mut bytes = 0_usize;
+    for argument in arguments {
+        ensure!(
+            argument.len() <= MAX_ARGUMENT_BYTES && !argument.contains('\0'),
+            "test argument exceeds 4096 bytes or contains NUL"
+        );
+        // Account for each OS argv terminator too, including empty arguments.
+        bytes = bytes
+            .checked_add(argument.len() + 1)
+            .context("test argument byte count overflow")?;
+    }
+    ensure!(bytes <= MAX_ARGV_BYTES, "test arguments exceed 32 KiB");
+    Ok(())
 }
 
 /// Serde's ordinary map deserializer overwrites duplicate keys. Ambiguous
@@ -185,6 +217,7 @@ pub(super) fn validate(
     entries: &BTreeMap<PathBuf, Entry>,
     test: &Path,
 ) -> Result<()> {
+    validate_arguments(&settings.arguments)?;
     ensure!(
         settings.stdin_mode != StdinMode::Pipe || settings.stdin.is_some(),
         "pipe stdin mode requires an explicit captured stdin file"
@@ -269,18 +302,21 @@ fn script_from(cwd: &Path, script: &Path) -> Result<PathBuf> {
     Ok(relative.to_path_buf())
 }
 
-pub(super) fn run(
-    snapshot: &Snapshot,
+fn configured_command(
     settings: &Settings,
     test: &Path,
     invocation: &Invocation,
     workspace: &Path,
     environment: &BTreeMap<OsString, OsString>,
-    timing: (Instant, Duration),
-) -> Result<Output> {
+) -> Result<Command> {
+    validate_arguments(&settings.arguments)?;
     let cwd = Path::new(settings.cwd.as_deref().unwrap_or(""));
     let mut command =
         invocation.command(&script_from(cwd, test)?, &workspace.join(cwd), environment);
+    // The invocation's operator-selected options always precede application
+    // data. In particular, native runtime_invocations appends `--` after its
+    // runtime controls, while Node/Bun stop option parsing at the script.
+    command.args(&settings.arguments);
     for (name, value) in &settings.environment {
         match value {
             Some(value) => {
@@ -291,6 +327,19 @@ pub(super) fn run(
             }
         }
     }
+    Ok(command)
+}
+
+pub(super) fn run(
+    snapshot: &Snapshot,
+    settings: &Settings,
+    test: &Path,
+    invocation: &Invocation,
+    workspace: &Path,
+    environment: &BTreeMap<OsString, OsString>,
+    timing: (Instant, Duration),
+) -> Result<Output> {
+    let mut command = configured_command(settings, test, invocation, workspace, environment)?;
     let bytes = input(settings, snapshot)?;
     let remaining = timing.0.saturating_duration_since(Instant::now());
     ensure!(
@@ -362,6 +411,133 @@ mod tests {
             before: vec![],
             after: vec![],
         }
+    }
+
+    #[test]
+    fn argument_limits_bound_counts_utf8_bytes_and_os_terminators() {
+        assert!(validate_arguments(&vec![String::new(); MAX_ARGUMENTS]).is_ok());
+        assert!(validate_arguments(&vec![String::new(); MAX_ARGUMENTS + 1]).is_err());
+        assert!(validate_arguments(&["x".repeat(MAX_ARGUMENT_BYTES)]).is_ok());
+        assert!(validate_arguments(&["x".repeat(MAX_ARGUMENT_BYTES + 1)]).is_err());
+        assert!(validate_arguments(&["λ".repeat(MAX_ARGUMENT_BYTES / 2)]).is_ok());
+        assert!(validate_arguments(&["λ".repeat(MAX_ARGUMENT_BYTES / 2 + 1)]).is_err());
+        // Eight 4095-byte arguments plus eight terminators exactly fill 32 KiB.
+        let mut exact = vec!["x".repeat(4095); 8];
+        assert!(validate_arguments(&exact).is_ok());
+        exact.push(String::new());
+        assert!(validate_arguments(&exact).is_err());
+        assert!(validate_arguments(&["secret\0value".into()]).is_err());
+    }
+
+    #[test]
+    fn literal_argument_values_are_not_logged_or_shell_restricted() {
+        let arguments: Vec<String> = [
+            "", "--", "--runtime", "node", "--eval", "process.exit(99)",
+            "space separated", "λ", "line\nbreak", "$(touch must-not-execute)",
+            "private-argument-value",
+        ].into_iter().map(str::to_owned).collect();
+        validate_arguments(&arguments).unwrap();
+        let settings = Settings { arguments, ..Settings::default() };
+        let debug = format!("{settings:?}");
+        assert!(debug.contains("argument_count: 11"));
+        assert!(!debug.contains("private-argument-value"));
+        assert!(!debug.contains("must-not-execute"));
+    }
+
+    #[test]
+    fn null_nonstring_duplicate_and_misnamed_argument_settings_are_refused() {
+        let root = fixture();
+        for settings in [
+            r#"{"arguments":null}"#,
+            r#"{"arguments":"one two"}"#,
+            r#"{"arguments":[7]}"#,
+            r#"{"arguments":[null]}"#,
+            r#"{"arguments":[],"arguments":["substituted"]}"#,
+            r#"{"args":["--eval","not a runtime option"]}"#,
+            r#"{"runtime_args":["--eval","not a runtime option"]}"#,
+        ] {
+            let raw = format!(
+                r#"{{"schema_version":"franken-node/migration-tests/v1","tests":["{TEST}"],"execution":{{"{TEST}":{settings}}}}}"#
+            );
+            put(root.path(), ".franken-node/migration-tests.json", raw.as_bytes());
+            assert!(inventory(&snapshot(root.path()).entries).is_err(), "{settings}");
+        }
+    }
+
+    #[test]
+    fn omitted_and_empty_argument_vectors_have_the_same_execution_contract() {
+        let original = fixture();
+        let candidate = fixture();
+        for (root, arguments) in [(original.path(), None), (candidate.path(), Some(vec![]))] {
+            let mut settings = serde_json::json!({"cwd":"packages/api"});
+            if let Some(arguments) = arguments {
+                settings["arguments"] = serde_json::Value::Array(arguments);
+            }
+            manifest(root, serde_json::json!({(TEST):settings}));
+        }
+        matched_execution(&snapshot(original.path()), &snapshot(candidate.path())).unwrap();
+    }
+
+    #[test]
+    fn application_arguments_follow_native_runtime_controls_and_the_terminator() {
+        use super::super::super::runtime_invocations;
+        let (_reference, native) = runtime_invocations(Path::new("/bin/false")).unwrap();
+        let arguments = vec![
+            "--runtime".into(), "node".into(), "--engine-bin".into(), "/untrusted".into(),
+            "--".into(), "".into(), "--json".into(),
+        ];
+        let settings = Settings {
+            cwd: Some("packages/api".into()), arguments: arguments.clone(),
+            ..Settings::default()
+        };
+        let command = configured_command(
+            &settings, Path::new(TEST), &native, Path::new("/workspace"), &BTreeMap::new(),
+        ).unwrap();
+        let mut expected: Vec<OsString> = vec![
+            "run".into(), "./check.cjs".into(), "--runtime".into(), "franken-engine".into(),
+            "--engine-bin".into(), native.executable.clone().into_os_string(),
+            "--console-only".into(), "--".into(),
+        ];
+        expected.extend(arguments.into_iter().map(OsString::from));
+        assert_eq!(command.get_args().collect::<Vec<_>>(), expected.iter().map(OsString::as_os_str).collect::<Vec<_>>());
+        assert_eq!(command.get_current_dir(), Some(Path::new("/workspace/packages/api")));
+        assert_eq!(command.get_program(), native.executable.as_os_str());
+    }
+
+    #[test]
+    fn reference_arguments_have_no_extra_application_separator() {
+        let runtime = node();
+        let settings = Settings {
+            arguments: vec!["".into(), "--".into(), "--eval".into(), "never executed".into()],
+            ..Settings::default()
+        };
+        let command = configured_command(
+            &settings, Path::new(TEST), &runtime, Path::new("/workspace"), &BTreeMap::new(),
+        ).unwrap();
+        let expected: Vec<OsString> = [
+            "./packages/api/check.cjs", "", "--", "--eval", "never executed",
+        ].into_iter().map(OsString::from).collect();
+        assert_eq!(command.get_args().collect::<Vec<_>>(), expected.iter().map(OsString::as_os_str).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn captured_arguments_execute_as_literal_guest_argv_not_runtime_options() {
+        let root = fixture();
+        put(root.path(), TEST, b"process.stdout.write(JSON.stringify(process.argv.slice(2)));");
+        let expected = serde_json::json!([
+            "--eval", "process.exit(99)", "--runtime", "node", "--", "", "λ", "a b",
+            "$(touch must-not-execute)", "; exit 7", "line\nbreak",
+        ]);
+        manifest(root.path(), serde_json::json!({(TEST):{
+            "cwd":"packages/api", "arguments":expected,
+        }}));
+        let captured = snapshot(root.path());
+        manifest(root.path(), serde_json::json!({(TEST):{"arguments":["later"]}}));
+        let output = execute_captured(&captured);
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(), expected);
+        assert!(!root.path().join("packages/api/must-not-execute").exists());
     }
 
     #[test]

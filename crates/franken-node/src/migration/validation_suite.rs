@@ -933,6 +933,10 @@ fn runtime_invocations(native_executable: &Path) -> Result<(Invocation, Invocati
             "--engine-bin".into(),
             executable.into_os_string(),
             "--console-only".into(),
+            // RunArgs::app_args is a trailing `last = true` operand. Captured
+            // application arguments must never become product policy/runtime
+            // options, even when an argument is literally `--runtime`.
+            "--".into(),
         ],
     };
     let reference = Invocation {
