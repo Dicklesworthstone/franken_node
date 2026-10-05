@@ -44,6 +44,14 @@ pub enum TransactionState {
     RolledBack,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceState {
+    Original,
+    Rewritten,
+    Conflict,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryEntry {
     pub transaction_id: String,
@@ -51,14 +59,6 @@ pub struct HistoryEntry {
     pub files: usize,
     /// Hash of the validated, canonically reserialized local journal.
     pub journal_sha256: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SourceState {
-    Original,
-    Rewritten,
-    Conflict,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -351,6 +351,29 @@ fn preflight(transaction: &RewriteTransaction, journal: &Journal) -> Vec<Rollbac
 /// Only `apply=true` may restore files. Recovery failures retain the existing
 /// pending journal so either this command or the next rewrite can resume.
 pub fn run(project: &Path, id: Option<&str>, apply: bool) -> RollbackReport {
+    run_checked(project, id, apply, None)
+}
+
+/// Restore exactly the journal previously bound to a rollout. The pin is the
+/// `HistoryEntry::journal_sha256` from a reviewed preview, not a signature.
+/// It is checked under the SAME writer lock as preflight and restoration,
+/// including when the transaction already has a completed rollback receipt.
+/// This prevents a changed journal from redefining an admitted recovery plan.
+pub fn run_pinned(
+    project: &Path,
+    id: &str,
+    journal_sha256: &str,
+    apply: bool,
+) -> RollbackReport {
+    run_checked(project, Some(id), apply, Some(journal_sha256))
+}
+
+fn run_checked(
+    project: &Path,
+    id: Option<&str>,
+    apply: bool,
+    journal_pin: Option<&str>,
+) -> RollbackReport {
     let mut report = RollbackReport {
         schema_version: "franken-node/migration-rollback/v1".into(),
         project_path: project.to_string_lossy().into_owned(),
@@ -367,6 +390,14 @@ pub fn run(project: &Path, id: Option<&str>, apply: bool) -> RollbackReport {
             !apply || id.is_some(),
             "applying rollback requires an explicit transaction ID"
         );
+        if let Some(pin) = journal_pin {
+            ensure!(
+                id.is_some()
+                    && pin.len() == 64
+                    && pin.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+                "rollback journal pin must be a lowercase SHA-256 digest"
+            );
+        }
         if let Some(id) = id {
             validate_id(id)?;
         }
@@ -390,7 +421,14 @@ pub fn run(project: &Path, id: Option<&str>, apply: bool) -> RollbackReport {
         };
         let selected = select(&transaction, id, pending.as_ref(), &mut reader)?
             .context("transaction has neither an applied nor a recoverable journal")?;
-        report.transaction = Some(selected.history_entry()?);
+        let entry = selected.history_entry()?;
+        if let Some(pin) = journal_pin {
+            ensure!(
+                pin == entry.journal_sha256,
+                "rollback journal differs from the bound recovery plan; no source files changed"
+            );
+        }
+        report.transaction = Some(entry);
         if selected.state == TransactionState::RolledBack {
             // Retrying an old ID must NEVER undo later independent edits or a
             // subsequent migration. This describes the receipt, not live state.
@@ -572,6 +610,81 @@ mod tests {
     fn journal(root: &Path, id: &str) -> Journal {
         serde_json::from_slice(&fs::read(store(root).join(id).join("applied.json")).unwrap())
             .unwrap()
+    }
+
+    #[test]
+    fn pinned_rollback_restores_the_reviewed_journal_and_modes() {
+        let root = fixture();
+        let id = applied(root.path());
+        let pin = run(root.path(), Some(&id), false).transaction.unwrap().journal_sha256;
+        let report = run_pinned(root.path(), &id, &pin, true);
+        assert_eq!(report.status, RollbackStatus::RolledBack, "{report:#?}");
+        assert_eq!(report.transaction.unwrap().journal_sha256, pin);
+        assert_source(root.path(), false);
+    }
+
+    #[test]
+    fn journal_substitution_is_rejected_before_any_restore_or_pending_write() {
+        let root = fixture();
+        let id = applied(root.path());
+        let pin = run(root.path(), Some(&id), false).transaction.unwrap().journal_sha256;
+        let mut substituted = journal(root.path(), &id);
+        substituted.records.pop();
+        fs::write(store(root.path()).join(&id).join("applied.json"), serde_json::to_vec(&substituted).unwrap()).unwrap();
+        let report = run_pinned(root.path(), &id, &pin, true);
+        assert_eq!(report.status, RollbackStatus::Error);
+        assert!(report.errors[0].contains("bound recovery plan"));
+        assert_source(root.path(), true);
+        assert!(!store(root.path()).join(PENDING).exists());
+    }
+
+    #[test]
+    fn completed_rollback_must_match_pin_before_idempotent_success() {
+        let root = fixture();
+        let id = applied(root.path());
+        let pin = run(root.path(), Some(&id), false).transaction.unwrap().journal_sha256;
+        assert_eq!(run_pinned(root.path(), &id, &pin, true).status, RollbackStatus::RolledBack);
+        fs::write(root.path().join("a.js"), b"later user work").unwrap();
+        assert_eq!(run_pinned(root.path(), &id, &"0".repeat(64), true).status, RollbackStatus::Error);
+        assert_eq!(run_pinned(root.path(), &id, &pin, true).status, RollbackStatus::AlreadyRolledBack);
+        assert_eq!(fs::read(root.path().join("a.js")).unwrap(), b"later user work");
+    }
+
+    #[test]
+    fn invalid_journal_pins_fail_without_creating_recovery_state() {
+        let root = fixture();
+        for pin in [String::new(), "0".repeat(63), "0".repeat(65), "G".repeat(64), "A".repeat(64)] {
+            let report = run_pinned(root.path(), "txn-selected", &pin, true);
+            assert_eq!(report.status, RollbackStatus::Error);
+            assert!(report.errors[0].contains("lowercase SHA-256"));
+        }
+        assert!(!root.path().join(".migrate-backup").exists());
+    }
+
+    #[test]
+    fn pinned_recovery_resumes_the_same_interrupted_apply() {
+        let root = fixture();
+        let transaction = RewriteTransaction::open(root.path()).unwrap();
+        let pending = transaction.prepare(&edits()).unwrap();
+        transaction.install(&pending, 0).unwrap();
+        drop(transaction);
+        let pin = run(root.path(), Some(&pending.session), false).transaction.unwrap().journal_sha256;
+        assert_eq!(run_pinned(root.path(), &pending.session, &"0".repeat(64), true).status, RollbackStatus::Error);
+        assert!(store(root.path()).join(PENDING).exists());
+        assert_eq!(run_pinned(root.path(), &pending.session, &pin, true).status, RollbackStatus::RolledBack);
+        assert_source(root.path(), false);
+    }
+
+    #[test]
+    fn pinned_restore_cannot_bypass_an_existing_writer() {
+        let root = fixture();
+        let id = applied(root.path());
+        let pin = run(root.path(), Some(&id), false).transaction.unwrap().journal_sha256;
+        let writer = RewriteTransaction::open(root.path()).unwrap();
+        assert_eq!(run_pinned(root.path(), &id, &pin, true).status, RollbackStatus::Error);
+        assert_source(root.path(), true);
+        drop(writer);
+        assert_eq!(run_pinned(root.path(), &id, &pin, false).status, RollbackStatus::Ready);
     }
 
     #[test]
