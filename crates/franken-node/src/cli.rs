@@ -815,8 +815,11 @@ mod rollback_cli_tests {
 
     #[test]
     fn rollback_defaults_to_nonmutating_history() {
-        let cli = Cli::try_parse_from(["franken-node", "migrate", "rollback", "project", "--json"]).unwrap();
-        let Command::Migrate(MigrateCommand::Rollback(args)) = cli.command else { panic!("wrong command"); };
+        let cli = Cli::try_parse_from(["franken-node", "migrate", "rollback", "project", "--json"])
+            .unwrap();
+        let Command::Migrate(MigrateCommand::Rollback(args)) = cli.command else {
+            panic!("wrong command");
+        };
         assert_eq!(args.project_path, PathBuf::from("project"));
         assert!(args.transaction.is_none());
         assert!(!args.apply);
@@ -825,22 +828,49 @@ mod rollback_cli_tests {
 
     #[test]
     fn selecting_a_transaction_does_not_implicitly_apply() {
-        let cli = Cli::try_parse_from(["franken-node", "migrate", "rollback", "project", "--transaction", "txn-123"]).unwrap();
-        let Command::Migrate(MigrateCommand::Rollback(args)) = cli.command else { panic!("wrong command"); };
+        let cli = Cli::try_parse_from([
+            "franken-node",
+            "migrate",
+            "rollback",
+            "project",
+            "--transaction",
+            "txn-123",
+        ])
+        .unwrap();
+        let Command::Migrate(MigrateCommand::Rollback(args)) = cli.command else {
+            panic!("wrong command");
+        };
         assert_eq!(args.transaction.as_deref(), Some("txn-123"));
         assert!(!args.apply);
     }
 
     #[test]
     fn rollback_apply_requires_an_explicit_transaction() {
-        let error = Cli::try_parse_from(["franken-node", "migrate", "rollback", "project", "--apply"]).unwrap_err();
-        assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        let error =
+            Cli::try_parse_from(["franken-node", "migrate", "rollback", "project", "--apply"])
+                .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
     }
 
     #[test]
     fn explicit_restore_and_json_parse_together() {
-        let cli = Cli::try_parse_from(["franken-node", "migrate", "rollback", "project", "--transaction", "txn-123", "--apply", "--json"]).unwrap();
-        let Command::Migrate(MigrateCommand::Rollback(args)) = cli.command else { panic!("wrong command"); };
+        let cli = Cli::try_parse_from([
+            "franken-node",
+            "migrate",
+            "rollback",
+            "project",
+            "--transaction",
+            "txn-123",
+            "--apply",
+            "--json",
+        ])
+        .unwrap();
+        let Command::Migrate(MigrateCommand::Rollback(args)) = cli.command else {
+            panic!("wrong command");
+        };
         assert!(args.apply && args.json);
         assert_eq!(args.transaction.as_deref(), Some("txn-123"));
     }
@@ -848,7 +878,9 @@ mod rollback_cli_tests {
     #[test]
     fn missing_rollback_project_remains_a_json_handler_error() {
         let cli = Cli::try_parse_from(["franken-node", "migrate", "rollback", "--json"]).unwrap();
-        let Command::Migrate(MigrateCommand::Rollback(args)) = cli.command else { panic!("wrong command"); };
+        let Command::Migrate(MigrateCommand::Rollback(args)) = cli.command else {
+            panic!("wrong command");
+        };
         assert!(args.project_path.as_os_str().is_empty());
         assert!(args.json);
     }
@@ -856,7 +888,10 @@ mod rollback_cli_tests {
     #[test]
     fn rollback_has_no_implicit_latest_or_force_override() {
         for flag in ["--latest", "--force", "--verify"] {
-            assert!(Cli::try_parse_from(["franken-node", "migrate", "rollback", "project", flag]).is_err());
+            assert!(
+                Cli::try_parse_from(["franken-node", "migrate", "rollback", "project", flag])
+                    .is_err()
+            );
         }
     }
 }
@@ -893,28 +928,64 @@ mod checked_rewrite_cli_tests {
 
     #[test]
     fn checked_rewrite_parses_explicit_apply_and_verification() {
-        let cli = Cli::try_parse_from(["franken-node", "migrate", "rewrite", "project", "--apply", "--verify", "--json"]).unwrap();
-        let Command::Migrate(MigrateCommand::Rewrite(args)) = cli.command else { panic!("wrong command"); };
+        let cli = Cli::try_parse_from([
+            "franken-node",
+            "migrate",
+            "rewrite",
+            "project",
+            "--apply",
+            "--verify",
+            "--json",
+        ])
+        .unwrap();
+        let Command::Migrate(MigrateCommand::Rewrite(args)) = cli.command else {
+            panic!("wrong command");
+        };
         assert!(args.apply && args.verify && args.json);
         assert!(args.emit_rollback.is_none());
     }
 
     #[test]
     fn checked_rewrite_cannot_execute_under_dry_run_semantics() {
-        let error = Cli::try_parse_from(["franken-node", "migrate", "rewrite", "project", "--verify"]).unwrap_err();
-        assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        let error =
+            Cli::try_parse_from(["franken-node", "migrate", "rewrite", "project", "--verify"])
+                .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
     }
 
     #[test]
     fn checked_rewrite_does_not_mix_a_second_rollback_artifact_with_its_report() {
-        let error = Cli::try_parse_from(["franken-node", "migrate", "rewrite", "project", "--apply", "--verify", "--emit-rollback", "rollback.json"]).unwrap_err();
+        let error = Cli::try_parse_from([
+            "franken-node",
+            "migrate",
+            "rewrite",
+            "project",
+            "--apply",
+            "--verify",
+            "--emit-rollback",
+            "rollback.json",
+        ])
+        .unwrap_err();
         assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]
     fn checked_rewrite_keeps_missing_project_in_the_json_handler_contract() {
-        let cli = Cli::try_parse_from(["franken-node", "migrate", "rewrite", "--apply", "--verify", "--json"]).unwrap();
-        let Command::Migrate(MigrateCommand::Rewrite(args)) = cli.command else { panic!("wrong command"); };
+        let cli = Cli::try_parse_from([
+            "franken-node",
+            "migrate",
+            "rewrite",
+            "--apply",
+            "--verify",
+            "--json",
+        ])
+        .unwrap();
+        let Command::Migrate(MigrateCommand::Rewrite(args)) = cli.command else {
+            panic!("wrong command");
+        };
         assert!(args.project_path.as_os_str().is_empty());
         assert!(args.verify && args.json);
     }
@@ -925,7 +996,9 @@ mod checked_rewrite_cli_tests {
             let mut arguments = vec!["franken-node", "migrate", "rewrite", "project"];
             arguments.extend(flags);
             let cli = Cli::try_parse_from(arguments).unwrap();
-            let Command::Migrate(MigrateCommand::Rewrite(args)) = cli.command else { panic!("wrong command"); };
+            let Command::Migrate(MigrateCommand::Rewrite(args)) = cli.command else {
+                panic!("wrong command");
+            };
             assert!(!args.verify);
         }
     }
@@ -2543,6 +2616,11 @@ pub enum DoctorCommand {
     /// Validate the Linux Bubblewrap backend required for process spawning.
     #[command(name = "process-spawn-readiness")]
     ProcessSpawnReadiness(DoctorProcessSpawnReadinessArgs),
+
+    /// Rank workspace-pressure findings by expected loss (IBD-8) using the
+    /// copilot value-of-information engine.
+    #[command(name = "expected-loss-actions")]
+    ExpectedLossActions(DoctorExpectedLossActionsArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -2612,6 +2690,35 @@ pub struct DoctorProcessSpawnReadinessArgs {
     /// Emit the readiness report as machine-readable JSON.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct DoctorExpectedLossActionsArgs {
+    /// Rank a previously emitted `doctor workspace-pressure --json` report
+    /// instead of collecting live workspace state. The file must be a
+    /// DoctorOutput JSON document.
+    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    pub from_report: Option<PathBuf>,
+
+    /// Emit the ranked recommendation envelope as JSON to stdout.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Maximum number of ranked recommendations to return.
+    #[arg(long, default_value_t = 5)]
+    pub top_k: usize,
+
+    /// Operator identity recorded in the recommendation audit trail.
+    #[arg(long, default_value = "operator://local")]
+    pub operator: String,
+
+    /// Use conservative pressure thresholds when collecting live state.
+    #[arg(long)]
+    pub conservative: bool,
+
+    /// Use permissive pressure thresholds when collecting live state.
+    #[arg(long)]
+    pub permissive: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -4137,13 +4244,9 @@ mod tests {
 
     #[test]
     fn migrate_rollout_parses_without_project_path_so_json_can_fail_closed() {
-        let cli = <Cli as clap::Parser>::try_parse_from([
-            "franken-node",
-            "migrate",
-            "rollout",
-            "--json",
-        ])
-        .expect("missing project path must parse so the handler can emit JSON");
+        let cli =
+            <Cli as clap::Parser>::try_parse_from(["franken-node", "migrate", "rollout", "--json"])
+                .expect("missing project path must parse so the handler can emit JSON");
         match cli.command {
             Command::Migrate(MigrateCommand::Rollout(args)) => {
                 assert!(args.json);

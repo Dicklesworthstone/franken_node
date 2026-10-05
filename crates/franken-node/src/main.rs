@@ -109,17 +109,18 @@ use crate::api::{
 use crate::cli::{
     BenchCommand, Cli, Command, DebugCommand, DebugEvidenceArgs, DebugEvidenceKind,
     DebugExplainArgs, DebugTraceArgs, DoctorCloseConditionArgs, DoctorCommand,
-    DoctorEvidenceReadinessArgs, DoctorPolicyActivationInput, DoctorProcessSpawnReadinessArgs,
-    DoctorWorkspacePressureArgs, FleetAgentArgs, FleetCommand, IncidentCommand, LtvCommand,
-    MigrateCommand, MigrateReportArgs, OpsCommand, OpsCompatCorpusRunArgs, OpsConfigAuditArgs,
-    OpsMetricsFormat, OpsProofCarryingEvidenceArgs, OpsResourceGovernorArgs,
-    OpsValidationCloseoutArgs, OpsValidationReadinessArgs, ProofQueueCommand, ProofQueueStatusArgs,
-    ProofWorkersCommand, ProofWorkersRestartArgs, ProofsCommand, RegistryCommand, RemoteCapCommand,
-    RemoteCapIssueArgs, RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand,
-    RuntimeLaneCommand, SafeModeCommand, SafeModeEnterArgs, SafeModeExitArgs, SafeModeStatusArgs,
-    TrustCardCommand, TrustCommand, VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs,
-    VerifyMigrationArgs, VerifyModuleArgs, VerifyRecoveryRunbookArgs, VerifyReleaseArgs,
-    VerifyTransparencyLogArgs, load_doctor_policy_activation_input,
+    DoctorEvidenceReadinessArgs, DoctorExpectedLossActionsArgs, DoctorPolicyActivationInput,
+    DoctorProcessSpawnReadinessArgs, DoctorWorkspacePressureArgs, FleetAgentArgs, FleetCommand,
+    IncidentCommand, LtvCommand, MigrateCommand, MigrateReportArgs, OpsCommand,
+    OpsCompatCorpusRunArgs, OpsConfigAuditArgs, OpsMetricsFormat, OpsProofCarryingEvidenceArgs,
+    OpsResourceGovernorArgs, OpsValidationCloseoutArgs, OpsValidationReadinessArgs,
+    ProofQueueCommand, ProofQueueStatusArgs, ProofWorkersCommand, ProofWorkersRestartArgs,
+    ProofsCommand, RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs, RemoteCapRevokeArgs,
+    RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand, SafeModeCommand,
+    SafeModeEnterArgs, SafeModeExitArgs, SafeModeStatusArgs, TrustCardCommand, TrustCommand,
+    VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs,
+    VerifyModuleArgs, VerifyRecoveryRunbookArgs, VerifyReleaseArgs, VerifyTransparencyLogArgs,
+    load_doctor_policy_activation_input,
 };
 use crate::ops::workspace_pressure_policy::WorkspacePressureInputs;
 use crate::policy::{
@@ -7131,6 +7132,115 @@ fn handle_doctor_workspace_pressure(
     Ok(())
 }
 
+/// IBD-8: rank the workspace-pressure doctor's findings by expected loss via the
+/// copilot value-of-information engine. Sources findings either from a saved
+/// `doctor workspace-pressure --json` report (`--from-report`) or a live probe.
+fn handle_doctor_expected_loss_actions(
+    args: &DoctorExpectedLossActionsArgs,
+    trace_id: &str,
+    parent_json: bool,
+) -> Result<()> {
+    use crate::ops::doctor::{
+        DOCTOR_EXPECTED_LOSS_ACTIONS_SCHEMA_VERSION, DoctorOutput, WorkspacePressureDoctor,
+        rank_doctor_actions_by_expected_loss,
+    };
+    use crate::ops::workspace_pressure_policy::PolicyThresholds;
+
+    let json = args.json || parent_json;
+
+    // Source the doctor findings: either a saved report or a live probe.
+    let report: DoctorOutput = if let Some(path) = &args.from_report {
+        let validated = cli::validate_user_content_pathbuf(path)
+            .with_context(|| format!("invalid --from-report path: {:?}", path))?;
+        let raw = std::fs::read_to_string(validated)
+            .with_context(|| format!("failed to read --from-report file: {:?}", validated))?;
+        serde_json::from_str(&raw).with_context(|| {
+            "--from-report must be a doctor workspace-pressure JSON report".to_owned()
+        })?
+    } else {
+        let coordination_report = collect_coordination_health();
+        if !json && !coordination_report.is_healthy() {
+            eprintln!(
+                "Warning: Agent coordination degraded: {}",
+                coordination_report.reason
+            );
+        }
+        let inputs =
+            collect_workspace_pressure_inputs_with_coordination(coordination_report.is_healthy())?;
+        let doctor = if args.conservative {
+            WorkspacePressureDoctor::with_thresholds(PolicyThresholds::conservative())
+        } else if args.permissive {
+            WorkspacePressureDoctor::with_thresholds(PolicyThresholds::permissive())
+        } else {
+            WorkspacePressureDoctor::new()
+        };
+        doctor.generate_report_with_agent_mail_coordination(
+            &inputs,
+            coordination_report.agent_mail_coordination,
+        )
+    };
+
+    let recommendation_id = Uuid::now_v7().to_string();
+    let effective_trace = if trace_id.is_empty() {
+        Uuid::now_v7().to_string()
+    } else {
+        trace_id.to_owned()
+    };
+
+    let response = rank_doctor_actions_by_expected_loss(
+        &report,
+        &args.operator,
+        &recommendation_id,
+        &effective_trace,
+        args.top_k,
+    );
+
+    if json {
+        let envelope = serde_json::json!({
+            "schema_version": DOCTOR_EXPECTED_LOSS_ACTIONS_SCHEMA_VERSION,
+            "source": if args.from_report.is_some() { "report" } else { "live" },
+            "doctor_status": report.status.as_str(),
+            "response": response,
+        });
+        println!("{}", serde_json::to_string_pretty(&envelope)?);
+    } else {
+        print_expected_loss_actions_human(&report, &response);
+    }
+
+    Ok(())
+}
+
+fn print_expected_loss_actions_human(
+    report: &crate::ops::doctor::DoctorOutput,
+    response: &frankenengine_node::security::copilot_engine::CopilotResponse,
+) {
+    println!(
+        "Expected-loss action ranking (status: {}, recommendation {})",
+        report.status.as_str(),
+        response.recommendation_id
+    );
+    if let Some(warning) = &response.degraded_warning {
+        println!("  WARNING: {}", warning.message);
+    }
+    if response.recommendations.is_empty() {
+        println!("  No actions recommended -- workspace healthy.");
+        return;
+    }
+    for (rank, rec) in response.recommendations.iter().enumerate() {
+        println!(
+            "  {}. [VoI {:.2}] {} -- dominant: {} loss",
+            rank + 1,
+            rec.voi_score,
+            rec.display_name,
+            rec.expected_loss.dominant_dimension(),
+        );
+        println!("     {}", rec.rationale);
+        if rec.degraded_confidence {
+            println!("     (confidence widened: system degraded)");
+        }
+    }
+}
+
 fn collect_workspace_pressure_inputs() -> Result<WorkspacePressureInputs> {
     // Intentionally does NOT print a coordination-degraded warning to stderr.
     // This helper feeds the DR-WORKSPACE-001 check inside the machine-readable
@@ -11208,16 +11318,24 @@ fn render_run_execution_receipt_summary(
 // self-describing envelope is that home: it exists only on the failure path and
 // carries the identical, SDK-verifiable `HostEffectLedger` shape, so a denial
 // stays visible instead of vanishing because the program aborted afterwards.
-const RUN_FAILURE_EFFECT_EVIDENCE_SCHEMA: &str = "franken-node/run-failure-effect-evidence/v1";
+// v2 (bd-uqz71): the JSON envelope also carries `error` (why the run failed)
+// and `captured_output` (what the guest printed before failing). v1 dropped
+// both in --json mode -- a scripted consumer saw only the ledger and had to
+// scrape the human `Error:` line off stderr to learn the failure reason.
+const RUN_FAILURE_EFFECT_EVIDENCE_SCHEMA: &str = "franken-node/run-failure-effect-evidence/v2";
 
-/// Surface the host-effect ledger recovered from a failed native run.
+/// Surface the host-effect ledger recovered from a failed native run, plus the
+/// failure reason and the guest's captured output.
 ///
-/// The run stays failed; this only stops its receipts from being discarded.
-/// Console-only mode emits nothing, for the same reason it suppresses the
-/// preflight banner: anything beyond the guest's own streams registers as
-/// behavioral divergence when a reference runtime is compared in lockstep.
+/// The run stays failed; this only stops its receipts (and, in --json mode, the
+/// reason and console) from being discarded. Console-only mode emits nothing,
+/// for the same reason it suppresses the preflight banner: anything beyond the
+/// guest's own streams registers as behavioral divergence when a reference
+/// runtime is compared in lockstep.
 fn emit_failed_run_effect_evidence(
-    ledger: &ops::engine_dispatcher::HostEffectLedger,
+    ledger: Option<&ops::engine_dispatcher::HostEffectLedger>,
+    guest_output: &ops::engine_dispatcher::CapturedProcessOutput,
+    error: &str,
     json: bool,
     console_only: bool,
 ) -> Result<()> {
@@ -11227,6 +11345,11 @@ fn emit_failed_run_effect_evidence(
     if json {
         let evidence = serde_json::json!({
             "schema_version": RUN_FAILURE_EFFECT_EVIDENCE_SCHEMA,
+            "error": error,
+            "captured_output": {
+                "stdout": guest_output.stdout,
+                "stderr": guest_output.stderr,
+            },
             "host_effect_ledger": ledger,
         });
         println!(
@@ -11236,10 +11359,12 @@ fn emit_failed_run_effect_evidence(
         );
         return Ok(());
     }
-    println!(
-        "run failed after host effects were already recorded; the signed ledger below is complete for the attempt"
-    );
-    println!("{}", render_host_effect_ledger_human(ledger));
+    if let Some(ledger) = ledger {
+        println!(
+            "run failed after host effects were already recorded; the signed ledger below is complete for the attempt"
+        );
+        println!("{}", render_host_effect_ledger_human(ledger));
+    }
     Ok(())
 }
 
@@ -31760,11 +31885,11 @@ fn main() -> Result<()> {
                     if let Some(failure) =
                         err.downcast_ref::<ops::engine_dispatcher::NativeRunFailure>()
                     {
+                        let guest_output = failure.guest_output();
                         // What the program printed before failing reaches the
                         // operator's streams first, as it does for a completed
                         // run (and under Node).
                         if !json {
-                            let guest_output = failure.guest_output();
                             if !guest_output.stdout.is_empty() {
                                 print!("{}", guest_output.stdout);
                             }
@@ -31772,9 +31897,18 @@ fn main() -> Result<()> {
                                 eprint!("{}", guest_output.stderr);
                             }
                         }
-                        if let Some(ledger) = failure.host_effect_ledger() {
-                            emit_failed_run_effect_evidence(ledger, json, console_only)?;
-                        }
+                        // bd-uqz71: emit the v2 evidence envelope even when the
+                        // attempt recorded no host-effect ledger (e.g. a pure
+                        // compute throw), so a --json consumer still sees the
+                        // failure reason and the guest's captured console
+                        // instead of only a human `Error:` line on stderr.
+                        emit_failed_run_effect_evidence(
+                            failure.host_effect_ledger(),
+                            guest_output,
+                            &failure.to_string(),
+                            json,
+                            console_only,
+                        )?;
                     }
                     #[cfg(feature = "engine")]
                     if let Some(interruption) =
@@ -32031,7 +32165,8 @@ fn main() -> Result<()> {
                             Ok(path) => path,
                             Err(err) => return migrate_fail("migrate.rewrite", args.json, err),
                         };
-                        let report = migration::verified_rewrite::run(&args.project_path, &executable);
+                        let report =
+                            migration::verified_rewrite::run(&args.project_path, &executable);
                         if let Err(err) = emit_json_or_human(&report, args.json, || {
                             migration::verified_rewrite::render(&report)
                         }) {
@@ -32040,13 +32175,23 @@ fn main() -> Result<()> {
                         if !report.is_success() {
                             // The full checked report has already been emitted;
                             // keep both JSON and human failures to one payload.
-                            let code = if report.status == migration::verified_rewrite::CheckedRewriteStatus::Error { 2 } else { 1 };
+                            let code = if report.status
+                                == migration::verified_rewrite::CheckedRewriteStatus::Error
+                            {
+                                2
+                            } else {
+                                1
+                            };
                             fail_closed_after_json_with_code(code);
                         }
                         return Ok(());
                     }
                     #[cfg(not(target_os = "linux"))]
-                    return migrate_fail("migrate.rewrite", args.json, "--verify currently requires Linux");
+                    return migrate_fail(
+                        "migrate.rewrite",
+                        args.json,
+                        "--verify currently requires Linux",
+                    );
                 }
                 let report = match migration::run_rewrite(&args.project_path, args.apply)
                     .with_context(|| {
@@ -32112,12 +32257,22 @@ fn main() -> Result<()> {
             }
             MigrateCommand::Rollback(args) => {
                 if args.project_path.as_os_str().is_empty() {
-                    return migrate_fail("migrate.rollback", args.json, "`migrate rollback` requires a project path");
+                    return migrate_fail(
+                        "migrate.rollback",
+                        args.json,
+                        "`migrate rollback` requires a project path",
+                    );
                 }
                 #[cfg(target_os = "linux")]
                 {
-                    let report = migration::rollback::run(&args.project_path, args.transaction.as_deref(), args.apply);
-                    if let Err(err) = emit_json_or_human(&report, args.json, || migration::rollback::render(&report)) {
+                    let report = migration::rollback::run(
+                        &args.project_path,
+                        args.transaction.as_deref(),
+                        args.apply,
+                    );
+                    if let Err(err) = emit_json_or_human(&report, args.json, || {
+                        migration::rollback::render(&report)
+                    }) {
                         return migrate_fail("migrate.rollback", args.json, err);
                     }
                     let code = report.exit_code();
@@ -32128,7 +32283,11 @@ fn main() -> Result<()> {
                     }
                 }
                 #[cfg(not(target_os = "linux"))]
-                return migrate_fail("migrate.rollback", args.json, "native rewrite rollback currently requires Linux");
+                return migrate_fail(
+                    "migrate.rollback",
+                    args.json,
+                    "native rewrite rollback currently requires Linux",
+                );
             }
             MigrateCommand::Validate(args) => {
                 if args.project_path.as_os_str().is_empty() {
@@ -32212,7 +32371,10 @@ fn main() -> Result<()> {
                     ..Default::default()
                 };
 
-                let target_stage = args.stage.as_deref().and_then(migration::rollout::RolloutStage::parse);
+                let target_stage = args
+                    .stage
+                    .as_deref()
+                    .and_then(migration::rollout::RolloutStage::parse);
 
                 let report = match args.action.as_str() {
                     "status" => manager.status().map_err(|e| e.to_string()),
@@ -33230,6 +33392,20 @@ fn main() -> Result<()> {
                                 DOCTOR_ERROR_CLI_SCHEMA_VERSION,
                                 "doctor.process-spawn-readiness",
                                 readiness_args.json || args.json,
+                                err,
+                            );
+                        }
+                    }
+                    DoctorCommand::ExpectedLossActions(action_args) => {
+                        if let Err(err) = handle_doctor_expected_loss_actions(
+                            action_args,
+                            &args.trace_id,
+                            args.json,
+                        ) {
+                            return named_cli_fail(
+                                DOCTOR_ERROR_CLI_SCHEMA_VERSION,
+                                "doctor.expected-loss-actions",
+                                action_args.json || args.json,
                                 err,
                             );
                         }

@@ -193,7 +193,7 @@ fn failure_evidence_via_product_supervisor(
                 output.status.code(), output.stdout, output.stderr
             )
         })?;
-    if evidence.schema_version != "franken-node/run-failure-effect-evidence/v1" {
+    if evidence.schema_version != "franken-node/run-failure-effect-evidence/v2" {
         return Err(format!(
             "product run returned unexpected failure evidence schema {:?}; stderr={:?}",
             evidence.schema_version, output.stderr
@@ -607,7 +607,7 @@ fn crypto_entropy_corpus_disclosure_fails_before_random_read_bd_y4t2i_2() {
             });
         assert_eq!(
             evidence.schema_version,
-            "franken-node/run-failure-effect-evidence/v1"
+            "franken-node/run-failure-effect-evidence/v2"
         );
         let ledger = evidence.host_effect_ledger;
         assert_eq!(ledger.effect_count, 0);

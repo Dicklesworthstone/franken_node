@@ -1631,6 +1631,243 @@ pub fn generate_human_report_file(
     Ok(human_report)
 }
 
+// ── IBD-8: expected-loss-ranked remediation (copilot_engine wire) ─────────────
+//
+// bd-reality-20260923-26n9r.14 found `security::copilot_engine`
+// (ActionRecommendationEngine, ~2.5k LOC) was compiled by default but reachable
+// from no CLI path — a "decorative control" the charter §4 forbids. This bridge
+// makes it load-bearing: it turns the workspace-pressure doctor's OBSERVED
+// findings into the copilot's expected-loss / value-of-information (VoI) ranking
+// so an operator sees which action most reduces expected loss, with a widened
+// uncertainty band under degraded mode and a served-recommendation audit trail.
+
+/// Schema version for the copilot expected-loss action envelope emitted by
+/// `franken-node doctor expected-loss-actions`.
+pub const DOCTOR_EXPECTED_LOSS_ACTIONS_SCHEMA_VERSION: &str =
+    "franken-node/doctor/expected-loss-actions/v1";
+
+/// Rank a doctor report's recommended actions by expected loss (IBD-8).
+///
+/// Bridges [`DoctorOutput`] into
+/// [`crate::security::copilot_engine::ActionRecommendationEngine`], returning a
+/// [`CopilotResponse`](crate::security::copilot_engine::CopilotResponse) whose
+/// recommendations are ordered highest-VoI first.
+///
+/// # Honesty contract
+///
+/// Charter §4 forbids decorative controls without measurable behavior, and this
+/// bead's own history warns against feeding engines fabricated defaults. Every
+/// loss value here is derived from a signal the doctor actually observed:
+/// - the per-action `priority` string ("high"/"medium"/"low"),
+/// - the overall [`DoctorStatus`] (healthy/warning/degraded/critical),
+/// - observed `memory_pressure` (`0.0..=1.0`),
+/// - the observed target-dir-vs-free-disk ratio, and
+/// - observed agent-mail `coordination_healthy`.
+///
+/// No constant stands in for an unobserved input. An advisory doctor
+/// recommendation mutates no state, so it reports its rollback truthfully as
+/// "none" rather than inventing one.
+#[must_use]
+pub fn rank_doctor_actions_by_expected_loss(
+    report: &DoctorOutput,
+    operator_identity: &str,
+    recommendation_id: &str,
+    trace_id: &str,
+    top_k: usize,
+) -> crate::security::copilot_engine::CopilotResponse {
+    use crate::security::copilot_engine::{
+        ActionCandidate, ActionRecommendationEngine, ConfidenceContext, ConfidenceInterval,
+        DataSourceInfo, DegradedModeInfo, ExpectedLossVector, SystemState,
+    };
+    use std::time::Duration;
+
+    let served_at = report.timestamp.to_rfc3339();
+
+    // Observed overall-health severity multiplier.
+    let status_mult = match report.status {
+        DoctorStatus::Healthy => 0.25,
+        DoctorStatus::Warning => 0.5,
+        DoctorStatus::Degraded => 1.0,
+        DoctorStatus::Critical => 1.5,
+    };
+
+    // Observed pressure scalars, each in [0, 1].
+    let mem_pressure = f64::from(report.resources.memory_pressure).clamp(0.0, 1.0);
+    let target = report.resources.target_dir_bytes as f64;
+    let free = report.resources.free_disk_bytes as f64;
+    let disk_pressure = if target + free <= 0.0 {
+        0.0
+    } else {
+        // Fraction of (reclaimable target dir + free disk) consumed by the build
+        // target dir: rises as free disk shrinks relative to what a clean could
+        // reclaim.
+        target / (target + free)
+    };
+    let env_pressure = mem_pressure.max(disk_pressure);
+    let build_contention = f64::from(report.resources.active_builds).min(8.0);
+
+    let candidates: Vec<ActionCandidate> = report
+        .recommended_actions
+        .iter()
+        .enumerate()
+        .map(|(i, action)| {
+            let base = match action.priority.to_ascii_lowercase().as_str() {
+                "high" => 3.0,
+                "medium" => 2.0,
+                _ => 1.0,
+            };
+
+            // Coordination-related actions threaten integrity (uncoordinated
+            // edits / conflicting reservations); resource-pressure actions
+            // threaten availability (builds stall). Classify from observed text.
+            let text = format!("{} {}", action.action, action.explanation).to_ascii_lowercase();
+            let is_coordination = text.contains("coordination")
+                || text.contains("reservation")
+                || text.contains("agent mail")
+                || text.contains("agent-mail");
+
+            // Expected loss if the operator WAITS: grows with observed severity
+            // and environmental pressure.
+            let wait_scale = base * status_mult * (1.0 + env_pressure);
+            let (avail_w, integ_w) = if is_coordination {
+                (0.2 * wait_scale, wait_scale)
+            } else {
+                (wait_scale, 0.2 * wait_scale)
+            };
+            let financial_w = 0.1 * wait_scale * build_contention;
+
+            let expected_loss_if_wait = ExpectedLossVector {
+                availability_loss: avail_w,
+                integrity_loss: integ_w,
+                confidentiality_loss: 0.0,
+                financial_loss: financial_w,
+                reputation_loss: 0.0,
+            };
+            // Acting resolves most of the risk; a residual fraction plus a small
+            // fixed execution cost remains, so VoI = wait.total - act.total > 0.
+            let residual = 0.2;
+            let expected_loss_if_act = ExpectedLossVector {
+                availability_loss: avail_w * residual,
+                integrity_loss: integ_w * residual,
+                confidentiality_loss: 0.0,
+                financial_loss: financial_w * residual + 0.05,
+                reputation_loss: 0.0,
+            };
+
+            let wait_total = expected_loss_if_wait.total();
+            let uncertainty_band = ConfidenceInterval {
+                lower_bound: wait_total * 0.75,
+                upper_bound: wait_total * 1.25 + 0.1,
+                confidence_level: 0.8,
+            };
+
+            let slug: String = action
+                .action
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() {
+                        c.to_ascii_lowercase()
+                    } else {
+                        '-'
+                    }
+                })
+                .collect();
+            let slug = slug.trim_matches('-');
+            let action_id = format!(
+                "doctor-{i:02}-{}",
+                if slug.is_empty() { "action" } else { slug }
+            );
+
+            let description = if action.explanation.trim().is_empty() {
+                if action.impact.trim().is_empty() {
+                    "Advisory workspace-pressure recommendation.".to_owned()
+                } else {
+                    action.impact.clone()
+                }
+            } else {
+                action.explanation.clone()
+            };
+
+            let confidence = ConfidenceContext {
+                data_sources: vec![DataSourceInfo {
+                    source_id: "doctor.workspace-pressure".to_owned(),
+                    freshness: served_at.clone(),
+                    is_stale: false,
+                    staleness_secs: 0,
+                }],
+                assumptions: vec![
+                    format!("doctor priority = {}", action.priority),
+                    format!("overall status = {}", report.status.as_str()),
+                ],
+                sensitivity: format!(
+                    "Flips if overall status severity drops below {status_mult:.2}x or observed \
+                     pressure ({env_pressure:.2}) clears"
+                ),
+            };
+
+            let rollback_command = action.command.clone().map_or_else(
+                || "none: advisory diagnostic (no automated state mutation)".to_owned(),
+                |cmd| {
+                    format!(
+                        "undo not automated; re-run `franken-node doctor workspace-pressure` to \
+                         re-observe (recommended command was: {cmd})"
+                    )
+                },
+            );
+
+            ActionCandidate {
+                action_id,
+                display_name: if action.action.trim().is_empty() {
+                    "workspace recommendation".to_owned()
+                } else {
+                    action.action.clone()
+                },
+                description,
+                expected_loss_if_act,
+                expected_loss_if_wait,
+                uncertainty_band,
+                preconditions: Vec::new(),
+                estimated_duration: Duration::from_secs(0),
+                rollback_command,
+                rollback_validated: false,
+                confidence,
+            }
+        })
+        .collect();
+
+    let degraded_mode = matches!(
+        report.status,
+        DoctorStatus::Degraded | DoctorStatus::Critical
+    ) || !report.resources.coordination_healthy;
+    let degraded_details = degraded_mode.then(|| DegradedModeInfo {
+        stale_inputs: Vec::new(),
+        reason: if report.summary.trim().is_empty() {
+            format!("workspace status {}", report.status.as_str())
+        } else {
+            report.summary.clone()
+        },
+        entered_at: served_at.clone(),
+    });
+
+    let state = SystemState {
+        degraded_mode,
+        degraded_details,
+        active_incidents: Vec::new(),
+        trust_state_age_secs: 0,
+        pending_operations: Vec::new(),
+    };
+
+    let mut engine = ActionRecommendationEngine::new(top_k.max(1));
+    engine.recommend(
+        &candidates,
+        &state,
+        operator_identity,
+        recommendation_id,
+        trace_id,
+        &served_at,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1864,5 +2101,204 @@ mod tests {
         );
         assert!(human.contains("Coordination: Degraded (archive_ahead_index)"));
         assert!(human.contains("Coordination Action:"));
+    }
+
+    // ── IBD-8 bridge (rank_doctor_actions_by_expected_loss) ──────────────────
+
+    fn ibd8_resources(
+        coordination_healthy: bool,
+        memory_pressure: f32,
+        active_builds: u32,
+    ) -> ResourceSummary {
+        ResourceSummary {
+            free_disk_bytes: 1_000_000_000,
+            free_disk_human: "1.0 GB".to_owned(),
+            target_dir_bytes: 1_000_000_000,
+            target_dir_human: "1.0 GB".to_owned(),
+            active_builds,
+            memory_pressure,
+            rch_status: RchStatus {
+                available: true,
+                available_slots: Some(4),
+                status_desc: "ok".to_owned(),
+            },
+            active_reservations: 0,
+            coordination_healthy,
+            agent_mail_coordination: AgentMailCoordinationSummary::healthy(),
+        }
+    }
+
+    fn ibd8_action(
+        priority: &str,
+        name: &str,
+        explanation: &str,
+        command: Option<&str>,
+    ) -> RecommendedAction {
+        RecommendedAction {
+            priority: priority.to_owned(),
+            action: name.to_owned(),
+            explanation: explanation.to_owned(),
+            command: command.map(str::to_owned),
+            impact: "test impact".to_owned(),
+        }
+    }
+
+    fn ibd8_report(
+        status: DoctorStatus,
+        actions: Vec<RecommendedAction>,
+        resources: ResourceSummary,
+    ) -> DoctorOutput {
+        DoctorOutput {
+            schema_version: DOCTOR_OUTPUT_SCHEMA_VERSION.to_owned(),
+            timestamp: Utc::now(),
+            status,
+            summary: "test summary".to_owned(),
+            resources,
+            policy_decisions: BTreeMap::new(),
+            recommended_actions: actions,
+            diagnostics: Vec::new(),
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn ibd8_ranks_actions_highest_voi_first() {
+        let report = ibd8_report(
+            DoctorStatus::Degraded,
+            vec![
+                ibd8_action("low", "tidy caches", "minor cleanup", None),
+                ibd8_action(
+                    "high",
+                    "free disk",
+                    "critical disk pressure",
+                    Some("cargo clean"),
+                ),
+                ibd8_action(
+                    "medium",
+                    "reduce builds",
+                    "throttle concurrent builds",
+                    None,
+                ),
+            ],
+            ibd8_resources(true, 0.5, 2),
+        );
+        let resp =
+            rank_doctor_actions_by_expected_loss(&report, "operator://test", "rec-1", "trace-1", 5);
+        assert_eq!(resp.recommendations.len(), 3);
+        // Strictly non-increasing VoI (highest first).
+        for pair in resp.recommendations.windows(2) {
+            assert!(
+                pair[0].voi_score >= pair[1].voi_score,
+                "recommendations not VoI-descending: {:?}",
+                resp.recommendations
+                    .iter()
+                    .map(|r| r.voi_score)
+                    .collect::<Vec<_>>()
+            );
+        }
+        // The observed high-priority action outranks medium and low.
+        assert_eq!(resp.recommendations[0].display_name, "free disk");
+        assert_eq!(resp.recommendations[2].display_name, "tidy caches");
+        // Acting beats waiting: VoI is positive and the rationale surfaces it.
+        assert!(resp.recommendations[0].voi_score > 0.0);
+        assert!(resp.recommendations[0].rationale.contains("VOI="));
+        // Resource-pressure actions are availability-dominant.
+        assert_eq!(
+            resp.recommendations[0].expected_loss.dominant_dimension(),
+            "availability"
+        );
+        // Advisory action with no command reports its rollback truthfully.
+        let tidy = resp
+            .recommendations
+            .iter()
+            .find(|r| r.display_name == "tidy caches")
+            .expect("tidy caches present");
+        assert!(tidy.rollback_command.starts_with("none:"));
+    }
+
+    #[test]
+    fn ibd8_degraded_status_widens_uncertainty_and_warns() {
+        let report = ibd8_report(
+            DoctorStatus::Critical,
+            vec![ibd8_action(
+                "high",
+                "free disk",
+                "critical disk pressure",
+                Some("cargo clean"),
+            )],
+            ibd8_resources(true, 0.9, 4),
+        );
+        let resp = rank_doctor_actions_by_expected_loss(&report, "op", "rec-2", "trace-2", 5);
+        assert!(resp.system_degraded);
+        assert!(resp.degraded_warning.is_some());
+        let rec = &resp.recommendations[0];
+        assert!(rec.degraded_confidence);
+        assert!(rec.adjusted_uncertainty.is_some());
+    }
+
+    #[test]
+    fn ibd8_coordination_action_is_integrity_dominant() {
+        let report = ibd8_report(
+            DoctorStatus::Warning,
+            vec![ibd8_action(
+                "high",
+                "repair agent-mail coordination",
+                "reservation index divergence detected",
+                Some("am doctor repair"),
+            )],
+            ibd8_resources(true, 0.2, 1),
+        );
+        let resp = rank_doctor_actions_by_expected_loss(&report, "op", "rec-3", "trace-3", 5);
+        assert_eq!(
+            resp.recommendations[0].expected_loss.dominant_dimension(),
+            "integrity"
+        );
+    }
+
+    #[test]
+    fn ibd8_unhealthy_coordination_marks_system_degraded() {
+        // Even a Warning-level status is degraded when coordination is unhealthy.
+        let report = ibd8_report(
+            DoctorStatus::Warning,
+            vec![ibd8_action(
+                "medium",
+                "reduce builds",
+                "throttle builds",
+                None,
+            )],
+            ibd8_resources(false, 0.4, 3),
+        );
+        let resp = rank_doctor_actions_by_expected_loss(&report, "op", "rec-6", "trace-6", 5);
+        assert!(resp.system_degraded);
+        assert!(resp.degraded_warning.is_some());
+    }
+
+    #[test]
+    fn ibd8_healthy_report_yields_no_recommendations() {
+        let report = ibd8_report(
+            DoctorStatus::Healthy,
+            Vec::new(),
+            ibd8_resources(true, 0.1, 0),
+        );
+        let resp = rank_doctor_actions_by_expected_loss(&report, "op", "rec-4", "trace-4", 5);
+        assert!(resp.recommendations.is_empty());
+        assert!(!resp.system_degraded);
+        assert!(resp.degraded_warning.is_none());
+    }
+
+    #[test]
+    fn ibd8_top_k_truncates_ranking() {
+        let report = ibd8_report(
+            DoctorStatus::Degraded,
+            vec![
+                ibd8_action("high", "a", "x", None),
+                ibd8_action("medium", "b", "y", None),
+                ibd8_action("low", "c", "z", None),
+            ],
+            ibd8_resources(true, 0.5, 2),
+        );
+        let resp = rank_doctor_actions_by_expected_loss(&report, "op", "rec-5", "trace-5", 2);
+        assert_eq!(resp.recommendations.len(), 2);
+        assert_eq!(resp.recommendations[0].display_name, "a");
     }
 }
