@@ -46,10 +46,12 @@ franken-node migrate rollout /project --migration-id txn-CHOSEN-ID \
 ```
 
 All illustrated paths must be replaced with real paths. Node must be on an
-absolute PATH entry. The three executable hashes must differ. The complete
-cohort must pass the existing process/output/filesystem checks before it can
-be signed. No unsigned-success fallback or automatic key provisioning occurs.
-An insufficient sample count may be attested truthfully, but still fails the
+absolute PATH entry. The three executable hashes must differ. By default the
+complete cohort must pass the existing process/output/filesystem checks before
+it can be signed. Explicit `--attest-regression` additionally permits a signed
+complete native FAIL as described below; it never converts that result to PASS.
+No unsigned-success fallback or automatic key provisioning occurs. An
+insufficient sample count may be attested truthfully, but still fails the
 rollout confidence gate unless explicitly overridden.
 
 Private key admission, the independent public-key match, execution consent and
@@ -119,6 +121,72 @@ signed validator's recorded baseline, not a claim that the original is still
 present during promotion. A later rollout transition still requires a new
 measurement and newly reviewed candidate hash. Failure never publishes a
 passing attestation and never restores or installs either source tree.
+
+## Retain authenticated regression evidence and recover
+
+Add `--attest-regression` to `run` to retain a **complete native FAIL** under the
+same signature protocol. This works with either same-tree or reviewed
+original/candidate execution; it does not waive `--execute`, paired hash
+approvals, original/candidate inventory matching, trust configuration or any
+existing execution budget. Use a new output path outside both projects.
+
+For example, after initializing the bound rollout and reviewing both hashes:
+
+```sh
+cargo +stable run --manifest-path tools/migration-validator/Cargo.toml \
+  --bin franken-migration-attest -- run /original \
+  --migrated-project /candidate \
+  --expected-input-sha256 "$ORIGINAL_SHA256" \
+  --expected-candidate-input-sha256 "$CANDIDATE_SHA256" \
+  --native-bin /installed/franken-node --bun-bin /installed/bun \
+  --signing-key /private/validator/migration.seed \
+  --out /private/evidence/cohort-regression.signed.json \
+  --attest-regression --execute
+```
+
+A retained regression prints `verdict: "FAIL"` and `regression_attested: true`
+and **exits 1**, even though the signed artifact was published successfully.
+Do not interpret file creation as successful validation, use `|| true` to hide
+the failure, or chain an expected-failure recovery command with `&&`.
+`ERROR`, missing observations, incomplete output, reference failures and
+reference disagreement do not produce a signed regression. A normal complete
+PASS still follows the unchanged passing-attestation path.
+
+After reviewing the failure, invoke the rollout decision separately:
+
+```sh
+franken-node migrate rollout /candidate --migration-id txn-CHOSEN-ID \
+  --action promote --lockstep-report /private/evidence/cohort-regression.signed.json --json
+```
+
+The default controller authenticates the envelope, captures the current
+candidate, requires the exact test inventory and filesystem scope, and
+reconstructs each case and the global verdict from all three observations.
+Only complete native failures with successful agreeing references can enter
+the native recovery path. The promotion command still fails; it records a
+durable abort intent and restores only the previously bound transaction.
+It does not install, execute or restore any pathname supplied by the report.
+The exact signed-envelope digest is retained in recovery history.
+
+A modified input, stale rollout state, changed trust key, invalid signature,
+weakened scope, missing case, inconsistent count or an inconclusive result
+refuses progression without authorizing source restoration. Insufficient
+successful samples also do not authorize rollback. `--force` never turns a
+signed FAIL into a promotion and prevents automatic restoration; library
+callers can independently disable `auto_rollback_on_failure`. An unbound
+rollout records cancellation but explicitly restores no source files.
+
+Conflicts with later user work leave the rollout aborted/failed and retryable;
+resolve conflicts explicitly and repeat the rollback action with the same
+transaction ID. Completed recovery retries preserve later edits. A supplied
+regression is checked even at the Default stage; idempotent stage requests
+cannot silently ignore it. Passing no-op requests leave state/history intact.
+
+Unsigned legacy lockstep reports are not negative cohort approvals. Default
+policy refuses automatic restoration from them. Library callers selecting
+`min_confidence_score = 0.0` explicitly opt into the separately trusted-local,
+unquantified legacy protocol, including its unauthenticated recovery evidence.
+The normal signed-cohort path does not require that override.
 
 ## Wire and trust contract
 

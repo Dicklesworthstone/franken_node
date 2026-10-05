@@ -76,14 +76,30 @@ franken-node migrate rollout ./project --migration-id txn-CHOSEN-ID --action rol
 ```
 
 Operator-health-triggered automatic rollback in `promote` follows the same
-source recovery path. Complete current-input blocking regressions in the
-legacy lockstep format also use that path. That legacy format retains its
-trusted-local, unsigned contract; cohort signatures do not authenticate it.
-It is not a background confidence monitor. Restoration failure is included in
-the returned promotion error, not silently discarded. An incomplete, malformed,
-failing or inconclusive project cohort refuses promotion without authorizing
-restoration; neither insufficient samples nor invalid evidence proves a
-workload regression.
+source recovery path. Authenticated, complete current-project native failures
+can now use it too. The live signer must be invoked with `--attest-regression`
+to retain a signed FAIL; it still exits nonzero. Supply that report explicitly
+to the rollout decision in a separate command. The controller authenticates
+first, then reconstructs every case from the three process/filesystem
+observations against the current candidate and exact captured test inventory.
+Successful agreeing references are mandatory. The signed-envelope digest is
+retained in recovery history; no report-supplied path selects what is restored.
+
+An incomplete, malformed, stale or inconclusive cohort refuses progression
+without authorizing restoration. Insufficient successful samples likewise do
+not prove a workload regression. A valid signed native FAIL can abort even a
+Default-stage rollout; a repeated stage request must not ignore supplied
+negative evidence. A valid passing no-op leaves the recorded state unchanged.
+`--force` or explicitly disabled automatic recovery refuses the failed
+promotion without automatic restoration. This is not a background monitor.
+Restoration failures are propagated, not silently discarded.
+
+Legacy unsigned lockstep failures no longer authorize automatic recovery under
+default policy. Only the explicit library `min_confidence_score = 0.0` policy
+opts into the unquantified trusted-local legacy protocol, including its
+unauthenticated regression classification. Direct operator rollback remains
+available independently of validation evidence. See the attestation guide for
+same-tree and reviewed original/candidate examples and exit-code semantics.
 
 ## What the confidence fields mean
 

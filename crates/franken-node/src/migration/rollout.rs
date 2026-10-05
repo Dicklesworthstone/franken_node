@@ -4,10 +4,11 @@
 //! existing native rewrite's `txn-...` as the migration ID binds source recovery
 //! to that exact journal. Rollback persists intent before restoring files and
 //! records completion only after the native recovery protocol succeeds.
-//! A complete blocking lockstep regression can trigger that same recovery path
-//! during promotion. Malformed, foreign or reference-disagreement evidence
-//! blocks promotion without restoring sources. Evidence is trusted local input;
-//! structural consistency does not authenticate it or cover unmeasured modules.
+//! A complete authenticated current-project native regression can trigger that
+//! same recovery path during promotion. Malformed, foreign, incomplete or
+//! reference-disagreement evidence blocks promotion without restoring sources.
+//! Legacy single-entry reports are trusted-local input only; automatic recovery
+//! from them requires the explicit zero-threshold legacy policy.
 //! Captured three-runtime project cohorts additionally bind the current tree
 //! and quantify sample-size uncertainty. Single-entry lockstep reports do not
 //! establish that confidence; default promotion requires the cohort report.
@@ -278,7 +279,8 @@ impl RolloutReport {
 pub struct RolloutConfig {
     pub ramp_step_pct: u8,
     /// Minimum conditional Wilson lower bound AND operator health ceiling.
-    /// Zero explicitly disables quantified admission for legacy entry reports.
+    /// Zero explicitly opts into unquantified, trusted-local legacy evidence,
+    /// including its unauthenticated regression classification for recovery.
     pub min_confidence_score: f64,
     pub require_lockstep_evidence: bool,
     /// Restore the bound native transaction on low confidence or a complete
@@ -340,16 +342,16 @@ fn lockstep_input_payload(project: &Path) -> io::Result<Vec<u8>> {
     }
 }
 
-/// Validate the existing lockstep report contract. Source rollback binding is
-/// independent of this evidence and does not upgrade it to release certification.
-/// A project-cohort report binds the full captured input; legacy reports bind
-/// only the harness's explicit input. Neither authenticates a producer or proves
-/// executable brands, statistical sampling assumptions or transitive execution.
+/// Validate evidence without changing rollout state or restoring sources.
+/// Cohorts authenticate a configured validator key and bind captured inputs;
+/// legacy reports bind only the harness's explicit input and are unsigned.
+/// Neither proves executable brands, statistical sampling assumptions or
+/// transitive execution coverage. Source recovery is a separate locked action.
 pub fn verify_lockstep_evidence(project: &Path, report_path: &Path) -> Result<String, String> {
     match assess_lockstep_evidence(project, report_path)? {
         LockstepEvidence::Passed(digest) => Ok(digest),
         LockstepEvidence::Measured(confidence) => Ok(format!("sha256:{}", confidence.evidence_sha256)),
-        LockstepEvidence::Regressed(reason) => Err(reason),
+        LockstepEvidence::Regressed(reason) | LockstepEvidence::AuthenticatedRegression(reason) => Err(reason),
     }
 }
 
@@ -357,6 +359,7 @@ enum LockstepEvidence {
     Passed(String),
     Measured(cohort::CohortConfidence),
     Regressed(String),
+    AuthenticatedRegression(String),
 }
 
 /// A report rejection is not necessarily evidence of a workload regression.
@@ -376,9 +379,9 @@ fn assess_lockstep_evidence(project: &Path, report_path: &Path) -> Result<Lockst
     let header: Header = serde_json::from_slice(&raw)
         .map_err(|error| format!("invalid rollout evidence header: {error}"))?;
     if header.schema_version == cohort::REPORT_SCHEMA {
-        // The producer's real capture/hash/admission implementation supplies
-        // the tree identity and inventory. No summary-only PASS projection.
-        return cohort::assess(project, &raw).map(LockstepEvidence::Measured);
+        // The same authenticated capture checks classify positive and negative
+        // evidence. No malformed report or summary-only FAIL starts recovery.
+        return cohort::assess_for_rollout(project, &raw);
     }
     let report: DivergenceReport = serde_json::from_slice(&raw)
         .map_err(|e| format!("lockstep report is not a `verify lockstep --json` report: {e}"))?;
@@ -807,7 +810,14 @@ impl RolloutManager {
                 return Err(reason);
             }
         }
-        if from_stage == next_stage && matches!(next_stage, RolloutStage::Shadow | RolloutStage::Default) {
+        // Idempotent stage requests must still examine supplied evidence: a
+        // completed rollout is not permission to ignore an authenticated FAIL.
+        // Retain the original state so a passing no-op cannot rewrite history
+        // or claim a new authorization without a state transition.
+        let unchanged = (from_stage == next_stage
+            && matches!(next_stage, RolloutStage::Shadow | RolloutStage::Default))
+            .then(|| state.clone());
+        if unchanged.is_some() && config.lockstep_report.is_none() {
             self.verify_bound_source(&state)?;
             return Ok(Self::report(state, true, "requested rollout stage already recorded; no transition performed".into()));
         }
@@ -837,7 +847,10 @@ impl RolloutManager {
                         state.lockstep_verified = true;
                         state.validation_confidence = Some(confidence);
                     }
-                    LockstepEvidence::Regressed(reason) => {
+                    LockstepEvidence::Regressed(reason) if config.min_confidence_score > 0.0 => {
+                        return Err(format!("{reason}; unsigned legacy evidence cannot authorize automatic source restoration; use an authenticated cohort or explicit rollback"));
+                    }
+                    LockstepEvidence::Regressed(reason) | LockstepEvidence::AuthenticatedRegression(reason) => {
                         if config.auto_rollback_on_failure && !config.force {
                             state.lockstep_verified = false;
                             state.validation_confidence = None;
@@ -862,6 +875,10 @@ impl RolloutManager {
         // Recovery checks its own pinned transaction and preserves conflicting
         // user edits, so a failed recovery remains durably aborted/retryable.
         self.verify_bound_source(&state)?;
+        if let Some(unchanged) = unchanged {
+            return Ok(Self::report(unchanged, true,
+                "requested rollout stage already recorded; supplied evidence validated; no transition performed".into()));
+        }
         let mut reason = if from_stage == next_stage && next_stage == RolloutStage::Ramp {
             format!("stepped rollout ramp to {new_ramp_pct}%")
         } else {
@@ -1612,6 +1629,7 @@ mod tests {
         fs::write(root.path().join("app.js"), b"independent user work").unwrap();
         let config = RolloutConfig {
             lockstep_report: Some(write_lockstep_report(root.path(), &input, true)),
+            min_confidence_score: 0.0, // Explicitly exercise trusted-local legacy recovery.
             ..RolloutConfig::default()
         };
         let error = manager.promote(&config, None, None).unwrap_err();
@@ -1639,6 +1657,7 @@ mod tests {
         manager.promote(&RolloutConfig { force: true, ..RolloutConfig::default() }, None, None).unwrap();
         let config = RolloutConfig {
             lockstep_report: Some(write_lockstep_report(root.path(), &input, true)),
+            min_confidence_score: 0.0, // Explicitly exercise trusted-local legacy recovery.
             ..RolloutConfig::default()
         };
         let error = manager.promote(&config, None, None).unwrap_err();
@@ -1669,5 +1688,23 @@ mod tests {
         assert!(report.lockstep_verified);
         assert!(report.validation_confidence.is_none());
         assert!(report.render_human().contains("unavailable"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn default_unsigned_regression_cannot_authorize_native_source_restoration() {
+        let (root, id, input) = applied_regression_project();
+        let manager = RolloutManager::new(root.path(), Some(&id));
+        manager.promote(&RolloutConfig { force: true, ..RolloutConfig::default() }, None, None).unwrap();
+        let before = manager.load_or_init().unwrap();
+        let path = write_lockstep_report(root.path(), &input, true);
+        for force in [false, true] {
+            let error = manager.promote(&RolloutConfig {
+                force, lockstep_report: Some(path.clone()), ..RolloutConfig::default()
+            }, None, None).unwrap_err();
+            assert!(error.contains("unsigned legacy evidence"), "{error}");
+            assert_eq!(manager.load_or_init().unwrap(), before);
+            assert_eq!(fs::read(root.path().join("app.js")).unwrap(), b"candidate");
+        }
     }
 }

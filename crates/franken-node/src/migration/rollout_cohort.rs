@@ -123,9 +123,21 @@ impl CohortConfidence {
 /// rollout state. Initialize rollout status BEFORE measuring; put the report
 /// outside the project. Every successful transition changes the tree identity,
 /// so another promotion needs a fresh measurement rather than replaying a flag.
-#[cfg(target_os = "linux")]
 pub fn assess(project: &Path, raw: &[u8]) -> Result<CohortConfidence, String> {
+    match assess_for_rollout(project, raw)? {
+        super::LockstepEvidence::Measured(confidence) => Ok(confidence),
+        super::LockstepEvidence::AuthenticatedRegression(reason) => Err(reason),
+        _ => Err("cohort did not establish authenticated passing confidence".into()),
+    }
+}
+
+/// Distinguish authenticated negative evidence from invalid/inconclusive input.
+/// This function performs no writes. Only the locked rollout controller may
+/// decide to restore its already-bound native transaction from this outcome.
+#[cfg(target_os = "linux")]
+pub(super) fn assess_for_rollout(project: &Path, raw: &[u8]) -> Result<super::LockstepEvidence, String> {
     use super::super::validation_suite::{
+        native_replay::failure_capture::product::check_native_regression,
         product_oracle::ProductReport, rewrite_candidate::RewriteCandidate,
     };
     use std::time::{Duration, Instant};
@@ -145,10 +157,16 @@ pub fn assess(project: &Path, raw: &[u8]) -> Result<CohortConfidence, String> {
     let captured = RewriteCandidate::capture(project, deadline)
         .map_err(|error| format!("cannot capture current rollout project: {error:#}"))?;
     let tests = captured.test_inventory().map_err(|error| format!("{error:#}"))?;
-    report.check_admission(&report.input_sha256, captured.input_sha256(), &tests)
-        .map_err(|error| format!(
-            "cohort admission refused: {error:#}; initialize rollout status before measuring and keep the report outside the project"
-        ))?;
+    let regression = if report.verdict == "FAIL" {
+        Some(check_native_regression(&report, &report.input_sha256, captured.input_sha256(), &tests)
+            .map_err(|error| format!("cohort regression evidence refused: {error:#}"))?)
+    } else {
+        report.check_admission(&report.input_sha256, captured.input_sha256(), &tests)
+            .map_err(|error| format!(
+                "cohort admission refused: {error:#}; initialize rollout status before measuring and keep the report outside the project"
+            ))?;
+        None
+    };
     // check_admission already demands distinct reference bytes. A rollout must
     // also reject a native role aliased to either reference executable.
     if report.native_runtime.sha256 == report.node_runtime.sha256
@@ -163,6 +181,14 @@ pub fn assess(project: &Path, raw: &[u8]) -> Result<CohortConfidence, String> {
     {
         return Err("cohort trust anchor changed during admission".into());
     }
+    if let Some(failed) = regression {
+        // A complete measured failure is not a low-sample confidence estimate.
+        // Bind the signed envelope without embedding private guest bytes.
+        return Ok(super::LockstepEvidence::AuthenticatedRegression(format!(
+            "authenticated cohort FAIL: {failed}/{} native regressions with successful agreeing references; evidence sha256:{}",
+            tests.len(), hex::encode(Sha256::digest(raw))
+        )));
+    }
     let total = u32::try_from(tests.len()).map_err(|_| "cohort test count overflow")?;
     // A partial or failing cohort never reaches this boundary. In particular,
     // ERROR/INCONCLUSIVE is not evidence authorizing destructive restoration.
@@ -171,11 +197,11 @@ pub fn assess(project: &Path, raw: &[u8]) -> Result<CohortConfidence, String> {
         captured.input_sha256().to_owned(),
         total,
         total,
-    )
+    ).map(super::LockstepEvidence::Measured)
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn assess(_project: &Path, _raw: &[u8]) -> Result<CohortConfidence, String> {
+pub(super) fn assess_for_rollout(_project: &Path, _raw: &[u8]) -> Result<super::LockstepEvidence, String> {
     Err("captured project-cohort rollout admission is supported on Linux only".into())
 }
 
@@ -564,5 +590,230 @@ mod admission_tests {
         let error = assess(root.path(), &serde_json::to_vec(&envelope).unwrap()).unwrap_err();
         assert!(error.contains("signature verification failed"), "{error}");
         assert!(!error.contains("capture current rollout"));
+    }
+
+    fn applied_regression_project() -> (tempfile::TempDir, RolloutManager) {
+        use super::super::super::rewrite_transaction::{Edit, RewriteTransaction};
+        use super::super::super::rollback;
+        let root = project(2);
+        for name in ["a.js", "b.js"] {
+            fs::write(root.path().join(name), b"original").unwrap();
+        }
+        RewriteTransaction::open(root.path()).unwrap().apply(&[
+            Edit { path: "a.js", before: b"original", after: b"candidate" },
+            Edit { path: "b.js", before: b"original", after: b"candidate" },
+        ]).unwrap();
+        let history = rollback::run(root.path(), None, false);
+        let manager = RolloutManager::new(root.path(), Some(&history.history[0].transaction_id));
+        manager.promote(&RolloutConfig { force: true, ..RolloutConfig::default() }, None, None).unwrap();
+        (root, manager)
+    }
+
+    fn regression_fixture(root: &Path) -> ProductReport {
+        let mut report = fixture(root);
+        report.cases[0].native.as_mut().unwrap().exit_code = Some(7);
+        report.cases[0].outcome = CaseOutcome::NativeDivergence;
+        report.cases[0].divergences = vec!["native:unsuccessful_exit".into()];
+        report.passed -= 1;
+        report.failed = 1;
+        report.native_divergences = 1;
+        report.verdict = "FAIL".into();
+        report
+    }
+
+    #[test]
+    fn signed_current_regression_restores_sources_and_binds_the_negative_evidence() {
+        use super::super::RolloutStatus;
+        let (root, manager) = applied_regression_project();
+        let output = tempfile::tempdir().unwrap();
+        let path = write_report(&regression_fixture(root.path()), output.path());
+        let evidence = hex::encode(Sha256::digest(fs::read(&path).unwrap()));
+        let error = manager.promote(&RolloutConfig {
+            lockstep_report: Some(path), ..RolloutConfig::default()
+        }, None, None).unwrap_err();
+        assert!(error.contains("authenticated cohort FAIL") && error.contains("Restored native rewrite"), "{error}");
+        let state = manager.load_or_init().unwrap();
+        assert_eq!(state.current_stage, RolloutStage::Aborted);
+        assert_eq!(state.status, RolloutStatus::RolledBack);
+        assert!(!state.lockstep_verified && state.validation_confidence.is_none());
+        assert_eq!(state.history[1].action, "rollback_started");
+        assert!(state.history[1].reason.contains(&evidence));
+        for name in ["a.js", "b.js"] {
+            assert_eq!(fs::read(root.path().join(name)).unwrap(), b"original");
+        }
+        fs::write(root.path().join("a.js"), b"later work").unwrap();
+        let reopened = RolloutManager::new(root.path(), Some(&state.migration_id));
+        reopened.rollback("retry completed negative-evidence recovery").unwrap();
+        assert_eq!(reopened.load_or_init().unwrap().history, state.history);
+        assert_eq!(fs::read(root.path().join("a.js")).unwrap(), b"later work");
+    }
+
+    #[test]
+    fn signed_but_inconsistent_regressions_never_change_sources_or_rollout_state() {
+        let (root, manager) = applied_regression_project();
+        let before = manager.load_or_init().unwrap();
+        let original = regression_fixture(root.path());
+        let output = tempfile::tempdir().unwrap();
+        for mutation in 0..12 {
+            let mut report = original.clone();
+            match mutation {
+                0 => report.cases[0].bun = None,
+                1 => report.cases[0].native.as_mut().unwrap().exit_code = Some(0),
+                2 => report.cases[0].divergences.clear(),
+                3 => report.native_divergences = 0,
+                4 => report.skipped = 1,
+                5 => report.errors.push("runtime replaced".into()),
+                6 => report.candidate_input_sha256 = "0".repeat(64),
+                7 => report.cases[1] = report.cases[0].clone(),
+                8 => report.filesystem_exclusions.push("**/*".into()),
+                9 => report.cases[0].native.as_mut().unwrap().workspace_delta = None,
+                10 => report.native_runtime.sha256 = report.node_runtime.sha256.clone(),
+                11 => report.cases[0].errors.push("incomplete output".into()),
+                _ => unreachable!(),
+            }
+            let error = manager.promote(&RolloutConfig {
+                lockstep_report: Some(write_report(&report, output.path())), ..RolloutConfig::default()
+            }, None, None).unwrap_err();
+            assert!(error.contains("cohort regression evidence refused"), "{mutation}: {error}");
+            assert_eq!(manager.load_or_init().unwrap(), before);
+            for name in ["a.js", "b.js"] {
+                assert_eq!(fs::read(root.path().join(name)).unwrap(), b"candidate");
+            }
+        }
+    }
+
+    #[test]
+    fn signed_reference_disagreement_is_not_native_recovery_authority() {
+        let (root, manager) = applied_regression_project();
+        let before = manager.load_or_init().unwrap();
+        let mut report = regression_fixture(root.path());
+        report.cases[0].bun.as_mut().unwrap().stdout.sha256 = "d".repeat(64);
+        report.cases[0].outcome = CaseOutcome::ReferenceDivergence;
+        report.cases[0].divergences.push("node/bun:stdout:byte_mismatch".into());
+        report.native_divergences = 0;
+        report.reference_divergences = 1;
+        report.verdict = "INCONCLUSIVE".into();
+        let output = tempfile::tempdir().unwrap();
+        assert!(manager.promote(&RolloutConfig {
+            lockstep_report: Some(write_report(&report, output.path())), ..RolloutConfig::default()
+        }, None, None).is_err());
+        assert_eq!(manager.load_or_init().unwrap(), before);
+        assert_eq!(fs::read(root.path().join("a.js")).unwrap(), b"candidate");
+    }
+
+    #[test]
+    fn signed_regression_respects_force_and_disabled_automatic_recovery() {
+        for force in [false, true] {
+            let (root, manager) = applied_regression_project();
+            let before = manager.load_or_init().unwrap();
+            let output = tempfile::tempdir().unwrap();
+            let error = manager.promote(&RolloutConfig {
+                force, auto_rollback_on_failure: force,
+                lockstep_report: Some(write_report(&regression_fixture(root.path()), output.path())),
+                ..RolloutConfig::default()
+            }, None, None).unwrap_err();
+            assert!(error.contains("authenticated cohort FAIL"), "{error}");
+            assert_eq!(manager.load_or_init().unwrap(), before);
+            assert_eq!(fs::read(root.path().join("a.js")).unwrap(), b"candidate");
+        }
+    }
+
+    #[test]
+    fn signed_regression_conflicts_remain_durable_and_retry_the_original_transaction() {
+        use super::super::RolloutStatus;
+        let (root, manager) = applied_regression_project();
+        fs::write(root.path().join("b.js"), b"independent user work").unwrap();
+        // Measure the current tree, not the former candidate. The separately
+        // pinned recovery journal still refuses to overwrite this user edit.
+        let report = regression_fixture(root.path());
+        let output = tempfile::tempdir().unwrap();
+        let error = manager.promote(&RolloutConfig {
+            lockstep_report: Some(write_report(&report, output.path())), ..RolloutConfig::default()
+        }, None, None).unwrap_err();
+        assert!(error.contains("automatic rollback did not complete"), "{error}");
+        let state = manager.load_or_init().unwrap();
+        assert_eq!(state.current_stage, RolloutStage::Aborted);
+        assert_eq!(state.status, RolloutStatus::Failed);
+        assert_eq!(fs::read(root.path().join("a.js")).unwrap(), b"candidate");
+        assert_eq!(fs::read(root.path().join("b.js")).unwrap(), b"independent user work");
+        let reopened = RolloutManager::new(root.path(), Some(&state.migration_id));
+        assert!(reopened.promote(&RolloutConfig { force: true, ..RolloutConfig::default() }, None, None).is_err());
+        // Explicit operator conflict resolution, never performed by recovery.
+        fs::write(root.path().join("b.js"), b"candidate").unwrap();
+        reopened.rollback("operator resolved conflict; retry exact transaction").unwrap();
+        assert_eq!(fs::read(root.path().join("a.js")).unwrap(), b"original");
+        assert_eq!(fs::read(root.path().join("b.js")).unwrap(), b"original");
+    }
+
+    #[test]
+    fn stale_signed_failure_and_foreign_signers_never_start_recovery() {
+        let (root, manager) = applied_regression_project();
+        let report = regression_fixture(root.path());
+        let output = tempfile::tempdir().unwrap();
+        let path = write_report(&report, output.path());
+        let mut before = manager.load_or_init().unwrap();
+        before.confidence_score = 0.99;
+        manager.persist(&before).unwrap();
+        assert!(manager.promote(&RolloutConfig {
+            lockstep_report: Some(path.clone()), ..RolloutConfig::default()
+        }, None, None).is_err());
+        assert_eq!(manager.load_or_init().unwrap(), before);
+        let report = regression_fixture(root.path());
+        fs::write(&path, attestation::seal(&serde_json::to_vec(&report).unwrap(),
+            &ed25519_dalek::SigningKey::from_bytes(&[8; 32])).unwrap()).unwrap();
+        let error = manager.promote(&RolloutConfig {
+            lockstep_report: Some(path), ..RolloutConfig::default()
+        }, None, None).unwrap_err();
+        assert!(error.contains("authentication refused"), "{error}");
+        assert_eq!(manager.load_or_init().unwrap(), before);
+        assert_eq!(fs::read(root.path().join("a.js")).unwrap(), b"candidate");
+    }
+
+    #[test]
+    fn live_measured_failure_is_authenticated_before_native_source_restoration() {
+        use super::super::super::validation_suite::ApprovedInputs;
+        let (root, manager) = applied_regression_project();
+        for index in 0..2 {
+            fs::write(root.path().join(format!("case-{index:04}.test.js")), "globalThis.answer = 42;\n").unwrap();
+        }
+        let captured = RewriteCandidate::capture(root.path(), Instant::now() + Duration::from_secs(30)).unwrap();
+        let pin = captured.input_sha256();
+        // Real process/capture/signature/recovery pipeline. true and false are
+        // deliberately selected test executables, NOT native/Bun parity proof.
+        let report = ApprovedInputs::capture(root.path(), None, pin, pin).unwrap()
+            .run_product(Path::new("/bin/false"), Path::new("/bin/true"), true).unwrap();
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(report.native_divergences, 2);
+        let output = tempfile::tempdir().unwrap();
+        let error = manager.promote(&RolloutConfig {
+            lockstep_report: Some(write_report(&report, output.path())), ..RolloutConfig::default()
+        }, None, None).unwrap_err();
+        assert!(error.contains("authenticated cohort FAIL") && error.contains("Restored native rewrite"), "{error}");
+        assert_eq!(fs::read(root.path().join("a.js")).unwrap(), b"original");
+        assert_eq!(fs::read(root.path().join("b.js")).unwrap(), b"original");
+    }
+
+    #[test]
+    fn completed_stage_checks_supplied_evidence_without_repeating_a_passing_transition() {
+        use super::super::RolloutStatus;
+        let (root, manager) = applied_regression_project();
+        manager.promote(&RolloutConfig { force: true, ..RolloutConfig::default() },
+            Some(RolloutStage::Default), None).unwrap();
+        let completed = manager.load_or_init().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let passing = RolloutConfig {
+            force: true,
+            lockstep_report: Some(write_report(&fixture(root.path()), output.path())),
+            ..RolloutConfig::default()
+        };
+        manager.promote(&passing, None, None).unwrap();
+        assert_eq!(manager.load_or_init().unwrap(), completed);
+        let error = manager.promote(&RolloutConfig {
+            lockstep_report: Some(write_report(&regression_fixture(root.path()), output.path())),
+            ..RolloutConfig::default()
+        }, None, None).unwrap_err();
+        assert!(error.contains("authenticated cohort FAIL"), "{error}");
+        assert_eq!(manager.status().unwrap().status, RolloutStatus::RolledBack);
+        assert_eq!(fs::read(root.path().join("a.js")).unwrap(), b"original");
     }
 }
