@@ -60,6 +60,66 @@ a private temporary file, file fsync, no-clobber publication and directory
 fsync. The producer rechecks the captured source tree and public key before
 signing/publishing. Existing reports are never overwritten.
 
+## Attest an original-to-candidate migration
+
+Use `--migrated-project` to compare Node and Bun on the original tree with
+native Franken on an independently prepared candidate. This is not a same-tree
+rerun that loses the original behavior. Both trees are captured and their exact
+approved snapshots are executed through the existing one-use `ApprovedInputs`
+API. No rewrite or installation is performed by the attestation operator.
+
+Provision the validation public key in the **candidate**, and initialize that
+candidate's rollout status before reviewing the inputs. Keep the original and
+candidate in separate, non-nested directories. Inspect each without execution:
+
+```sh
+cargo +stable run --manifest-path tools/migration-validator/Cargo.toml \
+  --bin franken-migration-suite -- /original --list-tests
+cargo +stable run --manifest-path tools/migration-validator/Cargo.toml \
+  --bin franken-migration-suite -- /candidate --list-tests
+```
+
+Review each captured inventory and its input SHA-256 independently. Set
+`ORIGINAL_SHA256` and `CANDIDATE_SHA256` to those reviewed 64-character hashes,
+then execute:
+
+```sh
+cargo +stable run --manifest-path tools/migration-validator/Cargo.toml \
+  --bin franken-migration-attest -- run /original \
+  --migrated-project /candidate \
+  --expected-input-sha256 "$ORIGINAL_SHA256" \
+  --expected-candidate-input-sha256 "$CANDIDATE_SHA256" \
+  --native-bin /installed/franken-node --bun-bin /installed/bun \
+  --signing-key /private/validator/migration.seed \
+  --out /private/evidence/migration-canary.signed.json --execute
+
+franken-node migrate rollout /candidate --migration-id txn-CHOSEN-ID \
+  --action promote --lockstep-report /private/evidence/migration-canary.signed.json --json
+```
+
+Cross-tree signing requires **both** reviewed hashes, including when the paths
+resolve to the same directory. Omitting one, swapping roles, stale captures,
+changed test selection, or differing golden expectations refuses execution.
+Explicitly reviewed hashes are also supported without `--migrated-project`;
+then provide the same hash for both roles. Without hashes, the original
+same-tree mode retains explicit `--execute` approval of the current capture.
+
+The candidate's independently installed key authorizes the signer; the
+original's key cannot override it. Private seeds, runtime executables and the
+signed report must remain outside **both** input trees. The operator verifies
+both trees still match the pre-execution hashes before signing and again before
+publication. Recapture is a rejection check, never a way to redefine an input
+that was already measured. These checks are not a filesystem lock against a
+hostile same-user process, nor an atomic snapshot of external effects.
+
+The signed report and the command summary retain separate `input_sha256` and
+`candidate_input_sha256` values. Existing rollout admission verifies that the
+candidate hash still matches its current project; the original hash is the
+signed validator's recorded baseline, not a claim that the original is still
+present during promotion. A later rollout transition still requires a new
+measurement and newly reviewed candidate hash. Failure never publishes a
+passing attestation and never restores or installs either source tree.
+
 ## Wire and trust contract
 
 The versioned JSON envelope contains `schema_version`, `public_key`,

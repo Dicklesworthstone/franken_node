@@ -108,12 +108,20 @@ jobs:
           cargo +stable test --manifest-path "$harness/Cargo.toml" migration::rollout:: -- --nocapture --test-threads=2 2>&1 | tee evidence/recovery-tests.log
           cargo +stable test --manifest-path "$harness/Cargo.toml" migration::rewrite_transaction:: -- --nocapture --test-threads=2 2>&1 | tee evidence/transaction-tests.log
           cargo +stable clippy --manifest-path "$harness/Cargo.toml" --lib -- -D warnings 2>&1 | tee evidence/clippy.log
-          cargo +stable test --manifest-path tools/migration-validator/Cargo.toml --bin franken-migration-attest report_attestation:: -- --nocapture 2>&1 | tee evidence/attestation-tests.log
-          cargo +stable test --manifest-path tools/migration-validator/Cargo.toml --bin franken-migration-attest linux::tests:: -- --nocapture --test-threads=2 2>&1 | tee evidence/attestation-operator-tests.log
-          cargo +stable clippy --manifest-path tools/migration-validator/Cargo.toml --bin franken-migration-attest -- -D warnings 2>&1 | tee evidence/attestation-clippy.log
           for file in rollout.rs rollout_cohort.rs report_attestation.rs rollout_store.rs rollout_recovery_tests.rs rewrite_rollback.rs; do
             rustfmt +stable --edition 2024 --config skip_children=true --emit stdout "$source/migration/$file" > "evidence/$file"
           done
+      - name: Execute attestation operator tests independently of rollout lint
+        # A failure above must remain a failure, but cannot hide execution of
+        # the independent signer regressions. No continue-on-error or relaxed lint.
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          cargo +stable test --manifest-path tools/migration-validator/Cargo.toml --bin franken-migration-attest report_attestation:: -- --nocapture 2>&1 | tee evidence/attestation-tests.log
+          cargo +stable test --manifest-path tools/migration-validator/Cargo.toml --bin franken-migration-attest linux::tests:: -- --nocapture --test-threads=2 2>&1 | tee evidence/attestation-operator-tests.log
+          cargo +stable clippy --manifest-path tools/migration-validator/Cargo.toml --bin franken-migration-attest -- -D warnings 2>&1 | tee evidence/attestation-clippy.log
       - name: Retain exact source and recovery execution evidence
         if: always()
         uses: actions/upload-artifact@v4
