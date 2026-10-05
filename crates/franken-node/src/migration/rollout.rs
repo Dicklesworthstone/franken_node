@@ -11,6 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{self, Read};
@@ -270,33 +271,64 @@ impl Default for RolloutConfig {
 
 const MAX_LOCKSTEP_REPORT_BYTES: u64 = 16 * 1024 * 1024;
 
-fn lockstep_input_payload(project: &Path) -> Vec<u8> {
-    if project.is_file() {
-        fs::read(project).unwrap_or_default()
+/// Read ordinary bounded evidence. Unix refuses a substituted symlink and
+/// opens nonblocking so a FIFO cannot hang promotion while the store is locked.
+fn read_lockstep_file(path: &Path) -> io::Result<Vec<u8>> {
+    if !fs::symlink_metadata(path)?.is_file() {
+        return Err(invalid("lockstep input must be a regular file"));
+    }
+    #[cfg(unix)]
+    let file = {
+        use rustix::fs::{Mode, OFlags, open};
+        File::from(open(
+            path,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?)
+    };
+    #[cfg(not(unix))]
+    let file = File::open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > MAX_LOCKSTEP_REPORT_BYTES {
+        return Err(invalid("lockstep input is nonregular or exceeds the evidence size limit"));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_LOCKSTEP_REPORT_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_LOCKSTEP_REPORT_BYTES {
+        return Err(invalid("lockstep input exceeds the evidence size limit"));
+    }
+    Ok(bytes)
+}
+
+fn lockstep_input_payload(project: &Path) -> io::Result<Vec<u8>> {
+    if fs::symlink_metadata(project)?.is_dir() {
+        read_lockstep_file(&project.join("package.json"))
     } else {
-        fs::read(project.join("package.json"))
-            .unwrap_or_else(|_| project.to_string_lossy().as_bytes().to_vec())
+        read_lockstep_file(project)
     }
 }
 
 /// Validate the existing lockstep report contract. Source rollback binding is
 /// independent of this evidence and does not upgrade it to release certification.
+/// This checks unsigned report consistency and the harness's explicit input,
+/// not authenticity, executable identity, or transitive module coverage.
 pub fn verify_lockstep_evidence(project: &Path, report_path: &Path) -> Result<String, String> {
-    use frankenengine_node::runtime::nversion_oracle::{DivergenceReport, OracleVerdict};
+    use frankenengine_node::runtime::nversion_oracle::{
+        CheckOutcome, DivergenceReport, OracleVerdict, SCHEMA_VERSION,
+    };
 
-    let file = File::open(report_path)
-        .map_err(|e| format!("cannot open lockstep report {}: {e}", report_path.display()))?;
-    let mut raw = Vec::new();
-    file.take(MAX_LOCKSTEP_REPORT_BYTES + 1)
-        .read_to_end(&mut raw)
+    let raw = read_lockstep_file(report_path)
         .map_err(|e| format!("cannot read lockstep report {}: {e}", report_path.display()))?;
-    if raw.len() as u64 > MAX_LOCKSTEP_REPORT_BYTES {
-        return Err("lockstep report exceeds the evidence size limit".to_string());
-    }
     let report: DivergenceReport = serde_json::from_slice(&raw)
         .map_err(|e| format!("lockstep report is not a `verify lockstep --json` report: {e}"))?;
     if report.verdict != OracleVerdict::Pass {
         return Err(format!("lockstep report verdict is {:?}, not Pass; resolve divergences before promotion", report.verdict));
+    }
+    if report.schema_version != SCHEMA_VERSION || report.trace_id.trim().is_empty() {
+        return Err("lockstep report has an unsupported schema or missing trace identity".into());
+    }
+    if !report.divergences.is_empty() {
+        return Err("lockstep report contains divergences despite its declared Pass verdict".into());
     }
     if report.checks.is_empty() {
         return Err("lockstep report contains no cross-runtime checks".to_string());
@@ -306,9 +338,31 @@ pub fn verify_lockstep_evidence(project: &Path, report_path: &Path) -> Result<St
     if !has_product_leg || !has_reference_leg {
         return Err("lockstep report must compare the franken product runtime against at least one reference runtime".to_string());
     }
-    let expected = lockstep_input_payload(project);
-    if let Some(check) = report.checks.iter().find(|check| check.input != expected) {
-        return Err(format!("lockstep report check {} was produced for different input than this project's current state; re-run `franken-node verify lockstep {} --json`", check.check_id, project.display()));
+    let mut fingerprints = BTreeSet::new();
+    for (id, runtime) in &report.runtimes {
+        if id.trim().is_empty()
+            || id != &runtime.runtime_id
+            || runtime.runtime_name.trim().is_empty()
+            || runtime.version.trim().is_empty()
+            || !fingerprints.insert(runtime.executor_fingerprint())
+        {
+            return Err("lockstep report has inconsistent or aliased runtime identities".into());
+        }
+    }
+    let expected = lockstep_input_payload(project)
+        .map_err(|e| format!("cannot read current lockstep input: {e}"))?;
+    let mut checks = BTreeSet::new();
+    for check in &report.checks {
+        if check.check_id.trim().is_empty()
+            || !checks.insert(&check.check_id)
+            || check.trace_id != report.trace_id
+            || !matches!(check.outcome.as_ref(), Some(CheckOutcome::Agree { .. }))
+        {
+            return Err("lockstep report has duplicate, foreign, unfinished or divergent checks".into());
+        }
+        if check.input != expected {
+            return Err(format!("lockstep report check {} was produced for different input than this project's current state; re-run `franken-node verify lockstep {} --json`", check.check_id, project.display()));
+        }
     }
     Ok(format!("sha256:{}", hex::encode(Sha256::digest(&raw))))
 }
@@ -589,18 +643,20 @@ impl RolloutManager {
             return Ok(Self::report(state, true, "requested rollout stage already recorded; no transition performed".into()));
         }
         let mut evidence_note = None;
-        if from_stage == RolloutStage::Shadow && !state.lockstep_verified {
-            match config.lockstep_report.as_deref() {
-                Some(report_path) => {
-                    let digest = verify_lockstep_evidence(&self.project_path, report_path)?;
-                    state.lockstep_verified = true;
-                    evidence_note = Some(format!("lockstep evidence {digest}"));
-                }
-                None if config.require_lockstep_evidence && !config.force => {
-                    return Err(format!("promotion out of Shadow requires lockstep evidence: run `franken-node verify lockstep {} --json > lockstep.json` and pass --lockstep-report lockstep.json", self.project_path.display()));
-                }
-                None => {}
+        // A previously verified decision cannot authorize a later promotion.
+        // Keep source transaction validation above; neither evidence path is a
+        // substitute for the other. Invalid supplied reports fail even if forced.
+        state.lockstep_verified = false;
+        match config.lockstep_report.as_deref() {
+            Some(report_path) => {
+                let digest = verify_lockstep_evidence(&self.project_path, report_path)?;
+                state.lockstep_verified = true;
+                evidence_note = Some(format!("lockstep evidence {digest}"));
             }
+            None if config.require_lockstep_evidence && !config.force => {
+                return Err(format!("promotion requires lockstep evidence: run `franken-node verify lockstep {} --json > lockstep.json` and pass --lockstep-report lockstep.json", self.project_path.display()));
+            }
+            None => {}
         }
         let mut reason = if from_stage == next_stage && next_stage == RolloutStage::Ramp {
             format!("stepped rollout ramp to {new_ramp_pct}%")
@@ -610,8 +666,12 @@ impl RolloutManager {
         if let Some(note) = evidence_note {
             reason.push_str("; ");
             reason.push_str(&note);
-        } else if from_stage == RolloutStage::Shadow && !state.lockstep_verified {
-            reason.push_str("; forced without lockstep evidence");
+        } else {
+            reason.push_str(if config.force {
+                "; forced without lockstep evidence"
+            } else {
+                "; explicit configuration permits unverified promotion"
+            });
         }
         let now = chrono::Utc::now().to_rfc3339();
         state.history.push(RolloutTransitionEvent {
@@ -757,6 +817,136 @@ mod tests {
         let manifest = br#"{"name":"rollout-fixture","version":"1.0.0"}"#.to_vec();
         fs::write(dir.join("package.json"), &manifest).unwrap();
         manifest
+    }
+
+    #[test]
+    fn declared_pass_requires_complete_consistent_oracle_records() {
+        let root = tempdir().unwrap();
+        let input = project_with_manifest(root.path());
+        let path = write_lockstep_report(root.path(), &input, false);
+        assert!(verify_lockstep_evidence(root.path(), &path).is_ok());
+        let original: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        for mutation in 0..8 {
+            let mut report = original.clone();
+            match mutation {
+                0 => report["schema_version"] = "unknown".into(),
+                1 => report["trace_id"] = "".into(),
+                2 => report["checks"][0]["outcome"] = serde_json::Value::Null,
+                3 => report["checks"][0]["trace_id"] = "foreign-trace".into(),
+                4 => report["checks"][0]["check_id"] = "".into(),
+                5 => {
+                    let repeated = report["checks"][0].clone();
+                    report["checks"].as_array_mut().unwrap().push(repeated);
+                }
+                6 => report["runtimes"]["node"]["runtime_id"] = "different-id".into(),
+                7 => report["runtimes"]["franken-node"]["runtime_name"] = "node".into(),
+                _ => unreachable!(),
+            }
+            fs::write(&path, serde_json::to_vec(&report).unwrap()).unwrap();
+            assert!(verify_lockstep_evidence(root.path(), &path).is_err(), "{mutation}");
+        }
+    }
+
+    #[test]
+    fn divergent_or_unfinished_checks_cannot_be_hidden_by_a_pass_summary() {
+        use frankenengine_node::runtime::nversion_oracle::{DivergenceReport, OracleVerdict};
+        let root = tempdir().unwrap();
+        let input = project_with_manifest(root.path());
+        let path = write_lockstep_report(root.path(), &input, true);
+        let mut report: DivergenceReport =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        report.verdict = OracleVerdict::Pass;
+        fs::write(&path, serde_json::to_vec(&report).unwrap()).unwrap();
+        assert!(verify_lockstep_evidence(root.path(), &path).is_err());
+        report.divergences.clear();
+        fs::write(&path, serde_json::to_vec(&report).unwrap()).unwrap();
+        assert!(verify_lockstep_evidence(root.path(), &path).is_err());
+    }
+
+    #[test]
+    fn every_promotion_rechecks_evidence_and_current_input_after_restart() {
+        let root = tempdir().unwrap();
+        let input = project_with_manifest(root.path());
+        let manager = RolloutManager::new(root.path(), Some("fresh-evidence"));
+        let config = RolloutConfig {
+            lockstep_report: Some(write_lockstep_report(root.path(), &input, false)),
+            ..RolloutConfig::default()
+        };
+        manager.promote(&config, None, None).unwrap();
+        let canary = manager.load_or_init().unwrap();
+        let restarted = RolloutManager::new(root.path(), Some("fresh-evidence"));
+        assert!(restarted.promote(&RolloutConfig::default(), None, None).is_err());
+        assert_eq!(restarted.load_or_init().unwrap(), canary);
+        fs::write(root.path().join("package.json"), br#"{"name":"changed"}"#).unwrap();
+        assert!(restarted.promote(&config, None, None).is_err());
+        assert_eq!(restarted.load_or_init().unwrap(), canary);
+    }
+
+    #[test]
+    fn forced_followup_clears_old_verification_but_cannot_admit_a_bad_report() {
+        let root = tempdir().unwrap();
+        let input = project_with_manifest(root.path());
+        let manager = RolloutManager::new(root.path(), Some("forced-followup"));
+        let mut config = RolloutConfig {
+            lockstep_report: Some(write_lockstep_report(root.path(), &input, false)),
+            ..RolloutConfig::default()
+        };
+        manager.promote(&config, None, None).unwrap();
+        let before = manager.load_or_init().unwrap();
+        config.force = true;
+        config.lockstep_report = Some(write_lockstep_report(root.path(), &input, true));
+        assert!(manager.promote(&config, None, None).is_err());
+        assert_eq!(manager.load_or_init().unwrap(), before);
+        config.lockstep_report = None;
+        let report = manager.promote(&config, None, None).unwrap();
+        assert!(!report.lockstep_verified);
+        assert!(report.message.contains("forced without lockstep evidence"));
+        assert_eq!(report.history.len(), 2);
+    }
+
+    #[test]
+    fn explicit_unverified_policy_does_not_inherit_a_verified_flag() {
+        let root = tempdir().unwrap();
+        let input = project_with_manifest(root.path());
+        let manager = RolloutManager::new(root.path(), Some("unverified-policy"));
+        manager.promote(&RolloutConfig {
+            lockstep_report: Some(write_lockstep_report(root.path(), &input, false)),
+            ..RolloutConfig::default()
+        }, None, None).unwrap();
+        let report = manager.promote(&RolloutConfig {
+            require_lockstep_evidence: false,
+            ..RolloutConfig::default()
+        }, None, None).unwrap();
+        assert!(!report.lockstep_verified);
+        assert!(report.message.contains("configuration permits unverified promotion"));
+        assert!(!report.message.contains("forced"));
+    }
+
+    #[test]
+    fn unreadable_or_oversized_inputs_cannot_fall_back_to_empty_or_path_bytes() {
+        let root = tempdir().unwrap();
+        let path = write_lockstep_report(root.path(), root.path().to_string_lossy().as_bytes(), false);
+        assert!(verify_lockstep_evidence(root.path(), &path).is_err());
+        let input = File::create(root.path().join("package.json")).unwrap();
+        input.set_len(MAX_LOCKSTEP_REPORT_BYTES + 1).unwrap();
+        assert!(verify_lockstep_evidence(root.path(), &path).is_err());
+        assert!(read_lockstep_file(root.path()).is_err());
+        let report = File::create(&path).unwrap();
+        report.set_len(MAX_LOCKSTEP_REPORT_BYTES + 1).unwrap();
+        assert!(verify_lockstep_evidence(root.path(), &path).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_evidence_is_rejected_before_reading_its_target() {
+        let root = tempdir().unwrap();
+        let input = project_with_manifest(root.path());
+        let path = write_lockstep_report(root.path(), &input, false);
+        let link = root.path().join("linked-report");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert!(verify_lockstep_evidence(root.path(), &link).is_err());
+        assert!(verify_lockstep_evidence(root.path(), &path).is_ok());
     }
 
     #[test]
