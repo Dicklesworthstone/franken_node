@@ -1,0 +1,108 @@
+name: Rollout source recovery
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/franken-node/src/migration/rollout*.rs'
+      - 'crates/franken-node/src/migration/rewrite_transaction.rs'
+      - 'crates/franken-node/src/migration/rewrite_rollback.rs'
+      - 'crates/franken-node/src/runtime/nversion_oracle.rs'
+      - 'crates/franken-node/src/security/constant_time.rs'
+      - 'crates/franken-node/src/lib.rs'
+      - '.github/workflows/rollout-source-recovery.yml'
+  pull_request:
+    paths:
+      - 'crates/franken-node/src/migration/rollout*.rs'
+      - 'crates/franken-node/src/migration/rewrite_transaction.rs'
+      - 'crates/franken-node/src/migration/rewrite_rollback.rs'
+      - '.github/workflows/rollout-source-recovery.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Compile and exercise actual rollout and native transaction modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal --component clippy --component rustfmt
+          harness="$RUNNER_TEMP/rollout-source-recovery"
+          source="$GITHUB_WORKSPACE/crates/franken-node/src"
+          mkdir -p "$harness" evidence
+          cat > "$harness/Cargo.toml" <<'TOML'
+          [package]
+          name = "rollout-source-recovery"
+          version = "0.0.0"
+          edition = "2024"
+          [workspace]
+          [lib]
+          path = "lib.rs"
+          [dependencies]
+          anyhow = "1.0"
+          serde = { version = "1.0", features = ["derive"] }
+          serde_json = "1.0"
+          sha2 = "0.11.0"
+          hex = "0.4.3"
+          chrono = "0.4.40"
+          fs2 = "0.4.3"
+          tempfile = "3"
+          subtle = "2.6.1"
+          proptest = "1.6"
+          rustix = { version = "1.1.4", default-features = false, features = ["std", "fs", "process"] }
+          TOML
+          # Import the actual shared helper, not an independently maintained
+          # implementation. This copies a read-only source range into the temp
+          # host; no repository source, gate or threshold is rewritten.
+          sed -n '/^pub(crate) fn push_bounded<T>/,/^}/p' "$source/lib.rs" > "$harness/bounded.rs"
+          test "$(grep -c '^pub(crate) fn push_bounded<T>' "$harness/bounded.rs")" = 1
+          test "$(grep -c '^}' "$harness/bounded.rs")" = 1
+          cat > "$harness/lib.rs" <<RUST
+          #![forbid(unsafe_code)]
+          extern crate self as frankenengine_node;
+          include!("bounded.rs");
+          #[path = "$source/security/constant_time.rs"]
+          pub mod production_constant_time;
+          pub mod security { pub use crate::production_constant_time as constant_time; }
+          #[path = "$source/runtime/nversion_oracle.rs"]
+          pub mod production_oracle;
+          pub mod runtime { pub use crate::production_oracle as nversion_oracle; }
+          pub mod migration {
+              #[path = "$source/migration/rewrite_transaction.rs"]
+              pub mod rewrite_transaction;
+              pub use rewrite_transaction::rollback;
+              #[path = "$source/migration/rollout.rs"]
+              pub mod rollout;
+          }
+          RUST
+          git rev-parse HEAD > evidence/revision.txt
+          rustc +stable --version > evidence/rust-version.txt
+          git ls-tree HEAD crates/franken-node/src/migration/ crates/franken-node/src/runtime/nversion_oracle.rs crates/franken-node/src/security/constant_time.rs crates/franken-node/src/lib.rs > evidence/source-blobs.txt
+          cargo +stable check --manifest-path "$harness/Cargo.toml" --lib 2>&1 | tee evidence/check.log
+          cargo +stable test --manifest-path "$harness/Cargo.toml" migration:: -- --nocapture --test-threads=2 2>&1 | tee evidence/recovery-tests.log
+          cargo +stable clippy --manifest-path "$harness/Cargo.toml" --lib -- -D warnings 2>&1 | tee evidence/clippy.log
+          for file in rollout.rs rollout_store.rs rollout_recovery_tests.rs rewrite_rollback.rs; do
+            rustfmt +stable --edition 2024 --config skip_children=true --emit stdout "$source/migration/$file" > "evidence/$file"
+          done
+      - name: Retain exact source and recovery execution evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rollout-source-recovery-evidence
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            evidence/
+            crates/franken-node/src/migration/rollout.rs
+            crates/franken-node/src/migration/rollout_store.rs
+            crates/franken-node/src/migration/rollout_recovery_tests.rs
+            crates/franken-node/src/migration/rewrite_transaction.rs
+            crates/franken-node/src/migration/rewrite_rollback.rs

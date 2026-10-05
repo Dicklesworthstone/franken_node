@@ -1,20 +1,24 @@
 //! Migration Autopilot Rollout State Machine.
 //!
-//! Provides the fourth pillar of the migration lifecycle:
-//! `audit -> rewrite -> validate -> rollout`.
+//! Provides `audit -> rewrite -> validate -> rollout` progression. Selecting an
+//! existing native rewrite's `txn-...` as the migration ID binds source recovery
+//! to that exact journal. Rollback persists intent before restoring files and
+//! records completion only after the native recovery protocol succeeds.
 //!
-//! Implements a deterministic, fail-closed state machine for staged rollout:
-//! `Shadow -> Canary -> Ramp -> Default`
-//! with durable state persistence, lockstep evidence verification, automatic
-//! rollback triggering on regression/breach, signed decision receipts,
-//! cancellation, and restart-safe idempotency.
+//! Rollout stages are local control state, not a traffic-routing implementation.
+//! Unbound rollouts can be aborted but never claim to restore source files.
+//! Journals and transition digests are local recovery metadata, not signatures.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+
+#[path = "rollout_store.rs"]
+mod store;
+use store::{Store, invalid};
 
 pub const ROLLOUT_STATE_SCHEMA_VERSION: &str = "franken-node/migration-rollout-state/v1";
 pub const ROLLOUT_REPORT_SCHEMA_VERSION: &str = "franken-node/migrate-rollout-cli/v1";
@@ -23,15 +27,10 @@ pub const ROLLOUT_REPORT_SCHEMA_VERSION: &str = "franken-node/migrate-rollout-cl
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RolloutStage {
-    /// Mirrored execution; inputs duplicated, outputs observed and diffed against reference.
     Shadow,
-    /// Low-volume canary execution (typically 1 instance or small percentage).
     Canary,
-    /// Stepped progressive traffic ramp (e.g., 25% -> 50% -> 75% -> 100%).
     Ramp,
-    /// Promoted as the default production runtime.
     Default,
-    /// Aborted and rolled back due to error, anomaly, or operator intervention.
     Aborted,
 }
 
@@ -64,7 +63,8 @@ impl std::fmt::Display for RolloutStage {
     }
 }
 
-/// Execution status of the rollout.
+/// Execution status of the rollout. Aborted/Failed means restoration has NOT
+/// completed; retry rollback with the same migration ID to resume recovery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RolloutStatus {
@@ -93,7 +93,6 @@ impl std::fmt::Display for RolloutStatus {
     }
 }
 
-/// An audit-trail event recorded during rollout lifecycle transitions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RolloutTransitionEvent {
     pub from_stage: RolloutStage,
@@ -103,11 +102,12 @@ pub struct RolloutTransitionEvent {
     pub timestamp_utc: String,
     pub confidence_score: f64,
     pub ramp_pct: u8,
+    /// Historical field name: this is a state digest, NOT a digital signature.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub receipt_signature: Option<String>,
 }
 
-/// Durable rollout state persisted in `.franken-node/state/rollout/<migration_id>.json`.
+/// Durable rollout state in `.franken-node/state/rollout/<migration_id>.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RolloutState {
     pub schema_version: String,
@@ -120,6 +120,10 @@ pub struct RolloutState {
     pub lockstep_verified: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rollback_plan_id: Option<String>,
+    /// Canonical native journal digest admitted BEFORE a rollout can proceed.
+    /// An ID without a pin is refused, never repaired by trusting new metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback_journal_sha256: Option<String>,
     pub history: Vec<RolloutTransitionEvent>,
     pub created_at: String,
     pub updated_at: String,
@@ -138,13 +142,13 @@ impl RolloutState {
             confidence_score: 1.0,
             lockstep_verified: false,
             rollback_plan_id: None,
+            rollback_journal_sha256: None,
             history: Vec::new(),
             created_at: now.clone(),
             updated_at: now,
         }
     }
 
-    /// Compute SHA-256 digest of the canonical state bytes.
     pub fn digest(&self) -> String {
         let mut hasher = Sha256::new();
         hasher.update(ROLLOUT_STATE_SCHEMA_VERSION.as_bytes());
@@ -154,11 +158,27 @@ impl RolloutState {
         hasher.update([self.ramp_pct]);
         hasher.update(self.confidence_score.to_le_bytes());
         hasher.update([u8::from(self.lockstep_verified)]);
+        // Bind recovery identity without claiming this digest authenticates it.
+        for field in [&self.rollback_plan_id, &self.rollback_journal_sha256] {
+            hasher.update([u8::from(field.is_some())]);
+            if let Some(value) = field {
+                hasher.update((value.len() as u64).to_le_bytes());
+                hasher.update(value.as_bytes());
+            }
+        }
         hex::encode(hasher.finalize())
     }
 }
 
-/// CLI report emitted by `franken-node migrate rollout`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceRollbackSummary {
+    pub transaction_id: String,
+    pub journal_sha256: String,
+    /// The bound transaction's restoration was recorded. This does not certify
+    /// later user edits, stop services, or roll back external side effects.
+    pub restoration_recorded: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RolloutReport {
     pub schema_version: String,
@@ -172,6 +192,8 @@ pub struct RolloutReport {
     pub confidence_score: f64,
     pub lockstep_verified: bool,
     pub rollback_triggered: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_rollback: Option<SourceRollbackSummary>,
     pub message: String,
     pub history: Vec<RolloutTransitionEvent>,
 }
@@ -195,46 +217,34 @@ impl RolloutReport {
                 b.push_str(&format!("] {}% (Ramp)", self.ramp_pct));
                 b
             }
-            RolloutStage::Default => "[■■■■] 100% (Default - Production Active)".to_string(),
-            RolloutStage::Aborted => "[XXXX] Aborted / Rolled Back".to_string(),
+            RolloutStage::Default => "[■■■■] 100% (Default stage)".to_string(),
+            RolloutStage::Aborted => "[XXXX] Aborted".to_string(),
         };
-
         writeln!(out, "Migration Rollout Status").unwrap();
         writeln!(out, "  Migration ID:       {}", self.migration_id).unwrap();
         writeln!(out, "  Project:            {}", self.project_path).unwrap();
-        writeln!(
-            out,
-            "  Stage:              {} ({})",
-            self.stage, self.status
-        )
-        .unwrap();
+        writeln!(out, "  Stage:              {} ({})", self.stage, self.status).unwrap();
         writeln!(out, "  Progress:           {}", bar).unwrap();
-        writeln!(
-            out,
-            "  Confidence Score:   {:.2}%",
-            self.confidence_score * 100.0
-        )
-        .unwrap();
+        writeln!(out, "  Confidence Score:   {:.2}%", self.confidence_score * 100.0).unwrap();
         writeln!(out, "  Lockstep Verified:  {}", self.lockstep_verified).unwrap();
         writeln!(out, "  Rollback Triggered: {}", self.rollback_triggered).unwrap();
+        if let Some(source) = &self.source_rollback {
+            writeln!(out, "  Source transaction: {}", source.transaction_id).unwrap();
+            writeln!(out, "  Restore recorded:   {}", source.restoration_recorded).unwrap();
+        } else {
+            writeln!(out, "  Source restoration: no transaction bound").unwrap();
+        }
         writeln!(out, "  Summary:            {}", self.message).unwrap();
-
         if !self.history.is_empty() {
             writeln!(out, "\nTransition History:").unwrap();
             for ev in &self.history {
-                writeln!(
-                    out,
-                    "  {} -> {}: {} ({}) at {}",
-                    ev.from_stage, ev.to_stage, ev.action, ev.reason, ev.timestamp_utc
-                )
-                .unwrap();
+                writeln!(out, "  {} -> {}: {} ({}) at {}", ev.from_stage, ev.to_stage, ev.action, ev.reason, ev.timestamp_utc).unwrap();
             }
         }
         out
     }
 }
 
-/// Rollout configuration controlling transitions and thresholds.
 #[derive(Debug, Clone)]
 pub struct RolloutConfig {
     pub ramp_step_pct: u8,
@@ -242,9 +252,6 @@ pub struct RolloutConfig {
     pub require_lockstep_evidence: bool,
     pub auto_rollback_on_failure: bool,
     pub force: bool,
-    /// `franken-node verify lockstep <project> --json` report proving the
-    /// migrated project behaves identically across runtimes. Required to leave
-    /// Shadow when `require_lockstep_evidence` is set (unless `force`).
     pub lockstep_report: Option<PathBuf>,
 }
 
@@ -261,12 +268,8 @@ impl Default for RolloutConfig {
     }
 }
 
-/// Upper bound on a lockstep report read as rollout evidence.
 const MAX_LOCKSTEP_REPORT_BYTES: u64 = 16 * 1024 * 1024;
 
-/// The bytes the lockstep harness feeds its cross-runtime checks for `project`
-/// (`LockstepHarness::verify_lockstep_entry`): the entry file for a file
-/// target, otherwise the project's package.json, otherwise its path.
 fn lockstep_input_payload(project: &Path) -> Vec<u8> {
     if project.is_file() {
         fs::read(project).unwrap_or_default()
@@ -276,13 +279,8 @@ fn lockstep_input_payload(project: &Path) -> Vec<u8> {
     }
 }
 
-/// Verify that `report_path` is a passing lockstep oracle report FOR THIS
-/// PROJECT and return its SHA-256 (bound into the transition receipt).
-///
-/// Rejects: unreadable/oversized/unparseable reports, any non-`Pass` verdict,
-/// reports without checks, reports lacking either a franken product leg or a
-/// reference-runtime leg, and reports whose checked input differs from this
-/// project's current bytes (evidence from another project or a stale tree).
+/// Validate the existing lockstep report contract. Source rollback binding is
+/// independent of this evidence and does not upgrade it to release certification.
 pub fn verify_lockstep_evidence(project: &Path, report_path: &Path) -> Result<String, String> {
     use frankenengine_node::runtime::nversion_oracle::{DivergenceReport, OracleVerdict};
 
@@ -297,12 +295,8 @@ pub fn verify_lockstep_evidence(project: &Path, report_path: &Path) -> Result<St
     }
     let report: DivergenceReport = serde_json::from_slice(&raw)
         .map_err(|e| format!("lockstep report is not a `verify lockstep --json` report: {e}"))?;
-
     if report.verdict != OracleVerdict::Pass {
-        return Err(format!(
-            "lockstep report verdict is {:?}, not Pass; resolve divergences before promotion",
-            report.verdict
-        ));
+        return Err(format!("lockstep report verdict is {:?}, not Pass; resolve divergences before promotion", report.verdict));
     }
     if report.checks.is_empty() {
         return Err("lockstep report contains no cross-runtime checks".to_string());
@@ -310,182 +304,291 @@ pub fn verify_lockstep_evidence(project: &Path, report_path: &Path) -> Result<St
     let has_product_leg = report.runtimes.values().any(|rt| !rt.is_reference);
     let has_reference_leg = report.runtimes.values().any(|rt| rt.is_reference);
     if !has_product_leg || !has_reference_leg {
-        return Err(
-            "lockstep report must compare the franken product runtime against at least one reference runtime"
-                .to_string(),
-        );
+        return Err("lockstep report must compare the franken product runtime against at least one reference runtime".to_string());
     }
     let expected = lockstep_input_payload(project);
     if let Some(check) = report.checks.iter().find(|check| check.input != expected) {
-        return Err(format!(
-            "lockstep report check {} was produced for different input than this project's current state; re-run `franken-node verify lockstep {} --json`",
-            check.check_id,
-            project.display()
-        ));
+        return Err(format!("lockstep report check {} was produced for different input than this project's current state; re-run `franken-node verify lockstep {} --json`", check.check_id, project.display()));
     }
     Ok(format!("sha256:{}", hex::encode(Sha256::digest(&raw))))
 }
 
-/// Manager coordinating state machine transitions and durable state storage.
 pub struct RolloutManager {
-    state_dir: PathBuf,
     project_path: PathBuf,
     migration_id: String,
 }
 
 impl RolloutManager {
     pub fn new(project_path: &Path, migration_id: Option<&str>) -> Self {
-        let state_dir = project_path
-            .join(".franken-node")
-            .join("state")
-            .join("rollout");
-        let id = migration_id
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| Self::discover_or_generate_id(project_path));
-
         Self {
-            state_dir,
             project_path: project_path.to_path_buf(),
-            migration_id: id,
+            migration_id: migration_id.map(str::to_owned)
+                .unwrap_or_else(|| Self::discover_or_generate_id(project_path)),
         }
     }
 
     fn discover_or_generate_id(project_path: &Path) -> String {
-        // Deterministic hash of canonical path for repeatability
-        let canonical = project_path
-            .canonicalize()
-            .unwrap_or_else(|_| project_path.to_path_buf());
-        let mut hasher = Sha256::new();
-        hasher.update(canonical.to_string_lossy().as_bytes());
-        let hex = hex::encode(hasher.finalize());
+        let canonical = project_path.canonicalize().unwrap_or_else(|_| project_path.to_path_buf());
+        let hex = hex::encode(Sha256::digest(canonical.to_string_lossy().as_bytes()));
         format!("mig-{}", &hex[..12])
     }
 
-    fn state_file_path(&self) -> PathBuf {
-        self.state_dir.join(format!("{}.json", self.migration_id))
-    }
-
-    /// Load existing rollout state or initialize a fresh one (restart-safe idempotency).
-    pub fn load_or_init(&self) -> io::Result<RolloutState> {
-        let path = self.state_file_path();
-        if path.is_file() {
-            let mut file = File::open(&path)?;
-            let mut buf = String::new();
-            file.read_to_string(&mut buf)?;
-            serde_json::from_str(&buf).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("corrupted rollout state at {}: {e}", path.display()),
-                )
-            })
-        } else {
-            let state = RolloutState::new(
-                self.migration_id.clone(),
-                self.project_path.to_string_lossy().into_owned(),
-            );
-            self.persist(&state)?;
-            Ok(state)
-        }
-    }
-
-    /// Atomically persist state to disk.
-    pub fn persist(&self, state: &RolloutState) -> io::Result<()> {
-        fs::create_dir_all(&self.state_dir)?;
-        let path = self.state_file_path();
-        let tmp_path = self.state_dir.join(format!("{}.tmp", self.migration_id));
-
-        let json = serde_json::to_string_pretty(state)
-            .map_err(|e| io::Error::other(format!("failed serializing rollout state: {e}")))?;
-
+    fn open_store(&self) -> io::Result<Store> {
+        if self.migration_id.is_empty()
+            || self.migration_id.len() > 96
+            || !self.migration_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
         {
-            let mut file = File::create(&tmp_path)?;
-            file.write_all(json.as_bytes())?;
-            file.sync_all()?;
+            return Err(invalid("migration ID must be a bounded alphanumeric identifier, not a path"));
         }
-        fs::rename(&tmp_path, &path)?;
+        Store::open(&self.project_path.canonicalize()?)
+    }
+
+    fn state_name(&self) -> String {
+        format!("{}.json", self.migration_id)
+    }
+
+    fn validate_state(&self, state: &RolloutState) -> io::Result<()> {
+        if state.schema_version != ROLLOUT_STATE_SCHEMA_VERSION
+            || state.migration_id != self.migration_id
+            || Path::new(&state.project_path).canonicalize()? != self.project_path.canonicalize()?
+            || !state.confidence_score.is_finite()
+            || !(0.0..=1.0).contains(&state.confidence_score)
+            || state.ramp_pct > 100
+        {
+            return Err(invalid("rollout state identity, schema, confidence or percentage is invalid"));
+        }
+        match (&state.rollback_plan_id, &state.rollback_journal_sha256) {
+            (None, None) if !state.migration_id.starts_with("txn-") => {}
+            (Some(id), Some(pin)) if id == &state.migration_id
+                && id.starts_with("txn-") && id.len() > 4
+                && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                && pin.len() == 64
+                && pin.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) => {}
+            _ => return Err(invalid("native rollback binding is missing, incomplete or inconsistent; do not rebind from current journal bytes")),
+        }
+        if state.current_stage == RolloutStage::Aborted
+            && (state.ramp_pct != 0 || !matches!(state.status, RolloutStatus::Failed | RolloutStatus::RolledBack))
+        {
+            return Err(invalid("aborted rollout must be failed/pending recovery or rolled back at zero percent"));
+        }
+        if state.status == RolloutStatus::RolledBack && state.current_stage != RolloutStage::Aborted {
+            return Err(invalid("restored rollout cannot be active"));
+        }
         Ok(())
     }
 
-    /// Inspect current rollout state without mutating it.
-    pub fn status(&self) -> io::Result<RolloutReport> {
-        let state = self.load_or_init()?;
-        Ok(RolloutReport {
-            schema_version: ROLLOUT_REPORT_SCHEMA_VERSION.to_string(),
-            command: "migrate.rollout".to_string(),
-            ok: state.status != RolloutStatus::Failed && state.status != RolloutStatus::RolledBack,
-            migration_id: state.migration_id.clone(),
-            project_path: state.project_path.clone(),
+    fn load_existing(&self, store: &Store) -> io::Result<Option<RolloutState>> {
+        store.read(&self.state_name())?.map(|bytes| {
+            let state: RolloutState = serde_json::from_slice(&bytes)
+                .map_err(|e| invalid(format!("corrupted rollout state: {e}")))?;
+            self.validate_state(&state)?;
+            Ok(state)
+        }).transpose()
+    }
+
+    fn persist_locked(&self, store: &Store, state: &RolloutState) -> io::Result<()> {
+        self.validate_state(state)?;
+        let bytes = serde_json::to_vec_pretty(state).map_err(|e| invalid(e.to_string()))?;
+        store.write(&self.state_name(), &bytes)
+    }
+
+    fn load_or_init_locked(&self, store: &Store) -> io::Result<RolloutState> {
+        if let Some(state) = self.load_existing(store)? {
+            return Ok(state);
+        }
+        let mut state = RolloutState::new(
+            self.migration_id.clone(),
+            self.project_path.canonicalize()?.to_string_lossy().into_owned(),
+        );
+        if self.migration_id.starts_with("txn-") {
+            self.bind_source_transaction(&mut state).map_err(invalid)?;
+        }
+        self.persist_locked(store, &state)?;
+        Ok(state)
+    }
+
+    /// Selecting an exact native transaction ID is explicit opt-in. Never infer
+    /// the most recent transaction, and never execute rollback while binding.
+    #[cfg(target_os = "linux")]
+    fn bind_source_transaction(&self, state: &mut RolloutState) -> Result<(), String> {
+        use super::rollback::{RollbackStatus, SourceState, TransactionState};
+        let preview = super::rollback::run(&self.project_path, Some(&self.migration_id), false);
+        let entry = preview.transaction.as_ref()
+            .ok_or_else(|| format!("cannot bind native rollback transaction: {}", preview.errors.join("; ")))?;
+        if preview.status != RollbackStatus::Ready
+            || entry.state != TransactionState::Applied
+            || preview.files.is_empty()
+            || preview.files.iter().any(|file| file.preflight_state != SourceState::Rewritten)
+        {
+            return Err("rollout requires an intact, fully applied native rewrite; recover interrupted or conflicting transactions with migrate rollback first".into());
+        }
+        state.rollback_plan_id = Some(entry.transaction_id.clone());
+        state.rollback_journal_sha256 = Some(entry.journal_sha256.clone());
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn bind_source_transaction(&self, _state: &mut RolloutState) -> Result<(), String> {
+        Err("native transaction-bound source rollback is supported on Linux only".into())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn verify_bound_source(&self, state: &RolloutState) -> Result<(), String> {
+        use super::rollback::{RollbackStatus, SourceState, TransactionState};
+        if let (Some(id), Some(pin)) = (&state.rollback_plan_id, &state.rollback_journal_sha256) {
+            let preview = super::rollback::run_pinned(&self.project_path, id, pin, false);
+            if preview.status != RollbackStatus::Ready
+                || !preview.transaction.as_ref().is_some_and(|entry| entry.state == TransactionState::Applied)
+                || preview.files.is_empty()
+                || preview.files.iter().any(|file| file.preflight_state != SourceState::Rewritten)
+            {
+                return Err(format!("bound rewrite is not intact and applied; promotion refused: {:?}; {}", preview.status, preview.errors.join("; ")));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn verify_bound_source(&self, state: &RolloutState) -> Result<(), String> {
+        if state.rollback_plan_id.is_some() {
+            return Err("native transaction-bound source rollback is supported on Linux only".into());
+        }
+        Ok(())
+    }
+
+    pub fn load_or_init(&self) -> io::Result<RolloutState> {
+        let store = self.open_store()?;
+        self.load_or_init_locked(&store)
+    }
+
+    /// Explicit state updates still cannot change the admitted recovery identity
+    /// or resurrect an aborted migration. Lifecycle methods retain the lock
+    /// across read/modify/write and use persist_locked instead.
+    pub fn persist(&self, state: &RolloutState) -> io::Result<()> {
+        let store = self.open_store()?;
+        if let Some(previous) = self.load_existing(&store)? {
+            if previous.rollback_plan_id != state.rollback_plan_id
+                || previous.rollback_journal_sha256 != state.rollback_journal_sha256
+                || (previous.current_stage == RolloutStage::Aborted && state.current_stage != RolloutStage::Aborted)
+            {
+                return Err(invalid("cannot replace a bound recovery plan or revive an aborted rollout"));
+            }
+        } else if state.rollback_plan_id.is_some() || self.migration_id.starts_with("txn-") {
+            return Err(invalid("initialize and admit the native transaction before updating rollout state"));
+        }
+        self.persist_locked(&store, state)
+    }
+
+    fn report(state: RolloutState, ok: bool, message: String) -> RolloutReport {
+        let source_rollback = state.rollback_plan_id.as_ref().zip(state.rollback_journal_sha256.as_ref())
+            .map(|(id, pin)| SourceRollbackSummary {
+                transaction_id: id.clone(),
+                journal_sha256: pin.clone(),
+                restoration_recorded: state.status == RolloutStatus::RolledBack,
+            });
+        RolloutReport {
+            schema_version: ROLLOUT_REPORT_SCHEMA_VERSION.into(),
+            command: "migrate.rollout".into(),
+            ok,
+            migration_id: state.migration_id,
+            project_path: state.project_path,
             stage: state.current_stage,
             status: state.status,
             ramp_pct: state.ramp_pct,
             confidence_score: state.confidence_score,
             lockstep_verified: state.lockstep_verified,
             rollback_triggered: state.current_stage == RolloutStage::Aborted,
-            message: format!(
-                "Rollout is in stage '{}' with status '{}'",
-                state.current_stage, state.status
-            ),
+            source_rollback,
+            message,
             history: state.history,
-        })
+        }
     }
 
-    /// Promote to the next stage in the rollout pipeline:
-    /// `Shadow -> Canary -> Ramp -> Default`.
+    pub fn status(&self) -> io::Result<RolloutReport> {
+        let store = self.open_store()?;
+        let state = self.load_or_init_locked(&store)?;
+        let message = format!("Rollout is in stage '{}' with status '{}'{}", state.current_stage, state.status,
+            if state.current_stage == RolloutStage::Aborted && state.status == RolloutStatus::Failed {
+                "; source restoration is not recorded as complete; retry rollback with the same migration ID"
+            } else { "" });
+        let ok = !matches!(state.status, RolloutStatus::Failed | RolloutStatus::RolledBack);
+        Ok(Self::report(state, ok, message))
+    }
+
     pub fn promote(
         &self,
         config: &RolloutConfig,
         target_stage: Option<RolloutStage>,
         target_ramp_pct: Option<u8>,
     ) -> Result<RolloutReport, String> {
-        let mut state = self.load_or_init().map_err(|e| e.to_string())?;
-
-        if state.current_stage == RolloutStage::Aborted {
-            return Err("cannot promote an aborted/rolled-back migration".to_string());
+        if !config.min_confidence_score.is_finite()
+            || !(0.0..=1.0).contains(&config.min_confidence_score)
+            || !(1..=100).contains(&config.ramp_step_pct)
+        {
+            return Err("rollout confidence must be finite and in [0,1]; ramp step must be in [1,100]".into());
         }
-
+        let store = self.open_store().map_err(|e| e.to_string())?;
+        let mut state = self.load_or_init_locked(&store).map_err(|e| e.to_string())?;
+        if state.current_stage == RolloutStage::Aborted || state.status == RolloutStatus::Failed {
+            return Err("cannot promote an aborted/rolled-back migration or one awaiting recovery".into());
+        }
         let from_stage = state.current_stage;
         let next_stage = target_stage.unwrap_or(match from_stage {
             RolloutStage::Shadow => RolloutStage::Canary,
             RolloutStage::Canary => RolloutStage::Ramp,
-            RolloutStage::Ramp => {
-                if state.ramp_pct >= 100 {
-                    RolloutStage::Default
-                } else {
-                    RolloutStage::Ramp
-                }
-            }
+            RolloutStage::Ramp if state.ramp_pct >= 100 => RolloutStage::Default,
+            RolloutStage::Ramp => RolloutStage::Ramp,
             RolloutStage::Default => RolloutStage::Default,
             RolloutStage::Aborted => RolloutStage::Aborted,
         });
-
-        // Fail-closed validation before advancing
+        if next_stage == RolloutStage::Aborted {
+            return Err("use the rollback action to abort; promotion cannot bypass source recovery".into());
+        }
         if !config.force {
             if next_stage == RolloutStage::Default && from_stage == RolloutStage::Shadow {
-                return Err(
-                    "cannot skip from Shadow directly to Default; requires Canary and Ramp validation"
-                        .to_string(),
-                );
+                return Err("cannot skip from Shadow directly to Default; requires Canary and Ramp validation".into());
             }
-
+            if !matches!((from_stage, next_stage),
+                (RolloutStage::Shadow, RolloutStage::Shadow | RolloutStage::Canary)
+                | (RolloutStage::Canary, RolloutStage::Ramp)
+                | (RolloutStage::Ramp, RolloutStage::Ramp)
+                | (RolloutStage::Default, RolloutStage::Default))
+                && !(from_stage == RolloutStage::Ramp && state.ramp_pct == 100 && next_stage == RolloutStage::Default)
+            {
+                return Err("promotion must follow Shadow -> Canary -> Ramp 100% -> Default".into());
+            }
             if state.confidence_score < config.min_confidence_score {
-                if config.auto_rollback_on_failure {
-                    let _ = self.rollback("confidence score dropped below threshold");
+                let reason = format!("confidence score {:.2} is below minimum threshold {:.2}", state.confidence_score, config.min_confidence_score);
+                if config.auto_rollback_on_failure
+                    && let Err(error) = self.rollback_locked(&store, state, &reason)
+                {
+                    return Err(format!("{reason}; automatic rollback did not complete: {error}"));
                 }
-                return Err(format!(
-                    "confidence score {:.2} is below minimum threshold {:.2}",
-                    state.confidence_score, config.min_confidence_score
-                ));
+                return Err(reason);
             }
         }
-
-        // Leaving Shadow exposes real traffic: require verified lockstep
-        // evidence for THIS project. `lockstep_verified` is set only from a
-        // verified report, never assumed (bd-reality-20260923-26n9r.16).
+        self.verify_bound_source(&state)?;
+        if target_ramp_pct.is_some() && next_stage != RolloutStage::Ramp {
+            return Err("ramp_pct applies only to the Ramp stage".into());
+        }
+        let new_ramp_pct = match next_stage {
+            RolloutStage::Shadow => 0,
+            RolloutStage::Canary => 5,
+            RolloutStage::Ramp => {
+                let pct = target_ramp_pct.unwrap_or_else(|| state.ramp_pct.saturating_add(config.ramp_step_pct).min(100));
+                if pct > 100 || (!config.force && pct <= state.ramp_pct) {
+                    return Err("ramp percentage must increase and cannot exceed 100%".into());
+                }
+                pct
+            }
+            RolloutStage::Default => 100,
+            RolloutStage::Aborted => unreachable!(),
+        };
+        if from_stage == next_stage && matches!(next_stage, RolloutStage::Shadow | RolloutStage::Default) {
+            return Ok(Self::report(state, true, "requested rollout stage already recorded; no transition performed".into()));
+        }
         let mut evidence_note = None;
-        if from_stage == RolloutStage::Shadow
-            && next_stage != RolloutStage::Shadow
-            && !state.lockstep_verified
-        {
+        if from_stage == RolloutStage::Shadow && !state.lockstep_verified {
             match config.lockstep_report.as_deref() {
                 Some(report_path) => {
                     let digest = verify_lockstep_evidence(&self.project_path, report_path)?;
@@ -493,193 +596,158 @@ impl RolloutManager {
                     evidence_note = Some(format!("lockstep evidence {digest}"));
                 }
                 None if config.require_lockstep_evidence && !config.force => {
-                    return Err(format!(
-                        "promotion out of Shadow requires lockstep evidence: run `franken-node verify lockstep {} --json > lockstep.json` and pass --lockstep-report lockstep.json",
-                        self.project_path.display()
-                    ));
+                    return Err(format!("promotion out of Shadow requires lockstep evidence: run `franken-node verify lockstep {} --json > lockstep.json` and pass --lockstep-report lockstep.json", self.project_path.display()));
                 }
                 None => {}
             }
         }
-
-        let mut new_ramp_pct = state.ramp_pct;
-        match next_stage {
-            RolloutStage::Shadow => {
-                new_ramp_pct = 0;
-            }
-            RolloutStage::Canary => {
-                new_ramp_pct = 5;
-            }
-            RolloutStage::Ramp => {
-                if let Some(override_pct) = target_ramp_pct {
-                    if override_pct > 100 {
-                        return Err("ramp_pct cannot exceed 100%".to_string());
-                    }
-                    new_ramp_pct = override_pct;
-                } else {
-                    new_ramp_pct = (state.ramp_pct + config.ramp_step_pct).min(100);
-                }
-            }
-            RolloutStage::Default => {
-                new_ramp_pct = 100;
-            }
-            RolloutStage::Aborted => {}
-        }
-
-        let now = chrono::Utc::now().to_rfc3339();
         let mut reason = if from_stage == next_stage && next_stage == RolloutStage::Ramp {
-            format!("stepped traffic ramp to {}%", new_ramp_pct)
+            format!("stepped rollout ramp to {new_ramp_pct}%")
         } else {
-            format!("promoted from {} to {}", from_stage, next_stage)
+            format!("promoted from {from_stage} to {next_stage}")
         };
         if let Some(note) = evidence_note {
             reason.push_str("; ");
             reason.push_str(&note);
-        } else if from_stage == RolloutStage::Shadow
-            && next_stage != RolloutStage::Shadow
-            && !state.lockstep_verified
-        {
+        } else if from_stage == RolloutStage::Shadow && !state.lockstep_verified {
             reason.push_str("; forced without lockstep evidence");
         }
-
-        let event = RolloutTransitionEvent {
+        let now = chrono::Utc::now().to_rfc3339();
+        state.history.push(RolloutTransitionEvent {
             from_stage,
             to_stage: next_stage,
-            action: "promote".to_string(),
+            action: "promote".into(),
             reason: reason.clone(),
             timestamp_utc: now.clone(),
             confidence_score: state.confidence_score,
             ramp_pct: new_ramp_pct,
             receipt_signature: Some(state.digest()),
-        };
-
+        });
         state.current_stage = next_stage;
         state.ramp_pct = new_ramp_pct;
-        state.status = if next_stage == RolloutStage::Default {
-            RolloutStatus::Completed
-        } else {
-            RolloutStatus::Active
-        };
+        state.status = if next_stage == RolloutStage::Default { RolloutStatus::Completed } else { RolloutStatus::Active };
         state.updated_at = now;
-        state.history.push(event);
-
-        self.persist(&state).map_err(|e| e.to_string())?;
-
-        Ok(RolloutReport {
-            schema_version: ROLLOUT_REPORT_SCHEMA_VERSION.to_string(),
-            command: "migrate.rollout".to_string(),
-            ok: true,
-            migration_id: state.migration_id.clone(),
-            project_path: state.project_path.clone(),
-            stage: state.current_stage,
-            status: state.status,
-            ramp_pct: state.ramp_pct,
-            confidence_score: state.confidence_score,
-            lockstep_verified: state.lockstep_verified,
-            rollback_triggered: false,
-            message: reason,
-            history: state.history,
-        })
+        self.persist_locked(&store, &state).map_err(|e| e.to_string())?;
+        Ok(Self::report(state, true, reason))
     }
 
-    /// Rollback the rollout to the pre-migration baseline.
+    /// Stop local rollout progression and restore the explicitly bound native
+    /// transaction, if any. There is no shell command or latest-ID inference.
     pub fn rollback(&self, reason: &str) -> Result<RolloutReport, String> {
-        let mut state = self.load_or_init().map_err(|e| e.to_string())?;
+        let store = self.open_store().map_err(|e| e.to_string())?;
+        let state = self.load_or_init_locked(&store).map_err(|e| e.to_string())?;
+        self.rollback_locked(&store, state, reason)
+    }
 
-        let from_stage = state.current_stage;
+    fn rollback_locked(&self, store: &Store, mut state: RolloutState, reason: &str) -> Result<RolloutReport, String> {
+        if reason.len() > 4096 {
+            return Err("rollback reason exceeds 4096 bytes".into());
+        }
+        if state.current_stage == RolloutStage::Aborted && state.status == RolloutStatus::RolledBack {
+            let message = if state.rollback_plan_id.is_some() {
+                "Source rollback already recorded; current files were not changed or re-certified"
+            } else {
+                "Rollout already aborted; no source files restored (no transaction bound)"
+            };
+            return Ok(Self::report(state, true, message.into()));
+        }
+        // Persist a failed/aborted intent FIRST. This forbids promotion after a
+        // crash, and retry retains the exact original binding. Native recovery
+        // then owns its own per-file durable write-ahead journal.
+        if !(state.current_stage == RolloutStage::Aborted && state.status == RolloutStatus::Failed) {
+            let now = chrono::Utc::now().to_rfc3339();
+            let event = RolloutTransitionEvent {
+                from_stage: state.current_stage,
+                to_stage: RolloutStage::Aborted,
+                action: "rollback_started".into(),
+                reason: reason.into(),
+                timestamp_utc: now.clone(),
+                confidence_score: state.confidence_score,
+                ramp_pct: 0,
+                receipt_signature: Some(state.digest()),
+            };
+            state.current_stage = RolloutStage::Aborted;
+            state.status = RolloutStatus::Failed;
+            state.ramp_pct = 0;
+            state.updated_at = now;
+            state.history.push(event);
+            self.persist_locked(store, &state).map_err(|e| e.to_string())?;
+        }
+        let restoration = self.restore_bound_source(&state)?;
         let now = chrono::Utc::now().to_rfc3339();
-
         let event = RolloutTransitionEvent {
-            from_stage,
+            from_stage: RolloutStage::Aborted,
             to_stage: RolloutStage::Aborted,
-            action: "rollback".to_string(),
-            reason: reason.to_string(),
+            action: "rollback".into(),
+            reason: format!("{restoration}; {reason}"),
             timestamp_utc: now.clone(),
             confidence_score: state.confidence_score,
             ramp_pct: 0,
             receipt_signature: Some(state.digest()),
         };
-
-        state.current_stage = RolloutStage::Aborted;
         state.status = RolloutStatus::RolledBack;
-        state.ramp_pct = 0;
         state.updated_at = now;
         state.history.push(event);
+        // If this final write fails, the durable intent stays retryable. The
+        // native completed receipt makes the next restore idempotent.
+        self.persist_locked(store, &state).map_err(|e| format!("{restoration}; completion state not persisted; retry rollback: {e}"))?;
+        Ok(Self::report(state, true, format!("{restoration}; {reason}")))
+    }
 
-        self.persist(&state).map_err(|e| e.to_string())?;
+    #[cfg(target_os = "linux")]
+    fn restore_bound_source(&self, state: &RolloutState) -> Result<String, String> {
+        use super::rollback::RollbackStatus;
+        let (Some(id), Some(pin)) = (&state.rollback_plan_id, &state.rollback_journal_sha256) else {
+            return Ok("Rollout aborted; no source files restored (no transaction bound)".into());
+        };
+        let report = super::rollback::run_pinned(&self.project_path, id, pin, true);
+        match report.status {
+            RollbackStatus::RolledBack => Ok(format!("Restored native rewrite {id}; journal_sha256={pin}; files={}", report.files.len())),
+            RollbackStatus::AlreadyRolledBack => Ok(format!("Native rewrite {id} restoration already recorded; current files were not changed or re-certified")),
+            _ => {
+                let details = report.errors.iter().map(String::as_str)
+                    .chain(report.files.iter().filter_map(|file| file.error.as_deref()))
+                    .collect::<Vec<_>>().join("; ");
+                Err(format!("native source rollback {id} did not complete ({:?}); rollout remains aborted/failed; preserve journals and resolve conflicts, then retry the same migration ID: {details}", report.status))
+            }
+        }
+    }
 
-        Ok(RolloutReport {
-            schema_version: ROLLOUT_REPORT_SCHEMA_VERSION.to_string(),
-            command: "migrate.rollout".to_string(),
-            ok: true,
-            migration_id: state.migration_id.clone(),
-            project_path: state.project_path.clone(),
-            stage: RolloutStage::Aborted,
-            status: RolloutStatus::RolledBack,
-            ramp_pct: 0,
-            confidence_score: state.confidence_score,
-            lockstep_verified: state.lockstep_verified,
-            rollback_triggered: true,
-            message: format!("Rollout rolled back: {}", reason),
-            history: state.history,
-        })
+    #[cfg(not(target_os = "linux"))]
+    fn restore_bound_source(&self, state: &RolloutState) -> Result<String, String> {
+        self.verify_bound_source(state)?;
+        Ok("Rollout aborted; no source files restored (no transaction bound)".into())
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "rollout_recovery_tests.rs"]
+mod recovery_tests;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frankenengine_node::runtime::nversion_oracle::{
-        BoundaryScope, RuntimeEntry, RuntimeOracle,
-    };
+    use frankenengine_node::runtime::nversion_oracle::{BoundaryScope, RuntimeEntry, RuntimeOracle};
     use std::collections::BTreeMap;
     use tempfile::tempdir;
 
-    /// Produce a lockstep report with the real oracle for `input`, where the
-    /// franken leg agrees (`diverge = false`) or disagrees with the reference.
     fn write_lockstep_report(dir: &Path, input: &[u8], diverge: bool) -> PathBuf {
         let mut oracle = RuntimeOracle::new("rollout-test-trace", 100);
         for (id, is_reference) in [("node", true), ("franken-node", false)] {
-            oracle
-                .register_runtime(RuntimeEntry {
-                    runtime_id: id.to_string(),
-                    runtime_name: id.to_string(),
-                    version: "test".to_string(),
-                    is_reference,
-                })
-                .unwrap();
+            oracle.register_runtime(RuntimeEntry {
+                runtime_id: id.to_string(), runtime_name: id.to_string(),
+                version: "test".to_string(), is_reference,
+            }).unwrap();
         }
         let mut outputs = BTreeMap::new();
         outputs.insert("node".to_string(), b"hello\n".to_vec());
-        outputs.insert(
-            "franken-node".to_string(),
-            if diverge {
-                b"goodbye\n".to_vec()
-            } else {
-                b"hello\n".to_vec()
-            },
-        );
-        let check = oracle
-            .run_cross_check("check-1", BoundaryScope::IO, input, &outputs)
-            .unwrap();
-        if let Some(frankenengine_node::runtime::nversion_oracle::CheckOutcome::Diverge {
-            outputs: div_outputs,
-        }) = check.outcome
-        {
-            oracle.classify_divergence(
-                "div-1",
-                "check-1",
-                BoundaryScope::IO,
-                frankenengine_node::runtime::nversion_oracle::RiskTier::High,
-                &div_outputs,
-            );
+        outputs.insert("franken-node".to_string(), if diverge { b"goodbye\n".to_vec() } else { b"hello\n".to_vec() });
+        let check = oracle.run_cross_check("check-1", BoundaryScope::IO, input, &outputs).unwrap();
+        if let Some(frankenengine_node::runtime::nversion_oracle::CheckOutcome::Diverge { outputs: div_outputs }) = check.outcome {
+            oracle.classify_divergence("div-1", "check-1", BoundaryScope::IO, frankenengine_node::runtime::nversion_oracle::RiskTier::High, &div_outputs);
         }
         let report = oracle.generate_report(0);
-        let path = dir.join(if diverge {
-            "lockstep-diverged.json"
-        } else {
-            "lockstep.json"
-        });
+        let path = dir.join(if diverge { "lockstep-diverged.json" } else { "lockstep.json" });
         fs::write(&path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
         path
     }
@@ -695,14 +763,9 @@ mod tests {
         let dir = tempdir().unwrap();
         project_with_manifest(dir.path());
         let mgr = RolloutManager::new(dir.path(), Some("mig-evidence-01"));
-        let err = mgr
-            .promote(&RolloutConfig::default(), None, None)
-            .unwrap_err();
+        let err = mgr.promote(&RolloutConfig::default(), None, None).unwrap_err();
         assert!(err.contains("requires lockstep evidence"), "{err}");
-        assert_eq!(
-            mgr.load_or_init().unwrap().current_stage,
-            RolloutStage::Shadow
-        );
+        assert_eq!(mgr.load_or_init().unwrap().current_stage, RolloutStage::Shadow);
     }
 
     #[test]
@@ -710,20 +773,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let manifest = project_with_manifest(dir.path());
         let mgr = RolloutManager::new(dir.path(), Some("mig-evidence-02"));
-
         let diverged = write_lockstep_report(dir.path(), &manifest, true);
-        let cfg = RolloutConfig {
-            lockstep_report: Some(diverged),
-            ..RolloutConfig::default()
-        };
+        let cfg = RolloutConfig { lockstep_report: Some(diverged), ..RolloutConfig::default() };
         let err = mgr.promote(&cfg, None, None).unwrap_err();
         assert!(err.contains("not Pass"), "{err}");
-
         let foreign = write_lockstep_report(dir.path(), b"{\"name\":\"other-project\"}", false);
-        let cfg = RolloutConfig {
-            lockstep_report: Some(foreign),
-            ..RolloutConfig::default()
-        };
+        let cfg = RolloutConfig { lockstep_report: Some(foreign), ..RolloutConfig::default() };
         let err = mgr.promote(&cfg, None, None).unwrap_err();
         assert!(err.contains("different input"), "{err}");
         assert!(!mgr.load_or_init().unwrap().lockstep_verified);
@@ -734,10 +789,7 @@ mod tests {
         let dir = tempdir().unwrap();
         project_with_manifest(dir.path());
         let mgr = RolloutManager::new(dir.path(), Some("mig-evidence-03"));
-        let cfg = RolloutConfig {
-            force: true,
-            ..RolloutConfig::default()
-        };
+        let cfg = RolloutConfig { force: true, ..RolloutConfig::default() };
         let report = mgr.promote(&cfg, None, None).unwrap();
         assert_eq!(report.stage, RolloutStage::Canary);
         assert!(!report.lockstep_verified);
@@ -749,7 +801,6 @@ mod tests {
         let dir = tempdir().unwrap();
         let mgr = RolloutManager::new(dir.path(), Some("mig-test-01"));
         let state = mgr.load_or_init().unwrap();
-
         assert_eq!(state.migration_id, "mig-test-01");
         assert_eq!(state.current_stage, RolloutStage::Shadow);
         assert_eq!(state.status, RolloutStatus::Pending);
@@ -762,36 +813,21 @@ mod tests {
         let dir = tempdir().unwrap();
         let manifest = project_with_manifest(dir.path());
         let mgr = RolloutManager::new(dir.path(), Some("mig-test-02"));
-        let cfg = RolloutConfig {
-            lockstep_report: Some(write_lockstep_report(dir.path(), &manifest, false)),
-            ..RolloutConfig::default()
-        };
-
-        // 1. Promote Shadow -> Canary (with verified lockstep evidence)
+        let cfg = RolloutConfig { lockstep_report: Some(write_lockstep_report(dir.path(), &manifest, false)), ..RolloutConfig::default() };
         let rep1 = mgr.promote(&cfg, None, None).unwrap();
         assert_eq!(rep1.stage, RolloutStage::Canary);
         assert_eq!(rep1.ramp_pct, 5);
         assert!(rep1.lockstep_verified);
         assert!(rep1.message.contains("lockstep evidence sha256:"));
-
-        // 2. Promote Canary -> Ramp (initial 25%)
         let rep2 = mgr.promote(&cfg, None, None).unwrap();
         assert_eq!(rep2.stage, RolloutStage::Ramp);
-        assert_eq!(rep2.ramp_pct, 30); // 5 + 25
-
-        // 3. Promote Ramp -> Ramp (stepped 55%)
+        assert_eq!(rep2.ramp_pct, 30);
         let rep3 = mgr.promote(&cfg, None, None).unwrap();
         assert_eq!(rep3.stage, RolloutStage::Ramp);
         assert_eq!(rep3.ramp_pct, 55);
-
-        // 4. Promote Ramp with explicit 100%
-        let rep4 = mgr
-            .promote(&cfg, Some(RolloutStage::Ramp), Some(100))
-            .unwrap();
+        let rep4 = mgr.promote(&cfg, Some(RolloutStage::Ramp), Some(100)).unwrap();
         assert_eq!(rep4.stage, RolloutStage::Ramp);
         assert_eq!(rep4.ramp_pct, 100);
-
-        // 5. Promote Ramp 100% -> Default
         let rep5 = mgr.promote(&cfg, None, None).unwrap();
         assert_eq!(rep5.stage, RolloutStage::Default);
         assert_eq!(rep5.status, RolloutStatus::Completed);
@@ -802,11 +838,7 @@ mod tests {
     fn direct_skip_from_shadow_to_default_fails_without_force() {
         let dir = tempdir().unwrap();
         let mgr = RolloutManager::new(dir.path(), Some("mig-test-03"));
-        let cfg = RolloutConfig::default();
-
-        let err = mgr
-            .promote(&cfg, Some(RolloutStage::Default), None)
-            .unwrap_err();
+        let err = mgr.promote(&RolloutConfig::default(), Some(RolloutStage::Default), None).unwrap_err();
         assert!(err.contains("cannot skip from Shadow directly to Default"));
     }
 
@@ -815,18 +847,15 @@ mod tests {
         let dir = tempdir().unwrap();
         let mgr = RolloutManager::new(dir.path(), Some("mig-test-04"));
         let mut state = mgr.load_or_init().unwrap();
-        state.confidence_score = 0.50; // Below 0.90 threshold
+        state.confidence_score = 0.50;
         mgr.persist(&state).unwrap();
-
-        let cfg = RolloutConfig::default();
-        let err = mgr.promote(&cfg, None, None).unwrap_err();
+        let err = mgr.promote(&RolloutConfig::default(), None, None).unwrap_err();
         assert!(err.contains("confidence score 0.50 is below minimum threshold"));
-
-        // Verify state is rolled back
         let status = mgr.status().unwrap();
         assert_eq!(status.stage, RolloutStage::Aborted);
         assert_eq!(status.status, RolloutStatus::RolledBack);
         assert!(status.rollback_triggered);
+        assert!(status.source_rollback.is_none());
     }
 
     #[test]
@@ -834,13 +863,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let manifest = project_with_manifest(dir.path());
         let mgr1 = RolloutManager::new(dir.path(), Some("mig-test-05"));
-        let cfg = RolloutConfig {
-            lockstep_report: Some(write_lockstep_report(dir.path(), &manifest, false)),
-            ..RolloutConfig::default()
-        };
-        mgr1.promote(&cfg, None, None).unwrap(); // Promoted to Canary
-
-        // Reopen in a second manager instance
+        let cfg = RolloutConfig { lockstep_report: Some(write_lockstep_report(dir.path(), &manifest, false)), ..RolloutConfig::default() };
+        mgr1.promote(&cfg, None, None).unwrap();
         let mgr2 = RolloutManager::new(dir.path(), Some("mig-test-05"));
         let status = mgr2.status().unwrap();
         assert_eq!(status.stage, RolloutStage::Canary);
@@ -852,18 +876,11 @@ mod tests {
     fn human_report_rendering() {
         let rep = RolloutReport {
             schema_version: ROLLOUT_REPORT_SCHEMA_VERSION.to_string(),
-            command: "migrate.rollout".to_string(),
-            ok: true,
-            migration_id: "mig-test-render".to_string(),
-            project_path: "/test/project".to_string(),
-            stage: RolloutStage::Canary,
-            status: RolloutStatus::Active,
-            ramp_pct: 5,
-            confidence_score: 0.98,
-            lockstep_verified: true,
-            rollback_triggered: false,
-            message: "canary running smoothly".to_string(),
-            history: vec![],
+            command: "migrate.rollout".to_string(), ok: true,
+            migration_id: "mig-test-render".to_string(), project_path: "/test/project".to_string(),
+            stage: RolloutStage::Canary, status: RolloutStatus::Active, ramp_pct: 5,
+            confidence_score: 0.98, lockstep_verified: true, rollback_triggered: false,
+            source_rollback: None, message: "canary running smoothly".to_string(), history: vec![],
         };
         let human = rep.render_human();
         assert!(human.contains("mig-test-render"));
