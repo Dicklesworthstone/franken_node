@@ -302,10 +302,10 @@ fn preflight(transaction: &RewriteTransaction, journal: &Journal) -> Vec<Rollbac
     journal
         .records
         .iter()
-        .map(|record| {
+        .enumerate()
+        .map(|(index, record)| {
             let state = (|| -> Result<SourceState> {
-                let (parent, name) = parent_and_name(&transaction.backups, &record.path, false)?;
-                let original = read_required(&parent, &name, MAX_FILE_BYTES)?;
+                let original = transaction.read_preimage(journal, index)?;
                 ensure!(
                     verify_image(&original, &record.before_sha256, record.before_bytes, None),
                     "original backup integrity mismatch"

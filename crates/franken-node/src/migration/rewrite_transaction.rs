@@ -50,6 +50,7 @@ pub const MAX_PLAN_BYTES: usize = 256 * 1024 * 1024;
 const MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_JOURNAL_BYTES: usize = 2 * 1024 * 1024;
 const JOURNAL_VERSION: &str = "franken-node/rewrite-transaction/v1";
+const VERSIONED_JOURNAL_VERSION: &str = "franken-node/rewrite-transaction/v2";
 const STORE: &str = ".franken-rewrite";
 const PENDING: &str = "pending.json";
 
@@ -400,7 +401,8 @@ impl RewriteTransaction {
 
     fn validate_journal(journal: &Journal) -> Result<()> {
         ensure!(
-            journal.schema_version == JOURNAL_VERSION,
+            journal.schema_version == JOURNAL_VERSION
+                || journal.schema_version == VERSIONED_JOURNAL_VERSION,
             "unsupported rewrite transaction schema"
         );
         ensure!(
@@ -449,12 +451,16 @@ impl RewriteTransaction {
     }
 
     fn prepare(&self, edits: &[Edit<'_>]) -> Result<Journal> {
+        self.prepare_with_preimages(edits, false)
+    }
+
+    fn prepare_with_preimages(&self, edits: &[Edit<'_>], versioned: bool) -> Result<Journal> {
         ensure!(
             !edits.is_empty() && edits.len() <= MAX_EDITS,
             "rewrite plan entry limit exceeded"
         );
         let mut journal = Journal {
-            schema_version: JOURNAL_VERSION.into(),
+            schema_version: if versioned { VERSIONED_JOURNAL_VERSION } else { JOURNAL_VERSION }.into(),
             session: unique_name("txn"),
             records: Vec::new(),
         };
@@ -487,13 +493,15 @@ impl RewriteTransaction {
                 "special permission bits require manual migration: {}",
                 edit.path
             );
-            let (parent, name) = parent_and_name(&self.backups, edit.path, true)?;
-            if let Some(backup) = read_optional(&parent, &name, MAX_FILE_BYTES)? {
-                ensure!(
-                    backup.bytes == edit.before,
-                    "immutable migration backup conflict: {}",
-                    edit.path
-                );
+            if !versioned {
+                let (parent, name) = parent_and_name(&self.backups, edit.path, true)?;
+                if let Some(backup) = read_optional(&parent, &name, MAX_FILE_BYTES)? {
+                    ensure!(
+                        backup.bytes == edit.before,
+                        "immutable migration backup conflict: {}",
+                        edit.path
+                    );
+                }
             }
             journal.records.push(Record {
                 path: edit.path.into(),
@@ -513,15 +521,27 @@ impl RewriteTransaction {
         self.dirty.borrow_mut().mark(&self.store)?;
         let session = directory(&self.store, Path::new(&journal.session), false)?;
         for (index, edit) in edits.iter().enumerate() {
-            let (parent, name) = parent_and_name(&self.backups, edit.path, false)?;
-            if let Some(backup) = read_optional(&parent, &name, MAX_FILE_BYTES)? {
-                ensure!(
-                    backup.bytes == edit.before,
-                    "immutable migration backup changed: {}",
-                    edit.path
-                );
+            if versioned {
+                // The preimage belongs to this journal, not to the first edit
+                // ever made to this pathname. An earlier generation's backups
+                // are never overwritten, adopted or used as a fallback.
+                self.publish_staged(
+                    &session,
+                    OsStr::new(&format!("{index}.before")),
+                    edit.before,
+                    0o600,
+                )?;
             } else {
-                self.publish_staged(&parent, &name, edit.before, 0o600)?;
+                let (parent, name) = parent_and_name(&self.backups, edit.path, false)?;
+                if let Some(backup) = read_optional(&parent, &name, MAX_FILE_BYTES)? {
+                    ensure!(
+                        backup.bytes == edit.before,
+                        "immutable migration backup changed: {}",
+                        edit.path
+                    );
+                } else {
+                    self.publish_staged(&parent, &name, edit.before, 0o600)?;
+                }
             }
             self.publish_staged(
                 &session,
@@ -539,6 +559,27 @@ impl RewriteTransaction {
         );
         self.publish_journal(&encoded)?;
         Ok(journal)
+    }
+
+    /// Select recovery material only from the validated journal's schema and
+    /// record ordinal. Never try a legacy or another session's backup when a
+    /// versioned preimage is missing or damaged. Callers verify its content hash.
+    fn read_preimage(&self, journal: &Journal, index: usize) -> Result<Contents> {
+        let record = journal.records.get(index).context("invalid preimage record index")?;
+        match journal.schema_version.as_str() {
+            JOURNAL_VERSION => {
+                let (parent, name) = parent_and_name(&self.backups, &record.path, false)?;
+                read_required(&parent, &name, MAX_FILE_BYTES)
+            }
+            VERSIONED_JOURNAL_VERSION => {
+                let session = directory(&self.store, Path::new(&journal.session), false)?;
+                let image = read_required(&session, OsStr::new(&format!("{index}.before")), MAX_FILE_BYTES)?;
+                ensure!(image.metadata.mode() & 0o7777 == 0o600,
+                    "transaction preimage must retain private permissions");
+                Ok(image)
+            }
+            _ => bail!("unsupported rewrite preimage schema"),
+        }
     }
 
     /// Stage `bytes` and create-only rename them to `name`; the directory entry
@@ -647,7 +688,7 @@ impl RewriteTransaction {
         // Verify the session exists and is not a symlink before any restoration.
         let _session = directory(&self.store, Path::new(&journal.session), false)?;
         let mut errors = Vec::new();
-        for record in journal.records.iter().rev() {
+        for (index, record) in journal.records.iter().enumerate().rev() {
             let restored = (|| -> Result<()> {
                 let (parent, name) = parent_and_name(&self.root, &record.path, false)?;
                 let current = read_required(&parent, &name, MAX_FILE_BYTES)?;
@@ -669,8 +710,7 @@ impl RewriteTransaction {
                     "recovery conflict; preserve unrelated edits to {}",
                     record.path
                 );
-                let (parent, name) = parent_and_name(&self.backups, &record.path, false)?;
-                let before = read_required(&parent, &name, MAX_FILE_BYTES)?;
+                let before = self.read_preimage(&journal, index)?;
                 ensure!(
                     verify_image(&before, &record.before_sha256, record.before_bytes, None),
                     "recovery backup integrity failure: {}",
@@ -709,6 +749,22 @@ impl RewriteTransaction {
             return Ok(None);
         }
         let journal = self.prepare(edits)?;
+        self.apply_prepared(journal)
+    }
+
+    /// Install a new generation using private, journal-scoped original images.
+    /// This supports repeated reviewed migrations of the same files. Recovery
+    /// remains the shared pinned protocol, including for historical v1 journals.
+    /// The path-global first-original API above retains its existing contract.
+    pub fn apply_versioned_with_receipt(&self, edits: &[Edit<'_>]) -> Result<Option<AppliedRewrite>> {
+        if edits.is_empty() {
+            return Ok(None);
+        }
+        let journal = self.prepare_with_preimages(edits, true)?;
+        self.apply_prepared(journal)
+    }
+
+    fn apply_prepared(&self, journal: Journal) -> Result<Option<AppliedRewrite>> {
         let receipt = AppliedRewrite {
             transaction_id: journal.session.clone(),
             journal_sha256: digest(&serde_json::to_vec(&journal)?),
@@ -717,7 +773,15 @@ impl RewriteTransaction {
         let result = (|| -> Result<()> {
             // A source may have changed while other files/backups were staged.
             // Recheck the entire plan before replacing even the first source.
-            for record in &journal.records {
+            for (index, record) in journal.records.iter().enumerate() {
+                if journal.schema_version == VERSIONED_JOURNAL_VERSION {
+                    let before = self.read_preimage(&journal, index)?;
+                    ensure!(
+                        verify_image(&before, &record.before_sha256, record.before_bytes, None),
+                        "transaction preimage integrity failed before installation: {}",
+                        record.path
+                    );
+                }
                 let (parent, name) = parent_and_name(&self.root, &record.path, false)?;
                 let current = read_required(&parent, &name, MAX_FILE_BYTES)?;
                 ensure!(
@@ -1242,5 +1306,259 @@ mod applied_receipt_tests {
             assert!(RewriteTransaction::open_without_recovery(root.path()).is_err());
         }
         assert!(rollback::run(root.path(), None, false).history.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod versioned_preimage_tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::symlink;
+    use std::path::PathBuf;
+
+    fn project() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("a.js"), b"a0").unwrap();
+        fs::write(root.path().join("b.js"), b"b0").unwrap();
+        fs::set_permissions(root.path().join("a.js"), Permissions::from_mode(0o751)).unwrap();
+        root
+    }
+
+    fn apply(root: &Path, before: [&[u8]; 2], after: [&[u8]; 2]) -> AppliedRewrite {
+        let writer = RewriteTransaction::open_without_recovery(root).unwrap();
+        writer.apply_versioned_with_receipt(&[
+            Edit { path: "a.js", before: before[0], after: after[0] },
+            Edit { path: "b.js", before: before[1], after: after[1] },
+        ]).unwrap().unwrap()
+    }
+
+    fn session(root: &Path, receipt: &AppliedRewrite) -> PathBuf {
+        root.join(".migrate-backup").join(STORE).join(&receipt.transaction_id)
+    }
+
+    fn sources(root: &Path, a: &[u8], b: &[u8]) {
+        assert_eq!(fs::read(root.join("a.js")).unwrap(), a);
+        assert_eq!(fs::read(root.join("b.js")).unwrap(), b);
+        assert_eq!(fs::metadata(root.join("a.js")).unwrap().mode() & 0o777, 0o751);
+    }
+
+    fn restore(root: &Path, receipt: &AppliedRewrite) -> rollback::RollbackReport {
+        rollback::run_pinned(root, &receipt.transaction_id, &receipt.journal_sha256, true)
+    }
+
+    #[test]
+    fn repeated_migrations_restore_the_immediate_predecessor_instead_of_the_first_original() {
+        let root = project();
+        let first = apply(root.path(), [b"a0", b"b0"], [b"a1", b"b1"]);
+        let second = apply(root.path(), [b"a1", b"b1"], [b"a2", b"b2"]);
+        assert_ne!(first.transaction_id, second.transaction_id);
+        assert_ne!(first.journal_sha256, second.journal_sha256);
+        sources(root.path(), b"a2", b"b2");
+        for (receipt, a, b) in [(&first, b"a0", b"b0"), (&second, b"a1", b"b1")] {
+            let directory = session(root.path(), receipt);
+            let journal: Journal = serde_json::from_slice(&fs::read(directory.join("applied.json")).unwrap()).unwrap();
+            assert_eq!(journal.schema_version, VERSIONED_JOURNAL_VERSION);
+            assert_eq!(digest(&serde_json::to_vec(&journal).unwrap()), receipt.journal_sha256);
+            assert_eq!(fs::read(directory.join("0.before")).unwrap(), a);
+            assert_eq!(fs::read(directory.join("1.before")).unwrap(), b);
+            assert_eq!(fs::metadata(directory.join("0.before")).unwrap().mode() & 0o777, 0o600);
+        }
+        assert!(!root.path().join(".migrate-backup/a.js").exists());
+        assert_eq!(restore(root.path(), &first).status, rollback::RollbackStatus::Conflict);
+        sources(root.path(), b"a2", b"b2");
+        assert_eq!(restore(root.path(), &second).status, rollback::RollbackStatus::RolledBack);
+        sources(root.path(), b"a1", b"b1");
+        assert_eq!(restore(root.path(), &first).status, rollback::RollbackStatus::RolledBack);
+        sources(root.path(), b"a0", b"b0");
+        assert_eq!(fs::read(session(root.path(), &second).join("0.before")).unwrap(), b"a1");
+        fs::write(root.path().join("a.js"), b"later user work").unwrap();
+        assert_eq!(restore(root.path(), &second).status, rollback::RollbackStatus::AlreadyRolledBack);
+        assert_eq!(fs::read(root.path().join("a.js")).unwrap(), b"later user work");
+    }
+
+    #[test]
+    fn a_versioned_install_can_follow_a_legacy_journal_without_replacing_its_backups() {
+        let root = project();
+        let legacy = {
+            let writer = RewriteTransaction::open(root.path()).unwrap();
+            writer.apply_with_receipt(&[
+                Edit { path: "a.js", before: b"a0", after: b"a1" },
+                Edit { path: "b.js", before: b"b0", after: b"b1" },
+            ]).unwrap().unwrap()
+        };
+        let original_journal = fs::read(session(root.path(), &legacy).join("applied.json")).unwrap();
+        let second = apply(root.path(), [b"a1", b"b1"], [b"a2", b"b2"]);
+        assert_eq!(fs::read(root.path().join(".migrate-backup/a.js")).unwrap(), b"a0");
+        assert_eq!(fs::read(session(root.path(), &legacy).join("applied.json")).unwrap(), original_journal);
+        assert_eq!(restore(root.path(), &legacy).status, rollback::RollbackStatus::Conflict);
+        assert_eq!(restore(root.path(), &second).status, rollback::RollbackStatus::RolledBack);
+        sources(root.path(), b"a1", b"b1");
+        assert_eq!(restore(root.path(), &legacy).status, rollback::RollbackStatus::RolledBack);
+        sources(root.path(), b"a0", b"b0");
+    }
+
+    #[test]
+    fn damaged_versioned_preimages_never_fall_back_to_legacy_backups() {
+        for mutation in 0..5 {
+            let root = project();
+            let receipt = apply(root.path(), [b"a0", b"b0"], [b"a1", b"b1"]);
+            // Even a byte-correct global backup cannot substitute for this
+            // journal's missing, linked, corrupt or non-private preimage.
+            fs::write(root.path().join(".migrate-backup/a.js"), b"a0").unwrap();
+            fs::write(root.path().join(".migrate-backup/b.js"), b"b0").unwrap();
+            let before = session(root.path(), &receipt).join("1.before");
+            let saved = root.path().join("retained-before");
+            match mutation {
+                0 => fs::rename(&before, &saved).unwrap(),
+                1 => fs::write(&before, b"corrupt").unwrap(),
+                2 => {
+                    fs::rename(&before, &saved).unwrap();
+                    symlink(&saved, &before).unwrap();
+                }
+                3 => fs::hard_link(&before, &saved).unwrap(),
+                _ => fs::set_permissions(&before, Permissions::from_mode(0o644)).unwrap(),
+            }
+            let report = restore(root.path(), &receipt);
+            assert_eq!(report.status, rollback::RollbackStatus::Conflict, "mutation {mutation}: {report:?}");
+            sources(root.path(), b"a1", b"b1");
+            assert!(!root.path().join(".migrate-backup").join(STORE).join(PENDING).exists());
+            assert!(!session(root.path(), &receipt).join("rolled-back.json").exists());
+        }
+    }
+
+    #[test]
+    fn pending_second_generation_recovers_without_undoing_the_completed_first() {
+        let root = project();
+        let first = apply(root.path(), [b"a0", b"b0"], [b"a1", b"b1"]);
+        let second = {
+            let writer = RewriteTransaction::open_without_recovery(root.path()).unwrap();
+            let journal = writer.prepare_with_preimages(&[
+                Edit { path: "a.js", before: b"a1", after: b"a2" },
+                Edit { path: "b.js", before: b"b1", after: b"b2" },
+            ], true).unwrap();
+            writer.install(&journal, 0).unwrap();
+            AppliedRewrite {
+                transaction_id: journal.session.clone(),
+                journal_sha256: digest(&serde_json::to_vec(&journal).unwrap()),
+                files: 2,
+            }
+        };
+        sources(root.path(), b"a2", b"b1");
+        assert!(RewriteTransaction::open_without_recovery(root.path()).is_err());
+        // The actual startup recovery path dispatches v2; there is no second
+        // recovery implementation and no reliance on a global original.
+        drop(RewriteTransaction::open(root.path()).unwrap());
+        sources(root.path(), b"a1", b"b1");
+        assert!(session(root.path(), &second).join("rolled-back.json").is_file());
+        assert!(!session(root.path(), &first).join("rolled-back.json").exists());
+        assert_eq!(restore(root.path(), &first).status, rollback::RollbackStatus::RolledBack);
+        sources(root.path(), b"a0", b"b0");
+    }
+
+    #[test]
+    fn a_later_user_conflict_blocks_the_complete_versioned_rollback_preflight() {
+        let root = project();
+        let receipt = apply(root.path(), [b"a0", b"b0"], [b"a1", b"b1"]);
+        fs::write(root.path().join("b.js"), b"independent user edit").unwrap();
+        assert_eq!(restore(root.path(), &receipt).status, rollback::RollbackStatus::Conflict);
+        sources(root.path(), b"a1", b"independent user edit");
+        // Explicit conflict resolution, not something performed by recovery.
+        fs::write(root.path().join("b.js"), b"b1").unwrap();
+        assert_eq!(restore(root.path(), &receipt).status, rollback::RollbackStatus::RolledBack);
+        sources(root.path(), b"a0", b"b0");
+    }
+
+    #[test]
+    fn versioned_images_are_durable_before_intent_and_sources_before_completion() {
+        let root = project();
+        let writer = RewriteTransaction::open_without_recovery(root.path()).unwrap();
+        DURABILITY_LOG.with(|log| log.borrow_mut().clear());
+        writer.apply_versioned_with_receipt(&[
+            Edit { path: "a.js", before: b"a0", after: b"a1" },
+            Edit { path: "b.js", before: b"b0", after: b"b1" },
+        ]).unwrap();
+        let log = DURABILITY_LOG.with(|log| std::mem::take(&mut *log.borrow_mut()));
+        assert_eq!(log, [
+            "file", "file", "file", "file", // both before/after pairs
+            "dir", "dir", // session contents and its entry in the store
+            "file", "journal", // pending intent
+            "file", "file", "dir", // installed sources and their directory
+            "archive", "archive", // completed journal and pending retirement
+        ]);
+    }
+
+    #[test]
+    fn versioned_preflight_rejects_a_stale_later_source_before_creating_a_session() {
+        let root = project();
+        {
+            let writer = RewriteTransaction::open_without_recovery(root.path()).unwrap();
+            assert!(writer.apply_versioned_with_receipt(&[
+                Edit { path: "a.js", before: b"a0", after: b"a1" },
+                Edit { path: "b.js", before: b"stale", after: b"b1" },
+            ]).is_err());
+            assert!(writer.apply_versioned_with_receipt(&[]).unwrap().is_none());
+        }
+        sources(root.path(), b"a0", b"b0");
+        let store = root.path().join(".migrate-backup").join(STORE);
+        assert_eq!(fs::read_dir(store).unwrap().count(), 1); // only the lock
+        assert!(rollback::run(root.path(), None, false).history.is_empty());
+    }
+
+    #[test]
+    fn failed_second_generation_install_restores_only_its_own_preimages() {
+        let root = project();
+        let first = apply(root.path(), [b"a0", b"b0"], [b"a1", b"b1"]);
+        let writer = RewriteTransaction::open_without_recovery(root.path()).unwrap();
+        let journal = writer.prepare_with_preimages(&[
+            Edit { path: "a.js", before: b"a1", after: b"a2" },
+            Edit { path: "b.js", before: b"b1", after: b"b2" },
+        ], true).unwrap();
+        let session = root.path().join(".migrate-backup").join(STORE).join(&journal.session);
+        fs::write(session.join("1.after"), b"damaged after-image").unwrap();
+        let error = writer.apply_prepared(journal).unwrap_err();
+        assert!(format!("{error:#}").contains("original sources restored"), "{error:#}");
+        sources(root.path(), b"a1", b"b1");
+        assert!(session.join("rolled-back.json").is_file());
+        assert!(!root.path().join(".migrate-backup").join(STORE)
+            .join(&first.transaction_id).join("rolled-back.json").exists());
+    }
+
+    #[test]
+    fn versioned_preimage_corruption_is_detected_before_any_live_replacement() {
+        let root = project();
+        let writer = RewriteTransaction::open_without_recovery(root.path()).unwrap();
+        let journal = writer.prepare_with_preimages(&[
+            Edit { path: "a.js", before: b"a0", after: b"a1" },
+            Edit { path: "b.js", before: b"b0", after: b"b1" },
+        ], true).unwrap();
+        fs::write(root.path().join(".migrate-backup").join(STORE)
+            .join(&journal.session).join("1.before"), b"damaged preimage").unwrap();
+        let error = writer.apply_prepared(journal).unwrap_err();
+        assert!(format!("{error:#}").contains("preimage integrity failed before installation"), "{error:#}");
+        sources(root.path(), b"a0", b"b0");
+    }
+
+    #[test]
+    fn preimages_from_another_generation_and_changed_schema_cannot_satisfy_a_pin() {
+        let root = project();
+        let first = apply(root.path(), [b"a0", b"b0"], [b"a1", b"b1"]);
+        let second = apply(root.path(), [b"a1", b"b1"], [b"a2", b"b2"]);
+        let preimage = session(root.path(), &second).join("0.before");
+        let actual = fs::read(&preimage).unwrap();
+        fs::write(&preimage, fs::read(session(root.path(), &first).join("0.before")).unwrap()).unwrap();
+        assert_eq!(restore(root.path(), &second).status, rollback::RollbackStatus::Conflict);
+        sources(root.path(), b"a2", b"b2");
+        fs::write(&preimage, actual).unwrap();
+        let path = session(root.path(), &second).join("applied.json");
+        let raw = fs::read(&path).unwrap();
+        let mut journal: Journal = serde_json::from_slice(&raw).unwrap();
+        journal.schema_version = JOURNAL_VERSION.into();
+        fs::write(&path, serde_json::to_vec(&journal).unwrap()).unwrap();
+        let report = restore(root.path(), &second);
+        assert_ne!(report.status, rollback::RollbackStatus::RolledBack);
+        sources(root.path(), b"a2", b"b2");
+        fs::write(&path, raw).unwrap();
+        assert_eq!(restore(root.path(), &second).status, rollback::RollbackStatus::RolledBack);
+        sources(root.path(), b"a1", b"b1");
     }
 }
