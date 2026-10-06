@@ -9,9 +9,9 @@ Node/Bun/Franken comparison. An imported JSON report cannot authorize writes.
 
 Keep original and candidate in separate, non-nested directories. Prepare the
 candidate using the same test inventory, golden fixtures, application request,
-metadata, dependencies and permissions as the original, except for intended
-ordinary-file content changes. Inspect without executing project code or
-opening the rewrite writer:
+metadata, dependencies and existing permissions as the original, except for
+intended ordinary-file replacements and new regular files under existing
+directories. Inspect without executing project code or opening the rewrite writer:
 
 ```sh
 cargo +stable run --manifest-path tools/migration-validator/Cargo.toml \
@@ -19,9 +19,13 @@ cargo +stable run --manifest-path tools/migration-validator/Cargo.toml \
 ```
 
 The JSON report includes both captured hashes, the selected tests, and changed
-paths with before/after hashes and byte counts. It does not print source bytes.
-Review the proposed source diff independently, along with that inventory. Do
-not blindly promote a hash from an untrusted report as an independent approval.
+paths with before/after hashes and byte counts. Each change has `kind: "replace"`
+or `kind: "create"`. Creations report `before_sha256: null` and
+`before_bytes: null`: absence is not an empty file. Their `created_mode` is the
+reviewed permission bits as an integer (for example, 416 is octal 0640).
+The report does not print source bytes. Review the proposed source diff
+independently, including added files and their modes, along with that inventory.
+Do not blindly promote a hash from an untrusted report as an independent approval.
 Set ORIGINAL_SHA256 and CANDIDATE_SHA256 to the reviewed hashes, then run:
 
 ```sh
@@ -38,10 +42,12 @@ check does not authenticate their brands. Choose real trusted runtime binaries.
 
 Both hashes and explicit execution consent are mandatory. Wrong, stale or
 swapped approvals and unsupported changes fail before writer creation or
-runtime discovery. The candidate is reconstructed through the existing
-`RewriteCandidate::prepare` implementation, and its complete captured hash must
-still equal the reviewed candidate hash. It is not a partial diff silently
-omitting unsupported changes.
+runtime discovery. The candidate is reconstructed through the shared
+`RewriteCandidate` preparation implementation, and its complete captured hash
+must still equal the reviewed candidate hash. It is not a partial diff silently
+omitting unsupported changes. Replacement-only library consumers are refused
+when a candidate adds files; the installer consumes the complete `changes()`
+plan containing both replacements and additions.
 
 The command then holds the native rewrite lock across execution, admission and
 installation. It deliberately refuses an unfinished rewrite instead of
@@ -62,25 +68,31 @@ post-initialization state. No capture exclusion is added by this accommodation.
 ## Execution and installation contract
 
 Node and Bun execute the immutable original snapshot; native Franken executes
-the immutable candidate. Every selected test, application argument, declared
-stdin/environment/working directory, golden assertion and persistent workspace
-delta uses the existing production validator. Reference failure/disagreement,
-incomplete observations, timeouts, native failure or unequal effects cannot be
-converted to PASS. The captured concurrency permission remains enforced.
+the immutable candidate, including its added helpers. Every selected test,
+application argument, declared stdin/environment/working directory, golden
+assertion and persistent workspace delta uses the existing production validator.
+Reference failure/disagreement, incomplete observations, timeouts, native failure
+or unequal effects cannot be converted to PASS. The captured concurrency
+permission remains enforced. Adding an automatically discovered test changes
+the inventory and is still rejected; a new helper cannot redefine the oracle.
 
 After complete passing evidence, both on-disk input trees must still match their
-pre-execution snapshots. Only the immutable captured before/after bytes are
-passed to the existing native transaction. The proposal is never reread to
+pre-execution snapshots, with the original's exact writer initialization covered
+by its separate guard. Only immutable captured bytes and reviewed new-file
+modes are passed to the native transaction. The proposal is never reread to
 redefine the installed bytes. Changes during validation refuse installation;
 the command does not conceal ambient guest effects by silently undoing them.
 
-Supported changes are existing regular-file content replacements. New/deleted
-or renamed entries, changed file modes, changed link targets/kinds, reserved
-metadata changes, and altered golden expectations or execution requests are
-rejected. The existing limits remain: at most 1,000 replacements, 10 MiB per
-before/after file, 256 MiB combined replacement bytes, and the validator's
-bounded whole-project capture and execution budgets. This command does not
-implement package installation or structural migration.
+Supported changes are existing regular-file content replacements and new
+regular files whose parent directories already exist in the original capture.
+New files require ordinary owner-readable modes, no symlink parents, and the
+same filesystem as the transaction store. New directories, deleted or renamed
+entries, changed existing file modes, changed link targets/kinds, reserved
+metadata changes, and altered golden expectations or execution requests remain
+rejected. The existing limits remain: at most 1,000 combined replacements and
+creations, 10 MiB per before/after file, 256 MiB of logical plan bytes, and the
+validator's bounded whole-project capture and execution budgets. This command
+does not run a package manager or implement arbitrary structural migration.
 
 Successful installation returns status `APPLIED` and `source_transaction`:
 
@@ -95,21 +107,23 @@ Successful installation returns status `APPLIED` and `source_transaction`:
 The identity comes directly from this writer's completed journal while the
 lock is held, never from guessing the latest history entry. An identical
 candidate still requires validation but returns `UNCHANGED` without a new
-transaction. `REJECTED` and `ERROR` exit nonzero. `execution_attempted` means the
-executor was called, not proof that every guest launched or completed; the
-individual validation observations record the measured outcomes.
+transaction. A creation-only plan is not unchanged: even adding an empty file
+requires a transaction. `REJECTED` and `ERROR` exit nonzero.
+`execution_attempted` means the executor was called, not proof that every guest
+launched or completed; individual observations record the measured outcomes.
 
 The transaction preserves original backups, modes, all-source preflight,
 no-follow descriptor access, write-ahead intent and durability barriers. Each
-file replacement is atomic, not the entire multi-file tree. Interruptions or
-I/O errors can leave recovery work; retain journals/backups and inspect them.
-A lost stdout report after a completed transaction is not an automatic rollback.
+file replacement or creation is atomic, not the entire multi-file tree.
+Interruptions or I/O errors can leave recovery work; retain journals/backups
+and inspect them. A lost stdout report after a completed transaction is not an
+automatic rollback.
 
 ## Successive migrations and transaction-scoped originals
 
-The reviewed installer uses `apply_versioned_with_receipt` and writes
-`franken-node/rewrite-transaction/v2` journals. Each changed file's exact
-pre-install bytes are retained privately at:
+Replacement-only reviewed installs retain `franken-node/rewrite-transaction/v2`
+journals. Plans containing new files use `franken-node/rewrite-transaction/v3`.
+Each replaced file's exact pre-install bytes are retained privately at:
 
 ```
 .migrate-backup/.franken-rewrite/TRANSACTION-ID/RECORD-INDEX.before
@@ -128,11 +142,11 @@ candidate from the current original's full captured tree, including its retained
 recovery and rollout metadata; editing an old candidate that lacks the new
 history is still an inventory mismatch. These copies contain private history
 and must remain private. Use the new role hashes with the same `apply` command;
-the three-runtime suite runs again. A
-previous PASS or installation receipt cannot authorize the next migration.
-The second transaction's original is candidate one's installed content, not
-the file's first-ever original. An identical proposal is still validated, but
-returns `UNCHANGED` without another transaction.
+the three-runtime suite runs again. A previous PASS or installation receipt
+cannot authorize the next migration. The second transaction's original is
+candidate one's installed content, not the file's first-ever original. An
+identical proposal is still validated, but returns `UNCHANGED` without another
+transaction.
 
 Restore the explicitly selected transaction using its exact returned identity.
 For overlapping migrations, restore candidate two to candidate one, then
@@ -144,18 +158,49 @@ claim of ordering for independent, non-overlapping transactions. A completed
 rollback retry never changes newer source work.
 
 Both explicit rollback and interrupted-install recovery use the journal's
-schema to select its originals. Missing, corrupt, linked or non-private v2
-preimages are errors: even a correct path-global backup cannot substitute.
-Historical v1 journals continue to use their immutable `.migrate-backup/PATH`
-backups; a v2 installation can follow them without modifying their evidence.
-The original library `apply` and `apply_with_receipt` APIs retain that v1
-first-original contract. They do not silently adopt the new storage format.
+schema to select its originals. Missing, corrupt, linked or non-private
+transaction preimages are errors: even a correct path-global backup cannot
+substitute. Historical v1 journals continue to use immutable
+`.migrate-backup/PATH` backups; newer installations can follow them without
+modifying their evidence. The original library `apply` and `apply_with_receipt`
+APIs retain that v1 first-original contract. They do not silently adopt the new
+storage format.
 
-Use an updated recovery binary that understands v2 for new reviewed installs;
-older readers reject this schema. Keep the complete transaction directories,
-not just the returned JSON summary. No automatic history conversion, backup
-deletion, garbage collection, or fallback to another generation is performed.
-The same per-operation limits and non-atomic multi-file recovery contract apply.
+## New-file creation and restoration of absence
+
+A v3 creation record explicitly marks its original as absent. It never treats
+an existing empty file as an absent target. Preparation checks the complete plan
+before staging recovery images or changing a live source. Creation uses an
+atomic no-replace rename, so a pathname appearing after preflight is not
+silently overwritten.
+
+Each creation retains a private `.after` image and a second, durable `.new`
+image with the reviewed file mode inside the private transaction directory.
+Installation moves `.new` to the approved absent pathname. Its continued
+presence proves installation did not consume it: a colliding source is then
+preserved, even when its bytes and permissions happen to match the proposal.
+
+Rollback previews report `original_absent: true`. A successful rollback restores
+absence by moving the unchanged created file into its transaction as
+`RECORD-INDEX.retired`, not deleting its bytes. The move cannot overwrite an
+existing retained file. An interrupted recovery recognizes the retained image;
+a new source appearing after retirement is a conflict, even if byte-identical.
+Source and transaction directory changes are synchronized before completion is
+recorded. Existing parent directories are never removed.
+
+Modified contents, changed permissions, symlinks and hard links fail the normal
+explicit rollback's all-file preflight without restoring earlier files. An
+interrupted installation retains the existing startup recovery semantics: it
+can restore safe records while preserving conflicts and leaving pending intent
+for retry. A later migration can replace an earlier created helper; restore
+that later generation first before restoring the earlier file's absence.
+
+Use an updated recovery binary that understands v3 for plans containing new
+files; older readers reject this schema. Keep the complete transaction
+directories, including retained images, not just the returned JSON summary.
+No automatic history conversion, backup deletion, garbage collection, or
+fallback to another generation is performed. The same per-operation limits
+and non-atomic multi-file recovery contract apply.
 
 ## Continue to rollout or restore
 
@@ -169,13 +214,13 @@ franken-node migrate rollout /work/original --migration-id txn-EXACT-ID \
 ```
 
 The second command restores through the explicitly bound rollout. The
-programmatic recovery API accepts the returned ID
-and journal hash through `rollback::run_pinned`; it does not select newer work.
-For rollout, initialize the installed project's status before producing fresh
-signed cohort evidence, following `migration_rollout_source_recovery.md`.
-The pre-install validation report is neither signed rollout authorization nor
-reusable after installation/state changes. Signed rollout storage and quantified
-promotion admission remain separate, unchanged decisions.
+programmatic recovery API accepts the returned ID and journal hash through
+`rollback::run_pinned`; it does not select newer work. For rollout, initialize
+the installed project's status before producing fresh signed cohort evidence,
+following `migration_rollout_source_recovery.md`. The pre-install validation
+report is neither signed rollout authorization nor reusable after
+installation/state changes. Signed rollout storage and quantified promotion
+admission remain separate, unchanged decisions.
 
 Use trusted project code only. Guest processes retain ambient host authority;
 the writer lock coordinates cooperating operators, not malicious same-user

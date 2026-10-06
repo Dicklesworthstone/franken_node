@@ -56,7 +56,7 @@ mod linux {
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::time::{Duration, Instant};
-    use rewrite_transaction::{AppliedRewrite, Edit, RewriteTransaction};
+    use rewrite_transaction::{AppliedRewrite, CreateFile, Edit, RewriteTransaction};
     use validation_suite::{product_oracle::ProductReport, rewrite_candidate::RewriteCandidate};
 
     #[derive(Debug, Serialize)]
@@ -80,11 +80,14 @@ mod linux {
 
     #[derive(Debug, Serialize)]
     struct Change {
+        kind: &'static str,
         path: String,
-        before_sha256: String,
+        before_sha256: Option<String>,
         after_sha256: String,
-        before_bytes: usize,
+        before_bytes: Option<usize>,
         after_bytes: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        created_mode: Option<u32>,
     }
 
     struct Prepared {
@@ -115,20 +118,34 @@ mod linux {
         let candidate_input_sha256 = proposed.input_sha256().to_owned();
         drop(proposed);
         capture.prepare_project(&candidate, &candidate_input_sha256)?;
-        let changes = capture.replacements()?.iter().map(|edit| Change {
+        let changes = capture.changes()?;
+        let mut descriptions: Vec<_> = changes.replacements.iter().map(|edit| Change {
+            kind: "replace",
             path: edit.path.into(),
-            before_sha256: hex::encode(Sha256::digest(edit.before)),
+            before_sha256: Some(hex::encode(Sha256::digest(edit.before))),
             after_sha256: hex::encode(Sha256::digest(edit.after)),
-            before_bytes: edit.before.len(),
+            before_bytes: Some(edit.before.len()),
             after_bytes: edit.after.len(),
+            created_mode: None,
         }).collect();
+        descriptions.extend(changes.additions.iter().map(|addition| Change {
+            kind: "create",
+            path: addition.path.into(),
+            before_sha256: None,
+            after_sha256: hex::encode(Sha256::digest(addition.after)),
+            before_bytes: None,
+            after_bytes: addition.after.len(),
+            created_mode: Some(addition.mode),
+        }));
+        descriptions.sort_by(|left, right| left.path.cmp(&right.path));
+        drop(changes);
         capture.ensure_source_unchanged()?;
         capture.ensure_candidate_source_unchanged()?;
         let report = Report {
             schema_version: "franken-node/reviewed-migration-apply/v1",
             status: "INSPECTED", project, candidate,
             input_sha256: capture.input_sha256().into(), candidate_input_sha256,
-            tests: capture.test_inventory()?, changes,
+            tests: capture.test_inventory()?, changes: descriptions,
             execution_attempted: false, release_certification: false,
             validation: None, source_transaction: None, errors: Vec::new(),
         };
@@ -187,15 +204,18 @@ mod linux {
             report.status = "ERROR";
             initialized.ensure_source_unchanged()?;
             capture.ensure_candidate_source_unchanged()?;
-            let replacements = capture.replacements()?;
-            let edits: Vec<_> = replacements.iter().map(|edit| Edit {
+            let changes = capture.changes()?;
+            let edits: Vec<_> = changes.replacements.iter().map(|edit| Edit {
                 path: edit.path, before: edit.before, after: edit.after,
+            }).collect();
+            let creations: Vec<_> = changes.additions.iter().map(|addition| CreateFile {
+                path: addition.path, after: addition.after, mode: addition.mode,
             }).collect();
             // Each reviewed installation owns its immediate preimages. A
             // second migration must not conflict with or replace the first
             // migration's immutable originals; both remain independently
             // recoverable through the same pinned native rollback protocol.
-            report.source_transaction = writer.apply_versioned_with_receipt(&edits)?;
+            report.source_transaction = writer.apply_with_creations_receipt(&edits, &creations)?;
             report.status = if report.source_transaction.is_some() { "APPLIED" } else { "UNCHANGED" };
             Ok(())
         })();
@@ -586,6 +606,123 @@ mod linux {
             assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), b"globalThis.answer = 40 + 2;\n");
             assert_eq!(fs::read(original.join("unreviewed-config.json")).unwrap(), b"changed");
             assert!(rewrite_transaction::rollback::run(&original, None, false).history.is_empty());
+        }
+
+        #[test]
+        fn reviewed_helper_addition_is_executed_installed_and_retained_on_rollback() {
+            use rewrite_transaction::rollback::RollbackStatus;
+            let (root, original, candidate) = pair();
+            let helper = b"module.exports = 42;\n";
+            fs::write(candidate.join("helper.cjs"), helper).unwrap();
+            fs::set_permissions(candidate.join("helper.cjs"), fs::Permissions::from_mode(0o640)).unwrap();
+            fs::write(candidate.join("case.test.cjs"), b"globalThis.answer = require('./helper.cjs');\n").unwrap();
+            let inspected = prepare(&original, &candidate, None).unwrap().report;
+            assert_eq!(inspected.changes.len(), 2);
+            let created = inspected.changes.iter().find(|change| change.kind == "create").unwrap();
+            assert_eq!(created.path, "helper.cjs");
+            assert!(created.before_sha256.is_none() && created.before_bytes.is_none());
+            assert_eq!(created.created_mode, Some(0o640));
+            assert!(!serde_json::to_string(&inspected).unwrap().contains("module.exports"));
+            assert!(!original.join("helper.cjs").exists());
+            assert!(!original.join(".migrate-backup").exists());
+            // Controlled native-role executable checks the actual staged helper.
+            // This measures production orchestration, not Franken JS semantics.
+            let native = controlled_native(root.path());
+            fs::write(&native, "#!/bin/sh\ntest -f helper.cjs && test \"$(/bin/cat helper.cjs)\" = 'module.exports = 42;'\n").unwrap();
+            let report = apply(&original, &candidate,
+                (&inspected.input_sha256, &inspected.candidate_input_sha256),
+                &native, Path::new("/bin/true"), true).unwrap();
+            assert_eq!(report.status, "APPLIED", "{report:?}");
+            assert_eq!(report.validation.as_ref().unwrap().verdict, "PASS");
+            assert_eq!(fs::read(original.join("helper.cjs")).unwrap(), helper);
+            assert_eq!(fs::metadata(original.join("helper.cjs")).unwrap().permissions().mode() & 0o777, 0o640);
+            let receipt = report.source_transaction.unwrap();
+            assert_eq!(receipt.files, 2);
+            assert_eq!(restore(&original, &receipt).status, RollbackStatus::RolledBack);
+            assert!(!original.join("helper.cjs").exists());
+            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), b"globalThis.answer = 40 + 2;\n");
+            assert_eq!(fs::read(receipt_directory(&original, &receipt).join("1.retired")).unwrap(), helper);
+            assert_eq!(fs::read(candidate.join("helper.cjs")).unwrap(), helper);
+            fs::write(original.join("helper.cjs"), b"later independent work").unwrap();
+            assert_eq!(restore(&original, &receipt).status, RollbackStatus::AlreadyRolledBack);
+            assert_eq!(fs::read(original.join("helper.cjs")).unwrap(), b"later independent work");
+        }
+
+        #[test]
+        fn a_creation_only_plan_is_applied_not_reported_as_unchanged() {
+            let (root, original, candidate) = pair();
+            fs::write(candidate.join("case.test.cjs"), fs::read(original.join("case.test.cjs")).unwrap()).unwrap();
+            fs::write(candidate.join("empty.dat"), b"").unwrap();
+            fs::write(candidate.join("binary.dat"), [0_u8, 255, 10, 13]).unwrap();
+            let native = controlled_native(root.path());
+            let report = apply_current(&original, &candidate, &native);
+            assert_eq!(report.status, "APPLIED", "{report:?}");
+            assert!(report.changes.iter().all(|change| change.kind == "create"));
+            assert_eq!(fs::read(original.join("empty.dat")).unwrap(), b"");
+            assert_eq!(fs::read(original.join("binary.dat")).unwrap(), [0, 255, 10, 13]);
+            let receipt = report.source_transaction.unwrap();
+            assert_eq!(receipt.files, 2);
+            assert_eq!(restore(&original, &receipt).status, rewrite_transaction::rollback::RollbackStatus::RolledBack);
+            assert!(!original.join("empty.dat").exists() && !original.join("binary.dat").exists());
+            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), b"globalThis.answer = 40 + 2;\n");
+        }
+
+        #[test]
+        fn a_failed_live_comparison_installs_neither_new_helpers_nor_replacements() {
+            let (_root, original, candidate) = pair();
+            fs::write(candidate.join("helper.cjs"), b"module.exports = 42;").unwrap();
+            let rejected = apply_current(&original, &candidate, Path::new("/bin/false"));
+            assert_eq!(rejected.status, "REJECTED", "{rejected:?}");
+            assert_eq!(rejected.validation.as_ref().unwrap().verdict, "FAIL");
+            assert!(rejected.source_transaction.is_none());
+            assert!(!original.join("helper.cjs").exists());
+            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), b"globalThis.answer = 40 + 2;\n");
+            assert!(rewrite_transaction::rollback::run(&original, None, false).history.is_empty());
+        }
+
+        #[test]
+        fn a_passing_guest_cannot_redefine_a_new_file_or_overwrite_a_new_collision() {
+            for original_target in [false, true] {
+                let (root, original, candidate) = pair();
+                fs::write(candidate.join("helper.cjs"), b"reviewed helper").unwrap();
+                let target = if original_target { &original } else { &candidate };
+                let source = format!("require('fs').writeFileSync({},'independent new bytes');\n",
+                    serde_json::to_string(&target.join("helper.cjs")).unwrap());
+                fs::write(original.join("case.test.cjs"), &source).unwrap();
+                fs::write(candidate.join("case.test.cjs"), format!("{source}// candidate\n")).unwrap();
+                let native = controlled_native(root.path());
+                let report = apply_current(&original, &candidate, &native);
+                assert_eq!(report.validation.as_ref().unwrap().verdict, "PASS");
+                assert_eq!(report.status, "ERROR", "{report:?}");
+                assert!(report.source_transaction.is_none());
+                assert_eq!(fs::read(target.join("helper.cjs")).unwrap(), b"independent new bytes");
+                assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), source.as_bytes());
+                assert!(rewrite_transaction::rollback::run(&original, None, false).history.is_empty());
+            }
+        }
+
+        #[test]
+        fn later_reviewed_replacement_of_a_created_helper_preserves_reverse_recovery() {
+            use rewrite_transaction::rollback::RollbackStatus;
+            let (root, original, candidate) = pair();
+            let native = controlled_native(root.path());
+            fs::write(candidate.join("helper.cjs"), b"first helper").unwrap();
+            let first_report = apply_current(&original, &candidate, &native);
+            assert_eq!(first_report.status, "APPLIED", "{first_report:?}");
+            let first = first_report.source_transaction.unwrap();
+            let next = root.path().join("next-candidate");
+            next_candidate(&original, &next, b"globalThis.answer = 42;\n");
+            fs::write(next.join("helper.cjs"), b"second helper").unwrap();
+            let second_report = apply_current(&original, &next, &native);
+            assert_eq!(second_report.status, "APPLIED", "{second_report:?}");
+            let second = second_report.source_transaction.unwrap();
+            assert_eq!(restore(&original, &first).status, RollbackStatus::Conflict);
+            assert_eq!(fs::read(original.join("helper.cjs")).unwrap(), b"second helper");
+            assert_eq!(restore(&original, &second).status, RollbackStatus::RolledBack);
+            assert_eq!(fs::read(original.join("helper.cjs")).unwrap(), b"first helper");
+            assert_eq!(restore(&original, &first).status, RollbackStatus::RolledBack);
+            assert!(!original.join("helper.cjs").exists());
+            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), b"globalThis.answer = 40 + 2;\n");
         }
     }
 }
