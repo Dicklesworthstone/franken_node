@@ -45,6 +45,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[path = "rewrite_rollback.rs"]
 pub mod rollback;
 
+#[path = "rewrite_creations.rs"]
+mod creations;
+pub use creations::CreateFile;
+
 pub const MAX_EDITS: usize = 1_000;
 pub const MAX_PLAN_BYTES: usize = 256 * 1024 * 1024;
 const MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
@@ -78,6 +82,13 @@ struct Record {
     before_bytes: usize,
     after_bytes: usize,
     mode: u32,
+    /// Version three distinguishes a missing preimage from an empty file.
+    #[serde(default, skip_serializing_if = "is_false")]
+    created: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -402,7 +413,8 @@ impl RewriteTransaction {
     fn validate_journal(journal: &Journal) -> Result<()> {
         ensure!(
             journal.schema_version == JOURNAL_VERSION
-                || journal.schema_version == VERSIONED_JOURNAL_VERSION,
+                || journal.schema_version == VERSIONED_JOURNAL_VERSION
+                || journal.schema_version == creations::JOURNAL_VERSION,
             "unsupported rewrite transaction schema"
         );
         ensure!(
@@ -423,6 +435,15 @@ impl RewriteTransaction {
         for record in &journal.records {
             validate_path(&record.path)?;
             ensure!(paths.insert(&record.path), "duplicate rewrite target");
+            if record.created {
+                ensure!(
+                    journal.schema_version == creations::JOURNAL_VERSION
+                        && record.before_bytes == 0
+                        && record.before_sha256 == digest(b"")
+                        && record.mode & 0o400 != 0,
+                    "invalid absent-preimage creation record"
+                );
+            }
             ensure!(
                 record.mode <= 0o777
                     && record.before_bytes <= MAX_FILE_BYTES
@@ -455,12 +476,29 @@ impl RewriteTransaction {
     }
 
     fn prepare_with_preimages(&self, edits: &[Edit<'_>], versioned: bool) -> Result<Journal> {
+        self.prepare_changes(
+            edits,
+            &[],
+            if versioned { VERSIONED_JOURNAL_VERSION } else { JOURNAL_VERSION },
+        )
+    }
+
+    fn prepare_changes(
+        &self,
+        edits: &[Edit<'_>],
+        creations: &[CreateFile<'_>],
+        schema: &str,
+    ) -> Result<Journal> {
+        let count = edits.len().checked_add(creations.len()).context("rewrite count overflow")?;
         ensure!(
-            !edits.is_empty() && edits.len() <= MAX_EDITS,
+            count > 0 && count <= MAX_EDITS,
             "rewrite plan entry limit exceeded"
         );
+        ensure!(creations.is_empty() || schema == creations::JOURNAL_VERSION,
+            "new files require the creation journal schema");
+        let versioned = schema != JOURNAL_VERSION;
         let mut journal = Journal {
-            schema_version: if versioned { VERSIONED_JOURNAL_VERSION } else { JOURNAL_VERSION }.into(),
+            schema_version: schema.into(),
             session: unique_name("txn"),
             records: Vec::new(),
         };
@@ -510,6 +548,32 @@ impl RewriteTransaction {
                 before_bytes: edit.before.len(),
                 after_bytes: edit.after.len(),
                 mode,
+                created: false,
+            });
+        }
+        for creation in creations {
+            validate_path(creation.path)?;
+            ensure!(paths.insert(creation.path), "duplicate rewrite target");
+            total = total.checked_add(creation.after.len()).context("rewrite plan byte overflow")?;
+            ensure!(total <= MAX_PLAN_BYTES && creation.after.len() <= MAX_FILE_BYTES,
+                "rewrite plan byte limit exceeded");
+            ensure!(creation.mode <= 0o777 && creation.mode & 0o400 != 0,
+                "created files require ordinary owner-readable permissions");
+            // Parents must already exist. No directory creation or structural
+            // replacement is smuggled into an absent-file approval.
+            let (parent, name) = parent_and_name(&self.root, creation.path, false)?;
+            ensure!(read_optional(&parent, &name, MAX_FILE_BYTES)?.is_none(),
+                "creation target already exists: {}", creation.path);
+            ensure!(parent.metadata()?.dev() == self.store.metadata()?.dev(),
+                "creation target must share the transaction filesystem: {}", creation.path);
+            journal.records.push(Record {
+                path: creation.path.into(),
+                before_sha256: digest(b""),
+                after_sha256: digest(creation.after),
+                before_bytes: 0,
+                after_bytes: creation.after.len(),
+                mode: creation.mode,
+                created: true,
             });
         }
         Self::validate_journal(&journal)?;
@@ -550,6 +614,24 @@ impl RewriteTransaction {
                 0o600,
             )?;
         }
+        for (offset, creation) in creations.iter().enumerate() {
+            let index = edits.len() + offset;
+            self.publish_staged(
+                &session,
+                OsStr::new(&format!("{index}.after")),
+                creation.after,
+                0o600,
+            )?;
+            // This durable image is consumed by the no-replace installation
+            // rename. Its continued presence proves we did not create a
+            // colliding pathname, even if that other file has identical bytes.
+            self.publish_staged(
+                &session,
+                OsStr::new(&format!("{index}.new")),
+                creation.after,
+                creation.mode,
+            )?;
+        }
         // Recovery material must be durable before the journal references it.
         self.flush_dirty()?;
         let encoded = serde_json::to_vec(&journal)?;
@@ -566,12 +648,13 @@ impl RewriteTransaction {
     /// versioned preimage is missing or damaged. Callers verify its content hash.
     fn read_preimage(&self, journal: &Journal, index: usize) -> Result<Contents> {
         let record = journal.records.get(index).context("invalid preimage record index")?;
+        ensure!(!record.created, "a created file has no original image");
         match journal.schema_version.as_str() {
             JOURNAL_VERSION => {
                 let (parent, name) = parent_and_name(&self.backups, &record.path, false)?;
                 read_required(&parent, &name, MAX_FILE_BYTES)
             }
-            VERSIONED_JOURNAL_VERSION => {
+            VERSIONED_JOURNAL_VERSION | creations::JOURNAL_VERSION => {
                 let session = directory(&self.store, Path::new(&journal.session), false)?;
                 let image = read_required(&session, OsStr::new(&format!("{index}.before")), MAX_FILE_BYTES)?;
                 ensure!(image.metadata.mode() & 0o7777 == 0o600,
@@ -661,6 +744,9 @@ impl RewriteTransaction {
             verify_image(&after, &record.after_sha256, record.after_bytes, None),
             "staged rewrite bytes changed"
         );
+        if record.created {
+            return self.install_created(journal, index);
+        }
         self.replace_image(
             record,
             &record.before_sha256,
@@ -690,6 +776,9 @@ impl RewriteTransaction {
         let mut errors = Vec::new();
         for (index, record) in journal.records.iter().enumerate().rev() {
             let restored = (|| -> Result<()> {
+                if record.created {
+                    return self.restore_created(&journal, index);
+                }
                 let (parent, name) = parent_and_name(&self.root, &record.path, false)?;
                 let current = read_required(&parent, &name, MAX_FILE_BYTES)?;
                 if verify_image(
@@ -774,7 +863,11 @@ impl RewriteTransaction {
             // A source may have changed while other files/backups were staged.
             // Recheck the entire plan before replacing even the first source.
             for (index, record) in journal.records.iter().enumerate() {
-                if journal.schema_version == VERSIONED_JOURNAL_VERSION {
+                if record.created {
+                    self.check_creation_ready(&journal, index)?;
+                    continue;
+                }
+                if journal.schema_version != JOURNAL_VERSION {
                     let before = self.read_preimage(&journal, index)?;
                     ensure!(
                         verify_image(&before, &record.before_sha256, record.before_bytes, None),

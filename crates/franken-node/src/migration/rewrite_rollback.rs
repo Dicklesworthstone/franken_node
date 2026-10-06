@@ -3,7 +3,8 @@
 //! Preview/history never create state or recover pending work. Applying requires
 //! an explicit transaction ID and a complete preflight, then uses the SAME
 //! write-ahead recovery protocol as the rewrite writer. No shell, Git restore,
-//! source deletion, or runtime execution is involved. Local journals are trusted
+//! source deletion, or runtime execution is involved. Created files are moved
+//! into retained transaction storage. Local journals are trusted
 //! recovery metadata, not signatures; this is not an adversarial OS sandbox.
 
 use super::{
@@ -67,6 +68,9 @@ pub struct RollbackFile {
     /// State observed during preflight, NOT a claim about later concurrent edits.
     pub preflight_state: SourceState,
     pub original_sha256: String,
+    /// For a v3 creation the original state was absence, not an empty file.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub original_absent: bool,
     pub rewritten_sha256: String,
     pub mode: u32,
     pub error: Option<String>,
@@ -305,6 +309,13 @@ fn preflight(transaction: &RewriteTransaction, journal: &Journal) -> Vec<Rollbac
         .enumerate()
         .map(|(index, record)| {
             let state = (|| -> Result<SourceState> {
+                if record.created {
+                    return Ok(if transaction.creation_is_original(journal, index)? {
+                        SourceState::Original
+                    } else {
+                        SourceState::Rewritten
+                    });
+                }
                 let original = transaction.read_preimage(journal, index)?;
                 ensure!(
                     verify_image(&original, &record.before_sha256, record.before_bytes, None),
@@ -339,6 +350,7 @@ fn preflight(transaction: &RewriteTransaction, journal: &Journal) -> Vec<Rollbac
                 path: record.path.clone(),
                 preflight_state,
                 original_sha256: record.before_sha256.clone(),
+                original_absent: record.created,
                 rewritten_sha256: record.after_sha256.clone(),
                 mode: record.mode,
                 error,
