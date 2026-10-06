@@ -29,6 +29,16 @@ struct Args {
 enum Action {
     /// Read both captured inventories and inspect supported changes. Executes and installs nothing.
     Inspect { project: PathBuf, candidate: PathBuf },
+    /// Read one retained request outcome without executing, installing or recovering anything.
+    RequestStatus {
+        project: PathBuf,
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        expected_input_sha256: String,
+        #[arg(long)]
+        expected_candidate_input_sha256: String,
+    },
     /// Run Node/Bun on the original and native Franken on the candidate, then install on PASS only.
     Apply {
         project: PathBuf,
@@ -41,6 +51,9 @@ enum Action {
         native_bin: PathBuf,
         #[arg(long)]
         bun_bin: PathBuf,
+        /// Bind this installation to a durable caller ID; replays return its recorded outcome only.
+        #[arg(long)]
+        request_id: Option<String>,
         /// Consent to trusted project execution with ambient OS authority; not a sandbox.
         #[arg(long, required = true)]
         execute: bool,
@@ -56,7 +69,8 @@ mod linux {
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::time::{Duration, Instant};
-    use rewrite_transaction::{AppliedRewrite, CreateFile, Edit, RewriteTransaction};
+    use rewrite_transaction::{AppliedRewrite, CreateFile, Edit, InstallRequest, RewriteTransaction};
+    use rewrite_transaction::rollback::{HistoryEntry, TransactionState, inspect_request};
     use validation_suite::{
         product_oracle::{CancellationToken, ProductReport},
         rewrite_candidate::RewriteCandidate,
@@ -67,7 +81,8 @@ mod linux {
         schema_version: &'static str,
         status: &'static str,
         project: PathBuf,
-        candidate: PathBuf,
+        // A historical lookup does not resolve or certify a candidate pathname.
+        candidate: Option<PathBuf>,
         input_sha256: String,
         candidate_input_sha256: String,
         tests: Vec<PathBuf>,
@@ -78,6 +93,13 @@ mod linux {
         /// that installation completed. Never infer no writes from exit 130.
         installation_started: bool,
         release_certification: bool,
+        /// True only when returning previously retained journal metadata. No
+        /// current source/validation result can be inferred from this outcome.
+        outcome_replayed: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request: Option<InstallRequest>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        recorded_outcome: Option<HistoryEntry>,
         #[serde(skip_serializing_if = "Option::is_none")]
         validation: Option<ProductReport>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -150,11 +172,12 @@ mod linux {
         capture.ensure_candidate_source_unchanged()?;
         let report = Report {
             schema_version: "franken-node/reviewed-migration-apply/v1",
-            status: "INSPECTED", project, candidate,
+            status: "INSPECTED", project, candidate: Some(candidate),
             input_sha256: capture.input_sha256().into(), candidate_input_sha256,
             tests: capture.test_inventory()?, changes: descriptions,
             execution_attempted: false, release_certification: false,
             cancellation_requested: false, installation_started: false,
+            outcome_replayed: false, request: None, recorded_outcome: None,
             validation: None, source_transaction: None, errors: Vec::new(),
         };
         Ok(Prepared { capture, report, deadline })
@@ -190,15 +213,35 @@ mod linux {
         apply_controlled(project, candidate, pins, native, bun, execute, &CancellationToken::default())
     }
 
+    #[cfg(test)]
     fn apply_controlled(
         project: &Path, candidate: &Path, pins: (&str, &str), native: &Path,
         bun: &Path, execute: bool, cancellation: &CancellationToken,
     ) -> Result<Report> {
+        apply_requested(project, candidate, pins, (native, bun), execute, cancellation, None)
+    }
+
+    fn apply_requested(
+        project: &Path, candidate: &Path, pins: (&str, &str), runtimes: (&Path, &Path),
+        execute: bool, cancellation: &CancellationToken, request_id: Option<&str>,
+    ) -> Result<Report> {
         ensure!(execute, "--execute is required before running project code");
         cancellation.check()?;
+        // Resolve once so a caller's alias cannot switch the request to a
+        // different project between history lookup, capture and installation.
+        let project = project.canonicalize().context("resolve installation project")?;
+        let request = request_id.map(|id| InstallRequest::new(&project, id, pins.0, pins.1)).transpose()?;
+        if let Some(request) = &request {
+            let mut recorded = request_status(&project, request)?;
+            if recorded.outcome_replayed {
+                record_cancellation(&mut recorded, cancellation);
+                return Ok(recorded);
+            }
+        }
         // Reject stale/unsupported approvals BEFORE opening the writer, and do
         // not implicitly recover an unrelated transaction merely to validate.
-        let Prepared { capture, mut report, deadline } = prepare(project, candidate, Some(pins))?;
+        let Prepared { capture, mut report, deadline } = prepare(&project, candidate, Some(pins))?;
+        report.request = request;
         cancellation.check()?;
         let (writer, initialized) = initialize_writer(&capture, &report.project, deadline)?;
         capture.ensure_candidate_source_unchanged()?;
@@ -207,7 +250,7 @@ mod linux {
             cancellation.check()?;
             // One execution path, no imported PASS, fallback or hidden retry.
             report.execution_attempted = true;
-            let measured = capture.validate_product_cancellable(native, bun, cancellation)?;
+            let measured = capture.validate_product_cancellable(runtimes.0, runtimes.1, cancellation)?;
             let admission = capture.check_product_validation(&measured).and_then(|()| {
                 ensure!(measured.native_runtime.sha256 != measured.node_runtime.sha256
                     && measured.native_runtime.sha256 != measured.bun_runtime.sha256,
@@ -234,6 +277,38 @@ mod linux {
         Ok(report)
     }
 
+    /// Read local journal history only. Do not open/capture a candidate, resolve
+    /// runtimes, recertify current source bytes or treat rollback as new work.
+    fn request_status(project: &Path, request: &InstallRequest) -> Result<Report> {
+        let recorded = inspect_request(project, request)?;
+        let status = match recorded.as_ref().map(|entry| (entry.state, entry.files)) {
+            None => "NOT_FOUND",
+            Some((TransactionState::Applied, 0)) => "RECORDED_UNCHANGED",
+            Some((TransactionState::Applied, _)) => "RECORDED_APPLIED",
+            Some((TransactionState::RolledBack, _)) => "RECORDED_ROLLED_BACK",
+            Some((TransactionState::ApplyInterrupted | TransactionState::RollbackPending, _)) => "RECOVERY_REQUIRED",
+        };
+        let source_transaction = recorded.as_ref().and_then(|entry| {
+            (entry.state == TransactionState::Applied).then(|| AppliedRewrite {
+                transaction_id: entry.transaction_id.clone(),
+                journal_sha256: entry.journal_sha256.clone(),
+                files: entry.files,
+            })
+        });
+        Ok(Report {
+            schema_version: "franken-node/reviewed-migration-apply/v1",
+            status, project: project.to_path_buf(), candidate: None,
+            input_sha256: request.input_sha256().into(),
+            candidate_input_sha256: request.candidate_input_sha256().into(),
+            tests: Vec::new(), changes: Vec::new(),
+            execution_attempted: false, installation_started: false,
+            cancellation_requested: false, release_certification: false,
+            outcome_replayed: recorded.is_some(), request: Some(request.clone()),
+            recorded_outcome: recorded, validation: None, source_transaction,
+            errors: Vec::new(),
+        })
+    }
+
     /// The final successful cancellation check is the commit boundary. After
     /// it, defer cooperative signals through the existing durable native writer
     /// (including its recovery on failure); never inject an early return into
@@ -254,14 +329,20 @@ mod linux {
         report.installation_started = true;
         // This call owns exact per-generation originals and returns the actual
         // journal identity. No cancellation checks are added inside the writer.
-        report.source_transaction = writer.apply_with_creations_receipt(&edits, &creations)?;
-        report.status = if report.source_transaction.is_some() { "APPLIED" } else { "UNCHANGED" };
+        report.source_transaction = if let Some(request) = &report.request {
+            Some(writer.apply_for_request(request, &edits, &creations)?)
+        } else {
+            writer.apply_with_creations_receipt(&edits, &creations)?
+        };
+        // Named no-op requests deliberately retain a zero-file journal. That
+        // receipt must not turn an unchanged source plan into an APPLIED claim.
+        report.status = if edits.is_empty() && creations.is_empty() { "UNCHANGED" } else { "APPLIED" };
         Ok(())
     }
 
     fn record_cancellation(report: &mut Report, cancellation: &CancellationToken) {
         report.cancellation_requested = cancellation.is_cancelled();
-        if report.cancellation_requested && !report.installation_started {
+        if report.cancellation_requested && !report.installation_started && !report.outcome_replayed {
             report.status = "CANCELLED";
         }
         // After the boundary, preserve APPLIED/UNCHANGED/ERROR and any journal
@@ -277,13 +358,20 @@ mod linux {
     pub(super) fn run(args: Args, cancellation: &CancellationToken) -> Result<Report> {
         match args.action {
             Action::Inspect { project, candidate } => Ok(prepare(&project, &candidate, None)?.report),
-            Action::Apply { project, candidate, expected_input_sha256, expected_candidate_input_sha256, native_bin, bun_bin, execute } =>
-                apply_controlled(&project, &candidate, (&expected_input_sha256, &expected_candidate_input_sha256), &native_bin, &bun_bin, execute, cancellation),
+            Action::RequestStatus { project, request_id, expected_input_sha256, expected_candidate_input_sha256 } => {
+                let project = project.canonicalize().context("resolve installation request project")?;
+                let request = InstallRequest::new(&project, &request_id, &expected_input_sha256, &expected_candidate_input_sha256)?;
+                request_status(&project, &request)
+            }
+            Action::Apply { project, candidate, expected_input_sha256, expected_candidate_input_sha256, native_bin, bun_bin, execute, request_id } =>
+                apply_requested(&project, &candidate, (&expected_input_sha256, &expected_candidate_input_sha256),
+                    (&native_bin, &bun_bin), execute, cancellation, request_id.as_deref()),
         }
     }
 
     pub(super) fn success(report: &Report) -> bool {
-        !report.cancellation_requested && matches!(report.status, "INSPECTED" | "APPLIED" | "UNCHANGED")
+        !report.cancellation_requested && matches!(report.status,
+            "INSPECTED" | "APPLIED" | "UNCHANGED" | "RECORDED_APPLIED" | "RECORDED_UNCHANGED")
     }
 
     pub(super) fn exit_code(report: &Report) -> u8 {
@@ -615,6 +703,7 @@ mod linux {
                     expected_input_sha256: inspected.input_sha256,
                     expected_candidate_input_sha256: inspected.candidate_input_sha256,
                     native_bin: root.join("waiting-native"), bun_bin: "/bin/true".into(), execute: true,
+                    request_id: None,
                 }};
                 let report = run(args, &cancellation).unwrap();
                 assert_eq!(report.status, "CANCELLED", "{report:?}");
@@ -1005,6 +1094,232 @@ mod linux {
             assert_eq!(restore(&original, &first).status, RollbackStatus::RolledBack);
             assert!(!original.join("helper.cjs").exists());
             assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), b"globalThis.answer = 40 + 2;\n");
+        }
+
+        fn named_apply(original: &Path, candidate: &Path, id: &str, native: &Path) -> Report {
+            let inspected = prepare(original, candidate, None).unwrap().report;
+            apply_requested(original, candidate,
+                (&inspected.input_sha256, &inspected.candidate_input_sha256),
+                (native, Path::new("/bin/true")), true, &CancellationToken::default(), Some(id)).unwrap()
+        }
+
+        fn repeat_without_inputs(original: &Path, request: &InstallRequest) -> Report {
+            apply_requested(original, Path::new("/missing-candidate"),
+                (request.input_sha256(), request.candidate_input_sha256()),
+                (Path::new("/missing-native"), Path::new("/missing-bun")),
+                true, &CancellationToken::default(), Some(request.id())).unwrap()
+        }
+
+        #[test]
+        fn named_installation_survives_lost_output_without_reexecution_or_recapturing_sources() {
+            const ROOT: &str = "FRANKEN_NAMED_INSTALL_OUTPUT_LOSS_ROOT";
+            if let Some(root) = std::env::var_os(ROOT) {
+                let root = PathBuf::from(root);
+                let report = named_apply(&root.join("original"), &root.join("candidate"),
+                    "release-17", &root.join("controlled-native"));
+                assert_eq!(report.status, "APPLIED", "{report:?}");
+                assert!(report.execution_attempted && report.installation_started);
+                // Actual installation completed. Die before returning any
+                // report to the orchestrator, with no destructors or stdout.
+                std::process::exit(73);
+            }
+            let (root, original, candidate) = pair();
+            controlled_native(root.path());
+            let counter = root.path().join("guest-invocations");
+            let before = format!("require('fs').appendFileSync({},'ran\\n');\n",
+                serde_json::to_string(&counter).unwrap());
+            fs::write(original.join("case.test.cjs"), &before).unwrap();
+            fs::write(candidate.join("case.test.cjs"), format!("{before}// migration\n")).unwrap();
+            fs::write(candidate.join("helper.cjs"), b"retained helper").unwrap();
+            let inspected = prepare(&original, &candidate, None).unwrap().report;
+            let request = InstallRequest::new(&original, "release-17", &inspected.input_sha256,
+                &inspected.candidate_input_sha256).unwrap();
+            let module = module_path!().split_once("::").map_or("", |(_, name)| name);
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &format!("{module}::named_installation_survives_lost_output_without_reexecution_or_recapturing_sources")])
+                .env(ROOT, root.path()).output().unwrap();
+            assert_eq!(output.status.code(), Some(73), "{}", String::from_utf8_lossy(&output.stderr));
+            assert_eq!(fs::read(&counter).unwrap(), b"ran\n");
+            let entry = inspect_request(&original, &request).unwrap().unwrap();
+            let receipt = AppliedRewrite { transaction_id: entry.transaction_id.clone(),
+                journal_sha256: entry.journal_sha256.clone(), files: entry.files };
+            let journal = fs::read(receipt_directory(&original, &receipt).join("applied.json")).unwrap();
+            fs::rename(&candidate, root.path().join("retained-candidate")).unwrap();
+            fs::write(original.join("case.test.cjs"), b"independent later work, not JavaScript").unwrap();
+            let repeated = repeat_without_inputs(&original, &request);
+            assert_eq!(repeated.status, "RECORDED_APPLIED", "{repeated:?}");
+            assert_eq!(exit_code(&repeated), 0);
+            assert!(repeated.outcome_replayed);
+            assert!(!repeated.execution_attempted && !repeated.installation_started);
+            assert!(repeated.validation.is_none() && repeated.candidate.is_none());
+            assert!(repeated.tests.is_empty() && repeated.changes.is_empty());
+            assert_eq!(repeated.source_transaction.as_ref(), Some(&receipt));
+            assert_eq!(repeated.recorded_outcome.as_ref(), Some(&entry));
+            assert_eq!(fs::read(&counter).unwrap(), b"ran\n");
+            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), b"independent later work, not JavaScript");
+            assert_eq!(fs::read(receipt_directory(&original, &receipt).join("applied.json")).unwrap(), journal);
+            assert_eq!(rewrite_transaction::rollback::run(&original, None, false).history.len(), 1);
+        }
+
+        #[test]
+        fn named_id_cannot_authorize_different_pins_or_bypass_execution_consent() {
+            let (root, original, candidate) = pair();
+            let native = controlled_native(root.path());
+            let first = named_apply(&original, &candidate, "reused-id", &native);
+            assert_eq!(first.status, "APPLIED", "{first:?}");
+            let request = first.request.unwrap();
+            for pins in [(request.candidate_input_sha256(), request.input_sha256()),
+                (request.input_sha256(), &*"c".repeat(64))] {
+                assert!(apply_requested(&original, &candidate, pins,
+                    (Path::new("/missing-native"), Path::new("/missing-bun")),
+                    true, &CancellationToken::default(), Some(request.id())).is_err());
+            }
+            assert!(apply_requested(&original, &candidate,
+                (request.input_sha256(), request.candidate_input_sha256()),
+                (&native, Path::new("/bin/true")), false, &CancellationToken::default(), Some(request.id())).is_err());
+            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), b"globalThis.answer = 42;\n");
+            assert_eq!(rewrite_transaction::rollback::run(&original, None, false).history.len(), 1);
+        }
+
+        #[test]
+        fn named_rollback_is_terminal_for_replay_and_never_reinstalls_created_files() {
+            let (root, original, candidate) = pair();
+            fs::write(candidate.join("helper.cjs"), b"new helper").unwrap();
+            let first = named_apply(&original, &candidate, "rolled-back", &controlled_native(root.path()));
+            assert_eq!(first.status, "APPLIED", "{first:?}");
+            let request = first.request.unwrap();
+            let receipt = first.source_transaction.unwrap();
+            assert_eq!(restore(&original, &receipt).status, rewrite_transaction::rollback::RollbackStatus::RolledBack);
+            fs::write(original.join("helper.cjs"), b"independent later helper").unwrap();
+            let repeated = repeat_without_inputs(&original, &request);
+            assert_eq!(repeated.status, "RECORDED_ROLLED_BACK");
+            assert_eq!(exit_code(&repeated), 1);
+            assert_eq!(repeated.recorded_outcome.unwrap().state, TransactionState::RolledBack);
+            assert!(repeated.source_transaction.is_none() && repeated.validation.is_none());
+            assert!(!repeated.execution_attempted && !repeated.installation_started);
+            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), b"globalThis.answer = 40 + 2;\n");
+            assert_eq!(fs::read(original.join("helper.cjs")).unwrap(), b"independent later helper");
+            assert_eq!(fs::read(receipt_directory(&original, &receipt).join("1.retired")).unwrap(), b"new helper");
+        }
+
+        #[test]
+        fn named_unchanged_validation_records_a_zero_file_outcome_once() {
+            let (root, original, candidate) = pair();
+            fs::write(candidate.join("case.test.cjs"), fs::read(original.join("case.test.cjs")).unwrap()).unwrap();
+            let first = named_apply(&original, &candidate, "unchanged", &controlled_native(root.path()));
+            assert_eq!(first.status, "UNCHANGED", "{first:?}");
+            assert!(first.execution_attempted && first.installation_started && !first.outcome_replayed);
+            assert_eq!(first.validation.as_ref().unwrap().verdict, "PASS");
+            assert_eq!(first.input_sha256, first.candidate_input_sha256);
+            assert!(first.changes.is_empty());
+            let receipt = first.source_transaction.unwrap();
+            assert_eq!(receipt.files, 0);
+            let repeated = repeat_without_inputs(&original, &first.request.unwrap());
+            assert_eq!(repeated.status, "RECORDED_UNCHANGED");
+            assert_eq!(exit_code(&repeated), 0);
+            assert!(!repeated.execution_attempted && !repeated.installation_started);
+            assert_eq!(repeated.source_transaction.as_ref(), Some(&receipt));
+            assert_eq!(rewrite_transaction::rollback::run(&original, None, false).history.len(), 1);
+        }
+
+        #[test]
+        fn named_pending_history_requires_explicit_recovery_without_rerunning_guests() {
+            let (root, original, candidate) = pair();
+            let first = named_apply(&original, &candidate, "pending", &controlled_native(root.path()));
+            assert_eq!(first.status, "APPLIED", "{first:?}");
+            let request = first.request.unwrap();
+            let receipt = first.source_transaction.unwrap();
+            let applied = receipt_directory(&original, &receipt).join("applied.json");
+            let pending = original.join(".migrate-backup/.franken-rewrite/pending.json");
+            // Retain the actual bound journal in the two valid pending states.
+            // The native backend separately exercises real process exits at
+            // every installation boundary; this test covers CLI classification.
+            let raw = fs::read(&applied).unwrap();
+            fs::rename(&applied, &pending).unwrap();
+            for rollback_pending in [false, true] {
+                if rollback_pending { fs::write(&applied, &raw).unwrap(); }
+                let repeated = repeat_without_inputs(&original, &request);
+                assert_eq!(repeated.status, "RECOVERY_REQUIRED", "{repeated:?}");
+                assert_eq!(exit_code(&repeated), 1);
+                assert!(repeated.source_transaction.is_none() && repeated.validation.is_none());
+                assert!(!repeated.execution_attempted && !repeated.installation_started);
+                assert_eq!(repeated.recorded_outcome.as_ref().unwrap().state,
+                    if rollback_pending { TransactionState::RollbackPending } else { TransactionState::ApplyInterrupted });
+                assert_eq!(fs::read(&pending).unwrap(), raw);
+                assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), b"globalThis.answer = 42;\n");
+            }
+            assert_eq!(restore(&original, &receipt).status, rewrite_transaction::rollback::RollbackStatus::RolledBack);
+            assert_eq!(repeat_without_inputs(&original, &request).status, "RECORDED_ROLLED_BACK");
+        }
+
+        #[test]
+        fn request_status_needs_no_candidate_runtime_or_execution_and_respects_writer_lock() {
+            let (_root, original, _candidate) = pair();
+            let input = "a".repeat(64);
+            let candidate = "b".repeat(64);
+            let args = Args::try_parse_from(["apply", "request-status", original.to_str().unwrap(),
+                "--request-id", "lookup", "--expected-input-sha256", &input,
+                "--expected-candidate-input-sha256", &candidate]).unwrap();
+            let absent = run(args, &CancellationToken::default()).unwrap();
+            assert_eq!(absent.status, "NOT_FOUND");
+            assert_eq!(exit_code(&absent), 1);
+            assert!(!absent.outcome_replayed && !absent.execution_attempted && !absent.installation_started);
+            assert!(absent.recorded_outcome.is_none() && absent.validation.is_none());
+            assert!(!original.join(".migrate-backup").exists());
+            let request = absent.request.unwrap();
+            let writer = RewriteTransaction::open_without_recovery(&original).unwrap();
+            assert!(request_status(&original, &request).is_err());
+            drop(writer);
+            assert_eq!(request_status(&original, &request).unwrap().status, "NOT_FOUND");
+            assert!(Args::try_parse_from(["apply", "request-status", "/project", "--execute"]).is_err());
+            let hash = "a".repeat(64);
+            let mut argv = vec!["apply", "apply", "/project", "/candidate", "--native-bin", "/native",
+                "--bun-bin", "/bun", "--request-id", "build-21", "--expected-input-sha256", &hash,
+                "--expected-candidate-input-sha256", &hash];
+            assert!(Args::try_parse_from(&argv).is_err());
+            argv.push("--execute");
+            assert!(Args::try_parse_from(&argv).is_ok());
+        }
+
+        #[test]
+        fn failed_or_precancelled_named_validation_cannot_create_a_success_receipt() {
+            let (_root, original, candidate) = pair();
+            let inspected = prepare(&original, &candidate, None).unwrap().report;
+            let request = InstallRequest::new(&original, "not-admitted", &inspected.input_sha256,
+                &inspected.candidate_input_sha256).unwrap();
+            let token = CancellationToken::default();
+            token.cancel();
+            assert!(apply_requested(&original, &candidate,
+                (request.input_sha256(), request.candidate_input_sha256()),
+                (Path::new("/missing-native"), Path::new("/missing-bun")), true, &token, Some(request.id())).is_err());
+            assert!(!original.join(".migrate-backup").exists());
+            let failed = apply_requested(&original, &candidate,
+                (request.input_sha256(), request.candidate_input_sha256()),
+                (Path::new("/bin/false"), Path::new("/bin/true")),
+                true, &CancellationToken::default(), Some(request.id())).unwrap();
+            assert_eq!(failed.status, "REJECTED", "{failed:?}");
+            assert!(failed.execution_attempted && !failed.installation_started && !failed.outcome_replayed);
+            assert!(failed.source_transaction.is_none());
+            assert_eq!(request_status(&original, &request).unwrap().status, "NOT_FOUND");
+            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), b"globalThis.answer = 40 + 2;\n");
+        }
+
+        #[test]
+        fn cancellation_of_a_recorded_reply_does_not_claim_the_original_install_was_cancelled() {
+            let (root, original, candidate) = pair();
+            let first = named_apply(&original, &candidate, "reply-cancel", &controlled_native(root.path()));
+            assert_eq!(first.status, "APPLIED", "{first:?}");
+            let receipt = first.source_transaction.unwrap();
+            let mut repeated = repeat_without_inputs(&original, &first.request.unwrap());
+            let cancellation = CancellationToken::default();
+            cancellation.cancel();
+            record_cancellation(&mut repeated, &cancellation);
+            assert_eq!(exit_code(&repeated), 130);
+            assert_eq!(repeated.status, "RECORDED_APPLIED");
+            assert!(repeated.cancellation_requested && repeated.outcome_replayed);
+            assert!(!repeated.installation_started && !repeated.execution_attempted);
+            assert_eq!(repeated.source_transaction.as_ref(), Some(&receipt));
+            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), b"globalThis.answer = 42;\n");
         }
     }
 }

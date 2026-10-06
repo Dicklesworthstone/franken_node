@@ -106,9 +106,10 @@ Successful installation returns status `APPLIED` and `source_transaction`:
 
 The identity comes directly from this writer's completed journal while the
 lock is held, never from guessing the latest history entry. An identical
-candidate still requires validation but returns `UNCHANGED` without a new
-transaction. A creation-only plan is not unchanged: even adding an empty file
-requires a transaction. `REJECTED` and `ERROR` exit nonzero.
+candidate still requires validation but returns `UNCHANGED`; without a request
+ID it creates no transaction. Named requests retain a zero-file outcome as
+explained below. A creation-only plan is not unchanged: even adding an empty
+file requires a transaction. `REJECTED` and `ERROR` exit nonzero.
 `execution_attempted` means the executor was called, not proof that every guest
 launched or completed; individual observations record the measured outcomes.
 
@@ -121,9 +122,10 @@ automatic rollback.
 
 ## Successive migrations and transaction-scoped originals
 
-Replacement-only reviewed installs retain `franken-node/rewrite-transaction/v2`
-journals. Plans containing new files use `franken-node/rewrite-transaction/v3`.
-Each replaced file's exact pre-install bytes are retained privately at:
+Without `--request-id`, replacement-only reviewed installs retain
+`franken-node/rewrite-transaction/v2` journals, and plans containing new files
+use `franken-node/rewrite-transaction/v3`. Named requests use v4 as described
+below. Each replaced file's exact pre-install bytes are retained privately at:
 
 ```
 .migrate-backup/.franken-rewrite/TRANSACTION-ID/RECORD-INDEX.before
@@ -146,7 +148,7 @@ the three-runtime suite runs again. A previous PASS or installation receipt
 cannot authorize the next migration. The second transaction's original is
 candidate one's installed content, not the file's first-ever original. An
 identical proposal is still validated, but returns `UNCHANGED` without another
-transaction.
+transaction unless a new request ID requires its own zero-file outcome.
 
 Restore the explicitly selected transaction using its exact returned identity.
 For overlapping migrations, restore candidate two to candidate one, then
@@ -168,9 +170,9 @@ storage format.
 
 ## New-file creation and restoration of absence
 
-A v3 creation record explicitly marks its original as absent. It never treats
-an existing empty file as an absent target. Preparation checks the complete plan
-before staging recovery images or changing a live source. Creation uses an
+A v3 or v4 creation record explicitly marks its original as absent. It never
+treats an existing empty file as an absent target. Preparation checks the complete
+plan before staging recovery images or changing a live source. Creation uses an
 atomic no-replace rename, so a pathname appearing after preflight is not
 silently overwritten.
 
@@ -195,12 +197,12 @@ can restore safe records while preserving conflicts and leaving pending intent
 for retry. A later migration can replace an earlier created helper; restore
 that later generation first before restoring the earlier file's absence.
 
-Use an updated recovery binary that understands v3 for plans containing new
-files; older readers reject this schema. Keep the complete transaction
-directories, including retained images, not just the returned JSON summary.
-No automatic history conversion, backup deletion, garbage collection, or
-fallback to another generation is performed. The same per-operation limits
-and non-atomic multi-file recovery contract apply.
+Use an updated recovery binary that understands the emitted v3/v4 schema for
+plans containing new files; older readers reject unknown schemas. Keep the
+complete transaction directories, including retained images, not just the
+returned JSON summary. No automatic history conversion, backup deletion,
+garbage collection, or fallback to another generation is performed. The same
+per-operation limits and non-atomic multi-file recovery contract apply.
 
 ## Continue to rollout or restore
 
@@ -250,8 +252,9 @@ The JSON report adds `cancellation_requested` and `installation_started`:
 
 | Cancellation observation | Result |
 |---|---|
-| Before the final installation boundary | `status: "CANCELLED"`, `installation_started: false`, no source transaction, exit 130. |
+| Before the final installation boundary of a new request | `status: "CANCELLED"`, `installation_started: false`, no source transaction, exit 130. |
 | After entering the journaled writer | Preserve the actual `APPLIED`, `UNCHANGED` or `ERROR` result and any transaction receipt; `installation_started: true`, `cancellation_requested: true`, exit 130. |
+| While replying with an already recorded outcome | Preserve the `RECORDED_*` or `RECOVERY_REQUIRED` status, set `cancellation_requested: true`, and exit 130. It does not cancel the earlier installation. |
 | No request observed | Existing success/error status and exit behavior, with `cancellation_requested: false`. |
 
 `installation_started` means the native writer was entered. It is not a claim
@@ -286,3 +289,86 @@ signal handlers or infer cancellation from a manifest, report or environment.
 Existing non-cancellable entrypoints retain their behavior. This integration
 covers the reviewed installer, not signal handling for every other migration,
 attestation, replay, rollout or fleet command.
+
+## Named installation requests and lost-response recovery
+
+Automation can choose a stable `--request-id` before executing a reviewed plan.
+The ID is 1..=64 ASCII letters, digits, hyphens or underscores. Use an opaque
+workflow ID, not a secret. Keep the ID and both reviewed hashes outside the
+project so writing them does not change the capture being approved.
+
+```sh
+cargo +stable run --manifest-path tools/migration-validator/Cargo.toml \
+  --bin franken-migration-apply -- apply /work/original /work/candidate \
+  --request-id release-20261006-17 \
+  --expected-input-sha256 "$ORIGINAL_SHA256" \
+  --expected-candidate-input-sha256 "$CANDIDATE_SHA256" \
+  --native-bin /installed/franken-node --bun-bin /installed/bun --execute
+```
+
+A new request still executes the complete live comparison and all installation
+admission checks. Immediately before source installation, its canonical project
+identity, request ID and both reviewed hashes are included in the same durable
+write-ahead journal as the file plan. There is no second receipt publication
+after installation on which retry correctness depends. The request chooses a
+single content-addressed transaction slot; reuse with different hashes is an
+error, not permission to choose another slot or overwrite the first journal.
+
+If the response is lost, repeat the same request and original hashes or query
+it without a candidate directory, runtimes, signal setup, or execution consent:
+
+```sh
+cargo +stable run --manifest-path tools/migration-validator/Cargo.toml \
+  --bin franken-migration-apply -- request-status /work/original \
+  --request-id release-20261006-17 \
+  --expected-input-sha256 "$ORIGINAL_SHA256" \
+  --expected-candidate-input-sha256 "$CANDIDATE_SHA256"
+```
+
+Lookup reads only the selected retained journal under the existing writer lock.
+It never executes guests, captures the current project, scans for a latest
+transaction, changes source files, or starts recovery. A repeated `apply` with
+a recorded request uses that same lookup; its candidate and runtime arguments
+are not accessed. The existing CLI still requires those arguments and `--execute`
+for `apply`, because an unseen request could start live execution. Prefer
+`request-status` when only inspecting an uncertain outcome.
+
+| Recorded result | Status / exit | Meaning |
+|---|---|---|
+| Applied nonempty plan | `RECORDED_APPLIED` / 0 | The exact transaction completed previously. |
+| Applied empty plan | `RECORDED_UNCHANGED` / 0 | An identical candidate was validated and a zero-file request outcome was retained. |
+| Completed rollback | `RECORDED_ROLLED_BACK` / 1 | This request is consumed; it is not reinstalled. |
+| Interrupted apply or pending rollback | `RECOVERY_REQUIRED` / 1 | Inspect and explicitly restore the exact returned journal; no automatic resume occurs. |
+| No retained outcome at the request slot | `NOT_FOUND` / 1 | There is no usable recorded outcome, not proof that no guest ever executed. |
+
+Recorded replies set `outcome_replayed: true`, `execution_attempted: false`,
+`installation_started: false`, `candidate: null`, and omit `validation`.
+`recorded_outcome` carries the exact transaction ID, state, journal hash and
+file count. Only previously applied outcomes also populate `source_transaction`.
+A recorded success is history, **not certification of the current source tree**;
+later edits or a removed candidate do not trigger reexecution or repair. The
+request pins identify that historical operation, not newly captured files.
+
+An unseen request is not reserved before validation. Failure or cancellation
+before journal preparation therefore has no recorded installation outcome and
+can have guest external effects. A retry must still satisfy fresh input review
+and full live admission. This is not exactly-once execution of arbitrary guest
+side effects. Incomplete staging with no journal is refused rather than adopted
+or deleted; retain it for inspection. Pending requests require explicit pinned
+recovery. After rollback or a different migration, use a new request ID and new
+independently reviewed hashes for any new installation.
+
+Named installations use `franken-node/rewrite-transaction/v4` journals and need
+an updated recovery binary. The schema embeds the request binding, reuses the
+same per-generation originals and new-file absence restoration, and permits a
+zero-file journal only for identical input/candidate hashes. Named no-op outcomes
+are not ordinary source-changing rollout plans. Unnamed installation behavior
+and historical v1/v2/v3 serialization are unchanged. No new store, dependency,
+imported-PASS path, backup deletion or weaker admission policy is introduced.
+
+Keep the complete local transaction history. The mechanism coordinates
+cooperating callers while that history remains intact; it does not authenticate
+journals, protect them from malicious removal/forgery, provide a globally
+protected request ledger, or establish fleet-wide freshness. Moving a project
+to another canonical pathname requires a new review; its old request binding
+is not silently adopted as belonging to the new project.
