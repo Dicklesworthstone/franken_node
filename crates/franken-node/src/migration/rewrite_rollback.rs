@@ -3,12 +3,11 @@
 //! Preview/history never create state or recover pending work. Applying requires
 //! an explicit transaction ID and a complete preflight, then uses the SAME
 //! write-ahead recovery protocol as the rewrite writer. No shell, Git restore,
-//! source deletion, or runtime execution is involved. Created files are moved
-//! into retained transaction storage. Local journals are trusted
+//! source deletion, or runtime execution is involved. Local journals are trusted
 //! recovery metadata, not signatures; this is not an adversarial OS sandbox.
 
 use super::{
-    Journal, MAX_FILE_BYTES, MAX_JOURNAL_BYTES, PENDING, RewriteTransaction, STORE, digest,
+    InstallRequest, Journal, MAX_FILE_BYTES, MAX_JOURNAL_BYTES, PENDING, RewriteTransaction, STORE, digest,
     directory, parent_and_name, read_optional, read_required, verify_image,
 };
 use anyhow::{Context, Result, ensure};
@@ -158,6 +157,7 @@ fn open_existing(project: &Path) -> Result<Option<RewriteTransaction>> {
     flock(&lock, FlockOperation::NonBlockingLockExclusive)
         .context("another rewrite holds the project lock")?;
     Ok(Some(RewriteTransaction {
+        project: project.to_path_buf(),
         root,
         backups,
         store,
@@ -357,6 +357,39 @@ fn preflight(transaction: &RewriteTransaction, journal: &Journal) -> Vec<Rollbac
             }
         })
         .collect()
+}
+
+/// Find the recorded outcome of one reviewed installation without capturing or
+/// executing project code, creating metadata, or initiating recovery. The result
+/// describes retained history, NOT whether current sources still match it.
+/// Lookup addresses one deterministic slot and never scans/guesses latest work.
+pub fn inspect_request(project: &Path, request: &InstallRequest) -> Result<Option<HistoryEntry>> {
+    let project = project.canonicalize().context("resolve installation request project")?;
+    request.check_project(&project)?;
+    let Some(transaction) = open_existing(&project)? else {
+        return Ok(None);
+    };
+    lookup_request(&transaction, request)
+}
+
+pub(super) fn lookup_request(
+    transaction: &RewriteTransaction,
+    request: &InstallRequest,
+) -> Result<Option<HistoryEntry>> {
+    request.check_project(&transaction.project)?;
+    let id = request.transaction_id();
+    if existing_directory(&transaction.store, &id)?.is_none() {
+        return Ok(None);
+    }
+    let mut reader = JournalReader::new();
+    let pending = reader.read(&transaction.store, PENDING)?;
+    let selected = select(transaction, &id, pending.as_ref(), &mut reader)?
+        .with_context(|| format!(
+            "request staging exists without a committed journal: {id}; preserve it for inspection; automatic retry refused"
+        ))?;
+    ensure!(selected.journal.request.as_ref() == Some(request),
+        "request ID is already bound to different reviewed inputs or a different project");
+    selected.history_entry().map(Some)
 }
 
 /// With no ID, list retained transactions. With an ID, preview restoration.

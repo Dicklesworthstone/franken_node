@@ -52,7 +52,8 @@ impl RewriteTransaction {
 
     fn inspect_creation(&self, journal: &Journal, index: usize) -> Result<CreationState> {
         let record = journal.records.get(index).context("invalid creation record index")?;
-        ensure!(journal.schema_version == JOURNAL_VERSION && record.created,
+        ensure!((journal.schema_version == JOURNAL_VERSION
+            || journal.schema_version == super::REQUEST_JOURNAL_VERSION) && record.created,
             "not a creation journal record");
         let session = directory(&self.store, Path::new(&journal.session), false)?;
         ensure!(session.metadata()?.mode() & 0o7777 == 0o700,

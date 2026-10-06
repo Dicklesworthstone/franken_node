@@ -37,8 +37,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, Metadata, Permissions};
 use std::io::{Read, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -55,6 +56,7 @@ const MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_JOURNAL_BYTES: usize = 2 * 1024 * 1024;
 const JOURNAL_VERSION: &str = "franken-node/rewrite-transaction/v1";
 const VERSIONED_JOURNAL_VERSION: &str = "franken-node/rewrite-transaction/v2";
+const REQUEST_JOURNAL_VERSION: &str = "franken-node/rewrite-transaction/v4";
 const STORE: &str = ".franken-rewrite";
 const PENDING: &str = "pending.json";
 
@@ -71,6 +73,72 @@ pub struct AppliedRewrite {
     pub transaction_id: String,
     pub journal_sha256: String,
     pub files: usize,
+}
+
+/// Caller-owned retry identity bound to one project and two reviewed captures.
+/// This is local recovery metadata, not a signature or reusable PASS report.
+/// The native journal retains it BEFORE installation, so losing stdout cannot
+/// turn a completed request into another installation. Fields are immutable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallRequest {
+    request_id: String,
+    project_sha256: String,
+    input_sha256: String,
+    candidate_input_sha256: String,
+}
+
+impl InstallRequest {
+    pub fn new(project: &Path, request_id: &str, input: &str, candidate: &str) -> Result<Self> {
+        let request = Self {
+            request_id: request_id.into(),
+            project_sha256: Self::project_digest(project)?,
+            input_sha256: input.into(),
+            candidate_input_sha256: candidate.into(),
+        };
+        request.validate()?;
+        Ok(request)
+    }
+
+    fn project_digest(project: &Path) -> Result<String> {
+        let project = project.canonicalize().context("resolve installation request project")?;
+        let mut hash = Sha256::new();
+        hash.update(b"franken-node/install-request-project/v1\0");
+        hash.update(project.as_os_str().as_bytes());
+        Ok(hex::encode(hash.finalize()))
+    }
+
+    pub fn check_project(&self, project: &Path) -> Result<()> {
+        self.validate()?;
+        ensure!(Self::project_digest(project)? == self.project_sha256,
+            "installation request belongs to a different project");
+        Ok(())
+    }
+
+    pub fn id(&self) -> &str { &self.request_id }
+    pub fn input_sha256(&self) -> &str { &self.input_sha256 }
+    pub fn candidate_input_sha256(&self) -> &str { &self.candidate_input_sha256 }
+
+    /// Only the opaque ID chooses this slot. Reusing the ID with different
+    /// reviewed hashes must conflict, not silently select a second slot.
+    pub fn transaction_id(&self) -> String {
+        let mut hash = Sha256::new();
+        hash.update(b"franken-node/install-request-slot/v1\0");
+        hash.update(self.request_id.as_bytes());
+        format!("txn-request-{}", hex::encode(hash.finalize()))
+    }
+
+    fn validate(&self) -> Result<()> {
+        ensure!(!self.request_id.is_empty() && self.request_id.len() <= 64
+            && self.request_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+            "request ID must be 1..=64 ASCII letters, digits, hyphens or underscores");
+        for pin in [&self.project_sha256, &self.input_sha256, &self.candidate_input_sha256] {
+            ensure!(pin.len() == 64
+                && pin.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                "installation request hashes must be lowercase SHA-256 digests");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +165,10 @@ pub(crate) struct Journal {
     schema_version: String,
     session: String,
     records: Vec<Record>,
+    // Omission preserves every historical v1/v2/v3 journal digest. Old readers
+    // reject v4 rather than recovering without understanding request identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request: Option<InstallRequest>,
 }
 
 struct Contents {
@@ -107,6 +179,7 @@ struct Contents {
 /// Owns the lock through recovery, planning and installation. Keep this guard
 /// alive while producing the plan, not merely while writing its last file.
 pub struct RewriteTransaction {
+    project: PathBuf,
     root: File,
     backups: File,
     store: File,
@@ -391,6 +464,7 @@ impl RewriteTransaction {
         flock(&lock, FlockOperation::NonBlockingLockExclusive)
             .context("another rewrite transaction holds the project lock")?;
         let transaction = Self {
+            project,
             root,
             backups,
             store,
@@ -414,7 +488,8 @@ impl RewriteTransaction {
         ensure!(
             journal.schema_version == JOURNAL_VERSION
                 || journal.schema_version == VERSIONED_JOURNAL_VERSION
-                || journal.schema_version == creations::JOURNAL_VERSION,
+                || journal.schema_version == creations::JOURNAL_VERSION
+                || journal.schema_version == REQUEST_JOURNAL_VERSION,
             "unsupported rewrite transaction schema"
         );
         ensure!(
@@ -426,8 +501,18 @@ impl RewriteTransaction {
                     .all(|b| b.is_ascii_alphanumeric() || b == b'-'),
             "invalid rewrite session"
         );
+        if journal.schema_version == REQUEST_JOURNAL_VERSION {
+            let request = journal.request.as_ref().context("request journal is missing its binding")?;
+            request.validate()?;
+            ensure!(journal.session == request.transaction_id(), "request journal slot differs from its binding");
+            ensure!(!journal.records.is_empty() || request.input_sha256 == request.candidate_input_sha256,
+                "an unchanged request must bind identical captures");
+        } else {
+            ensure!(journal.request.is_none(), "request bindings require the request journal schema");
+        }
         ensure!(
-            !journal.records.is_empty() && journal.records.len() <= MAX_EDITS,
+            (!journal.records.is_empty() || journal.schema_version == REQUEST_JOURNAL_VERSION)
+                && journal.records.len() <= MAX_EDITS,
             "invalid rewrite journal count"
         );
         let mut paths = BTreeSet::new();
@@ -437,7 +522,8 @@ impl RewriteTransaction {
             ensure!(paths.insert(&record.path), "duplicate rewrite target");
             if record.created {
                 ensure!(
-                    journal.schema_version == creations::JOURNAL_VERSION
+                    (journal.schema_version == creations::JOURNAL_VERSION
+                        || journal.schema_version == REQUEST_JOURNAL_VERSION)
                         && record.before_bytes == 0
                         && record.before_sha256 == digest(b"")
                         && record.mode & 0o400 != 0,
@@ -489,18 +575,29 @@ impl RewriteTransaction {
         creations: &[CreateFile<'_>],
         schema: &str,
     ) -> Result<Journal> {
+        self.prepare_bound_changes(edits, creations, schema, None)
+    }
+
+    fn prepare_bound_changes(
+        &self,
+        edits: &[Edit<'_>],
+        creations: &[CreateFile<'_>],
+        schema: &str,
+        request: Option<&InstallRequest>,
+    ) -> Result<Journal> {
         let count = edits.len().checked_add(creations.len()).context("rewrite count overflow")?;
         ensure!(
-            count > 0 && count <= MAX_EDITS,
+            (count > 0 || request.is_some()) && count <= MAX_EDITS,
             "rewrite plan entry limit exceeded"
         );
-        ensure!(creations.is_empty() || schema == creations::JOURNAL_VERSION,
+        ensure!(creations.is_empty() || schema == creations::JOURNAL_VERSION || schema == REQUEST_JOURNAL_VERSION,
             "new files require the creation journal schema");
         let versioned = schema != JOURNAL_VERSION;
         let mut journal = Journal {
             schema_version: schema.into(),
-            session: unique_name("txn"),
+            session: request.map_or_else(|| unique_name("txn"), InstallRequest::transaction_id),
             records: Vec::new(),
+            request: request.cloned(),
         };
         let mut total = 0_usize;
         let mut paths = BTreeSet::new();
@@ -654,7 +751,7 @@ impl RewriteTransaction {
                 let (parent, name) = parent_and_name(&self.backups, &record.path, false)?;
                 read_required(&parent, &name, MAX_FILE_BYTES)
             }
-            VERSIONED_JOURNAL_VERSION | creations::JOURNAL_VERSION => {
+            VERSIONED_JOURNAL_VERSION | creations::JOURNAL_VERSION | REQUEST_JOURNAL_VERSION => {
                 let session = directory(&self.store, Path::new(&journal.session), false)?;
                 let image = read_required(&session, OsStr::new(&format!("{index}.before")), MAX_FILE_BYTES)?;
                 ensure!(image.metadata.mode() & 0o7777 == 0o600,
@@ -851,6 +948,25 @@ impl RewriteTransaction {
         }
         let journal = self.prepare_with_preimages(edits, true)?;
         self.apply_prepared(journal)
+    }
+
+    /// Record and install one previously unseen reviewed request. Callers own
+    /// live validation and hold this lock through it. Replays use inspect_request
+    /// instead: this method never treats an old record as a new apply. A named
+    /// unchanged plan gets a zero-file journal so its outcome is discoverable.
+    pub fn apply_for_request(
+        &self,
+        request: &InstallRequest,
+        edits: &[Edit<'_>],
+        creations: &[CreateFile<'_>],
+    ) -> Result<AppliedRewrite> {
+        request.check_project(&self.project)?;
+        ensure!(rollback::lookup_request(self, request)?.is_none(),
+            "installation request already has a recorded outcome; inspect it instead of applying again");
+        ensure!(read_optional(&self.store, OsStr::new(PENDING), MAX_JOURNAL_BYTES)?.is_none(),
+            "unfinished rewrite requires explicit recovery before a named installation");
+        let journal = self.prepare_bound_changes(edits, creations, REQUEST_JOURNAL_VERSION, Some(request))?;
+        self.apply_prepared(journal)?.context("named installation did not return its journal identity")
     }
 
     fn apply_prepared(&self, journal: Journal) -> Result<Option<AppliedRewrite>> {
@@ -1653,5 +1769,217 @@ mod versioned_preimage_tests {
         fs::write(&path, raw).unwrap();
         assert_eq!(restore(root.path(), &second).status, rollback::RollbackStatus::RolledBack);
         sources(root.path(), b"a1", b"b1");
+    }
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use rollback::{RollbackStatus, TransactionState};
+
+    fn project() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("app.cjs"), b"before").unwrap();
+        root
+    }
+
+    fn request(root: &Path, id: &str) -> InstallRequest {
+        InstallRequest::new(root, id, &"a".repeat(64), &"b".repeat(64)).unwrap()
+    }
+
+    fn edits() -> [Edit<'static>; 1] {
+        [Edit { path: "app.cjs", before: b"before", after: b"after" }]
+    }
+
+    fn session(root: &Path, request: &InstallRequest) -> PathBuf {
+        root.join(".migrate-backup").join(STORE).join(request.transaction_id())
+    }
+
+    #[test]
+    fn request_validation_and_unused_lookup_never_create_metadata() {
+        let root = project();
+        for id in ["", "../escape", "has space", "line\n", "nonascii-\u{03b1}"] {
+            assert!(InstallRequest::new(root.path(), id, &"a".repeat(64), &"b".repeat(64)).is_err());
+        }
+        assert!(InstallRequest::new(root.path(), &"x".repeat(65), &"a".repeat(64), &"b".repeat(64)).is_err());
+        for hash in ["a".repeat(63), "a".repeat(65), "A".repeat(64), "g".repeat(64)] {
+            assert!(InstallRequest::new(root.path(), "valid", &hash, &"b".repeat(64)).is_err());
+        }
+        let request = request(root.path(), "Pipeline_07-build-2");
+        assert!(rollback::inspect_request(root.path(), &request).unwrap().is_none());
+        assert!(!root.path().join(".migrate-backup").exists());
+        assert_eq!(request.transaction_id().len(), 76);
+        assert_eq!(serde_json::from_slice::<InstallRequest>(&serde_json::to_vec(&request).unwrap()).unwrap(), request);
+    }
+
+    #[test]
+    fn recorded_request_is_exact_history_not_authority_to_repeat_or_certify_sources() {
+        let root = project();
+        let request = request(root.path(), "deployment-17");
+        let receipt = RewriteTransaction::open_without_recovery(root.path()).unwrap()
+            .apply_for_request(&request, &edits(), &[]).unwrap();
+        let raw = fs::read(session(root.path(), &request).join("applied.json")).unwrap();
+        let journal: Journal = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(journal.schema_version, REQUEST_JOURNAL_VERSION);
+        assert_eq!(journal.request.as_ref(), Some(&request));
+        assert_eq!(receipt.transaction_id, request.transaction_id());
+        assert_eq!(receipt.journal_sha256, digest(&serde_json::to_vec(&journal).unwrap()));
+        fs::write(root.path().join("app.cjs"), b"later user work").unwrap();
+        let found = rollback::inspect_request(root.path(), &request).unwrap().unwrap();
+        assert_eq!(found.state, TransactionState::Applied);
+        assert_eq!(found.journal_sha256, receipt.journal_sha256);
+        let writer = RewriteTransaction::open_without_recovery(root.path()).unwrap();
+        assert!(writer.apply_for_request(&request, &edits(), &[]).is_err());
+        assert!(rollback::inspect_request(root.path(), &request).is_err()); // real lock
+        drop(writer);
+        assert_eq!(fs::read(root.path().join("app.cjs")).unwrap(), b"later user work");
+        assert_eq!(fs::read(session(root.path(), &request).join("applied.json")).unwrap(), raw);
+    }
+
+    #[test]
+    fn request_id_reuse_with_different_pins_or_project_never_selects_new_work() {
+        let root = project();
+        let original = request(root.path(), "same-id");
+        RewriteTransaction::open_without_recovery(root.path()).unwrap()
+            .apply_for_request(&original, &edits(), &[]).unwrap();
+        for (input, candidate) in [("b", "a"), ("a", "c")] {
+            let changed = InstallRequest::new(root.path(), "same-id", &input.repeat(64), &candidate.repeat(64)).unwrap();
+            assert_eq!(changed.transaction_id(), original.transaction_id());
+            assert!(rollback::inspect_request(root.path(), &changed).is_err());
+        }
+        let other = project();
+        assert!(rollback::inspect_request(other.path(), &original).is_err());
+        assert!(!other.path().join(".migrate-backup").exists());
+        assert!(RewriteTransaction::open_without_recovery(other.path()).unwrap()
+            .apply_for_request(&original, &edits(), &[]).is_err());
+        assert_eq!(fs::read(other.path().join("app.cjs")).unwrap(), b"before");
+        assert_eq!(fs::read(root.path().join("app.cjs")).unwrap(), b"after");
+    }
+
+    #[test]
+    fn named_noop_is_durable_and_cannot_hide_a_nonidentical_capture() {
+        let root = project();
+        let invalid = request(root.path(), "invalid-noop");
+        let writer = RewriteTransaction::open_without_recovery(root.path()).unwrap();
+        assert!(writer.apply_for_request(&invalid, &[], &[]).is_err());
+        assert!(!session(root.path(), &invalid).exists());
+        let request = InstallRequest::new(root.path(), "noop", &"a".repeat(64), &"a".repeat(64)).unwrap();
+        let receipt = writer.apply_for_request(&request, &[], &[]).unwrap();
+        assert_eq!(receipt.files, 0);
+        drop(writer);
+        assert_eq!(rollback::inspect_request(root.path(), &request).unwrap().unwrap().state, TransactionState::Applied);
+        assert_eq!(rollback::run_pinned(root.path(), &receipt.transaction_id, &receipt.journal_sha256, true).status,
+            RollbackStatus::RolledBack);
+        assert_eq!(rollback::inspect_request(root.path(), &request).unwrap().unwrap().state, TransactionState::RolledBack);
+        assert_eq!(fs::read(root.path().join("app.cjs")).unwrap(), b"before");
+    }
+
+    #[test]
+    fn rolled_back_request_remains_consumed_and_preserves_later_work() {
+        let root = project();
+        let request = request(root.path(), "mixed-install");
+        let receipt = RewriteTransaction::open_without_recovery(root.path()).unwrap()
+            .apply_for_request(&request, &edits(), &[CreateFile { path: "helper.cjs", after: b"new", mode: 0o640 }])
+            .unwrap();
+        assert_eq!(receipt.files, 2);
+        assert_eq!(rollback::run_pinned(root.path(), &receipt.transaction_id, &receipt.journal_sha256, true).status,
+            RollbackStatus::RolledBack);
+        assert!(!root.path().join("helper.cjs").exists());
+        assert_eq!(fs::read(session(root.path(), &request).join("1.retired")).unwrap(), b"new");
+        fs::write(root.path().join("helper.cjs"), b"later helper").unwrap();
+        let found = rollback::inspect_request(root.path(), &request).unwrap().unwrap();
+        assert_eq!(found.state, TransactionState::RolledBack);
+        assert!(RewriteTransaction::open_without_recovery(root.path()).unwrap()
+            .apply_for_request(&request, &edits(), &[]).is_err());
+        assert_eq!(fs::read(root.path().join("helper.cjs")).unwrap(), b"later helper");
+        assert_eq!(fs::read(root.path().join("app.cjs")).unwrap(), b"before");
+    }
+
+    #[test]
+    fn incomplete_staging_and_substituted_bindings_fail_closed_without_recovery() {
+        let root = project();
+        let request = request(root.path(), "incomplete");
+        let writer = RewriteTransaction::open_without_recovery(root.path()).unwrap();
+        fs::create_dir(session(root.path(), &request)).unwrap();
+        assert!(writer.apply_for_request(&request, &edits(), &[]).is_err());
+        drop(writer);
+        assert!(rollback::inspect_request(root.path(), &request).is_err());
+        assert_eq!(fs::read(root.path().join("app.cjs")).unwrap(), b"before");
+        let request = InstallRequest::new(root.path(), "complete", &"a".repeat(64), &"b".repeat(64)).unwrap();
+        RewriteTransaction::open_without_recovery(root.path()).unwrap()
+            .apply_for_request(&request, &edits(), &[]).unwrap();
+        let path = session(root.path(), &request).join("applied.json");
+        let mut journal: Journal = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        journal.request.as_mut().unwrap().candidate_input_sha256 = "c".repeat(64);
+        fs::write(&path, serde_json::to_vec(&journal).unwrap()).unwrap();
+        assert!(rollback::inspect_request(root.path(), &request).is_err());
+        assert_eq!(fs::read(root.path().join("app.cjs")).unwrap(), b"after");
+    }
+
+    #[test]
+    fn request_schema_is_mandatory_and_old_journal_bytes_are_unchanged() {
+        let root = project();
+        let writer = RewriteTransaction::open(root.path()).unwrap();
+        let journal = writer.prepare(&edits()).unwrap();
+        let encoded = serde_json::to_vec(&journal).unwrap();
+        let raw: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert!(raw.get("request").is_none());
+        assert_eq!(encoded, serde_json::to_vec(&serde_json::from_slice::<Journal>(&encoded).unwrap()).unwrap());
+        let request = request(root.path(), "schema");
+        let mut changed = journal;
+        changed.request = Some(request.clone());
+        for schema in [JOURNAL_VERSION, VERSIONED_JOURNAL_VERSION, creations::JOURNAL_VERSION] {
+            changed.schema_version = schema.into();
+            assert!(RewriteTransaction::validate_journal(&changed).is_err());
+        }
+        changed.schema_version = REQUEST_JOURNAL_VERSION.into();
+        assert!(RewriteTransaction::validate_journal(&changed).is_err()); // old random slot
+        changed.session = request.transaction_id();
+        RewriteTransaction::validate_journal(&changed).unwrap();
+        changed.request = None;
+        assert!(RewriteTransaction::validate_journal(&changed).is_err());
+    }
+
+    #[test]
+    fn process_exit_before_and_after_commit_keeps_the_request_bound_to_one_journal() {
+        const ROOT: &str = "FRANKEN_REQUEST_CRASH_ROOT";
+        const STEP: &str = "FRANKEN_REQUEST_CRASH_STEP";
+        if let Some(root) = std::env::var_os(ROOT) {
+            let root = PathBuf::from(root);
+            let request = request(&root, "crash-case");
+            let writer = RewriteTransaction::open_without_recovery(&root).unwrap();
+            let journal = writer.prepare_bound_changes(&edits(),
+                &[CreateFile { path: "helper.cjs", after: b"helper", mode: 0o600 }],
+                REQUEST_JOURNAL_VERSION, Some(&request)).unwrap();
+            let step: usize = std::env::var(STEP).unwrap().parse().unwrap();
+            if step == 3 {
+                writer.apply_prepared(journal).unwrap();
+            } else {
+                for index in 0..step { writer.install(&journal, index).unwrap(); }
+            }
+            std::process::exit(73); // no destructors and no stdout delivery
+        }
+        let module = module_path!().split_once("::").map_or(module_path!(), |(_, m)| m);
+        let test = format!("{module}::process_exit_before_and_after_commit_keeps_the_request_bound_to_one_journal");
+        for step in 0..=3 {
+            let root = project();
+            let request = request(root.path(), "crash-case");
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test]).env(ROOT, root.path()).env(STEP, step.to_string())
+                .output().unwrap();
+            assert_eq!(child.status.code(), Some(73), "{}", String::from_utf8_lossy(&child.stderr));
+            let found = rollback::inspect_request(root.path(), &request).unwrap().unwrap();
+            assert_eq!(found.state, if step == 3 { TransactionState::Applied } else { TransactionState::ApplyInterrupted });
+            assert_eq!(found.transaction_id, request.transaction_id());
+            // Inspection cannot implicitly finish or undo an interrupted apply.
+            assert_eq!(fs::read(root.path().join("app.cjs")).unwrap(), if step == 0 { b"before".as_slice() } else { b"after" });
+            assert_eq!(rollback::run_pinned(root.path(), &found.transaction_id, &found.journal_sha256, true).status,
+                RollbackStatus::RolledBack);
+            assert_eq!(fs::read(root.path().join("app.cjs")).unwrap(), b"before");
+            assert!(!root.path().join("helper.cjs").exists());
+            assert_eq!(rollback::inspect_request(root.path(), &request).unwrap().unwrap().state, TransactionState::RolledBack);
+        }
     }
 }
