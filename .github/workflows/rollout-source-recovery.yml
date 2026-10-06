@@ -142,6 +142,13 @@ jobs:
           cargo +stable test --manifest-path tools/migration-validator/Cargo.toml --bin franken-migration-apply reviewed_directory_tests:: -- --nocapture --test-threads=2 2>&1 | tee evidence/reviewed-candidate-tests.log
           cargo +stable test --manifest-path tools/migration-validator/Cargo.toml --bin franken-migration-apply rewrite_transaction:: -- --nocapture --test-threads=2 2>&1 | tee evidence/reviewed-transaction-tests.log
           cargo +stable clippy --manifest-path tools/migration-validator/Cargo.toml --bin franken-migration-apply -- -D warnings 2>&1 | tee evidence/reviewed-installation-clippy.log
+      - name: Exercise cooperative cancellation and real operator signals
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          cargo +stable test --manifest-path tools/migration-validator/Cargo.toml --bin franken-migration-apply cancel -- --nocapture --test-threads=2 2>&1 | tee evidence/migration-cancellation-tests.log
       - name: Retain exact source and recovery execution evidence
         if: always()
         uses: actions/upload-artifact@v4

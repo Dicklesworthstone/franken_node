@@ -229,3 +229,60 @@ is not an OS sandbox or a globally atomic snapshot. No fleet traffic is moved,
 no live services are stopped, and no external side effects are rolled back.
 The report always sets `release_certification: false`; no compatibility-corpus,
 production-safety or migration-throughput KPI follows from installing one suite.
+
+## Cancelling reviewed installation
+
+The Linux `apply` command handles Ctrl-C/SIGINT, SIGTERM and SIGHUP as a sticky
+cancellation request. No additional flag is required. Signal setup happens
+before capture, writer initialization or project execution; a conflicting
+existing handler is an error, not permission to overwrite it. The handler only
+sets the operation's shared atomic token. Inspection does not register a handler.
+
+Before installation, cancellation stops active owned runtime process groups,
+closes their pipes and reaps their leaders through the existing supervisor.
+All started case workers are joined. Later runtime legs and cases do not launch
+once they observe the request. Completed observations remain in the report;
+interrupted product validation is `ERROR`, not a native `FAIL`, passing evidence
+or automatic source-restoration authorization. A signal after validation has
+finished is checked again before the writer can install its captured plan.
+
+The JSON report adds `cancellation_requested` and `installation_started`:
+
+| Cancellation observation | Result |
+|---|---|
+| Before the final installation boundary | `status: "CANCELLED"`, `installation_started: false`, no source transaction, exit 130. |
+| After entering the journaled writer | Preserve the actual `APPLIED`, `UNCHANGED` or `ERROR` result and any transaction receipt; `installation_started: true`, `cancellation_requested: true`, exit 130. |
+| No request observed | Existing success/error status and exit behavior, with `cancellation_requested: false`. |
+
+`installation_started` means the native writer was entered. It is not a claim
+that files changed or that installation succeeded. An empty admitted plan may
+return `UNCHANGED`. **Exit 130 does not mean that installation did not happen.**
+Always inspect the structured status and returned transaction identity. When
+stdout is lost or an I/O error leaves the outcome uncertain, inspect retained
+journals rather than assuming that a retry is safe or that rollback occurred.
+
+The final successful token check is the commit boundary. After that check,
+cooperative signals are deferred through the existing journaled installation,
+durability barriers and any failure recovery. There are no new cancellation
+returns inside the writer. Repeated signals do not bypass this shield or reset
+the token. SIGKILL, process crashes and power loss still require the existing
+interrupted-transaction recovery protocol; cooperative cancellation is not an
+atomic multi-file transaction or a guarantee against abrupt termination.
+
+Cancellation is checked between capture/preparation phases and between bounded
+process-I/O polling rounds. Existing execution and cleanup budgets remain in
+force, but cancellation cannot instantly interrupt blocking kernel filesystem
+or report-output I/O or synchronous capture work. No hard cancellation-latency
+bound is claimed.
+A cancelled pre-install operation can leave expected initialized lock metadata;
+it does not install the reviewed changes. Guest ambient/external effects are
+not undone, and escaped process-group descendants remain outside the cleanup
+guarantee. Cancellation does not add an OS sandbox.
+
+Library callers can pass their own per-operation `product_oracle::CancellationToken`
+to `RewriteCandidate::validate_product_cancellable`. Tokens are independent by
+default; cloned tokens share a one-way request. The library does not install
+signal handlers or infer cancellation from a manifest, report or environment.
+Existing non-cancellable entrypoints retain their behavior. This integration
+covers the reviewed installer, not signal handling for every other migration,
+attestation, replay, rollout or fleet command.

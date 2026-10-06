@@ -57,7 +57,10 @@ mod linux {
     use std::path::Path;
     use std::time::{Duration, Instant};
     use rewrite_transaction::{AppliedRewrite, CreateFile, Edit, RewriteTransaction};
-    use validation_suite::{product_oracle::ProductReport, rewrite_candidate::RewriteCandidate};
+    use validation_suite::{
+        product_oracle::{CancellationToken, ProductReport},
+        rewrite_candidate::RewriteCandidate,
+    };
 
     #[derive(Debug, Serialize)]
     pub(super) struct Report {
@@ -70,6 +73,10 @@ mod linux {
         tests: Vec<PathBuf>,
         changes: Vec<Change>,
         execution_attempted: bool,
+        cancellation_requested: bool,
+        /// The journaled writer was entered, not proof that a file changed or
+        /// that installation completed. Never infer no writes from exit 130.
+        installation_started: bool,
         release_certification: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         validation: Option<ProductReport>,
@@ -147,6 +154,7 @@ mod linux {
             input_sha256: capture.input_sha256().into(), candidate_input_sha256,
             tests: capture.test_inventory()?, changes: descriptions,
             execution_attempted: false, release_certification: false,
+            cancellation_requested: false, installation_started: false,
             validation: None, source_transaction: None, errors: Vec::new(),
         };
         Ok(Prepared { capture, report, deadline })
@@ -177,18 +185,29 @@ mod linux {
         Ok((writer, initialized))
     }
 
+    #[cfg(test)]
     fn apply(project: &Path, candidate: &Path, pins: (&str, &str), native: &Path, bun: &Path, execute: bool) -> Result<Report> {
+        apply_controlled(project, candidate, pins, native, bun, execute, &CancellationToken::default())
+    }
+
+    fn apply_controlled(
+        project: &Path, candidate: &Path, pins: (&str, &str), native: &Path,
+        bun: &Path, execute: bool, cancellation: &CancellationToken,
+    ) -> Result<Report> {
         ensure!(execute, "--execute is required before running project code");
+        cancellation.check()?;
         // Reject stale/unsupported approvals BEFORE opening the writer, and do
         // not implicitly recover an unrelated transaction merely to validate.
         let Prepared { capture, mut report, deadline } = prepare(project, candidate, Some(pins))?;
+        cancellation.check()?;
         let (writer, initialized) = initialize_writer(&capture, &report.project, deadline)?;
         capture.ensure_candidate_source_unchanged()?;
         report.status = "ERROR";
         let operation = (|| -> Result<()> {
+            cancellation.check()?;
             // One execution path, no imported PASS, fallback or hidden retry.
             report.execution_attempted = true;
-            let measured = capture.validate_product(native, bun)?;
+            let measured = capture.validate_product_cancellable(native, bun, cancellation)?;
             let admission = capture.check_product_validation(&measured).and_then(|()| {
                 ensure!(measured.native_runtime.sha256 != measured.node_runtime.sha256
                     && measured.native_runtime.sha256 != measured.bun_runtime.sha256,
@@ -197,44 +216,78 @@ mod linux {
             });
             report.status = if measured.verdict == "ERROR" { "ERROR" } else { "REJECTED" };
             report.validation = Some(measured);
+            cancellation.check()?;
             if let Err(error) = admission {
                 report.errors.push(format!("candidate refused; sources not installed: {error:#}"));
                 return Ok(());
             }
             report.status = "ERROR";
             initialized.ensure_source_unchanged()?;
+            cancellation.check()?;
             capture.ensure_candidate_source_unchanged()?;
-            let changes = capture.changes()?;
-            let edits: Vec<_> = changes.replacements.iter().map(|edit| Edit {
-                path: edit.path, before: edit.before, after: edit.after,
-            }).collect();
-            let creations: Vec<_> = changes.additions.iter().map(|addition| CreateFile {
-                path: addition.path, after: addition.after, mode: addition.mode,
-            }).collect();
-            // Each reviewed installation owns its immediate preimages. A
-            // second migration must not conflict with or replace the first
-            // migration's immutable originals; both remain independently
-            // recoverable through the same pinned native rollback protocol.
-            report.source_transaction = writer.apply_with_creations_receipt(&edits, &creations)?;
-            report.status = if report.source_transaction.is_some() { "APPLIED" } else { "UNCHANGED" };
-            Ok(())
+            install_candidate(&writer, &capture, &mut report, cancellation)
         })();
         if let Err(error) = operation {
             report.errors.push(format!("{error:#}"));
         }
+        record_cancellation(&mut report, cancellation);
         Ok(report)
     }
 
-    pub(super) fn run(args: Args) -> Result<Report> {
+    /// The final successful cancellation check is the commit boundary. After
+    /// it, defer cooperative signals through the existing durable native writer
+    /// (including its recovery on failure); never inject an early return into
+    /// write-ahead publication, live installation or restoration. An abrupt
+    /// process/kernel failure still uses the retained native recovery protocol.
+    fn install_candidate(
+        writer: &RewriteTransaction, capture: &RewriteCandidate,
+        report: &mut Report, cancellation: &CancellationToken,
+    ) -> Result<()> {
+        let changes = capture.changes()?;
+        let edits: Vec<_> = changes.replacements.iter().map(|edit| Edit {
+            path: edit.path, before: edit.before, after: edit.after,
+        }).collect();
+        let creations: Vec<_> = changes.additions.iter().map(|addition| CreateFile {
+            path: addition.path, after: addition.after, mode: addition.mode,
+        }).collect();
+        cancellation.check()?;
+        report.installation_started = true;
+        // This call owns exact per-generation originals and returns the actual
+        // journal identity. No cancellation checks are added inside the writer.
+        report.source_transaction = writer.apply_with_creations_receipt(&edits, &creations)?;
+        report.status = if report.source_transaction.is_some() { "APPLIED" } else { "UNCHANGED" };
+        Ok(())
+    }
+
+    fn record_cancellation(report: &mut Report, cancellation: &CancellationToken) {
+        report.cancellation_requested = cancellation.is_cancelled();
+        if report.cancellation_requested && !report.installation_started {
+            report.status = "CANCELLED";
+        }
+        // After the boundary, preserve APPLIED/UNCHANGED/ERROR and any journal
+        // receipt. A cancellation flag is not a claim of restored source state.
+    }
+
+    pub(super) fn install_signal_handler(cancellation: &CancellationToken) -> Result<()> {
+        let cancellation = cancellation.clone();
+        ctrlc::try_set_handler(move || cancellation.cancel())
+            .context("cannot install migration cancellation handler; refusing execution")
+    }
+
+    pub(super) fn run(args: Args, cancellation: &CancellationToken) -> Result<Report> {
         match args.action {
             Action::Inspect { project, candidate } => Ok(prepare(&project, &candidate, None)?.report),
             Action::Apply { project, candidate, expected_input_sha256, expected_candidate_input_sha256, native_bin, bun_bin, execute } =>
-                apply(&project, &candidate, (&expected_input_sha256, &expected_candidate_input_sha256), &native_bin, &bun_bin, execute),
+                apply_controlled(&project, &candidate, (&expected_input_sha256, &expected_candidate_input_sha256), &native_bin, &bun_bin, execute, cancellation),
         }
     }
 
     pub(super) fn success(report: &Report) -> bool {
-        matches!(report.status, "INSPECTED" | "APPLIED" | "UNCHANGED")
+        !report.cancellation_requested && matches!(report.status, "INSPECTED" | "APPLIED" | "UNCHANGED")
+    }
+
+    pub(super) fn exit_code(report: &Report) -> u8 {
+        if report.cancellation_requested { 130 } else if success(report) { 0 } else { 1 }
     }
 
     #[cfg(test)]
@@ -396,6 +449,235 @@ mod linux {
             assert!(Args::try_parse_from(&args).is_err());
             args.push("--execute");
             assert!(Args::try_parse_from(&args).is_ok());
+        }
+
+        #[test]
+        fn precancelled_apply_and_candidate_validation_do_not_open_a_writer() {
+            let (_root, original, candidate) = pair();
+            let prepared = prepare(&original, &candidate, None).unwrap();
+            let cancellation = CancellationToken::default();
+            cancellation.cancel();
+            let error = apply_controlled(&original, &candidate,
+                (&prepared.report.input_sha256, &prepared.report.candidate_input_sha256),
+                Path::new("/missing-native"), Path::new("/missing-bun"), true, &cancellation)
+                .unwrap_err();
+            assert!(error.to_string().contains("MIGRATION_CANCELLED"));
+            let error = prepared.capture.validate_product_cancellable(
+                Path::new("/missing-native"), Path::new("/missing-bun"), &cancellation)
+                .unwrap_err();
+            assert!(error.to_string().contains("MIGRATION_CANCELLED"));
+            assert!(!original.join(".migrate-backup").exists());
+            assert!(!candidate.join(".migrate-backup").exists());
+            prepared.capture.ensure_source_unchanged().unwrap();
+        }
+
+        fn waiting_native(root: &Path) -> PathBuf {
+            let native = root.join("waiting-native");
+            let ready = root.join("native-ready");
+            // A controlled shell process is a lifecycle fixture, not a native
+            // engine. The original Node and /bin/true legs emit no output.
+            fs::write(&native, format!(
+                "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nexec /bin/sleep 30\n",
+                ready.display())).unwrap();
+            fs::set_permissions(&native, fs::Permissions::from_mode(0o700)).unwrap();
+            native
+        }
+
+        fn wait_ready(path: &Path) -> bool {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            // Opening the marker precedes writing its PID. Do not cancel in
+            // that gap and then mistake an empty marker for a cleanup defect.
+            let observed = || fs::read_to_string(path).ok()
+                .and_then(|raw| raw.parse::<u32>().ok()).is_some_and(|pid| pid > 1);
+            while !observed() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            observed()
+        }
+
+        #[test]
+        fn cancellation_during_native_execution_preserves_references_and_refuses_all_changes() {
+            let (root, original, candidate) = pair();
+            fs::write(candidate.join("helper.cjs"), b"new helper").unwrap();
+            let native = waiting_native(root.path());
+            let ready = root.path().join("native-ready");
+            let prepared = prepare(&original, &candidate, None).unwrap();
+            let cancellation = CancellationToken::default();
+            let report = std::thread::scope(|scope| {
+                let cancellation = &cancellation;
+                let ready = &ready;
+                let trigger = scope.spawn(move || {
+                    let observed = wait_ready(ready);
+                    cancellation.cancel();
+                    assert!(observed, "native fixture never reached cancellation barrier");
+                });
+                let report = apply_controlled(&original, &candidate,
+                    (&prepared.report.input_sha256, &prepared.report.candidate_input_sha256),
+                    &native, Path::new("/bin/true"), true, cancellation).unwrap();
+                trigger.join().unwrap();
+                report
+            });
+            assert_eq!(report.status, "CANCELLED", "{report:?}");
+            assert_eq!(exit_code(&report), 130);
+            assert!(report.cancellation_requested && report.execution_attempted);
+            assert!(!report.installation_started && report.source_transaction.is_none());
+            let measured = report.validation.as_ref().unwrap();
+            assert_eq!(measured.verdict, "ERROR");
+            assert_eq!(measured.native_divergences, 0);
+            assert!(measured.cases[0].node.is_some() && measured.cases[0].bun.is_some());
+            assert!(measured.cases[0].native.is_none());
+            assert!(!original.join("helper.cjs").exists());
+            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), b"globalThis.answer = 40 + 2;\n");
+            let history = rewrite_transaction::rollback::run(&original, None, false);
+            assert!(history.history.is_empty() && history.pending_transaction_id.is_none());
+            // The exclusive owner reaped its child before the report escaped.
+            let pid: u32 = fs::read_to_string(ready).unwrap().parse().unwrap();
+            assert!(!PathBuf::from(format!("/proc/{pid}")).exists());
+        }
+
+        #[test]
+        fn cancellation_after_live_passing_evidence_still_blocks_writer_entry() {
+            let (root, original, candidate) = pair();
+            fs::write(candidate.join("helper.cjs"), b"new helper").unwrap();
+            let Prepared { capture, mut report, deadline } = prepare(&original, &candidate, None).unwrap();
+            let (writer, initialized) = initialize_writer(&capture, &original, deadline).unwrap();
+            let cancellation = CancellationToken::default();
+            let measured = capture.validate_product_cancellable(
+                &controlled_native(root.path()), Path::new("/bin/true"), &cancellation).unwrap();
+            capture.check_product_validation(&measured).unwrap();
+            assert_eq!(measured.verdict, "PASS");
+            report.validation = Some(measured);
+            initialized.ensure_source_unchanged().unwrap();
+            capture.ensure_candidate_source_unchanged().unwrap();
+            cancellation.cancel();
+            let error = install_candidate(&writer, &capture, &mut report, &cancellation).unwrap_err();
+            assert!(error.to_string().contains("MIGRATION_CANCELLED"));
+            record_cancellation(&mut report, &cancellation);
+            assert_eq!(report.status, "CANCELLED");
+            assert_eq!(exit_code(&report), 130);
+            assert!(!report.installation_started && report.source_transaction.is_none());
+            assert!(!original.join("helper.cjs").exists());
+            assert_eq!(fs::read_dir(original.join(".migrate-backup/.franken-rewrite")).unwrap().count(), 1);
+            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), b"globalThis.answer = 40 + 2;\n");
+        }
+
+        #[test]
+        fn cancellation_observed_after_commit_preserves_applied_status_and_exact_recovery_receipt() {
+            let (root, original, candidate) = pair();
+            fs::write(candidate.join("helper.cjs"), b"retained creation").unwrap();
+            let Prepared { capture, mut report, deadline } = prepare(&original, &candidate, None).unwrap();
+            let (writer, initialized) = initialize_writer(&capture, &original, deadline).unwrap();
+            let cancellation = CancellationToken::default();
+            let measured = capture.validate_product_cancellable(
+                &controlled_native(root.path()), Path::new("/bin/true"), &cancellation).unwrap();
+            capture.check_product_validation(&measured).unwrap();
+            report.validation = Some(measured);
+            initialized.ensure_source_unchanged().unwrap();
+            capture.ensure_candidate_source_unchanged().unwrap();
+            install_candidate(&writer, &capture, &mut report, &cancellation).unwrap();
+            cancellation.cancel();
+            record_cancellation(&mut report, &cancellation);
+            assert_eq!(report.status, "APPLIED");
+            assert!(report.installation_started && report.cancellation_requested);
+            assert_eq!(exit_code(&report), 130);
+            assert!(!success(&report));
+            assert_eq!(fs::read(original.join("helper.cjs")).unwrap(), b"retained creation");
+            let receipt = report.source_transaction.unwrap();
+            drop(writer);
+            assert_eq!(restore(&original, &receipt).status, rewrite_transaction::rollback::RollbackStatus::RolledBack);
+            assert!(!original.join("helper.cjs").exists());
+            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), b"globalThis.answer = 40 + 2;\n");
+            assert!(receipt_directory(&original, &receipt).join("rolled-back.json").exists());
+        }
+
+        const SIGNAL_CHILD_ROOT: &str = "FRANKEN_MIGRATION_SIGNAL_TEST_ROOT";
+
+        fn signal_child(test: &str, root: &Path) -> std::process::Command {
+            let module = module_path!().split_once("::").map_or("", |(_, module)| module);
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact", &format!("{module}::{test}"), "--nocapture"])
+                .env(SIGNAL_CHILD_ROOT, root);
+            child
+        }
+
+        #[test]
+        fn operator_signals_cancel_live_guests_without_claiming_source_restoration() {
+            use rustix::process::{Pid, Signal, kill_process};
+            if let Some(root) = std::env::var_os(SIGNAL_CHILD_ROOT) {
+                let root = PathBuf::from(root);
+                let original = root.join("original");
+                let candidate = root.join("candidate");
+                let inspected = prepare(&original, &candidate, None).unwrap().report;
+                let cancellation = CancellationToken::default();
+                install_signal_handler(&cancellation).unwrap();
+                let args = Args { action: Action::Apply {
+                    project: original, candidate,
+                    expected_input_sha256: inspected.input_sha256,
+                    expected_candidate_input_sha256: inspected.candidate_input_sha256,
+                    native_bin: root.join("waiting-native"), bun_bin: "/bin/true".into(), execute: true,
+                }};
+                let report = run(args, &cancellation).unwrap();
+                assert_eq!(report.status, "CANCELLED", "{report:?}");
+                assert!(!report.installation_started && report.source_transaction.is_none());
+                fs::write(root.join("cancelled-report.json"), serde_json::to_vec(&report).unwrap()).unwrap();
+                std::process::exit(i32::from(exit_code(&report)));
+            }
+            for signal in [Signal::INT, Signal::TERM, Signal::HUP] {
+                let (root, original, candidate) = pair();
+                fs::write(candidate.join("helper.cjs"), b"must not install").unwrap();
+                waiting_native(root.path());
+                let mut child = signal_child("operator_signals_cancel_live_guests_without_claiming_source_restoration", root.path());
+                let completion = smoke_supervisor::supervise_with_observer(
+                    &mut child, Duration::from_secs(20), Duration::from_secs(2),
+                    |pid| {
+                        ensure!(wait_ready(&root.path().join("native-ready")), "signal fixture did not start");
+                        let pid = Pid::from_raw(i32::try_from(pid)?).context("invalid child PID")?;
+                        // Signal ONLY the operator. Its separately owned native
+                        // group must be stopped by the cancellation protocol.
+                        kill_process(pid, signal)?;
+                        Ok(())
+                    }, |_, _| Ok(()),
+                ).unwrap();
+                assert_eq!(completion.reason, smoke_supervisor::StopReason::Exited);
+                assert_eq!(completion.status.code(), Some(130));
+                let report: serde_json::Value = serde_json::from_slice(
+                    &fs::read(root.path().join("cancelled-report.json")).unwrap()).unwrap();
+                assert_eq!(report["status"], "CANCELLED");
+                assert_eq!(report["cancellation_requested"], true);
+                assert_eq!(report["installation_started"], false);
+                assert_eq!(report["validation"]["verdict"], "ERROR");
+                assert!(report.get("source_transaction").is_none());
+                assert!(!original.join("helper.cjs").exists());
+                assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), b"globalThis.answer = 40 + 2;\n");
+                let pid: u32 = fs::read_to_string(root.path().join("native-ready")).unwrap().parse().unwrap();
+                assert!(!PathBuf::from(format!("/proc/{pid}")).exists());
+                assert!(rewrite_transaction::rollback::run(&original, None, false).history.is_empty());
+            }
+        }
+
+        #[test]
+        fn cancellation_handler_registration_refuses_a_second_owner() {
+            if std::env::var_os(SIGNAL_CHILD_ROOT).is_some() {
+                let first = CancellationToken::default();
+                install_signal_handler(&first).unwrap();
+                let second = CancellationToken::default();
+                assert!(install_signal_handler(&second).is_err());
+                rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::TERM).unwrap();
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while !first.is_cancelled() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                assert!(first.is_cancelled());
+                assert!(!second.is_cancelled());
+                return;
+            }
+            let root = tempfile::tempdir().unwrap();
+            let output = smoke_supervisor::run_command_with_timeout(
+                &mut signal_child("cancellation_handler_registration_refuses_a_second_owner", root.path()),
+                Duration::from_secs(5), Duration::from_secs(1),
+            ).unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert!(fs::read_dir(root.path()).unwrap().next().is_none());
         }
 
         // Controlled, byte-distinct executables exercise actual capture,
@@ -731,15 +1013,28 @@ fn main() -> ExitCode {
     let args = Args::parse();
     #[cfg(target_os = "linux")]
     {
-        let (output, success) = match linux::run(args) {
-            Ok(report) => {
-                let success = linux::success(&report);
-                (serde_json::to_value(report).expect("bounded JSON report"), success)
+        let cancellation = validation_suite::product_oracle::CancellationToken::default();
+        let result = (|| {
+            if matches!(&args.action, Action::Apply { .. }) {
+                linux::install_signal_handler(&cancellation)?;
             }
-            Err(error) => (serde_json::json!({
-                "schema_version": "franken-node/reviewed-migration-apply/v1", "status": "ERROR",
-                "release_certification": false, "errors": [format!("{error:#}")]
-            }), false),
+            linux::run(args, &cancellation)
+        })();
+        let (output, exit_code) = match result {
+            Ok(report) => {
+                let exit_code = linux::exit_code(&report);
+                (serde_json::to_value(report).expect("bounded JSON report"), exit_code)
+            }
+            Err(error) => {
+                let cancelled = cancellation.is_cancelled();
+                (serde_json::json!({
+                    "schema_version": "franken-node/reviewed-migration-apply/v1",
+                    "status": if cancelled { "CANCELLED" } else { "ERROR" },
+                    "cancellation_requested": cancelled,
+                    "installation_started": false,
+                    "release_certification": false, "errors": [format!("{error:#}")]
+                }), if cancelled { 130 } else { 1 })
+            }
         };
         // A broken output pipe after a commit is not a rollback. The retained
         // native journal remains authoritative when command output is lost.
@@ -747,7 +1042,7 @@ fn main() -> ExitCode {
             eprintln!("cannot publish migration report; inspect retained transaction history: {error}");
             return ExitCode::from(1);
         }
-        if success { ExitCode::SUCCESS } else { ExitCode::from(1) }
+        ExitCode::from(exit_code)
     }
     #[cfg(not(target_os = "linux"))]
     {
