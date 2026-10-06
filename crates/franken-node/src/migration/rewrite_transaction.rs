@@ -59,6 +59,15 @@ pub struct Edit<'a> {
     pub after: &'a [u8],
 }
 
+/// Identity of the journal that this exact writer durably applied. This is a
+/// local recovery receipt, not an authenticated validation or fleet decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppliedRewrite {
+    pub transaction_id: String,
+    pub journal_sha256: String,
+    pub files: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Record {
@@ -337,6 +346,17 @@ fn verify_image(contents: &Contents, sha256: &str, length: usize, mode: Option<u
 
 impl RewriteTransaction {
     pub fn open(project: &Path) -> Result<Self> {
+        Self::open_selected(project, true)
+    }
+
+    /// Acquire the existing writer lock without implicitly restoring sources.
+    /// Reviewed-candidate installation must not recover another operation before
+    /// its own validation. An unfinished journal requires explicit recovery.
+    pub fn open_without_recovery(project: &Path) -> Result<Self> {
+        Self::open_selected(project, false)
+    }
+
+    fn open_selected(project: &Path, recover: bool) -> Result<Self> {
         let project = project.canonicalize().context("resolve rewrite project")?;
         let root = File::from(open(
             &project,
@@ -365,9 +385,16 @@ impl RewriteTransaction {
             _lock: lock,
             dirty: Default::default(),
         };
-        transaction
-            .recover_pending()
-            .context("pending rewrite recovery failed; refusing a new apply")?;
+        if recover {
+            transaction
+                .recover_pending()
+                .context("pending rewrite recovery failed; refusing a new apply")?;
+        } else {
+            ensure!(
+                read_optional(&transaction.store, OsStr::new(PENDING), MAX_JOURNAL_BYTES)?.is_none(),
+                "unfinished rewrite requires explicit recovery before reviewed migration installation"
+            );
+        }
         Ok(transaction)
     }
 
@@ -672,10 +699,21 @@ impl RewriteTransaction {
     }
 
     pub fn apply(&self, edits: &[Edit<'_>]) -> Result<()> {
+        self.apply_with_receipt(edits).map(|_| ())
+    }
+
+    /// Return this operation's identity, never infer the newest history entry
+    /// after dropping the lock. Empty plans return None and create no journal.
+    pub fn apply_with_receipt(&self, edits: &[Edit<'_>]) -> Result<Option<AppliedRewrite>> {
         if edits.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let journal = self.prepare(edits)?;
+        let receipt = AppliedRewrite {
+            transaction_id: journal.session.clone(),
+            journal_sha256: digest(&serde_json::to_vec(&journal)?),
+            files: journal.records.len(),
+        };
         let result = (|| -> Result<()> {
             // A source may have changed while other files/backups were staged.
             // Recheck the entire plan before replacing even the first source.
@@ -713,7 +751,7 @@ impl RewriteTransaction {
                 )),
             };
         }
-        Ok(())
+        Ok(Some(receipt))
     }
 }
 
@@ -1152,5 +1190,57 @@ mod tests {
             .unwrap();
         assert!(!pending(root.path()).exists());
         assert_original(root.path());
+    }
+}
+
+#[cfg(test)]
+mod applied_receipt_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn returned_receipt_selects_exact_pinned_rollback_without_guessing_history() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("app.js"), b"original").unwrap();
+        let receipt = {
+            let writer = RewriteTransaction::open_without_recovery(root.path()).unwrap();
+            writer.apply_with_receipt(&[Edit { path: "app.js", before: b"original", after: b"candidate" }])
+                .unwrap().unwrap()
+        };
+        assert_eq!(receipt.files, 1);
+        let preview = rollback::run_pinned(root.path(), &receipt.transaction_id, &receipt.journal_sha256, false);
+        assert_eq!(preview.status, rollback::RollbackStatus::Ready);
+        assert_eq!(preview.transaction.unwrap().journal_sha256, receipt.journal_sha256);
+        let restored = rollback::run_pinned(root.path(), &receipt.transaction_id, &receipt.journal_sha256, true);
+        assert_eq!(restored.status, rollback::RollbackStatus::RolledBack);
+        assert_eq!(fs::read(root.path().join("app.js")).unwrap(), b"original");
+    }
+
+    #[test]
+    fn reviewed_open_refuses_pending_work_without_restoring_any_source() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("app.js"), b"original").unwrap();
+        {
+            let writer = RewriteTransaction::open(root.path()).unwrap();
+            let journal = writer.prepare(&[Edit { path: "app.js", before: b"original", after: b"candidate" }]).unwrap();
+            writer.install(&journal, 0).unwrap();
+        }
+        assert!(RewriteTransaction::open_without_recovery(root.path()).is_err());
+        assert_eq!(fs::read(root.path().join("app.js")).unwrap(), b"candidate");
+        assert!(root.path().join(".migrate-backup/.franken-rewrite/pending.json").exists());
+        // The existing explicit recovery-capable entrypoint retains its contract.
+        drop(RewriteTransaction::open(root.path()).unwrap());
+        assert_eq!(fs::read(root.path().join("app.js")).unwrap(), b"original");
+    }
+
+    #[test]
+    fn empty_apply_returns_no_transaction_and_keeps_history_empty() {
+        let root = tempfile::tempdir().unwrap();
+        {
+            let writer = RewriteTransaction::open_without_recovery(root.path()).unwrap();
+            assert!(writer.apply_with_receipt(&[]).unwrap().is_none());
+            assert!(RewriteTransaction::open_without_recovery(root.path()).is_err());
+        }
+        assert!(rollback::run(root.path(), None, false).history.is_empty());
     }
 }

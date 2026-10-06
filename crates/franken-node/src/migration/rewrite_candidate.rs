@@ -28,6 +28,7 @@ pub struct RewriteCandidate {
     project: PathBuf,
     original: Snapshot,
     candidate: Option<Snapshot>,
+    candidate_project: Option<PathBuf>,
     deadline: Instant,
 }
 
@@ -45,6 +46,7 @@ impl RewriteCandidate {
             project,
             original,
             candidate: None,
+            candidate_project: None,
             deadline,
         })
     }
@@ -67,11 +69,103 @@ impl RewriteCandidate {
         self.original.stage(destination, self.deadline)
     }
 
+    /// Prepare an independently reviewed directory, not an imported verdict.
+    /// Only replacements supported by the native writer are accepted. A new,
+    /// removed, renamed, relinked or chmod'ed entry is an error, never silently
+    /// omitted from the proposed migration. Reserved metadata and golden/request
+    /// changes are rejected by the existing replacement/inventory checks.
+    pub fn prepare_project(&mut self, project: &Path, expected_sha256: &str) -> Result<()> {
+        self.candidate = None;
+        self.candidate_project = None;
+        ensure!(
+            expected_sha256.len() == 64
+                && expected_sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "candidate approval must be 64 lowercase hexadecimal characters"
+        );
+        let project = project.canonicalize().context("resolve proposed migration")?;
+        ensure!(
+            project != self.project
+                && !project.starts_with(&self.project)
+                && !self.project.starts_with(&project),
+            "original and proposed migration must be separate, non-nested directories"
+        );
+        let proposed = Snapshot::capture(&project, self.deadline)?;
+        ensure!(proposed.digest == expected_sha256, "proposed migration does not match reviewed candidate hash");
+        ensure!(
+            self.original.entries.keys().eq(proposed.entries.keys()),
+            "migration installation supports existing-file replacements only; entry inventory changed"
+        );
+        let mut owned = Vec::new();
+        for (path, before) in &self.original.entries {
+            budget(self.deadline)?;
+            let after = &proposed.entries[path];
+            ensure!(before.mode == after.mode, "migration installation cannot change entry modes: {}", path.display());
+            match (&before.data, &after.data) {
+                (EntryData::File(before), EntryData::File(after)) => {
+                    if before != after {
+                        owned.push((path.to_str().context("migration path is not UTF-8")?.to_owned(),
+                            before.clone(), after.as_slice()));
+                    }
+                }
+                (EntryData::Directory, EntryData::Directory) => {}
+                (EntryData::Link(before), EntryData::Link(after)) if before == after => {}
+                _ => anyhow::bail!("migration installation cannot change entry kinds or links: {}", path.display()),
+            }
+        }
+        let replacements: Vec<_> = owned.iter().map(|(path, before, after)| Replacement {
+            path, before, after,
+        }).collect();
+        self.prepare(&replacements)?;
+        if self.candidate.as_ref().map(|s| s.digest.as_str()) != Some(expected_sha256) {
+            self.candidate = None;
+            anyhow::bail!("prepared migration differs from the complete reviewed candidate");
+        }
+        self.candidate_project = Some(project);
+        Ok(())
+    }
+
+    fn candidate_root(&self) -> &Path {
+        self.candidate_project.as_deref().unwrap_or(&self.project)
+    }
+
+    /// Reject edits to an external proposal made while its captured version ran.
+    /// This is a freshness check, never replacement of already measured bytes.
+    pub fn ensure_candidate_source_unchanged(&self) -> Result<()> {
+        let candidate = self.candidate.as_ref().context("checked rewrite candidate is not prepared")?;
+        if let Some(project) = &self.candidate_project {
+            ensure!(Snapshot::capture(project, self.deadline)?.digest == candidate.digest,
+                "proposed migration changed during validation; refusing installation");
+        }
+        Ok(())
+    }
+
+    /// Borrow the exact captured before/after bytes. No source-tree reread or
+    /// report decoding may redefine the installation after live validation.
+    pub fn replacements(&self) -> Result<Vec<Replacement<'_>>> {
+        budget(self.deadline)?;
+        let candidate = self.candidate.as_ref().context("checked rewrite candidate is not prepared")?;
+        let mut result = Vec::new();
+        for (path, before) in &self.original.entries {
+            if let (EntryData::File(before), EntryData::File(after)) =
+                (&before.data, &candidate.entries[path].data)
+                && before != after
+            {
+                result.push(Replacement {
+                    path: path.to_str().context("migration path is not UTF-8")?,
+                    before,
+                    after,
+                });
+            }
+        }
+        Ok(result)
+    }
+
     /// Validate every replacement before staging any of them. Only ordinary
     /// captured files may change; paths, links and the test inventory persist.
     pub fn prepare(&mut self, replacements: &[Replacement<'_>]) -> Result<()> {
         // A failed second preparation cannot leave an earlier candidate usable.
         self.candidate = None;
+        self.candidate_project = None;
         ensure!(
             replacements.len() <= 1_000,
             "checked rewrite replacement count exceeded"
@@ -250,7 +344,7 @@ impl RewriteCandidate {
     /// rejected rewrite. A saved capsule is never installation authorization.
     pub fn validate_native(&self, native_executable: &Path) -> Result<SuiteReport> {
         self.validate_native_with(native_executable, || {
-            FailureArchive::from_environment([&self.project, &self.project])
+            FailureArchive::from_environment([&self.project, self.candidate_root()])
         })
     }
 
@@ -266,7 +360,7 @@ impl RewriteCandidate {
         budget(self.deadline)?;
         let archive = archive()?;
         run_captured_with_archive(
-            (&self.project, &self.project),
+            (&self.project, self.candidate_root()),
             (&self.original, candidate),
             native_executable,
             self.deadline,
@@ -295,7 +389,7 @@ impl RewriteCandidate {
         bun_executable: &Path,
     ) -> Result<ProductReport> {
         self.validate_product_with(native_executable, bun_executable, || {
-            FailureArchive::from_environment([&self.project, &self.project])
+            FailureArchive::from_environment([&self.project, self.candidate_root()])
         })
     }
 
@@ -312,7 +406,7 @@ impl RewriteCandidate {
         budget(self.deadline)?;
         let archive = archive()?;
         let mut report = product_oracle::run_captured(
-            [&self.project, &self.project],
+            [&self.project, self.candidate_root()],
             [&self.original, candidate],
             native_executable,
             bun_executable,
@@ -987,5 +1081,126 @@ mod tests {
                 .to_string()
                 .contains("budget")
         );
+    }
+}
+
+#[cfg(test)]
+mod reviewed_directory_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    fn pair() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let original = root.path().join("original");
+        let proposed = root.path().join("proposed");
+        for path in [&original, &proposed] {
+            fs::create_dir(path).unwrap();
+            fs::write(path.join("case.test.cjs"), "console.log(40 + 2);\n").unwrap();
+            fs::write(path.join("config.json"), "{}\n").unwrap();
+            fs::set_permissions(path.join("config.json"), fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        (root, original, proposed)
+    }
+    fn capture(path: &Path) -> RewriteCandidate {
+        RewriteCandidate::capture(path, Instant::now() + std::time::Duration::from_secs(30)).unwrap()
+    }
+    fn pin(path: &Path) -> String {
+        capture(path).input_sha256().into()
+    }
+
+    #[test]
+    fn reviewed_directory_preserves_exact_bytes_and_does_not_install() {
+        let (_root, original, proposed) = pair();
+        fs::write(proposed.join("case.test.cjs"), "console.log(42);\n").unwrap();
+        let mut plan = capture(&original);
+        plan.prepare_project(&proposed, &pin(&proposed)).unwrap();
+        let edits = plan.replacements().unwrap();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].path, "case.test.cjs");
+        assert_eq!(edits[0].before, b"console.log(40 + 2);\n");
+        assert_eq!(edits[0].after, b"console.log(42);\n");
+        assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), edits[0].before);
+        fs::write(proposed.join("case.test.cjs"), "process.exit(99);").unwrap();
+        assert_eq!(plan.replacements().unwrap()[0].after, b"console.log(42);\n");
+        assert!(plan.ensure_candidate_source_unchanged().is_err());
+        plan.ensure_source_unchanged().unwrap();
+    }
+
+    #[test]
+    fn identical_separate_tree_produces_an_explicit_empty_plan() {
+        let (_root, original, proposed) = pair();
+        let mut plan = capture(&original);
+        plan.prepare_project(&proposed, &pin(&proposed)).unwrap();
+        assert!(plan.replacements().unwrap().is_empty());
+        plan.ensure_candidate_source_unchanged().unwrap();
+    }
+
+    #[test]
+    fn wrong_pins_and_aliases_invalidate_an_earlier_preparation() {
+        let (root, original, proposed) = pair();
+        let alias = root.path().join("original-alias");
+        symlink(&original, &alias).unwrap();
+        let mut plan = capture(&original);
+        let expected = pin(&proposed);
+        for (path, bad_pin) in [(&proposed, "bad".to_owned()), (&proposed, "0".repeat(64)), (&alias, expected.clone())] {
+            plan.prepare_project(&proposed, &expected).unwrap();
+            assert!(plan.prepare_project(path, &bad_pin).is_err());
+            assert!(plan.replacements().is_err());
+        }
+    }
+
+    #[test]
+    fn structural_mode_and_link_changes_are_never_partially_installed() {
+        for mutation in 0..5 {
+            let (_root, original, proposed) = pair();
+            fs::write(proposed.join("case.test.cjs"), "console.log(42);\n").unwrap();
+            match mutation {
+                0 => fs::write(proposed.join("new.js"), "new").unwrap(),
+                1 => { fs::rename(proposed.join("config.json"), proposed.join("renamed.json")).unwrap(); }
+                2 => fs::set_permissions(proposed.join("config.json"), fs::Permissions::from_mode(0o600)).unwrap(),
+                3 => {
+                    fs::rename(proposed.join("config.json"), proposed.join("saved.json")).unwrap();
+                    symlink("saved.json", proposed.join("config.json")).unwrap();
+                }
+                _ => {
+                    symlink("case.test.cjs", original.join("link.cjs")).unwrap();
+                    symlink("config.json", proposed.join("link.cjs")).unwrap();
+                }
+            }
+            let mut plan = capture(&original);
+            assert!(plan.prepare_project(&proposed, &pin(&proposed)).is_err(), "mutation {mutation}");
+            assert!(plan.replacements().is_err());
+            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), b"console.log(40 + 2);\n");
+        }
+    }
+
+    #[test]
+    fn reviewed_golden_or_reserved_metadata_changes_cannot_redefine_success() {
+        for change_metadata in [false, true] {
+            let (_root, original, proposed) = pair();
+            for path in [&original, &proposed] {
+                fs::create_dir(path.join(".franken-node")).unwrap();
+                fs::write(path.join(".franken-node/migration-tests.json"),
+                    r#"{"schema_version":"franken-node/migration-tests/v1","tests":["case.test.cjs"],"expectations":{"case.test.cjs":{"stdout":"expected.txt"}}}"#).unwrap();
+                fs::write(path.join(".franken-node/authority.txt"), "original authority").unwrap();
+                fs::write(path.join("expected.txt"), "42\n").unwrap();
+            }
+            let target = if change_metadata { ".franken-node/authority.txt" } else { "expected.txt" };
+            fs::write(proposed.join(target), "redefined").unwrap();
+            let mut plan = capture(&original);
+            assert!(plan.prepare_project(&proposed, &pin(&proposed)).is_err());
+            assert!(plan.replacements().is_err());
+        }
+    }
+
+    #[test]
+    fn proposed_tree_cannot_supply_the_runtime_executable() {
+        let (_root, original, proposed) = pair();
+        let mut plan = capture(&original);
+        plan.prepare_project(&proposed, &pin(&proposed)).unwrap();
+        let runtime = proposed.join("native-runtime");
+        fs::copy("/bin/true", &runtime).unwrap();
+        let error = plan.validate_product(&runtime, Path::new("/bin/false")).unwrap_err();
+        assert!(format!("{error:#}").contains("outside both"), "{error:#}");
     }
 }
