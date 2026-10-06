@@ -85,7 +85,7 @@ fn no_expectations_preserves_legacy_comparison_only_behavior() {
     );
     let snapshot = capture(root.path());
     let tests = inventory(&snapshot.entries).unwrap();
-    tests[Path::new("scripts/check.js")]
+    tests.tests[Path::new("scripts/check.js")]
         .expectations
         .check(&snapshot, &output(b"anything", b"anything"))
         .unwrap();
@@ -97,7 +97,7 @@ fn byte_exact_stream_assertions_support_binary_data_and_empty_stderr() {
     write(root.path(), "fixtures/stdout.bin", [0, 255, 10, 13]);
     let snapshot = capture(root.path());
     let tests = inventory(&snapshot.entries).unwrap();
-    let expected = &tests[Path::new("scripts/check.js")].expectations;
+    let expected = &tests.tests[Path::new("scripts/check.js")].expectations;
     expected.check(&snapshot, &output(&[0, 255, 10, 13], b"")).unwrap();
     assert!(expected.check(&snapshot, &output(&[0, 255, 10], b"")).is_err());
     assert!(expected.check(&snapshot, &output(&[0, 255, 10, 13], b"warning")).is_err());
@@ -108,7 +108,7 @@ fn output_is_not_trimmed_decoded_or_normalized() {
     let root = project("");
     let snapshot = capture(root.path());
     let tests = inventory(&snapshot.entries).unwrap();
-    let expected = &tests[Path::new("scripts/check.js")].expectations;
+    let expected = &tests.tests[Path::new("scripts/check.js")].expectations;
     for wrong in [b"42".as_slice(), b"42\r\n", b" 42\n", b"", b"42\n\n"] {
         assert!(expected.check(&snapshot, &output(wrong, b"")).is_err());
     }
@@ -120,7 +120,7 @@ fn mismatch_diagnostics_do_not_expose_expected_or_actual_bytes() {
     write(root.path(), "fixtures/stdout.bin", b"secret-expected-token");
     let snapshot = capture(root.path());
     let tests = inventory(&snapshot.entries).unwrap();
-    let error = tests[Path::new("scripts/check.js")]
+    let error = tests.tests[Path::new("scripts/check.js")]
         .expectations
         .check(&snapshot, &output(b"secret-actual-token", b""))
         .unwrap_err()
@@ -249,7 +249,7 @@ fn mutable_source_tree_cannot_rewrite_the_captured_oracle() {
     let snapshot = capture(root.path());
     write(root.path(), "fixtures/stdout.bin", b"wrong\n");
     let tests = inventory(&snapshot.entries).unwrap();
-    tests[Path::new("scripts/check.js")]
+    tests.tests[Path::new("scripts/check.js")]
         .expectations
         .check(&snapshot, &output(b"42\n", b""))
         .unwrap();
