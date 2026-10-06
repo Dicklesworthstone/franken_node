@@ -11104,6 +11104,198 @@ fn emit_trust_error_json(command: &str, message: &str) -> Result<()> {
     Ok(())
 }
 
+/// `trust graph`: the ecosystem reputation graph (charter capability 9) built
+/// from the verified trust-card registry and the project's npm lockfile.
+const TRUST_GRAPH_CLI_SCHEMA_VERSION: &str = "franken-node/trust-graph-cli/v1";
+
+#[derive(Debug, Serialize)]
+struct TrustGraphFocus {
+    node: supply_chain::trust_graph::TrustGraphNode,
+    blast_radius: Vec<supply_chain::trust_graph::BlastRadiusEntry>,
+    transitions: Vec<supply_chain::trust_graph::TrustTransition>,
+}
+
+#[derive(Debug, Serialize)]
+struct TrustGraphCliReport {
+    schema_version: &'static str,
+    command: &'static str,
+    /// Lockfile the `depends_on` edges came from; `None` means the project
+    /// has none and the graph holds publisher edges only.
+    lockfile: Option<String>,
+    graph: supply_chain::trust_graph::TrustGraph,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    focus: Option<TrustGraphFocus>,
+}
+
+fn load_project_lockfile_graph(
+    project_root: &Path,
+) -> Result<(
+    Option<String>,
+    supply_chain::trust_graph::LockfileDependencyGraph,
+)> {
+    for candidate in ["package-lock.json", "npm-shrinkwrap.json"] {
+        let path = project_root.join(candidate);
+        if !path.is_file() {
+            continue;
+        }
+        let raw = bounded_read_to_string(&path, MAX_LOCKFILE_BYTES)
+            .with_context(|| format!("failed reading lockfile {}", path.display()))?;
+        let value: serde_json::Value = serde_json::from_str(&raw)
+            .with_context(|| format!("invalid lockfile JSON: {}", path.display()))?;
+        return Ok((
+            Some(candidate.to_string()),
+            supply_chain::trust_graph::LockfileDependencyGraph::from_lockfile_json(&value),
+        ));
+    }
+    Ok((
+        None,
+        supply_chain::trust_graph::LockfileDependencyGraph::default(),
+    ))
+}
+
+fn trust_graph_report(extension: Option<&str>) -> Result<TrustGraphCliReport> {
+    use supply_chain::trust_graph::{blast_radius, build_trust_graph};
+
+    let now_secs = now_unix_secs();
+    let mut state = trust_card_cli_registry(now_secs)?;
+    let cards = state
+        .registry
+        .list(
+            &TrustCardListFilter::empty(),
+            "trace-cli-trust-graph",
+            now_secs,
+        )
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    let histories = state
+        .registry
+        .snapshot()
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?
+        .cards_by_extension;
+    let (lockfile, dependencies) = load_project_lockfile_graph(Path::new("."))?;
+    let graph = build_trust_graph(&cards, &histories, &dependencies);
+    let focus = match extension.map(str::trim).filter(|id| !id.is_empty()) {
+        None => None,
+        Some(extension_id) => {
+            let node = graph
+                .nodes
+                .iter()
+                .find(|node| node.node_id == extension_id)
+                .cloned()
+                .ok_or_else(|| trust_card_not_found_error(extension_id))?;
+            Some(TrustGraphFocus {
+                blast_radius: blast_radius(&graph, extension_id),
+                transitions: graph
+                    .transitions
+                    .iter()
+                    .filter(|transition| transition.extension_id == extension_id)
+                    .cloned()
+                    .collect(),
+                node,
+            })
+        }
+    };
+    Ok(TrustGraphCliReport {
+        schema_version: TRUST_GRAPH_CLI_SCHEMA_VERSION,
+        command: "trust.graph",
+        lockfile,
+        graph,
+        focus,
+    })
+}
+
+fn render_trust_graph_human(report: &TrustGraphCliReport) -> String {
+    let summary = &report.graph.summary;
+    let mut lines = vec![
+        format!(
+            "trust graph: extensions={} publishers={} untracked_dependencies={} edges={} transitions={}",
+            summary.extensions,
+            summary.publishers,
+            summary.untracked_dependencies,
+            summary.edges,
+            summary.transitions
+        ),
+        format!(
+            "  quarantined={} revoked={} degraded_by_propagation={} lockfile={}",
+            summary.quarantined,
+            summary.revoked,
+            summary.degraded_by_propagation,
+            report.lockfile.as_deref().unwrap_or("none")
+        ),
+    ];
+    let render_score =
+        |score: Option<u16>| score.map_or_else(|| "-".to_string(), |score| score.to_string());
+    for node in &report.graph.nodes {
+        if node.effective_score == node.base_score && node.explanation.is_empty() {
+            continue;
+        }
+        lines.push(format!(
+            "  {} [{}] trust {} -> {}",
+            node.node_id,
+            serde_json::to_value(node.kind)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_default(),
+            render_score(node.base_score),
+            render_score(node.effective_score)
+        ));
+        for reason in &node.explanation {
+            lines.push(format!("    {}: {}", reason.rule, reason.detail));
+        }
+    }
+    if let Some(focus) = &report.focus {
+        lines.push(format!(
+            "focus {}: trust {} -> {}",
+            focus.node.node_id,
+            render_score(focus.node.base_score),
+            render_score(focus.node.effective_score)
+        ));
+        if focus.blast_radius.is_empty() {
+            lines.push("  blast radius: none (no extension depends on it)".to_string());
+        } else {
+            lines.push(format!(
+                "  blast radius: {}",
+                focus
+                    .blast_radius
+                    .iter()
+                    .map(|entry| format!("{} (depth {})", entry.extension_id, entry.depth))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        for transition in &focus.transitions {
+            let changes = transition
+                .changes
+                .iter()
+                .map(|change| format!("{} {} -> {}", change.field, change.from, change.to))
+                .collect::<Vec<_>>()
+                .join("; ");
+            let causes = transition
+                .causes
+                .iter()
+                .map(|cause| format!("{} ({})", cause.event_code, cause.detail))
+                .collect::<Vec<_>>()
+                .join("; ");
+            lines.push(format!(
+                "  v{} -> v{} at {}: {}{}",
+                transition.from_version,
+                transition.to_version,
+                transition.recorded_at,
+                if changes.is_empty() {
+                    "no field change"
+                } else {
+                    changes.as_str()
+                },
+                if causes.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [because: {causes}]")
+                }
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
 fn trust_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Result<()> {
     let message = format!("{error:#}");
     if json {
@@ -33124,6 +33316,17 @@ fn main() -> Result<()> {
                         fail_closed_after_json();
                     }
                     return Err(err);
+                }
+            }
+            TrustCommand::Graph(args) => {
+                let report = match trust_graph_report(args.extension.as_deref()) {
+                    Ok(report) => report,
+                    Err(err) => return trust_fail("trust.graph", args.json, err),
+                };
+                if args.json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    println!("{}", render_trust_graph_human(&report));
                 }
             }
             TrustCommand::Sync(args) => {

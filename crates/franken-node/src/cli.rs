@@ -1348,6 +1348,22 @@ pub enum TrustCommand {
 
     /// Refresh trust-card cache and OSV vulnerability state (cached unless `--force`).
     Sync(TrustSyncArgs),
+
+    /// Reputation graph: publishers, extensions and lockfile dependencies,
+    /// with propagated trust, explanations, transitions and blast radius.
+    Graph(TrustGraphArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct TrustGraphArgs {
+    /// Focus on one extension: its explanation, version transitions, and the
+    /// extensions whose trust rests on it (blast radius).
+    #[arg(long)]
+    pub extension: Option<String>,
+
+    /// Emit `franken-node/trust-graph-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]

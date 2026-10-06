@@ -19,6 +19,7 @@ pub mod revocation_registry;
 pub mod transparency_verifier;
 pub mod trust_card;
 pub mod trust_card_registry_store;
+pub mod trust_graph;
 pub mod typosquat;
 
 #[cfg(all(test, feature = "engine"))]
