@@ -48,6 +48,17 @@ installation. It deliberately refuses an unfinished rewrite instead of
 implicitly restoring another operation before validating this proposal. Use
 explicit `migrate rollback` recovery to resolve pending work first.
 
+First use may create the native writer's private directories and empty lock
+file. Those expected initialization writes are not permission to ignore changes
+under `.migrate-backup`. Before opening the real writer, the installer stages
+the immutable reviewed original into a private temporary tree and runs the
+same nonrecovering writer initialization there. The real post-open tree must
+match that exact predicted capture. A new strict freshness guard then covers
+all its bytes, including initialized metadata, until installation begins.
+Unrelated source additions or guest changes to writer metadata are rejected.
+The original reviewed hashes and executed snapshots are never rebound to the
+post-initialization state. No capture exclusion is added by this accommodation.
+
 ## Execution and installation contract
 
 Node and Bun execute the immutable original snapshot; native Franken executes
@@ -93,6 +104,58 @@ no-follow descriptor access, write-ahead intent and durability barriers. Each
 file replacement is atomic, not the entire multi-file tree. Interruptions or
 I/O errors can leave recovery work; retain journals/backups and inspect them.
 A lost stdout report after a completed transaction is not an automatic rollback.
+
+## Successive migrations and transaction-scoped originals
+
+The reviewed installer uses `apply_versioned_with_receipt` and writes
+`franken-node/rewrite-transaction/v2` journals. Each changed file's exact
+pre-install bytes are retained privately at:
+
+```
+.migrate-backup/.franken-rewrite/TRANSACTION-ID/RECORD-INDEX.before
+```
+
+The record index is its zero-based position in that journal, not a caller-chosen
+path. The matching `.after` image remains in the same transaction. Both images
+are written create-only with mode 0600 and made durable before the pending
+journal. All preimages are checked again before any live file is replaced.
+Earlier journals, preimages and path-global backups are never overwritten.
+
+This permits original -> candidate one -> candidate two without first undoing
+candidate one. Before each application, inspect and independently review the
+currently installed original and the next candidate again. Prepare that next
+candidate from the current original's full captured tree, including its retained
+recovery and rollout metadata; editing an old candidate that lacks the new
+history is still an inventory mismatch. These copies contain private history
+and must remain private. Use the new role hashes with the same `apply` command;
+the three-runtime suite runs again. A
+previous PASS or installation receipt cannot authorize the next migration.
+The second transaction's original is candidate one's installed content, not
+the file's first-ever original. An identical proposal is still validated, but
+returns `UNCHANGED` without another transaction.
+
+Restore the explicitly selected transaction using its exact returned identity.
+For overlapping migrations, restore candidate two to candidate one, then
+candidate one to the original. Trying to restore an earlier transaction while
+its files contain a different later image fails the existing full preflight;
+unrelated user edits also remain conflicts, not permission to overwrite them.
+This is content/mode conflict protection, not a global deployment stack or a
+claim of ordering for independent, non-overlapping transactions. A completed
+rollback retry never changes newer source work.
+
+Both explicit rollback and interrupted-install recovery use the journal's
+schema to select its originals. Missing, corrupt, linked or non-private v2
+preimages are errors: even a correct path-global backup cannot substitute.
+Historical v1 journals continue to use their immutable `.migrate-backup/PATH`
+backups; a v2 installation can follow them without modifying their evidence.
+The original library `apply` and `apply_with_receipt` APIs retain that v1
+first-original contract. They do not silently adopt the new storage format.
+
+Use an updated recovery binary that understands v2 for new reviewed installs;
+older readers reject this schema. Keep the complete transaction directories,
+not just the returned JSON summary. No automatic history conversion, backup
+deletion, garbage collection, or fallback to another generation is performed.
+The same per-operation limits and non-atomic multi-file recovery contract apply.
 
 ## Continue to rollout or restore
 

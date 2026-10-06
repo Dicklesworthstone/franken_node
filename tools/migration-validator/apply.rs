@@ -53,6 +53,7 @@ mod linux {
     use anyhow::{Context, Result, ensure};
     use serde::Serialize;
     use sha2::{Digest, Sha256};
+    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::time::{Duration, Instant};
     use rewrite_transaction::{AppliedRewrite, Edit, RewriteTransaction};
@@ -89,6 +90,7 @@ mod linux {
     struct Prepared {
         capture: RewriteCandidate,
         report: Report,
+        deadline: Instant,
     }
 
     fn valid_pin(pin: &str) -> bool {
@@ -130,16 +132,40 @@ mod linux {
             execution_attempted: false, release_certification: false,
             validation: None, source_transaction: None, errors: Vec::new(),
         };
-        Ok(Prepared { capture, report })
+        Ok(Prepared { capture, report, deadline })
+    }
+
+    /// Predict only the native writer's own initialization on an immutable
+    /// private copy, then require the live post-open tree to match it exactly.
+    /// This is not a metadata exclusion or a redefinition of reviewed inputs:
+    /// validation still executes the original pre-initialization snapshots.
+    /// The returned guard binds every live byte, including the initialized
+    /// writer state, through execution until the actual installation begins.
+    fn initialize_writer(capture: &RewriteCandidate, project: &Path, deadline: Instant)
+        -> Result<(RewriteTransaction, RewriteCandidate)>
+    {
+        let staged = tempfile::Builder::new()
+            .prefix("franken-reviewed-writer-")
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()?;
+        let expected_root = staged.path().join("project");
+        capture.stage_original(&expected_root)?;
+        drop(RewriteTransaction::open_without_recovery(&expected_root)?);
+        let expected = RewriteCandidate::capture(&expected_root, deadline)?;
+        let writer = RewriteTransaction::open_without_recovery(project)?;
+        let initialized = RewriteCandidate::capture(project, deadline)?;
+        ensure!(initialized.input_sha256() == expected.input_sha256(),
+            "project differs from the reviewed input plus exact native writer initialization");
+        initialized.ensure_source_unchanged()?;
+        Ok((writer, initialized))
     }
 
     fn apply(project: &Path, candidate: &Path, pins: (&str, &str), native: &Path, bun: &Path, execute: bool) -> Result<Report> {
         ensure!(execute, "--execute is required before running project code");
         // Reject stale/unsupported approvals BEFORE opening the writer, and do
         // not implicitly recover an unrelated transaction merely to validate.
-        let Prepared { capture, mut report } = prepare(project, candidate, Some(pins))?;
-        let writer = RewriteTransaction::open_without_recovery(&report.project)?;
-        capture.ensure_source_unchanged()?;
+        let Prepared { capture, mut report, deadline } = prepare(project, candidate, Some(pins))?;
+        let (writer, initialized) = initialize_writer(&capture, &report.project, deadline)?;
         capture.ensure_candidate_source_unchanged()?;
         report.status = "ERROR";
         let operation = (|| -> Result<()> {
@@ -159,13 +185,17 @@ mod linux {
                 return Ok(());
             }
             report.status = "ERROR";
-            capture.ensure_source_unchanged()?;
+            initialized.ensure_source_unchanged()?;
             capture.ensure_candidate_source_unchanged()?;
             let replacements = capture.replacements()?;
             let edits: Vec<_> = replacements.iter().map(|edit| Edit {
                 path: edit.path, before: edit.before, after: edit.after,
             }).collect();
-            report.source_transaction = writer.apply_with_receipt(&edits)?;
+            // Each reviewed installation owns its immediate preimages. A
+            // second migration must not conflict with or replace the first
+            // migration's immutable originals; both remain independently
+            // recoverable through the same pinned native rollback protocol.
+            report.source_transaction = writer.apply_versioned_with_receipt(&edits)?;
             report.status = if report.source_transaction.is_some() { "APPLIED" } else { "UNCHANGED" };
             Ok(())
         })();
@@ -346,6 +376,216 @@ mod linux {
             assert!(Args::try_parse_from(&args).is_err());
             args.push("--execute");
             assert!(Args::try_parse_from(&args).is_ok());
+        }
+
+        // Controlled, byte-distinct executables exercise actual capture,
+        // process admission, writer and rollback integration. They are not
+        // Bun/Franken implementations or evidence of runtime compatibility.
+        fn controlled_native(root: &Path) -> PathBuf {
+            let native = root.join("controlled-native");
+            fs::write(&native, "#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(&native, fs::Permissions::from_mode(0o700)).unwrap();
+            native
+        }
+
+        fn apply_current(original: &Path, candidate: &Path, native: &Path) -> Report {
+            let inspected = prepare(original, candidate, None).unwrap().report;
+            apply(original, candidate,
+                (&inspected.input_sha256, &inspected.candidate_input_sha256),
+                native, Path::new("/bin/true"), true).unwrap()
+        }
+
+        fn next_candidate(original: &Path, destination: &Path, source: &[u8]) {
+            // Preserve the full captured inventory, including retained native
+            // history. Only intended ordinary source replacements may differ.
+            RewriteCandidate::capture(original, Instant::now() + Duration::from_secs(30))
+                .unwrap().stage_original(destination).unwrap();
+            fs::write(destination.join("case.test.cjs"), source).unwrap();
+        }
+
+        fn receipt_directory(original: &Path, receipt: &AppliedRewrite) -> PathBuf {
+            original.join(".migrate-backup/.franken-rewrite").join(&receipt.transaction_id)
+        }
+
+        fn restore(original: &Path, receipt: &AppliedRewrite) -> rewrite_transaction::rollback::RollbackReport {
+            rewrite_transaction::rollback::run_pinned(original,
+                &receipt.transaction_id, &receipt.journal_sha256, true)
+        }
+
+        #[test]
+        fn successive_reviewed_installations_keep_independent_originals_and_reverse_recovery() {
+            use rewrite_transaction::rollback::RollbackStatus;
+            let (root, original, candidate) = pair();
+            let native = controlled_native(root.path());
+            let before = fs::read(original.join("case.test.cjs")).unwrap();
+            let intermediate = fs::read(candidate.join("case.test.cjs")).unwrap();
+            let first_report = apply_current(&original, &candidate, &native);
+            assert_eq!(first_report.status, "APPLIED", "{first_report:?}");
+            assert_eq!(first_report.validation.as_ref().unwrap().verdict, "PASS");
+            let first = first_report.source_transaction.unwrap();
+            let first_journal = fs::read(receipt_directory(&original, &first).join("applied.json")).unwrap();
+
+            let final_source = b"globalThis.answer = 6 * 7;\n";
+            let next = root.path().join("next-candidate");
+            next_candidate(&original, &next, final_source);
+            let second_report = apply_current(&original, &next, &native);
+            assert_eq!(second_report.status, "APPLIED", "{second_report:?}");
+            assert!(second_report.execution_attempted);
+            assert_eq!(second_report.validation.as_ref().unwrap().verdict, "PASS");
+            let second = second_report.source_transaction.unwrap();
+            assert_ne!(first.transaction_id, second.transaction_id);
+            assert_ne!(first.journal_sha256, second.journal_sha256);
+            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), final_source);
+            assert_eq!(fs::read(receipt_directory(&original, &first).join("applied.json")).unwrap(), first_journal);
+            assert_eq!(fs::read(receipt_directory(&original, &first).join("0.before")).unwrap(), before);
+            assert_eq!(fs::read(receipt_directory(&original, &second).join("0.before")).unwrap(), intermediate);
+            assert!(!original.join(".migrate-backup/case.test.cjs").exists());
+
+            assert_eq!(restore(&original, &first).status, RollbackStatus::Conflict);
+            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), final_source);
+            assert_eq!(restore(&original, &second).status, RollbackStatus::RolledBack);
+            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), intermediate);
+            assert_eq!(restore(&original, &first).status, RollbackStatus::RolledBack);
+            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), before);
+            assert_eq!(fs::metadata(original.join("case.test.cjs")).unwrap().permissions().mode() & 0o777, 0o640);
+            assert_eq!(fs::read(candidate.join("case.test.cjs")).unwrap(), intermediate);
+            assert_eq!(fs::read(next.join("case.test.cjs")).unwrap(), final_source);
+            assert_eq!(rewrite_transaction::rollback::run(&original, None, false).history.len(), 2);
+            fs::write(original.join("case.test.cjs"), b"independent later edit").unwrap();
+            assert_eq!(restore(&original, &second).status, RollbackStatus::AlreadyRolledBack);
+            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), b"independent later edit");
+        }
+
+        #[test]
+        fn a_failed_second_validation_leaves_the_first_installation_and_its_recovery_intact() {
+            let (root, original, candidate) = pair();
+            let native = controlled_native(root.path());
+            let first_report = apply_current(&original, &candidate, &native);
+            assert_eq!(first_report.status, "APPLIED", "{first_report:?}");
+            let first = first_report.source_transaction.unwrap();
+            let first_journal = fs::read(receipt_directory(&original, &first).join("applied.json")).unwrap();
+            let before = fs::read(original.join("case.test.cjs")).unwrap();
+            let next = root.path().join("next-candidate");
+            next_candidate(&original, &next, b"globalThis.answer = 21 + 21;\n");
+            let rejected = apply_current(&original, &next, Path::new("/bin/false"));
+            assert_eq!(rejected.status, "REJECTED", "{rejected:?}");
+            assert_eq!(rejected.validation.as_ref().unwrap().verdict, "FAIL");
+            assert!(rejected.source_transaction.is_none());
+            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), before);
+            assert_eq!(fs::read(receipt_directory(&original, &first).join("applied.json")).unwrap(), first_journal);
+            let history = rewrite_transaction::rollback::run(&original, None, false);
+            assert_eq!(history.history.len(), 1);
+            assert!(history.pending_transaction_id.is_none());
+            assert_eq!(restore(&original, &first).status, rewrite_transaction::rollback::RollbackStatus::RolledBack);
+            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), b"globalThis.answer = 40 + 2;\n");
+        }
+
+        #[test]
+        fn repeated_identical_candidate_is_revalidated_without_creating_another_transaction() {
+            let (root, original, candidate) = pair();
+            let native = controlled_native(root.path());
+            let first = apply_current(&original, &candidate, &native);
+            assert_eq!(first.status, "APPLIED", "{first:?}");
+            let receipt = first.source_transaction.unwrap();
+            let journal = fs::read(receipt_directory(&original, &receipt).join("applied.json")).unwrap();
+            let next = root.path().join("identical-candidate");
+            next_candidate(&original, &next, b"globalThis.answer = 42;\n");
+            let repeated = apply_current(&original, &next, &native);
+            assert_eq!(repeated.status, "UNCHANGED", "{repeated:?}");
+            assert!(repeated.execution_attempted);
+            assert_eq!(repeated.validation.as_ref().unwrap().verdict, "PASS");
+            assert!(repeated.changes.is_empty());
+            assert!(repeated.source_transaction.is_none());
+            assert_eq!(rewrite_transaction::rollback::run(&original, None, false).history.len(), 1);
+            assert_eq!(fs::read(receipt_directory(&original, &receipt).join("applied.json")).unwrap(), journal);
+            // Matching installed bytes do not waive a fresh runtime decision.
+            let failed = apply_current(&original, &next, Path::new("/bin/false"));
+            assert_eq!(failed.status, "REJECTED", "{failed:?}");
+            assert!(failed.execution_attempted && failed.source_transaction.is_none());
+            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), b"globalThis.answer = 42;\n");
+        }
+
+        #[test]
+        fn reviewed_installation_can_follow_a_legacy_writer_without_adopting_its_backup() {
+            use rewrite_transaction::rollback::RollbackStatus;
+            let (root, original, _candidate) = pair();
+            let native = controlled_native(root.path());
+            let before = fs::read(original.join("case.test.cjs")).unwrap();
+            let middle = b"globalThis.answer = 42;\n";
+            let legacy = {
+                let writer = RewriteTransaction::open(&original).unwrap();
+                writer.apply_with_receipt(&[Edit {
+                    path: "case.test.cjs", before: &before, after: middle,
+                }]).unwrap().unwrap()
+            };
+            let old_journal = fs::read(receipt_directory(&original, &legacy).join("applied.json")).unwrap();
+            let candidate = root.path().join("next-candidate");
+            next_candidate(&original, &candidate, b"globalThis.answer = 7 * 6;\n");
+            let report = apply_current(&original, &candidate, &native);
+            assert_eq!(report.status, "APPLIED", "{report:?}");
+            let next = report.source_transaction.unwrap();
+            assert_eq!(fs::read(original.join(".migrate-backup/case.test.cjs")).unwrap(), before);
+            assert_eq!(fs::read(receipt_directory(&original, &legacy).join("applied.json")).unwrap(), old_journal);
+            assert_eq!(fs::read(receipt_directory(&original, &next).join("0.before")).unwrap(), middle);
+            assert_eq!(restore(&original, &next).status, RollbackStatus::RolledBack);
+            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), middle);
+            assert_eq!(restore(&original, &legacy).status, RollbackStatus::RolledBack);
+            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), before);
+        }
+
+        #[test]
+        fn writer_initialization_is_exact_without_redefining_reviewed_or_executed_inputs() {
+            let (_root, original, candidate) = pair();
+            let prepared = prepare(&original, &candidate, None).unwrap();
+            let reviewed = prepared.report.input_sha256.clone();
+            let (writer, initialized) = initialize_writer(&prepared.capture, &original, prepared.deadline).unwrap();
+            assert_eq!(prepared.capture.input_sha256(), reviewed);
+            assert_ne!(initialized.input_sha256(), reviewed);
+            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), b"globalThis.answer = 40 + 2;\n");
+            let store = original.join(".migrate-backup/.franken-rewrite");
+            assert_eq!(fs::read_dir(&store).unwrap().count(), 1);
+            assert!(fs::read(store.join("lock")).unwrap().is_empty());
+            initialized.ensure_source_unchanged().unwrap();
+            // The pre-bootstrap capture has not been silently rebound.
+            assert!(prepared.capture.ensure_source_unchanged().is_err());
+            fs::write(store.join("unexpected.json"), b"not created by the writer").unwrap();
+            assert!(initialized.ensure_source_unchanged().is_err());
+            assert!(RewriteTransaction::open_without_recovery(&original).is_err());
+            drop(writer);
+        }
+
+        #[test]
+        fn a_live_pass_cannot_hide_guest_changes_to_initialized_writer_metadata() {
+            let (root, original, candidate) = pair();
+            let lock = original.join(".migrate-backup/.franken-rewrite/lock");
+            let source = format!("require('fs').writeFileSync({},'guest metadata edit');\n",
+                serde_json::to_string(&lock).unwrap());
+            fs::write(original.join("case.test.cjs"), &source).unwrap();
+            fs::write(candidate.join("case.test.cjs"), format!("{source}// candidate\n")).unwrap();
+            let native = controlled_native(root.path());
+            let report = apply_current(&original, &candidate, &native);
+            assert_eq!(report.validation.as_ref().unwrap().verdict, "PASS");
+            assert_eq!(report.status, "ERROR", "{report:?}");
+            assert!(report.execution_attempted && report.source_transaction.is_none());
+            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), source.as_bytes());
+            assert_eq!(fs::read(lock).unwrap(), b"guest metadata edit");
+            assert!(rewrite_transaction::rollback::run(&original, None, false).history.is_empty());
+        }
+
+        #[test]
+        fn writer_bootstrap_does_not_exempt_other_changes_after_input_review() {
+            let (_root, original, candidate) = pair();
+            let prepared = prepare(&original, &candidate, None).unwrap();
+            fs::write(original.join("unreviewed-config.json"), b"changed").unwrap();
+            let result = initialize_writer(&prepared.capture, &original, prepared.deadline);
+            let error = match result {
+                Ok(_) => panic!("writer bootstrap admitted an unrelated input change"),
+                Err(error) => error,
+            };
+            assert!(error.to_string().contains("exact native writer initialization"), "{error:#}");
+            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), b"globalThis.answer = 40 + 2;\n");
+            assert_eq!(fs::read(original.join("unreviewed-config.json")).unwrap(), b"changed");
+            assert!(rewrite_transaction::rollback::run(&original, None, false).history.is_empty());
         }
     }
 }
