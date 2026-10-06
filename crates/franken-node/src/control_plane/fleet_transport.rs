@@ -1655,7 +1655,13 @@ fn validate_transport_identifier<'a>(
     )))
 }
 
-fn validate_action_record(action: &FleetActionRecord) -> Result<(), FleetTransportError> {
+/// Validate one action record with the same rules every transport applies on
+/// ingest (identifier charset/length, non-empty single-line text fields).
+///
+/// # Errors
+///
+/// Returns [`FleetTransportError::SerializationError`] naming the bad field.
+pub fn validate_action_record(action: &FleetActionRecord) -> Result<(), FleetTransportError> {
     validate_action_id(&action.action_id)?;
 
     match &action.action {
@@ -1714,6 +1720,17 @@ fn validate_action_record(action: &FleetActionRecord) -> Result<(), FleetTranspo
         }
     }
 
+    Ok(())
+}
+
+/// Validate a node heartbeat record (zone and node identifiers).
+///
+/// # Errors
+///
+/// Returns [`FleetTransportError::SerializationError`] naming the bad field.
+pub fn validate_node_status(status: &NodeStatus) -> Result<(), FleetTransportError> {
+    validate_zone_id(&status.zone_id)?;
+    validate_node_id(&status.node_id)?;
     Ok(())
 }
 

@@ -124,7 +124,7 @@ We only use **Cargo** in this project, NEVER any other package manager.
 | Crate | Purpose |
 |-------|---------|
 | `fsqlite` | Local SQLite-backed storage adapter and conformance test coverage |
-| `fastapi-rust` | API route and server-surface integration tests |
+| `fastapi-rust` | API route and server-surface integration tests (`testing` feature); also a normal optional dependency behind `fleet-control-plane-server` |
 | `sqlmodel` + `sqlmodel-core` + `sqlmodel-schema` | SQL model/schema interop and storage contract tests |
 | `loom` | Concurrency interleaving tests for runtime/control-plane primitives |
 | `criterion` | Benchmark harnesses and performance evidence generation |
@@ -144,6 +144,7 @@ Current crate features:
 | `engine` | default: enabled | Links the sibling `frankenengine-engine` and `frankenengine-extension-host` crates. |
 | `http-client` | default: enabled | Enables outbound HTTP client support via `ureq` and `url`. |
 | `external-commands` | default: enabled | Enables external command/process helpers via `which` and `ctrlc`. |
+| `fleet-control-plane-server` | default: enabled | `franken-node fleet serve`: the live HTTP fleet coordinator (fastapi_rust on the asupersync runtime) over the durable fleet store; implies `http-client`. |
 | `extended-surfaces` | opt-in | Legacy umbrella for `control-plane`, `policy-engine`, `remote-ops`, `admin-tools`, `verifier-tools`, and `advanced-features`. |
 | `control-plane` | opt-in | API middleware, fleet operations, and control-plane functionality. |
 | `policy-engine` | opt-in | Security policies, guardrail monitors, and hardening state machines. |
@@ -328,7 +329,7 @@ CLI / config / profiles
 
 ### Feature Flags and Packaging Reality
 
-- `default` enables only `engine`, `http-client`, and `external-commands`.
+- `default` enables only `engine`, `http-client`, `external-commands`, and `fleet-control-plane-server`.
 - `extended-surfaces` is a legacy umbrella over the current granular product features: `control-plane`, `policy-engine`, `remote-ops`, `admin-tools`, `verifier-tools`, and `advanced-features`.
 - `test-support` enables shared testing helpers by composing `control-plane` and `admin-tools`.
 - Deployment/profile defaults live in `packaging/profiles.toml`, which currently defines `local`, `dev`, and `enterprise` packaging metadata for packaging/release flows. The live runtime `--profile <name>` / `FRANKEN_NODE_PROFILE` path still selects `strict`, `balanced`, or `legacy-risky`.

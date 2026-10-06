@@ -8,8 +8,12 @@ pub mod divergence_gate;
 pub mod dpor_exploration;
 pub mod epoch_transition_barrier;
 pub mod evidence_replay_gate;
+#[cfg(feature = "fleet-control-plane-server")]
+pub mod fleet_http_server;
 pub mod fleet_transport;
 pub mod fleet_transport_durable;
+#[cfg(feature = "http-client")]
+pub mod fleet_transport_http;
 pub mod fork_detection;
 pub mod key_role_separation;
 pub mod marker_stream;

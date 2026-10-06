@@ -17,7 +17,7 @@ Commands:
   trust           Local trust-card registry, OSV scan, and file-transport quarantine log
   remotecap       Ed25519 capability tokens; `use` is dry-run (does not send HTTP)
   trust-card      Local trust-card registry inspect (show[PATH]; not a live HTTP API)
-  fleet           Local file-transport fleet[PATH] log (not a live control plane)
+  fleet           Fleet quarantine control plane (local file transport, or a live HTTP coordinator)
   incident        Recorded incident bundles: export, integrity-verified replay, counterfactual (not live re-execution)
   ltv             Long-term verifiability attestation and offline verification
   ops             Local ops snapshots: health files, config audit, metrics, corpus run (not a live daemon)

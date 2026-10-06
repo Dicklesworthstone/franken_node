@@ -16720,7 +16720,7 @@ mod fleet_command_tests {
             activated: false,
             pending_convergences: Vec::new(),
         };
-        let rendered = render_fleet_status_human(&status, true);
+        let rendered = render_fleet_status_human(&status, true, FleetTransportKind::File);
         assert!(rendered.contains("fleet status: zone=zone-1"));
         assert!(rendered.contains("activated=false"));
         assert!(rendered.contains(
@@ -16763,7 +16763,7 @@ mod fleet_command_tests {
             trace_id: "trace-fleet".to_string(),
             event_code: "FLEET-005".to_string(),
         };
-        let rendered = render_fleet_action_human(&action);
+        let rendered = render_fleet_action_human(&action, FleetTransportKind::File);
         assert!(rendered.contains("fleet action: type=reconcile operation_id=fleet-op-7"));
         assert!(rendered.contains("success=true"));
         assert!(rendered.contains("event_code=FLEET-005"));
@@ -23935,6 +23935,8 @@ struct LoadedFleetState {
     state: FleetSharedState,
     stale_nodes: Vec<PersistedNodeStatus>,
     active_incidents: Vec<FleetCliPendingIncident>,
+    transport_kind: FleetTransportKind,
+    control_plane_url: Option<String>,
 }
 
 const FLEET_CLI_STATUS_SCHEMA_VERSION: &str = "franken-node/fleet-status-cli/v1";
@@ -23944,8 +23946,12 @@ const FLEET_CLI_AGENT_SCHEMA_VERSION: &str = "franken-node/fleet-agent-cli/v1";
 const FLEET_CLI_ERROR_SCHEMA_VERSION: &str = "franken-node/fleet-error-cli/v1";
 const FLEET_CLI_TRANSPORT: &str = "file";
 const FLEET_CLI_ACTIVATED_SOURCE: &str = "file_transport_not_live";
+const FLEET_CLI_HTTP_TRANSPORT: &str = "http";
+const FLEET_CLI_HTTP_ACTIVATED_SOURCE: &str = "http_control_plane_live";
 
 fn emit_fleet_error_json(command: &str, message: &str) -> Result<()> {
+    // A failure never proves liveness, so `live_control_plane` stays false
+    // even when the configured transport is the HTTP coordinator.
     println!(
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
@@ -23953,7 +23959,7 @@ fn emit_fleet_error_json(command: &str, message: &str) -> Result<()> {
             "command": command,
             "ok": false,
             "error": message,
-            "transport": FLEET_CLI_TRANSPORT,
+            "transport": configured_fleet_transport_kind().label(),
             "live_control_plane": false,
         }))?
     );
@@ -23972,12 +23978,16 @@ fn fleet_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Resul
 #[derive(Debug, Clone, Serialize)]
 struct FleetCliStatusReport {
     schema_version: &'static str,
-    /// CLI fleet status is always the local file-transport log, not a live API.
+    /// `file` (local durable store) or `http` (live coordinator).
     transport: &'static str,
-    /// File-transport CLI cannot claim a live control-plane heartbeat.
+    /// True only when the state was read from a coordinator that answered.
     live_control_plane: bool,
-    /// `status.activated` is hardcoded for file transport; not a live fleet API.
+    /// Why `status.activated` has its value (`file_transport_not_live` or
+    /// `http_control_plane_live`).
     activated_source: &'static str,
+    /// Coordinator origin when `transport=http`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    control_plane_url: Option<String>,
     status: FleetStatus,
     state_dir: PathBuf,
     convergence_timeout_seconds: u64,
@@ -23991,8 +24001,10 @@ struct FleetCliNodeReport {
     schema_version: &'static str,
     transport: &'static str,
     live_control_plane: bool,
-    /// `zone_status.activated` is hardcoded for file transport; not a live fleet API.
+    /// Why `zone_status.activated` has its value.
     activated_source: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    control_plane_url: Option<String>,
     node: PersistedNodeStatus,
     stale: bool,
     zone_status: FleetStatus,
@@ -24006,8 +24018,10 @@ struct FleetCliActionReport {
     schema_version: &'static str,
     transport: &'static str,
     live_control_plane: bool,
-    /// `status.activated` is hardcoded for file transport; not a live fleet API.
+    /// Why `status.activated` has its value.
     activated_source: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    control_plane_url: Option<String>,
     action: FleetActionResult,
     #[serde(skip_serializing_if = "Option::is_none")]
     convergence_receipt: Option<FleetCliConvergenceReceipt>,
@@ -24057,15 +24071,190 @@ fn resolve_fleet_state_dir(
     Ok(ensure_state_dir(project_root)?.join("fleet"))
 }
 
-fn open_fleet_transport(
+/// Which fleet store a command reached: the local WAL-durable database, or a
+/// live coordinator (`franken-node fleet serve`) over its HTTP API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FleetTransportKind {
+    File,
+    Http,
+}
+
+impl FleetTransportKind {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::File => FLEET_CLI_TRANSPORT,
+            Self::Http => FLEET_CLI_HTTP_TRANSPORT,
+        }
+    }
+
+    /// Only a coordinator that answered over HTTP is a live control plane.
+    const fn live(self) -> bool {
+        matches!(self, Self::Http)
+    }
+
+    const fn activated_source(self) -> &'static str {
+        match self {
+            Self::File => FLEET_CLI_ACTIVATED_SOURCE,
+            Self::Http => FLEET_CLI_HTTP_ACTIVATED_SOURCE,
+        }
+    }
+}
+
+/// The transport a fleet command talks to. Both arms implement the same
+/// [`PersistedFleetTransport`] contract, so every fleet code path is shared.
+enum FleetTransportHandle {
+    Durable(fleet_transport_durable::DurableFleetTransport),
+    #[cfg(feature = "http-client")]
+    Http(control_plane::fleet_transport_http::HttpFleetTransport),
+}
+
+impl FleetTransportHandle {
+    const fn kind(&self) -> FleetTransportKind {
+        match self {
+            Self::Durable(_) => FleetTransportKind::File,
+            #[cfg(feature = "http-client")]
+            Self::Http(_) => FleetTransportKind::Http,
+        }
+    }
+
+    fn control_plane_url(&self) -> Option<String> {
+        match self {
+            Self::Durable(_) => None,
+            #[cfg(feature = "http-client")]
+            Self::Http(transport) => Some(transport.url().as_str().to_string()),
+        }
+    }
+
+    fn list_stale_nodes(
+        &self,
+        now: DateTime<Utc>,
+        staleness_threshold: Duration,
+    ) -> std::result::Result<Vec<PersistedNodeStatus>, FleetTransportError> {
+        match self {
+            Self::Durable(transport) => transport.list_stale_nodes(now, staleness_threshold),
+            #[cfg(feature = "http-client")]
+            Self::Http(transport) => transport.list_stale_nodes(now, staleness_threshold),
+        }
+    }
+}
+
+impl PersistedFleetTransport for FleetTransportHandle {
+    fn initialize(&mut self) -> std::result::Result<(), FleetTransportError> {
+        match self {
+            Self::Durable(transport) => transport.initialize(),
+            #[cfg(feature = "http-client")]
+            Self::Http(transport) => transport.initialize(),
+        }
+    }
+
+    fn publish_action(
+        &mut self,
+        action: &PersistedFleetActionRecord,
+    ) -> std::result::Result<(), FleetTransportError> {
+        match self {
+            Self::Durable(transport) => transport.publish_action(action),
+            #[cfg(feature = "http-client")]
+            Self::Http(transport) => transport.publish_action(action),
+        }
+    }
+
+    fn list_actions(
+        &self,
+    ) -> std::result::Result<Vec<PersistedFleetActionRecord>, FleetTransportError> {
+        match self {
+            Self::Durable(transport) => transport.list_actions(),
+            #[cfg(feature = "http-client")]
+            Self::Http(transport) => transport.list_actions(),
+        }
+    }
+
+    fn upsert_node_status(
+        &mut self,
+        status: &PersistedNodeStatus,
+    ) -> std::result::Result<(), FleetTransportError> {
+        match self {
+            Self::Durable(transport) => transport.upsert_node_status(status),
+            #[cfg(feature = "http-client")]
+            Self::Http(transport) => transport.upsert_node_status(status),
+        }
+    }
+
+    fn list_node_statuses(
+        &self,
+    ) -> std::result::Result<Vec<PersistedNodeStatus>, FleetTransportError> {
+        match self {
+            Self::Durable(transport) => transport.list_node_statuses(),
+            #[cfg(feature = "http-client")]
+            Self::Http(transport) => transport.list_node_statuses(),
+        }
+    }
+
+    fn read_shared_state(&self) -> std::result::Result<FleetSharedState, FleetTransportError> {
+        match self {
+            Self::Durable(transport) => transport.read_shared_state(),
+            #[cfg(feature = "http-client")]
+            Self::Http(transport) => transport.read_shared_state(),
+        }
+    }
+}
+
+/// Resolve a configured path relative to the config file that named it (or
+/// the project root when it came from the environment).
+fn resolve_fleet_config_path(
     project_root: &Path,
-) -> Result<(u64, PathBuf, fleet_transport_durable::DurableFleetTransport)> {
+    resolved: &config::ResolvedConfig,
+    path: &Path,
+) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    if let Some(source_root) = resolved.source_path.as_deref().and_then(Path::parent) {
+        return source_root.join(path);
+    }
+    project_root.join(path)
+}
+
+/// Read the coordinator bearer token from `path` (trimmed; must validate).
+#[cfg(feature = "http-client")]
+fn read_fleet_control_plane_token(path: &Path) -> Result<String> {
+    let raw = bounded_read_to_string(path, 4 << 10).with_context(|| {
+        format!(
+            "failed reading fleet control-plane token {}; the coordinator writes it with \
+             `franken-node fleet serve --generate-token`",
+            path.display()
+        )
+    })?;
+    let token = raw.trim().to_string();
+    control_plane::fleet_transport_http::validate_bearer_token(&token)
+        .map_err(|reason| anyhow::anyhow!("{}: {reason}", path.display()))?;
+    Ok(token)
+}
+
+/// The transport kind fleet commands would use, from `[fleet]` settings alone
+/// (no network access); used to label failures truthfully.
+fn configured_fleet_transport_kind() -> FleetTransportKind {
+    config::Config::resolve_for_fleet(None, config::CliOverrides::default())
+        .ok()
+        .and_then(|resolved| resolved.config.fleet.control_plane_url)
+        .map_or(FleetTransportKind::File, |_| FleetTransportKind::Http)
+}
+
+fn open_fleet_transport(project_root: &Path) -> Result<(u64, PathBuf, FleetTransportHandle)> {
     // bd-ph79w: fleet transport consumes only `[fleet]` settings; full config
     // validation would abort every fleet command in workspaces that have not
     // run `init` with an unrelated trust.registry_signing_key error.
     let resolved = config::Config::resolve_for_fleet(None, config::CliOverrides::default())
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     let state_dir = resolve_fleet_state_dir(project_root, &resolved)?;
+    if let Some(url) = resolved.config.fleet.control_plane_url.as_deref() {
+        return open_http_fleet_transport(project_root, &resolved, url).map(|transport| {
+            (
+                resolved.config.fleet.convergence_timeout_seconds,
+                state_dir,
+                transport,
+            )
+        });
+    }
     // bd-reality-20260820-w0fc6.3: the authoritative store is now the
     // WAL-durable frankensqlite database; the legacy JSONL layout is imported
     // once at initialize and deleting the db files rolls back to it.
@@ -24077,8 +24266,54 @@ fn open_fleet_transport(
     Ok((
         resolved.config.fleet.convergence_timeout_seconds,
         state_dir,
-        transport,
+        FleetTransportHandle::Durable(transport),
     ))
+}
+
+/// Connect to a live coordinator. Fails closed: a missing token, an
+/// unreachable coordinator or a refused token is an error, never a silent
+/// fallback to the local store.
+#[cfg(feature = "http-client")]
+fn open_http_fleet_transport(
+    project_root: &Path,
+    resolved: &config::ResolvedConfig,
+    url: &str,
+) -> Result<FleetTransportHandle> {
+    let token_path = resolved
+        .config
+        .fleet
+        .control_plane_token_path
+        .as_deref()
+        .map(|path| resolve_fleet_config_path(project_root, resolved, path))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "fleet.control_plane_url is set but no token is configured; set \
+                 [fleet] control_plane_token_path or FRANKEN_NODE_FLEET_CONTROL_PLANE_TOKEN_PATH \
+                 to the coordinator's token file"
+            )
+        })?;
+    let token = read_fleet_control_plane_token(&token_path)?;
+    let mut transport = control_plane::fleet_transport_http::HttpFleetTransport::new(
+        url,
+        &token,
+        control_plane::fleet_transport_http::FLEET_HTTP_DEFAULT_TIMEOUT,
+    )
+    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    transport
+        .initialize()
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    Ok(FleetTransportHandle::Http(transport))
+}
+
+#[cfg(not(feature = "http-client"))]
+fn open_http_fleet_transport(
+    _project_root: &Path,
+    _resolved: &config::ResolvedConfig,
+    url: &str,
+) -> Result<FleetTransportHandle> {
+    anyhow::bail!(
+        "fleet.control_plane_url={url} requires the `http-client` feature, which this build omits"
+    )
 }
 
 fn fleet_operation_id(kind: &str) -> String {
@@ -24302,6 +24537,8 @@ fn load_fleet_state(project_root: &Path) -> Result<LoadedFleetState> {
         state,
         stale_nodes,
         active_incidents,
+        transport_kind: transport.kind(),
+        control_plane_url: transport.control_plane_url(),
     })
 }
 
@@ -24341,8 +24578,9 @@ fn fleet_status_from_loaded_state(loaded: &LoadedFleetState, requested_zone: &st
         active_revocations: count_active_fleet_revocations(&loaded.state, requested_zone),
         healthy_nodes,
         total_nodes,
-        // File-transport CLI status is not a live fleet API; do not claim activation.
-        activated: false,
+        // Activation is claimed only when the state came from a live
+        // coordinator; the local file transport is never a live fleet API.
+        activated: loaded.transport_kind.live(),
         pending_convergences,
     }
 }
@@ -24352,9 +24590,10 @@ fn fleet_status_report(project_root: &Path, requested_zone: &str) -> Result<Flee
     let status = fleet_status_from_loaded_state(&loaded, requested_zone);
     Ok(FleetCliStatusReport {
         schema_version: FLEET_CLI_STATUS_SCHEMA_VERSION,
-        transport: FLEET_CLI_TRANSPORT,
-        live_control_plane: false,
-        activated_source: FLEET_CLI_ACTIVATED_SOURCE,
+        transport: loaded.transport_kind.label(),
+        live_control_plane: loaded.transport_kind.live(),
+        activated_source: loaded.transport_kind.activated_source(),
+        control_plane_url: loaded.control_plane_url,
         status,
         state_dir: loaded.state_dir,
         convergence_timeout_seconds: loaded.convergence_timeout_seconds,
@@ -24403,9 +24642,10 @@ fn fleet_describe_report(
     let zone_status = fleet_status_from_loaded_state(&loaded, &node.zone_id);
     Ok(FleetCliNodeReport {
         schema_version: FLEET_CLI_DESCRIBE_SCHEMA_VERSION,
-        transport: FLEET_CLI_TRANSPORT,
-        live_control_plane: false,
-        activated_source: FLEET_CLI_ACTIVATED_SOURCE,
+        transport: loaded.transport_kind.label(),
+        live_control_plane: loaded.transport_kind.live(),
+        activated_source: loaded.transport_kind.activated_source(),
+        control_plane_url: loaded.control_plane_url.clone(),
         node,
         stale,
         zone_status,
@@ -24644,9 +24884,10 @@ fn fleet_action_report(
     let status = fleet_status_from_loaded_state(&loaded, requested_zone);
     Ok(FleetCliActionReport {
         schema_version: FLEET_CLI_ACTION_SCHEMA_VERSION,
-        transport: FLEET_CLI_TRANSPORT,
-        live_control_plane: false,
-        activated_source: FLEET_CLI_ACTIVATED_SOURCE,
+        transport: loaded.transport_kind.label(),
+        live_control_plane: loaded.transport_kind.live(),
+        activated_source: loaded.transport_kind.activated_source(),
+        control_plane_url: loaded.control_plane_url,
         action,
         convergence_receipt,
         status,
@@ -24666,7 +24907,15 @@ fn emit_fleet_status_report(
     if json {
         println!("{}", serde_json::to_string_pretty(report)?);
     } else {
-        println!("{}", render_fleet_status_human(&report.status, verbose));
+        let kind = if report.live_control_plane {
+            FleetTransportKind::Http
+        } else {
+            FleetTransportKind::File
+        };
+        println!(
+            "{}",
+            render_fleet_status_human(&report.status, verbose, kind)
+        );
     }
     Ok(())
 }
@@ -24684,7 +24933,12 @@ fn emit_fleet_action_report(report: &FleetCliActionReport, json: bool) -> Result
     if json {
         println!("{}", serde_json::to_string_pretty(report)?);
     } else {
-        let mut rendered = render_fleet_action_human(&report.action);
+        let kind = if report.live_control_plane {
+            FleetTransportKind::Http
+        } else {
+            FleetTransportKind::File
+        };
+        let mut rendered = render_fleet_action_human(&report.action, kind);
         if let Some(receipt) = &report.convergence_receipt {
             rendered.push_str(&format!(
                 "\n  convergence_receipt_elapsed_ms={} timed_out={}",
@@ -24719,12 +24973,10 @@ fn append_trust_quarantine_action(
     affected_cards: usize,
 ) -> Result<String> {
     let loaded = load_fleet_state(project_root)?;
-    let mut transport =
-        fleet_transport_durable::DurableFleetTransport::new(loaded.state_dir.clone())
-            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-    transport
-        .initialize()
-        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    // The same transport fleet commands use: the local durable store, or the
+    // live coordinator when `[fleet] control_plane_url` is configured, so a
+    // quarantine issued on one node reaches every agent polling it.
+    let (_, _, mut transport) = open_fleet_transport(project_root)?;
 
     let operation_id = fleet_operation_id("quarantine");
     let incident_id = format!("inc-{operation_id}");
@@ -24820,7 +25072,11 @@ impl FleetStatusPresentationView {
     }
 }
 
-fn render_fleet_status_human(status: &FleetStatus, verbose: bool) -> String {
+fn render_fleet_status_human(
+    status: &FleetStatus,
+    verbose: bool,
+    kind: FleetTransportKind,
+) -> String {
     let pending_convergences = status
         .pending_convergences
         .iter()
@@ -24857,9 +25113,9 @@ fn render_fleet_status_human(status: &FleetStatus, verbose: bool) -> String {
 
     let model = FleetStatusPresentationModel {
         zone_id: status.zone_id.clone(),
-        transport: FLEET_CLI_TRANSPORT.to_string(),
-        live_control_plane: false,
-        activated_source: FLEET_CLI_ACTIVATED_SOURCE.to_string(),
+        transport: kind.label().to_string(),
+        live_control_plane: kind.live(),
+        activated_source: kind.activated_source().to_string(),
         activated: status.activated,
         active_quarantines: status.active_quarantines,
         active_revocations: status.active_revocations,
@@ -24901,12 +25157,13 @@ fn render_fleet_node_human(report: &FleetCliNodeReport) -> String {
         lines.push(format!("  active_incidents={incidents}"));
     }
     lines.push(format!(
-        "  transport={FLEET_CLI_TRANSPORT} live_control_plane=false activated_source={FLEET_CLI_ACTIVATED_SOURCE}"
+        "  transport={} live_control_plane={} activated_source={}",
+        report.transport, report.live_control_plane, report.activated_source
     ));
     lines.join("\n")
 }
 
-fn render_fleet_action_human(action: &FleetActionResult) -> String {
+fn render_fleet_action_human(action: &FleetActionResult, kind: FleetTransportKind) -> String {
     let mut lines = vec![
         format!(
             "fleet action: type={} operation_id={}",
@@ -24931,7 +25188,10 @@ fn render_fleet_action_human(action: &FleetActionResult) -> String {
         ));
     }
     lines.push(format!(
-        "  transport={FLEET_CLI_TRANSPORT} live_control_plane=false activated_source={FLEET_CLI_ACTIVATED_SOURCE}"
+        "  transport={} live_control_plane={} activated_source={}",
+        kind.label(),
+        kind.live(),
+        kind.activated_source()
     ));
     lines.join("\n")
 }
@@ -25306,6 +25566,119 @@ fn apply_fleet_release_action(
     Ok(released)
 }
 
+/// Default coordinator token location, relative to the project root.
+#[cfg(feature = "fleet-control-plane-server")]
+const FLEET_CONTROL_PLANE_TOKEN_DEFAULT: &str = ".franken-node/keys/fleet-control-plane.token";
+
+/// Serve this node's durable fleet store as the live HTTP control plane.
+#[cfg(feature = "fleet-control-plane-server")]
+fn run_fleet_serve(args: &cli::FleetServeArgs) -> Result<()> {
+    use control_plane::fleet_http_server::{
+        FLEET_HTTP_LISTENING, FLEET_HTTP_SHUTDOWN, FleetControlPlaneService, FleetHttpEvent,
+        FleetHttpEventSink, FleetHttpServerConfig, FleetHttpServerControl,
+        serve_fleet_control_plane,
+    };
+    use std::io::Write as _;
+    use std::sync::Arc;
+
+    let bind: std::net::SocketAddr = args.bind.trim().parse().with_context(|| {
+        format!(
+            "`fleet serve --bind {}` must be an ip:port socket address (e.g. 127.0.0.1:9440)",
+            args.bind
+        )
+    })?;
+    if !bind.ip().is_loopback() && !args.allow_non_loopback {
+        anyhow::bail!(
+            "refusing to bind {bind}: the fleet control plane speaks plaintext HTTP, so a \
+             non-loopback listener would expose the bearer token; put it behind a TLS-terminating \
+             proxy or an encrypted overlay and pass --allow-non-loopback"
+        );
+    }
+
+    let token_path = args
+        .token_file
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(FLEET_CONTROL_PLANE_TOKEN_DEFAULT));
+    let mut generated_token = false;
+    if !token_path.exists() {
+        if !args.generate_token {
+            anyhow::bail!(
+                "fleet control-plane token {} does not exist; rerun with --generate-token to \
+                 create it (0600) and copy it to each node's control_plane_token_path",
+                token_path.display()
+            );
+        }
+        create_private_random_key_file(&token_path)?;
+        generated_token = true;
+    }
+    let token = read_fleet_control_plane_token(&token_path)?;
+
+    let resolved = config::Config::resolve_for_fleet(None, config::CliOverrides::default())
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    let state_dir = resolve_fleet_state_dir(Path::new("."), &resolved)?;
+    let service = Arc::new(
+        FleetControlPlaneService::open(state_dir.clone(), &token)
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?,
+    );
+    let control = FleetHttpServerControl::with_shutdown_flag(install_fleet_agent_shutdown_flag()?);
+
+    let json = args.json;
+    let store_display = state_dir.display().to_string();
+    let token_display = token_path.display().to_string();
+    let sink: FleetHttpEventSink = Arc::new(move |event: &FleetHttpEvent| {
+        if json {
+            let mut line = serde_json::to_value(event).unwrap_or_default();
+            if event.event_code == FLEET_HTTP_LISTENING
+                && let Some(object) = line.as_object_mut()
+            {
+                object.insert("state_dir".to_string(), store_display.clone().into());
+                object.insert("token_file".to_string(), token_display.clone().into());
+                object.insert("token_generated".to_string(), generated_token.into());
+            }
+            println!("{line}");
+        } else if event.event_code == FLEET_HTTP_LISTENING {
+            println!(
+                "fleet control plane listening on http://{} (store={store_display}, token={token_display}{})",
+                event.bound_addr.as_deref().unwrap_or("?"),
+                if generated_token { ", generated" } else { "" }
+            );
+        } else if event.event_code == FLEET_HTTP_SHUTDOWN {
+            eprintln!(
+                "fleet control plane stopped after {} request(s)",
+                event.requests_served.unwrap_or_default()
+            );
+        } else {
+            eprintln!(
+                "fleet control plane: {} {} -> {} {}",
+                event.method.as_deref().unwrap_or("?"),
+                event.path.as_deref().unwrap_or("?"),
+                event.status.unwrap_or_default(),
+                event.outcome.unwrap_or("?")
+            );
+        }
+        let _ = std::io::stdout().flush();
+    });
+
+    serve_fleet_control_plane(
+        service,
+        &FleetHttpServerConfig {
+            bind: bind.to_string(),
+            max_requests: args.max_requests,
+        },
+        control,
+        sink,
+    )
+    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    Ok(())
+}
+
+#[cfg(not(feature = "fleet-control-plane-server"))]
+fn run_fleet_serve(_args: &cli::FleetServeArgs) -> Result<()> {
+    anyhow::bail!(
+        "`fleet serve` requires the `fleet-control-plane-server` feature, which this build omits"
+    )
+}
+
 /// Run the fleet agent polling loop.
 fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
     use control_plane::fleet_transport::{
@@ -25317,14 +25690,31 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
     let resolved = resolve_fleet_agent_args(args)?;
     let poll_interval = std::time::Duration::from_secs(resolved.poll_interval_secs);
     let (_, _state_dir, mut transport) = open_fleet_transport(Path::new("."))?;
+    let transport_kind = transport.kind();
 
-    // The agent always runs over `open_fleet_transport` (DurableFleetTransport).
+    // A configured coordinator makes this a live multi-node agent: actions are
+    // pulled from, and heartbeats pushed to, `fleet serve` over HTTP.
+    if transport_kind == FleetTransportKind::Http {
+        eprintln!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "event_code": "FLEET_TRANSPORT_HTTP_LIVE",
+                "node_id": resolved.node_id,
+                "zone_id": resolved.zone_id,
+                "control_plane_url": transport.control_plane_url(),
+                "substrate": "fastapi_rust_coordinator",
+            }))
+            .unwrap_or_default()
+        );
+    }
+
+    // Without a coordinator the agent runs over the local DurableFleetTransport.
     // The asupersync feature compiles the substrate in but does not route this
     // loop through it, so the event must not claim an asupersync control lane
     // (it previously reported ASUPERSYNC_CONTROL_LANE_ACTIVATED /
     // "charter_compliant_control_lane"; bd-reality-20260923-26n9r.16).
     #[cfg(feature = "asupersync-transport")]
-    {
+    if transport_kind == FleetTransportKind::File {
         eprintln!(
             "{}",
             serde_json::to_string(&serde_json::json!({
@@ -25339,7 +25729,7 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
     }
 
     #[cfg(not(feature = "asupersync-transport"))]
-    {
+    if transport_kind == FleetTransportKind::File {
         let fleet_cfg = config::Config::resolve_for_fleet(None, config::CliOverrides::default())
             .map(|r| r.config.fleet)
             .unwrap_or_else(|_| config::FleetConfig {
@@ -25349,6 +25739,8 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
                 convergence_timeout_seconds: 30,
                 barrier_timeout_ms: None,
                 allow_degraded_file_transport: false,
+                control_plane_url: None,
+                control_plane_token_path: None,
             });
         if !args.fallback_file_transport && !fleet_cfg.allow_degraded_file_transport {
             eprintln!(
@@ -25584,8 +25976,8 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
         // Emit poll result
         let result = FleetAgentPollResult {
             schema_version: FLEET_CLI_AGENT_SCHEMA_VERSION.to_string(),
-            transport: FLEET_CLI_TRANSPORT.to_string(),
-            live_control_plane: false,
+            transport: transport_kind.label().to_string(),
+            live_control_plane: transport_kind.live(),
             cycle,
             node_id: resolved.node_id.clone(),
             zone_id: resolved.zone_id.clone(),
@@ -25607,11 +25999,12 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
             println!("{}", serde_json::to_string(&result)?);
         } else {
             eprintln!(
-                "fleet agent: poll cycle={} actions={} quarantine_version={} transport={} live_control_plane=false",
+                "fleet agent: poll cycle={} actions={} quarantine_version={} transport={} live_control_plane={}",
                 result.cycle,
                 result.actions_processed,
                 result.quarantine_version,
-                FLEET_CLI_TRANSPORT
+                result.transport,
+                result.live_control_plane
             );
         }
 
@@ -33121,6 +33514,11 @@ fn main() -> Result<()> {
             FleetCommand::Agent(args) => {
                 if let Err(err) = run_fleet_agent(&args) {
                     return fleet_fail("fleet.agent", args.json, err);
+                }
+            }
+            FleetCommand::Serve(args) => {
+                if let Err(err) = run_fleet_serve(&args) {
+                    return fleet_fail("fleet.serve", args.json, err);
                 }
             }
         },

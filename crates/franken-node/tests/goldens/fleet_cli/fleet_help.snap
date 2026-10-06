@@ -1,17 +1,18 @@
 ---
 source: crates/franken-node/tests/cli_subcommand_goldens.rs
 ---
-Local file-transport fleet[PATH] log (not a live control plane)
+Fleet quarantine control plane (local file transport, or a live HTTP coordinator)
 
 Usage: franken-node fleet <COMMAND>
 
 Commands:
-  status     Show local persisted fleet and quarantine state (not a live heartbeat)
-  describe   Describe one node from local persisted fleet state
+  status     Show fleet and quarantine state from the configured store
+  describe   Describe one node from the configured fleet store
   release    Lift quarantine[PATH] controls with receipts
-  reconcile  Reconcile local fleet-action log; timeout fails closed
-  agent      Poll local file-transport fleet actions (not a live cluster)
-  help       Print this message or the help of the given subcommand(s)
+  reconcile  Reconcile the fleet-action log; timeout fails closed
+  agent      Poll fleet actions and push heartbeats: the local durable store, or a live coordinator when `[fleet] control_plane_url` is configured
+  serve      Serve this node's durable fleet store as the live HTTP control plane that agents and operators on other nodes connect to
+  help      Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help     Print help

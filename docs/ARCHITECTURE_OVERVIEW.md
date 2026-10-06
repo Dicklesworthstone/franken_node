@@ -76,17 +76,17 @@ FrankenNode organizes functionality into distinct product planes:
 - CLI: `franken-node trust`, `franken-node verify`
 
 ### 🚁 Fleet Control Domain (`api/fleet_quarantine.rs`, `control_plane/`)
-**Purpose:** Local file-transport fleet/quarantine log (not a live multi-node control plane)  
+**Purpose:** Fleet quarantine/release control plane: a local durable store by default, or a live HTTP coordinator shared by every node  
 **Key Components:**
-- File-backed quarantine/release/reconcile records
+- Durable quarantine/release/reconcile records and node heartbeats
 - Signed decision receipts
-- Zone labels on local log records
-- File-transport convergence (`live_control_plane=false`)
+- Zone labels on fleet records
+- Local convergence (`live_control_plane=false`) or multi-node convergence through `fleet serve` (`live_control_plane=true`)
 
 **Entry Points:**
 - `src/api/fleet_quarantine.rs:FleetControlManager` 
-- `src/control_plane/` - epoch/fork/MMR primitives (not a live fleet daemon)
-- CLI: `franken-node fleet status`, `franken-node fleet release`, `franken-node fleet agent` (file JSONL, not a live heartbeat)
+- `src/control_plane/fleet_transport.rs` (durable store), `fleet_http_server.rs` (coordinator), `fleet_transport_http.rs` (client)
+- CLI: `franken-node fleet serve`, `franken-node fleet status`, `franken-node fleet release`, `franken-node fleet agent`
 
 ### 📊 Replay & Incidents Domain (`replay/`, `observability/`)
 **Purpose:** Deterministic replay, incident analysis, evidence capture  
@@ -178,7 +178,7 @@ Core Commands:
   run              Execute JavaScript with franken_engine
   migrate          Migration analysis and tooling (`--emit-rollback` is unsigned JSON)
   trust            Trust and supply chain operations
-  fleet            Local file-transport fleet/quarantine log (not a live control plane)
+  fleet            Fleet quarantine control plane (local store, or a live `fleet serve` coordinator)
   ops              Local ops snapshots (not a live daemon)
     health-check   Compiled git SHA plus local ledger/receipt files
   verify           Compatibility/release verification (Node is spec when included)

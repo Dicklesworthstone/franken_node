@@ -130,9 +130,12 @@ replay part of the runtime contract, so JS/TS velocity comes with:
   unsigned JSON rollback plans (not Ed25519-signed). `migrate validate`
   is static+smoke; behavioral comparison is a separate `verify lockstep`
   (Bun+franken dyad by default; real Node.js can be added when available)
-- **Fleet quarantine log**: local file-transport quarantine, release, and
-  reconcile with signed decision receipts. Not a live multi-node control
-  plane (`live_control_plane=false`)
+- **Fleet quarantine control plane**: quarantine, release, and reconcile
+  with signed decision receipts. By default over the local durable store
+  (`transport=file`, `live_control_plane=false`); with `fleet serve` on a
+  coordinator and `[fleet] control_plane_url` on every node, the same
+  commands run as a live multi-node control plane over authenticated HTTP
+  (`transport=http`, `live_control_plane=true`)
 - **Verifier SDK**: independent third parties can validate receipts,
   bundles, and the honesty manifest without trusting the producing
   runtime. `bench run` reports are SHA256 `provenance_hash` documents,
@@ -148,7 +151,7 @@ replay part of the runtime contract, so JS/TS velocity comes with:
 | Counterfactual simulator | Re-evaluate the recorded incident decision trace under a different policy mode and inspect the diff |
 | Migration autopilot | Audit, rewrite, validate, and rollout. `--emit-rollback` is unsigned JSON (not Ed25519-signed); `migrate validate` is static+smoke, not `verify lockstep` |
 | Compatibility oracle | Lockstep vs Node (spec) plus Bun as a second reference; matching only Bun stays fail |
-| Fleet quarantine log | Local file-transport quarantine, reconcile, release; signed decision receipts (`live_control_plane=false`) |
+| Fleet quarantine control plane | Quarantine, reconcile, release with signed decision receipts; local file transport by default, or a live HTTP coordinator (`fleet serve`) shared by every node |
 | Signed extension registry | Ed25519-signed artifacts, provenance enforcement, assurance levels |
 | Remote capability tokens | Scope-bound, single-use-optional Ed25519 capability tokens with audience binding |
 | Verifier SDK | Independent verification of receipts, bundles, and the honesty manifest (not Ed25519-signed `bench run` reports) |
@@ -416,7 +419,7 @@ franken-node verify release ./release-dir --key-dir ./trusted-public-keys
 6. **Inspect trust and fleet state:**
    ```bash
    franken-node trust list --risk high
-   franken-node fleet status --json   # local file-transport log, not a live heartbeat
+   franken-node fleet status --json   # local store, or the live coordinator when configured
    franken-node incident list --severity high
    ```
 7. **Diagnose environment health:**
@@ -432,12 +435,12 @@ franken-node verify release ./release-dir --key-dir ./trusted-public-keys
 | Scenario | Why franken-node fits |
 |---|---|
 | **Regulated SaaS deploying third-party extensions** | Trust cards + revocation freshness gates + signed registry give a continuous audit trail of which artifacts ran at which version with what attestations. The verifier SDK lets external auditors validate claims without trusting the operator. |
-| **Multi-region operator with quarantine SLA** | Local file-transport fleet quarantine log emits signed decision receipts. `franken-node fleet reconcile` waits on file-transport convergence; it is not a live multi-node heartbeat. |
+| **Multi-region operator with quarantine SLA** | One node runs `franken-node fleet serve`; every other node points `[fleet] control_plane_url` at it. `trust quarantine` on any node reaches every agent over authenticated HTTP, heartbeats are stamped on the coordinator's clock, and `fleet reconcile` waits on real multi-node convergence. Without a coordinator the same commands use the local file transport. |
 | **Migration from legacy Node to a hardened runtime** | `migrate audit` → `migrate rewrite --apply --emit-rollback` → `verify lockstep` is an end-to-end pipeline. `--emit-rollback` writes unsigned JSON (not Ed25519-signed); `migrate validate` is static+smoke, not lockstep. `verify lockstep` is the behavioral oracle. |
 | **Post-incident counterfactual analysis** | `incident bundle --verify` exports a signed, deterministic snapshot of the incident window. `incident counterfactual --policy strict` answers "would tighter policy have blocked this?" with a reproducible diff. |
 | **Public claim verification** | `frankenengine-verifier-sdk` runs outside the producing runtime. Third parties verify receipts, capsules, and counterfactuals without trusting franken-node's own logs. |
 | **Operator triage under disk / build pressure** | `doctor workspace-pressure` analyzes disk, memory, RCH queue depth, and build-fleet state, routes through balanced/conservative/permissive policy, and emits recommended actions. |
-| **Long-running fleet agent on edge nodes** | `fleet agent --zone <z> --poll-interval-secs <n>` polls the local file-transport action log and applies records with bounded retries. It is not a live multi-node heartbeat. |
+| **Long-running fleet agent on edge nodes** | `fleet agent --zone <z> --poll-interval-secs <n>` pulls actions from the coordinator (or the local file-transport log when none is configured), applies them to the node's own trust-card registry with bounded retries, and pushes a heartbeat each cycle. |
 | **Compliance archival** | The evidence ledger is append-only, signature-chained, and witness-traced. Incident bundles plus the registry's signed publish records produce a defensible chain of custody. |
 
 ---
@@ -546,10 +549,11 @@ franken-node fleet release --incident INC-2026-0042 --json
 ```
 
 `fleet release` lifts quarantine with a signed receipt and waits for
-file-transport log convergence (`live_control_plane=false`). `franken-node
-fleet reconcile` confirms that local log catch-up; `franken-node fleet
-status --verbose` shows persisted application of the release, not a live
-multi-node heartbeat.
+convergence of the configured fleet store: the local file transport
+(`live_control_plane=false`), or every node heartbeating into a `fleet
+serve` coordinator (`live_control_plane=true`). `franken-node fleet
+reconcile` confirms that catch-up; `franken-node fleet status --verbose`
+shows the per-node application of the release.
 
 ### Quarterly — Public claim verification
 
@@ -775,7 +779,8 @@ every leaf command available in the current build.
 | `franken-node trust scan [path]` | Populate baseline trust cards from package.json. A plain rescan skips existing cards; with `--deep`/`--audit` it refreshes them from the fetched evidence (same version only; lowering risk needs an OSV answer from the default endpoint) and keeps certification, revocation, quarantine and camouflage marks. Flags: `--deep`, `--audit`, `--json`. |
 | `franken-node trust sync` | Refresh trust-card cache and npm vulnerability state from OSV; `--force` to ignore caches. `--json` emits `franken-node/trust-sync-cli/v1`. |
 | `franken-node trust revoke <id>` | Revoke an artifact or publisher in the **local** trust-card registry (not a live fleet). The extension id is handler-required so `--json` failures emit `franken-node/trust-error-cli/v1` instead of a human clap error. Optional `--receipt-signing-key`, `--receipt-out`. `--json` emits the revoked trust card; failures `franken-node/trust-error-cli/v1`. |
-| `franken-node trust quarantine` | Quarantine a suspicious artifact in the **local** trust-card registry and file-transport fleet log (`live_control_plane=false`). Not a live multi-node broadcast. `--artifact` is handler-required so `--json` failures emit `franken-node/trust-error-cli/v1` instead of a human clap error. `--json` emits `franken-node/trust-quarantine-cli/v1`. |
+| `franken-node trust quarantine` | Quarantine a suspicious artifact in the local trust-card registry and publish the quarantine to the fleet store: the local file transport, or the live coordinator when `[fleet] control_plane_url` is set (every agent polling it applies the quarantine). `--artifact` is handler-required so `--json` failures emit `franken-node/trust-error-cli/v1` instead of a human clap error. `--json` emits `franken-node/trust-quarantine-cli/v1`. |
+| `franken-node trust graph` | Ecosystem reputation graph from the verified trust-card registry and the project's `package-lock.json`: publisher→extension and lockfile `depends_on` edges, effective trust after named propagation rules (R1 revoked → 0; R2 quarantined ≤ 100; R3 at most 200 above the weakest dependency; R4 publishers with a revoked/quarantined extension capped at 400 and their extensions at publisher + 300), an explanation per lowered score, untracked dependencies reported as coverage gaps, and card-version transitions with the audit records that caused them. `--extension <id>` adds that extension's blast radius (every extension whose trust rests on it). `--json` emits `franken-node/trust-graph-cli/v1`. |
 | `franken-node trust release` | Lift a local sentinel run-subject quarantine record for one `--app` (durable JSON; not a live Runtime Sentinel daemon). `--app`, `--operator-id`, and `--reason` are handler-required so `--json` failures emit `franken-node/trust-release-error/v1` instead of a human clap error. `--json` emits `franken-node/trust-release-cli/v1`. |
 | `franken-node trust-card show <id>` | Show a card from the **local** trust-card registry JSON (not a live HTTP API). The extension id is handler-required so `--json` failures emit `franken-node/trust-card-error-cli/v1` instead of a human clap error. Flags: `--json`. |
 | `franken-node trust-card export <id> --json` | Export trust card as canonical JSON. The extension id is handler-required so `--json` failures emit `franken-node/trust-card-error-cli/v1` instead of a human clap error. |
@@ -792,15 +797,43 @@ every leaf command available in the current build.
 | `franken-node remotecap use` | Authorize a scoped network operation against a token (dry-run). Does not perform the HTTP request. `--token-file`, `--operation`, and `--endpoint` are handler-required so `--json` failures emit `franken-node/remotecap-error-cli/v1` instead of a human clap error. Flags: `--json` (`franken-node/remotecap-use-cli/v1`). |
 | `franken-node remotecap revoke` | Revoke a capability token. Required: `--token-file`. Flags: `--json` (`franken-node/remotecap-revoke-cli/v1`). |
 
-### Fleet quarantine log (file transport)
+### Fleet quarantine control plane (file transport or live HTTP coordinator)
+
+Every fleet command, and `trust quarantine`, talks to one of two stores:
+
+- **File transport (default).** The node's own WAL-durable fleet store;
+  JSON reports `transport=file`, `live_control_plane=false`,
+  `activated_source=file_transport_not_live`.
+- **Live coordinator.** When `[fleet] control_plane_url` (or
+  `FRANKEN_NODE_FLEET_CONTROL_PLANE_URL`) names a node running
+  `fleet serve`, commands use its HTTP API with the bearer token from
+  `[fleet] control_plane_token_path` (or
+  `FRANKEN_NODE_FLEET_CONTROL_PLANE_TOKEN_PATH`). Reports carry
+  `transport=http`, `live_control_plane=true`,
+  `activated_source=http_control_plane_live` and `control_plane_url`. A
+  missing token, a refused token or an unreachable coordinator is an error;
+  there is no silent fallback to the local store. Plaintext `http://` is
+  accepted only for loopback; reach a remote coordinator over `https://`.
 
 | Command | Purpose |
 |---|---|
-| `franken-node fleet status` | Show **local persisted** fleet/quarantine state from file transport. `activated` is not a live multi-node heartbeat. Flags: `--zone`, `--verbose`, `--json` (`activated_source=file_transport_not_live`). |
+| `franken-node fleet serve` | Run the live coordinator: serves this node's durable fleet store over HTTP (fastapi_rust listener on the asupersync runtime). Routes: `GET /v1/fleet/health` (open), `GET/POST /v1/fleet/actions`, `GET/POST /v1/fleet/nodes`, `GET /v1/fleet/state` (bearer token, constant-time compare). Validates every record, caps bodies at 64 KiB, stamps heartbeats with its own clock. Flags: `--bind` (default `127.0.0.1:9440`; port 0 picks a free port, printed first on stdout), `--token-file` (default `.franken-node/keys/fleet-control-plane.token`), `--generate-token` (create a 0600 256-bit token), `--allow-non-loopback` (plaintext listener; only behind TLS termination or an encrypted overlay), `--max-requests`, `--json` (JSONL `FLEET_HTTP_LISTENING` / `FLEET_HTTP_REQUEST` / `FLEET_HTTP_SHUTDOWN` events). |
+| `franken-node fleet status` | Show fleet/quarantine state from the configured store. `activated` is true only when a live coordinator answered. Flags: `--zone`, `--verbose`, `--json`. |
 | `franken-node fleet describe <node>` | Describe one fleet node with zone context and incident state. Flags: `--zone`, `--json`. |
 | `franken-node fleet release` | Lift quarantine/revocation controls with signed receipts. `--incident` is handler-required so `--json` failures emit `franken-node/fleet-error-cli/v1` instead of a human clap error. Flags: `--json`. |
-| `franken-node fleet reconcile` | Reconcile local fleet-action log and wait for file-transport convergence. Times out fail-closed (same as `fleet release`). Flags: `--json`. |
-| `franken-node fleet agent` | Poll local file-transport fleet actions (not a live cluster). `--zone` is handler-required so `--json` failures emit `franken-node/fleet-error-cli/v1` instead of a human clap error. Flags: `--node-id`, `--poll-interval-secs`, `--max-cycles`, `--once`, `--json`. |
+| `franken-node fleet reconcile` | Reconcile the fleet-action log and wait for convergence. Times out fail-closed (same as `fleet release`). Flags: `--json`. |
+| `franken-node fleet agent` | Pull fleet actions, apply them to this node's trust-card registry, and push a heartbeat each cycle. `--zone` is handler-required so `--json` failures emit `franken-node/fleet-error-cli/v1` instead of a human clap error. Flags: `--node-id`, `--poll-interval-secs`, `--max-cycles`, `--once`, `--json`. |
+
+```bash
+# coordinator
+franken-node fleet serve --bind 127.0.0.1:9440 --generate-token
+# every other node (token copied from the coordinator)
+export FRANKEN_NODE_FLEET_CONTROL_PLANE_URL=http://127.0.0.1:9440
+export FRANKEN_NODE_FLEET_CONTROL_PLANE_TOKEN_PATH=/etc/franken-node/fleet.token
+franken-node fleet agent --node-id edge-1 --zone us-east --poll-interval-secs 10
+franken-node trust quarantine --artifact npm:@acme/auth-guard --json
+franken-node fleet status --json   # transport=http, live_control_plane=true
+```
 
 ### Incident replay and forensics
 
@@ -1197,9 +1230,10 @@ feature.
 |---|---|---|---|
 | **Trust cards** | `supply_chain::trust_card` | Publisher identity, risk assessment, audit history, version tracking, camouflage hint, HMAC-signed snapshots, trusted-vs-untrusted source context | Yes: `trust`, `trust-card`, `run` preflight. Camouflage marking is library only |
 | **Revocation freshness gates** | `security::revocation_freshness{_gate}` | SafetyTier-based (Standard/Risky/Dangerous) age policies; `now >= expires_at` fail-closed semantics; bound to capability issuance | `revocation_freshness`: yes (`run` preflight, `remotecap issue`). `revocation_freshness_gate`: library only |
-| **Fleet quarantine state machine** | `api::fleet_quarantine`, `control_plane::fleet_transport` | `QuarantineScope`, `FleetAction` (quarantine/revoke/release), signed `DecisionReceipt`, `ConvergencePhase` tracking, file-backed durable transport | Partly: `fleet release/reconcile` use the durable file transport and signed decision receipts; `FleetControlManager` and the release-quorum logic are library only |
+| **Fleet quarantine state machine** | `api::fleet_quarantine`, `control_plane::fleet_transport`, `control_plane::fleet_http_server`, `control_plane::fleet_transport_http` | `QuarantineScope`, `FleetAction` (quarantine/revoke/release), signed `DecisionReceipt`, `ConvergencePhase` tracking, durable transport, live HTTP coordinator | Partly: `fleet serve/agent/status/release/reconcile` and `trust quarantine` run over the durable store or a live coordinator with signed decision receipts; `FleetControlManager` and the release-quorum logic are library only |
+| **Ecosystem reputation graph** | `supply_chain::trust_graph` | Publisher / extension / lockfile-dependency graph; rule-based trust propagation with per-node explanations; card-version transitions with audit causes; blast radius | Yes: `trust graph` |
 | **Deterministic incident replay** | `replay::time_travel_engine`, `tools::replay_bundle` | `WorkflowTrace` capture, environment snapshot, schema versioning, `ReplayVerdict`, divergence detection, fsync-backed durable serialization | `tools::replay_bundle`: yes (`incident bundle/replay`, `run` incident capture). `time_travel_engine`: library only |
-| **Counterfactual simulator** | `replay::time_travel_engine` + `sdk/verifier` | Re-execute the same trace under an alternative `--policy`; emit diff of decisions, blocked actions, and evidence | `incident counterfactual` scores recorded evidence; `time_travel_engine` is library only |
+| **Counterfactual simulator** | `tools::counterfactual_replay`, `replay::time_travel_engine` + `sdk/verifier` | Re-decide a recorded incident under an alternative `--policy`; emit diff of decisions, blocked actions, and evidence | `incident counterfactual`: `--model production` re-decides run-captured host effects with the run path's per-profile capability table; `--model synthetic` scores recorded evidence. `time_travel_engine` is library only |
 | **Compatibility lockstep oracle** | `runtime::lockstep_harness`, `api::compat_gate` | `verify lockstep` defaults to Bun+franken dyad; corpus L1 treats Node as spec (matching only Bun stays fail; `child_process` aborts remain fail) | `lockstep_harness`: yes (`verify lockstep`). `compat_gate`: `feature:control-plane` |
 | **Migration autopilot** | `migration::*`, BPET migration gate | Audit → rewrite → validate → rollout; unsigned JSON `MigrationRollbackPlan` (not Ed25519-signed); `migrate validate` is static+smoke, not `verify lockstep` | `migration::*`: yes (`migrate`). BPET migration gate: `feature:admin-tools` |
 | **Signed extension registry** | `supply_chain::extension_registry`; `registry::*`, `extensions::artifact_contract` | Ed25519-signed artifacts, schema enforcement, assurance levels, GC, search | Yes: the `registry` commands use `supply_chain::extension_registry`. `registry::*`: `feature:admin-tools`; `artifact_contract`: `feature:advanced-features` |
@@ -2881,10 +2915,10 @@ Stage details:
    `verify lockstep`. Doctor WARNs when
    `migration.require_lockstep_validation` is false; that flag does
    not make `migrate validate` invoke lockstep.
-4. **Rollout** uses the local file-transport fleet log
-   (`live_control_plane=false`):
+4. **Rollout** uses the configured fleet store (the local file
+   transport, or a `fleet serve` coordinator):
    `franken-node fleet release --incident <migration-id>` emits the
-   signed release receipt and waits for file-log convergence.
+   signed release receipt and waits for fleet convergence.
 
 `franken-node migrate-report` produces a single-document operator
 assessment that summarizes the audit and (if run) the validation result
@@ -3326,11 +3360,12 @@ one pass.
   but can surprise teams whose registries are not yet provenance-clean.
 - **Migration rewrites target high-value patterns first.** Niche framework
   macros may still need manual edits; the audit will tell you.
-- **Fleet CLI is file-transport by default** (`live_control_plane=false`)
-  and needs correct clock discipline. A partitioned node will not converge
-  until `fleet reconcile`.
+- **Fleet CLI is file-transport by default** (`live_control_plane=false`).
+  A partitioned node will not converge until `fleet reconcile`.
 - **Single-node mode** stores fleet state locally; multi-node coordination
-  requires the asupersync transport or a configured external transport.
+  runs through one `fleet serve` coordinator. Its listener is plaintext
+  HTTP (loopback by default): expose it beyond the host only behind TLS
+  termination or an encrypted overlay.
 - **Counterfactual simulations** depend on the completeness of the
   telemetry captured during the incident window. Sparse evidence produces
   sparse counterfactuals. The default counterfactual executor is a
@@ -3406,10 +3441,11 @@ runs static+smoke `migrate validate`. Behavioral comparison is a separate
 
 ### Can I run franken-node without a centralized fleet control plane?
 
-Yes. Default fleet state is local file-transport JSONL under
+Yes. Default fleet state is the local durable store under
 `.franken-node/state/` (`live_control_plane=false`). Multi-node
-coordination requires enabling `asupersync-transport` or another
-configured transport; the default binary does not bind asupersync.
+coordination is opt-in: run `franken-node fleet serve` on one node and
+set `[fleet] control_plane_url` (plus `control_plane_token_path`) on the
+others.
 
 ### What does deterministic replay include?
 
@@ -3501,13 +3537,15 @@ records are auditable JSON, not a signed receipt pair.
 
 ### How do I scale up to many fleet nodes?
 
-Default fleet state is **local file-transport JSONL**, not a live cluster.
-`franken-node fleet agent --zone <zone>` polls that local action log.
-Multi-node coordination requires enabling `asupersync-transport` (opt-in)
-or another configured control-plane transport in `franken_node.toml`; the
-default binary does not bind asupersync. `convergence_timeout_seconds`
-governs how long `fleet release` and `fleet reconcile` wait for file-log
-convergence before failing closed.
+Default fleet state is the **local durable store**, not a live cluster.
+To span nodes, run `franken-node fleet serve --generate-token` on a
+coordinator, copy the token file to every node, and set
+`[fleet] control_plane_url` / `control_plane_token_path` (or
+`FRANKEN_NODE_FLEET_CONTROL_PLANE_URL` /
+`FRANKEN_NODE_FLEET_CONTROL_PLANE_TOKEN_PATH`). `franken-node fleet agent
+--zone <zone>` then polls the coordinator and heartbeats into it.
+`convergence_timeout_seconds` governs how long `fleet release` and `fleet
+reconcile` wait for convergence before failing closed.
 
 ### What is the difference between `runtime.lanes` and `SchedulerLane`?
 

@@ -128,9 +128,13 @@ blake3 = ["dep:blake3"]
 # explicitly with `cargo build --features profiling` when running
 # under a perf-round measurement skill.
 profiling = ["dep:hdrhistogram"]
+# Live multi-node fleet coordinator (`franken-node fleet serve`): the charter's
+# HTTP substrate (fastapi_rust on the asupersync runtime) serving the durable
+# fleet store; clients reach it through the `http-client` transport.
+fleet-control-plane-server = ["http-client", "dep:fastapi_rust", "dep:asupersync"]
 # Default stays limited to features needed for a usable node binary.
 # Heavy product surfaces and optional export formats require explicit opt-in.
-default = ["engine", "http-client", "external-commands"]
+default = ["engine", "http-client", "external-commands", "fleet-control-plane-server"]
 
 [dependencies]
 anyhow.workspace = true
@@ -152,7 +156,13 @@ ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
 ciborium = { version = "0.2.2", optional = true }
 flate2 = { version = "1.0.35", optional = true }
 rand = "0.8.5"
-asupersync = { version = "=0.5.0", optional = true }
+# default-features = false: asupersync's defaults enable `nightly-outcome-try`
+# (`#![feature(try_trait_v2)]`); nothing here needs its proc-macros or `?` on
+# outcomes, so stable toolchains keep building.
+asupersync = { version = "=0.5.0", optional = true, default-features = false }
+# The fleet coordinator's HTTP listener (`fleet-control-plane-server`). The
+# same sibling checkout is also a dev-dependency (with `testing`) below.
+fastapi_rust = { package = "fastapi-rust", path = "../../../fastapi_rust/crates/fastapi", default-features = false, optional = true }
 # bd-98xo5.12.1: HDR histogram for the `profiling` feature. Optional
 # so default builds pay zero binary cost.
 hdrhistogram = { version = "7.5", default-features = false, optional = true }

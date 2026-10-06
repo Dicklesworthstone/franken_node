@@ -150,6 +150,8 @@ impl Config {
                     convergence_timeout_seconds: timeouts::FLEET_STRICT_CONVERGENCE_TIMEOUT_SECS,
                     barrier_timeout_ms: None,
                     allow_degraded_file_transport: false,
+                    control_plane_url: None,
+                    control_plane_token_path: None,
                 },
                 observability: ObservabilityConfig {
                     namespace: "franken_node".to_string(),
@@ -224,6 +226,8 @@ impl Config {
                     convergence_timeout_seconds: timeouts::FLEET_BALANCED_CONVERGENCE_TIMEOUT_SECS,
                     barrier_timeout_ms: None,
                     allow_degraded_file_transport: false,
+                    control_plane_url: None,
+                    control_plane_token_path: None,
                 },
                 observability: ObservabilityConfig {
                     namespace: "franken_node".to_string(),
@@ -298,6 +302,8 @@ impl Config {
                     convergence_timeout_seconds: timeouts::FLEET_LEGACY_CONVERGENCE_TIMEOUT_SECS,
                     barrier_timeout_ms: None,
                     allow_degraded_file_transport: true,
+                    control_plane_url: None,
+                    control_plane_token_path: None,
                 },
                 observability: ObservabilityConfig {
                     namespace: "franken_node".to_string(),
@@ -1154,6 +1160,26 @@ impl Config {
                     MAX_MERGE_DECISIONS,
                 );
             }
+            if let Some(value) = &section.control_plane_url {
+                self.fleet.control_plane_url = Some(value.clone());
+                push_bounded(
+                    decisions,
+                    MergeDecision::new(stage.clone(), "fleet.control_plane_url", value),
+                    MAX_MERGE_DECISIONS,
+                );
+            }
+            if let Some(value) = &section.control_plane_token_path {
+                self.fleet.control_plane_token_path = Some(value.clone());
+                push_bounded(
+                    decisions,
+                    MergeDecision::new(
+                        stage.clone(),
+                        "fleet.control_plane_token_path",
+                        value.display(),
+                    ),
+                    MAX_MERGE_DECISIONS,
+                );
+            }
         }
 
         if let Some(section) = &overrides.observability {
@@ -1818,6 +1844,43 @@ impl Config {
             push_bounded(
                 decisions,
                 MergeDecision::new(MergeStage::Env, "fleet.barrier_timeout_ms", parsed),
+                MAX_MERGE_DECISIONS,
+            );
+        }
+        if let Some(raw) = env_lookup("FRANKEN_NODE_FLEET_CONTROL_PLANE_URL") {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Err(ConfigError::EnvParseFailed {
+                    key: "FRANKEN_NODE_FLEET_CONTROL_PLANE_URL".to_string(),
+                    value: raw,
+                    reason: "control-plane URL must not be empty".to_string(),
+                });
+            }
+            self.fleet.control_plane_url = Some(trimmed.to_string());
+            push_bounded(
+                decisions,
+                MergeDecision::new(MergeStage::Env, "fleet.control_plane_url", trimmed),
+                MAX_MERGE_DECISIONS,
+            );
+        }
+        if let Some(raw) = env_lookup("FRANKEN_NODE_FLEET_CONTROL_PLANE_TOKEN_PATH") {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Err(ConfigError::EnvParseFailed {
+                    key: "FRANKEN_NODE_FLEET_CONTROL_PLANE_TOKEN_PATH".to_string(),
+                    value: raw,
+                    reason: "token path must not be empty".to_string(),
+                });
+            }
+            let parsed = PathBuf::from(trimmed);
+            self.fleet.control_plane_token_path = Some(parsed.clone());
+            push_bounded(
+                decisions,
+                MergeDecision::new(
+                    MergeStage::Env,
+                    "fleet.control_plane_token_path",
+                    parsed.display(),
+                ),
                 MAX_MERGE_DECISIONS,
             );
         }
@@ -3002,6 +3065,8 @@ struct FleetOverrides {
     pub convergence_timeout_seconds: Option<u64>,
     pub barrier_timeout_ms: Option<u64>,
     pub allow_degraded_file_transport: Option<bool>,
+    pub control_plane_url: Option<String>,
+    pub control_plane_token_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -3409,6 +3474,16 @@ pub struct FleetConfig {
     /// Allow degraded file-transport mode when asupersync-transport is not available.
     #[serde(default)]
     pub allow_degraded_file_transport: bool,
+    /// Base URL of a live fleet coordinator (`franken-node fleet serve`). When
+    /// set, fleet commands and `trust quarantine` use the coordinator's HTTP
+    /// API instead of the local durable store. Plaintext `http://` is accepted
+    /// only for loopback hosts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_plane_url: Option<String>,
+    /// File holding the coordinator's bearer token (required with
+    /// `control_plane_url`; `fleet serve` writes it with `--generate-token`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_plane_token_path: Option<PathBuf>,
 }
 
 // -- Observability --

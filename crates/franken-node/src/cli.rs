@@ -163,7 +163,7 @@ pub enum Command {
     #[command(subcommand, name = "trust-card")]
     TrustCard(TrustCardCommand),
 
-    /// Local file-transport fleet/quarantine log (not a live control plane).
+    /// Fleet quarantine control plane (local file transport, or a live HTTP coordinator).
     #[command(subcommand)]
     Fleet(FleetCommand),
 
@@ -1340,7 +1340,7 @@ pub enum TrustCommand {
     /// Revoke an artifact or publisher in the local trust-card registry (not a live fleet).
     Revoke(TrustRevokeArgs),
 
-    /// Quarantine an artifact in the local trust-card registry and file-transport log (not a live fleet).
+    /// Quarantine an artifact in the local trust-card registry and publish it to the fleet store.
     Quarantine(TrustQuarantineArgs),
 
     /// Lift a local sentinel run-subject quarantine record for `--app` (not a live Runtime Sentinel daemon).
@@ -1735,20 +1735,58 @@ pub struct TrustCardDiffArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum FleetCommand {
-    /// Show local persisted fleet and quarantine state (not a live heartbeat).
+    /// Show fleet and quarantine state from the configured store.
     Status(FleetStatusArgs),
 
-    /// Describe one node from local persisted fleet state.
+    /// Describe one node from the configured fleet store.
     Describe(FleetDescribeArgs),
 
     /// Lift quarantine/revocation controls with receipts.
     Release(FleetReleaseArgs),
 
-    /// Reconcile local fleet-action log; timeout fails closed.
+    /// Reconcile the fleet-action log; timeout fails closed.
     Reconcile(FleetReconcileArgs),
 
-    /// Poll local file-transport fleet actions (not a live cluster).
+    /// Poll fleet actions and push heartbeats: the local durable store, or a
+    /// live coordinator when `[fleet] control_plane_url` is configured.
     Agent(FleetAgentArgs),
+
+    /// Serve this node's durable fleet store as the live HTTP control plane
+    /// that agents and operators on other nodes connect to.
+    Serve(FleetServeArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct FleetServeArgs {
+    /// Socket address to listen on. Port 0 picks a free port; the bound
+    /// address is printed on stdout as the first line.
+    #[arg(long, default_value = "127.0.0.1:9440")]
+    pub bind: String,
+
+    /// File holding the bearer token clients must present. Defaults to
+    /// `.franken-node/keys/fleet-control-plane.token`.
+    #[arg(long)]
+    pub token_file: Option<PathBuf>,
+
+    /// Create the token file (0600, 256 random bits) if it does not exist.
+    #[arg(long)]
+    pub generate_token: bool,
+
+    /// Permit a non-loopback bind address. The listener speaks plaintext
+    /// HTTP, so only use this behind a TLS-terminating proxy or on an
+    /// encrypted overlay network.
+    #[arg(long)]
+    pub allow_non_loopback: bool,
+
+    /// Stop after serving this many requests (for scripted drills; omit to
+    /// serve until SIGINT/SIGTERM).
+    #[arg(long)]
+    pub max_requests: Option<u64>,
+
+    /// Emit structured JSONL events (listening, per-request access log,
+    /// shutdown) on stdout instead of human-readable lines on stderr.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -1762,8 +1800,8 @@ pub struct FleetStatusArgs {
     pub verbose: bool,
 
     /// Emit JSON instead of human-readable output.
-    /// JSON includes `transport=file` and `live_control_plane=false` so
-    /// `status.activated` is not a live fleet-API heartbeat.
+    /// JSON includes `transport` (`file` or `http`) and `live_control_plane`;
+    /// `status.activated` is true only when a live coordinator answered.
     #[arg(long)]
     pub json: bool,
 }
@@ -1781,7 +1819,7 @@ pub struct FleetDescribeArgs {
     pub zone: Option<String>,
 
     /// Emit JSON instead of human-readable output.
-    /// Includes `transport=file` and `live_control_plane=false`.
+    /// Includes `transport` (`file` or `http`) and `live_control_plane`.
     #[arg(long)]
     pub json: bool,
 }
@@ -1795,7 +1833,7 @@ pub struct FleetReleaseArgs {
     pub incident: String,
 
     /// Emit JSON instead of human-readable output.
-    /// Includes `transport=file` and `live_control_plane=false`.
+    /// Includes `transport` (`file` or `http`) and `live_control_plane`.
     #[arg(long)]
     pub json: bool,
 }
@@ -1807,7 +1845,7 @@ pub struct FleetReconcileArgs {
     pub fallback_file_transport: bool,
 
     /// Emit JSON instead of human-readable output.
-    /// Includes `transport=file` and `live_control_plane=false`.
+    /// Includes `transport` (`file` or `http`) and `live_control_plane`.
     #[arg(long)]
     pub json: bool,
 }
@@ -1843,8 +1881,8 @@ pub struct FleetAgentArgs {
     pub fallback_file_transport: bool,
 
     /// Emit JSON instead of human-readable output.
-    /// Includes `transport=file` and `live_control_plane=false`; this is
-    /// not a live cluster heartbeat.
+    /// Includes `transport` (`file` or `http`) and `live_control_plane`
+    /// (true only against a live coordinator).
     #[arg(long)]
     pub json: bool,
 }
@@ -3215,6 +3253,46 @@ mod parser_contract_extra_tests {
                 assert!(args.zone.is_empty());
             }
             other => return Err(format!("expected fleet agent, got {other:?}")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn fleet_serve_defaults_to_loopback_and_parses_flags() -> Result<(), String> {
+        let cli = parse(&["franken-node", "fleet", "serve"]).map_err(|err| err.to_string())?;
+        match cli.command {
+            Command::Fleet(FleetCommand::Serve(args)) => {
+                assert_eq!(args.bind, "127.0.0.1:9440");
+                assert!(args.token_file.is_none());
+                assert!(!args.generate_token);
+                assert!(!args.allow_non_loopback);
+                assert!(args.max_requests.is_none());
+            }
+            other => return Err(format!("expected fleet serve, got {other:?}")),
+        }
+        let cli = parse(&[
+            "franken-node",
+            "fleet",
+            "serve",
+            "--bind",
+            "127.0.0.1:0",
+            "--token-file",
+            "tok",
+            "--generate-token",
+            "--max-requests",
+            "5",
+            "--json",
+        ])
+        .map_err(|err| err.to_string())?;
+        match cli.command {
+            Command::Fleet(FleetCommand::Serve(args)) => {
+                assert_eq!(args.bind, "127.0.0.1:0");
+                assert_eq!(args.token_file.as_deref(), Some(Path::new("tok")));
+                assert!(args.generate_token);
+                assert_eq!(args.max_requests, Some(5));
+                assert!(args.json);
+            }
+            other => return Err(format!("expected fleet serve, got {other:?}")),
         }
         Ok(())
     }
