@@ -132,6 +132,16 @@ jobs:
           mkdir -p evidence
           cargo +stable test --manifest-path tools/migration-validator/Cargo.toml --bin franken-rollout-verify -- --nocapture --test-threads=2 2>&1 | tee evidence/rollout-verifier-tests.log
           cargo +stable clippy --manifest-path tools/migration-validator/Cargo.toml --bin franken-rollout-verify -- -D warnings 2>&1 | tee evidence/rollout-verifier-clippy.log
+      - name: Exercise reviewed candidate installation and exact native recovery
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          cargo +stable test --manifest-path tools/migration-validator/Cargo.toml --bin franken-migration-apply linux::tests:: -- --nocapture --test-threads=2 2>&1 | tee evidence/reviewed-installation-tests.log
+          cargo +stable test --manifest-path tools/migration-validator/Cargo.toml --bin franken-migration-apply reviewed_directory_tests:: -- --nocapture --test-threads=2 2>&1 | tee evidence/reviewed-candidate-tests.log
+          cargo +stable test --manifest-path tools/migration-validator/Cargo.toml --bin franken-migration-apply rewrite_transaction:: -- --nocapture --test-threads=2 2>&1 | tee evidence/reviewed-transaction-tests.log
+          cargo +stable clippy --manifest-path tools/migration-validator/Cargo.toml --bin franken-migration-apply -- -D warnings 2>&1 | tee evidence/reviewed-installation-clippy.log
       - name: Retain exact source and recovery execution evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -144,4 +154,5 @@ jobs:
             crates/franken-node/src/migration/
             tools/migration-validator/attest.rs
             tools/migration-validator/rollout_verify.rs
+            tools/migration-validator/apply.rs
             tools/migration-validator/Cargo.toml
