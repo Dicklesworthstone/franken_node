@@ -349,7 +349,7 @@ pub(super) fn run(
     invocation: &Invocation,
     workspace: &Path,
     environment: &BTreeMap<OsString, OsString>,
-    timing: (Instant, Duration),
+    timing: (Instant, Duration, Option<&smoke_supervisor::CancellationToken>),
 ) -> Result<Output> {
     let mut command = configured_command(settings, test, invocation, workspace, environment)?;
     let bytes = input(settings, snapshot)?;
@@ -358,6 +358,12 @@ pub(super) fn run(
         !remaining.is_zero(),
         "test execution setup exhausted the runtime budget"
     );
+    if let Some(cancellation) = timing.2 {
+        return smoke_supervisor::run_command_cancellable(
+            &mut command, remaining, timing.1, bytes,
+            settings.stdin_mode == StdinMode::Pipe, cancellation,
+        ).context("execute cancellable captured test settings");
+    }
     // Mode participates in Settings equality, so paired validation, checked
     // rewrites and capsule replay cannot substitute file input for pipe input.
     // Both transports use the same exclusive child owner and output checks.

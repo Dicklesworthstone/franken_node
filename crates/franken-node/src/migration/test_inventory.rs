@@ -470,6 +470,21 @@ pub(super) fn run_test(
     environment: &BTreeMap<OsString, OsString>,
     timing: (Duration, Duration),
 ) -> Result<Output> {
+    run_test_cancellable(snapshot, invocation, test, workspace, environment, timing, None)
+}
+
+pub(super) fn run_test_cancellable(
+    snapshot: &Snapshot,
+    invocation: &Invocation,
+    test: &Path,
+    workspace: &Path,
+    environment: &BTreeMap<OsString, OsString>,
+    timing: (Duration, Duration),
+    cancellation: Option<&super::smoke_supervisor::CancellationToken>,
+) -> Result<Output> {
+    if let Some(cancellation) = cancellation {
+        cancellation.check()?;
+    }
     let deadline = Instant::now()
         .checked_add(timing.0)
         .context("test execution deadline overflow")?;
@@ -485,12 +500,15 @@ pub(super) fn run_test(
         invocation,
         workspace,
         environment,
-        (deadline, timing.1),
+        (deadline, timing.1, cancellation),
     )?;
     settings.expectations.check(snapshot, &output)?;
     settings
         .expectations
         .check_files(snapshot, output_workspace.as_ref(), deadline)?;
+    if let Some(cancellation) = cancellation {
+        cancellation.check()?;
+    }
     Ok(output)
 }
 

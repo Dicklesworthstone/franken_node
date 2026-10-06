@@ -470,6 +470,20 @@ impl RewriteCandidate {
         self.validate_product_with(native_executable, bun_executable, || Ok(None))
     }
 
+    /// The caller owns this operation's cancellation handle. A request stops
+    /// active process groups and later case dispatch; it cannot be presented
+    /// as passing evidence or as a native regression authorizing recovery.
+    pub fn validate_product_cancellable(
+        &self,
+        native_executable: &Path,
+        bun_executable: &Path,
+        cancellation: &product_oracle::CancellationToken,
+    ) -> Result<ProductReport> {
+        self.validate_product_controlled(
+            native_executable, bun_executable, || Ok(None), Some(cancellation),
+        )
+    }
+
     /// Primary-command variant that honors the caller's explicit failure
     /// directory selection. A rejected candidate retains all three legs, never
     /// a pair projection. Library callers can use validate_product for no I/O.
@@ -489,19 +503,33 @@ impl RewriteCandidate {
         bun_executable: &Path,
         archive: impl FnOnce() -> Result<Option<FailureArchive>>,
     ) -> Result<ProductReport> {
+        self.validate_product_controlled(native_executable, bun_executable, archive, None)
+    }
+
+    fn validate_product_controlled(
+        &self,
+        native_executable: &Path,
+        bun_executable: &Path,
+        archive: impl FnOnce() -> Result<Option<FailureArchive>>,
+        cancellation: Option<&product_oracle::CancellationToken>,
+    ) -> Result<ProductReport> {
+        if let Some(cancellation) = cancellation {
+            cancellation.check()?;
+        }
         let candidate = self
             .candidate
             .as_ref()
             .context("checked rewrite candidate is not prepared")?;
         budget(self.deadline)?;
         let archive = archive()?;
-        let mut report = product_oracle::run_captured(
+        let mut report = product_oracle::run_captured_cancellable(
             [&self.project, self.candidate_root()],
             [&self.original, candidate],
             native_executable,
             bun_executable,
             self.deadline,
             true,
+            cancellation,
         )?;
         if let Some(archive) = archive {
             report.failure_capture =
@@ -990,7 +1018,7 @@ mod tests {
         assert!(error.to_string().contains("outside"));
         candidate.deadline = Instant::now();
         let error = candidate
-            .validate_native_with(Path::new("/absent/native"), || {
+            .validate_native_with(Path::new("absent/native"), || {
                 panic!("expired validation cannot reserve storage")
             })
             .unwrap_err();

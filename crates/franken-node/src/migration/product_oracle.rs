@@ -24,6 +24,15 @@ use std::time::{Duration, Instant};
 
 const ROLES: [&str; 3] = ["node", "bun", "native"];
 
+pub use super::smoke_supervisor::CancellationToken;
+
+fn check_cancellation(cancellation: Option<&CancellationToken>) -> Result<()> {
+    if let Some(cancellation) = cancellation {
+        cancellation.check()?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum CaseOutcome {
@@ -216,6 +225,22 @@ pub(super) fn run_captured(
     deadline: Instant,
     compare_filesystem: bool,
 ) -> Result<ProductReport> {
+    run_captured_cancellable(
+        projects, snapshots, native_executable, bun_executable,
+        deadline, compare_filesystem, None,
+    )
+}
+
+pub(super) fn run_captured_cancellable(
+    projects: [&Path; 2],
+    snapshots: [&Snapshot; 2],
+    native_executable: &Path,
+    bun_executable: &Path,
+    deadline: Instant,
+    compare_filesystem: bool,
+    cancellation: Option<&CancellationToken>,
+) -> Result<ProductReport> {
+    check_cancellation(cancellation)?;
     budget(deadline)?;
     matched_tests(snapshots[0], snapshots[1])?;
     let roots = [projects[0].canonicalize()?, projects[1].canonicalize()?];
@@ -251,14 +276,14 @@ pub(super) fn run_captured(
         identities[0].sha256 != identities[1].sha256,
         "Node and Bun references must have distinct executable hashes"
     );
-    execute(
+    execute_cancellable(
         snapshots[0],
         snapshots[1],
         runtimes,
         identities,
-        deadline,
-        LEG_TIMEOUT,
+        (deadline, LEG_TIMEOUT),
         compare_filesystem,
+        cancellation,
     )
 }
 
@@ -276,12 +301,13 @@ fn measure(
     test: &Path,
     workspace: &Path,
     environment: &BTreeMap<OsString, OsString>,
-    timing: (Instant, Duration),
+    timing: (Instant, Duration, Option<&CancellationToken>),
     filesystem: bool,
 ) -> Leg {
-    let (deadline, leg_timeout) = timing;
+    let (deadline, leg_timeout, cancellation) = timing;
     let mut leg = Leg::default();
     let result = (|| -> Result<()> {
+        check_cancellation(cancellation)?;
         budget(deadline)?;
         snapshot.stage(workspace, deadline)?;
         ensure!(
@@ -294,13 +320,14 @@ fn measure(
             .context("initial workspace observation failed")?;
         budget(deadline)?;
         let timeout = leg_timeout.min(deadline.saturating_duration_since(Instant::now()));
-        let output = test_inventory::run_test(
+        let output = test_inventory::run_test_cancellable(
             snapshot,
             invocation,
             test,
             workspace,
             environment,
             (timeout, DRAIN_TIMEOUT),
+            cancellation,
         )
         .context("execution failed")?;
         // Keep completed evidence even when final filesystem collection fails.
@@ -316,6 +343,7 @@ fn measure(
                 .workspace_delta = Some(workspace_effects::summarize(&delta)?);
             leg.delta = Some(delta);
         }
+        check_cancellation(cancellation)?;
         Ok(())
     })();
     if let Err(error) = result {
@@ -407,6 +435,22 @@ pub(super) fn execute(
     leg_timeout: Duration,
     filesystem: bool,
 ) -> Result<ProductReport> {
+    execute_cancellable(
+        original, candidate, runtimes, identities, (deadline, leg_timeout), filesystem, None,
+    )
+}
+
+fn execute_cancellable(
+    original: &Snapshot,
+    candidate: &Snapshot,
+    runtimes: [&Invocation; 3],
+    identities: [RuntimeIdentity; 3],
+    timing: (Instant, Duration),
+    filesystem: bool,
+    cancellation: Option<&CancellationToken>,
+) -> Result<ProductReport> {
+    check_cancellation(cancellation)?;
+    let (deadline, leg_timeout) = timing;
     let tests = matched_tests(original, candidate)?;
     let concurrency = test_inventory::concurrency(original)?;
     let [node_runtime, bun_runtime, native_runtime] = identities;
@@ -451,6 +495,7 @@ pub(super) fn execute(
     };
     let environment = std::env::vars_os().collect();
     let completed = test_inventory::run_scheduled(&tests, concurrency, deadline, |test| {
+        check_cancellation(cancellation)?;
         budget(deadline)?;
         let case = tempfile::Builder::new()
             .prefix("franken-product-oracle-")
@@ -466,7 +511,7 @@ pub(super) fn execute(
                 test,
                 &case.path().join(ROLES[index]),
                 &environment,
-                (deadline, leg_timeout),
+                (deadline, leg_timeout, cancellation),
                 filesystem,
             );
         }
@@ -496,7 +541,7 @@ pub(super) fn execute(
         &report.bun_runtime,
         &report.native_runtime,
     ]) {
-        match invocation.identity(deadline) {
+        match check_cancellation(cancellation).and_then(|()| invocation.identity(deadline)) {
             Ok(after) if &after == before => {}
             Ok(_) => report.errors.push(format!(
                 "{role} runtime executable changed during comparison"
@@ -505,6 +550,12 @@ pub(super) fn execute(
                 .errors
                 .push(format!("{role} runtime identity recheck failed: {error:#}")),
         }
+    }
+    // A late request is not a passing suite merely because its last child
+    // exited zero. Preserve completed rows, but never admit cancellation as
+    // a native regression or use it to authorize source installation.
+    if let Err(error) = check_cancellation(cancellation) {
+        report.errors.push(error.to_string());
     }
     report.verdict = if report.errored > 0 || report.skipped > 0 || !report.errors.is_empty() {
         "ERROR"
@@ -575,6 +626,81 @@ mod tests {
             "tests": tests,
             "max_concurrent_tests": limit,
         }).to_string());
+    }
+
+    #[test]
+    fn precancelled_product_request_never_discovers_or_launches_runtimes() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), "case.test.js", "throw new Error('must not run');");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let inputs = CapturedInputs::capture(root.path(), None, deadline).unwrap();
+        let cancellation = CancellationToken::default();
+        cancellation.cancel();
+        let error = run_captured_cancellable(
+            [root.path(), root.path()], [&inputs.reference, &inputs.reference],
+            Path::new("/missing-native"), Path::new("/missing-bun"), deadline,
+            true, Some(&cancellation),
+        ).unwrap_err();
+        assert!(error.to_string().contains("MIGRATION_CANCELLED"), "{error:#}");
+    }
+
+    #[test]
+    fn cancellation_joins_active_cases_preserves_completed_evidence_and_skips_later_guests() {
+        // Deliberate Node role invocations test orchestration, not runtime parity.
+        for concurrency in [1, 2] {
+            let root = tempfile::tempdir().unwrap();
+            let external = tempfile::tempdir().unwrap();
+            let ready = external.path();
+            let later = external.path().join("later");
+            let source = format!(r#"
+if (process.argv[2] === 'bun') {{
+    require('fs').writeFileSync({} + '/' + require('path').basename(__filename), 'ready');
+    setInterval(() => {{}}, 1000);
+}} else console.log(42);
+"#, serde_json::to_string(&ready).unwrap());
+            write(root.path(), "a.test.js", &source);
+            write(root.path(), "b.test.js", &source);
+            write(root.path(), "c.test.js", &format!("require('fs').writeFileSync({}, 'ran');",
+                serde_json::to_string(&later).unwrap()));
+            concurrent_manifest(root.path(), &["a.test.js", "b.test.js", "c.test.js"], concurrency);
+            let deadline = Instant::now() + Duration::from_secs(60);
+            let inputs = CapturedInputs::capture(root.path(), None, deadline).unwrap();
+            let node = invocation("node");
+            let bun = invocation("bun");
+            let native = invocation("native");
+            let identities = [node.identity(deadline).unwrap(), bun.identity(deadline).unwrap(),
+                native.identity(deadline).unwrap()];
+            let cancellation = CancellationToken::default();
+            let report = std::thread::scope(|scope| {
+                let cancel = &cancellation;
+                let ready = &ready;
+                let trigger = scope.spawn(move || {
+                    let end = Instant::now() + Duration::from_secs(15);
+                    let reached = || ready.join("a.test.js").exists()
+                        && (concurrency == 1 || ready.join("b.test.js").exists());
+                    while !reached() && Instant::now() < end {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    let observed = reached();
+                    cancel.cancel();
+                    assert!(observed, "reference guest never reached its cancellation barrier");
+                });
+                let report = execute_cancellable(&inputs.reference, &inputs.reference,
+                    [&node, &bun, &native], identities, (deadline, Duration::from_secs(20)),
+                    true, Some(&cancellation)).unwrap();
+                trigger.join().unwrap();
+                report
+            });
+            assert_eq!(report.verdict, "ERROR", "{report:#?}");
+            assert!(report.skipped > 0);
+            assert_eq!(report.native_divergences, 0);
+            assert!(report.errors.iter().any(|error| error.contains("MIGRATION_CANCELLED")));
+            assert!(report.cases[0].node.is_some());
+            assert!(report.cases.iter().all(|row| row.native.is_none()));
+            assert!(!later.exists(), "a later test launched after cancellation");
+            assert!(report.check_admission(&report.input_sha256, &report.candidate_input_sha256,
+                &inputs.reference.tests().unwrap()).is_err());
+        }
     }
 
     #[test]
