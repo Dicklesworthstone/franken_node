@@ -847,6 +847,18 @@ struct RunExecutionReceiptCore {
     auto_quarantined_extensions: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     sentinel_enforcement: Option<SentinelEnforcementSummary>,
+    /// The incident this run's tripped runtime control was captured as
+    /// (bd-reality-20260923-26n9r.8); absent for runs that tripped nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    incident_capture: Option<RunIncidentCaptureRef>,
+}
+
+/// Where a run's automatically captured incident evidence lives.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct RunIncidentCaptureRef {
+    incident_id: String,
+    /// Project-relative path of the evidence package.
+    evidence_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -8571,6 +8583,7 @@ fn build_run_execution_receipt(
         violation_count,
         auto_quarantined_extensions,
         sentinel_enforcement,
+        incident_capture: None,
     };
     let seed_hash = compute_run_execution_receipt_seed_hash(&core)?;
     core.receipt_id = deterministic_run_execution_receipt_id(&seed_hash);
@@ -10615,48 +10628,85 @@ fn append_run_evidence_entry(
     )
 }
 
-fn maybe_capture_run_incident(
-    project_root: &Path,
-    policy_mode: &str,
-    app_path: &Path,
-    receipt: &RunExecutionReceipt,
-    receipt_path: &Path,
-    dispatch: &ops::engine_dispatcher::RunDispatchReport,
-    trace_id: &str,
-) -> Result<Option<String>> {
-    use frankenengine_node::tools::replay_bundle::{
-        EventType, INCIDENT_EVIDENCE_SCHEMA, IncidentEvidenceEvent, IncidentEvidenceMetadata,
-        IncidentEvidencePackage, IncidentSeverity, validate_incident_evidence_package,
-    };
-
-    let Some(ledger) = dispatch.host_effect_ledger.as_ref() else {
-        return Ok(None);
-    };
-    let tripped_control = !receipt.core.ssrf_violations.is_empty()
-        || ledger.denied_count > 0
-        || receipt.core.sentinel_enforcement.is_some();
-    if !tripped_control || ledger.entries.is_empty() {
-        return Ok(None);
-    }
-
-    let head = ledger
-        .chain_head_hash
+/// The incident id `run` gives a captured run: `INC-RUN-` plus the first 16
+/// hex digits of its host-effect chain head.
+fn run_incident_id(chain_head_hash: &str) -> String {
+    let head = chain_head_hash
         .trim_start_matches("sha256:")
         .chars()
         .take(16)
         .collect::<String>();
-    let incident_id = format!("INC-RUN-{head}");
-    let receipt_ref = receipt_path
-        .strip_prefix(project_root)
-        .unwrap_or(receipt_path)
-        .to_string_lossy()
-        .into_owned();
+    format!("INC-RUN-{head}")
+}
+
+fn run_incident_evidence_relative_path(incident_id: &str) -> String {
+    format!(
+        "{INCIDENT_EVIDENCE_RELATIVE_DIR}/{}/{INCIDENT_EVIDENCE_FILE_NAME}",
+        incident_id_slug(incident_id)
+    )
+}
+
+/// The incident a run is captured as when it tripped a runtime security
+/// control (an SSRF violation, a denied host effect, or a Sentinel
+/// escalation) and recorded host effects. `None` for runs that tripped
+/// nothing. Recorded on the run receipt before the evidence is written, so
+/// the receipt references its incident.
+fn planned_run_incident_capture(
+    receipt: &RunExecutionReceipt,
+    dispatch: &ops::engine_dispatcher::RunDispatchReport,
+) -> Option<RunIncidentCaptureRef> {
+    let ledger = dispatch.host_effect_ledger.as_ref()?;
+    let tripped_control = !receipt.core.ssrf_violations.is_empty()
+        || ledger.denied_count > 0
+        || receipt.core.sentinel_enforcement.is_some();
+    if !tripped_control || ledger.entries.is_empty() {
+        return None;
+    }
+    let incident_id = run_incident_id(&ledger.chain_head_hash);
+    Some(RunIncidentCaptureRef {
+        evidence_path: run_incident_evidence_relative_path(&incident_id),
+        incident_id,
+    })
+}
+
+/// A recorded run as incident capture sees it; shared by automatic capture
+/// and `incident capture --from-run`.
+struct RunIncidentSource<'a> {
+    incident_id: &'a str,
+    policy_mode: &'a str,
+    app_path: &'a str,
+    receipt_id: &'a str,
+    receipt_hash: &'a str,
+    /// Project-relative path of the run receipt.
+    receipt_ref: &'a str,
+    trace_id: &'a str,
+    ssrf_violations: &'a [String],
+    sentinel_enforced: bool,
+    ledger: &'a ops::engine_dispatcher::HostEffectLedger,
+    severity: tools::replay_bundle::IncidentSeverity,
+    detector: &'a str,
+    title: String,
+    tags: Vec<String>,
+}
+
+/// Build an incident evidence package from a run's signed host-effect
+/// ledger: one event per recorded effect, in chain order, each carrying its
+/// effect-receipt chain entry (real per-effect timestamps, no authored
+/// events).
+fn build_run_incident_evidence(
+    source: &RunIncidentSource<'_>,
+) -> Result<tools::replay_bundle::IncidentEvidencePackage> {
+    use frankenengine_node::tools::replay_bundle::{
+        EventType, INCIDENT_EVIDENCE_SCHEMA, IncidentEvidenceEvent, IncidentEvidenceMetadata,
+        IncidentEvidencePackage, validate_incident_evidence_package,
+    };
+
     let millis_to_rfc3339 = |millis: u64| {
         chrono::DateTime::from_timestamp_millis(i64::try_from(millis).unwrap_or(i64::MAX))
             .unwrap_or_default()
             .to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
     };
-
+    let ledger = source.ledger;
     let mut events = Vec::with_capacity(ledger.entries.len());
     let mut previous_event_id: Option<String> = None;
     for entry in &ledger.entries {
@@ -10666,54 +10716,503 @@ fn maybe_capture_run_incident(
             timestamp: millis_to_rfc3339(entry.receipt.recorded_at_millis),
             event_type: EventType::PolicyEval,
             payload: serde_json::json!({ "effect_receipt_chain_entry": entry }),
-            provenance_ref: receipt_ref.clone(),
+            provenance_ref: source.receipt_ref.to_string(),
             parent_event_id: previous_event_id.replace(event_id),
             state_snapshot: None,
             policy_version: None,
         });
     }
-    let collected_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
     let package = IncidentEvidencePackage {
         schema_version: INCIDENT_EVIDENCE_SCHEMA.to_string(),
-        incident_id: incident_id.clone(),
-        collected_at,
+        incident_id: source.incident_id.to_string(),
+        collected_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
         // The run's operator-visible trace id (`--trace-id`), which also keys
         // its structured logs and receipt; the ledger's own id is internal.
-        trace_id: trace_id.to_string(),
-        severity: IncidentSeverity::High,
+        trace_id: source.trace_id.to_string(),
+        severity: source.severity,
         incident_type: "runtime-security-control".to_string(),
-        detector: "franken-node run (automatic capture)".to_string(),
-        policy_version: policy_mode.to_string(),
+        detector: source.detector.to_string(),
+        policy_version: source.policy_mode.to_string(),
         initial_state_snapshot: serde_json::json!({
-            "run_receipt_id": receipt.core.receipt_id,
-            "run_receipt_hash": receipt.receipt_hash,
+            "run_receipt_id": source.receipt_id,
+            "run_receipt_hash": source.receipt_hash,
             "host_effect_chain_head": ledger.chain_head_hash,
             "effect_count": ledger.effect_count,
             "allowed_count": ledger.allowed_count,
             "denied_count": ledger.denied_count,
             "failed_count": ledger.failed_count,
-            "ssrf_violations": receipt.core.ssrf_violations,
-            "sentinel_enforced": receipt.core.sentinel_enforcement.is_some(),
+            "ssrf_violations": source.ssrf_violations,
+            "sentinel_enforced": source.sentinel_enforced,
         }),
         events,
-        evidence_refs: vec![receipt_ref],
+        evidence_refs: vec![source.receipt_ref.to_string()],
         metadata: IncidentEvidenceMetadata {
-            title: format!(
-                "Run of {} tripped a runtime security control",
-                app_path.display()
-            ),
-            affected_components: vec![app_path.display().to_string()],
-            tags: vec!["auto-captured".to_string(), "run".to_string()],
+            title: source.title.clone(),
+            affected_components: vec![source.app_path.to_string()],
+            tags: source.tags.clone(),
         },
     };
-    validate_incident_evidence_package(&package, Some(&incident_id))
+    validate_incident_evidence_package(&package, Some(source.incident_id))
         .map_err(|err| anyhow::anyhow!("captured incident evidence is invalid: {err}"))?;
-    let evidence_path = project_root
-        .join(INCIDENT_EVIDENCE_RELATIVE_DIR)
-        .join(incident_id_slug(&incident_id))
-        .join(INCIDENT_EVIDENCE_FILE_NAME);
-    write_bytes_atomically(&evidence_path, &serde_json::to_vec_pretty(&package)?)?;
-    Ok(Some(incident_id))
+    Ok(package)
+}
+
+fn project_relative_display(project_root: &Path, path: &Path) -> String {
+    path.strip_prefix(project_root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn maybe_capture_run_incident(
+    project_root: &Path,
+    policy_mode: &str,
+    app_path: &Path,
+    receipt: &RunExecutionReceipt,
+    receipt_path: &Path,
+    dispatch: &ops::engine_dispatcher::RunDispatchReport,
+    trace_id: &str,
+) -> Result<Option<String>> {
+    let Some(capture) = receipt.core.incident_capture.as_ref() else {
+        return Ok(None);
+    };
+    let Some(ledger) = dispatch.host_effect_ledger.as_ref() else {
+        return Ok(None);
+    };
+    let receipt_ref = project_relative_display(project_root, receipt_path);
+    let app_display = app_path.display().to_string();
+    let package = build_run_incident_evidence(&RunIncidentSource {
+        incident_id: &capture.incident_id,
+        policy_mode,
+        app_path: &app_display,
+        receipt_id: &receipt.core.receipt_id,
+        receipt_hash: &receipt.receipt_hash,
+        receipt_ref: &receipt_ref,
+        trace_id,
+        ssrf_violations: &receipt.core.ssrf_violations,
+        sentinel_enforced: receipt.core.sentinel_enforcement.is_some(),
+        ledger,
+        severity: tools::replay_bundle::IncidentSeverity::High,
+        detector: "franken-node run (automatic capture)",
+        title: format!("Run of {app_display} tripped a runtime security control"),
+        tags: vec!["auto-captured".to_string(), "run".to_string()],
+    })?;
+    write_bytes_atomically(
+        &project_root.join(&capture.evidence_path),
+        &serde_json::to_vec_pretty(&package)?,
+    )?;
+    Ok(Some(capture.incident_id.clone()))
+}
+
+/// Schema of the per-run host-effect ledger record `run` persists so an
+/// operator can capture any recorded run later (`incident capture --from-run`).
+const RUN_LEDGER_RECORD_SCHEMA: &str = "franken-node/run-host-effect-ledger-record/v1";
+const RUN_LEDGER_RELATIVE_DIR: &str = ".franken-node/state/run-ledgers";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RunHostEffectLedgerRecord {
+    schema_version: String,
+    receipt_id: String,
+    receipt_hash: String,
+    /// Project-relative path of the run receipt.
+    receipt_path: String,
+    app_path: String,
+    policy_mode: String,
+    trace_id: String,
+    ssrf_violations: Vec<String>,
+    sentinel_enforced: bool,
+    /// The product-root-signed identity capture that authenticates the
+    /// session key which signed `host_effect_ledger`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runtime_evidence_identity_capture_path: Option<String>,
+    host_effect_ledger: ops::engine_dispatcher::HostEffectLedger,
+}
+
+/// Persist the run's signed host-effect ledger beside its receipt
+/// (`.franken-node/state/run-ledgers/<day>/<receipt id>.json`). Runs that
+/// recorded no ledger (non-native runtimes) persist nothing.
+fn persist_run_host_effect_ledger(
+    project_root: &Path,
+    policy_mode: &str,
+    receipt: &RunExecutionReceipt,
+    receipt_path: &Path,
+    dispatch: &ops::engine_dispatcher::RunDispatchReport,
+    trace_id: &str,
+) -> Result<Option<PathBuf>> {
+    let Some(ledger) = dispatch.host_effect_ledger.as_ref() else {
+        return Ok(None);
+    };
+    #[cfg(feature = "engine")]
+    let capture_path = dispatch.runtime_evidence_identity_capture_path.clone();
+    #[cfg(not(feature = "engine"))]
+    let capture_path: Option<String> = None;
+    let record = RunHostEffectLedgerRecord {
+        schema_version: RUN_LEDGER_RECORD_SCHEMA.to_string(),
+        receipt_id: receipt.core.receipt_id.clone(),
+        receipt_hash: receipt.receipt_hash.clone(),
+        receipt_path: project_relative_display(project_root, receipt_path),
+        app_path: receipt.core.app_path.clone(),
+        policy_mode: policy_mode.to_string(),
+        trace_id: trace_id.to_string(),
+        ssrf_violations: receipt.core.ssrf_violations.clone(),
+        sentinel_enforced: receipt.core.sentinel_enforcement.is_some(),
+        runtime_evidence_identity_capture_path: capture_path,
+        host_effect_ledger: ledger.clone(),
+    };
+    let ended_at = DateTime::parse_from_rfc3339(&receipt.core.end_time_utc)
+        .context("run receipt end_time_utc was not valid RFC3339")?;
+    let path = project_root
+        .join(RUN_LEDGER_RELATIVE_DIR)
+        .join(ended_at.format("%Y-%m-%d").to_string())
+        .join(format!("{}.json", receipt.core.receipt_id));
+    write_bytes_atomically(&path, &serde_json::to_vec_pretty(&record)?)?;
+    Ok(Some(path))
+}
+
+/// Find `<root>/<day>/<id>.json` (and, under `include_archive`,
+/// `<root>/archive/<day>/<id>.json`).
+fn find_dated_record(root: &Path, record_id: &str, include_archive: bool) -> Result<Option<PathBuf>> {
+    let file_name = format!("{record_id}.json");
+    let mut roots = vec![root.to_path_buf()];
+    if include_archive {
+        roots.push(root.join("archive"));
+    }
+    for base in roots {
+        if !base.is_dir() {
+            continue;
+        }
+        let mut days: Vec<PathBuf> = std::fs::read_dir(&base)
+            .with_context(|| format!("failed listing {}", base.display()))?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.is_dir() && path.file_name().is_some_and(|name| name != "archive"))
+            .collect();
+        days.sort();
+        for day in days.into_iter().rev() {
+            let candidate = day.join(&file_name);
+            if candidate.is_file() {
+                return Ok(Some(candidate));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Every persisted run receipt, active and archived.
+fn list_all_run_receipts(project_root: &Path) -> Result<Vec<PathBuf>> {
+    let receipts_root = project_root.join(".franken-node/state/execution-receipts");
+    let mut receipts = list_active_run_receipts(&receipts_root)?;
+    receipts.extend(list_active_run_receipts(&receipts_root.join("archive"))?);
+    receipts.sort();
+    Ok(receipts)
+}
+
+fn validate_run_receipt_id(receipt_id: &str) -> Result<()> {
+    if receipt_id.is_empty()
+        || receipt_id.len() > 128
+        || !receipt_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        anyhow::bail!(
+            "`{receipt_id}` is neither an existing receipt file nor a run receipt id \
+             ([A-Za-z0-9_-], at most 128 characters)"
+        );
+    }
+    Ok(())
+}
+
+const INCIDENT_CAPTURE_CLI_SCHEMA_VERSION: &str = "franken-node/incident-capture-cli/v1";
+
+/// `incident capture --from-run`: capture a recorded run as incident evidence
+/// after the fact. The run's persisted host-effect ledger is re-verified
+/// (hash chain, outcome counts, and the detached signature against the
+/// product-root-signed session identity) and bound to the run receipt by
+/// hash before any evidence is written; nothing is accepted from the
+/// operator but the choice of run and the severity.
+fn handle_incident_capture_command(args: &cli::IncidentCaptureArgs) -> Result<()> {
+    let selector = args.from_run.trim();
+    if selector.is_empty() {
+        anyhow::bail!("`incident capture` requires --from-run <receipt-id|receipt-path>");
+    }
+    let project_root =
+        std::env::current_dir().context("failed resolving the project directory")?;
+    let receipt_path = {
+        let as_path = Path::new(selector);
+        if as_path.is_file() {
+            as_path.to_path_buf()
+        } else {
+            validate_run_receipt_id(selector)?;
+            find_dated_record(
+                &project_root.join(".franken-node/state/execution-receipts"),
+                selector,
+                true,
+            )?
+            .ok_or_else(|| anyhow::anyhow!("no run receipt `{selector}` in this project"))?
+        }
+    };
+    let receipt: serde_json::Value = serde_json::from_str(
+        &bounded_read_to_string(&receipt_path, MAX_GENERAL_FILE_BYTES)
+            .with_context(|| format!("failed reading run receipt {}", receipt_path.display()))?,
+    )
+    .with_context(|| format!("{} is not a run receipt", receipt_path.display()))?;
+    if receipt["schema_version"] != RUN_EXECUTION_RECEIPT_SCHEMA_VERSION {
+        anyhow::bail!(
+            "{} is not a `{RUN_EXECUTION_RECEIPT_SCHEMA_VERSION}` receipt",
+            receipt_path.display()
+        );
+    }
+    let receipt_id = receipt["receipt_id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("run receipt has no receipt_id"))?
+        .to_string();
+    validate_run_receipt_id(&receipt_id)?;
+    let receipt_hash = receipt["receipt_hash"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("run receipt has no receipt_hash"))?
+        .to_string();
+
+    let record_path = find_dated_record(&project_root.join(RUN_LEDGER_RELATIVE_DIR), &receipt_id, false)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "run {receipt_id} has no persisted host-effect ledger; only native engine runs \
+                 record one"
+            )
+        })?;
+    let record: RunHostEffectLedgerRecord = serde_json::from_str(
+        &bounded_read_to_string(&record_path, MAX_EVIDENCE_INPUT_BYTES)
+            .with_context(|| format!("failed reading {}", record_path.display()))?,
+    )
+    .with_context(|| format!("{} is not a run ledger record", record_path.display()))?;
+    if record.schema_version != RUN_LEDGER_RECORD_SCHEMA {
+        anyhow::bail!(
+            "{} is not a `{RUN_LEDGER_RECORD_SCHEMA}` record",
+            record_path.display()
+        );
+    }
+    if record.receipt_id != receipt_id || record.receipt_hash != receipt_hash {
+        anyhow::bail!(
+            "ledger record {} does not belong to run receipt {receipt_id} (receipt hash mismatch)",
+            record_path.display()
+        );
+    }
+    let product_root_key_id = verify_run_ledger_record(&project_root, &record)?;
+
+    let ledger = &record.host_effect_ledger;
+    if ledger.entries.is_empty() {
+        anyhow::bail!("run {receipt_id} recorded no host effects; there is nothing to capture");
+    }
+    let severity = match args.severity.as_deref() {
+        None => tools::replay_bundle::IncidentSeverity::High,
+        Some(raw) => match normalize_incident_severity_label(raw) {
+            Some("low") => tools::replay_bundle::IncidentSeverity::Low,
+            Some("medium") => tools::replay_bundle::IncidentSeverity::Medium,
+            Some("high") => tools::replay_bundle::IncidentSeverity::High,
+            Some("critical") => tools::replay_bundle::IncidentSeverity::Critical,
+            _ => anyhow::bail!(
+                "invalid --severity `{raw}`; expected one of: low, medium, high, critical"
+            ),
+        },
+    };
+    let incident_id = run_incident_id(&ledger.chain_head_hash);
+    let evidence_relative = run_incident_evidence_relative_path(&incident_id);
+    let evidence_path = project_root.join(&evidence_relative);
+    let status = if evidence_path.is_file() {
+        // The automatic capture (or an earlier operator capture) already
+        // wrote this incident; keep the existing evidence untouched.
+        "already_captured"
+    } else {
+        let package = build_run_incident_evidence(&RunIncidentSource {
+            incident_id: &incident_id,
+            policy_mode: &record.policy_mode,
+            app_path: &record.app_path,
+            receipt_id: &receipt_id,
+            receipt_hash: &receipt_hash,
+            receipt_ref: &record.receipt_path,
+            trace_id: &record.trace_id,
+            ssrf_violations: &record.ssrf_violations,
+            sentinel_enforced: record.sentinel_enforced,
+            ledger,
+            severity,
+            detector: "franken-node incident capture --from-run (operator)",
+            title: format!("Operator capture of the run of {}", record.app_path),
+            tags: vec!["operator-captured".to_string(), "run".to_string()],
+        })?;
+        write_bytes_atomically(&evidence_path, &serde_json::to_vec_pretty(&package)?)?;
+        "captured"
+    };
+
+    let report = serde_json::json!({
+        "schema_version": INCIDENT_CAPTURE_CLI_SCHEMA_VERSION,
+        "command": "incident.capture",
+        "status": status,
+        "incident_id": incident_id,
+        "evidence_path": evidence_relative,
+        "receipt_id": receipt_id,
+        "ledger_record": project_relative_display(&project_root, &record_path),
+        "effect_count": ledger.effect_count,
+        "denied_count": ledger.denied_count,
+        "verification": {
+            "chain": "valid",
+            "signature": "valid",
+            "product_root_key_id": product_root_key_id,
+        },
+    });
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "incident {status}: {incident_id} ({} effect(s), {} denied) from run {receipt_id}; \
+             export with `franken-node incident bundle --id {incident_id} --verify`",
+            ledger.effect_count, ledger.denied_count
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "engine")]
+fn verify_run_ledger_record(project_root: &Path, record: &RunHostEffectLedgerRecord) -> Result<String> {
+    let capture_path = record
+        .runtime_evidence_identity_capture_path
+        .as_deref()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "run {} recorded no runtime-evidence identity capture, so its ledger signature \
+                 cannot be authenticated",
+                record.receipt_id
+            )
+        })?;
+    ops::engine_dispatcher::verify_recorded_host_effect_ledger(
+        project_root,
+        &record.host_effect_ledger,
+        Path::new(capture_path),
+    )
+    .with_context(|| {
+        format!(
+            "host-effect ledger of run {} failed verification",
+            record.receipt_id
+        )
+    })
+}
+
+#[cfg(not(feature = "engine"))]
+fn verify_run_ledger_record(_project_root: &Path, record: &RunHostEffectLedgerRecord) -> Result<String> {
+    anyhow::bail!(
+        "verifying the host-effect ledger of run {} needs the `engine` feature",
+        record.receipt_id
+    )
+}
+
+const OPS_INCIDENT_COVERAGE_CLI_SCHEMA_VERSION: &str = "franken-node/ops-incident-coverage-cli/v1";
+
+/// `ops incident-coverage`: the charter's "100% deterministic replay
+/// availability for high-severity incidents", measured from the project's
+/// own records. The population is every persisted run that tripped a
+/// runtime security control (its receipt names the incident it was captured
+/// as); an incident counts as captured when its evidence package validates
+/// and as replayable when a signature-verified bundle for it exists.
+fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<()> {
+    let project_root =
+        std::env::current_dir().context("failed resolving the project directory")?;
+    if let Some(min) = args.min_coverage
+        && !(0.0..=1.0).contains(&min)
+    {
+        anyhow::bail!("--min-coverage must be within 0.0..=1.0 (got {min})");
+    }
+    let receipts = list_all_run_receipts(&project_root)?;
+    let mut observed: BTreeMap<String, String> = BTreeMap::new();
+    let mut unreadable_receipts = 0_usize;
+    for path in &receipts {
+        let parsed = bounded_read_to_string(path, MAX_GENERAL_FILE_BYTES)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+        let Some(receipt) = parsed else {
+            unreadable_receipts = unreadable_receipts.saturating_add(1);
+            continue;
+        };
+        if let Some(incident_id) = receipt["incident_capture"]["incident_id"].as_str() {
+            observed.insert(
+                incident_id.to_string(),
+                receipt["receipt_id"].as_str().unwrap_or_default().to_string(),
+            );
+        }
+    }
+    let entries = collect_incident_list_entries(&project_root, None)?;
+    let mut captured = Vec::new();
+    let mut uncaptured = Vec::new();
+    let mut bundled = Vec::new();
+    let mut unbundled = Vec::new();
+    for incident_id in observed.keys() {
+        let is_captured = entries.iter().any(|entry| {
+            entry.source == "captured" && entry.status == "valid" && &entry.incident_id == incident_id
+        });
+        let is_bundled = entries.iter().any(|entry| {
+            entry.source == "bundle" && entry.status == "verified" && &entry.incident_id == incident_id
+        });
+        if is_captured {
+            captured.push(incident_id.clone());
+        } else {
+            uncaptured.push(incident_id.clone());
+        }
+        if is_bundled {
+            bundled.push(incident_id.clone());
+        } else {
+            unbundled.push(incident_id.clone());
+        }
+    }
+    let ratio = |count: usize| {
+        if observed.is_empty() {
+            None
+        } else {
+            Some(count as f64 / observed.len() as f64)
+        }
+    };
+    let capture_coverage = ratio(captured.len());
+    let bundle_coverage = ratio(bundled.len());
+    let report = serde_json::json!({
+        "schema_version": OPS_INCIDENT_COVERAGE_CLI_SCHEMA_VERSION,
+        "command": "ops.incident-coverage",
+        "receipts_scanned": receipts.len(),
+        "unreadable_receipts": unreadable_receipts,
+        "high_severity_events": observed.len(),
+        "captured": captured.len(),
+        "bundled": bundled.len(),
+        "capture_coverage": capture_coverage,
+        "replay_coverage": bundle_coverage,
+        "uncaptured_incidents": uncaptured,
+        "unbundled_incidents": unbundled,
+        "min_coverage": args.min_coverage,
+    });
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        let percent = |value: Option<f64>| {
+            value.map_or_else(|| "n/a".to_string(), |value| format!("{:.1}%", value * 100.0))
+        };
+        println!(
+            "incident coverage: high_severity_events={} captured={} ({}) replayable={} ({}) receipts_scanned={}",
+            observed.len(),
+            captured.len(),
+            percent(capture_coverage),
+            bundled.len(),
+            percent(bundle_coverage),
+            receipts.len()
+        );
+        for incident_id in &unbundled {
+            println!("  not replayable yet: {incident_id} (franken-node incident bundle --id {incident_id} --verify)");
+        }
+    }
+    if let Some(min) = args.min_coverage
+        && bundle_coverage.unwrap_or(1.0) < min
+    {
+        if args.json {
+            fail_closed_after_json();
+        }
+        anyhow::bail!(
+            "replay coverage {} is below --min-coverage {min}",
+            bundle_coverage.map_or_else(|| "n/a".to_string(), |value| format!("{value:.3}"))
+        );
+    }
+    Ok(())
 }
 
 fn maybe_auto_quarantine_run_dependencies(
@@ -17825,8 +18324,9 @@ mod incident_list_tests {
         write_fixture_bundle(&bundle_path, "INC-CF-001", "high");
 
         let trusted_key_ids = incident_test_trusted_key_ids();
-        let summary = incident_counterfactual_cli_summary(&bundle_path, &trusted_key_ids, "strict")
-            .expect("counterfactual");
+        let summary =
+            incident_counterfactual_cli_summary(&bundle_path, &trusted_key_ids, "strict", false)
+                .expect("counterfactual");
         let canonical: serde_json::Value =
             serde_json::from_str(&summary.canonical_json).expect("counterfactual json");
 
@@ -17849,9 +18349,13 @@ mod incident_list_tests {
         write_fixture_bundle(&bundle_path, "INC-CF-BAD-POLICY", "high");
 
         let trusted_key_ids = incident_test_trusted_key_ids();
-        let err =
-            incident_counterfactual_cli_summary(&bundle_path, &trusted_key_ids, "not-a-policy")
-                .expect_err("invalid policy must fail");
+        let err = incident_counterfactual_cli_summary(
+            &bundle_path,
+            &trusted_key_ids,
+            "not-a-policy",
+            false,
+        )
+        .expect_err("invalid policy must fail");
 
         assert!(
             format!("{err:#}").contains("invalid policy override spec `not-a-policy`"),
@@ -21044,6 +21548,80 @@ impl std::fmt::Debug for IncidentCounterfactualCliSummary {
     }
 }
 
+/// Re-decide a run-captured incident's recorded host effects under a runtime
+/// profile with the run path's own capability table (`--model production`).
+#[cfg(feature = "engine")]
+fn production_counterfactual_output(
+    bundle: &tools::replay_bundle::ReplayBundle,
+    policy: &str,
+) -> Result<tools::counterfactual_replay::CounterfactualSimulationOutput> {
+    use tools::counterfactual_replay::{
+        ProductionProfileExecutor, ProfileGrantTable, ReplayExecutionBounds, SimulationMode,
+        production_decidable_effect_count,
+    };
+
+    let counterfactual: Profile = policy.trim().parse().map_err(|_| {
+        anyhow::anyhow!(
+            "--model production re-decides effects under a runtime profile; `{policy}` is not one \
+             (expected strict, balanced or legacy-risky)"
+        )
+    })?;
+    let recorded: Profile = bundle.policy_version.trim().parse().map_err(|_| {
+        anyhow::anyhow!(
+            "bundle {} was recorded under policy `{}`, which is not a runtime profile; the \
+             production model re-decides incidents captured from `franken-node run`",
+            bundle.bundle_id,
+            bundle.policy_version
+        )
+    })?;
+    if production_decidable_effect_count(bundle) == 0 {
+        anyhow::bail!(
+            "bundle {} carries no recorded host effects (signed effect-receipt chain entries); \
+             the production model can only re-decide incidents captured from `franken-node run`",
+            bundle.bundle_id
+        );
+    }
+    let table = ProfileGrantTable::new(
+        [Profile::Strict, Profile::Balanced, Profile::LegacyRisky].map(|profile| {
+            (
+                profile.to_string(),
+                ops::engine_dispatcher::profile_capability_grants(profile),
+            )
+        }),
+    );
+    let engine = CounterfactualReplayEngine::new(
+        ProductionProfileExecutor::new(table),
+        ReplayExecutionBounds::default(),
+    );
+    let baseline = PolicyConfig {
+        policy_name: recorded.to_string(),
+        ..PolicyConfig::default()
+    };
+    let alternate = PolicyConfig {
+        policy_name: counterfactual.to_string(),
+        ..PolicyConfig::default()
+    };
+    engine
+        .simulate(
+            bundle,
+            &baseline,
+            SimulationMode::SinglePolicySwap {
+                alternate_policy: alternate,
+            },
+        )
+        .map_err(|err| anyhow::anyhow!(err.to_string()))
+}
+
+#[cfg(not(feature = "engine"))]
+fn production_counterfactual_output(
+    _bundle: &tools::replay_bundle::ReplayBundle,
+    _policy: &str,
+) -> Result<tools::counterfactual_replay::CounterfactualSimulationOutput> {
+    anyhow::bail!(
+        "--model production needs the run path's capability table, which requires the `engine` feature"
+    )
+}
+
 // bd-5r99w.4: bumped v1 -> v2 to add the `executor` discriminator and bind it
 // into the counterfactual digest preimage. The diff machinery is real, but the
 // default executor is a synthetic risk-score stand-in; v2 makes that explicit so
@@ -21056,22 +21634,36 @@ fn incident_counterfactual_cli_summary(
     bundle_path: &Path,
     trusted_key_ids: &[String],
     policy: &str,
+    production: bool,
 ) -> Result<IncidentCounterfactualCliSummary> {
     let bundle = read_bundle_from_path_with_trusted_keys(bundle_path, trusted_key_ids)
         .with_context(|| format!("failed reading replay bundle {}", bundle_path.display()))?;
-    let baseline_policy = PolicyConfig::from_bundle(&bundle);
-    let mode = PolicyConfig::from_cli_spec(policy, &baseline_policy)
-        .with_context(|| format!("invalid policy override spec `{policy}`"))?;
-    let engine = CounterfactualReplayEngine::default();
-    let executor = engine.executor_kind().to_string();
-    let output = engine
-        .simulate(&bundle, &baseline_policy, mode)
-        .with_context(|| {
-            format!(
-                "counterfactual replay failed for bundle {}",
-                bundle_path.display()
-            )
-        })?;
+    let (executor, output) = if production {
+        (
+            tools::counterfactual_replay::EXECUTOR_KIND_PRODUCTION.to_string(),
+            production_counterfactual_output(&bundle, policy).with_context(|| {
+                format!(
+                    "production counterfactual replay failed for bundle {}",
+                    bundle_path.display()
+                )
+            })?,
+        )
+    } else {
+        let baseline_policy = PolicyConfig::from_bundle(&bundle);
+        let mode = PolicyConfig::from_cli_spec(policy, &baseline_policy)
+            .with_context(|| format!("invalid policy override spec `{policy}`"))?;
+        let engine = CounterfactualReplayEngine::default();
+        let executor = engine.executor_kind().to_string();
+        let output = engine
+            .simulate(&bundle, &baseline_policy, mode)
+            .with_context(|| {
+                format!(
+                    "counterfactual replay failed for bundle {}",
+                    bundle_path.display()
+                )
+            })?;
+        (executor, output)
+    };
     let (total_decisions, changed_decisions, severity_delta) = summarize_output(&output);
     let canonical_json = counterfactual_to_json(&output)
         .context("failed encoding counterfactual output to canonical json")?;
@@ -21370,27 +21962,19 @@ fn handle_incident_counterfactual_command(args: &cli::IncidentCounterfactualArgs
     if args.policy.trim().is_empty() {
         anyhow::bail!("`incident counterfactual` requires --policy");
     }
-    // bd-5r99w.4: the synthetic, sandboxed risk-score model is the only executor
-    // available today; the production decision engine is gated on the engine-split
-    // runtime decision kernel (bd-f5b04.2). Make the model explicit so a synthetic
-    // re-evaluation is never the silent default, and refuse `production` honestly
-    // rather than quietly falling back to synthetic.
-    match args.model.as_str() {
-        tools::counterfactual_replay::EXECUTOR_KIND_SYNTHETIC => {}
-        tools::counterfactual_replay::EXECUTOR_KIND_PRODUCTION => {
-            anyhow::bail!(
-                "counterfactual --model production requires the runtime's real policy decision \
-                 engine, which is gated on the engine-split decision kernel (bd-f5b04.2) and is \
-                 not available in this build; re-run with --model synthetic for the sandboxed \
-                 risk-score model (labeled `executor: synthetic` in the report)"
-            );
-        }
+    // bd-5r99w.4: the model is explicit so a synthetic re-evaluation is never
+    // read as a production decision. `production` re-decides the recorded host
+    // effects of a run-captured incident with the run path's own per-profile
+    // capability table; `synthetic` is the sandboxed risk-score stand-in.
+    let production = match args.model.as_str() {
+        tools::counterfactual_replay::EXECUTOR_KIND_SYNTHETIC => false,
+        tools::counterfactual_replay::EXECUTOR_KIND_PRODUCTION => true,
         other => {
             anyhow::bail!(
                 "invalid counterfactual --model `{other}`; expected `synthetic` or `production`"
             );
         }
-    }
+    };
     if !args.json {
         eprintln!(
             "franken-node incident counterfactual: bundle={} policy={} model={}",
@@ -21403,8 +21987,12 @@ fn handle_incident_counterfactual_command(args: &cli::IncidentCounterfactualArgs
         args.trusted_public_key.as_deref(),
         args.trusted_key_dir.as_deref(),
     )?;
-    let summary =
-        incident_counterfactual_cli_summary(&args.bundle, &trusted_key_ids, &args.policy)?;
+    let summary = incident_counterfactual_cli_summary(
+        &args.bundle,
+        &trusted_key_ids,
+        &args.policy,
+        production,
+    )?;
     let promotion_signing_material = if args.promote {
         match load_receipt_signing_material(args.promotion_signing_key.as_deref())? {
             Some(material) => Some(material),
@@ -32549,7 +33137,7 @@ fn main() -> Result<()> {
                 &dispatch,
                 now_unix_secs(),
             )?;
-            let receipt = build_run_execution_receipt(
+            let mut receipt = build_run_execution_receipt(
                 &app_path,
                 &policy,
                 resolved.selected_profile,
@@ -32561,11 +33149,30 @@ fn main() -> Result<()> {
                 None,
                 compat_preflight_report,
             )?;
+            // bd-reality-20260923-26n9r.8: the receipt names the incident a
+            // tripped control is captured as, and its hash commits to it.
+            if let Some(capture) = planned_run_incident_capture(&receipt, &dispatch) {
+                receipt.core.incident_capture = Some(capture);
+                receipt.receipt_hash = compute_run_execution_receipt_hash(&receipt.core)?;
+            }
             let receipt_path = persist_run_execution_receipt(
                 &project_root,
                 &receipt,
                 configured_run_receipt_limit(&resolved.config),
             )?;
+            // The signed ledger is kept beside the receipt so any run can be
+            // captured later; a write failure is reported, not fatal.
+            if let Err(err) = persist_run_host_effect_ledger(
+                &project_root,
+                &policy,
+                &receipt,
+                &receipt_path,
+                &dispatch,
+                &trace_id,
+            ) && !console_only
+            {
+                eprintln!("warning: run host-effect ledger was not persisted: {err:#}");
+            }
             // The run already completed; a capture failure is reported loudly
             // but does not rewrite the run's own exit semantics.
             let captured_incident = match maybe_capture_run_incident(
@@ -33760,6 +34367,11 @@ fn main() -> Result<()> {
                     return incident_fail("incident.counterfactual", args.json, err);
                 }
             }
+            IncidentCommand::Capture(args) => {
+                if let Err(err) = handle_incident_capture_command(&args) {
+                    return incident_fail("incident.capture", args.json, err);
+                }
+            }
             IncidentCommand::List(args) => {
                 let severity_filter = match parse_incident_severity_filter(args.severity.as_deref())
                 {
@@ -33872,6 +34484,11 @@ fn main() -> Result<()> {
             OpsCommand::CompatCorpusRun(args) => {
                 if let Err(err) = handle_ops_compat_corpus_run(&args) {
                     return ops_fail("ops.compat-corpus-run", args.json, err);
+                }
+            }
+            OpsCommand::IncidentCoverage(args) => {
+                if let Err(err) = handle_ops_incident_coverage(&args) {
+                    return ops_fail("ops.incident-coverage", args.json, err);
                 }
             }
         },

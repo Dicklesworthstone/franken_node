@@ -10,6 +10,7 @@ Commands:
   replay          Integrity-verified replay of the recorded incident bundle (not live re-execution)
   counterfactual  Simulate alternative policy actions
   list            List recorded incidents
+  capture         Capture a recorded run as incident evidence from its persisted, signed host-effect ledger (re-verified before anything is written)
   help            Print this message or the help of the given subcommand(s)
 
 Options:

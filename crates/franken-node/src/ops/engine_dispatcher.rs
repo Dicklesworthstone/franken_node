@@ -2571,6 +2571,16 @@ pub struct CapturedProcessOutput {
     pub stderr: String,
 }
 
+/// The capabilities `run` grants each runtime profile, exactly as the native
+/// run path resolves them (before any signed process-spawn admission, which
+/// is configuration rather than profile). Production counterfactual replay
+/// re-decides recorded host effects against this same table.
+#[cfg(feature = "engine")]
+#[must_use]
+pub fn profile_capability_grants(profile: Profile) -> Vec<String> {
+    EngineDispatcher::map_profile_to_capabilities(profile)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunDispatchReport {
     pub runtime: String,
@@ -2816,6 +2826,55 @@ fn validate_host_effect_ledger(
         .signature
         .verify_detached(&signature_payload, trusted_identity)
         .map_err(|error| format!("native-session ledger signature failed: {error}"))
+}
+
+/// Re-verify a persisted host-effect ledger after the run: the identity
+/// capture at `capture_path` must sit in this user's runtime-evidence capture
+/// directory and be signed by this machine's runtime-evidence product root,
+/// and the ledger (outcome counts, hash chain, head and detached signature)
+/// must verify against the session identity that capture authenticates.
+/// Returns the product root's key id.
+///
+/// # Errors
+///
+/// Fails when the product root or capture cannot be read, the capture lives
+/// outside the capture directory, or any signature or chain check fails.
+#[cfg(feature = "engine")]
+pub fn verify_recorded_host_effect_ledger(
+    project_root: &Path,
+    ledger: &HostEffectLedger,
+    capture_path: &Path,
+) -> Result<String> {
+    let (product_root_path, capture_directory, _) =
+        prepare_runtime_evidence_directories(project_root)?;
+    let capture_directory = capture_directory.canonicalize().with_context(|| {
+        format!(
+            "resolve runtime evidence capture directory {}",
+            capture_directory.display()
+        )
+    })?;
+    let resolved_capture = capture_path.canonicalize().with_context(|| {
+        format!(
+            "resolve runtime evidence identity capture {}",
+            capture_path.display()
+        )
+    })?;
+    if resolved_capture.parent() != Some(capture_directory.as_path()) {
+        anyhow::bail!(
+            "runtime evidence identity capture {} is not in {}",
+            resolved_capture.display(),
+            capture_directory.display()
+        );
+    }
+    let product_root = load_runtime_evidence_product_root(&product_root_path)?;
+    let trusted_root = product_root.verifying_key();
+    let bytes = read_runtime_evidence_private_file(&resolved_capture, 64 * 1024)?;
+    let capture: RuntimeEvidenceIdentityCapture = serde_json::from_slice(&bytes)
+        .context("runtime evidence identity capture is not valid JSON")?;
+    capture.verify_with_product_root(&trusted_root)?;
+    validate_host_effect_ledger(ledger, &capture.evidence_verification_identity)
+        .map_err(|error| anyhow::anyhow!(error))?;
+    Ok(product_root_key_id(&trusted_root))
 }
 
 /// Parent-observed state of one provider call in a native-session write-ahead
@@ -6709,7 +6768,7 @@ impl EngineDispatcher {
     /// **Note**: All capability strings are validated against franken-engine's supported
     /// capability set to prevent silent capability bypass due to unknown strings.
     #[cfg(feature = "engine")]
-    fn map_profile_to_capabilities(profile: Profile) -> Vec<String> {
+    pub(crate) fn map_profile_to_capabilities(profile: Profile) -> Vec<String> {
         // Map to capability strings that franken-engine actually recognizes.
         // Based on frankenengine_engine::capability::RuntimeCapability::from_tag_str mapping.
         match profile {

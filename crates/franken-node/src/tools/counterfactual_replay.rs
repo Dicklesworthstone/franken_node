@@ -8,12 +8,16 @@
 //! - INV-CF-SANDBOXED: replay executor is pure computation only.
 //! - INV-CF-BOUNDED: replay enforces step and wall-clock bounds.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::push_bounded;
+use crate::runtime::effect_receipt::{
+    EffectKind, EffectReceipt, EffectReceiptChainEntry, PolicyOutcome,
+};
 
 use super::replay_bundle::{
     EventType, ReplayBundle, ReplayBundleError, TimelineEvent, validate_bundle_integrity,
@@ -474,6 +478,260 @@ impl SandboxedExecutor for PureSandboxedExecutor {
             recorded_effects,
         }
     }
+}
+
+/// Which capabilities each runtime profile grants on the run path. The CLI
+/// fills it from the native dispatcher's own table
+/// (`ops::engine_dispatcher::profile_capability_grants`), so the production
+/// executor decides with exactly the grants `run` enforces.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProfileGrantTable {
+    grants: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl ProfileGrantTable {
+    #[must_use]
+    pub fn new(entries: impl IntoIterator<Item = (String, Vec<String>)>) -> Self {
+        Self {
+            grants: entries
+                .into_iter()
+                .map(|(profile, capabilities)| (profile, capabilities.into_iter().collect()))
+                .collect(),
+        }
+    }
+
+    fn grants(&self, profile: &str) -> Option<&BTreeSet<String>> {
+        self.grants.get(profile)
+    }
+
+    #[must_use]
+    pub fn profiles(&self) -> Vec<String> {
+        self.grants.keys().cloned().collect()
+    }
+}
+
+/// How certain a production re-decision is.
+pub const DETERMINATION_EXACT: &str = "exact";
+/// Decided assuming the guest's control flow after the first divergence is
+/// unchanged (a refused effect can change what a program does next).
+pub const DETERMINATION_PATH_ASSUMED: &str = "path_assumed";
+
+/// The production decision model: re-decides every host effect recorded in a
+/// run-captured incident (its signed effect-receipt chain entry) under a
+/// runtime profile, using the run path's own capability table.
+///
+/// * The capability gate is the only profile-dependent gate on the run path:
+///   the SSRF, information-flow and sandbox gates read operator configuration
+///   that is the same under every profile. So an effect whose capability the
+///   counterfactual profile grants gets exactly the recorded gate outcome,
+///   and one it does not grant is refused at the capability gate.
+/// * Child-process spawning is authorized by a signed admission (operator
+///   configuration), never by a profile, so a spawn keeps its recorded
+///   outcome.
+/// * Effects refused at the original profile's capability gate never reached
+///   the host and are absent from the ledger; replay cannot decide them.
+/// * After the first effect whose decision differs from the record, later
+///   decisions are labelled `path_assumed`.
+#[derive(Debug)]
+pub struct ProductionProfileExecutor {
+    table: ProfileGrantTable,
+    /// First diverging sequence number seen per policy name, in replay order.
+    first_divergence: std::cell::RefCell<BTreeMap<String, u64>>,
+}
+
+impl ProductionProfileExecutor {
+    #[must_use]
+    pub fn new(table: ProfileGrantTable) -> Self {
+        Self {
+            table,
+            first_divergence: std::cell::RefCell::new(BTreeMap::new()),
+        }
+    }
+}
+
+/// Capability the run path checks for a recorded effect.
+fn required_capability(receipt: &EffectReceipt) -> &'static str {
+    let capability_ref = match &receipt.policy_outcome {
+        PolicyOutcome::Allowed { capability_ref } | PolicyOutcome::Failed { capability_ref, .. } => {
+            Some(capability_ref.as_str())
+        }
+        PolicyOutcome::Denied { .. } => None,
+    };
+    if let Some(capability_ref) = capability_ref {
+        if capability_ref.starts_with("process-spawn:") {
+            return "process_spawn";
+        }
+        if let Some(host_io) = capability_ref.strip_prefix("host-io:") {
+            return match host_io {
+                "fs_read" => "fs_read",
+                "fs_write" => "fs_write",
+                "random_read" => "random_read",
+                // network_send / network_recv are both the profile's egress grant.
+                _ => "network_egress",
+            };
+        }
+    }
+    match receipt.effect_kind {
+        EffectKind::FsRead => "fs_read",
+        EffectKind::FsWrite => "fs_write",
+        EffectKind::NetConnect | EffectKind::HttpRequest => "network_egress",
+        EffectKind::Spawn => "process_spawn",
+        EffectKind::ModuleResolve => "module_load",
+        EffectKind::RandomRead => "random_read",
+    }
+}
+
+/// Severity weight of an effect that is allowed to execute. Weights rank
+/// effect classes by the harm an adversarial program can do with them; a
+/// secret-labelled effect weighs three times as much. A refused effect
+/// costs nothing.
+fn production_effect_loss(receipt: &EffectReceipt, decision: &str) -> u64 {
+    if decision != "allow" {
+        return 0;
+    }
+    let base: u64 = match receipt.effect_kind {
+        EffectKind::Spawn => 30,
+        EffectKind::HttpRequest | EffectKind::NetConnect => 20,
+        EffectKind::FsWrite => 10,
+        EffectKind::FsRead => 2,
+        EffectKind::ModuleResolve => 1,
+        EffectKind::RandomRead => 0,
+    };
+    let secret_labelled = receipt.label_set_commitment
+        != crate::runtime::effect_receipt::EFFECT_RECEIPT_EMPTY_LABEL_SET_COMMITMENT;
+    if secret_labelled { base * 3 } else { base }
+}
+
+fn recorded_effect_entry(event: &TimelineEvent) -> Option<EffectReceiptChainEntry> {
+    let entry = event.payload.get("effect_receipt_chain_entry")?;
+    serde_json::from_value(entry.clone()).ok()
+}
+
+impl SandboxedExecutor for ProductionProfileExecutor {
+    fn executor_kind(&self) -> &'static str {
+        EXECUTOR_KIND_PRODUCTION
+    }
+
+    fn evaluate_event(&self, event: &TimelineEvent, policy: &PolicyConfig) -> DecisionPoint {
+        let Some(entry) = recorded_effect_entry(event) else {
+            return DecisionPoint {
+                sequence_number: event.sequence_number,
+                event_type: event.event_type,
+                decision: "no_effect".to_string(),
+                rationale: format!(
+                    "event={} carries no recorded host effect; nothing to re-decide",
+                    event.event_type.as_str()
+                ),
+                expected_loss: 0,
+                recorded_effects: Vec::new(),
+            };
+        };
+        let receipt = &entry.receipt;
+        let capability = required_capability(receipt);
+        let recorded = match &receipt.policy_outcome {
+            PolicyOutcome::Allowed { .. } => "allow",
+            PolicyOutcome::Denied { .. } => "deny",
+            // The gates allowed it; the host could not perform it.
+            PolicyOutcome::Failed { .. } => "allow",
+        };
+        let (decision, mut rationale) = match self.table.grants(&policy.policy_name) {
+            None => (
+                "deny",
+                format!(
+                    "profile `{}` is not a runtime profile; known profiles: {}",
+                    policy.policy_name,
+                    self.table.profiles().join(", ")
+                ),
+            ),
+            Some(_) if capability == "process_spawn" => (
+                recorded,
+                "child-process spawning is authorized by a signed admission, not a profile; \
+                 recorded outcome kept"
+                    .to_string(),
+            ),
+            Some(grants) if !grants.contains(capability) => (
+                "deny",
+                format!(
+                    "capability gate: profile `{}` does not grant `{capability}` (run-path capability table)",
+                    policy.policy_name
+                ),
+            ),
+            Some(_) => (
+                recorded,
+                match &receipt.policy_outcome {
+                    PolicyOutcome::Denied { reason } => format!(
+                        "profile `{}` grants `{capability}`; the profile-independent gate that refused it would refuse it again: {reason}",
+                        policy.policy_name
+                    ),
+                    PolicyOutcome::Failed { reason, .. } => format!(
+                        "profile `{}` grants `{capability}`; the gates allow it and the host failure is replayed: {reason}",
+                        policy.policy_name
+                    ),
+                    PolicyOutcome::Allowed { .. } => format!(
+                        "profile `{}` grants `{capability}`; the recorded gates allowed it",
+                        policy.policy_name
+                    ),
+                },
+            ),
+        };
+
+        let determination = {
+            let mut first = self.first_divergence.borrow_mut();
+            let diverged_before = first
+                .get(&policy.policy_name)
+                .is_some_and(|seq| *seq < event.sequence_number);
+            if decision != recorded {
+                first
+                    .entry(policy.policy_name.clone())
+                    .or_insert(event.sequence_number);
+            }
+            if diverged_before {
+                DETERMINATION_PATH_ASSUMED
+            } else {
+                DETERMINATION_EXACT
+            }
+        };
+        rationale.push_str(&format!(
+            "; effect={} seq={} determination={determination}",
+            receipt.effect_kind.label(),
+            receipt.seq
+        ));
+
+        DecisionPoint {
+            sequence_number: event.sequence_number,
+            event_type: event.event_type,
+            decision: decision.to_string(),
+            rationale,
+            expected_loss: production_effect_loss(receipt, decision),
+            recorded_effects: vec![RecordedHostEffect {
+                sequence_number: receipt.seq,
+                effect_kind: receipt.effect_kind.label().to_string(),
+                capability_ref: capability.to_string(),
+                pre_state_hash: Some(receipt.pre_state_hash.as_str().to_string()),
+                args_hash: Some(receipt.args_hash.as_str().to_string()),
+                result_hash: receipt
+                    .result_hash
+                    .as_ref()
+                    .map(|hash| hash.as_str().to_string()),
+                post_state_hash: receipt
+                    .post_state_hash
+                    .as_ref()
+                    .map(|hash| hash.as_str().to_string()),
+                recorded_policy_decision: recorded.to_string(),
+            }],
+        }
+    }
+}
+
+/// Number of events in `bundle` that carry a recorded host effect the
+/// production executor can re-decide.
+#[must_use]
+pub fn production_decidable_effect_count(bundle: &ReplayBundle) -> usize {
+    bundle
+        .timeline
+        .iter()
+        .filter(|event| recorded_effect_entry(event).is_some())
+        .count()
 }
 
 #[derive(Debug, Clone)]
@@ -1684,5 +1942,266 @@ mod tests {
         let (total, changed, _delta) = summarize_output(&result);
         assert_eq!(total, 3);
         assert!(changed >= 1);
+    }
+
+    // ── Production executor ────────────────────────────────────────────────
+
+    /// Mirrors the native run path's table (the CLI passes
+    /// `ops::engine_dispatcher::profile_capability_grants` itself).
+    fn grant_table() -> ProfileGrantTable {
+        let caps = |list: &[&str]| list.iter().map(|cap| (*cap).to_string()).collect();
+        ProfileGrantTable::new([
+            (
+                "strict".to_string(),
+                caps(&["module_load", "fs_read", "builtin", "timer"]),
+            ),
+            (
+                "balanced".to_string(),
+                caps(&[
+                    "module_load",
+                    "fs_read",
+                    "network_egress",
+                    "builtin",
+                    "random_read",
+                    "timer",
+                ]),
+            ),
+            (
+                "legacy-risky".to_string(),
+                caps(&[
+                    "module_load",
+                    "fs_read",
+                    "fs_write",
+                    "network_egress",
+                    "builtin",
+                    "random_read",
+                    "env_read",
+                    "timer",
+                ]),
+            ),
+        ])
+    }
+
+    fn hash(tag: &str) -> crate::storage::cas::ContentHash {
+        crate::storage::cas::content_hash(tag.as_bytes())
+    }
+
+    fn effect_chain(receipts: Vec<EffectReceipt>) -> Vec<EffectReceiptChainEntry> {
+        let mut chain = crate::runtime::effect_receipt::EffectReceiptChain::new();
+        for receipt in receipts {
+            chain.append(receipt).expect("append receipt");
+        }
+        chain.entries().to_vec()
+    }
+
+    fn allowed(seq: u64, kind: EffectKind, capability_ref: &str) -> EffectReceipt {
+        EffectReceipt::allowed(
+            seq,
+            "trace-prod-cf",
+            kind,
+            capability_ref,
+            hash(&format!("pre-{seq}")),
+            hash(&format!("args-{seq}")),
+            hash(&format!("result-{seq}")),
+            hash(&format!("post-{seq}")),
+            1_000 + seq,
+        )
+    }
+
+    fn denied(seq: u64, kind: EffectKind, reason: &str) -> EffectReceipt {
+        EffectReceipt::denied(
+            seq,
+            "trace-prod-cf",
+            kind,
+            reason,
+            hash(&format!("pre-{seq}")),
+            hash(&format!("args-{seq}")),
+            1_000 + seq,
+        )
+    }
+
+    fn effect_events(entries: &[EffectReceiptChainEntry]) -> Vec<TimelineEvent> {
+        entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| TimelineEvent {
+                sequence_number: u64::try_from(index).expect("index") + 1,
+                timestamp: format!("2026-10-06T12:00:00.00000{index}Z"),
+                event_type: EventType::PolicyEval,
+                payload: serde_json::json!({ "effect_receipt_chain_entry": entry }),
+                causal_parent: None,
+            })
+            .collect()
+    }
+
+    fn policy(name: &str) -> PolicyConfig {
+        PolicyConfig {
+            policy_name: name.to_string(),
+            ..PolicyConfig::default()
+        }
+    }
+
+    #[test]
+    fn production_executor_is_labeled_production() {
+        let executor = ProductionProfileExecutor::new(grant_table());
+        assert_eq!(executor.executor_kind(), EXECUTOR_KIND_PRODUCTION);
+        let engine = CounterfactualReplayEngine::new(executor, ReplayExecutionBounds::default());
+        assert_eq!(engine.executor_kind(), EXECUTOR_KIND_PRODUCTION);
+    }
+
+    #[test]
+    fn production_baseline_reproduces_the_recorded_decisions() {
+        let entries = effect_chain(vec![
+            allowed(0, EffectKind::FsRead, "host-io:fs_read"),
+            allowed(1, EffectKind::HttpRequest, "host-io:network_send"),
+            denied(2, EffectKind::HttpRequest, "ssrf: egress to 169.254.169.254 blocked"),
+        ]);
+        let executor = ProductionProfileExecutor::new(grant_table());
+        let decisions: Vec<String> = effect_events(&entries)
+            .iter()
+            .map(|event| executor.evaluate_event(event, &policy("balanced")).decision)
+            .collect();
+        assert_eq!(decisions, vec!["allow", "allow", "deny"]);
+    }
+
+    #[test]
+    fn strict_counterfactual_refuses_egress_at_the_capability_gate() {
+        let entries = effect_chain(vec![
+            allowed(0, EffectKind::FsRead, "host-io:fs_read"),
+            allowed(1, EffectKind::HttpRequest, "host-io:network_send"),
+        ]);
+        let events = effect_events(&entries);
+        let executor = ProductionProfileExecutor::new(grant_table());
+        let read = executor.evaluate_event(&events[0], &policy("strict"));
+        assert_eq!(read.decision, "allow");
+        assert!(read.rationale.contains("determination=exact"), "{}", read.rationale);
+        let egress = executor.evaluate_event(&events[1], &policy("strict"));
+        assert_eq!(egress.decision, "deny");
+        assert!(
+            egress
+                .rationale
+                .contains("does not grant `network_egress`"),
+            "{}",
+            egress.rationale
+        );
+        assert_eq!(egress.expected_loss, 0);
+        assert_eq!(egress.recorded_effects[0].recorded_policy_decision, "allow");
+        assert_eq!(egress.recorded_effects[0].capability_ref, "network_egress");
+    }
+
+    #[test]
+    fn decisions_after_the_first_divergence_are_path_assumed() {
+        let entries = effect_chain(vec![
+            allowed(0, EffectKind::HttpRequest, "host-io:network_send"),
+            allowed(1, EffectKind::FsRead, "host-io:fs_read"),
+        ]);
+        let events = effect_events(&entries);
+        let executor = ProductionProfileExecutor::new(grant_table());
+        let first = executor.evaluate_event(&events[0], &policy("strict"));
+        assert_eq!(first.decision, "deny");
+        assert!(first.rationale.contains("determination=exact"));
+        let second = executor.evaluate_event(&events[1], &policy("strict"));
+        assert_eq!(second.decision, "allow");
+        assert!(
+            second.rationale.contains("determination=path_assumed"),
+            "{}",
+            second.rationale
+        );
+    }
+
+    #[test]
+    fn profile_independent_gates_keep_their_recorded_refusal() {
+        let entries = effect_chain(vec![denied(
+            0,
+            EffectKind::HttpRequest,
+            "ssrf: egress to 10.0.0.1 blocked",
+        )]);
+        let events = effect_events(&entries);
+        let executor = ProductionProfileExecutor::new(grant_table());
+        let decision = executor.evaluate_event(&events[0], &policy("legacy-risky"));
+        assert_eq!(decision.decision, "deny");
+        assert!(decision.rationale.contains("would refuse it again"));
+    }
+
+    #[test]
+    fn spawn_keeps_its_admission_bound_outcome_and_unknown_profiles_refuse() {
+        let entries = effect_chain(vec![allowed(
+            0,
+            EffectKind::Spawn,
+            "process-spawn:token-1@policy-subject",
+        )]);
+        let events = effect_events(&entries);
+        let executor = ProductionProfileExecutor::new(grant_table());
+        let kept = executor.evaluate_event(&events[0], &policy("strict"));
+        assert_eq!(kept.decision, "allow");
+        assert!(kept.rationale.contains("signed admission"));
+        let unknown = executor.evaluate_event(&events[0], &policy("permissive"));
+        assert_eq!(unknown.decision, "deny");
+        assert!(unknown.rationale.contains("not a runtime profile"));
+    }
+
+    #[test]
+    fn events_without_recorded_effects_are_not_re_decided() {
+        let executor = ProductionProfileExecutor::new(grant_table());
+        let event = TimelineEvent {
+            sequence_number: 1,
+            timestamp: "2026-10-06T12:00:00Z".to_string(),
+            event_type: EventType::ExternalSignal,
+            payload: serde_json::json!({ "signal": "operator-note" }),
+            causal_parent: None,
+        };
+        let decision = executor.evaluate_event(&event, &policy("strict"));
+        assert_eq!(decision.decision, "no_effect");
+        assert!(decision.recorded_effects.is_empty());
+        assert_eq!(decision.expected_loss, 0);
+    }
+
+    #[test]
+    fn production_replay_over_a_bundle_reports_the_strict_divergence() {
+        let entries = effect_chain(vec![
+            allowed(0, EffectKind::FsRead, "host-io:fs_read"),
+            allowed(1, EffectKind::HttpRequest, "host-io:network_send"),
+        ]);
+        let events: Vec<RawEvent> = entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                RawEvent::new(
+                    format!("2026-10-06T12:00:00.00000{index}Z"),
+                    EventType::PolicyEval,
+                    serde_json::json!({ "effect_receipt_chain_entry": entry }),
+                )
+                .with_policy_version("balanced")
+            })
+            .collect();
+        let mut bundle = generate_replay_bundle("INC-RUN-PRODCF0001", &events).expect("bundle");
+        assert_eq!(bundle.policy_version, "balanced");
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x51; 32]);
+        sign_replay_bundle(
+            &mut bundle,
+            &ReplayBundleSigningMaterial {
+                signing_key: &signing_key,
+                key_source: "test-production-counterfactual",
+                signing_identity: "production-counterfactual-test",
+            },
+        )
+        .expect("sign bundle");
+        assert_eq!(production_decidable_effect_count(&bundle), 2);
+
+        let engine = CounterfactualReplayEngine::new(
+            ProductionProfileExecutor::new(grant_table()),
+            ReplayExecutionBounds::default(),
+        );
+        let baseline = PolicyConfig::from_bundle(&bundle);
+        let result = engine
+            .replay_with_baseline(&bundle, &baseline, &policy("strict"))
+            .expect("production replay");
+        assert_eq!(result.summary_statistics.total_decisions, 2);
+        assert_eq!(result.summary_statistics.changed_decisions, 1);
+        assert!(result.summary_statistics.severity_delta < 0);
+        let divergence = &result.divergence_points[0];
+        assert_eq!(divergence.original_decision, "allow");
+        assert_eq!(divergence.counterfactual_decision, "deny");
+        assert_eq!(divergence.effect_diffs[0].effect_kind, "http_request");
     }
 }

@@ -1932,6 +1932,21 @@ pub enum OpsCommand {
     /// genuine per-test results with digest-bound provenance (bd-kfseq).
     #[command(name = "compat-corpus-run")]
     CompatCorpusRun(OpsCompatCorpusRunArgs),
+    /// Share of runs that tripped a runtime control whose incident was
+    /// captured and is replayable from a verified bundle.
+    #[command(name = "incident-coverage")]
+    IncidentCoverage(OpsIncidentCoverageArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct OpsIncidentCoverageArgs {
+    /// Fail (exit non-zero) when replay coverage is below this fraction (0.0-1.0).
+    #[arg(long)]
+    pub min_coverage: Option<f64>,
+
+    /// Emit `franken-node/ops-incident-coverage-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -2195,6 +2210,27 @@ pub enum IncidentCommand {
 
     /// List recorded incidents.
     List(IncidentListArgs),
+
+    /// Capture a recorded run as incident evidence from its persisted, signed
+    /// host-effect ledger (re-verified before anything is written).
+    Capture(IncidentCaptureArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct IncidentCaptureArgs {
+    /// Run receipt id, or a path to the run receipt file.
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/incident-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
+    pub from_run: String,
+
+    /// Severity recorded on the evidence: low, medium, high (default), critical.
+    #[arg(long)]
+    pub severity: Option<String>,
+
+    /// Emit `franken-node/incident-capture-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -2290,10 +2326,11 @@ pub struct IncidentCounterfactualArgs {
     pub policy: String,
 
     /// Decision model used to evaluate the recorded timeline: `synthetic` (a
-    /// sandboxed risk-score stand-in, the current default) or `production` (the
-    /// runtime's real policy decision engine). The chosen model is labeled in the
-    /// report and bound into the counterfactual digest. `production` is gated on
-    /// the engine-split runtime decision kernel and is not yet available.
+    /// sandboxed risk-score stand-in, the default) or `production`, which
+    /// re-decides every host effect a run-captured incident recorded under the
+    /// runtime profile named by `--policy`, using the run path's own capability
+    /// table. The chosen model is labeled in the report and bound into the
+    /// counterfactual digest.
     #[arg(long, default_value = "synthetic")]
     pub model: String,
 
