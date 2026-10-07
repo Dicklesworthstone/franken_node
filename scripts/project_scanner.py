@@ -19,6 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.lib.test_logger import configure_test_logging
+from scripts.dependency_inventory import InventoryError, scan_dependencies as dependency_inventory
 
 ROOT = Path(__file__).resolve().parent.parent
 REGISTRY_PATH = ROOT / "docs" / "COMPATIBILITY_REGISTRY.json"
@@ -131,33 +132,8 @@ def scan_file(filepath: Path, registry: dict) -> list[dict]:
 
 
 def scan_dependencies(project_dir: Path) -> list[dict]:
-    """Analyze package.json for dependency risks."""
-    results = []
-    pkg_json = project_dir / "package.json"
-    if not pkg_json.exists():
-        return results
-
-    try:
-        pkg = json.loads(pkg_json.read_text())
-    except (json.JSONDecodeError, OSError):
-        return results
-
-    all_deps = {}
-    all_deps.update(pkg.get("dependencies", {}))
-    all_deps.update(pkg.get("devDependencies", {}))
-
-    for name, version in all_deps.items():
-        is_native = name in NATIVE_ADDON_PACKAGES
-        risk = "critical" if is_native else "low"
-        results.append({
-            "name": name,
-            "version": version,
-            "has_native_addon": is_native,
-            "risk_level": risk,
-            "notes": "Native addon — requires port or replacement" if is_native else None,
-        })
-
-    return results
+    """Read direct declarations and the complete bounded npm lock inventory."""
+    return dependency_inventory(project_dir, NATIVE_ADDON_PACKAGES)
 
 
 def compute_readiness(risk_dist: dict) -> str:
@@ -191,8 +167,8 @@ def scan_project(project_dir: Path) -> dict:
     for item in api_usage:
         risk_dist[item["risk_level"]] += 1
     for dep in dependencies:
-        if dep["risk_level"] == "critical":
-            risk_dist["critical"] += 1
+        if dep["risk_level"] in ("high", "critical"):
+            risk_dist[dep["risk_level"]] += 1
 
     # Generate recommendations
     recommendations = []
@@ -205,7 +181,7 @@ def scan_project(project_dir: Path) -> dict:
     if risk_dist["high"] > 0:
         recommendations.append({
             "category": "high-risk",
-            "message": f"{risk_dist['high']} high-risk API usages — verify compatibility before migration",
+            "message": f"{risk_dist['high']} high-risk API/dependency items — review before migration",
             "severity": "warning",
         })
 
@@ -304,7 +280,14 @@ def main():
         sys.exit(2)
 
     project_dir = Path(args[0])
-    report = scan_project(project_dir)
+    try:
+        report = scan_project(project_dir)
+    except (InventoryError, OSError) as error:
+        if json_output:
+            print(json.dumps({"project": str(project_dir), "status": "error", "error": str(error)}))
+        else:
+            print(f"Project scan failed: {error}", file=sys.stderr)
+        sys.exit(2)
 
     if json_output:
         print(json.dumps(report, indent=2))
