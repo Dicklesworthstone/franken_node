@@ -1,0 +1,28 @@
+name: Native Dependency Admission
+on:
+  push:
+    branches: [main]
+    paths:
+      - crates/franken-node/src/migration/dependency_admission.rs
+      - crates/franken-node/src/migration/verified_rewrite.rs
+      - tools/dependency-admission/**
+      - .github/workflows/native-dependency-admission.yml
+  pull_request:
+    paths:
+      - crates/franken-node/src/migration/dependency_admission.rs
+      - crates/franken-node/src/migration/verified_rewrite.rs
+      - tools/dependency-admission/**
+      - .github/workflows/native-dependency-admission.yml
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  native-source-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select stable Rust
+        run: rustup default stable
+      - name: Test actual native inventory source (not the full product binary)
+        run: cargo test --manifest-path tools/dependency-admission/Cargo.toml

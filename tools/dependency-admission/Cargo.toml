@@ -1,0 +1,23 @@
+# Compile the actual product source without the unrelated sibling workspaces.
+[package]
+name = "franken-native-dependency-admission-tests"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "LicenseRef-MIT-OpenAI-Anthropic-Rider"
+
+[workspace]
+
+[lib]
+path = "../../crates/franken-node/src/migration/dependency_admission.rs"
+
+[dependencies]
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
+sha2 = "0.11.0"
+hex = "0.4.3"
+rustix = { version = "1.1", features = ["fs"] }
+
+[dev-dependencies]
+tempfile = "3.19"
