@@ -2818,6 +2818,82 @@ pub struct EngineContainmentDecision {
     /// Parser limits applied to the entrypoint and every imported module.
     /// Captured from the same resolved configuration handed to the engine.
     pub parser_budget: RuntimeParseBudget,
+    /// Resolved native execution limits on both lanes, from the configuration
+    /// actually handed to the engine. Absent in older serialized decisions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_limits: Option<EngineExecutionLimitsReport>,
+}
+
+/// Effective native limits after applying product overrides and engine lane
+/// defaults. The selected lane identifies which ceilings governed this run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineExecutionLimitsReport {
+    pub deterministic: EngineLaneExecutionLimits,
+    pub throughput: EngineLaneExecutionLimits,
+    /// Absent only for a configuration inspected before execution; completed
+    /// native decisions populate this from the engine's actual lane result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_lane: Option<EngineExecutionLane>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineExecutionLane {
+    Deterministic,
+    Throughput,
+}
+
+/// Engine-accounted ceilings for one native lane. Estimated memory excludes
+/// console text and is not a process-RSS limit; heap objects count allocations
+/// until the engine supports live-object reclamation. The separate console
+/// entry and byte ceilings both apply, and overflow fails without eviction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineLaneExecutionLimits {
+    pub max_instructions: u64,
+    pub max_heap_objects: u32,
+    pub max_total_memory_bytes: u64,
+    pub max_console_entries: usize,
+    pub max_console_bytes: usize,
+}
+
+#[cfg(feature = "engine")]
+impl EngineExecutionLimitsReport {
+    /// Resolve lane defaults through the same engine constructors execution
+    /// uses, without duplicating engine constants in product receipts.
+    #[must_use]
+    pub fn from_execution_config(
+        config: &frankenengine_engine::runtime_config::ExecutionConfig,
+    ) -> Self {
+        use frankenengine_engine::baseline_interpreter::InterpreterConfig;
+
+        let limits = |lane: InterpreterConfig| EngineLaneExecutionLimits {
+            max_instructions: lane.instruction_budget,
+            max_heap_objects: lane.max_heap_objects,
+            max_total_memory_bytes: lane.max_total_memory_bytes,
+            max_console_entries: lane.max_console_entries,
+            max_console_bytes: lane.max_console_bytes,
+        };
+        Self {
+            deterministic: limits(InterpreterConfig::deterministic_from_config(config)),
+            throughput: limits(InterpreterConfig::throughput_from_config(config)),
+            selected_lane: None,
+        }
+    }
+
+    /// Bind the report to the lane actually returned by native execution.
+    #[must_use]
+    pub fn with_selected_lane(
+        mut self,
+        lane: frankenengine_engine::baseline_interpreter::LaneChoice,
+    ) -> Self {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        self.selected_lane = Some(match lane {
+            LaneChoice::QuickJs => EngineExecutionLane::Deterministic,
+            LaneChoice::V8 => EngineExecutionLane::Throughput,
+        });
+        self
+    }
 }
 
 /// bd-5r99w.12: the trust-native effect ledger surfaced by `franken-node run`.
@@ -4100,6 +4176,7 @@ fn package_scope_is_module(app_path: &Path) -> bool {
 fn engine_containment_decision(
     result: &frankenengine_engine::execution_orchestrator::OrchestratorResult,
     parser_budget: RuntimeParseBudget,
+    execution_limits: EngineExecutionLimitsReport,
 ) -> EngineContainmentDecision {
     let stopping = result.optimal_stopping_certificate.as_ref();
     let security_entry = result.evidence_entries.iter().find(|entry| {
@@ -4123,6 +4200,7 @@ fn engine_containment_decision(
         decision_rationale: security_entry.map(|entry| entry.chosen_action.rationale.clone()),
         instructions_executed: result.instructions_executed,
         parser_budget,
+        execution_limits: Some(execution_limits.with_selected_lane(result.lane)),
     }
 }
 
@@ -4200,7 +4278,32 @@ fn native_execution_failure_message(
             crate::config::MAX_PARSE_TOKENS,
         )
     } else {
-        detail
+        match error.primary_error() {
+            OrchestratorError::Interpreter(InterpreterError::MemoryBudgetExceeded { .. }) => {
+                format!(
+                    "{detail}; configure runtime.max_heap_objects / runtime.max_total_memory_bytes \
+                     in [runtime] or FRANKEN_NODE_RUNTIME_MAX_HEAP_OBJECTS / \
+                     FRANKEN_NODE_RUNTIME_MAX_TOTAL_MEMORY_BYTES; these bound engine \
+                     allocations and accounted memory, not process RSS"
+                )
+            }
+            OrchestratorError::Interpreter(InterpreterError::ConsoleBudgetExceeded {
+                entries,
+                max_entries,
+                ..
+            }) if entries > max_entries => format!(
+                "{detail}; configure runtime.max_console_entries in [runtime] or \
+                 FRANKEN_NODE_RUNTIME_MAX_CONSOLE_ENTRIES; the independent engine \
+                 console-byte ceiling still applies"
+            ),
+            OrchestratorError::Interpreter(InterpreterError::ConsoleBudgetExceeded { .. }) => {
+                format!(
+                    "{detail}; reduce console text to fit the engine's fixed console-byte \
+                     ceiling; runtime.max_console_entries changes only the entry ceiling"
+                )
+            }
+            _ => detail,
+        }
     }
 }
 
@@ -4669,8 +4772,9 @@ impl EngineDispatcher {
         }
 
         // Library callers can construct Config directly, so enforce the same
-        // absolute parser envelope as the TOML/environment resolver before any
-        // execution-side effect.
+        // execution and parser budgets as the TOML/environment resolver before
+        // any execution-side effect.
+        config.runtime.validate_execution_budget()?;
         config.runtime.validate_parse_budget()?;
 
         // An external executable named by --engine-bin, the environment, or
@@ -5394,6 +5498,7 @@ impl EngineDispatcher {
         ) {
             anyhow::bail!("native-session request policy mode was invalid");
         }
+        request.config.runtime.validate_execution_budget()?;
         request.config.runtime.validate_parse_budget()?;
         if !crate::security::constant_time::ct_eq(
             &request.runtime_evidence_grant.capture.session_nonce,
@@ -7346,11 +7451,8 @@ impl EngineDispatcher {
                 throughput_max_registers: 256,    // Conservative register limit
                 max_call_depth: 32,               // Shallow call stack for safety
                 max_prototype_chain_depth: 8,     // Limited prototype depth
-                // Newer engine memory/console caps (max_heap_objects,
-                // max_total_memory_bytes, max_console_entries) default to None
-                // (no cap), matching Balanced; setting per-profile values is a
-                // separate policy decision. `..default()` keeps this forward-
-                // compatible with future ExecutionConfig fields.
+                // None for memory/console overrides preserves each engine
+                // lane's finite containment defaults, matching Balanced.
                 ..ExecutionConfig::default()
             },
             Profile::Balanced => ExecutionConfig {
@@ -7374,6 +7476,9 @@ impl EngineDispatcher {
             execution.deterministic_budget = max_instructions;
             execution.throughput_budget = max_instructions;
         }
+        execution.max_heap_objects = config.runtime.max_heap_objects;
+        execution.max_total_memory_bytes = config.runtime.max_total_memory_bytes;
+        execution.max_console_entries = config.runtime.max_console_entries;
 
         // Map observability settings to governance config
         let governance = GovernanceConfig {
@@ -7660,6 +7765,12 @@ impl EngineDispatcher {
         .entered();
 
         let setup_start = Instant::now();
+        config.runtime.validate_execution_budget().map_err(|error| {
+            native_engine_spawn_error_with_telemetry_cleanup(
+                error.to_string(),
+                &mut telemetry_guard,
+            )
+        })?;
         config.runtime.validate_parse_budget().map_err(|error| {
             native_engine_spawn_error_with_telemetry_cleanup(
                 error.to_string(),
@@ -7738,6 +7849,8 @@ impl EngineDispatcher {
         // before `orchestrator_config` is moved into the orchestrator below.
         let run_egress_trace = orchestrator_config.policy_id.clone();
         let runtime_config = Self::map_config_to_runtime_config(config); // bd-1nkf8: Map from franken-node config
+        let execution_limits =
+            EngineExecutionLimitsReport::from_execution_config(&runtime_config.execution);
 
         let ambient_authority_grant = Self::map_profile_to_ambient_authority_grant(config.profile);
         let expected_evidence_identity = evidence_authority.verification_identity();
@@ -8064,7 +8177,8 @@ impl EngineDispatcher {
             stdout,
             stderr,
         };
-        let engine_decision = engine_containment_decision(&execution_result, parser_budget);
+        let engine_decision =
+            engine_containment_decision(&execution_result, parser_budget, execution_limits);
 
         // Stop telemetry and return
         let telemetry_guard = telemetry_guard.take().ok_or_else(|| {
@@ -8977,6 +9091,85 @@ mod tests {
             assert!(!message.contains("effective parser limits"), "{message}");
         }
     }
+    #[test]
+    fn runtime_legacy_engine_decisions_do_not_invent_execution_limits() {
+        let document = serde_json::json!({
+            "containment_action": "allow", "selector_action": "allow", "risk_state": "benign",
+            "posterior_benign_millionths": 850_000, "posterior_anomalous_millionths": 40_000,
+            "posterior_malicious_millionths": 10_000, "posterior_unknown_millionths": 100_000,
+            "expected_loss_millionths": 0, "stopping_trigger": null, "stopping_observations": null,
+            "cusum_statistic_millionths": null, "guardplane_last_action": null,
+            "decision_rationale": null, "instructions_executed": 12,
+            "parser_budget": {
+                "max_source_bytes": 1_048_576, "max_token_count": 65_536, "max_recursion_depth": 256
+            }
+        });
+        let decision: EngineContainmentDecision = serde_json::from_value(document).unwrap();
+        assert_eq!(decision.execution_limits, None);
+        assert!(
+            serde_json::to_value(decision)
+                .unwrap()
+                .get("execution_limits")
+                .is_none()
+        );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn native_execution_budget_hints_name_only_relevant_operator_controls() {
+        use frankenengine_engine::baseline_interpreter::InterpreterError;
+        use frankenengine_engine::execution_orchestrator::OrchestratorError;
+
+        let budget = Config::default().runtime.effective_parse_budget(Profile::Balanced);
+        for (error, expected) in [
+            (
+                InterpreterError::MemoryBudgetExceeded {
+                    requested_heap_objects: 3,
+                    max_heap_objects: 2,
+                    requested_bytes: 1024,
+                    max_bytes: 4096,
+                },
+                "FRANKEN_NODE_RUNTIME_MAX_HEAP_OBJECTS",
+            ),
+            (
+                InterpreterError::MemoryBudgetExceeded {
+                    requested_heap_objects: 1,
+                    max_heap_objects: 10,
+                    requested_bytes: 4097,
+                    max_bytes: 4096,
+                },
+                "FRANKEN_NODE_RUNTIME_MAX_TOTAL_MEMORY_BYTES",
+            ),
+            (
+                InterpreterError::ConsoleBudgetExceeded {
+                    entries: 3,
+                    max_entries: 2,
+                    bytes: 10,
+                    max_bytes: 100,
+                },
+                "FRANKEN_NODE_RUNTIME_MAX_CONSOLE_ENTRIES",
+            ),
+            (
+                InterpreterError::ConsoleBudgetExceeded {
+                    entries: 1,
+                    max_entries: 2,
+                    bytes: 101,
+                    max_bytes: 100,
+                },
+                "fixed console-byte ceiling",
+            ),
+        ] {
+            let message = native_execution_failure_message(&OrchestratorError::Interpreter(error), budget);
+            assert!(message.contains(expected), "{message}");
+            assert!(!message.contains("effective parser limits"), "{message}");
+        }
+        let forged = OrchestratorError::Interpreter(InterpreterError::UncaughtException {
+            value: "memory budget exceeded: ConsoleBudgetExceeded".to_string(),
+        });
+        let message = native_execution_failure_message(&forged, budget);
+        assert!(!message.contains("FRANKEN_NODE_RUNTIME_MAX_"), "{message}");
+    }
+
     use crate::supply_chain::certification::{EvidenceType, VerifiedEvidenceRef};
     use crate::supply_chain::trust_card::{
         BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,

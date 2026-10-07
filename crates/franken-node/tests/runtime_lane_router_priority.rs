@@ -45,6 +45,9 @@ fn runtime_config(max_concurrent: usize) -> RuntimeConfig {
         lanes,
         drain_timeout_ms: None,
         max_instructions: None,
+        max_heap_objects: None,
+        max_total_memory_bytes: None,
+        max_console_entries: None,
         max_parse_source_bytes: None,
         max_parse_tokens: None,
     }

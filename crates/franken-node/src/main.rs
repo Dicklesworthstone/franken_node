@@ -841,6 +841,9 @@ struct RunExecutionReceiptCore {
     /// Effective entrypoint/import parser limits for a completed native run.
     #[serde(skip_serializing_if = "Option::is_none")]
     parser_budget: Option<config::RuntimeParseBudget>,
+    /// Effective execution limits and selected lane for a completed native run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    execution_limits: Option<ops::engine_dispatcher::EngineExecutionLimitsReport>,
     preflight_verdict: PreFlightVerdict,
     telemetry_summary: Option<RunExecutionTelemetrySummary>,
     ssrf_violations: Vec<String>,
@@ -8583,6 +8586,10 @@ fn build_run_execution_receipt(
             .engine_decision
             .as_ref()
             .map(|decision| decision.parser_budget),
+        execution_limits: dispatch
+            .engine_decision
+            .as_ref()
+            .and_then(|decision| decision.execution_limits),
         preflight_verdict: preflight.verdict.clone(),
         telemetry_summary: summarize_run_telemetry(dispatch.telemetry.as_ref()),
         ssrf_violations,

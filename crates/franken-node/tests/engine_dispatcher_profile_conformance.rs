@@ -196,6 +196,79 @@ fn runtime_max_instructions_overrides_the_profile_budget() {
     }
 }
 
+/// Memory and transcript overrides must reach the interpreter on both lanes;
+/// omission retains the engine's lane-specific defaults, including byte caps.
+#[test]
+#[cfg(feature = "engine")]
+fn runtime_execution_budget_overrides_reach_both_engine_lanes() {
+    use frankenengine_engine::baseline_interpreter::{InterpreterConfig, LaneChoice};
+    use frankenengine_node::ops::engine_dispatcher::{EngineExecutionLane, EngineExecutionLimitsReport};
+
+    for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+        let original = config_with_profile(profile);
+        let default = EngineDispatcher::map_config_to_runtime_config_for_tests(&original);
+        let defaults = EngineExecutionLimitsReport::from_execution_config(&default.execution);
+        assert_eq!(defaults.deterministic.max_heap_objects, 100_000);
+        assert_eq!(defaults.deterministic.max_total_memory_bytes, 64 * 1024 * 1024);
+        assert_eq!(defaults.deterministic.max_console_entries, 100_000);
+        assert_eq!(defaults.throughput.max_heap_objects, 1_000_000);
+        assert_eq!(defaults.throughput.max_total_memory_bytes, 512 * 1024 * 1024);
+        assert_eq!(defaults.throughput.max_console_entries, 1_000_000);
+        assert_eq!(defaults.deterministic.max_console_bytes, 8 * 1024 * 1024);
+        assert_eq!(defaults.throughput.max_console_bytes, 8 * 1024 * 1024);
+        assert_eq!(defaults.selected_lane, None);
+
+        // Exercise explicit bounds both below and above lane defaults. The
+        // override replaces that ceiling, while the independent caps remain.
+        for (objects, bytes, entries) in [(1, 1, 1), (2_000_000, 1_073_741_824, 2_000_000)] {
+            let mut configured = original.clone();
+            configured.runtime.max_heap_objects = Some(objects);
+            configured.runtime.max_total_memory_bytes = Some(bytes);
+            configured.runtime.max_console_entries = Some(entries);
+            configured.runtime.validate_execution_budget().unwrap();
+            let mapped = EngineDispatcher::map_config_to_runtime_config_for_tests(&configured);
+            for lane in [
+                InterpreterConfig::deterministic_from_config(&mapped.execution),
+                InterpreterConfig::throughput_from_config(&mapped.execution),
+            ] {
+                assert_eq!(lane.max_heap_objects, objects, "{profile:?}");
+                assert_eq!(lane.max_total_memory_bytes, bytes, "{profile:?}");
+                assert_eq!(lane.max_console_entries, entries, "{profile:?}");
+                assert_eq!(lane.max_console_bytes, 8 * 1024 * 1024, "{profile:?}");
+            }
+            let report = EngineExecutionLimitsReport::from_execution_config(&mapped.execution);
+            for lane in [report.deterministic, report.throughput] {
+                assert_eq!(lane.max_heap_objects, objects);
+                assert_eq!(lane.max_total_memory_bytes, bytes);
+                assert_eq!(lane.max_console_entries, entries);
+            }
+            for (engine_lane, expected_lane, json_name) in [
+                (LaneChoice::QuickJs, EngineExecutionLane::Deterministic, "deterministic"),
+                (LaneChoice::V8, EngineExecutionLane::Throughput, "throughput"),
+            ] {
+                let selected = report.with_selected_lane(engine_lane);
+                assert_eq!(selected.selected_lane, Some(expected_lane));
+                let json = serde_json::to_value(selected).unwrap();
+                assert_eq!(json["selected_lane"], json_name);
+                assert_eq!(serde_json::from_value::<EngineExecutionLimitsReport>(json).unwrap(), selected);
+            }
+
+            // None of these resource controls changes trust, capabilities,
+            // parser limits, instruction fuel, or containment thresholds.
+            let mut expected = default.clone();
+            expected.execution.max_heap_objects = Some(objects);
+            expected.execution.max_total_memory_bytes = Some(bytes);
+            expected.execution.max_console_entries = Some(entries);
+            assert_eq!(mapped, expected);
+            let before = EngineDispatcher::map_config_to_orchestrator_config_for_tests(&original);
+            let after = EngineDispatcher::map_config_to_orchestrator_config_for_tests(&configured);
+            assert_eq!(after.parser_options, before.parser_options);
+            assert_eq!(after.force_lane, before.force_lane);
+            assert_eq!(after.policy_id, before.policy_id);
+        }
+    }
+}
+
 /// Parser limits may be configured without changing effect capabilities,
 /// recursion depth, or instruction budgets (bd-fkdzv).
 #[test]

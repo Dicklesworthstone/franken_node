@@ -1424,6 +1424,30 @@ impl Config {
                     MAX_MERGE_DECISIONS,
                 );
             }
+            if let Some(value) = section.max_heap_objects {
+                self.runtime.max_heap_objects = Some(value);
+                push_bounded(
+                    decisions,
+                    MergeDecision::new(stage.clone(), "runtime.max_heap_objects", value),
+                    MAX_MERGE_DECISIONS,
+                );
+            }
+            if let Some(value) = section.max_total_memory_bytes {
+                self.runtime.max_total_memory_bytes = Some(value);
+                push_bounded(
+                    decisions,
+                    MergeDecision::new(stage.clone(), "runtime.max_total_memory_bytes", value),
+                    MAX_MERGE_DECISIONS,
+                );
+            }
+            if let Some(value) = section.max_console_entries {
+                self.runtime.max_console_entries = Some(value);
+                push_bounded(
+                    decisions,
+                    MergeDecision::new(stage.clone(), "runtime.max_console_entries", value),
+                    MAX_MERGE_DECISIONS,
+                );
+            }
             if let Some(value) = section.max_parse_source_bytes {
                 self.runtime.max_parse_source_bytes = Some(value);
                 push_bounded(
@@ -2034,6 +2058,33 @@ impl Config {
                 MAX_MERGE_DECISIONS,
             );
         }
+        if let Some(raw) = env_lookup("FRANKEN_NODE_RUNTIME_MAX_HEAP_OBJECTS") {
+            let parsed = parse_env_u32("FRANKEN_NODE_RUNTIME_MAX_HEAP_OBJECTS", &raw)?;
+            self.runtime.max_heap_objects = Some(parsed);
+            push_bounded(
+                decisions,
+                MergeDecision::new(MergeStage::Env, "runtime.max_heap_objects", parsed),
+                MAX_MERGE_DECISIONS,
+            );
+        }
+        if let Some(raw) = env_lookup("FRANKEN_NODE_RUNTIME_MAX_TOTAL_MEMORY_BYTES") {
+            let parsed = parse_env_u64("FRANKEN_NODE_RUNTIME_MAX_TOTAL_MEMORY_BYTES", &raw)?;
+            self.runtime.max_total_memory_bytes = Some(parsed);
+            push_bounded(
+                decisions,
+                MergeDecision::new(MergeStage::Env, "runtime.max_total_memory_bytes", parsed),
+                MAX_MERGE_DECISIONS,
+            );
+        }
+        if let Some(raw) = env_lookup("FRANKEN_NODE_RUNTIME_MAX_CONSOLE_ENTRIES") {
+            let parsed = parse_env_usize("FRANKEN_NODE_RUNTIME_MAX_CONSOLE_ENTRIES", &raw)?;
+            self.runtime.max_console_entries = Some(parsed);
+            push_bounded(
+                decisions,
+                MergeDecision::new(MergeStage::Env, "runtime.max_console_entries", parsed),
+                MAX_MERGE_DECISIONS,
+            );
+        }
         if let Some(raw) = env_lookup("FRANKEN_NODE_RUNTIME_MAX_PARSE_SOURCE_BYTES") {
             let parsed = parse_env_u64("FRANKEN_NODE_RUNTIME_MAX_PARSE_SOURCE_BYTES", &raw)?;
             self.runtime.max_parse_source_bytes = Some(parsed);
@@ -2248,11 +2299,7 @@ impl Config {
                 "runtime.bulkhead_retry_after_ms must be > 0".to_string(),
             ));
         }
-        if self.runtime.max_instructions == Some(0) {
-            return Err(ConfigError::ValidationFailed(
-                "runtime.max_instructions must be > 0".to_string(),
-            ));
-        }
+        self.runtime.validate_execution_budget()?;
         self.runtime.validate_parse_budget()?;
         validate_opt_score(
             "migration.verification_threshold",
@@ -3173,6 +3220,9 @@ struct RuntimeOverrides {
     pub lanes: Option<BTreeMap<String, RuntimeLaneOverrides>>,
     pub drain_timeout_ms: Option<u64>,
     pub max_instructions: Option<u64>,
+    pub max_heap_objects: Option<u32>,
+    pub max_total_memory_bytes: Option<u64>,
+    pub max_console_entries: Option<usize>,
     pub max_parse_source_bytes: Option<u64>,
     pub max_parse_tokens: Option<u64>,
 }
@@ -3919,6 +3969,22 @@ pub struct RuntimeConfig {
     /// legacy-risky 5B). The wall-clock timeout still applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_instructions: Option<u64>,
+    /// Heap-object allocation ceiling for both native execution lanes. This
+    /// counts total allocations until engine live-object reclamation exists;
+    /// it is not a live-object count. `None` preserves each lane's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_heap_objects: Option<u32>,
+    /// Estimated engine memory ceiling in bytes for both native execution
+    /// lanes, excluding console text. This is engine accounting, not a bound
+    /// on process RSS. `None` preserves each lane's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_total_memory_bytes: Option<u64>,
+    /// Maximum retained console entries for both native execution lanes.
+    /// Exceeding this limit fails the run while preserving earlier output.
+    /// Must be positive; the engine's separate console-byte cap still applies.
+    /// `None` preserves each lane's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_console_entries: Option<usize>,
     /// Source-byte budget for each entry, required, or imported module in the
     /// native engine. Replaces the profile default; valid range is
     /// `1..=MAX_PARSE_SOURCE_BYTES`. Token and recursion budgets still apply.
@@ -3943,6 +4009,49 @@ pub struct RuntimeParseBudget {
 }
 
 impl RuntimeConfig {
+    /// Reject invalid explicit native execution budgets before admission.
+    ///
+    /// Both configuration resolution and native dispatch invoke this check so
+    /// direct Rust callers cannot bypass it by assigning public config fields.
+    /// Console capacity zero is refused because the engine interprets it as
+    /// discarding output, which would violate the product's output contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::ValidationFailed`] naming the config field and
+    /// environment variable when an explicit budget is zero.
+    pub fn validate_execution_budget(&self) -> Result<(), ConfigError> {
+        for (is_zero, field, env_key) in [
+            (
+                self.max_instructions == Some(0),
+                "runtime.max_instructions",
+                "FRANKEN_NODE_RUNTIME_MAX_INSTRUCTIONS",
+            ),
+            (
+                self.max_heap_objects == Some(0),
+                "runtime.max_heap_objects",
+                "FRANKEN_NODE_RUNTIME_MAX_HEAP_OBJECTS",
+            ),
+            (
+                self.max_total_memory_bytes == Some(0),
+                "runtime.max_total_memory_bytes",
+                "FRANKEN_NODE_RUNTIME_MAX_TOTAL_MEMORY_BYTES",
+            ),
+            (
+                self.max_console_entries == Some(0),
+                "runtime.max_console_entries",
+                "FRANKEN_NODE_RUNTIME_MAX_CONSOLE_ENTRIES",
+            ),
+        ] {
+            if is_zero {
+                return Err(ConfigError::ValidationFailed(format!(
+                    "{field} must be > 0 ({env_key})"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Reject invalid explicit parser limits before native engine admission.
     ///
     /// The resolver calls this after applying configuration precedence. Native
@@ -4036,6 +4145,9 @@ impl RuntimeConfig {
             ),
             drain_timeout_ms: None,
             max_instructions: None,
+            max_heap_objects: None,
+            max_total_memory_bytes: None,
+            max_console_entries: None,
             max_parse_source_bytes: None,
             max_parse_tokens: None,
         }
@@ -4066,6 +4178,9 @@ impl RuntimeConfig {
             ),
             drain_timeout_ms: None,
             max_instructions: None,
+            max_heap_objects: None,
+            max_total_memory_bytes: None,
+            max_console_entries: None,
             max_parse_source_bytes: None,
             max_parse_tokens: None,
         }
@@ -4096,6 +4211,9 @@ impl RuntimeConfig {
             ),
             drain_timeout_ms: None,
             max_instructions: None,
+            max_heap_objects: None,
+            max_total_memory_bytes: None,
+            max_console_entries: None,
             max_parse_source_bytes: None,
             max_parse_tokens: None,
         }
@@ -5161,6 +5279,239 @@ mod tests {
         assert!(!config.trust.risky_requires_fresh_revocation);
         assert!(!config.registry.require_signatures);
         assert_eq!(config.registry.minimum_assurance_level, 1);
+    }
+
+    #[test]
+    fn runtime_execution_budget_defaults_preserve_engine_lane_limits() {
+        for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+            let config = Config::for_profile(profile);
+            assert_eq!(config.runtime.max_heap_objects, None);
+            assert_eq!(config.runtime.max_total_memory_bytes, None);
+            assert_eq!(config.runtime.max_console_entries, None);
+            config.runtime.validate_execution_budget().unwrap();
+            let json = serde_json::to_value(&config.runtime).unwrap();
+            for field in [
+                "max_heap_objects",
+                "max_total_memory_bytes",
+                "max_console_entries",
+            ] {
+                assert!(
+                    json.get(field).is_none(),
+                    "unset override {field} must stay absent"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_execution_budget_rejects_zero_in_direct_configs() {
+        for (field, env_key, runtime) in [
+            (
+                "runtime.max_instructions",
+                "FRANKEN_NODE_RUNTIME_MAX_INSTRUCTIONS",
+                RuntimeConfig {
+                    max_instructions: Some(0),
+                    ..RuntimeConfig::balanced_defaults()
+                },
+            ),
+            (
+                "runtime.max_heap_objects",
+                "FRANKEN_NODE_RUNTIME_MAX_HEAP_OBJECTS",
+                RuntimeConfig {
+                    max_heap_objects: Some(0),
+                    ..RuntimeConfig::balanced_defaults()
+                },
+            ),
+            (
+                "runtime.max_total_memory_bytes",
+                "FRANKEN_NODE_RUNTIME_MAX_TOTAL_MEMORY_BYTES",
+                RuntimeConfig {
+                    max_total_memory_bytes: Some(0),
+                    ..RuntimeConfig::balanced_defaults()
+                },
+            ),
+            (
+                "runtime.max_console_entries",
+                "FRANKEN_NODE_RUNTIME_MAX_CONSOLE_ENTRIES",
+                RuntimeConfig {
+                    max_console_entries: Some(0),
+                    ..RuntimeConfig::balanced_defaults()
+                },
+            ),
+        ] {
+            let error = runtime.validate_execution_budget().unwrap_err().to_string();
+            assert!(error.contains(field), "{error}");
+            assert!(error.contains(env_key), "{error}");
+            let mut config = valid_base_config(Profile::Balanced);
+            config.runtime = runtime;
+            assert!(
+                config.validate().is_err(),
+                "global validation must reject {field}"
+            );
+        }
+        for runtime in [
+            RuntimeConfig {
+                max_instructions: Some(1),
+                max_heap_objects: Some(1),
+                max_total_memory_bytes: Some(1),
+                max_console_entries: Some(1),
+                ..RuntimeConfig::balanced_defaults()
+            },
+            RuntimeConfig {
+                max_instructions: Some(u64::MAX),
+                max_heap_objects: Some(u32::MAX),
+                max_total_memory_bytes: Some(u64::MAX),
+                max_console_entries: Some(usize::MAX),
+                ..RuntimeConfig::balanced_defaults()
+            },
+        ] {
+            runtime
+                .validate_execution_budget()
+                .expect("positive representable budgets");
+        }
+    }
+
+    #[test]
+    fn runtime_execution_budget_roundtrips_through_config_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("franken_node.toml");
+        for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+            let mut config = valid_base_config(profile);
+            config.runtime.max_heap_objects = Some(200_000);
+            config.runtime.max_total_memory_bytes = Some(96 * 1024 * 1024);
+            config.runtime.max_console_entries = Some(2_000);
+            std::fs::write(&path, config.to_toml().unwrap()).unwrap();
+            let resolved = Config::resolve_with_env(
+                Some(&path),
+                CliOverrides::default(),
+                &map_lookup(BTreeMap::new()),
+            )
+            .unwrap();
+            assert_eq!(resolved.config, config);
+        }
+    }
+
+    #[test]
+    fn runtime_execution_budget_merges_file_profile_and_environment_with_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("franken_node.toml");
+        std::fs::write(
+            &path,
+            r#"
+profile = "strict"
+[runtime]
+max_heap_objects = 100001
+max_total_memory_bytes = 67108865
+max_console_entries = 1001
+[profiles.strict.runtime]
+max_heap_objects = 200002
+max_total_memory_bytes = 134217730
+max_console_entries = 2002
+[trust]
+registry_signing_key = "x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c="
+[security]
+authorized_api_keys = ["test-api-key"]
+"#,
+        )
+        .unwrap();
+        let env = BTreeMap::from([
+            (
+                "FRANKEN_NODE_RUNTIME_MAX_HEAP_OBJECTS".to_string(),
+                "300003".to_string(),
+            ),
+            (
+                "FRANKEN_NODE_RUNTIME_MAX_TOTAL_MEMORY_BYTES".to_string(),
+                "201326595".to_string(),
+            ),
+            (
+                "FRANKEN_NODE_RUNTIME_MAX_CONSOLE_ENTRIES".to_string(),
+                "3003".to_string(),
+            ),
+        ]);
+        let resolved =
+            Config::resolve_with_env(Some(&path), CliOverrides::default(), &map_lookup(env))
+                .unwrap();
+        assert_eq!(resolved.config.runtime.max_heap_objects, Some(300_003));
+        assert_eq!(
+            resolved.config.runtime.max_total_memory_bytes,
+            Some(201_326_595)
+        );
+        assert_eq!(resolved.config.runtime.max_console_entries, Some(3_003));
+        for (field, values) in [
+            ("runtime.max_heap_objects", [100_001_u64, 200_002, 300_003]),
+            (
+                "runtime.max_total_memory_bytes",
+                [67_108_865, 134_217_730, 201_326_595],
+            ),
+            ("runtime.max_console_entries", [1_001, 2_002, 3_003]),
+        ] {
+            let decisions: Vec<_> = resolved
+                .decisions
+                .iter()
+                .filter(|decision| decision.field == field)
+                .cloned()
+                .collect();
+            assert_eq!(
+                decisions,
+                vec![
+                    MergeDecision::new(MergeStage::File, field, values[0]),
+                    MergeDecision::new(MergeStage::Profile, field, values[1]),
+                    MergeDecision::new(MergeStage::Env, field, values[2]),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_execution_budget_rejects_invalid_toml_and_environment_values() {
+        let (_dir, path) = security_baseline_file();
+        let baseline = std::fs::read_to_string(&path).unwrap();
+        for (field, env_key) in [
+            ("max_heap_objects", "FRANKEN_NODE_RUNTIME_MAX_HEAP_OBJECTS"),
+            (
+                "max_total_memory_bytes",
+                "FRANKEN_NODE_RUNTIME_MAX_TOTAL_MEMORY_BYTES",
+            ),
+            (
+                "max_console_entries",
+                "FRANKEN_NODE_RUNTIME_MAX_CONSOLE_ENTRIES",
+            ),
+        ] {
+            for raw in ["0", "-1", "1.5", "18446744073709551616"] {
+                std::fs::write(&path, format!("{baseline}\n[runtime]\n{field} = {raw}\n")).unwrap();
+                let error = Config::resolve_with_env(
+                    Some(&path),
+                    CliOverrides::default(),
+                    &map_lookup(BTreeMap::new()),
+                )
+                .unwrap_err()
+                .to_string();
+                assert!(error.contains(field), "{raw}: {error}");
+
+                std::fs::write(&path, &baseline).unwrap();
+                let env = BTreeMap::from([(env_key.to_string(), raw.to_string())]);
+                let error = Config::resolve_with_env(
+                    Some(&path),
+                    CliOverrides::default(),
+                    &map_lookup(env),
+                )
+                .unwrap_err()
+                .to_string();
+                assert!(error.contains(env_key), "{raw}: {error}");
+            }
+        }
+        let env = BTreeMap::from([(
+            "FRANKEN_NODE_RUNTIME_MAX_HEAP_OBJECTS".to_string(),
+            "4294967296".to_string(),
+        )]);
+        let error =
+            Config::resolve_with_env(Some(&path), CliOverrides::default(), &map_lookup(env))
+                .unwrap_err()
+                .to_string();
+        assert!(
+            error.contains("FRANKEN_NODE_RUNTIME_MAX_HEAP_OBJECTS"),
+            "{error}"
+        );
     }
 
     #[test]

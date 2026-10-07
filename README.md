@@ -624,6 +624,25 @@ tokens**; zero, malformed values, and values above these caps fail configuration
 validation. Overrides never silently clamp. The effective source, token, and
 recursion limits are included in native run receipts and engine decisions.
 
+The optional `runtime.max_heap_objects`, `runtime.max_total_memory_bytes`, and
+`runtime.max_console_entries` settings also apply to both native lanes. Each
+must be a positive integer; environment values override TOML and invalid values
+fail before guest execution. Leaving an option unset preserves the engine's
+existing lane default:
+
+| Native lane | Heap-object allocations | Accounted memory | Console entries | Console bytes |
+|---|---:|---:|---:|---:|
+| Deterministic | 100,000 | 64 MiB | 100,000 | 8 MiB |
+| Throughput | 1,000,000 | 512 MiB | 1,000,000 | 8 MiB |
+
+Heap objects count allocations until the engine supports live-object
+reclamation. Accounted memory excludes console text and is not a process-RSS
+ceiling. The console entry and byte ceilings apply independently; overflow
+fails the run while retaining earlier output, and the byte ceiling remains
+fixed. Completed native run receipts and engine decisions include
+`execution_limits` with the effective limits for both lanes and `selected_lane`
+identifying the lane actually used.
+
 No profile—including `legacy-risky`—grants `process_spawn`. That capability is
 impossible by default and requires an expiring Ed25519-signed
 `ChildProcessSpawn` token bound to the complete resolved policy/config plus a
@@ -1066,6 +1085,13 @@ bulkhead_retry_after_ms = 50
 # strict 200M, balanced 1B, legacy-risky 5B). Also
 # FRANKEN_NODE_RUNTIME_MAX_INSTRUCTIONS. The wall-clock timeout still applies.
 # max_instructions = 1_000_000_000
+# Optional positive execution ceilings on both native lanes; omitted values
+# preserve the engine defaults listed under Runtime Profiles.
+# max_heap_objects = 200_000
+# max_total_memory_bytes = 100_663_296
+# max_console_entries = 2_000
+# Accounted memory excludes console and is not process RSS. Console bytes
+# retain the separate fixed engine ceiling; overflow fails without eviction.
 # Independent per-module parser limits, including required/imported modules.
 # Defaults are listed under Runtime Profiles. Accepted override ranges:
 # source bytes 1..=2_097_152; tokens 1..=131_072. Invalid values fail closed.
@@ -2057,6 +2083,9 @@ convention. The most common:
 | `FRANKEN_NODE_PROFILE` | `profile` | `strict`, `balanced`, or `legacy-risky` |
 | `FRANKEN_NODE_RUNTIME_PREFERRED` | `runtime.preferred` | `auto`, `node`, `bun`, or `franken-engine` |
 | `FRANKEN_NODE_RUNTIME_MAX_INSTRUCTIONS` | `runtime.max_instructions` | Instruction budget for one `run` (> 0); replaces the profile default |
+| `FRANKEN_NODE_RUNTIME_MAX_HEAP_OBJECTS` | `runtime.max_heap_objects` | Positive allocation ceiling on both native lanes; not a live-object count |
+| `FRANKEN_NODE_RUNTIME_MAX_TOTAL_MEMORY_BYTES` | `runtime.max_total_memory_bytes` | Positive engine-accounted memory ceiling in bytes; excludes console text and is not RSS |
+| `FRANKEN_NODE_RUNTIME_MAX_CONSOLE_ENTRIES` | `runtime.max_console_entries` | Positive console-entry ceiling on both lanes; overflow fails and the fixed byte ceiling still applies |
 | `FRANKEN_NODE_RUNTIME_MAX_PARSE_SOURCE_BYTES` | `runtime.max_parse_source_bytes` | Source bytes per entry/required/imported JavaScript module (1–2,097,152); replaces the profile default |
 | `FRANKEN_NODE_RUNTIME_MAX_PARSE_TOKENS` | `runtime.max_parse_tokens` | Tokens per entry/required/imported JavaScript module (1–131,072); replaces the profile default |
 | `FRANKEN_NODE_ENGINE_BINARY_PATH` | `engine.binary_path` | Override the resolved `franken_engine` binary path |

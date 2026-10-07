@@ -1918,6 +1918,116 @@ fn runtime_max_instructions_bounds_a_run() {
     );
 }
 
+/// Operator memory ceilings apply to the real native worker, including
+/// allocations made by ordinary array/object programs.
+#[test]
+fn runtime_heap_and_memory_budgets_fail_closed() {
+    let (dir, default_run) = run_app(
+        "const rows = []; for (let i = 0; i < 100; i++) rows.push({ id: i }); console.log('finished');",
+        &["--console-only"],
+    );
+    assert_eq!(default_run.exit_code, Some(0), "{}", default_run.stderr);
+    assert_eq!(default_run.stdout, "finished\n");
+
+    for (key, value, expected_limit) in [
+        ("FRANKEN_NODE_RUNTIME_MAX_HEAP_OBJECTS", "2", "limits 2 heap objects"),
+        ("FRANKEN_NODE_RUNTIME_MAX_TOTAL_MEMORY_BYTES", "1", "/ 1 bytes"),
+    ] {
+        let output = Command::new(franken_node_bin())
+            .args(["run", "app.js", "--policy", "balanced", "--console-only"])
+            .env(key, value)
+            .current_dir(dir.path())
+            .output()
+            .expect("run with explicit resource ceiling");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{key}: {stderr}");
+        assert!(stderr.contains("memory budget exceeded"), "{key}: {stderr}");
+        assert!(stderr.contains(expected_limit), "{key}: {stderr}");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("finished"));
+    }
+}
+
+/// Transcript capacity is an explicit fail-closed bound, never a ring buffer
+/// that silently replaces earlier output or a JS-catchable resource failure.
+#[test]
+fn runtime_console_entry_budget_preserves_the_head_and_refuses_overflow() {
+    let (dir, default_run) = run_app(
+        "console.log('first'); console.error('second'); try { console.log('overflow'); } catch (e) { console.log('caught'); } console.log('after');",
+        &["--console-only"],
+    );
+    assert_eq!(default_run.exit_code, Some(0), "{}", default_run.stderr);
+    assert_eq!(default_run.stdout, "first\noverflow\nafter\n");
+    assert_eq!(default_run.stderr, "second\n");
+
+    let overflow = Command::new(franken_node_bin())
+        .args(["run", "app.js", "--policy", "balanced", "--console-only"])
+        .env("FRANKEN_NODE_RUNTIME_MAX_CONSOLE_ENTRIES", "2")
+        .current_dir(dir.path())
+        .output()
+        .expect("run with a two-entry console budget");
+    let stderr = String::from_utf8_lossy(&overflow.stderr);
+    assert!(!overflow.status.success(), "{stderr}");
+    assert_eq!(String::from_utf8_lossy(&overflow.stdout), "first\n");
+    assert!(stderr.starts_with("second\n"), "{stderr}");
+    assert!(stderr.contains("console output budget exceeded"), "{stderr}");
+    assert!(stderr.contains("3 entries") && stderr.contains("limits 2 entries"), "{stderr}");
+
+    // At the exact entry count execution succeeds and retains every entry.
+    let exact = Command::new(franken_node_bin())
+        .args(["run", "app.js", "--policy", "balanced", "--console-only"])
+        .env("FRANKEN_NODE_RUNTIME_MAX_CONSOLE_ENTRIES", "4")
+        .current_dir(dir.path())
+        .output()
+        .expect("run at the exact console-entry budget");
+    assert!(exact.status.success(), "{}", String::from_utf8_lossy(&exact.stderr));
+    assert_eq!(String::from_utf8_lossy(&exact.stdout), default_run.stdout);
+    assert_eq!(String::from_utf8_lossy(&exact.stderr), default_run.stderr);
+}
+
+#[test]
+fn runtime_execution_limits_report_records_actual_lane_defaults_and_overrides() {
+    let (dir, default_run) = run_app("console.log('limits');", &["--json"]);
+    assert_eq!(default_run.exit_code, Some(0), "{}", default_run.stderr);
+    let report = last_json_document(&default_run.stdout);
+    let limits = &report["dispatch"]["engine_decision"]["execution_limits"];
+    assert_eq!(
+        report["receipt"]["execution_limits"],
+        report["dispatch"]["engine_decision"]["execution_limits"],
+        "the signed receipt must bind the native execution limits"
+    );
+    assert_eq!(limits["deterministic"]["max_total_memory_bytes"], 67_108_864);
+    assert_eq!(limits["throughput"]["max_total_memory_bytes"], 536_870_912);
+    assert_eq!(limits["deterministic"]["max_heap_objects"], 100_000);
+    assert_eq!(limits["throughput"]["max_heap_objects"], 1_000_000);
+    assert_eq!(limits["selected_lane"], "deterministic");
+
+    let output = Command::new(franken_node_bin())
+        .args(["run", "app.js", "--policy", "balanced", "--json"])
+        .env("FRANKEN_NODE_RUNTIME_MAX_INSTRUCTIONS", "123456")
+        .env("FRANKEN_NODE_RUNTIME_MAX_HEAP_OBJECTS", "200001")
+        .env("FRANKEN_NODE_RUNTIME_MAX_TOTAL_MEMORY_BYTES", "100663296")
+        .env("FRANKEN_NODE_RUNTIME_MAX_CONSOLE_ENTRIES", "17")
+        .current_dir(dir.path())
+        .output()
+        .expect("run with explicit execution limits");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let report = last_json_document(&String::from_utf8_lossy(&output.stdout));
+    assert_eq!(report["dispatch"]["engine_decision"]["execution_limits"]["selected_lane"], "deterministic");
+    assert_eq!(
+        report["receipt"]["execution_limits"],
+        report["dispatch"]["engine_decision"]["execution_limits"],
+        "the signed receipt must bind every explicit native execution limit"
+    );
+    for lane in ["deterministic", "throughput"] {
+        let limits = &report["dispatch"]["engine_decision"]["execution_limits"][lane];
+        assert_eq!(limits["max_instructions"], 123_456, "{lane}");
+        assert_eq!(limits["max_heap_objects"], 200_001, "{lane}");
+        assert_eq!(limits["max_total_memory_bytes"], 100_663_296, "{lane}");
+        assert_eq!(limits["max_console_entries"], 17, "{lane}");
+        assert_eq!(limits["max_console_bytes"], 8_388_608, "{lane}");
+    }
+}
+
 /// The last JSON document on a `run --json` stdout (the run report; a
 /// preflight report may precede it).
 fn last_json_document(stdout: &str) -> Value {
