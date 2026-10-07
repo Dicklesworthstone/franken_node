@@ -5466,6 +5466,12 @@ authorized_api_keys = ["test-api-key"]
     fn runtime_execution_budget_rejects_invalid_toml_and_environment_values() {
         let (_dir, path) = security_baseline_file();
         let baseline = std::fs::read_to_string(&path).unwrap();
+        Config::resolve_with_env(
+            Some(&path),
+            CliOverrides::default(),
+            &map_lookup(BTreeMap::new()),
+        )
+        .expect("baseline must resolve before adding invalid execution budgets");
         for (field, env_key) in [
             ("max_heap_objects", "FRANKEN_NODE_RUNTIME_MAX_HEAP_OBJECTS"),
             (
@@ -5484,9 +5490,18 @@ authorized_api_keys = ["test-api-key"]
                     CliOverrides::default(),
                     &map_lookup(BTreeMap::new()),
                 )
-                .unwrap_err()
-                .to_string();
-                assert!(error.contains(field), "{raw}: {error}");
+                .unwrap_err();
+                if raw == "0" {
+                    assert!(
+                        matches!(&error, ConfigError::ValidationFailed(message) if message.contains(field)),
+                        "{raw}: {error}"
+                    );
+                } else {
+                    assert!(
+                        matches!(&error, ConfigError::ParseFailed(error_path, _) if error_path == &path),
+                        "{raw}: {error}"
+                    );
+                }
 
                 std::fs::write(&path, &baseline).unwrap();
                 let env = BTreeMap::from([(env_key.to_string(), raw.to_string())]);

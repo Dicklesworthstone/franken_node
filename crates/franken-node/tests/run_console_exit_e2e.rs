@@ -1930,8 +1930,16 @@ fn runtime_heap_and_memory_budgets_fail_closed() {
     assert_eq!(default_run.stdout, "finished\n");
 
     for (key, value, expected_limit) in [
-        ("FRANKEN_NODE_RUNTIME_MAX_HEAP_OBJECTS", "2", "limits 2 heap objects"),
-        ("FRANKEN_NODE_RUNTIME_MAX_TOTAL_MEMORY_BYTES", "1", "/ 1 bytes"),
+        (
+            "FRANKEN_NODE_RUNTIME_MAX_HEAP_OBJECTS",
+            "2",
+            "limits 2 heap objects",
+        ),
+        (
+            "FRANKEN_NODE_RUNTIME_MAX_TOTAL_MEMORY_BYTES",
+            "1",
+            "/ 1 bytes",
+        ),
     ] {
         let output = Command::new(franken_node_bin())
             .args(["run", "app.js", "--policy", "balanced", "--console-only"])
@@ -1969,8 +1977,14 @@ fn runtime_console_entry_budget_preserves_the_head_and_refuses_overflow() {
     assert!(!overflow.status.success(), "{stderr}");
     assert_eq!(String::from_utf8_lossy(&overflow.stdout), "first\n");
     assert!(stderr.starts_with("second\n"), "{stderr}");
-    assert!(stderr.contains("console output budget exceeded"), "{stderr}");
-    assert!(stderr.contains("3 entries") && stderr.contains("limits 2 entries"), "{stderr}");
+    assert!(
+        stderr.contains("console output budget exceeded"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("3 entries") && stderr.contains("limits 2 entries"),
+        "{stderr}"
+    );
 
     // At the exact entry count execution succeeds and retains every entry.
     let exact = Command::new(franken_node_bin())
@@ -1979,7 +1993,11 @@ fn runtime_console_entry_budget_preserves_the_head_and_refuses_overflow() {
         .current_dir(dir.path())
         .output()
         .expect("run at the exact console-entry budget");
-    assert!(exact.status.success(), "{}", String::from_utf8_lossy(&exact.stderr));
+    assert!(
+        exact.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exact.stderr)
+    );
     assert_eq!(String::from_utf8_lossy(&exact.stdout), default_run.stdout);
     assert_eq!(String::from_utf8_lossy(&exact.stderr), default_run.stderr);
 }
@@ -1995,7 +2013,10 @@ fn runtime_execution_limits_report_records_actual_lane_defaults_and_overrides() 
         report["dispatch"]["engine_decision"]["execution_limits"],
         "the signed receipt must bind the native execution limits"
     );
-    assert_eq!(limits["deterministic"]["max_total_memory_bytes"], 67_108_864);
+    assert_eq!(
+        limits["deterministic"]["max_total_memory_bytes"],
+        67_108_864
+    );
     assert_eq!(limits["throughput"]["max_total_memory_bytes"], 536_870_912);
     assert_eq!(limits["deterministic"]["max_heap_objects"], 100_000);
     assert_eq!(limits["throughput"]["max_heap_objects"], 1_000_000);
@@ -2010,9 +2031,16 @@ fn runtime_execution_limits_report_records_actual_lane_defaults_and_overrides() 
         .current_dir(dir.path())
         .output()
         .expect("run with explicit execution limits");
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let report = last_json_document(&String::from_utf8_lossy(&output.stdout));
-    assert_eq!(report["dispatch"]["engine_decision"]["execution_limits"]["selected_lane"], "deterministic");
+    assert_eq!(
+        report["dispatch"]["engine_decision"]["execution_limits"]["selected_lane"],
+        "deterministic"
+    );
     assert_eq!(
         report["receipt"]["execution_limits"],
         report["dispatch"]["engine_decision"]["execution_limits"],

@@ -7765,12 +7765,15 @@ impl EngineDispatcher {
         .entered();
 
         let setup_start = Instant::now();
-        config.runtime.validate_execution_budget().map_err(|error| {
-            native_engine_spawn_error_with_telemetry_cleanup(
-                error.to_string(),
-                &mut telemetry_guard,
-            )
-        })?;
+        config
+            .runtime
+            .validate_execution_budget()
+            .map_err(|error| {
+                native_engine_spawn_error_with_telemetry_cleanup(
+                    error.to_string(),
+                    &mut telemetry_guard,
+                )
+            })?;
         config.runtime.validate_parse_budget().map_err(|error| {
             native_engine_spawn_error_with_telemetry_cleanup(
                 error.to_string(),
@@ -9120,7 +9123,9 @@ mod tests {
         use frankenengine_engine::baseline_interpreter::InterpreterError;
         use frankenengine_engine::execution_orchestrator::OrchestratorError;
 
-        let budget = Config::default().runtime.effective_parse_budget(Profile::Balanced);
+        let budget = Config::default()
+            .runtime
+            .effective_parse_budget(Profile::Balanced);
         for (error, expected) in [
             (
                 InterpreterError::MemoryBudgetExceeded {
@@ -9159,7 +9164,8 @@ mod tests {
                 "fixed console-byte ceiling",
             ),
         ] {
-            let message = native_execution_failure_message(&OrchestratorError::Interpreter(error), budget);
+            let message =
+                native_execution_failure_message(&OrchestratorError::Interpreter(error), budget);
             assert!(message.contains(expected), "{message}");
             assert!(!message.contains("effective parser limits"), "{message}");
         }

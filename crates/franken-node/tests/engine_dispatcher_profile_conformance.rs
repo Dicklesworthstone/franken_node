@@ -202,17 +202,25 @@ fn runtime_max_instructions_overrides_the_profile_budget() {
 #[cfg(feature = "engine")]
 fn runtime_execution_budget_overrides_reach_both_engine_lanes() {
     use frankenengine_engine::baseline_interpreter::{InterpreterConfig, LaneChoice};
-    use frankenengine_node::ops::engine_dispatcher::{EngineExecutionLane, EngineExecutionLimitsReport};
+    use frankenengine_node::ops::engine_dispatcher::{
+        EngineExecutionLane, EngineExecutionLimitsReport,
+    };
 
     for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
         let original = config_with_profile(profile);
         let default = EngineDispatcher::map_config_to_runtime_config_for_tests(&original);
         let defaults = EngineExecutionLimitsReport::from_execution_config(&default.execution);
         assert_eq!(defaults.deterministic.max_heap_objects, 100_000);
-        assert_eq!(defaults.deterministic.max_total_memory_bytes, 64 * 1024 * 1024);
+        assert_eq!(
+            defaults.deterministic.max_total_memory_bytes,
+            64 * 1024 * 1024
+        );
         assert_eq!(defaults.deterministic.max_console_entries, 100_000);
         assert_eq!(defaults.throughput.max_heap_objects, 1_000_000);
-        assert_eq!(defaults.throughput.max_total_memory_bytes, 512 * 1024 * 1024);
+        assert_eq!(
+            defaults.throughput.max_total_memory_bytes,
+            512 * 1024 * 1024
+        );
         assert_eq!(defaults.throughput.max_console_entries, 1_000_000);
         assert_eq!(defaults.deterministic.max_console_bytes, 8 * 1024 * 1024);
         assert_eq!(defaults.throughput.max_console_bytes, 8 * 1024 * 1024);
@@ -243,14 +251,25 @@ fn runtime_execution_budget_overrides_reach_both_engine_lanes() {
                 assert_eq!(lane.max_console_entries, entries);
             }
             for (engine_lane, expected_lane, json_name) in [
-                (LaneChoice::QuickJs, EngineExecutionLane::Deterministic, "deterministic"),
-                (LaneChoice::V8, EngineExecutionLane::Throughput, "throughput"),
+                (
+                    LaneChoice::QuickJs,
+                    EngineExecutionLane::Deterministic,
+                    "deterministic",
+                ),
+                (
+                    LaneChoice::V8,
+                    EngineExecutionLane::Throughput,
+                    "throughput",
+                ),
             ] {
                 let selected = report.with_selected_lane(engine_lane);
                 assert_eq!(selected.selected_lane, Some(expected_lane));
                 let json = serde_json::to_value(selected).unwrap();
                 assert_eq!(json["selected_lane"], json_name);
-                assert_eq!(serde_json::from_value::<EngineExecutionLimitsReport>(json).unwrap(), selected);
+                assert_eq!(
+                    serde_json::from_value::<EngineExecutionLimitsReport>(json).unwrap(),
+                    selected
+                );
             }
 
             // None of these resource controls changes trust, capabilities,

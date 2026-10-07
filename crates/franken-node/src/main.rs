@@ -206,8 +206,8 @@ use frankenengine_node::{
         replay_bundle::{
             ReplayBundleSigningMaterial, generate_replay_bundle_from_evidence,
             read_bundle_from_path_with_trusted_key, read_bundle_from_path_with_trusted_keys,
-            replay_bundle_with_trusted_keys, sign_replay_bundle,
-            validate_bundle_integrity, write_bundle_to_path_with_trusted_key,
+            replay_bundle_with_trusted_keys, sign_replay_bundle, validate_bundle_integrity,
+            write_bundle_to_path_with_trusted_key,
         },
     },
 };
@@ -5706,7 +5706,12 @@ fn read_captured_incident_evidence(
         None,
         &signing.signing_key.verifying_key(),
     )
-    .with_context(|| format!("captured incident source authentication failed: {}", path.display()))
+    .with_context(|| {
+        format!(
+            "captured incident source authentication failed: {}",
+            path.display()
+        )
+    })
 }
 
 fn write_captured_incident_evidence(
@@ -5715,11 +5720,9 @@ fn write_captured_incident_evidence(
 ) -> Result<()> {
     let signing = load_receipt_signing_material(None)?
         .ok_or_else(|| missing_replay_bundle_signing_key_error("source capture"))?;
-    let signed = tools::replay_bundle::sign_incident_evidence_package(
-        package.clone(),
-        &signing.signing_key,
-    )
-    .context("failed signing captured incident evidence")?;
+    let signed =
+        tools::replay_bundle::sign_incident_evidence_package(package.clone(), &signing.signing_key)
+            .context("failed signing captured incident evidence")?;
     write_bytes_atomically(path, &serde_json::to_vec_pretty(&signed)?)
 }
 
@@ -11080,7 +11083,9 @@ fn handle_incident_capture_command(args: &cli::IncidentCaptureArgs) -> Result<()
             || existing.initial_state_snapshot["run_receipt_hash"] != receipt_hash
             || existing.initial_state_snapshot["host_effect_chain_head"] != ledger.chain_head_hash
         {
-            anyhow::bail!("existing captured incident does not belong to authenticated run {receipt_id}");
+            anyhow::bail!(
+                "existing captured incident does not belong to authenticated run {receipt_id}"
+            );
         }
         "already_captured"
     } else {
@@ -11205,7 +11210,9 @@ fn authenticated_run_decision_inventory(
     let store = DurableEvidenceLedger::open(&state_dir)
         .context("failed opening the durable run-decision inventory")?;
     let expected_rows = store.count().context("failed counting durable decisions")?;
-    let rows = store.entries_json().context("failed reading durable decisions")?;
+    let rows = store
+        .entries_json()
+        .context("failed reading durable decisions")?;
     if u64::try_from(rows.len()).unwrap_or(u64::MAX) != expected_rows {
         anyhow::bail!("durable decision inventory changed or contains unreadable rows; retry");
     }
@@ -11217,7 +11224,10 @@ fn authenticated_run_decision_inventory(
         verify_evidence_entry(&entry, verifying_key)
             .with_context(|| format!("durable decision row {} failed authentication", index + 1))?;
         if !security::constant_time::ct_eq(&entry.prev_entry_hash, &previous_hash) {
-            anyhow::bail!("durable decision inventory chain is inconsistent at row {}", index + 1);
+            anyhow::bail!(
+                "durable decision inventory chain is inconsistent at row {}",
+                index + 1
+            );
         }
         previous_hash = evidence_entry_hash_hex(&entry);
         if entry.schema_version == RUN_DECISION_EVIDENCE_SCHEMA {
@@ -11245,10 +11255,12 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
     let mut source_errors = Vec::new();
     let signing = load_receipt_signing_material(None);
     let mut inventory_runs = 0_usize;
-    let inventory = signing.as_ref()
+    let inventory = signing
+        .as_ref()
         .map_err(|err| anyhow::anyhow!("{err:#}"))
         .and_then(|material| {
-            let material = material.as_ref()
+            let material = material
+                .as_ref()
                 .ok_or_else(|| missing_replay_bundle_signing_key_error("coverage verification"))?;
             authenticated_run_decision_inventory(
                 &project_root,
@@ -11259,27 +11271,32 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
     // receipt from native-ledger verification. An editable runtime label alone
     // never grants that exemption, and these receipts are not counted as fully
     // authenticated native receipts.
-    let clean_non_native_runs: BTreeMap<String, String> = inventory.as_ref()
+    let clean_non_native_runs: BTreeMap<String, String> = inventory
+        .as_ref()
         .map(|runs| {
-            runs.iter().filter_map(|run| {
-                let payload = &run.payload;
-                let no_denied_effects = payload.get("host_effects_denied")
-                    .is_some_and(|value| value.is_null() || value.as_u64() == Some(0));
-                let clean = matches!(payload["runtime"].as_str(), Some("node" | "bun"))
-                    && payload["exit_code"].as_i64() == Some(0)
-                    && payload["violation_count"].as_u64() == Some(0)
-                    && no_denied_effects
-                    && matches!(
-                        payload.get("containment_verdict"),
-                        Some(serde_json::Value::Null)
-                    );
-                if !clean {
-                    return None;
-                }
-                payload["receipt_hash"].as_str()
-                    .filter(|hash| !hash.is_empty())
-                    .map(|hash| (run.decision_id.clone(), hash.to_string()))
-            }).collect()
+            runs.iter()
+                .filter_map(|run| {
+                    let payload = &run.payload;
+                    let no_denied_effects = payload
+                        .get("host_effects_denied")
+                        .is_some_and(|value| value.is_null() || value.as_u64() == Some(0));
+                    let clean = matches!(payload["runtime"].as_str(), Some("node" | "bun"))
+                        && payload["exit_code"].as_i64() == Some(0)
+                        && payload["violation_count"].as_u64() == Some(0)
+                        && no_denied_effects
+                        && matches!(
+                            payload.get("containment_verdict"),
+                            Some(serde_json::Value::Null)
+                        );
+                    if !clean {
+                        return None;
+                    }
+                    payload["receipt_hash"]
+                        .as_str()
+                        .filter(|hash| !hash.is_empty())
+                        .map(|hash| (run.decision_id.clone(), hash.to_string()))
+                })
+                .collect()
         })
         .unwrap_or_default();
     let mut excluded_non_native_receipts = 0_usize;
@@ -11287,8 +11304,7 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
         let parsed = bounded_read_to_string(path, MAX_GENERAL_FILE_BYTES)
             .with_context(|| format!("failed reading run receipt {}", path.display()))
             .and_then(|raw| {
-                serde_json::from_str::<serde_json::Value>(&raw)
-                    .context("not a run receipt")
+                serde_json::from_str::<serde_json::Value>(&raw).context("not a run receipt")
             });
         let receipt = match parsed {
             Ok(receipt) => receipt,
@@ -11303,9 +11319,12 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
         };
         if let Some(receipt_id) = receipt["receipt_id"].as_str() {
             receipt_ids.insert(receipt_id.to_string());
-            if clean_non_native_runs.get(receipt_id).is_some_and(|expected_hash| {
-                receipt["receipt_hash"].as_str() == Some(expected_hash.as_str())
-            }) {
+            if clean_non_native_runs
+                .get(receipt_id)
+                .is_some_and(|expected_hash| {
+                    receipt["receipt_hash"].as_str() == Some(expected_hash.as_str())
+                })
+            {
                 excluded_non_native_receipts = excluded_non_native_receipts.saturating_add(1);
                 continue;
             }
@@ -11337,7 +11356,10 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
         }
     }
     for path in list_active_run_receipts(&project_root.join(RUN_LEDGER_RELATIVE_DIR))? {
-        let record_id = path.file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
+        let record_id = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or_default();
         if !receipt_ids.contains(record_id) {
             source_errors.push(serde_json::json!({
                 "path": project_relative_display(&project_root, &path),
@@ -11365,13 +11387,15 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
                         run.payload["receipt_hash"].as_str(),
                     ) {
                         (Some(chain_head), Some(receipt_hash)) => {
-                            observed.entry(run_incident_id(chain_head)).or_insert_with(|| {
-                                (
-                                    run.decision_id.clone(),
-                                    receipt_hash.to_string(),
-                                    chain_head.to_string(),
-                                )
-                            });
+                            observed
+                                .entry(run_incident_id(chain_head))
+                                .or_insert_with(|| {
+                                    (
+                                        run.decision_id.clone(),
+                                        receipt_hash.to_string(),
+                                        chain_head.to_string(),
+                                    )
+                                });
                         }
                         _ => {
                             source_errors.push(serde_json::json!({
@@ -11390,7 +11414,9 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
             }));
         }
     }
-    let trusted_key_id = signing.ok().flatten()
+    let trusted_key_id = signing
+        .ok()
+        .flatten()
         .map(|material| signing_material_key_id(&material));
     let mut verified_bundles = Vec::new();
     if let Some(key_id) = trusted_key_id.as_deref() {
@@ -11412,7 +11438,8 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
                 &package.incident_id == incident_id
                     && package.initial_state_snapshot["run_receipt_id"] == receipt_id.as_str()
                     && package.initial_state_snapshot["run_receipt_hash"] == receipt_hash.as_str()
-                    && package.initial_state_snapshot["host_effect_chain_head"] == chain_head.as_str()
+                    && package.initial_state_snapshot["host_effect_chain_head"]
+                        == chain_head.as_str()
             })
             .and_then(|package| generate_replay_bundle_from_evidence(&package).ok())
             .map(|bundle| bundle.integrity_hash);
@@ -21470,8 +21497,8 @@ fn read_incident_bundle_evidence(
 ) -> Result<(tools::replay_bundle::IncidentEvidencePackage, bool)> {
     let bytes = bounded_read(path, MAX_CAPTURED_INCIDENT_BYTES)
         .with_context(|| format!("failed reading {}", path.display()))?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes)
-        .context("not an incident evidence package")?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).context("not an incident evidence package")?;
     let working_dir = std::env::current_dir().context("failed resolving the project directory")?;
     let mut lexical_path = PathBuf::new();
     for component in working_dir.join(path).components() {
@@ -21485,15 +21512,20 @@ fn read_incident_bundle_evidence(
     }
     let capture_root = working_dir.join(INCIDENT_EVIDENCE_RELATIVE_DIR);
     let in_capture_store = lexical_path.starts_with(&capture_root)
-        || path.canonicalize().ok()
+        || path
+            .canonicalize()
+            .ok()
             .zip(capture_root.canonicalize().ok())
             .is_some_and(|(candidate, root)| candidate.starts_with(root));
     let requires_authentication = !explicit_input
         || in_capture_store
         || value.get("source_signature").is_some()
-        || value.get("incident_type").and_then(serde_json::Value::as_str)
+        || value
+            .get("incident_type")
+            .and_then(serde_json::Value::as_str)
             == Some("runtime-security-control")
-        || value.get("initial_state_snapshot")
+        || value
+            .get("initial_state_snapshot")
             .and_then(|state| state.get("run_receipt_id"))
             .is_some();
     if requires_authentication {
@@ -21553,23 +21585,21 @@ fn handle_incident_bundle_command(args: &cli::IncidentBundleArgs) -> Result<()> 
             ),
         );
     }
-    let (evidence, source_authenticated) = match read_incident_bundle_evidence(
-        &evidence_path,
-        &args.id,
-        args.evidence_path.is_some(),
-    ) {
-        Ok(evidence) => evidence,
-        Err(err) => {
-            return incident_fail(
-                "incident.bundle",
-                args.json,
-                format!(
-                    "failed reading authoritative incident evidence {}: {err:#}",
-                    evidence_path.display()
-                ),
-            );
-        }
-    };
+    let (evidence, source_authenticated) =
+        match read_incident_bundle_evidence(&evidence_path, &args.id, args.evidence_path.is_some())
+        {
+            Ok(evidence) => evidence,
+            Err(err) => {
+                return incident_fail(
+                    "incident.bundle",
+                    args.json,
+                    format!(
+                        "failed reading authoritative incident evidence {}: {err:#}",
+                        evidence_path.display()
+                    ),
+                );
+            }
+        };
     let mut bundle = match generate_replay_bundle_from_evidence(&evidence).with_context(|| {
         format!(
             "failed generating replay bundle from authoritative evidence {}",

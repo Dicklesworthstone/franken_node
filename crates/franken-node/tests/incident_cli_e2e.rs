@@ -1629,16 +1629,16 @@ fn incident_store_authenticates_captures_and_rejects_signature_downgrade() {
     let workspace = config_only_workspace();
     configure_replay_bundle_signing_key(workspace.path());
     let incident_id = "INC-AUTHENTICATED-SOURCE";
-    let evidence_path = workspace.path().join(
-        ".franken-node/state/incidents/INC-AUTHENTICATED-SOURCE/evidence.v1.json",
-    );
+    let evidence_path = workspace
+        .path()
+        .join(".franken-node/state/incidents/INC-AUTHENTICATED-SOURCE/evidence.v1.json");
     write_fixture_incident_evidence(&evidence_path, incident_id);
     let package: IncidentEvidencePackage =
         serde_json::from_slice(&fs::read(&evidence_path).expect("read evidence"))
             .expect("parse evidence");
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x42_u8; 32]);
-    let signed = sign_incident_evidence_package(package, &signing_key)
-        .expect("sign captured source");
+    let signed =
+        sign_incident_evidence_package(package, &signing_key).expect("sign captured source");
     let genuine = serde_json::to_value(&signed).expect("serialize captured source");
     fs::write(
         &evidence_path,
@@ -1649,7 +1649,14 @@ fn incident_store_authenticates_captures_and_rejects_signature_downgrade() {
     let bundle = || {
         run_cli_in_workspace(
             workspace.path(),
-            &["incident", "bundle", "--id", incident_id, "--verify", "--json"],
+            &[
+                "incident",
+                "bundle",
+                "--id",
+                incident_id,
+                "--verify",
+                "--json",
+            ],
         )
     };
     let valid = bundle();
@@ -1692,11 +1699,17 @@ fn incident_store_authenticates_captures_and_rejects_signature_downgrade() {
         .find(|entry| entry["incident_id"] == incident_id && entry["source"] == "captured")
         .expect("invalid capture must remain visible");
     assert!(
-        captured["status"].as_str().expect("capture status").starts_with("invalid:"),
+        captured["status"]
+            .as_str()
+            .expect("capture status")
+            .starts_with("invalid:"),
         "{captured}"
     );
 
-    tampered.as_object_mut().expect("capture object").remove("source_signature");
+    tampered
+        .as_object_mut()
+        .expect("capture object")
+        .remove("source_signature");
     fs::write(
         &evidence_path,
         serde_json::to_vec_pretty(&tampered).expect("encode stripped capture"),
@@ -1706,8 +1719,14 @@ fn incident_store_authenticates_captures_and_rejects_signature_downgrade() {
     let downgrade = run_cli_in_workspace(
         workspace.path(),
         &[
-            "incident", "bundle", "--id", incident_id, "--evidence-path",
-            &evidence_arg, "--verify", "--json",
+            "incident",
+            "bundle",
+            "--id",
+            incident_id,
+            "--evidence-path",
+            &evidence_arg,
+            "--verify",
+            "--json",
         ],
     );
     assert!(
@@ -1725,9 +1744,9 @@ fn incident_capture_source_authority_is_independent_of_export_key() {
     let workspace = config_only_workspace();
     configure_replay_bundle_signing_key(workspace.path());
     let incident_id = "INC-SOURCE-AUTHORITY";
-    let evidence_path = workspace.path().join(
-        ".franken-node/state/incidents/INC-SOURCE-AUTHORITY/evidence.v1.json",
-    );
+    let evidence_path = workspace
+        .path()
+        .join(".franken-node/state/incidents/INC-SOURCE-AUTHORITY/evidence.v1.json");
     write_fixture_incident_evidence(&evidence_path, incident_id);
     let package: IncidentEvidencePackage =
         serde_json::from_slice(&fs::read(&evidence_path).expect("read evidence"))
@@ -1749,8 +1768,14 @@ fn incident_capture_source_authority_is_independent_of_export_key() {
         run_cli_in_workspace(
             workspace.path(),
             &[
-                "incident", "bundle", "--id", incident_id, "--receipt-signing-key",
-                &export_key_arg, "--verify", "--json",
+                "incident",
+                "bundle",
+                "--id",
+                incident_id,
+                "--receipt-signing-key",
+                &export_key_arg,
+                "--verify",
+                "--json",
             ],
         )
     };
@@ -1801,15 +1826,18 @@ fn incident_coverage_refuses_empty_or_unreadable_populations() {
         )
     };
     let empty = coverage();
-    assert!(!empty.status.success(), "an empty population cannot establish full coverage");
+    assert!(
+        !empty.status.success(),
+        "an empty population cannot establish full coverage"
+    );
     let empty_report: serde_json::Value =
         serde_json::from_slice(&empty.stdout).expect("empty coverage JSON");
     assert!(empty_report["replay_coverage"].is_null());
     assert_eq!(empty_report["high_severity_events"], 0);
 
-    let receipt_path = workspace.path().join(
-        ".franken-node/state/execution-receipts/2026-10-07/corrupted.json",
-    );
+    let receipt_path = workspace
+        .path()
+        .join(".franken-node/state/execution-receipts/2026-10-07/corrupted.json");
     fs::create_dir_all(receipt_path.parent().expect("receipt directory"))
         .expect("create receipt directory");
     fs::write(&receipt_path, b"{ truncated").expect("write corrupt receipt");
@@ -1823,7 +1851,10 @@ fn incident_coverage_refuses_empty_or_unreadable_populations() {
     assert_eq!(report["unreadable_receipts"], 1);
     assert_eq!(report["population_authenticated"], false);
     assert!(
-        !report["source_errors"].as_array().expect("source errors").is_empty(),
+        !report["source_errors"]
+            .as_array()
+            .expect("source errors")
+            .is_empty(),
         "{report}"
     );
 }
@@ -1863,9 +1894,9 @@ fn incident_coverage_excludes_only_independently_authenticated_clean_external_ru
         .expect("open durable inventory")
         .append_signed_chained(entry, &signing_key)
         .expect("append authentic clean external decision");
-    let receipt_dir = workspace.path().join(
-        ".franken-node/state/execution-receipts/2026-10-07",
-    );
+    let receipt_dir = workspace
+        .path()
+        .join(".franken-node/state/execution-receipts/2026-10-07");
     fs::create_dir_all(&receipt_dir).expect("create receipt directory");
     fs::write(
         receipt_dir.join(format!("{receipt_id}.json")),
@@ -1878,9 +1909,8 @@ fn incident_coverage_excludes_only_independently_authenticated_clean_external_ru
         .expect("encode external receipt selector"),
     )
     .expect("write discoverable external receipt");
-    let coverage = || {
-        run_cli_in_workspace(workspace.path(), &["ops", "incident-coverage", "--json"])
-    };
+    let coverage =
+        || run_cli_in_workspace(workspace.path(), &["ops", "incident-coverage", "--json"]);
     let clean = coverage();
     assert!(
         clean.status.success(),
@@ -1914,7 +1944,10 @@ fn incident_coverage_excludes_only_independently_authenticated_clean_external_ru
     assert_eq!(forged["excluded_non_native_receipts"], 1);
     assert_eq!(forged["population_authenticated"], false, "{forged}");
     assert!(
-        !forged["source_errors"].as_array().expect("source errors").is_empty(),
+        !forged["source_errors"]
+            .as_array()
+            .expect("source errors")
+            .is_empty(),
         "an editable runtime label must not bypass source authentication"
     );
 }

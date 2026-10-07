@@ -179,7 +179,9 @@ pub enum ReplayBundleError {
     SignatureMalformed { detail: String },
     #[error("replay bundle signature verification failed")]
     SignatureInvalid,
-    #[error("incident evidence source signature schema mismatch: expected {expected}, found {actual}")]
+    #[error(
+        "incident evidence source signature schema mismatch: expected {expected}, found {actual}"
+    )]
     EvidenceSourceSignatureSchemaMismatch {
         actual: String,
         expected: &'static str,
@@ -712,18 +714,15 @@ impl<'de> Deserialize<'de> for SignedIncidentEvidencePackage {
         D: serde::Deserializer<'de>,
     {
         let mut value = UniqueEvidenceJson::deserialize(deserializer)?.0;
-        check_evidence_source_fields(&value)
-            .map_err(<D::Error as serde::de::Error>::custom)?;
+        check_evidence_source_fields(&value).map_err(<D::Error as serde::de::Error>::custom)?;
         let signature = value
             .as_object_mut()
             .and_then(|object| object.remove("source_signature"))
-            .ok_or_else(|| {
-                <D::Error as serde::de::Error>::missing_field("source_signature")
-            })?;
-        let source_signature = serde_json::from_value(signature)
-            .map_err(<D::Error as serde::de::Error>::custom)?;
-        let evidence = serde_json::from_value(value)
-            .map_err(<D::Error as serde::de::Error>::custom)?;
+            .ok_or_else(|| <D::Error as serde::de::Error>::missing_field("source_signature"))?;
+        let source_signature =
+            serde_json::from_value(signature).map_err(<D::Error as serde::de::Error>::custom)?;
+        let evidence =
+            serde_json::from_value(value).map_err(<D::Error as serde::de::Error>::custom)?;
         Ok(Self {
             evidence,
             source_signature,
@@ -795,7 +794,10 @@ fn validate_run_ledger_record(record: &Value) -> Result<&Value, ReplayBundleErro
             return Err(invalid(format!("{field} must be a nonempty string")));
         }
     }
-    if !record.get("host_effect_ledger").is_some_and(Value::is_object) {
+    if !record
+        .get("host_effect_ledger")
+        .is_some_and(Value::is_object)
+    {
         return Err(invalid("host_effect_ledger must be an object".to_string()));
     }
     if !record
@@ -803,7 +805,9 @@ fn validate_run_ledger_record(record: &Value) -> Result<&Value, ReplayBundleErro
         .and_then(Value::as_array)
         .is_some_and(|values| values.iter().all(Value::is_string))
     {
-        return Err(invalid("ssrf_violations must be an array of strings".to_string()));
+        return Err(invalid(
+            "ssrf_violations must be an array of strings".to_string(),
+        ));
     }
     let sentinel_enforced = record
         .get("sentinel_enforced")
@@ -813,10 +817,11 @@ fn validate_run_ledger_record(record: &Value) -> Result<&Value, ReplayBundleErro
         .get("receipt_snapshot")
         .filter(|value| value.is_object())
         .ok_or(ReplayBundleError::RunLedgerReceiptSnapshotMissing)?;
-    if snapshot.get("schema_version").and_then(Value::as_str)
-        != Some(RUN_EXECUTION_RECEIPT_SCHEMA)
+    if snapshot.get("schema_version").and_then(Value::as_str) != Some(RUN_EXECUTION_RECEIPT_SCHEMA)
     {
-        return Err(invalid("unexpected receipt snapshot schema_version".to_string()));
+        return Err(invalid(
+            "unexpected receipt snapshot schema_version".to_string(),
+        ));
     }
     for field in [
         "receipt_id",
@@ -861,9 +866,7 @@ fn run_ledger_record_signing_bytes(record: &Value) -> Result<Vec<u8>, ReplayBund
     // Complete execution receipts include finite floating-point telemetry. Sort
     // every object while preserving those JSON numbers, unlike incident events.
     canonical.sort_all_objects();
-    let mut payload = Vec::with_capacity(
-        RUN_LEDGER_RECORD_SIGNATURE_DOMAIN.len() + counter.len,
-    );
+    let mut payload = Vec::with_capacity(RUN_LEDGER_RECORD_SIGNATURE_DOMAIN.len() + counter.len);
     payload.extend_from_slice(RUN_LEDGER_RECORD_SIGNATURE_DOMAIN);
     serde_json::to_writer(&mut payload, &canonical)?;
     Ok(payload)
@@ -884,7 +887,10 @@ pub fn sign_run_ledger_record(
     signed
         .as_object_mut()
         .expect("validated record object")
-        .insert("record_signature".to_string(), Value::String(signature.clone()));
+        .insert(
+            "record_signature".to_string(),
+            Value::String(signature.clone()),
+        );
     let mut counter = ByteCounter::default();
     serde_json::to_writer_pretty(&mut counter, &signed)?;
     if counter.len as u64 > MAX_RUN_LEDGER_RECORD_BYTES {
@@ -958,9 +964,8 @@ fn incident_evidence_source_signing_bytes(
         &serde_json::to_value(evidence)?,
         "$.incident_evidence_source",
     )?;
-    let mut payload = Vec::with_capacity(
-        INCIDENT_EVIDENCE_SOURCE_SIGNATURE_DOMAIN.len() + counter.len,
-    );
+    let mut payload =
+        Vec::with_capacity(INCIDENT_EVIDENCE_SOURCE_SIGNATURE_DOMAIN.len() + counter.len);
     payload.extend_from_slice(INCIDENT_EVIDENCE_SOURCE_SIGNATURE_DOMAIN);
     serde_json::to_writer(&mut payload, &canonical)?;
     Ok(payload)
@@ -1015,9 +1020,11 @@ pub fn verify_incident_evidence_source(
         });
     }
     if signature.algorithm != "ed25519" {
-        return Err(ReplayBundleError::EvidenceSourceSignatureAlgorithmUnsupported {
-            algorithm: signature.algorithm.clone(),
-        });
+        return Err(
+            ReplayBundleError::EvidenceSourceSignatureAlgorithmUnsupported {
+                algorithm: signature.algorithm.clone(),
+            },
+        );
     }
     let trusted_key_id =
         crate::supply_chain::artifact_signing::KeyId::from_verifying_key(trusted_key).to_string();
@@ -3390,7 +3397,6 @@ mod tests {
         }
     }
 
-
     fn signed_incident_source_fixture(incident_id: &str) -> SignedIncidentEvidencePackage {
         let mut package = fixture_evidence_package(incident_id);
         package.incident_type = "runtime-security-control".to_string();
@@ -3441,13 +3447,17 @@ mod tests {
     fn signed_incident_source_authenticates_events_metadata_and_run_bindings() {
         let original = signed_incident_source_fixture("INC-SOURCE-MUTATIONS");
         let mutations: &[(&str, fn(&mut IncidentEvidencePackage))] = &[
-            ("incident id", |p| p.incident_id = "INC-SOURCE-OTHER".to_string()),
+            ("incident id", |p| {
+                p.incident_id = "INC-SOURCE-OTHER".to_string()
+            }),
             ("collected timestamp", |p| {
                 p.collected_at = "2026-02-20T10:06:00.000000Z".to_string();
             }),
             ("trace", |p| p.trace_id = "forged-trace".to_string()),
             ("severity", |p| p.severity = IncidentSeverity::Low),
-            ("incident type", |p| p.incident_type = "operator-note".to_string()),
+            ("incident type", |p| {
+                p.incident_type = "operator-note".to_string()
+            }),
             ("detector", |p| p.detector = "forged-detector".to_string()),
             ("policy", |p| p.policy_version = "9.9.9".to_string()),
             ("receipt id", |p| {
@@ -3463,15 +3473,21 @@ mod tests {
             ("event payload", |p| {
                 p.events[0].payload["severity"] = serde_json::json!("low");
             }),
-            ("event type", |p| p.events[0].event_type = EventType::StateChange),
+            ("event type", |p| {
+                p.events[0].event_type = EventType::StateChange
+            }),
             ("event timestamp", |p| {
                 p.events[2].timestamp = "2026-02-20T10:00:00.000400Z".to_string();
             }),
             ("event snapshot", |p| {
                 p.events[0].state_snapshot = Some(serde_json::json!({"forged": true}));
             }),
-            ("event policy", |p| p.events[0].policy_version = Some("9.9.9".to_string())),
-            ("event parent", |p| p.events[2].parent_event_id = Some("evt-001".to_string())),
+            ("event policy", |p| {
+                p.events[0].policy_version = Some("9.9.9".to_string())
+            }),
+            ("event parent", |p| {
+                p.events[2].parent_event_id = Some("evt-001".to_string())
+            }),
             ("event identity", |p| {
                 p.events[0].event_id = "evt-forged".to_string();
                 p.events[1].parent_event_id = Some("evt-forged".to_string());
@@ -3479,9 +3495,13 @@ mod tests {
             ("provenance", |p| {
                 p.events[0].provenance_ref = "refs/logs/event-002.json".to_string();
             }),
-            ("evidence refs", |p| p.evidence_refs.push("refs/extra.json".to_string())),
+            ("evidence refs", |p| {
+                p.evidence_refs.push("refs/extra.json".to_string())
+            }),
             ("title", |p| p.metadata.title = "forged title".to_string()),
-            ("components", |p| p.metadata.affected_components.push("forged".to_string())),
+            ("components", |p| {
+                p.metadata.affected_components.push("forged".to_string())
+            }),
             ("tags", |p| p.metadata.tags.push("forged".to_string())),
         ];
         let trusted_key = fixture_signing_key().verifying_key();
@@ -3490,18 +3510,24 @@ mod tests {
             mutate(&mut altered.evidence);
             validate_incident_evidence_package(&altered.evidence, None)
                 .unwrap_or_else(|error| panic!("{name} should remain structurally valid: {error}"));
-            assert!(matches!(
-                verify_incident_evidence_source(&altered, None, &trusted_key),
-                Err(ReplayBundleError::EvidenceSourcePayloadHashMismatch)
-            ), "{name} must be authenticated");
-            let forged_payload =
-                incident_evidence_source_signing_bytes(&altered.evidence).expect("canonical source");
+            assert!(
+                matches!(
+                    verify_incident_evidence_source(&altered, None, &trusted_key),
+                    Err(ReplayBundleError::EvidenceSourcePayloadHashMismatch)
+                ),
+                "{name} must be authenticated"
+            );
+            let forged_payload = incident_evidence_source_signing_bytes(&altered.evidence)
+                .expect("canonical source");
             altered.source_signature.signed_payload_sha256 =
                 hex::encode(Sha256::digest(&forged_payload));
-            assert!(matches!(
-                verify_incident_evidence_source(&altered, None, &trusted_key),
-                Err(ReplayBundleError::EvidenceSourceSignatureInvalid)
-            ), "recomputing the advertised hash must not authenticate {name}");
+            assert!(
+                matches!(
+                    verify_incident_evidence_source(&altered, None, &trusted_key),
+                    Err(ReplayBundleError::EvidenceSourceSignatureInvalid)
+                ),
+                "recomputing the advertised hash must not authenticate {name}"
+            );
         }
     }
 
@@ -3516,7 +3542,8 @@ mod tests {
         ));
         let mut altered = signed.clone();
         altered.source_signature.key_id =
-            crate::supply_chain::artifact_signing::KeyId::from_verifying_key(&other_key).to_string();
+            crate::supply_chain::artifact_signing::KeyId::from_verifying_key(&other_key)
+                .to_string();
         assert!(matches!(
             verify_incident_evidence_source(&altered, None, &other_key),
             Err(ReplayBundleError::EvidenceSourceSignatureInvalid)
@@ -3645,18 +3672,21 @@ mod tests {
         for (needle, replacement) in [
             ("\"trace_id\":", "\"trace_id\":\"duplicate\",\"trace_id\":"),
             ("\"event_id\":", "\"event_id\":\"duplicate\",\"event_id\":"),
-            ("\"payload\":{", "\"payload\":{\"duplicate\":1,\"duplicate\":2,"),
+            (
+                "\"payload\":{",
+                "\"payload\":{\"duplicate\":1,\"duplicate\":2,",
+            ),
             ("\"algorithm\":", "\"algorithm\":\"ed25519\",\"algorithm\":"),
-            ("\"run_receipt_id\":", "\"run_receipt_id\":\"duplicate\",\"run_receipt_id\":"),
+            (
+                "\"run_receipt_id\":",
+                "\"run_receipt_id\":\"duplicate\",\"run_receipt_id\":",
+            ),
         ] {
             let duplicate = json.replacen(needle, replacement, 1);
             assert_ne!(duplicate, json, "fixture must exercise {needle}");
-            let error = parse_verified_incident_evidence_package(
-                duplicate.as_bytes(),
-                None,
-                &trusted_key,
-            )
-            .expect_err("duplicate JSON field must fail");
+            let error =
+                parse_verified_incident_evidence_package(duplicate.as_bytes(), None, &trusted_key)
+                    .expect_err("duplicate JSON field must fail");
             assert!(error.to_string().contains("duplicate JSON field"));
         }
         let trailing = format!("{json} {{}}");
@@ -3683,7 +3713,6 @@ mod tests {
             Err(ReplayBundleError::EvidenceSourceTooLarge { .. })
         ));
     }
-
 
     fn signed_run_ledger_record_fixture() -> (Value, Value) {
         let receipt = serde_json::json!({
@@ -3731,9 +3760,9 @@ mod tests {
             },
             "receipt_snapshot": receipt,
         });
-        record["record_signature"] =
-            serde_json::json!(sign_run_ledger_record(&record, &fixture_signing_key())
-                .expect("sign run record"));
+        record["record_signature"] = serde_json::json!(
+            sign_run_ledger_record(&record, &fixture_signing_key()).expect("sign run record")
+        );
         (record, receipt)
     }
 
@@ -3743,13 +3772,22 @@ mod tests {
         let trusted_key = fixture_signing_key().verifying_key();
         verify_run_ledger_record_receipt(&record, &receipt, &trusted_key)
             .expect("authentic record");
-        assert_eq!(record["record_signature"].as_str().expect("signature").len(), 128);
+        assert_eq!(
+            record["record_signature"]
+                .as_str()
+                .expect("signature")
+                .len(),
+            128
+        );
         let bytes = serde_json::to_vec_pretty(&record).expect("record JSON");
         let parsed = parse_verified_run_ledger_record(&bytes, &receipt, &trusted_key)
             .expect("authenticated raw record");
         assert_eq!(parsed, record);
         assert_eq!(parsed["receipt_snapshot"], receipt);
-        assert_eq!(parsed["receipt_snapshot"]["telemetry_summary"]["cpu_percent"], 12.5);
+        assert_eq!(
+            parsed["receipt_snapshot"]["telemetry_summary"]["cpu_percent"],
+            12.5
+        );
         assert_eq!(
             sign_run_ledger_record(&parsed, &fixture_signing_key()).expect("stable signature"),
             record["record_signature"].as_str().expect("signature"),
@@ -3770,15 +3808,17 @@ mod tests {
             let mut altered_receipt = receipt.clone();
             *altered_receipt.pointer_mut(pointer).expect("receipt field") =
                 serde_json::json!("forged");
-            assert!(matches!(
-                verify_run_ledger_record_receipt(&record, &altered_receipt, &trusted_key),
-                Err(ReplayBundleError::RunLedgerReceiptMismatch)
-            ), "receipt field {pointer} must remain bound");
+            assert!(
+                matches!(
+                    verify_run_ledger_record_receipt(&record, &altered_receipt, &trusted_key),
+                    Err(ReplayBundleError::RunLedgerReceiptMismatch)
+                ),
+                "receipt field {pointer} must remain bound"
+            );
         }
         let mut altered = record.clone();
         altered["receipt_hash"] = serde_json::json!("forged-advertised-hash");
-        altered["receipt_snapshot"]["receipt_hash"] =
-            serde_json::json!("forged-advertised-hash");
+        altered["receipt_snapshot"]["receipt_hash"] = serde_json::json!("forged-advertised-hash");
         let altered_receipt = altered["receipt_snapshot"].clone();
         validate_run_ledger_record(&altered).expect("coordinated edit remains structurally valid");
         assert!(matches!(
@@ -3788,10 +3828,13 @@ mod tests {
 
         let mut substituted = receipt;
         substituted["telemetry_summary"]["cpu_percent"] = serde_json::json!(0.1);
-        assert!(matches!(
-            verify_run_ledger_record_receipt(&record, &substituted, &trusted_key),
-            Err(ReplayBundleError::RunLedgerReceiptMismatch)
-        ), "matching advertised id/hash cannot authenticate a substituted receipt");
+        assert!(
+            matches!(
+                verify_run_ledger_record_receipt(&record, &substituted, &trusted_key),
+                Err(ReplayBundleError::RunLedgerReceiptMismatch)
+            ),
+            "matching advertised id/hash cannot authenticate a substituted receipt"
+        );
     }
 
     #[test]
@@ -3799,8 +3842,12 @@ mod tests {
         let (record, _) = signed_run_ledger_record_fixture();
         let trusted_key = fixture_signing_key().verifying_key();
         let mutations: &[(&str, fn(&mut Value))] = &[
-            ("trace", |r| r["trace_id"] = serde_json::json!("forged-trace")),
-            ("receipt path", |r| r["receipt_path"] = serde_json::json!("another/receipt.json")),
+            ("trace", |r| {
+                r["trace_id"] = serde_json::json!("forged-trace")
+            }),
+            ("receipt path", |r| {
+                r["receipt_path"] = serde_json::json!("another/receipt.json")
+            }),
             ("app", |r| {
                 r["app_path"] = serde_json::json!("another.js");
                 r["receipt_snapshot"]["app_path"] = serde_json::json!("another.js");
@@ -3814,7 +3861,8 @@ mod tests {
                 r["receipt_snapshot"]["receipt_id"] = serde_json::json!("another-run");
             }),
             ("identity capture", |r| {
-                r["runtime_evidence_identity_capture_path"] = serde_json::json!("forged/session.json");
+                r["runtime_evidence_identity_capture_path"] =
+                    serde_json::json!("forged/session.json");
             }),
             ("chain head", |r| {
                 r["host_effect_ledger"]["chain_head_hash"] = serde_json::json!("forged-chain");
@@ -3823,7 +3871,9 @@ mod tests {
                 r["host_effect_ledger"]["effects"][0]["payload"]["outcome"] =
                     serde_json::json!("allow");
             }),
-            ("outcome count", |r| r["host_effect_ledger"]["denied_count"] = serde_json::json!(0)),
+            ("outcome count", |r| {
+                r["host_effect_ledger"]["denied_count"] = serde_json::json!(0)
+            }),
             ("incident pointer", |r| {
                 r["receipt_snapshot"]["incident_capture"]["evidence_path"] =
                     serde_json::json!("forged/evidence.json");
@@ -3839,10 +3889,13 @@ mod tests {
             validate_run_ledger_record(&altered)
                 .unwrap_or_else(|error| panic!("{name} should remain structurally valid: {error}"));
             let receipt = altered["receipt_snapshot"].clone();
-            assert!(matches!(
-                verify_run_ledger_record_receipt(&altered, &receipt, &trusted_key),
-                Err(ReplayBundleError::RunLedgerRecordSignatureInvalid)
-            ), "product signature must cover {name}");
+            assert!(
+                matches!(
+                    verify_run_ledger_record_receipt(&altered, &receipt, &trusted_key),
+                    Err(ReplayBundleError::RunLedgerRecordSignatureInvalid)
+                ),
+                "product signature must cover {name}"
+            );
         }
     }
 
@@ -3851,18 +3904,31 @@ mod tests {
         let (record, receipt) = signed_run_ledger_record_fixture();
         let trusted_key = fixture_signing_key().verifying_key();
         let mut missing = record.clone();
-        missing.as_object_mut().expect("record").remove("record_signature");
+        missing
+            .as_object_mut()
+            .expect("record")
+            .remove("record_signature");
         assert!(matches!(
             verify_run_ledger_record_receipt(&missing, &receipt, &trusted_key),
             Err(ReplayBundleError::RunLedgerRecordSignatureMissing)
         ));
         missing = record.clone();
-        missing.as_object_mut().expect("record").remove("receipt_snapshot");
+        missing
+            .as_object_mut()
+            .expect("record")
+            .remove("receipt_snapshot");
         assert!(matches!(
             verify_run_ledger_record_receipt(&missing, &receipt, &trusted_key),
             Err(ReplayBundleError::RunLedgerReceiptSnapshotMissing)
         ));
-        for field in ["receipt_id", "receipt_hash", "receipt_path", "app_path", "policy_mode", "trace_id"] {
+        for field in [
+            "receipt_id",
+            "receipt_hash",
+            "receipt_path",
+            "app_path",
+            "policy_mode",
+            "trace_id",
+        ] {
             let mut altered = record.clone();
             altered[field] = serde_json::json!("");
             assert!(sign_run_ledger_record(&altered, &fixture_signing_key()).is_err());
@@ -3880,7 +3946,12 @@ mod tests {
             *altered.pointer_mut(pointer).expect("field") = serde_json::json!("invalid");
             assert!(sign_run_ledger_record(&altered, &fixture_signing_key()).is_err());
         }
-        for bad_signature in ["".to_string(), "aa".to_string(), "zz".repeat(64), "00".repeat(64)] {
+        for bad_signature in [
+            "".to_string(),
+            "aa".to_string(),
+            "zz".repeat(64),
+            "00".repeat(64),
+        ] {
             let mut altered = record.clone();
             altered["record_signature"] = serde_json::json!(bad_signature);
             assert!(verify_run_ledger_record_receipt(&altered, &receipt, &trusted_key).is_err());
@@ -3926,9 +3997,10 @@ mod tests {
             parse_verified_run_ledger_record(&unsigned_extension, &receipt, &trusted_key),
             Err(ReplayBundleError::RunLedgerRecordSignatureInvalid)
         ));
-        extended["record_signature"] =
-            serde_json::json!(sign_run_ledger_record(&extended, &fixture_signing_key())
-                .expect("sign complete extended record"));
+        extended["record_signature"] = serde_json::json!(
+            sign_run_ledger_record(&extended, &fixture_signing_key())
+                .expect("sign complete extended record")
+        );
         let bytes = serde_json::to_vec(&extended).expect("record JSON");
         assert_eq!(
             parse_verified_run_ledger_record(&bytes, &receipt, &trusted_key)
@@ -3939,25 +4011,30 @@ mod tests {
         let json = serde_json::to_string(&record).expect("record JSON");
         for (needle, replacement) in [
             ("\"trace_id\":", "\"trace_id\":\"duplicate\",\"trace_id\":"),
-            ("\"receipt_snapshot\":{", "\"receipt_snapshot\":{\"duplicate\":1,\"duplicate\":2,"),
-            ("\"payload\":{", "\"payload\":{\"duplicate\":1,\"duplicate\":2,"),
+            (
+                "\"receipt_snapshot\":{",
+                "\"receipt_snapshot\":{\"duplicate\":1,\"duplicate\":2,",
+            ),
+            (
+                "\"payload\":{",
+                "\"payload\":{\"duplicate\":1,\"duplicate\":2,",
+            ),
         ] {
             let duplicate = json.replacen(needle, replacement, 1);
             assert_ne!(duplicate, json, "fixture must exercise {needle}");
-            let error = parse_verified_run_ledger_record(
-                duplicate.as_bytes(),
+            let error =
+                parse_verified_run_ledger_record(duplicate.as_bytes(), &receipt, &trusted_key)
+                    .expect_err("duplicate record fields must fail before collapsing");
+            assert!(error.to_string().contains("duplicate JSON field"));
+        }
+        assert!(
+            parse_verified_run_ledger_record(
+                format!("{json} {{}}").as_bytes(),
                 &receipt,
                 &trusted_key,
             )
-            .expect_err("duplicate record fields must fail before collapsing");
-            assert!(error.to_string().contains("duplicate JSON field"));
-        }
-        assert!(parse_verified_run_ledger_record(
-            format!("{json} {{}}").as_bytes(),
-            &receipt,
-            &trusted_key,
-        )
-        .is_err());
+            .is_err()
+        );
     }
 
     fn chunked_fixture_bundle() -> ReplayBundle {
