@@ -525,6 +525,167 @@ fn native_timeout_reaps_a_worker_stuck_in_admitted_http_io() {
         "the released response must not revive a timed-out guest callback"
     );
 
+    // Persistence is checked only after the real server and worker cleanup
+    // above, so a failed assertion cannot leave the admitted request hanging.
+    // The parent owns this WAL prefix; it never becomes a finalized effect
+    // ledger or a claim that the interrupted guest produced no console.
+    assert_eq!(evidence["success"], false);
+    assert_eq!(evidence["guest_output_available"], false);
+    assert!(
+        evidence["error"]
+            .as_str()
+            .is_some_and(|error| error.to_ascii_lowercase().contains("timed out")),
+        "the original timeout remains the run's error: {evidence}"
+    );
+    assert_eq!(evidence["dispatch"]["runtime"], "franken_engine");
+    assert!(evidence["dispatch"]["host_effect_ledger"].is_null());
+    assert!(evidence["dispatch"]["engine_decision"].is_null());
+    assert!(evidence["dispatch"]["sentinel"].is_null());
+    assert!(evidence.get("allowed_count").is_none());
+    assert!(evidence.get("denied_count").is_none());
+
+    let typed_wal: frankenengine_node::ops::engine_dispatcher::NativeEffectInterruptionEvidence =
+        serde_json::from_value(evidence.clone()).expect("the original typed parent WAL");
+    let wal = serde_json::to_value(&typed_wal).expect("serialize every typed WAL field");
+    let receipt = &evidence["receipt"];
+    assert_eq!(receipt["runtime_used"], "franken_engine");
+    assert_eq!(receipt["exit_code"], 1);
+    assert_eq!(receipt["execution_failure"], evidence["error"]);
+    assert_eq!(receipt["interruption_evidence"], wal);
+    assert!(
+        receipt["incident_capture"].is_null(),
+        "indeterminate provider state cannot auto-produce certified replay evidence"
+    );
+    let receipt_id = receipt["receipt_id"].as_str().expect("timeout receipt ID");
+    let receipt_path = dir.path().join(
+        evidence["receipt_path"]
+            .as_str()
+            .expect("timeout names its durable receipt"),
+    );
+    let stored_receipt: Value =
+        serde_json::from_slice(&std::fs::read(&receipt_path).expect("read timeout receipt"))
+            .expect("timeout receipt JSON");
+    assert_eq!(stored_receipt, *receipt);
+    let ended_at = chrono::DateTime::parse_from_rfc3339(
+        receipt["end_time_utc"].as_str().expect("timeout end time"),
+    )
+    .expect("RFC3339 timeout end time");
+    let invented_ledger_path = dir
+        .path()
+        .join(".franken-node/state/run-ledgers")
+        .join(ended_at.format("%Y-%m-%d").to_string())
+        .join(format!("{receipt_id}.json"));
+    assert!(
+        !invented_ledger_path.exists(),
+        "the parent WAL must not acquire a fabricated finalized run-ledger record"
+    );
+
+    use frankenengine_node::observability::evidence_ledger::{
+        DecisionKind, EvidenceEntry, verify_evidence_entry,
+    };
+    use frankenengine_node::observability::evidence_ledger_durable::DurableEvidenceLedger;
+    let rows = DurableEvidenceLedger::open_default(dir.path())
+        .expect("open durable timeout decision inventory")
+        .entries_json()
+        .expect("read timeout decision inventory");
+    assert_eq!(
+        rows.len(),
+        1,
+        "the interrupted attempt is retained exactly once"
+    );
+    let decision: EvidenceEntry = serde_json::from_str(&rows[0]).expect("timeout decision");
+    let verifying_key = receipt_verifying_key(dir.path());
+    verify_evidence_entry(&decision, &verifying_key)
+        .expect("the product signs the interrupted-attempt decision");
+    assert_eq!(decision.decision_id, receipt_id);
+    assert_eq!(decision.decision_kind, DecisionKind::Deny);
+    assert_eq!(decision.payload["receipt_hash"], receipt["receipt_hash"]);
+    assert_eq!(decision.payload["run_receipt_snapshot"], *receipt);
+    assert_eq!(decision.payload["interruption_evidence"], wal);
+    assert_eq!(decision.payload["guest_output_available"], false);
+    assert!(decision.payload["host_effect_chain_head"].is_null());
+    assert!(decision.payload["host_effects_allowed"].is_null());
+    assert!(decision.payload["host_effects_denied"].is_null());
+    // This identity captures session context. The product decision signature
+    // above, not the engine identity, authenticates the parent-observed WAL.
+    assert!(decision.payload["runtime_evidence_identity_capture"].is_object());
+    assert_eq!(
+        decision.payload["runtime_evidence_identity_capture"],
+        evidence["dispatch"]["runtime_evidence_identity_capture"]
+    );
+    assert_eq!(
+        decision.payload["runtime_evidence_identity_capture_path"],
+        evidence["dispatch"]["runtime_evidence_identity_capture_path"]
+    );
+    assert!(decision.payload["runtime_evidence_identity_capture_path"].is_string());
+    let interrupted_index = typed_wal
+        .entries
+        .iter()
+        .position(|entry| {
+            entry.state
+                == frankenengine_node::ops::engine_dispatcher::NativeEffectWalState::InterruptedIndeterminate
+        })
+        .expect("the admitted HTTP effect remains unmatched");
+    for pointer in [
+        format!("/interruption_evidence/entries/{interrupted_index}/state"),
+        format!("/run_receipt_snapshot/interruption_evidence/entries/{interrupted_index}/state"),
+    ] {
+        let mut forged = decision.clone();
+        *forged
+            .payload
+            .pointer_mut(&pointer)
+            .expect("signed WAL state") = Value::from("provider_returned");
+        assert!(
+            verify_evidence_entry(&forged, &verifying_key).is_err(),
+            "changing interrupted state must invalidate the signature at {pointer}"
+        );
+    }
+
+    let capture = Command::new(franken_node_bin())
+        .args(["incident", "capture", "--from-run", receipt_id, "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("try to capture an indeterminate timeout as finalized evidence");
+    assert!(
+        !capture.status.success(),
+        "an interruption is not replay-certifiable"
+    );
+    let capture_diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&capture.stdout),
+        String::from_utf8_lossy(&capture.stderr)
+    )
+    .to_ascii_lowercase();
+    assert!(
+        capture_diagnostic.contains("interrupted") || capture_diagnostic.contains("indeterminate"),
+        "capture must explain the incomplete effect boundary: {capture_diagnostic}"
+    );
+    let (listing, list) = run_workspace_json(dir.path(), &["incident", "list", "--json"]);
+    assert_eq!(listing.exit_code, Some(0), "{}", listing.stderr);
+    assert_eq!(list["incidents"], serde_json::json!([]));
+    let (coverage, report) = run_workspace_json(
+        dir.path(),
+        &["ops", "incident-coverage", "--min-coverage", "1", "--json"],
+    );
+    assert_ne!(coverage.exit_code, Some(0));
+    assert_eq!(report["receipts_scanned"], 1);
+    assert_eq!(report["inventory_runs"], 1);
+    assert_eq!(report["excluded_non_native_receipts"], 0);
+    assert_eq!(report["population_authenticated"], false);
+    let source_errors = report["source_errors"]
+        .as_array()
+        .expect("coverage source errors");
+    assert!(
+        source_errors.iter().any(|error| {
+            let detail = error.to_string().to_ascii_lowercase();
+            detail.contains(receipt_id)
+                && (detail.contains("interrupted") || detail.contains("indeterminate"))
+        }),
+        "coverage must retain the timed-out attempt's unavailable final evidence: {report}"
+    );
+    assert_eq!(report["captured"], 0);
+    assert_eq!(report["bundled"], 0);
+
     // A later product run must start a fresh healthy worker; timeout cleanup
     // cannot poison global admission or telemetry state.
     std::fs::write(
@@ -555,6 +716,21 @@ fn native_timeout_reaps_a_worker_stuck_in_admitted_http_io() {
     assert_eq!(
         std::fs::read(dir.path().join("healthy.marker")).expect("healthy marker"),
         b"healthy"
+    );
+    let (coverage_after_healthy, after_healthy) = run_workspace_json(
+        dir.path(),
+        &["ops", "incident-coverage", "--min-coverage", "1", "--json"],
+    );
+    assert_ne!(coverage_after_healthy.exit_code, Some(0));
+    assert_eq!(after_healthy["receipts_scanned"], 2);
+    assert_eq!(after_healthy["inventory_runs"], 2);
+    assert!(
+        after_healthy["source_errors"]
+            .as_array()
+            .expect("post-recovery source errors")
+            .iter()
+            .any(|error| error.to_string().contains(receipt_id)),
+        "a healthy later run must not erase the unresolved timeout: {after_healthy}"
     );
 }
 

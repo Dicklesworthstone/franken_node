@@ -841,6 +841,12 @@ struct RunExecutionReceiptCore {
     /// and hashing. An unsuccessful attempt must not look like an ordinary exit.
     #[serde(skip_serializing_if = "Option::is_none")]
     execution_failure: Option<String>,
+    /// The bounded journal prefix observed by the parent before an interrupted
+    /// worker could finalize its effect ledger. This never certifies replay or
+    /// the external outcome of an unmatched provider admission.
+    #[cfg(feature = "engine")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interruption_evidence: Option<ops::engine_dispatcher::NativeEffectInterruptionEvidence>,
     runtime_used: String,
     runtime_version: Option<String>,
     /// Effective entrypoint/import parser limits for a completed native run.
@@ -8591,7 +8597,7 @@ fn build_run_execution_receipt(
     sentinel_enforcement: Option<SentinelEnforcementSummary>,
     lockstep_verdict: Option<serde_json::Value>,
     compat_preflight: Option<serde_json::Value>,
-    execution_failure: Option<String>,
+    execution_error: Option<&anyhow::Error>,
 ) -> Result<RunExecutionReceipt> {
     let violation_count = ssrf_violations.len();
     let mut core = RunExecutionReceiptCore {
@@ -8604,7 +8610,11 @@ fn build_run_execution_receipt(
         end_time_utc: dispatch.finished_at_utc.clone(),
         duration_ms: dispatch.duration_ms,
         exit_code: dispatch.exit_code,
-        execution_failure,
+        execution_failure: execution_error.map(ToString::to_string),
+        #[cfg(feature = "engine")]
+        interruption_evidence: execution_error
+            .and_then(|error| error.downcast_ref::<ops::engine_dispatcher::NativeRunInterruption>())
+            .map(|interruption| interruption.effect_evidence().clone()),
         runtime_used: dispatch.runtime.clone(),
         runtime_version: None,
         parser_budget: dispatch
@@ -10629,23 +10639,15 @@ fn record_trust_decision_evidence(
     }
 }
 
-/// Record the run's outcome in the durable evidence ledger.
-fn append_run_evidence_entry(
-    project_root: &Path,
+/// Build the exact payload signed by the durable run-decision ledger. An
+/// interruption includes its complete receipt snapshot, so the parent-observed
+/// journal remains independently inspectable even if the receipt file is lost.
+fn build_run_decision_evidence_payload(
     receipt: &RunExecutionReceipt,
     receipt_path: &Path,
     dispatch: &ops::engine_dispatcher::RunDispatchReport,
-    trace_id: &str,
-) -> Result<Option<observability::evidence_ledger::EvidenceEntry>> {
-    use observability::evidence_ledger::DecisionKind;
-
+) -> Result<serde_json::Value> {
     let containment_verdict = native_containment_action(&dispatch.runtime, dispatch.exit_code);
-    let decision_kind = match containment_verdict {
-        Some("Quarantine") => DecisionKind::Quarantine,
-        Some(_) => DecisionKind::Escalate,
-        None if receipt.core.execution_failure.is_some() => DecisionKind::Deny,
-        None => DecisionKind::Admit,
-    };
     let ledger = dispatch.host_effect_ledger.as_ref();
     let mut payload = serde_json::json!({
         "app_path": receipt.core.app_path,
@@ -10663,6 +10665,45 @@ fn append_run_evidence_entry(
     if let Some(failure) = &receipt.core.execution_failure {
         payload["execution_failure"] = serde_json::Value::String(failure.clone());
     }
+    #[cfg(feature = "engine")]
+    if let Some(interruption) = &receipt.core.interruption_evidence {
+        payload["interruption_evidence"] = serde_json::to_value(interruption)
+            .context("failed serializing the parent-observed interruption journal")?;
+        payload["run_receipt_snapshot"] = serde_json::to_value(receipt)
+            .context("failed serializing the interrupted run receipt snapshot")?;
+        payload["guest_output_available"] = serde_json::Value::Bool(false);
+        payload["evidence_origin"] =
+            serde_json::Value::String("parent_observed_native_session_wal".to_string());
+        // This authenticates the identity the parent assigned to the session.
+        // The WAL itself has no finalized engine signature or effect outcomes;
+        // only the parent's retained observation is signed by this decision.
+        payload["runtime_evidence_identity_capture"] =
+            serde_json::to_value(&dispatch.runtime_evidence_identity_capture)
+                .context("failed serializing interrupted session identity")?;
+        payload["runtime_evidence_identity_capture_path"] =
+            serde_json::to_value(&dispatch.runtime_evidence_identity_capture_path)
+                .context("failed serializing interrupted session identity path")?;
+    }
+    Ok(payload)
+}
+
+/// Record the run's outcome in the durable evidence ledger.
+fn append_run_evidence_entry(
+    project_root: &Path,
+    receipt: &RunExecutionReceipt,
+    receipt_path: &Path,
+    dispatch: &ops::engine_dispatcher::RunDispatchReport,
+    trace_id: &str,
+) -> Result<Option<observability::evidence_ledger::EvidenceEntry>> {
+    use observability::evidence_ledger::DecisionKind;
+
+    let decision_kind = match native_containment_action(&dispatch.runtime, dispatch.exit_code) {
+        Some("Quarantine") => DecisionKind::Quarantine,
+        Some(_) => DecisionKind::Escalate,
+        None if receipt.core.execution_failure.is_some() => DecisionKind::Deny,
+        None => DecisionKind::Admit,
+    };
+    let payload = build_run_decision_evidence_payload(receipt, receipt_path, dispatch)?;
     append_decision_evidence(
         &project_ledger_dir(project_root),
         RUN_DECISION_EVIDENCE_SCHEMA,
@@ -10990,6 +11031,15 @@ fn load_authenticated_run_ledger_record(
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("run receipt has no receipt_id"))?;
     validate_run_receipt_id(receipt_id)?;
+    if receipt
+        .get("interruption_evidence")
+        .is_some_and(|evidence| !evidence.is_null())
+    {
+        anyhow::bail!(
+            "run {receipt_id} has indeterminate interrupted execution evidence; \
+             no finalized host-effect ledger is available for replay certification"
+        );
+    }
     let record_path = find_dated_record(
         &project_root.join(RUN_LEDGER_RELATIVE_DIR),
         receipt_id,
@@ -12417,19 +12467,44 @@ fn emit_failed_run_effect_evidence(
 #[cfg(feature = "engine")]
 fn emit_interrupted_run_effect_evidence(
     evidence: &ops::engine_dispatcher::NativeEffectInterruptionEvidence,
+    error: &str,
     json: bool,
     console_only: bool,
+    persisted: Option<&RunCommandOutput>,
+    persistence_error: Option<&str>,
 ) -> Result<()> {
     if console_only {
         return Ok(());
     }
     if json {
+        let mut envelope = serde_json::to_value(evidence)
+            .context("failed serializing interrupted-run host-effect evidence")?;
+        envelope["success"] = serde_json::Value::Bool(false);
+        envelope["error"] = serde_json::Value::String(error.to_string());
+        // Console is carried in the worker's final response. An interrupted
+        // worker has not supplied it; empty report buffers prove no absence.
+        envelope["guest_output_available"] = serde_json::Value::Bool(false);
+        if let Some(output) = persisted {
+            envelope["preflight"] = serde_json::to_value(&output.preflight)?;
+            envelope["dispatch"] = serde_json::to_value(&output.dispatch)?;
+            envelope["receipt"] = serde_json::to_value(&output.receipt)?;
+            envelope["receipt_path"] = serde_json::Value::String(output.receipt_path.clone());
+        }
+        if let Some(error) = persistence_error {
+            envelope["persistence_error"] = serde_json::Value::String(error.to_string());
+        }
         println!(
             "{}",
-            serde_json::to_string_pretty(evidence)
+            serde_json::to_string_pretty(&envelope)
                 .context("failed serializing interrupted-run host-effect evidence")?
         );
         return Ok(());
+    }
+    if let Some(output) = persisted {
+        println!(
+            "{}",
+            render_run_execution_receipt_summary(&output.receipt, Path::new(&output.receipt_path),)
+        );
     }
     if evidence.terminal_state == "timeout_cleanup_unproven" {
         println!(
@@ -12466,6 +12541,9 @@ fn emit_interrupted_run_effect_evidence(
     }
     if let Some(error) = evidence.protocol_error.as_deref() {
         println!("  journal_protocol_error={error}");
+    }
+    if let Some(error) = persistence_error {
+        eprintln!("interrupted-run evidence persistence failed: {error}");
     }
     Ok(())
 }
@@ -33472,15 +33550,23 @@ fn main() -> Result<()> {
             ) {
                 Ok(dispatch) => (dispatch, None),
                 Err(err) => {
-                    if let Some(dispatch) = err
+                    let recovered_dispatch = err
                         .downcast_ref::<ops::engine_dispatcher::NativeRunFailure>()
                         .and_then(ops::engine_dispatcher::NativeRunFailure::dispatch_report)
-                        .cloned()
-                    {
-                        // A failed guest can already have performed or been
-                        // denied effects. Its verified report must pass through
-                        // the same containment and durable evidence path as a
-                        // successful execution before propagating the failure.
+                        .cloned();
+                    #[cfg(feature = "engine")]
+                    let recovered_dispatch = recovered_dispatch.or_else(|| {
+                        err.downcast_ref::<ops::engine_dispatcher::NativeRunInterruption>()
+                            .and_then(
+                                ops::engine_dispatcher::NativeRunInterruption::dispatch_report,
+                            )
+                            .cloned()
+                    });
+                    if let Some(dispatch) = recovered_dispatch {
+                        // A failed or interrupted guest may already have
+                        // touched external state. Retain the evidence actually
+                        // recovered and apply the shared containment and durable
+                        // recording path before propagating the original error.
                         (dispatch, Some(err))
                     } else {
                         // bd-muy9u: when the attempt aborted after the engine had
@@ -33525,8 +33611,11 @@ fn main() -> Result<()> {
                         {
                             emit_interrupted_run_effect_evidence(
                                 interruption.effect_evidence(),
+                                &interruption.to_string(),
                                 json,
                                 console_only,
+                                None,
+                                None,
                             )?;
                         }
                         // bd-rpo4f: `dispatch_run` surfaces requested-runtime
@@ -33586,7 +33675,7 @@ fn main() -> Result<()> {
                     sentinel_enforcement,
                     None,
                     compat_preflight_report,
-                    execution_error.as_ref().map(|error| error.to_string()),
+                    execution_error.as_ref(),
                 )?;
                 // bd-reality-20260923-26n9r.8: the receipt names the incident a
                 // tripped control is captured as, and its hash commits to it.
@@ -33612,8 +33701,8 @@ fn main() -> Result<()> {
                 {
                     eprintln!("warning: run host-effect ledger was not persisted: {err:#}");
                 }
-                // The run already completed; a capture failure is reported loudly
-                // but does not rewrite the run's own exit semantics.
+                // Capture only finalized evidence; a capture failure is reported
+                // without rewriting the attempt's own exit semantics.
                 let captured_incident = match maybe_capture_run_incident(
                     &project_root,
                     &policy,
@@ -33658,6 +33747,22 @@ fn main() -> Result<()> {
                             }
                         }
                         let detail = format!("{persistence_error:#}");
+                        #[cfg(feature = "engine")]
+                        if let Some(interruption) =
+                            error.downcast_ref::<ops::engine_dispatcher::NativeRunInterruption>()
+                        {
+                            emit_interrupted_run_effect_evidence(
+                                interruption.effect_evidence(),
+                                &interruption.to_string(),
+                                json,
+                                console_only,
+                                None,
+                                Some(&detail),
+                            )?;
+                            return Err(error.context(format!(
+                                "failed persisting the interrupted run: {detail}"
+                            )));
+                        }
                         emit_failed_run_effect_evidence(
                             dispatch.host_effect_ledger.as_ref(),
                             &dispatch.captured_output,
@@ -33701,15 +33806,35 @@ fn main() -> Result<()> {
                         dispatch.exit_code,
                     ),
                 };
-                emit_failed_run_effect_evidence(
-                    dispatch.host_effect_ledger.as_ref(),
-                    &dispatch.captured_output,
-                    &error.to_string(),
-                    json,
-                    console_only,
-                    Some(&output),
-                    None,
-                )?;
+                #[cfg(feature = "engine")]
+                let interruption =
+                    error.downcast_ref::<ops::engine_dispatcher::NativeRunInterruption>();
+                #[cfg(feature = "engine")]
+                if let Some(interruption) = interruption {
+                    emit_interrupted_run_effect_evidence(
+                        interruption.effect_evidence(),
+                        &interruption.to_string(),
+                        json,
+                        console_only,
+                        Some(&output),
+                        None,
+                    )?;
+                }
+                #[cfg(feature = "engine")]
+                let emit_failure = interruption.is_none();
+                #[cfg(not(feature = "engine"))]
+                let emit_failure = true;
+                if emit_failure {
+                    emit_failed_run_effect_evidence(
+                        dispatch.host_effect_ledger.as_ref(),
+                        &dispatch.captured_output,
+                        &error.to_string(),
+                        json,
+                        console_only,
+                        Some(&output),
+                        None,
+                    )?;
+                }
             } else {
                 emit_run_completion_output(
                     &preflight,
@@ -36006,9 +36131,8 @@ mod run_trust_gate_tests {
         assert_eq!(first.receipt_hash, second.receipt_hash);
     }
 
-    #[test]
-    fn run_failure_reason_is_bound_to_receipt_hash_and_identity() {
-        let core = RunExecutionReceiptCore {
+    fn sample_failed_run_receipt_core() -> RunExecutionReceiptCore {
+        RunExecutionReceiptCore {
             receipt_id: "01950fa2-7738-8000-8000-000000000001".to_string(),
             schema_version: RUN_EXECUTION_RECEIPT_SCHEMA_VERSION.to_string(),
             app_path: "/project/index.js".to_string(),
@@ -36019,6 +36143,8 @@ mod run_trust_gate_tests {
             duration_ms: 1_000,
             exit_code: Some(1),
             execution_failure: Some("guest threw after a denied host effect".to_string()),
+            #[cfg(feature = "engine")]
+            interruption_evidence: None,
             runtime_used: "franken_engine".to_string(),
             runtime_version: None,
             parser_budget: None,
@@ -36036,7 +36162,12 @@ mod run_trust_gate_tests {
             auto_quarantined_extensions: Vec::new(),
             sentinel_enforcement: None,
             incident_capture: None,
-        };
+        }
+    }
+
+    #[test]
+    fn run_failure_reason_is_bound_to_receipt_hash_and_identity() {
+        let core = sample_failed_run_receipt_core();
         let original_hash = compute_run_execution_receipt_hash(&core).expect("receipt hash");
         let original_id = deterministic_run_execution_receipt_id(
             &compute_run_execution_receipt_seed_hash(&core).expect("receipt seed"),
@@ -36066,6 +36197,82 @@ mod run_trust_gate_tests {
                 .is_none(),
             "ordinary exits must retain their existing receipt representation"
         );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn run_interruption_journal_is_bound_to_receipt_hash_and_identity() {
+        use ops::engine_dispatcher::{
+            NativeEffectInterruptionEvidence, NativeEffectWalEntry, NativeEffectWalState,
+        };
+
+        let journal = NativeEffectInterruptionEvidence {
+            schema_version: "franken-node/native-effect-interruption-evidence/v1".to_string(),
+            session_nonce: "parent-session-1".to_string(),
+            terminal_state: "timeout_indeterminate".to_string(),
+            replay_certified: false,
+            journal_complete: true,
+            journal_event_cap: 2_048,
+            completed_effect_count: 1,
+            interrupted_effect_count: 1,
+            entries: vec![
+                NativeEffectWalEntry {
+                    sequence: 0,
+                    effect_kind: "filesystem_write".to_string(),
+                    request_hash: "sha256:returned-write".to_string(),
+                    state: NativeEffectWalState::ProviderReturned,
+                },
+                NativeEffectWalEntry {
+                    sequence: 1,
+                    effect_kind: "network_request".to_string(),
+                    request_hash: "sha256:unfinished-request".to_string(),
+                    state: NativeEffectWalState::InterruptedIndeterminate,
+                },
+            ],
+            protocol_error: None,
+        };
+        let mut core = sample_failed_run_receipt_core();
+        core.execution_failure = Some("native execution timed out".to_string());
+        core.interruption_evidence = Some(journal.clone());
+        let original_hash = compute_run_execution_receipt_hash(&core).expect("receipt hash");
+        let original_id = deterministic_run_execution_receipt_id(
+            &compute_run_execution_receipt_seed_hash(&core).expect("receipt seed"),
+        );
+
+        let mut forged_completion = journal.clone();
+        forged_completion.entries[1].state = NativeEffectWalState::ProviderReturned;
+        forged_completion.completed_effect_count = 2;
+        forged_completion.interrupted_effect_count = 0;
+        let mut forged_certification = journal.clone();
+        forged_certification.replay_certified = true;
+        let mut foreign_session = journal.clone();
+        foreign_session.session_nonce = "different-parent-session".to_string();
+        let mut erased_admission = journal;
+        erased_admission.entries.pop();
+        erased_admission.interrupted_effect_count = 0;
+
+        for replacement in [
+            None,
+            Some(forged_completion),
+            Some(forged_certification),
+            Some(foreign_session),
+            Some(erased_admission),
+        ] {
+            let mut tampered = core.clone();
+            tampered.interruption_evidence = replacement;
+            assert_ne!(
+                compute_run_execution_receipt_hash(&tampered).expect("tampered receipt hash"),
+                original_hash,
+                "journal removal, completion, certification, session substitution and admission erasure must change the receipt hash"
+            );
+            assert_ne!(
+                deterministic_run_execution_receipt_id(
+                    &compute_run_execution_receipt_seed_hash(&tampered).expect("tampered seed"),
+                ),
+                original_id,
+                "the parent-observed interrupted boundary must participate in receipt identity"
+            );
+        }
     }
 
     #[test]

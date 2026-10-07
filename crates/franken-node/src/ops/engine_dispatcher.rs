@@ -3166,12 +3166,16 @@ pub struct NativeEffectInterruptionEvidence {
 ///
 /// The display text remains the same actionable timeout error. Downcasting
 /// preserves the sibling WAL artifact without ever presenting it as a
-/// finalized host-effect ledger.
+/// finalized host-effect ledger. The dispatch report retains the authenticated
+/// session identity for durable observation of the unsuccessful attempt.
 #[cfg(feature = "engine")]
 #[derive(Debug)]
 pub struct NativeRunInterruption {
     actionable: ActionableError,
     effect_evidence: Box<NativeEffectInterruptionEvidence>,
+    runtime_evidence_identity_capture: Option<RuntimeEvidenceIdentityCapture>,
+    runtime_evidence_identity_capture_path: Option<PathBuf>,
+    dispatch_report: Option<Box<RunDispatchReport>>,
 }
 
 #[cfg(feature = "engine")]
@@ -3179,6 +3183,50 @@ impl NativeRunInterruption {
     #[must_use]
     pub fn effect_evidence(&self) -> &NativeEffectInterruptionEvidence {
         &self.effect_evidence
+    }
+
+    /// The supervisor's report of the interrupted attempt. Its session identity
+    /// authenticates the provisioned key, not a finalized effect outcome. The
+    /// report contains no effect ledger, telemetry, or engine decision because
+    /// the worker did not complete the protocol that would authenticate them.
+    /// Guest output is unavailable; empty captured streams do not prove silence.
+    #[must_use]
+    pub fn dispatch_report(&self) -> Option<&RunDispatchReport> {
+        self.dispatch_report.as_deref()
+    }
+
+    fn attach_dispatch_report(
+        &mut self,
+        runtime_path: &Path,
+        target: &Path,
+        working_dir: &Path,
+        started_at: chrono::DateTime<Utc>,
+        duration: std::time::Duration,
+    ) {
+        let report = EngineDispatcher::build_dispatch_report(DispatchReportInputs {
+            runtime: "franken_engine",
+            runtime_path,
+            target,
+            working_dir,
+            used_fallback_runtime: false,
+            started_at,
+            duration,
+            output: Output {
+                // Preserve the CLI's original error exit status. Neither a
+                // guest exit code nor a containment verdict was returned.
+                status: exit_status_from_code(1),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            },
+            telemetry: None,
+            host_effect_ledger: None,
+            runtime_evidence_identity_capture: self.runtime_evidence_identity_capture.take(),
+            runtime_evidence_identity_capture_path: self
+                .runtime_evidence_identity_capture_path
+                .take(),
+            engine_decision: None,
+        });
+        self.dispatch_report = Some(Box::new(report));
     }
 }
 
@@ -5334,6 +5382,14 @@ impl EngineDispatcher {
                         started_at,
                         started.elapsed(),
                     );
+                } else if let Some(interruption) = error.downcast_mut::<NativeRunInterruption>() {
+                    interruption.attach_dispatch_report(
+                        Path::new(&bin_path),
+                        app_path,
+                        project_paths.project_root(),
+                        started_at,
+                        started.elapsed(),
+                    );
                 }
                 error
             })
@@ -6807,6 +6863,9 @@ impl EngineDispatcher {
                     return Err(anyhow::Error::new(NativeRunInterruption {
                         actionable,
                         effect_evidence: Box::new(effect_evidence),
+                        runtime_evidence_identity_capture: Some(expected_evidence_capture),
+                        runtime_evidence_identity_capture_path: Some(evidence_capture_path),
+                        dispatch_report: None,
                     }));
                 }
                 Ok(None) => thread::sleep(NATIVE_SESSION_POLL_INTERVAL),
@@ -9674,6 +9733,132 @@ mod tests {
                 .to_string()
                 .contains("parse failed before execution")
         );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn native_interrupted_dispatch_report_preserves_identity_without_certifying_wal() {
+        let nonce = "00000000-0000-4000-8000-000000000127";
+        let capture = runtime_evidence_grant_for_test(nonce, [0xE1; 32], [0xF2; 32])
+            .capture
+            .clone();
+        let capture_path = PathBuf::from("/var/lib/franken-node-state/interrupted-capture.json");
+        let requests = [
+            HostIoRequest::FsWrite {
+                path: "completed-marker".to_string(),
+                data: b"provider returned".to_vec(),
+            },
+            HostIoRequest::NetworkRecv {
+                endpoint: "example.invalid:443".to_string(),
+                max_len: 1024,
+            },
+        ];
+        let mut output = Vec::new();
+        for (sequence, request) in requests.iter().enumerate() {
+            let admission = NativeSessionOutputFrame::HostEffectAdmitted {
+                schema_version: NATIVE_EFFECT_WAL_SCHEMA.to_string(),
+                nonce: nonce.to_string(),
+                sequence: sequence as u64,
+                effect_kind: request.kind().to_string(),
+                request_hash: native_effect_wal_request_hash(request)
+                    .expect("hash interrupted attempt admission"),
+            };
+            output.extend(
+                encode_native_session_frame(&admission, NATIVE_SESSION_MAX_EFFECT_WAL_EVENT_BYTES)
+                    .expect("encode interrupted attempt admission"),
+            );
+            if sequence == 0 {
+                let completion = NativeSessionOutputFrame::HostEffectCompleted {
+                    schema_version: NATIVE_EFFECT_WAL_SCHEMA.to_string(),
+                    nonce: nonce.to_string(),
+                    sequence: 0,
+                };
+                output.extend(
+                    encode_native_session_frame(
+                        &completion,
+                        NATIVE_SESSION_MAX_EFFECT_WAL_EVENT_BYTES,
+                    )
+                    .expect("encode provider return marker"),
+                );
+            }
+        }
+
+        for cleanup_failure in [None, Some("process-group kill failed")] {
+            let evidence =
+                native_timeout_effect_evidence(Ok((&output, false)), cleanup_failure, nonce, false);
+            let expected_evidence = evidence.clone();
+            let actionable = ActionableError::new(
+                "native session timed out",
+                "inspect the interrupted effect evidence before retrying",
+            );
+            let expected_error = actionable.to_string();
+            let mut interruption = NativeRunInterruption {
+                actionable,
+                effect_evidence: Box::new(evidence),
+                runtime_evidence_identity_capture: Some(capture.clone()),
+                runtime_evidence_identity_capture_path: Some(capture_path.clone()),
+                dispatch_report: None,
+            };
+            let started_at = chrono::DateTime::parse_from_rfc3339("2026-10-07T18:00:00Z")
+                .expect("parse interrupted attempt start")
+                .with_timezone(&Utc);
+            interruption.attach_dispatch_report(
+                Path::new("/usr/bin/franken-node"),
+                Path::new("/srv/project/blocked.js"),
+                Path::new("/srv/project"),
+                started_at,
+                Duration::from_millis(250),
+            );
+
+            let report = interruption
+                .dispatch_report()
+                .expect("interrupted attempt remains reportable");
+            assert_eq!(report.runtime, "franken_engine");
+            assert_eq!(report.target, "/srv/project/blocked.js");
+            assert_eq!(report.working_dir, "/srv/project");
+            assert_eq!(report.started_at_utc, started_at.to_rfc3339());
+            assert_eq!(report.duration_ms, 250);
+            assert_eq!(report.exit_code, Some(1));
+            assert!(!report.terminated_by_signal);
+            assert!(!report.used_fallback_runtime);
+            assert_eq!(
+                report.runtime_evidence_identity_capture,
+                Some(capture.clone())
+            );
+            assert_eq!(
+                report.runtime_evidence_identity_capture_path.as_deref(),
+                capture_path.to_str()
+            );
+            assert!(report.host_effect_ledger.is_none());
+            assert!(report.telemetry.is_none());
+            assert!(report.sentinel.is_none());
+            assert!(report.engine_decision.is_none());
+            assert!(report.captured_output.stdout.is_empty());
+            assert!(report.captured_output.stderr.is_empty());
+            let retained = interruption.effect_evidence();
+            assert_eq!(retained, &expected_evidence);
+            assert!(!retained.replay_certified);
+            assert_eq!(retained.completed_effect_count, 1);
+            assert_eq!(retained.interrupted_effect_count, 1);
+            assert_eq!(
+                retained.entries[0].state,
+                NativeEffectWalState::ProviderReturned
+            );
+            assert_eq!(
+                retained.entries[1].state,
+                NativeEffectWalState::InterruptedIndeterminate
+            );
+            assert_eq!(retained.journal_complete, cleanup_failure.is_none());
+            assert_eq!(
+                retained.terminal_state,
+                if cleanup_failure.is_some() {
+                    "timeout_cleanup_unproven"
+                } else {
+                    "timeout_indeterminate"
+                }
+            );
+            assert_eq!(interruption.to_string(), expected_error);
+        }
     }
 
     #[cfg(feature = "engine")]

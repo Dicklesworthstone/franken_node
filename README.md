@@ -1739,6 +1739,25 @@ the envelope retains the original failure and console and reports
 `persistence_error`, without inventing a persisted receipt. `--console-only`
 continues to emit the guest streams without receipt or incident notices.
 
+Native timeouts also retain an execution receipt. Its `interruption_evidence`
+binds the parent-observed write-ahead journal before receipt identity and hashing.
+The signed durable `Deny` decision includes that journal, the complete
+`run_receipt_snapshot`, and the authenticated session identity context, so the
+observation remains inspectable if the separate receipt file becomes unavailable.
+The decision signs the parent's observation; session identity alone does not
+authenticate a finalized engine outcome. An unmatched admission remains
+`interrupted_indeterminate`, a provider-return marker remains `provider_returned`,
+and `replay_certified` stays false, including when worker cleanup is unproven.
+
+Timeout JSON retains the `franken-node/native-effect-interruption-evidence/v1`
+fields and adds `error`, `receipt`, `receipt_path`, and `dispatch`.
+`guest_output_available: false` makes clear that the interrupted worker did not
+supply its final console response. Receipt-storage failure retains the journal
+and original timeout error with a separate `persistence_error`. Interrupted runs
+remain nonzero failures, produce no fabricated finalized host-effect ledger or
+automatic replay capture, and remain visible as source errors in incident
+coverage. `incident capture --from-run` explicitly refuses to certify them.
+
 An explicit `--evidence-path` can still import operator-authored evidence;
 the export reports `source_authenticated: false`. Captured-store files and inputs
 that contain source signatures or runtime-run claims still require source
