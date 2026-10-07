@@ -405,6 +405,10 @@ enum NativeSessionResponse {
         schema_version: String,
         nonce: String,
         message: String,
+        /// The actual telemetry report recovered while shutting down this
+        /// failed attempt. Absent when the worker could not produce one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        telemetry_report: Option<Box<TelemetryRuntimeReport>>,
         /// bd-muy9u: effects the aborted attempt already performed or was
         /// denied. Carried across the worker boundary so a failed native run
         /// surfaces the same SDK-verifiable receipts a successful one does.
@@ -3188,22 +3192,28 @@ impl std::fmt::Display for NativeRunInterruption {
 #[cfg(feature = "engine")]
 impl std::error::Error for NativeRunInterruption {}
 
-/// A native run that failed after it had already done something the operator
-/// must still see: performed or been denied host effects (bd-muy9u), or
-/// printed output before throwing.
+/// An unsuccessful native attempt with the evidence the worker actually
+/// recovered, including attempts that produced no ledger or console output.
 ///
 /// The run stays failed and the operator-visible text is byte-identical to the
 /// [`ActionableError`] the same failure produced before: this type exists only
-/// to keep the attempt's signed, hash-chained host-effect ledger and its guest
-/// output attached, so the CLI can surface what a denial produced and what the
-/// program printed instead of dropping both because the program aborted
-/// afterwards. Recover it with
+/// to keep the attempt's signed, hash-chained host-effect ledger, guest output,
+/// telemetry, and authenticated session identity attached. The dispatcher adds
+/// a report so the CLI can persist the failed run and enforce its recorded
+/// security decisions before returning the original error. Recover it with
 /// `anyhow::Error::downcast_ref::<NativeRunFailure>()`.
 #[derive(Debug)]
 pub struct NativeRunFailure {
     actionable: ActionableError,
     host_effect_ledger: Option<Box<HostEffectLedger>>,
     guest_output: CapturedProcessOutput,
+    #[cfg(feature = "engine")]
+    telemetry_report: Option<Box<TelemetryRuntimeReport>>,
+    #[cfg(feature = "engine")]
+    runtime_evidence_identity_capture: Option<RuntimeEvidenceIdentityCapture>,
+    #[cfg(feature = "engine")]
+    runtime_evidence_identity_capture_path: Option<PathBuf>,
+    dispatch_report: Option<Box<RunDispatchReport>>,
 }
 
 impl NativeRunFailure {
@@ -3213,14 +3223,64 @@ impl NativeRunFailure {
     /// run's ledger before the failure was constructed.
     #[must_use]
     pub fn host_effect_ledger(&self) -> Option<&HostEffectLedger> {
-        self.host_effect_ledger.as_deref()
+        match self.dispatch_report.as_deref() {
+            Some(report) => report.host_effect_ledger.as_ref(),
+            None => self.host_effect_ledger.as_deref(),
+        }
     }
 
     /// What the program printed before it failed, split into stdout and
     /// stderr exactly as a completed run's output is.
     #[must_use]
     pub fn guest_output(&self) -> &CapturedProcessOutput {
-        &self.guest_output
+        self.dispatch_report
+            .as_deref()
+            .map_or(&self.guest_output, |report| &report.captured_output)
+    }
+
+    /// The unsuccessful attempt's report, attached by [`EngineDispatcher::dispatch_run`]
+    /// after worker evidence validation. Its nonzero exit status describes the
+    /// execution failure; an absent engine containment decision or effect
+    /// ledger remains absent rather than being inferred from that status.
+    #[must_use]
+    pub fn dispatch_report(&self) -> Option<&RunDispatchReport> {
+        self.dispatch_report.as_deref()
+    }
+
+    #[cfg(feature = "engine")]
+    fn attach_dispatch_report(
+        &mut self,
+        runtime_path: &Path,
+        target: &Path,
+        working_dir: &Path,
+        started_at: chrono::DateTime<Utc>,
+        duration: std::time::Duration,
+    ) {
+        let guest_output = std::mem::take(&mut self.guest_output);
+        let report = EngineDispatcher::build_dispatch_report(DispatchReportInputs {
+            runtime: "franken_engine",
+            runtime_path,
+            target,
+            working_dir,
+            used_fallback_runtime: false,
+            started_at,
+            duration,
+            output: Output {
+                // The CLI propagates the original execution error with exit 1.
+                // This is not an engine containment verdict or guest exit call.
+                status: exit_status_from_code(1),
+                stdout: guest_output.stdout.into_bytes(),
+                stderr: guest_output.stderr.into_bytes(),
+            },
+            telemetry: self.telemetry_report.take().map(|report| *report),
+            host_effect_ledger: self.host_effect_ledger.take().map(|ledger| *ledger),
+            runtime_evidence_identity_capture: self.runtime_evidence_identity_capture.take(),
+            runtime_evidence_identity_capture_path: self
+                .runtime_evidence_identity_capture_path
+                .take(),
+            engine_decision: None,
+        });
+        self.dispatch_report = Some(Box::new(report));
     }
 }
 
@@ -5265,6 +5325,18 @@ impl EngineDispatcher {
                 process_spawn_trust_key_hex.as_deref(),
                 &self.app_args,
             )
+            .map_err(|mut error| {
+                if let Some(failure) = error.downcast_mut::<NativeRunFailure>() {
+                    failure.attach_dispatch_report(
+                        Path::new(&bin_path),
+                        app_path,
+                        project_paths.project_root(),
+                        started_at,
+                        started.elapsed(),
+                    );
+                }
+                error
+            })
         }?;
         #[cfg(not(feature = "engine"))]
         let (output, report, host_effect_ledger, engine_decision) = {
@@ -5673,6 +5745,7 @@ impl EngineDispatcher {
                             "failed"
                         }
                     ),
+                    telemetry_report: None,
                     // The worker never started, so no effect could have run.
                     host_effect_ledger: None,
                     stdout_base64: String::new(),
@@ -5705,6 +5778,7 @@ impl EngineDispatcher {
                                     nonce,
                                     message: "native engine returned a signal-only status"
                                         .to_string(),
+                                    telemetry_report: Some(Box::new(telemetry_report)),
                                     // bd-muy9u: execution reached completion and
                                     // produced a ledger; only the exit status was
                                     // unusable. Losing the effects here would be
@@ -5732,13 +5806,14 @@ impl EngineDispatcher {
                         }
                         Err(EngineProcessError::Spawn {
                             message,
+                            telemetry_report,
                             host_effect_ledger,
                             guest_output: (stdout, stderr),
-                            ..
                         }) => NativeSessionResponse::ExecutionFailed {
                             schema_version: NATIVE_SESSION_SCHEMA.to_string(),
                             nonce,
                             message,
+                            telemetry_report,
                             host_effect_ledger: host_effect_ledger.map(|ledger| *ledger),
                             stdout_base64: base64::engine::general_purpose::STANDARD.encode(stdout),
                             stderr_base64: base64::engine::general_purpose::STANDARD.encode(stderr),
@@ -5773,6 +5848,7 @@ impl EngineDispatcher {
                     message: format!(
                         "native engine worker stopped without a typed outcome: {error}; worker joined: {worker_joined}"
                     ),
+                    telemetry_report: None,
                     // No typed outcome crossed the channel, so the attempt's
                     // effect boundary is unknown. Emitting an empty ledger here
                     // would assert "no effects occurred" without evidence.
@@ -6986,6 +7062,7 @@ impl EngineDispatcher {
                 schema_version,
                 nonce: response_nonce,
                 message,
+                telemetry_report,
                 host_effect_ledger,
                 stdout_base64,
                 stderr_base64,
@@ -7038,16 +7115,14 @@ impl EngineDispatcher {
                     phase: "execution".to_string(),
                 };
                 let actionable = dispatch_error.to_actionable();
-                if host_effect_ledger.is_none()
-                    && guest_output.stdout.is_empty()
-                    && guest_output.stderr.is_empty()
-                {
-                    return Err(actionable.into());
-                }
                 Err(anyhow::Error::new(NativeRunFailure {
                     actionable,
                     host_effect_ledger: host_effect_ledger.map(Box::new),
                     guest_output,
+                    telemetry_report,
+                    runtime_evidence_identity_capture: Some(expected_evidence_capture),
+                    runtime_evidence_identity_capture_path: Some(evidence_capture_path),
+                    dispatch_report: None,
                 }))
             }
             NativeSessionResponse::TelemetryFailed {
@@ -9440,6 +9515,165 @@ mod tests {
             append_runtime_evidence_containment_mask(&mut command, Path::new("relative/state"))
                 .expect_err("a relative mask target must fail closed");
         assert!(relative_error.to_string().contains("must be absolute"));
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn native_failed_dispatch_report_preserves_verified_evidence_and_output() {
+        use frankenengine_extension_host::host_io::{HostIoError, HostIoRequest};
+
+        let session_nonce = uuid::Uuid::now_v7().to_string();
+        let grant = runtime_evidence_grant_for_test(&session_nonce, [0xA1; 32], [0xB2; 32]);
+        let capture = grant.capture.clone();
+        let authority = grant.into_authority().expect("authenticate session grant");
+        let ledger = EngineDispatcher::build_host_effect_ledger(
+            "trace-failed-dispatch-report",
+            &[(
+                HostIoRequest::FsWrite {
+                    path: "blocked.txt".to_string(),
+                    data: b"refused".to_vec(),
+                },
+                Err(HostIoError::Denied {
+                    reason: "write refused by runtime policy".to_string(),
+                }),
+            )],
+            &authority,
+            SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH),
+        )
+        .expect("sign the recorded denied effect");
+        validate_host_effect_ledger(&ledger, &capture.evidence_verification_identity)
+            .expect("the failed attempt's ledger is authentic");
+        let expected_ledger = serde_json::to_value(&ledger).expect("serialize expected ledger");
+        let telemetry = TelemetryRuntimeReport {
+            final_state: BridgeLifecycleState::Stopped,
+            bridge_id: "failed-attempt-telemetry".to_string(),
+            accepted_total: 3,
+            persisted_total: 2,
+            shed_total: 0,
+            dropped_total: 1,
+            retry_total: 4,
+            drain_completed: false,
+            drain_duration_ms: 37,
+            telemetry_events: vec![],
+            recent_events: vec![],
+        };
+        let expected_telemetry =
+            serde_json::to_value(&telemetry).expect("serialize expected telemetry");
+        let capture_path = PathBuf::from("/var/lib/franken-node-state/failed-capture.json");
+        let actionable = ActionableError::new("guest execution failed", "inspect the run evidence");
+        let expected_error = actionable.to_string();
+        let mut failure = NativeRunFailure {
+            actionable,
+            host_effect_ledger: Some(Box::new(ledger)),
+            guest_output: CapturedProcessOutput {
+                stdout: "before failure\n".to_string(),
+                stderr: "guest warning\n".to_string(),
+            },
+            telemetry_report: Some(Box::new(telemetry)),
+            runtime_evidence_identity_capture: Some(capture.clone()),
+            runtime_evidence_identity_capture_path: Some(capture_path.clone()),
+            dispatch_report: None,
+        };
+        let started_at = chrono::DateTime::parse_from_rfc3339("2026-10-07T18:00:00Z")
+            .expect("parse attempt start")
+            .with_timezone(&Utc);
+        failure.attach_dispatch_report(
+            Path::new("/usr/bin/franken-node"),
+            Path::new("/srv/project/app.js"),
+            Path::new("/srv/project"),
+            started_at,
+            Duration::from_millis(42),
+        );
+
+        let report = failure.dispatch_report().expect("failed attempt report");
+        assert_eq!(report.runtime, "franken_engine");
+        assert_eq!(report.exit_code, Some(1));
+        assert!(!report.terminated_by_signal);
+        assert!(!report.used_fallback_runtime);
+        assert_eq!(report.started_at_utc, started_at.to_rfc3339());
+        assert_eq!(report.duration_ms, 42);
+        assert!(report.engine_decision.is_none());
+        assert_eq!(
+            report.runtime_evidence_identity_capture,
+            Some(capture.clone())
+        );
+        assert_eq!(
+            report.runtime_evidence_identity_capture_path.as_deref(),
+            capture_path.to_str()
+        );
+        assert_eq!(
+            serde_json::to_value(report.telemetry.as_ref().expect("retained telemetry"))
+                .expect("serialize retained telemetry"),
+            expected_telemetry
+        );
+        let retained_ledger = report.host_effect_ledger.as_ref().expect("retained ledger");
+        assert_eq!(
+            serde_json::to_value(retained_ledger).expect("serialize retained ledger"),
+            expected_ledger
+        );
+        validate_host_effect_ledger(retained_ledger, &capture.evidence_verification_identity)
+            .expect("retained ledger remains authentic");
+        assert!(
+            report.sentinel.is_some(),
+            "failed effects still feed Sentinel"
+        );
+        assert_eq!(
+            failure
+                .host_effect_ledger()
+                .expect("ledger accessor")
+                .denied_count,
+            1
+        );
+        assert_eq!(failure.guest_output().stdout, "before failure\n");
+        assert_eq!(failure.guest_output().stderr, "guest warning\n");
+        assert_eq!(failure.to_string(), expected_error);
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn native_failed_dispatch_report_keeps_an_unknown_effect_boundary_absent() {
+        let capture = runtime_evidence_grant_for_test(
+            &uuid::Uuid::now_v7().to_string(),
+            [0xC1; 32],
+            [0xD2; 32],
+        )
+        .capture
+        .clone();
+        let mut failure = NativeRunFailure {
+            actionable: ActionableError::new("parse failed before execution", "fix the source"),
+            host_effect_ledger: None,
+            guest_output: CapturedProcessOutput::default(),
+            telemetry_report: None,
+            runtime_evidence_identity_capture: Some(capture),
+            runtime_evidence_identity_capture_path: Some(PathBuf::from(
+                "/var/lib/franken-node-state/unexecuted-capture.json",
+            )),
+            dispatch_report: None,
+        };
+        failure.attach_dispatch_report(
+            Path::new("/usr/bin/franken-node"),
+            Path::new("/srv/project/invalid.js"),
+            Path::new("/srv/project"),
+            Utc::now(),
+            Duration::from_millis(1),
+        );
+
+        let report = failure
+            .dispatch_report()
+            .expect("quiet failure remains reportable");
+        assert_eq!(report.exit_code, Some(1));
+        assert!(report.host_effect_ledger.is_none());
+        assert!(report.telemetry.is_none());
+        assert!(report.sentinel.is_none());
+        assert!(report.engine_decision.is_none());
+        assert!(failure.host_effect_ledger().is_none());
+        assert!(failure.guest_output().stdout.is_empty());
+        assert!(failure.guest_output().stderr.is_empty());
+        assert!(
+            failure
+                .to_string()
+                .contains("parse failed before execution")
+        );
     }
 
     #[cfg(feature = "engine")]

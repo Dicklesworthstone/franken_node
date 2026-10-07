@@ -596,6 +596,147 @@ fn assert_no_debug_dump(stream: &str, label: &str) {
     }
 }
 
+fn receipt_verifying_key(workspace: &std::path::Path) -> ed25519_dalek::VerifyingKey {
+    let public_hex =
+        std::fs::read_to_string(workspace.join(".franken-node/keys/receipt-signing.pub"))
+            .expect("read the operator's init-provisioned receipt authority");
+    let public_bytes: [u8; 32] = hex::decode(public_hex.trim())
+        .expect("receipt public key is hex")
+        .try_into()
+        .expect("receipt public key is 32 bytes");
+    ed25519_dalek::VerifyingKey::from_bytes(&public_bytes).expect("valid receipt public key")
+}
+
+fn run_workspace_json(workspace: &std::path::Path, args: &[&str]) -> (RunOutcome, Value) {
+    let output = Command::new(franken_node_bin())
+        .args(args)
+        .current_dir(workspace)
+        .output()
+        .expect("run the real product command");
+    let outcome = RunOutcome {
+        exit_code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    };
+    let report = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "{args:?} must emit JSON: {error}; exit={:?}; stdout={}; stderr={}",
+            outcome.exit_code, outcome.stdout, outcome.stderr
+        )
+    });
+    (outcome, report)
+}
+
+fn persisted_failed_run_receipt(
+    workspace: &std::path::Path,
+    outcome: &RunOutcome,
+    evidence: &Value,
+) -> (std::path::PathBuf, Value) {
+    assert_eq!(outcome.exit_code, Some(1), "{}", outcome.stderr);
+    assert_eq!(
+        evidence["schema_version"],
+        "franken-node/run-failure-effect-evidence/v2"
+    );
+    assert_eq!(evidence["dispatch"]["runtime"], "franken_engine");
+    assert_eq!(evidence["dispatch"]["exit_code"], 1);
+    assert_eq!(evidence["dispatch"]["terminated_by_signal"], false);
+    assert_eq!(
+        evidence["dispatch"]["captured_output"],
+        evidence["captured_output"]
+    );
+    assert_eq!(
+        evidence["dispatch"]["host_effect_ledger"],
+        evidence["host_effect_ledger"]
+    );
+    let receipt = &evidence["receipt"];
+    assert_eq!(receipt["runtime_used"], "franken_engine");
+    assert_eq!(receipt["exit_code"], 1);
+    assert_eq!(receipt["execution_failure"], evidence["error"]);
+    assert!(
+        receipt["execution_failure"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty()),
+        "the durable receipt must bind the original execution failure: {evidence}"
+    );
+    let receipt_path = workspace.join(
+        evidence["receipt_path"]
+            .as_str()
+            .expect("failed run names its persisted receipt"),
+    );
+    assert!(
+        receipt_path
+            .canonicalize()
+            .expect("failed receipt exists")
+            .starts_with(workspace.canonicalize().expect("workspace exists")),
+        "the receipt must live in the run's own project"
+    );
+    let persisted: Value =
+        serde_json::from_slice(&std::fs::read(&receipt_path).expect("read failed receipt"))
+            .expect("failed receipt is JSON");
+    assert_eq!(persisted, *receipt, "CLI and durable receipt must agree");
+    (receipt_path, persisted)
+}
+
+fn authenticated_failed_run_record(
+    workspace: &std::path::Path,
+    evidence: &Value,
+    receipt: &Value,
+) -> Option<Value> {
+    use frankenengine_node::ops::engine_dispatcher::{
+        HostEffectLedger, verify_recorded_host_effect_ledger,
+    };
+    use frankenengine_node::tools::replay_bundle::parse_verified_run_ledger_record;
+
+    let ended_at = chrono::DateTime::parse_from_rfc3339(
+        receipt["end_time_utc"].as_str().expect("receipt end time"),
+    )
+    .expect("receipt has an RFC3339 end time");
+    let record_path = workspace
+        .join(".franken-node/state/run-ledgers")
+        .join(ended_at.format("%Y-%m-%d").to_string())
+        .join(format!(
+            "{}.json",
+            receipt["receipt_id"].as_str().expect("receipt identity")
+        ));
+    if evidence["host_effect_ledger"].is_null() {
+        assert!(
+            !record_path.exists(),
+            "an unavailable finalized ledger must not acquire a fabricated run record"
+        );
+        return None;
+    }
+    let record_bytes = std::fs::read(&record_path).expect("failed run persists its signed ledger");
+    let verifying_key = receipt_verifying_key(workspace);
+    let record = parse_verified_run_ledger_record(&record_bytes, receipt, &verifying_key)
+        .expect("the complete failed receipt and run record authenticate");
+    assert_eq!(record["receipt_snapshot"], *receipt);
+    assert_eq!(record["host_effect_ledger"], evidence["host_effect_ledger"]);
+    assert_eq!(
+        record["runtime_evidence_identity_capture_path"],
+        evidence["dispatch"]["runtime_evidence_identity_capture_path"]
+    );
+    let ledger: HostEffectLedger = serde_json::from_value(record["host_effect_ledger"].clone())
+        .expect("stored finalized engine ledger");
+    verify_recorded_host_effect_ledger(
+        workspace,
+        &ledger,
+        std::path::Path::new(
+            record["runtime_evidence_identity_capture_path"]
+                .as_str()
+                .expect("failed record retains the product-root-signed session identity"),
+        ),
+    )
+    .expect("the failed ledger verifies against the independently stored engine authority");
+
+    let mut forged_receipt = receipt.clone();
+    forged_receipt["execution_failure"] = Value::Null;
+    assert!(
+        parse_verified_run_ledger_record(&record_bytes, &forged_receipt, &verifying_key).is_err(),
+        "a genuine record cannot authenticate a receipt with its execution failure removed"
+    );
+    Some(record)
+}
+
 #[test]
 fn clean_compute_run_surfaces_real_exit_zero_and_signed_receipt() {
     let (_dir, outcome) = run_app(COMPUTE_APP, &["--json"]);
@@ -704,7 +845,7 @@ fn a_failed_run_still_surfaces_the_denied_effect_receipt_bd_muy9u() {
         console.log(\"unexpected\", res.statusCode);\n\
         });\n";
 
-    let (_dir, outcome) = run_app(UNHANDLED_DENIED_EGRESS_APP, &["--json"]);
+    let (dir, outcome) = run_app(UNHANDLED_DENIED_EGRESS_APP, &["--json"]);
 
     assert_ne!(
         outcome.exit_code,
@@ -785,6 +926,317 @@ fn a_failed_run_still_surfaces_the_denied_effect_receipt_bd_muy9u() {
         "recovered evidence is still chain-committed; got ledger=\n{}",
         serde_json::to_string_pretty(ledger).unwrap_or_default()
     );
+
+    // bd-reality-20260923-26n9r.8: a failed attempt must travel through the
+    // same durable evidence and incident pipeline as a completed run. The
+    // guest above is real and uncaught; none of these artifacts are fixtures.
+    let (receipt_path, run_receipt) = persisted_failed_run_receipt(dir.path(), &outcome, &evidence);
+    let record = authenticated_failed_run_record(dir.path(), &evidence, &run_receipt)
+        .expect("the denied attempt has a finalized ledger");
+    assert_eq!(evidence["dispatch"]["sentinel"]["escalated"], false);
+    assert!(run_receipt["sentinel_enforcement"].is_null());
+
+    use frankenengine_node::observability::evidence_ledger::{
+        DecisionKind, EvidenceEntry, verify_evidence_entry,
+    };
+    use frankenengine_node::observability::evidence_ledger_durable::DurableEvidenceLedger;
+    let entries = DurableEvidenceLedger::open_default(dir.path())
+        .expect("open durable failed-run inventory")
+        .entries_json()
+        .expect("read durable failed-run inventory")
+        .into_iter()
+        .map(|raw| serde_json::from_str::<EvidenceEntry>(&raw).expect("durable evidence entry"))
+        .collect::<Vec<_>>();
+    let decision = entries
+        .iter()
+        .find(|entry| entry.decision_id == run_receipt["receipt_id"].as_str().unwrap())
+        .expect("failed attempt is retained in the durable inventory");
+    let verifying_key = receipt_verifying_key(dir.path());
+    verify_evidence_entry(decision, &verifying_key).expect("failed decision is signed");
+    assert_eq!(decision.decision_kind, DecisionKind::Deny);
+    assert_eq!(decision.payload["exit_code"], 1);
+    assert_eq!(
+        decision.payload["receipt_hash"],
+        run_receipt["receipt_hash"]
+    );
+    assert_eq!(decision.payload["host_effects_denied"], 1);
+
+    let incident_id = run_receipt["incident_capture"]["incident_id"]
+        .as_str()
+        .expect("the failed denial has an automatic incident identity");
+    let source_path = dir.path().join(
+        run_receipt["incident_capture"]["evidence_path"]
+            .as_str()
+            .expect("the failed receipt names its captured evidence"),
+    );
+    let source = frankenengine_node::tools::replay_bundle::read_verified_incident_evidence_package(
+        &source_path,
+        Some(incident_id),
+        &verifying_key,
+    )
+    .expect("automatic failed-run capture is source-signed by the product authority");
+    assert_eq!(
+        source.initial_state_snapshot["run_receipt_id"],
+        run_receipt["receipt_id"]
+    );
+    assert_eq!(
+        source.initial_state_snapshot["run_receipt_hash"],
+        run_receipt["receipt_hash"]
+    );
+    assert_eq!(source.events.len(), 1);
+    assert_eq!(
+        source.events[0].payload["effect_receipt_chain_entry"],
+        ledger["entries"][0]
+    );
+
+    let (listing, list) = run_workspace_json(dir.path(), &["incident", "list", "--json"]);
+    assert_eq!(listing.exit_code, Some(0), "{}", listing.stderr);
+    assert!(
+        list["incidents"]
+            .as_array()
+            .expect("incident listing")
+            .iter()
+            .any(|row| {
+                row["incident_id"] == incident_id
+                    && row["source"] == "captured"
+                    && row["status"] == "valid"
+            })
+    );
+    let (capture, captured) = run_workspace_json(
+        dir.path(),
+        &[
+            "incident",
+            "capture",
+            "--from-run",
+            run_receipt["receipt_id"].as_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert_eq!(capture.exit_code, Some(0), "{}", capture.stderr);
+    assert_eq!(captured["status"], "already_captured");
+    assert_eq!(captured["verification"]["receipt_binding"], "authenticated");
+    assert_eq!(captured["verification"]["source_signature"], "valid");
+    assert_eq!(captured["denied_count"], 1);
+
+    let (before, before_report) = run_workspace_json(
+        dir.path(),
+        &["ops", "incident-coverage", "--min-coverage", "1", "--json"],
+    );
+    assert_ne!(
+        before.exit_code,
+        Some(0),
+        "capture alone is not a verified replay bundle"
+    );
+    assert_eq!(before_report["population_authenticated"], true);
+    assert_eq!(before_report["inventory_runs"], 1);
+    assert_eq!(before_report["high_severity_events"], 1);
+    assert_eq!(before_report["captured"], 1);
+    assert_eq!(before_report["bundled"], 0);
+
+    let (bundle, bundled) = run_workspace_json(
+        dir.path(),
+        &[
+            "incident",
+            "bundle",
+            "--id",
+            incident_id,
+            "--verify",
+            "--json",
+        ],
+    );
+    assert_eq!(bundle.exit_code, Some(0), "{}", bundle.stderr);
+    assert_eq!(bundled["source_authenticated"], true);
+    let (coverage, covered) = run_workspace_json(
+        dir.path(),
+        &["ops", "incident-coverage", "--min-coverage", "1", "--json"],
+    );
+    assert_eq!(
+        coverage.exit_code,
+        Some(0),
+        "{}: {covered}",
+        coverage.stderr
+    );
+    assert_eq!(covered["authenticated_receipts"], 1);
+    assert_eq!(covered["inventory_runs"], 1);
+    assert_eq!(covered["high_severity_events"], 1);
+    assert_eq!(covered["bundled"], 1);
+    assert_eq!(covered["replay_coverage"], 1.0);
+    assert_eq!(covered["source_errors"], serde_json::json!([]));
+
+    // The durable CLI path rejects hand editing even when an already-captured
+    // source exists. A failed receipt must never be relabelled as success.
+    let original_source = std::fs::read(&source_path).expect("original captured source");
+    let mut forged_receipt = run_receipt.clone();
+    forged_receipt["exit_code"] = Value::from(0);
+    std::fs::write(
+        &receipt_path,
+        serde_json::to_vec_pretty(&forged_receipt).unwrap(),
+    )
+    .expect("simulate a hand-edited failed receipt");
+    let capture_after_tamper = Command::new(franken_node_bin())
+        .args([
+            "incident",
+            "capture",
+            "--from-run",
+            run_receipt["receipt_id"].as_str().unwrap(),
+            "--json",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("attempt capture of a tampered failed receipt");
+    assert!(!capture_after_tamper.status.success());
+    assert_eq!(
+        std::fs::read(&source_path).expect("capture retained"),
+        original_source
+    );
+    assert_eq!(record["receipt_snapshot"], run_receipt);
+}
+
+#[test]
+fn a_pure_throw_with_no_console_still_persists_a_failed_run_receipt() {
+    let (dir, outcome) = run_app(THROW_APP, &["--json"]);
+    let evidence: Value = serde_json::from_str(&outcome.stdout).unwrap_or_else(|error| {
+        panic!(
+            "pure throw must emit durable failure metadata: {error}; stderr={}",
+            outcome.stderr
+        )
+    });
+    let (_receipt_path, receipt) = persisted_failed_run_receipt(dir.path(), &outcome, &evidence);
+    assert_eq!(evidence["captured_output"]["stdout"], "");
+    assert_eq!(evidence["captured_output"]["stderr"], "");
+    assert!(evidence["error"].as_str().unwrap().contains("boom"));
+    assert!(
+        receipt["incident_capture"].is_null(),
+        "a pure guest throw is not a security incident"
+    );
+    if let Some(record) = authenticated_failed_run_record(dir.path(), &evidence, &receipt) {
+        assert_eq!(record["host_effect_ledger"]["effect_count"], 0);
+        assert_eq!(
+            record["host_effect_ledger"]["entries"],
+            serde_json::json!([])
+        );
+    }
+
+    use frankenengine_node::observability::evidence_ledger::{
+        DecisionKind, EvidenceEntry, verify_evidence_entry,
+    };
+    use frankenengine_node::observability::evidence_ledger_durable::DurableEvidenceLedger;
+    let rows = DurableEvidenceLedger::open_default(dir.path())
+        .expect("open pure-throw decision inventory")
+        .entries_json()
+        .expect("read pure-throw decision inventory");
+    assert_eq!(
+        rows.len(),
+        1,
+        "the no-output failure remains a recorded attempt"
+    );
+    let entry: EvidenceEntry = serde_json::from_str(&rows[0]).expect("failed run decision");
+    verify_evidence_entry(&entry, &receipt_verifying_key(dir.path()))
+        .expect("signed pure-throw decision");
+    assert_eq!(entry.decision_id, receipt["receipt_id"].as_str().unwrap());
+    assert_eq!(entry.decision_kind, DecisionKind::Deny);
+    assert_eq!(entry.payload["exit_code"], 1);
+    assert_eq!(entry.payload["receipt_hash"], receipt["receipt_hash"]);
+    assert_eq!(
+        entry.payload["host_effects_denied"],
+        evidence["host_effect_ledger"]["denied_count"]
+    );
+}
+
+#[test]
+fn a_failed_run_still_enforces_its_real_sentinel_quarantine() {
+    const REPEATED_DENIAL_THEN_THROW: &str = "const http = require(\"http\");\n\
+        for (let i = 0; i < 5; i++) {\n\
+            const req = http.get(\"http://169.254.169.254/latest/meta-data/\", () => {});\n\
+            req.on(\"error\", () => {});\n\
+        }\n\
+        throw new Error(\"after repeated denied egress\");\n";
+    let (dir, outcome) = run_app(REPEATED_DENIAL_THEN_THROW, &["--json"]);
+    let evidence: Value = serde_json::from_str(&outcome.stdout).unwrap_or_else(|error| {
+        panic!(
+            "failed sentinel run must emit JSON: {error}; stderr={}",
+            outcome.stderr
+        )
+    });
+    let (_receipt_path, receipt) = persisted_failed_run_receipt(dir.path(), &outcome, &evidence);
+    assert!(
+        evidence["error"]
+            .as_str()
+            .unwrap()
+            .contains("after repeated denied egress")
+    );
+    assert_eq!(evidence["host_effect_ledger"]["denied_count"], 5);
+    authenticated_failed_run_record(dir.path(), &evidence, &receipt)
+        .expect("repeated denials have an authenticated finalized ledger");
+    let sentinel = &evidence["dispatch"]["sentinel"];
+    assert_eq!(
+        sentinel["escalated"], true,
+        "five real denials must reach the Sentinel: {sentinel}"
+    );
+    assert_eq!(sentinel["e_value_ppm"], 243_000_000_u64);
+    let enforcement = &receipt["sentinel_enforcement"];
+    assert_eq!(enforcement["mode"], "enforced");
+    assert_eq!(
+        enforcement["decision_id"],
+        sentinel["decision"]["decision_id"]
+    );
+    let quarantine_path = dir.path().join(
+        enforcement["quarantine_record_path"]
+            .as_str()
+            .expect("persisted subject quarantine"),
+    );
+    let quarantine: Value = serde_json::from_slice(
+        &std::fs::read(&quarantine_path).expect("failed run writes the actual quarantine"),
+    )
+    .expect("quarantine JSON");
+    assert_eq!(quarantine["released"], false);
+    assert_eq!(quarantine["decision_id"], enforcement["decision_id"]);
+    assert_eq!(
+        quarantine["escalation_receipt"],
+        sentinel["escalation_receipt"]
+    );
+    let key_bytes: [u8; 32] = hex::decode(
+        quarantine["escalation_verifying_key_hex"]
+            .as_str()
+            .expect("escalation verification identity"),
+    )
+    .expect("escalation key hex")
+    .try_into()
+    .expect("32-byte escalation key");
+    let key = ed25519_dalek::VerifyingKey::from_bytes(&key_bytes).expect("escalation public key");
+    let escalation: frankenengine_node::observability::evidence_ledger::EvidenceEntry =
+        serde_json::from_value(quarantine["escalation_receipt"].clone())
+            .expect("signed escalation");
+    frankenengine_node::observability::evidence_ledger::verify_evidence_entry(&escalation, &key)
+        .expect("the actual persisted escalation signature verifies");
+
+    let rerun = Command::new(franken_node_bin())
+        .args([
+            "run",
+            "app.js",
+            "--policy",
+            "balanced",
+            "--runtime",
+            "franken-engine",
+            "--json",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("attempt to rerun the quarantined failed subject");
+    assert!(
+        !rerun.status.success(),
+        "the persisted quarantine must block the next run"
+    );
+    let rerun_stdout = String::from_utf8_lossy(&rerun.stdout);
+    let rerun_stderr = String::from_utf8_lossy(&rerun.stderr);
+    assert!(
+        rerun_stdout.contains("quarantin") || rerun_stderr.contains("quarantin"),
+        "the next refusal must be the subject quarantine: stdout={rerun_stdout}; stderr={rerun_stderr}"
+    );
+    assert!(
+        !rerun_stdout.contains("run-failure-effect-evidence"),
+        "the quarantined subject must be refused before guest execution"
+    );
 }
 
 /// bd-uqz71: a --json run that fails AFTER the guest printed must surface both
@@ -837,6 +1289,93 @@ fn failed_run_json_envelope_carries_guest_console_and_error_bd_uqz71() {
         !outcome.stdout.trim_end().ends_with("fix_command="),
         "the --json path must not append a human error line after the envelope; stdout=\n{}",
         outcome.stdout
+    );
+}
+
+#[test]
+fn receipt_persistence_failure_preserves_the_guest_error_and_console() {
+    let dir = tempfile::TempDir::new().expect("fresh persistence-failure workspace");
+    std::fs::write(
+        dir.path().join("app.js"),
+        "console.log(\"PERSISTENCE_STDOUT\");\n\
+         console.error(\"PERSISTENCE_STDERR\");\n\
+         throw new Error(\"ORIGINAL_GUEST_FAILURE\");\n",
+    )
+    .expect("write the real marker-and-throw guest");
+    let init = Command::new(franken_node_bin())
+        .args(["init", "--profile", "balanced", "--out-dir", "."])
+        .current_dir(dir.path())
+        .output()
+        .expect("initialize the persistence-failure project");
+    assert!(
+        init.status.success(),
+        "init must succeed before the obstruction: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    // Preserve the directory init actually created, then obstruct its original
+    // path with a regular file. This fails for privileged and unprivileged
+    // runners alike, without chmod assumptions or deleting a directory.
+    let receipts_root = dir.path().join(".franken-node/state/execution-receipts");
+    assert!(receipts_root.is_dir(), "init creates the receipt directory");
+    let preserved_root = dir
+        .path()
+        .join(".franken-node/state/execution-receipts-initial");
+    std::fs::rename(&receipts_root, &preserved_root)
+        .expect("preserve init's receipt directory before obstruction");
+    const OBSTRUCTION: &[u8] = b"receipt output is intentionally obstructed\n";
+    std::fs::write(&receipts_root, OBSTRUCTION).expect("obstruct receipt output with a file");
+
+    let (outcome, evidence) = run_workspace_json(
+        dir.path(),
+        &[
+            "run",
+            "app.js",
+            "--policy",
+            "balanced",
+            "--runtime",
+            "franken-engine",
+            "--json",
+        ],
+    );
+    assert_eq!(outcome.exit_code, Some(1), "{}", outcome.stderr);
+    assert_eq!(
+        evidence["schema_version"],
+        "franken-node/run-failure-effect-evidence/v2"
+    );
+    assert_eq!(
+        evidence["captured_output"]["stdout"],
+        "PERSISTENCE_STDOUT\n"
+    );
+    assert_eq!(
+        evidence["captured_output"]["stderr"],
+        "PERSISTENCE_STDERR\n"
+    );
+    assert!(
+        evidence["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("ORIGINAL_GUEST_FAILURE")),
+        "the storage failure must not replace the original guest failure: {evidence}"
+    );
+    assert!(
+        evidence["persistence_error"]
+            .as_str()
+            .is_some_and(
+                |error| error.contains("failed creating") && error.contains("execution-receipts")
+            ),
+        "the envelope must separately identify the actual receipt-output obstruction: {evidence}"
+    );
+    assert!(evidence.get("receipt").is_none());
+    assert!(evidence.get("receipt_path").is_none());
+    assert_ne!(evidence["success"], true);
+    assert_eq!(
+        std::fs::read(&receipts_root).expect("obstruction remains a regular file"),
+        OBSTRUCTION,
+        "failed persistence must not overwrite the obstructing file"
+    );
+    assert!(
+        preserved_root.is_dir(),
+        "the original directory is preserved"
     );
 }
 

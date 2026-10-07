@@ -837,6 +837,10 @@ struct RunExecutionReceiptCore {
     end_time_utc: String,
     duration_ms: u64,
     exit_code: Option<i32>,
+    /// The original native execution failure, committed before receipt identity
+    /// and hashing. An unsuccessful attempt must not look like an ordinary exit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    execution_failure: Option<String>,
     runtime_used: String,
     runtime_version: Option<String>,
     /// Effective entrypoint/import parser limits for a completed native run.
@@ -8587,6 +8591,7 @@ fn build_run_execution_receipt(
     sentinel_enforcement: Option<SentinelEnforcementSummary>,
     lockstep_verdict: Option<serde_json::Value>,
     compat_preflight: Option<serde_json::Value>,
+    execution_failure: Option<String>,
 ) -> Result<RunExecutionReceipt> {
     let violation_count = ssrf_violations.len();
     let mut core = RunExecutionReceiptCore {
@@ -8599,6 +8604,7 @@ fn build_run_execution_receipt(
         end_time_utc: dispatch.finished_at_utc.clone(),
         duration_ms: dispatch.duration_ms,
         exit_code: dispatch.exit_code,
+        execution_failure,
         runtime_used: dispatch.runtime.clone(),
         runtime_version: None,
         parser_budget: dispatch
@@ -10637,28 +10643,33 @@ fn append_run_evidence_entry(
     let decision_kind = match containment_verdict {
         Some("Quarantine") => DecisionKind::Quarantine,
         Some(_) => DecisionKind::Escalate,
+        None if receipt.core.execution_failure.is_some() => DecisionKind::Deny,
         None => DecisionKind::Admit,
     };
     let ledger = dispatch.host_effect_ledger.as_ref();
+    let mut payload = serde_json::json!({
+        "app_path": receipt.core.app_path,
+        "profile": receipt.core.profile,
+        "runtime": receipt.core.runtime_used,
+        "exit_code": receipt.core.exit_code,
+        "containment_verdict": containment_verdict,
+        "violation_count": receipt.core.violation_count,
+        "receipt_hash": receipt.receipt_hash,
+        "receipt_path": receipt_path.display().to_string(),
+        "host_effect_chain_head": ledger.map(|ledger| ledger.chain_head_hash.clone()),
+        "host_effects_allowed": ledger.map(|ledger| ledger.allowed_count),
+        "host_effects_denied": ledger.map(|ledger| ledger.denied_count),
+    });
+    if let Some(failure) = &receipt.core.execution_failure {
+        payload["execution_failure"] = serde_json::Value::String(failure.clone());
+    }
     append_decision_evidence(
         &project_ledger_dir(project_root),
         RUN_DECISION_EVIDENCE_SCHEMA,
         &receipt.core.receipt_id,
         decision_kind,
         trace_id,
-        serde_json::json!({
-            "app_path": receipt.core.app_path,
-            "profile": receipt.core.profile,
-            "runtime": receipt.core.runtime_used,
-            "exit_code": receipt.core.exit_code,
-            "containment_verdict": containment_verdict,
-            "violation_count": receipt.core.violation_count,
-            "receipt_hash": receipt.receipt_hash,
-            "receipt_path": receipt_path.display().to_string(),
-            "host_effect_chain_head": ledger.map(|ledger| ledger.chain_head_hash.clone()),
-            "host_effects_allowed": ledger.map(|ledger| ledger.allowed_count),
-            "host_effects_denied": ledger.map(|ledger| ledger.denied_count),
-        }),
+        payload,
     )
 }
 
@@ -12348,12 +12359,14 @@ fn emit_failed_run_effect_evidence(
     error: &str,
     json: bool,
     console_only: bool,
+    persisted: Option<&RunCommandOutput>,
+    persistence_error: Option<&str>,
 ) -> Result<()> {
     if console_only {
         return Ok(());
     }
     if json {
-        let evidence = serde_json::json!({
+        let mut evidence = serde_json::json!({
             "schema_version": RUN_FAILURE_EFFECT_EVIDENCE_SCHEMA,
             "error": error,
             "captured_output": {
@@ -12362,6 +12375,16 @@ fn emit_failed_run_effect_evidence(
             },
             "host_effect_ledger": ledger,
         });
+        if let Some(output) = persisted {
+            evidence["success"] = serde_json::Value::Bool(false);
+            evidence["preflight"] = serde_json::to_value(&output.preflight)?;
+            evidence["dispatch"] = serde_json::to_value(&output.dispatch)?;
+            evidence["receipt"] = serde_json::to_value(&output.receipt)?;
+            evidence["receipt_path"] = serde_json::Value::String(output.receipt_path.clone());
+        }
+        if let Some(error) = persistence_error {
+            evidence["persistence_error"] = serde_json::Value::String(error.to_string());
+        }
         println!(
             "{}",
             serde_json::to_string_pretty(&evidence)
@@ -12369,11 +12392,20 @@ fn emit_failed_run_effect_evidence(
         );
         return Ok(());
     }
+    if let Some(output) = persisted {
+        println!(
+            "{}",
+            render_run_execution_receipt_summary(&output.receipt, Path::new(&output.receipt_path),)
+        );
+    }
     if let Some(ledger) = ledger {
         println!(
             "run failed after host effects were already recorded; the signed ledger below is complete for the attempt"
         );
         println!("{}", render_host_effect_ledger_human(ledger));
+    }
+    if let Some(error) = persistence_error {
+        eprintln!("failed-run evidence persistence failed: {error}");
     }
     Ok(())
 }
@@ -33431,65 +33463,78 @@ fn main() -> Result<()> {
                     .with_native_session_worker_path(native_session_worker_path)
                     .with_project_paths(project_paths.clone())
                     .with_app_args(app_args);
-            let dispatch = match dispatcher.dispatch_run(
+            let (dispatch, execution_error) = match dispatcher.dispatch_run(
                 &app_path,
                 &resolved.config,
                 &policy,
                 &trusted_extension_ids,
                 now_unix_secs(),
             ) {
-                Ok(dispatch) => dispatch,
+                Ok(dispatch) => (dispatch, None),
                 Err(err) => {
-                    // bd-muy9u: when the attempt aborted after the engine had
-                    // already performed or been denied host effects, those
-                    // receipts are recovered on the error. Emit them before
-                    // propagating: a denial must not become invisible merely
-                    // because the guest aborted afterwards. The run still
-                    // fails — only the evidence is preserved.
-                    if let Some(failure) =
-                        err.downcast_ref::<ops::engine_dispatcher::NativeRunFailure>()
+                    if let Some(dispatch) = err
+                        .downcast_ref::<ops::engine_dispatcher::NativeRunFailure>()
+                        .and_then(ops::engine_dispatcher::NativeRunFailure::dispatch_report)
+                        .cloned()
                     {
-                        let guest_output = failure.guest_output();
-                        // What the program printed before failing reaches the
-                        // operator's streams first, as it does for a completed
-                        // run (and under Node).
-                        if !json {
-                            if !guest_output.stdout.is_empty() {
-                                print!("{}", guest_output.stdout);
+                        // A failed guest can already have performed or been
+                        // denied effects. Its verified report must pass through
+                        // the same containment and durable evidence path as a
+                        // successful execution before propagating the failure.
+                        (dispatch, Some(err))
+                    } else {
+                        // bd-muy9u: when the attempt aborted after the engine had
+                        // already performed or been denied host effects, those
+                        // receipts are recovered on the error. Emit them before
+                        // propagating: a denial must not become invisible merely
+                        // because the guest aborted afterwards. The run still
+                        // fails — only the evidence is preserved.
+                        if let Some(failure) =
+                            err.downcast_ref::<ops::engine_dispatcher::NativeRunFailure>()
+                        {
+                            let guest_output = failure.guest_output();
+                            // What the program printed before failing reaches the
+                            // operator's streams first, as it does for a completed
+                            // run (and under Node).
+                            if !json {
+                                if !guest_output.stdout.is_empty() {
+                                    print!("{}", guest_output.stdout);
+                                }
+                                if !guest_output.stderr.is_empty() {
+                                    eprint!("{}", guest_output.stderr);
+                                }
                             }
-                            if !guest_output.stderr.is_empty() {
-                                eprint!("{}", guest_output.stderr);
-                            }
+                            // bd-uqz71: emit the v2 evidence envelope even when the
+                            // attempt recorded no host-effect ledger (e.g. a pure
+                            // compute throw), so a --json consumer still sees the
+                            // failure reason and the guest's captured console
+                            // instead of only a human `Error:` line on stderr.
+                            emit_failed_run_effect_evidence(
+                                failure.host_effect_ledger(),
+                                guest_output,
+                                &failure.to_string(),
+                                json,
+                                console_only,
+                                None,
+                                None,
+                            )?;
                         }
-                        // bd-uqz71: emit the v2 evidence envelope even when the
-                        // attempt recorded no host-effect ledger (e.g. a pure
-                        // compute throw), so a --json consumer still sees the
-                        // failure reason and the guest's captured console
-                        // instead of only a human `Error:` line on stderr.
-                        emit_failed_run_effect_evidence(
-                            failure.host_effect_ledger(),
-                            guest_output,
-                            &failure.to_string(),
-                            json,
-                            console_only,
-                        )?;
-                    }
-                    #[cfg(feature = "engine")]
-                    if let Some(interruption) =
-                        err.downcast_ref::<ops::engine_dispatcher::NativeRunInterruption>()
-                    {
-                        emit_interrupted_run_effect_evidence(
-                            interruption.effect_evidence(),
-                            json,
-                            console_only,
-                        )?;
-                    }
-                    // bd-rpo4f: `dispatch_run` surfaces requested-runtime
-                    // unavailability as a typed error instead of exiting the
-                    // process from library code. The CLI boundary owns the
-                    // operator contract: actionable message on stderr, exit
-                    // 127 (pinned by test_native_engine_missing_binary_error_handling).
-                    if let Some(
+                        #[cfg(feature = "engine")]
+                        if let Some(interruption) =
+                            err.downcast_ref::<ops::engine_dispatcher::NativeRunInterruption>()
+                        {
+                            emit_interrupted_run_effect_evidence(
+                                interruption.effect_evidence(),
+                                json,
+                                console_only,
+                            )?;
+                        }
+                        // bd-rpo4f: `dispatch_run` surfaces requested-runtime
+                        // unavailability as a typed error instead of exiting the
+                        // process from library code. The CLI boundary owns the
+                        // operator contract: actionable message on stderr, exit
+                        // 127 (pinned by test_native_engine_missing_binary_error_handling).
+                        if let Some(
                         unavailable @ ops::engine_dispatcher::DispatchResolutionError::RequestedRuntimeUnavailable(_),
                     ) = err.downcast_ref::<ops::engine_dispatcher::DispatchResolutionError>()
                     {
@@ -33504,94 +33549,130 @@ fn main() -> Result<()> {
                         eprintln!("{unavailable}");
                         std::process::exit(127);
                     }
-                    return Err(err);
+                        return Err(err);
+                    }
                 }
             };
-            let ssrf_violations = extract_ssrf_violations(&dispatch);
-            let auto_quarantined_extensions = maybe_auto_quarantine_run_dependencies(
-                &project_root,
-                &resolved.config,
-                &preflight,
-                ssrf_violations.len(),
-                now_unix_secs(),
-            )?;
-            // bd-fp1je: a Sentinel escalation drives product-side enforcement
-            // (run-subject auto-quarantine + trust-card risk bump) per the
-            // resolved profile's `trust.quarantine_on_high_risk`.
-            let sentinel_enforcement = maybe_enforce_sentinel_escalation(
-                &project_paths,
-                &resolved.config,
-                resolved.selected_profile,
-                &policy,
-                &app_path,
-                &preflight,
-                &dispatch,
-                now_unix_secs(),
-            )?;
-            let mut receipt = build_run_execution_receipt(
-                &app_path,
-                &policy,
-                resolved.selected_profile,
-                &preflight,
-                &dispatch,
-                ssrf_violations,
-                auto_quarantined_extensions,
-                sentinel_enforcement,
-                None,
-                compat_preflight_report,
-            )?;
-            // bd-reality-20260923-26n9r.8: the receipt names the incident a
-            // tripped control is captured as, and its hash commits to it.
-            if let Some(capture) = planned_run_incident_capture(&receipt, &dispatch) {
-                receipt.core.incident_capture = Some(capture);
-                receipt.receipt_hash = compute_run_execution_receipt_hash(&receipt.core)?;
-            }
-            let receipt_path = persist_run_execution_receipt(
-                &project_root,
-                &receipt,
-                configured_run_receipt_limit(&resolved.config),
-            )?;
-            // The signed ledger is kept beside the receipt so any run can be
-            // captured later; a write failure is reported, not fatal.
-            if let Err(err) = persist_run_host_effect_ledger(
-                &project_root,
-                &policy,
-                &receipt,
-                &receipt_path,
-                &dispatch,
-                &trace_id,
-            ) && !console_only
-            {
-                eprintln!("warning: run host-effect ledger was not persisted: {err:#}");
-            }
-            // The run already completed; a capture failure is reported loudly
-            // but does not rewrite the run's own exit semantics.
-            let captured_incident = match maybe_capture_run_incident(
-                &project_root,
-                &policy,
-                &app_path,
-                &receipt,
-                &receipt_path,
-                &dispatch,
-                &trace_id,
-            ) {
-                Ok(incident) => incident,
-                Err(err) => {
-                    eprintln!("warning: automatic incident capture failed: {err:#}");
-                    None
+            let persisted_run = (|| -> Result<(RunExecutionReceipt, PathBuf, Option<String>)> {
+                let ssrf_violations = extract_ssrf_violations(&dispatch);
+                let auto_quarantined_extensions = maybe_auto_quarantine_run_dependencies(
+                    &project_root,
+                    &resolved.config,
+                    &preflight,
+                    ssrf_violations.len(),
+                    now_unix_secs(),
+                )?;
+                // bd-fp1je: a Sentinel escalation drives product-side enforcement
+                // (run-subject auto-quarantine + trust-card risk bump) per the
+                // resolved profile's `trust.quarantine_on_high_risk`.
+                let sentinel_enforcement = maybe_enforce_sentinel_escalation(
+                    &project_paths,
+                    &resolved.config,
+                    resolved.selected_profile,
+                    &policy,
+                    &app_path,
+                    &preflight,
+                    &dispatch,
+                    now_unix_secs(),
+                )?;
+                let mut receipt = build_run_execution_receipt(
+                    &app_path,
+                    &policy,
+                    resolved.selected_profile,
+                    &preflight,
+                    &dispatch,
+                    ssrf_violations,
+                    auto_quarantined_extensions,
+                    sentinel_enforcement,
+                    None,
+                    compat_preflight_report,
+                    execution_error.as_ref().map(|error| error.to_string()),
+                )?;
+                // bd-reality-20260923-26n9r.8: the receipt names the incident a
+                // tripped control is captured as, and its hash commits to it.
+                if let Some(capture) = planned_run_incident_capture(&receipt, &dispatch) {
+                    receipt.core.incident_capture = Some(capture);
+                    receipt.receipt_hash = compute_run_execution_receipt_hash(&receipt.core)?;
+                }
+                let receipt_path = persist_run_execution_receipt(
+                    &project_root,
+                    &receipt,
+                    configured_run_receipt_limit(&resolved.config),
+                )?;
+                // The signed ledger is kept beside the receipt so any run can be
+                // captured later; a write failure is reported, not fatal.
+                if let Err(err) = persist_run_host_effect_ledger(
+                    &project_root,
+                    &policy,
+                    &receipt,
+                    &receipt_path,
+                    &dispatch,
+                    &trace_id,
+                ) && !console_only
+                {
+                    eprintln!("warning: run host-effect ledger was not persisted: {err:#}");
+                }
+                // The run already completed; a capture failure is reported loudly
+                // but does not rewrite the run's own exit semantics.
+                let captured_incident = match maybe_capture_run_incident(
+                    &project_root,
+                    &policy,
+                    &app_path,
+                    &receipt,
+                    &receipt_path,
+                    &dispatch,
+                    &trace_id,
+                ) {
+                    Ok(incident) => incident,
+                    Err(err) => {
+                        eprintln!("warning: automatic incident capture failed: {err:#}");
+                        None
+                    }
+                };
+                // Likewise a ledger append failure is reported, not fatal.
+                if let Err(err) = append_run_evidence_entry(
+                    &project_root,
+                    &receipt,
+                    &receipt_path,
+                    &dispatch,
+                    &trace_id,
+                ) && !structured_logs_jsonl
+                {
+                    eprintln!("warning: evidence ledger append failed: {err:#}");
+                }
+                Ok((receipt, receipt_path, captured_incident))
+            })();
+            let (receipt, receipt_path, captured_incident) = match persisted_run {
+                Ok(persisted) => persisted,
+                Err(persistence_error) => {
+                    if let Some(error) = execution_error {
+                        // Persistence itself can fail (for example on a full
+                        // disk). Preserve the actual guest failure and console
+                        // instead of replacing them with the storage error.
+                        if !json {
+                            if !dispatch.captured_output.stdout.is_empty() {
+                                print!("{}", dispatch.captured_output.stdout);
+                            }
+                            if !dispatch.captured_output.stderr.is_empty() {
+                                eprint!("{}", dispatch.captured_output.stderr);
+                            }
+                        }
+                        let detail = format!("{persistence_error:#}");
+                        emit_failed_run_effect_evidence(
+                            dispatch.host_effect_ledger.as_ref(),
+                            &dispatch.captured_output,
+                            &error.to_string(),
+                            json,
+                            console_only,
+                            None,
+                            Some(&detail),
+                        )?;
+                        return Err(error
+                            .context(format!("failed persisting the unsuccessful run: {detail}")));
+                    }
+                    return Err(persistence_error);
                 }
             };
-            // Likewise a ledger append failure is reported, not fatal.
-            if let Err(err) = append_run_evidence_entry(
-                &project_root,
-                &receipt,
-                &receipt_path,
-                &dispatch,
-                &trace_id,
-            ) && !structured_logs_jsonl
-            {
-                eprintln!("warning: evidence ledger append failed: {err:#}");
-            }
 
             if structured_logs_jsonl {
                 eprint!(
@@ -33600,14 +33681,45 @@ fn main() -> Result<()> {
                 );
             }
 
-            emit_run_completion_output(
-                &preflight,
-                &dispatch,
-                &receipt,
-                &receipt_path,
-                json,
-                console_only,
-            )?;
+            if let Some(error) = execution_error.as_ref() {
+                if !json {
+                    if !dispatch.captured_output.stdout.is_empty() {
+                        print!("{}", dispatch.captured_output.stdout);
+                    }
+                    if !dispatch.captured_output.stderr.is_empty() {
+                        eprint!("{}", dispatch.captured_output.stderr);
+                    }
+                }
+                let output = RunCommandOutput {
+                    success: false,
+                    preflight: preflight.clone(),
+                    dispatch: dispatch.clone(),
+                    receipt: receipt.clone(),
+                    receipt_path: receipt_path.display().to_string(),
+                    containment_verdict: native_containment_action(
+                        &dispatch.runtime,
+                        dispatch.exit_code,
+                    ),
+                };
+                emit_failed_run_effect_evidence(
+                    dispatch.host_effect_ledger.as_ref(),
+                    &dispatch.captured_output,
+                    &error.to_string(),
+                    json,
+                    console_only,
+                    Some(&output),
+                    None,
+                )?;
+            } else {
+                emit_run_completion_output(
+                    &preflight,
+                    &dispatch,
+                    &receipt,
+                    &receipt_path,
+                    json,
+                    console_only,
+                )?;
+            }
             // `--console-only` streams are exactly the guest's (the lockstep
             // franken leg compares them against node/bun), so the capture
             // notice is metadata that must not appear there.
@@ -33620,6 +33732,9 @@ fn main() -> Result<()> {
                 );
             }
 
+            if let Some(error) = execution_error {
+                return Err(error);
+            }
             if dispatch.terminated_by_signal {
                 if json {
                     fail_closed_after_json();
@@ -35869,6 +35984,7 @@ mod run_trust_gate_tests {
             None,
             None,
             None,
+            None,
         )
         .expect("first receipt");
         let second = build_run_execution_receipt(
@@ -35882,11 +35998,74 @@ mod run_trust_gate_tests {
             None,
             None,
             None,
+            None,
         )
         .expect("second receipt");
 
         assert_eq!(first.core.receipt_id, second.core.receipt_id);
         assert_eq!(first.receipt_hash, second.receipt_hash);
+    }
+
+    #[test]
+    fn run_failure_reason_is_bound_to_receipt_hash_and_identity() {
+        let core = RunExecutionReceiptCore {
+            receipt_id: "01950fa2-7738-8000-8000-000000000001".to_string(),
+            schema_version: RUN_EXECUTION_RECEIPT_SCHEMA_VERSION.to_string(),
+            app_path: "/project/index.js".to_string(),
+            policy_mode: "balanced".to_string(),
+            profile: "balanced".to_string(),
+            start_time_utc: "2026-10-07T12:00:00Z".to_string(),
+            end_time_utc: "2026-10-07T12:00:01Z".to_string(),
+            duration_ms: 1_000,
+            exit_code: Some(1),
+            execution_failure: Some("guest threw after a denied host effect".to_string()),
+            runtime_used: "franken_engine".to_string(),
+            runtime_version: None,
+            parser_budget: None,
+            execution_limits: None,
+            preflight_verdict: PreFlightVerdict::Passed {
+                checked: 0,
+                warnings: Vec::new(),
+                results: Vec::new(),
+            },
+            telemetry_summary: None,
+            ssrf_violations: Vec::new(),
+            lockstep_verdict: None,
+            compat_preflight: None,
+            violation_count: 0,
+            auto_quarantined_extensions: Vec::new(),
+            sentinel_enforcement: None,
+            incident_capture: None,
+        };
+        let original_hash = compute_run_execution_receipt_hash(&core).expect("receipt hash");
+        let original_id = deterministic_run_execution_receipt_id(
+            &compute_run_execution_receipt_seed_hash(&core).expect("receipt seed"),
+        );
+        for replacement in [None, Some("different failure".to_string())] {
+            let mut tampered = core.clone();
+            tampered.execution_failure = replacement;
+            assert_ne!(
+                compute_run_execution_receipt_hash(&tampered).expect("tampered receipt hash"),
+                original_hash,
+                "removing or changing the failure must change the authenticated receipt"
+            );
+            assert_ne!(
+                deterministic_run_execution_receipt_id(
+                    &compute_run_execution_receipt_seed_hash(&tampered).expect("tampered seed"),
+                ),
+                original_id,
+                "the execution failure must participate in receipt identity"
+            );
+        }
+        let mut ordinary_exit = core;
+        ordinary_exit.execution_failure = None;
+        assert!(
+            serde_json::to_value(&ordinary_exit)
+                .expect("ordinary exit receipt")
+                .get("execution_failure")
+                .is_none(),
+            "ordinary exits must retain their existing receipt representation"
+        );
     }
 
     #[test]
@@ -35958,6 +36137,7 @@ mod run_trust_gate_tests {
             None,
             None,
             None,
+            None,
         )
         .expect("receipt");
 
@@ -35993,6 +36173,7 @@ mod run_trust_gate_tests {
             None,
             None,
             None,
+            None,
         )
         .expect("receipt one");
         let receipt_two = build_run_execution_receipt(
@@ -36011,6 +36192,7 @@ mod run_trust_gate_tests {
             None,
             None,
             None,
+            None,
         )
         .expect("receipt two");
         let receipt_three = build_run_execution_receipt(
@@ -36026,6 +36208,7 @@ mod run_trust_gate_tests {
             ),
             Vec::new(),
             Vec::new(),
+            None,
             None,
             None,
             None,
@@ -37495,6 +37678,7 @@ mod run_trust_gate_tests {
                 None,   // sentinel_enforcement
                 None,   // lockstep_verdict
                 None,   // compat_preflight
+                None,   // execution_failure
             )
             .expect("receipt generation should succeed");
 
@@ -37527,6 +37711,7 @@ mod run_trust_gate_tests {
                 &dispatch,
                 vec![],
                 vec![],
+                None,
                 None,
                 None,
                 None,

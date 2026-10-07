@@ -1723,6 +1723,22 @@ Editing both advertised receipt hashes or substituting receipt metadata cannot
 satisfy that binding. Existing unsigned run records must be recreated by a
 fresh run before they can supply authenticated runtime capture.
 
+Native execution failures with a recovered dispatch report pass through the same
+SSRF quarantine, Sentinel enforcement, receipt persistence, and automatic incident
+capture as successful executions. Throwing after a denied effect cannot skip those
+controls. The receipt commits the original `execution_failure` before its identity
+and hash are derived, and the durable run decision records the failed attempt as
+`Deny`. A recovered ledger retains its independently verified engine identity and
+can be captured and bundled later; an unavailable finalized ledger remains absent.
+
+For these failures, `run --json` preserves the
+`franken-node/run-failure-effect-evidence/v2` envelope and its `error`,
+`captured_output`, and `host_effect_ledger`, adding `receipt`, `receipt_path`, and
+`dispatch`. The command still exits nonzero. If receipt persistence itself fails,
+the envelope retains the original failure and console and reports
+`persistence_error`, without inventing a persisted receipt. `--console-only`
+continues to emit the guest streams without receipt or incident notices.
+
 An explicit `--evidence-path` can still import operator-authored evidence;
 the export reports `source_authenticated: false`. Captured-store files and inputs
 that contain source signatures or runtime-run claims still require source
