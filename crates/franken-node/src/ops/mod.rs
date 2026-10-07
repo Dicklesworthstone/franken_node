@@ -65,6 +65,7 @@ pub mod closed_bead_compliance;
 pub mod compat_corpus_run;
 pub mod doctor;
 pub mod engine_dispatcher;
+pub mod native_replay;
 pub mod evidence_index;
 pub mod flow_gated_host_io;
 #[cfg(feature = "admin-tools")]

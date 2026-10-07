@@ -855,6 +855,11 @@ struct RunExecutionReceiptCore {
     /// Effective execution limits and selected lane for a completed native run.
     #[serde(skip_serializing_if = "Option::is_none")]
     execution_limits: Option<ops::engine_dispatcher::EngineExecutionLimitsReport>,
+    /// Hash of the exact opt-in native replay payload retained in the signed
+    /// run record. Bind captured source, inputs and outcomes before deriving
+    /// this receipt's identity; ordinary runs retain no replay payload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_replay_payload_sha256: Option<String>,
     preflight_verdict: PreFlightVerdict,
     telemetry_summary: Option<RunExecutionTelemetrySummary>,
     ssrf_violations: Vec<String>,
@@ -8600,6 +8605,11 @@ fn build_run_execution_receipt(
     execution_error: Option<&anyhow::Error>,
 ) -> Result<RunExecutionReceipt> {
     let violation_count = ssrf_violations.len();
+    if let Some(capture) = &dispatch.native_replay {
+        capture
+            .validate()
+            .map_err(|error| anyhow::anyhow!("native replay capture is invalid: {error}"))?;
+    }
     let mut core = RunExecutionReceiptCore {
         receipt_id: Uuid::now_v7().to_string(),
         schema_version: RUN_EXECUTION_RECEIPT_SCHEMA_VERSION.to_string(),
@@ -8625,6 +8635,10 @@ fn build_run_execution_receipt(
             .engine_decision
             .as_ref()
             .and_then(|decision| decision.execution_limits),
+        native_replay_payload_sha256: dispatch
+            .native_replay
+            .as_ref()
+            .map(|capture| capture.payload_sha256.clone()),
         preflight_verdict: preflight.verdict.clone(),
         telemetry_summary: summarize_run_telemetry(dispatch.telemetry.as_ref()),
         ssrf_violations,
@@ -10725,6 +10739,25 @@ fn run_incident_id(chain_head_hash: &str) -> String {
     format!("INC-RUN-{head}")
 }
 
+/// Runs without host effects share the ledger genesis. Their execution
+/// evidence is identified by the authenticated run receipt instead.
+fn run_execution_incident_id(
+    ledger: &ops::engine_dispatcher::HostEffectLedger,
+    receipt_id: &str,
+) -> String {
+    if !ledger.entries.is_empty() {
+        return run_incident_id(&ledger.chain_head_hash);
+    }
+    let digest = sha2::Sha256::digest(
+        [
+            b"franken-node/native-execution-incident/v1\0" as &[u8],
+            receipt_id.as_bytes(),
+        ]
+        .concat(),
+    );
+    format!("INC-RUN-{}", hex::encode(&digest[..16]))
+}
+
 fn run_incident_evidence_relative_path(incident_id: &str) -> String {
     format!(
         "{INCIDENT_EVIDENCE_RELATIVE_DIR}/{}/{INCIDENT_EVIDENCE_FILE_NAME}",
@@ -10745,10 +10778,10 @@ fn planned_run_incident_capture(
     let tripped_control = !receipt.core.ssrf_violations.is_empty()
         || ledger.denied_count > 0
         || receipt.core.sentinel_enforcement.is_some();
-    if !tripped_control || ledger.entries.is_empty() {
+    if !tripped_control || (ledger.entries.is_empty() && dispatch.native_replay.is_none()) {
         return None;
     }
-    let incident_id = run_incident_id(&ledger.chain_head_hash);
+    let incident_id = run_execution_incident_id(ledger, &receipt.core.receipt_id);
     Some(RunIncidentCaptureRef {
         evidence_path: run_incident_evidence_relative_path(&incident_id),
         incident_id,
@@ -10769,6 +10802,8 @@ struct RunIncidentSource<'a> {
     ssrf_violations: &'a [String],
     sentinel_enforced: bool,
     ledger: &'a ops::engine_dispatcher::HostEffectLedger,
+    native_replay: Option<&'a ops::native_replay::NativeReplayCapture>,
+    completed_at: &'a str,
     severity: tools::replay_bundle::IncidentSeverity,
     detector: &'a str,
     title: String,
@@ -10808,6 +10843,49 @@ fn build_run_incident_evidence(
             policy_version: None,
         });
     }
+    if events.is_empty() {
+        let replay = source.native_replay.ok_or_else(|| {
+            anyhow::anyhow!(
+                "a run without host effects requires captured native execution evidence"
+            )
+        })?;
+        // This is the completed execution observed by the worker, not an
+        // invented host effect. The source signature binds its originating
+        // receipt and exact native execution payload.
+        events.push(IncidentEvidenceEvent {
+            event_id: "run-completed".to_string(),
+            timestamp: source.completed_at.to_string(),
+            event_type: EventType::StateChange,
+            payload: serde_json::json!({
+                "native_execution_completed": {
+                    "run_receipt_id": source.receipt_id,
+                    "run_receipt_hash": source.receipt_hash,
+                    "payload_sha256": replay.payload_sha256,
+                },
+            }),
+            provenance_ref: source.receipt_ref.to_string(),
+            parent_event_id: None,
+            state_snapshot: None,
+            policy_version: None,
+        });
+    }
+    let mut initial_state_snapshot = serde_json::json!({
+        "run_receipt_id": source.receipt_id,
+        "run_receipt_hash": source.receipt_hash,
+        "host_effect_chain_head": ledger.chain_head_hash,
+        "effect_count": ledger.effect_count,
+        "allowed_count": ledger.allowed_count,
+        "denied_count": ledger.denied_count,
+        "failed_count": ledger.failed_count,
+        "ssrf_violations": source.ssrf_violations,
+        "sentinel_enforced": source.sentinel_enforced,
+    });
+    if let Some(capture) = source.native_replay {
+        capture
+            .validate()
+            .map_err(|error| anyhow::anyhow!("native replay capture is invalid: {error}"))?;
+        initial_state_snapshot["native_replay"] = serde_json::to_value(capture)?;
+    }
     let package = IncidentEvidencePackage {
         schema_version: INCIDENT_EVIDENCE_SCHEMA.to_string(),
         incident_id: source.incident_id.to_string(),
@@ -10819,17 +10897,7 @@ fn build_run_incident_evidence(
         incident_type: "runtime-security-control".to_string(),
         detector: source.detector.to_string(),
         policy_version: source.policy_mode.to_string(),
-        initial_state_snapshot: serde_json::json!({
-            "run_receipt_id": source.receipt_id,
-            "run_receipt_hash": source.receipt_hash,
-            "host_effect_chain_head": ledger.chain_head_hash,
-            "effect_count": ledger.effect_count,
-            "allowed_count": ledger.allowed_count,
-            "denied_count": ledger.denied_count,
-            "failed_count": ledger.failed_count,
-            "ssrf_violations": source.ssrf_violations,
-            "sentinel_enforced": source.sentinel_enforced,
-        }),
+        initial_state_snapshot,
         events,
         evidence_refs: vec![source.receipt_ref.to_string()],
         metadata: IncidentEvidenceMetadata {
@@ -10878,6 +10946,8 @@ fn maybe_capture_run_incident(
         ssrf_violations: &receipt.core.ssrf_violations,
         sentinel_enforced: receipt.core.sentinel_enforcement.is_some(),
         ledger,
+        native_replay: dispatch.native_replay.as_ref(),
+        completed_at: &receipt.core.end_time_utc,
         severity: tools::replay_bundle::IncidentSeverity::High,
         detector: "franken-node run (automatic capture)",
         title: format!("Run of {app_display} tripped a runtime security control"),
@@ -10910,6 +10980,8 @@ struct RunHostEffectLedgerRecord {
     runtime_evidence_identity_capture_path: Option<String>,
     host_effect_ledger: ops::engine_dispatcher::HostEffectLedger,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_replay: Option<ops::native_replay::NativeReplayCapture>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     receipt_snapshot: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     record_signature: Option<String>,
@@ -10929,6 +11001,8 @@ fn persist_run_host_effect_ledger(
     let Some(ledger) = dispatch.host_effect_ledger.as_ref() else {
         return Ok(None);
     };
+    let receipt_snapshot = serde_json::to_value(receipt)?;
+    verify_native_replay_receipt_binding(dispatch.native_replay.as_ref(), &receipt_snapshot)?;
     #[cfg(feature = "engine")]
     let capture_path = dispatch.runtime_evidence_identity_capture_path.clone();
     #[cfg(not(feature = "engine"))]
@@ -10945,7 +11019,8 @@ fn persist_run_host_effect_ledger(
         sentinel_enforced: receipt.core.sentinel_enforcement.is_some(),
         runtime_evidence_identity_capture_path: capture_path,
         host_effect_ledger: ledger.clone(),
-        receipt_snapshot: Some(serde_json::to_value(receipt)?),
+        native_replay: dispatch.native_replay.clone(),
+        receipt_snapshot: Some(receipt_snapshot),
         record_signature: None,
     };
     let signing = load_receipt_signing_material(None)?
@@ -11020,6 +11095,31 @@ fn validate_run_receipt_id(receipt_id: &str) -> Result<()> {
     Ok(())
 }
 
+fn verify_native_replay_receipt_binding(
+    capture: Option<&ops::native_replay::NativeReplayCapture>,
+    receipt: &serde_json::Value,
+) -> Result<()> {
+    let binding = receipt.get("native_replay_payload_sha256");
+    match capture {
+        Some(capture) => {
+            capture
+                .validate()
+                .map_err(|error| anyhow::anyhow!("native replay capture is invalid: {error}"))?;
+            if binding.and_then(serde_json::Value::as_str) != Some(capture.payload_sha256.as_str())
+            {
+                anyhow::bail!("native replay payload does not match its authenticated run receipt");
+            }
+        }
+        None if binding.is_some() => {
+            anyhow::bail!(
+                "the run receipt binds native replay evidence missing from its run record"
+            );
+        }
+        None => {}
+    }
+    Ok(())
+}
+
 /// Authenticate the complete persisted record and its full receipt snapshot
 /// before deserialization can discard unknown signed fields. The runtime
 /// effect ledger is then checked against its independent product-root capture.
@@ -11062,6 +11162,7 @@ fn load_authenticated_run_ledger_record(
     .with_context(|| format!("run record {} failed authentication", record_path.display()))?;
     let record: RunHostEffectLedgerRecord = serde_json::from_value(authenticated)
         .with_context(|| format!("{} is not a run ledger record", record_path.display()))?;
+    verify_native_replay_receipt_binding(record.native_replay.as_ref(), receipt)?;
     let product_root_key_id = verify_run_ledger_record(project_root, &record)?;
     Ok((record, record_path, product_root_key_id))
 }
@@ -11119,8 +11220,11 @@ fn handle_incident_capture_command(args: &cli::IncidentCaptureArgs) -> Result<()
         load_authenticated_run_ledger_record(&project_root, &receipt)?;
 
     let ledger = &record.host_effect_ledger;
-    if ledger.entries.is_empty() {
-        anyhow::bail!("run {receipt_id} recorded no host effects; there is nothing to capture");
+    if ledger.entries.is_empty() && record.native_replay.is_none() {
+        anyhow::bail!(
+            "run {receipt_id} recorded no host effects or native replay inputs; \
+             run with --capture-replay to retain a pure program's execution"
+        );
     }
     let severity = match args.severity.as_deref() {
         None => tools::replay_bundle::IncidentSeverity::High,
@@ -11134,7 +11238,7 @@ fn handle_incident_capture_command(args: &cli::IncidentCaptureArgs) -> Result<()
             ),
         },
     };
-    let incident_id = run_incident_id(&ledger.chain_head_hash);
+    let incident_id = run_execution_incident_id(ledger, &receipt_id);
     let evidence_relative = run_incident_evidence_relative_path(&incident_id);
     let evidence_path = project_root.join(&evidence_relative);
     let status = if evidence_path.is_file() {
@@ -11143,6 +11247,13 @@ fn handle_incident_capture_command(args: &cli::IncidentCaptureArgs) -> Result<()
             || existing.initial_state_snapshot["run_receipt_id"] != receipt_id
             || existing.initial_state_snapshot["run_receipt_hash"] != receipt_hash
             || existing.initial_state_snapshot["host_effect_chain_head"] != ledger.chain_head_hash
+            || existing.initial_state_snapshot.get("native_replay")
+                != record
+                    .native_replay
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()?
+                    .as_ref()
         {
             anyhow::bail!(
                 "existing captured incident does not belong to authenticated run {receipt_id}"
@@ -11161,6 +11272,10 @@ fn handle_incident_capture_command(args: &cli::IncidentCaptureArgs) -> Result<()
             ssrf_violations: &record.ssrf_violations,
             sentinel_enforced: record.sentinel_enforced,
             ledger,
+            native_replay: record.native_replay.as_ref(),
+            completed_at: receipt["end_time_utc"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("run receipt has no end_time_utc"))?,
             severity,
             detector: "franken-node incident capture --from-run (operator)",
             title: format!("Operator capture of the run of {}", record.app_path),
@@ -11180,6 +11295,7 @@ fn handle_incident_capture_command(args: &cli::IncidentCaptureArgs) -> Result<()
         "ledger_record": project_relative_display(&project_root, &record_path),
         "effect_count": ledger.effect_count,
         "denied_count": ledger.denied_count,
+        "native_replay_available": record.native_replay.is_some(),
         "verification": {
             "chain": "valid",
             "signature": "valid",
@@ -18710,8 +18826,8 @@ mod incident_list_tests {
         write_fixture_bundle(&bundle_path, "INC-REPLAY-001", "high");
 
         let trusted_key_ids = incident_test_trusted_key_ids();
-        let summary =
-            incident_replay_cli_summary(&bundle_path, &trusted_key_ids).expect("replay summary");
+        let summary = incident_replay_cli_summary(&bundle_path, &trusted_key_ids, false)
+            .expect("replay summary");
 
         assert_eq!(summary.incident_id, "INC-REPLAY-001");
         assert!(summary.matched);
@@ -18728,7 +18844,7 @@ mod incident_list_tests {
         let missing = temp.path().join("missing.fnbundle");
 
         let trusted_key_ids = incident_test_trusted_key_ids();
-        let err = incident_replay_cli_summary(&missing, &trusted_key_ids)
+        let err = incident_replay_cli_summary(&missing, &trusted_key_ids, false)
             .expect_err("missing bundle must fail");
 
         assert!(
@@ -18745,7 +18861,7 @@ mod incident_list_tests {
         corrupt_bundle_integrity_hash(&bundle_path);
 
         let trusted_key_ids = incident_test_trusted_key_ids();
-        let err = incident_replay_cli_summary(&bundle_path, &trusted_key_ids)
+        let err = incident_replay_cli_summary(&bundle_path, &trusted_key_ids, false)
             .expect_err("corrupt bundle must fail");
 
         assert!(
@@ -21645,6 +21761,10 @@ fn read_incident_bundle_evidence(
         || value
             .get("initial_state_snapshot")
             .and_then(|state| state.get("run_receipt_id"))
+            .is_some()
+        || value
+            .get("initial_state_snapshot")
+            .and_then(|state| state.get("native_replay"))
             .is_some();
     if requires_authentication {
         let signing = load_receipt_signing_material(None)?
@@ -21824,6 +21944,7 @@ fn handle_incident_bundle_command(args: &cli::IncidentBundleArgs) -> Result<()> 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IncidentReplayCliSummary {
     incident_id: String,
+    replay_kind: String,
     matched: bool,
     event_count: usize,
     expected_sequence_hash: String,
@@ -21831,11 +21952,13 @@ struct IncidentReplayCliSummary {
     /// Verified timeline events from the bundle, surfaced so `--json` can emit
     /// the reconstructed incident timeline alongside the replay result.
     timeline: Vec<tools::replay_bundle::TimelineEvent>,
+    execution_result: Option<ops::native_replay::NativeReplayOutcome>,
 }
 
 fn incident_replay_cli_summary(
     bundle_path: &Path,
     trusted_key_ids: &[String],
+    execute: bool,
 ) -> Result<IncidentReplayCliSummary> {
     // bd-rjc2m: carry the full cause chain (e.g. "bundle integrity mismatch")
     // so fail-closed replays name the refusal instead of a bare context line.
@@ -21849,14 +21972,56 @@ fn incident_replay_cli_summary(
     let outcome = replay_bundle_with_trusted_keys(&bundle, trusted_key_ids).map_err(|err| {
         anyhow::anyhow!("failed replaying bundle {}: {err:#}", bundle_path.display())
     })?;
+    let execution_result: Option<ops::native_replay::NativeReplayOutcome> = if execute {
+        if !outcome.matched {
+            anyhow::bail!("recorded trace integrity failed before native re-execution");
+        }
+        let value = bundle
+            .initial_state_snapshot
+            .get("native_replay")
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "this bundle has no captured native execution inputs; \
+                     record a supported native run with --capture-replay, then capture and bundle it"
+                )
+            })?;
+        let capture: ops::native_replay::NativeReplayCapture =
+            serde_json::from_value(value.clone()).context("invalid native replay capsule")?;
+        capture
+            .validate()
+            .map_err(|error| anyhow::anyhow!("native replay capture is invalid: {error}"))?;
+        #[cfg(feature = "engine")]
+        {
+            Some(
+                ops::native_replay::reexecute(&capture)
+                    .map_err(|error| anyhow::anyhow!("native re-execution failed: {error}"))?,
+            )
+        }
+        #[cfg(not(feature = "engine"))]
+        {
+            anyhow::bail!("incident replay --execute requires a build with the `engine` feature");
+        }
+    } else {
+        None
+    };
+    let matched = outcome.matched
+        && execution_result
+            .as_ref()
+            .is_none_or(|execution| execution.matched);
+    let replay_kind = execution_result.as_ref().map_or_else(
+        || "recorded_trace".to_string(),
+        |execution| execution.replay_kind.clone(),
+    );
 
     Ok(IncidentReplayCliSummary {
         incident_id: outcome.incident_id,
-        matched: outcome.matched,
+        replay_kind,
+        matched,
         event_count: outcome.event_count,
         expected_sequence_hash: outcome.expected_sequence_hash,
         replayed_sequence_hash: outcome.replayed_sequence_hash,
         timeline: bundle.timeline,
+        execution_result,
     })
 }
 
@@ -21881,7 +22046,7 @@ fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> 
         Ok(ids) => ids,
         Err(err) => return incident_fail("incident.replay", args.json, err),
     };
-    let summary = match incident_replay_cli_summary(&args.bundle, &trusted_key_ids) {
+    let summary = match incident_replay_cli_summary(&args.bundle, &trusted_key_ids, args.execute) {
         Ok(summary) => summary,
         Err(err) => return incident_fail("incident.replay", args.json, err),
     };
@@ -21919,6 +22084,7 @@ fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> 
                 "incident_id": &summary.incident_id,
                 "bundle": args.bundle.display().to_string(),
                 "timeline_events": summary.timeline.len(),
+                "replay_kind": &summary.replay_kind,
             }),
         );
         eprintln!("{}", serde_json::to_string(&loaded)?);
@@ -21932,6 +22098,8 @@ fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> 
                 "incident_id": &summary.incident_id,
                 "matched": summary.matched,
                 "event_count": summary.event_count,
+                "replay_kind": &summary.replay_kind,
+                "execution_result": &summary.execution_result,
                 "expected_sequence_hash": &summary.expected_sequence_hash,
                 "replayed_sequence_hash": &summary.replayed_sequence_hash,
             }),
@@ -21948,6 +22116,7 @@ fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> 
                     "incident_id": &summary.incident_id,
                     "expected_sequence_hash": &summary.expected_sequence_hash,
                     "replayed_sequence_hash": &summary.replayed_sequence_hash,
+                    "execution_result": &summary.execution_result,
                 }),
             );
             eprintln!("{}", serde_json::to_string(&diverged)?);
@@ -21976,6 +22145,7 @@ fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> 
             "command": "incident.replay",
             "schema_version": "incident-replay-cli-v1",
             "incident_id": &summary.incident_id,
+            "replay_kind": &summary.replay_kind,
             "replay_result": {
                 "matched": summary.matched,
                 "event_count": summary.event_count,
@@ -21983,6 +22153,7 @@ fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> 
                 "replayed_sequence_hash": &summary.replayed_sequence_hash,
             },
             "timeline": &summary.timeline,
+            "execution_result": &summary.execution_result,
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
         if !summary.matched {
@@ -21992,12 +22163,19 @@ fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> 
         }
     } else {
         println!(
-            "incident replay: incident_id={} matched={} timeline_events={} (replayed {} steps)",
+            "incident replay: incident_id={} kind={} matched={} timeline_events={} (verified {} recorded steps)",
             summary.incident_id,
+            summary.replay_kind,
             summary.matched,
             summary.timeline.len(),
             summary.event_count
         );
+        if let Some(execution) = &summary.execution_result {
+            println!(
+                "native execution comparison: {}",
+                serde_json::to_string(execution)?
+            );
+        }
         if !summary.matched {
             anyhow::bail!(
                 "replay mismatch for incident {} in bundle {}",
@@ -33520,6 +33698,7 @@ fn main() -> Result<()> {
                 runtime,
                 engine_bin,
                 compat_preflight,
+                capture_replay,
                 app_args,
             } = args;
 
@@ -33637,6 +33816,7 @@ fn main() -> Result<()> {
                 ops::engine_dispatcher::EngineDispatcher::new(engine_bin, requested_runtime)
                     .with_native_session_worker_path(native_session_worker_path)
                     .with_project_paths(project_paths.clone())
+                    .with_replay_capture(capture_replay)
                     .with_app_args(app_args);
             let (dispatch, execution_error) = match dispatcher.dispatch_run(
                 &app_path,
@@ -33785,16 +33965,26 @@ fn main() -> Result<()> {
                     &receipt,
                     configured_run_receipt_limit(&resolved.config),
                 )?;
-                // The signed ledger is kept beside the receipt so any run can be
-                // captured later; a write failure is reported, not fatal.
-                if let Err(err) = persist_run_host_effect_ledger(
+                // An explicitly requested replay capture must be durably bound
+                // to the signed run record before the command can succeed.
+                let persisted_ledger = persist_run_host_effect_ledger(
                     &project_root,
                     &policy,
                     &receipt,
                     &receipt_path,
                     &dispatch,
                     &trace_id,
-                ) && !console_only
+                );
+                if dispatch.native_replay.is_some() {
+                    persisted_ledger
+                        .context("failed persisting requested native replay capture")?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "requested native replay capture has no signed run record"
+                            )
+                        })?;
+                } else if let Err(err) = persisted_ledger
+                    && !console_only
                 {
                     eprintln!("warning: run host-effect ledger was not persisted: {err:#}");
                 }
@@ -35919,6 +36109,7 @@ mod run_trust_gate_tests {
                 stderr: String::new(),
             },
             host_effect_ledger: None,
+            native_replay: None,
             #[cfg(feature = "engine")]
             runtime_evidence_identity_capture: None,
             #[cfg(feature = "engine")]
@@ -36246,6 +36437,7 @@ mod run_trust_gate_tests {
             runtime_version: None,
             parser_budget: None,
             execution_limits: None,
+            native_replay_payload_sha256: None,
             preflight_verdict: PreFlightVerdict::Passed {
                 checked: 0,
                 warnings: Vec::new(),
@@ -36293,6 +36485,70 @@ mod run_trust_gate_tests {
                 .get("execution_failure")
                 .is_none(),
             "ordinary exits must retain their existing receipt representation"
+        );
+    }
+
+    #[test]
+    fn native_replay_payload_is_bound_to_run_receipt_identity() {
+        let mut core = sample_failed_run_receipt_core();
+        core.execution_failure = None;
+        core.exit_code = Some(0);
+        core.native_replay_payload_sha256 = Some("ab".repeat(32));
+        let hash = compute_run_execution_receipt_hash(&core).expect("captured receipt hash");
+        let id = deterministic_run_execution_receipt_id(
+            &compute_run_execution_receipt_seed_hash(&core).expect("captured receipt identity"),
+        );
+        for replacement in [None, Some("cd".repeat(32))] {
+            let mut changed = core.clone();
+            changed.native_replay_payload_sha256 = replacement;
+            assert_ne!(compute_run_execution_receipt_hash(&changed).unwrap(), hash);
+            assert_ne!(
+                deterministic_run_execution_receipt_id(
+                    &compute_run_execution_receipt_seed_hash(&changed).unwrap(),
+                ),
+                id,
+                "a different or missing captured execution must have a different receipt identity"
+            );
+        }
+        core.native_replay_payload_sha256 = None;
+        assert!(
+            serde_json::to_value(core)
+                .unwrap()
+                .get("native_replay_payload_sha256")
+                .is_none(),
+            "ordinary runs retain their existing receipt representation"
+        );
+    }
+
+    #[test]
+    fn signed_run_record_requires_its_exact_native_replay_payload() {
+        use ops::native_replay::{NATIVE_REPLAY_CAPTURE_SCHEMA, NativeReplayCapture};
+
+        let capture = NativeReplayCapture {
+            schema_version: NATIVE_REPLAY_CAPTURE_SCHEMA.to_string(),
+            payload_json: "{}".to_string(),
+            payload_sha256: hex::encode(sha2::Sha256::digest(b"{}")),
+        };
+        let receipt = serde_json::json!({"native_replay_payload_sha256": capture.payload_sha256});
+        verify_native_replay_receipt_binding(Some(&capture), &receipt)
+            .expect("captured bytes and their receipt binding agree");
+        verify_native_replay_receipt_binding(None, &serde_json::json!({}))
+            .expect("ordinary receipt has no replay binding");
+        assert!(verify_native_replay_receipt_binding(None, &receipt).is_err());
+        assert!(
+            verify_native_replay_receipt_binding(Some(&capture), &serde_json::json!({})).is_err()
+        );
+
+        let mut altered = capture.clone();
+        altered.payload_json = "{\"substituted\":true}".to_string();
+        assert!(verify_native_replay_receipt_binding(Some(&altered), &receipt).is_err());
+        altered.payload_sha256 = hex::encode(sha2::Sha256::digest(altered.payload_json.as_bytes()));
+        altered
+            .validate()
+            .expect("replacement has a valid standalone hash");
+        assert!(
+            verify_native_replay_receipt_binding(Some(&altered), &receipt).is_err(),
+            "rehashing replacement source does not authenticate it as the recorded run"
         );
     }
 
@@ -38056,6 +38312,7 @@ mod run_trust_gate_tests {
                 duration_ms: 60000,
                 exit_code: 0,
                 runtime: EngineRuntime::Node,
+                native_replay: None,
             };
             let app_path = std::path::Path::new("/test/app");
 

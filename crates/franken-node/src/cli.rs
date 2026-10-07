@@ -326,6 +326,12 @@ pub struct RunArgs {
     #[arg(long)]
     pub compat_preflight: bool,
 
+    /// Retain the entry source and raw host-I/O results for offline native
+    /// re-execution with `incident replay --execute`. Captured data may contain
+    /// application secrets. Only supported, finalized native runs qualify.
+    #[arg(long)]
+    pub capture_replay: bool,
+
     /// Arguments for the program itself, after `--`
     /// (`franken-node run app.js -- a b`). They become `process.argv[2..]`
     /// where the policy lets the program read `process.argv` (bd-my9hk).
@@ -2288,6 +2294,13 @@ pub struct IncidentReplayArgs {
     #[arg(long = "key-dir", alias = "trusted-key-dir")]
     pub trusted_key_dir: Option<PathBuf>,
 
+    /// Re-execute captured JavaScript with recorded host-I/O results and
+    /// verify its guest execution. Runtime module loading is disabled; policy
+    /// decisions are compared separately under that restricted authority.
+    /// Requires a signed bundle from `run --capture-replay`.
+    #[arg(long)]
+    pub execute: bool,
+
     /// Emit the structured replay result as JSON on stdout. Required for
     /// compatibility with the README's "All commands accept `--json`" contract.
     #[arg(long)]
@@ -3288,9 +3301,53 @@ mod parser_contract_extra_tests {
             Command::Incident(IncidentCommand::Replay(args)) => {
                 assert!(args.json);
                 assert!(args.bundle.as_os_str().is_empty());
+                assert!(!args.execute);
             }
             other => return Err(format!("expected incident replay, got {other:?}")),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn native_replay_capture_and_execution_require_explicit_cli_flags() -> Result<(), String> {
+        let cli = parse(&["franken-node", "run", "app.js"]).map_err(|error| error.to_string())?;
+        let Command::Run(args) = cli.command else {
+            return Err("expected run command".to_string());
+        };
+        assert!(
+            !args.capture_replay,
+            "ordinary runs do not retain source and raw I/O"
+        );
+
+        let cli = parse(&[
+            "franken-node",
+            "run",
+            "app.js",
+            "--capture-replay",
+            "--json",
+        ])
+        .map_err(|error| error.to_string())?;
+        let Command::Run(args) = cli.command else {
+            return Err("expected replay-capturing run command".to_string());
+        };
+        assert!(args.capture_replay);
+        assert!(args.json);
+
+        let cli = parse(&[
+            "franken-node",
+            "incident",
+            "replay",
+            "--bundle",
+            "incident.fnbundle",
+            "--execute",
+            "--json",
+        ])
+        .map_err(|error| error.to_string())?;
+        let Command::Incident(IncidentCommand::Replay(args)) = cli.command else {
+            return Err("expected native incident replay command".to_string());
+        };
+        assert!(args.execute);
+        assert!(args.json);
         Ok(())
     }
 

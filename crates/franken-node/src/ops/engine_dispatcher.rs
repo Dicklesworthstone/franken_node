@@ -261,6 +261,8 @@ struct NativeSessionRequest {
     runtime_evidence_grant: RuntimeEvidenceSessionGrant,
     /// The program's own arguments, for `process.argv` (bd-my9hk).
     app_args: Vec<String>,
+    #[serde(default)]
+    capture_replay: bool,
 }
 
 #[cfg(all(feature = "engine", target_os = "linux"))]
@@ -400,6 +402,8 @@ enum NativeSessionResponse {
         // response frame the size of the largest variant.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         engine_decision: Option<Box<EngineContainmentDecision>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        native_replay: Option<crate::ops::native_replay::NativeReplayCapture>,
     },
     ExecutionFailed {
         schema_version: String,
@@ -2419,6 +2423,7 @@ struct NativeEngineRunContext {
     project_paths: RunProjectPaths,
     /// The program's own arguments, for `process.argv` (bd-my9hk).
     app_args: Vec<String>,
+    capture_replay: bool,
 }
 
 #[cfg(feature = "engine")]
@@ -2724,6 +2729,8 @@ pub struct EngineDispatcher {
     /// The program's own arguments (`run app.js -- a b`), which become
     /// `process.argv[2..]` (bd-my9hk).
     app_args: Vec<String>,
+    /// Retain exact source and recorded I/O for authenticated incident reexecution.
+    capture_replay: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -2787,6 +2794,10 @@ pub struct RunDispatchReport {
     /// before producing a decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_decision: Option<EngineContainmentDecision>,
+    /// Opt-in native execution inputs, carried into the signed run record and
+    /// incident bundle. These contain source and raw host-I/O result bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_replay: Option<crate::ops::native_replay::NativeReplayCapture>,
 }
 
 /// Why the engine contained (or allowed) a completed native run
@@ -3225,6 +3236,7 @@ impl NativeRunInterruption {
                 .runtime_evidence_identity_capture_path
                 .take(),
             engine_decision: None,
+            native_replay: None,
         });
         self.dispatch_report = Some(Box::new(report));
     }
@@ -3327,6 +3339,7 @@ impl NativeRunFailure {
                 .runtime_evidence_identity_capture_path
                 .take(),
             engine_decision: None,
+            native_replay: None,
         });
         self.dispatch_report = Some(Box::new(report));
     }
@@ -3384,6 +3397,7 @@ struct DispatchReportInputs<'a> {
     #[cfg(feature = "engine")]
     runtime_evidence_identity_capture_path: Option<PathBuf>,
     engine_decision: Option<EngineContainmentDecision>,
+    native_replay: Option<crate::ops::native_replay::NativeReplayCapture>,
 }
 
 #[cfg(feature = "engine")]
@@ -3393,6 +3407,7 @@ type NativeEngineSuccess = (
     Option<HostEffectLedger>,
     EvidenceVerificationIdentity,
     EngineContainmentDecision,
+    Option<crate::ops::native_replay::NativeReplayCapture>,
 );
 
 #[cfg(feature = "engine")]
@@ -3403,6 +3418,7 @@ type NativeEngineDispatchSuccess = (
     RuntimeEvidenceIdentityCapture,
     PathBuf,
     Option<EngineContainmentDecision>,
+    Option<crate::ops::native_replay::NativeReplayCapture>,
 );
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4666,6 +4682,7 @@ impl Default for EngineDispatcher {
             native_session_worker_path: None,
             project_paths: None,
             app_args: Vec::new(),
+            capture_replay: false,
         }
     }
 }
@@ -4849,6 +4866,14 @@ impl EngineDispatcher {
         self
     }
 
+    /// Capture source and recorded host I/O for subsequent incident reexecution.
+    /// The default leaves these potentially sensitive bytes out of reports.
+    #[must_use]
+    pub fn with_replay_capture(mut self, enabled: bool) -> Self {
+        self.capture_replay = enabled;
+        self
+    }
+
     /// Dispatches profile-governed execution to the embedded franken-engine.
     /// Builds without the embedded engine fail closed before plan resolution;
     /// an external executable is never trusted as the policy boundary by name.
@@ -4884,6 +4909,15 @@ impl EngineDispatcher {
         // any execution-side effect.
         config.runtime.validate_execution_budget()?;
         config.runtime.validate_parse_budget()?;
+
+        if self.capture_replay
+            && (config.profile == Profile::LegacyRisky
+                || config.security.child_process_spawn.is_some())
+        {
+            anyhow::bail!(
+                "native replay capture requires strict or balanced policy without process-spawn authority; ambient process state and child processes are not replay inputs"
+            );
+        }
 
         // An external executable named by --engine-bin, the environment, or
         // project config has no authenticated identity. In builds without the
@@ -5249,6 +5283,7 @@ impl EngineDispatcher {
                 #[cfg(feature = "engine")]
                 runtime_evidence_identity_capture_path: None,
                 engine_decision: None,
+                native_replay: None,
             }));
         }
 
@@ -5353,6 +5388,7 @@ impl EngineDispatcher {
             runtime_evidence_identity_capture,
             runtime_evidence_identity_capture_path,
             engine_decision,
+            native_replay,
         ) = {
             tracing::info!(
                 execution_mode = "native",
@@ -5372,6 +5408,7 @@ impl EngineDispatcher {
                 process_spawn_admission.as_ref(),
                 process_spawn_trust_key_hex.as_deref(),
                 &self.app_args,
+                self.capture_replay,
             )
             .map_err(|mut error| {
                 if let Some(failure) = error.downcast_mut::<NativeRunFailure>() {
@@ -5395,7 +5432,7 @@ impl EngineDispatcher {
             })
         }?;
         #[cfg(not(feature = "engine"))]
-        let (output, report, host_effect_ledger, engine_decision) = {
+        let (output, report, host_effect_ledger, engine_decision, native_replay) = {
             if config.profile == Profile::Strict {
                 let dispatch_error = EngineDispatchError::EngineNotBuilt {
                     app_path: app_path.to_path_buf(),
@@ -5406,7 +5443,7 @@ impl EngineDispatcher {
             tracing::warn!("Engine feature disabled; falling back to external process execution");
             Self::run_engine_process(&mut cmd, telemetry_handle)
                 .map_err(|err| anyhow::anyhow!("{err}"))
-                .map(|(output, report)| (output, report, None::<HostEffectLedger>, None))
+                .map(|(output, report)| (output, report, None::<HostEffectLedger>, None, None))
         }?;
         if !report.drain_completed {
             eprintln!(
@@ -5437,6 +5474,7 @@ impl EngineDispatcher {
             #[cfg(feature = "engine")]
             runtime_evidence_identity_capture_path: Some(runtime_evidence_identity_capture_path),
             engine_decision,
+            native_replay,
         }))
     }
 
@@ -5509,6 +5547,7 @@ impl EngineDispatcher {
                 .map(|path| path.display().to_string()),
             sentinel,
             engine_decision: inputs.engine_decision,
+            native_replay: inputs.native_replay,
         }
     }
 
@@ -5768,6 +5807,7 @@ impl EngineDispatcher {
         let config = request.config;
         let policy_mode = request.policy_mode;
         let app_args = request.app_args;
+        let capture_replay = request.capture_replay;
         let nonce = request.nonce;
         let cancellation = NativeEngineCancellation::new();
         let effect_wal = NativeEffectWalEmitter::new(nonce.clone(), Box::new(io::stdout()));
@@ -5784,6 +5824,7 @@ impl EngineDispatcher {
                     effect_wal: Some(effect_wal),
                     project_paths,
                     app_args,
+                    capture_replay,
                 },
             )
         });
@@ -5827,6 +5868,7 @@ impl EngineDispatcher {
                             host_effect_ledger,
                             evidence_verification_identity,
                             engine_decision,
+                            native_replay,
                         )) => {
                             let Some(exit_code) = output.status.code() else {
                                 return write_response(NativeSessionResponse::ExecutionFailed {
@@ -5858,6 +5900,7 @@ impl EngineDispatcher {
                                 host_effect_ledger,
                                 evidence_verification_identity,
                                 engine_decision: Some(Box::new(engine_decision)),
+                                native_replay,
                             }
                         }
                         Err(EngineProcessError::Spawn {
@@ -5935,6 +5978,7 @@ impl EngineDispatcher {
         process_spawn_admission: Option<&ChildProcessSpawnAdmission>,
         process_spawn_trust_key_hex: Option<&str>,
         app_args: &[String],
+        capture_replay: bool,
     ) -> Result<NativeEngineDispatchSuccess> {
         use std::time::Duration;
 
@@ -5955,6 +5999,7 @@ impl EngineDispatcher {
             process_spawn_admission,
             process_spawn_trust_key_hex,
             app_args,
+            capture_replay,
             timeout,
         )
     }
@@ -5988,6 +6033,7 @@ impl EngineDispatcher {
         process_spawn_admission: Option<&ChildProcessSpawnAdmission>,
         process_spawn_trust_key_hex: Option<&str>,
         app_args: &[String],
+        capture_replay: bool,
         timeout: std::time::Duration,
     ) -> Result<NativeEngineDispatchSuccess> {
         use base64::Engine as _;
@@ -6452,6 +6498,7 @@ impl EngineDispatcher {
             process_spawn_trust_key_hex: process_spawn_trust_key_hex.map(str::to_string),
             runtime_evidence_grant,
             app_args: app_args.to_vec(),
+            capture_replay,
         };
         let request_frame = Zeroizing::new(
             encode_native_session_frame(&request, NATIVE_SESSION_MAX_REQUEST_BYTES).map_err(
@@ -7026,6 +7073,7 @@ impl EngineDispatcher {
                 host_effect_ledger,
                 evidence_verification_identity,
                 engine_decision,
+                native_replay,
             } => {
                 validate_envelope(&schema_version, &response_nonce).map_err(|message| {
                     EngineDispatchError::EngineExecutionError {
@@ -7061,6 +7109,24 @@ impl EngineDispatcher {
                     };
                     return Err(dispatch_error.to_actionable().into());
                 }
+                let replay_validation =
+                    if native_replay.is_some() != capture_replay {
+                        Err("native-session replay capture did not match the requested capture mode"
+                        .to_string())
+                    } else {
+                        native_replay.as_ref().map_or(
+                            Ok(()),
+                            crate::ops::native_replay::NativeReplayCapture::validate,
+                        )
+                    };
+                replay_validation.map_err(|message| {
+                    EngineDispatchError::EngineExecutionError {
+                        app_path: app_path_buf.clone(),
+                        error_message: message,
+                        phase: "worker replay capture".to_string(),
+                    }
+                    .to_actionable()
+                })?;
                 let stdout = base64::engine::general_purpose::STANDARD
                     .decode(stdout_base64)
                     .map_err(|error| {
@@ -7115,6 +7181,7 @@ impl EngineDispatcher {
                     expected_evidence_capture,
                     evidence_capture_path,
                     engine_decision.map(|decision| *decision),
+                    native_replay,
                 ))
             }
             NativeSessionResponse::ExecutionFailed {
@@ -7817,6 +7884,9 @@ impl EngineDispatcher {
             parse_goal: ParseGoal::Script, // Default to script parsing (most common)
             commonjs_entry: false, // Set per entrypoint by map_config_to_orchestrator_config_for_entrypoint
             parser_options,
+            // Preserve the operator's configured register ceilings. The engine
+            // also offers automatic widening, which is not a product override.
+            auto_size_register_window: false,
             trace_id_prefix: config.observability.namespace.clone(), // Use observability namespace
             policy_id: Self::generate_opaque_policy_id(config.profile, None), // Opaque policy ID to prevent information disclosure
         }
@@ -7863,6 +7933,7 @@ impl EngineDispatcher {
                 effect_wal: None,
                 project_paths,
                 app_args: Vec::new(),
+                capture_replay: false,
             },
         )
     }
@@ -7888,6 +7959,7 @@ impl EngineDispatcher {
             effect_wal,
             project_paths,
             app_args,
+            capture_replay,
         } = run_context;
         let mut telemetry_guard = Some(telemetry_guard);
 
@@ -7915,6 +7987,19 @@ impl EngineDispatcher {
             )
         })?;
         let parser_budget = config.runtime.effective_parse_budget(config.profile);
+
+        // Recheck inside the authenticated worker as well as at public dispatch.
+        // Neither ambient process authority nor process effects have a complete
+        // replay input protocol yet.
+        if capture_replay
+            && (config.profile == Profile::LegacyRisky || process_spawn_admission.is_some())
+        {
+            return Err(native_engine_spawn_error_with_telemetry_cleanup(
+                "Native replay capture does not support ambient process or child-process authority"
+                    .to_string(),
+                &mut telemetry_guard,
+            ));
+        }
 
         // The parent selected this authority before dependency preflight and
         // checked that its evidence root is outside it. Retain the same root
@@ -7993,6 +8078,8 @@ impl EngineDispatcher {
         let expected_evidence_identity = evidence_authority.verification_identity();
         let host_effect_ledger_authority = evidence_authority.clone();
         let host_effect_ledger_epoch = security_epoch_for_profile(config.profile);
+        let replay_configs =
+            capture_replay.then(|| (orchestrator_config.clone(), runtime_config.clone()));
         let mut orchestrator = ExecutionOrchestrator::try_new_with_runtime_config_and_authority(
             orchestrator_config,
             runtime_config,
@@ -8016,6 +8103,7 @@ impl EngineDispatcher {
         ));
         process_argv.push(execution_app_path.display().to_string());
         process_argv.extend(app_args);
+        let replay_argv = capture_replay.then(|| process_argv.clone());
         orchestrator.set_process_argv(process_argv);
 
         // Process authority is orthogonal to the ordinary runtime profile. The
@@ -8292,6 +8380,32 @@ impl EngineDispatcher {
         // stdout/stderr) instead of a Rust `{:?}` debug dump of the result.
         let (stdout, stderr) = render_console_streams(&execution_result.console_output);
 
+        let native_replay = match (replay_configs, replay_argv) {
+            (Some((orchestrator_config, runtime_config)), Some(process_argv)) => {
+                match crate::ops::native_replay::NativeReplayCapture::from_execution(
+                    &package,
+                    &orchestrator_config,
+                    &runtime_config,
+                    &process_argv,
+                    &execution_result,
+                ) {
+                    Ok(capture) => Some(capture),
+                    Err(error) => {
+                        // Capture is an explicitly requested run outcome. Keep
+                        // the real effects and guest output when that outcome
+                        // cannot be delivered; never mint incomplete inputs.
+                        return Err(native_engine_spawn_error_with_telemetry_cleanup(
+                            format!("Native replay capture failed: {error}"),
+                            &mut telemetry_guard,
+                        )
+                        .with_host_effect_ledger(Some(host_effect_ledger))
+                        .with_guest_output(stdout, stderr));
+                    }
+                }
+            }
+            _ => None,
+        };
+
         // bd-5r99w.2: derive the REAL exit code from the runtime's containment
         // verdict instead of always stamping synthetic success; with no
         // containment, the program's own `process.exit` code (bd-my9hk).
@@ -8336,6 +8450,7 @@ impl EngineDispatcher {
             Some(host_effect_ledger),
             expected_evidence_identity,
             engine_decision,
+            native_replay,
         ))
     }
 
@@ -9887,6 +10002,7 @@ mod tests {
             runtime_evidence_identity_capture: Some(capture.clone()),
             runtime_evidence_identity_capture_path: Some(capture_path.clone()),
             engine_decision: None,
+            native_replay: None,
         });
 
         assert_eq!(
@@ -12024,6 +12140,7 @@ mod tests {
             #[cfg(feature = "engine")]
             runtime_evidence_identity_capture_path: None,
             engine_decision: None,
+            native_replay: None,
         });
 
         assert_eq!(report.runtime, "node");
@@ -12061,6 +12178,7 @@ mod tests {
             #[cfg(feature = "engine")]
             runtime_evidence_identity_capture_path: None,
             engine_decision: None,
+            native_replay: None,
         });
 
         assert_eq!(report.duration_ms, u64::MAX);
@@ -12091,6 +12209,7 @@ mod tests {
             #[cfg(feature = "engine")]
             runtime_evidence_identity_capture_path: None,
             engine_decision: None,
+            native_replay: None,
         });
 
         assert_eq!(report.captured_output.stdout, "\u{fffd}ok");
@@ -12648,6 +12767,7 @@ mod tests {
                         #[cfg(feature = "engine")]
                         runtime_evidence_identity_capture_path: None,
                         engine_decision: None,
+                        native_replay: None,
                     };
 
                     // Verify report field sanitization
@@ -12953,6 +13073,7 @@ mod tests {
                     #[cfg(feature = "engine")]
                     runtime_evidence_identity_capture_path: None,
                     engine_decision: None,
+                    native_replay: None,
                 };
 
                 // Build report with malicious output
@@ -12985,6 +13106,7 @@ mod tests {
                         .map(|path| path.display().to_string()),
                     sentinel: None,
                     engine_decision: None,
+                    native_replay: None,
                 };
 
                 // Test report serialization safety
@@ -13597,6 +13719,7 @@ mod tests {
                     runtime_evidence_identity_capture_path: None,
                     sentinel: None,
                     engine_decision: None,
+                    native_replay: None,
                 };
 
                 // Test dispatch report serialization with poisoned telemetry
@@ -14689,7 +14812,7 @@ mod tests {
         let bridge = TelemetryBridge::new(socket_path.to_str().expect("utf8"), adapter);
         let handle = bridge.start().expect("start telemetry bridge");
 
-        let (output, _telemetry, _ledger, _evidence_identity, _engine_decision) =
+        let (output, _telemetry, _ledger, _evidence_identity, _engine_decision, _native_replay) =
             EngineDispatcher::run_engine_native(&app, &config, "legacy-risky", handle)
                 .expect("legacy-risky native run accepts static process shape");
         assert!(output.status.success());
@@ -14826,7 +14949,7 @@ mod tests {
         let bridge = TelemetryBridge::new(socket_path.to_str().expect("utf8"), adapter);
         let handle = bridge.start().expect("start telemetry bridge");
 
-        let (_output, _telemetry, ledger, evidence_identity, _engine_decision) =
+        let (_output, _telemetry, ledger, evidence_identity, _engine_decision, _native_replay) =
             EngineDispatcher::run_engine_native(&app, &config, "legacy-risky", handle)
                 .expect("native run succeeds");
         let ledger = ledger.expect("native path always surfaces a host-effect ledger");
@@ -14880,6 +15003,7 @@ mod tests {
             #[cfg(feature = "engine")]
             runtime_evidence_identity_capture_path: None,
             engine_decision: None,
+            native_replay: None,
         });
         let json = serde_json::to_string(&report).expect("serialize run report");
         assert!(
@@ -15631,6 +15755,7 @@ mod tests {
             process_spawn_trust_key_hex: Some("11".repeat(32)),
             runtime_evidence_grant: runtime_evidence_grant_for_test(&nonce, [0x21; 32], [0x42; 32]),
             app_args: vec!["alpha".to_string()],
+            capture_replay: true,
         };
         let frame = encode_native_session_frame(&request, NATIVE_SESSION_MAX_REQUEST_BYTES)
             .expect("encode request frame");
@@ -15642,6 +15767,7 @@ mod tests {
         assert_eq!(decoded.config, request.config);
         assert_eq!(decoded.project_paths, request.project_paths);
         assert_eq!(decoded.app_args, request.app_args);
+        assert!(decoded.capture_replay);
         assert_eq!(
             decoded.process_spawn_trust_key_hex,
             request.process_spawn_trust_key_hex
@@ -16075,6 +16201,7 @@ mod tests {
             Some(&admission),
             None,
             &[],
+            false,
             timeout,
         );
         let elapsed = started.elapsed();
@@ -16133,6 +16260,7 @@ mod tests {
             None,
             None,
             &[],
+            false,
             timeout,
         );
         let elapsed = start.elapsed();
