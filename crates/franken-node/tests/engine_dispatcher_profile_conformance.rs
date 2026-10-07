@@ -196,6 +196,100 @@ fn runtime_max_instructions_overrides_the_profile_budget() {
     }
 }
 
+/// Larger function frames and deeper guest calls can be admitted explicitly
+/// without granting filesystem, network, or process capabilities.
+#[test]
+#[cfg(feature = "engine")]
+fn runtime_frame_budget_overrides_preserve_profile_security_and_reach_both_lanes() {
+    use frankenengine_engine::baseline_interpreter::InterpreterConfig;
+    use frankenengine_node::config::{MAX_NATIVE_CALL_DEPTH, MAX_NATIVE_REGISTERS};
+    use frankenengine_node::ops::engine_dispatcher::EngineExecutionLimitsReport;
+
+    for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+        let original = config_with_profile(profile);
+        let before = EngineDispatcher::map_config_to_runtime_config_for_tests(&original);
+        let defaults = EngineExecutionLimitsReport::from_execution_config(&before.execution);
+        assert_eq!(
+            defaults.deterministic.max_registers,
+            Some(before.execution.deterministic_max_registers)
+        );
+        assert_eq!(
+            defaults.throughput.max_registers,
+            Some(before.execution.throughput_max_registers)
+        );
+        for (registers, call_depth) in [
+            (1, 1),
+            (2_048, 128),
+            (MAX_NATIVE_REGISTERS, MAX_NATIVE_CALL_DEPTH),
+        ] {
+            let mut configured = original.clone();
+            configured.runtime.max_registers = Some(registers);
+            configured.runtime.max_call_depth = Some(call_depth);
+            configured.runtime.validate_execution_budget().unwrap();
+            let after = EngineDispatcher::map_config_to_runtime_config_for_tests(&configured);
+            after
+                .validate()
+                .expect("the engine must accept product budget caps");
+            for lane in [
+                InterpreterConfig::deterministic_from_config(&after.execution),
+                InterpreterConfig::throughput_from_config(&after.execution),
+            ] {
+                assert_eq!(lane.max_registers, registers, "{profile:?}");
+                assert_eq!(lane.max_call_depth, call_depth, "{profile:?}");
+            }
+            let report = EngineExecutionLimitsReport::from_execution_config(&after.execution);
+            for lane in [report.deterministic, report.throughput] {
+                assert_eq!(lane.max_registers, Some(registers));
+                assert_eq!(lane.max_call_depth, Some(call_depth));
+            }
+            let mut expected = before.clone();
+            expected.execution.deterministic_max_registers = registers;
+            expected.execution.throughput_max_registers = registers;
+            expected.execution.max_call_depth = call_depth;
+            assert_eq!(after, expected, "only explicit frame limits may change");
+            let original_orchestrator =
+                EngineDispatcher::map_config_to_orchestrator_config_for_tests(&original);
+            let configured_orchestrator =
+                EngineDispatcher::map_config_to_orchestrator_config_for_tests(&configured);
+            assert_eq!(
+                configured_orchestrator.policy_id,
+                original_orchestrator.policy_id
+            );
+            assert_eq!(configured_orchestrator.epoch, original_orchestrator.epoch);
+            assert_eq!(
+                configured_orchestrator.force_lane,
+                original_orchestrator.force_lane
+            );
+            assert_eq!(
+                configured_orchestrator.parser_options,
+                original_orchestrator.parser_options
+            );
+        }
+    }
+}
+
+#[test]
+fn historical_execution_limits_do_not_invent_unrecorded_frame_budgets() {
+    use frankenengine_node::ops::engine_dispatcher::EngineExecutionLimitsReport;
+
+    let historical_lane = serde_json::json!({
+        "max_instructions": 1000,
+        "max_heap_objects": 100_000,
+        "max_total_memory_bytes": 67_108_864,
+        "max_console_entries": 100_000,
+        "max_console_bytes": 8_388_608
+    });
+    let historical = serde_json::json!({
+        "deterministic": historical_lane,
+        "throughput": historical_lane,
+        "selected_lane": "deterministic"
+    });
+    let parsed: EngineExecutionLimitsReport = serde_json::from_value(historical.clone()).unwrap();
+    assert_eq!(parsed.deterministic.max_registers, None);
+    assert_eq!(parsed.throughput.max_call_depth, None);
+    assert_eq!(serde_json::to_value(parsed).unwrap(), historical);
+}
+
 /// Memory and transcript overrides must reach the interpreter on both lanes;
 /// omission retains the engine's lane-specific defaults, including byte caps.
 #[test]

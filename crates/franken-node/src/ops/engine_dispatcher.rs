@@ -2866,12 +2866,19 @@ pub enum EngineExecutionLane {
 }
 
 /// Engine-accounted ceilings for one native lane. Estimated memory excludes
-/// console text and is not a process-RSS limit; heap objects count allocations
+/// console text and register backing storage and is not a process-RSS limit;
+/// heap objects count allocations
 /// until the engine supports live-object reclamation. The separate console
 /// entry and byte ceilings both apply, and overflow fails without eviction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EngineLaneExecutionLimits {
     pub max_instructions: u64,
+    /// Absent in historical receipts that did not capture frame limits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_registers: Option<u32>,
+    /// Absent in historical receipts that did not capture guest call depth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_call_depth: Option<usize>,
     pub max_heap_objects: u32,
     pub max_total_memory_bytes: u64,
     pub max_console_entries: usize,
@@ -2890,6 +2897,8 @@ impl EngineExecutionLimitsReport {
 
         let limits = |lane: InterpreterConfig| EngineLaneExecutionLimits {
             max_instructions: lane.instruction_budget,
+            max_registers: Some(lane.max_registers),
+            max_call_depth: Some(lane.max_call_depth),
             max_heap_objects: lane.max_heap_objects,
             max_total_memory_bytes: lane.max_total_memory_bytes,
             max_console_entries: lane.max_console_entries,
@@ -7736,6 +7745,13 @@ impl EngineDispatcher {
         if let Some(max_instructions) = config.runtime.max_instructions {
             execution.deterministic_budget = max_instructions;
             execution.throughput_budget = max_instructions;
+        }
+        if let Some(max_registers) = config.runtime.max_registers {
+            execution.deterministic_max_registers = max_registers;
+            execution.throughput_max_registers = max_registers;
+        }
+        if let Some(max_call_depth) = config.runtime.max_call_depth {
+            execution.max_call_depth = max_call_depth;
         }
         execution.max_heap_objects = config.runtime.max_heap_objects;
         execution.max_total_memory_bytes = config.runtime.max_total_memory_bytes;

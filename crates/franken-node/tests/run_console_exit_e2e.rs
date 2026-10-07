@@ -2806,6 +2806,144 @@ fn runtime_max_instructions_bounds_a_run() {
     );
 }
 
+/// A sparse data literal retains enough simultaneously live values to need
+/// more than the balanced lane's 256 registers. An explicit resource override
+/// must admit that program while retaining balanced trust and capability rules.
+#[test]
+fn runtime_max_registers_admits_a_large_frame_without_changing_policy() {
+    let dir = profile_selection_workspace(Some("balanced"));
+    let elements = (0..320)
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    std::fs::write(
+        dir.path().join("app.js"),
+        format!(
+            "const items = [,{elements}];\nconsole.log(items.length);\nconsole.log(items[320]);\n"
+        ),
+    )
+    .expect("write wide-register program");
+
+    let run = |max_registers: Option<&str>| {
+        let mut command = Command::new(franken_node_bin());
+        command
+            .args(["run", "app.js", "--policy", "balanced", "--json"])
+            .env_remove("FRANKEN_NODE_RUNTIME_MAX_REGISTERS")
+            .current_dir(dir.path());
+        if let Some(limit) = max_registers {
+            command.env("FRANKEN_NODE_RUNTIME_MAX_REGISTERS", limit);
+        }
+        command.output().expect("run wide-register program")
+    };
+
+    let limited = run(None);
+    assert!(
+        !limited.status.success(),
+        "the default frame must be bounded"
+    );
+    let refusal = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&limited.stdout),
+        String::from_utf8_lossy(&limited.stderr)
+    );
+    assert!(
+        refusal.contains("register") && refusal.contains("max 256"),
+        "expected the register ceiling, not another execution failure: {refusal}"
+    );
+
+    let admitted = run(Some("1024"));
+    assert!(
+        admitted.status.success(),
+        "explicit register budget must admit the same program: {}",
+        String::from_utf8_lossy(&admitted.stderr)
+    );
+    let report = last_json_document(&String::from_utf8_lossy(&admitted.stdout));
+    assert_eq!(report["preflight"]["policy_mode"], "balanced");
+    assert_eq!(report["receipt"]["profile"], "balanced");
+    assert_eq!(report["receipt"]["policy_mode"], "balanced");
+    assert_eq!(
+        report["dispatch"]["captured_output"]["stdout"],
+        "321\n319\n"
+    );
+    assert_eq!(
+        report["receipt"]["execution_limits"],
+        report["dispatch"]["engine_decision"]["execution_limits"]
+    );
+    for lane in ["deterministic", "throughput"] {
+        assert_eq!(
+            report["receipt"]["execution_limits"][lane]["max_registers"],
+            1_024
+        );
+    }
+}
+
+/// Strict's finite call-depth ceiling is independently configurable. Growing
+/// it must let ordinary recursion finish without selecting a weaker profile.
+#[test]
+fn runtime_max_call_depth_admits_recursion_without_changing_strict_policy() {
+    let dir = profile_selection_workspace(Some("strict"));
+    std::fs::write(
+        dir.path().join("app.js"),
+        "function count(n) {\n\
+         if (n <= 0) { return 0; }\n\
+         return 1 + count(n - 1);\n\
+         }\n\
+         console.log(count(48));\n",
+    )
+    .expect("write recursive program");
+
+    let run = |max_call_depth: Option<&str>| {
+        let mut command = Command::new(franken_node_bin());
+        command
+            .args(["run", "app.js", "--policy", "strict", "--json"])
+            .env_remove("FRANKEN_NODE_RUNTIME_MAX_CALL_DEPTH")
+            .current_dir(dir.path());
+        if let Some(limit) = max_call_depth {
+            command.env("FRANKEN_NODE_RUNTIME_MAX_CALL_DEPTH", limit);
+        }
+        command.output().expect("run recursive program")
+    };
+
+    let limited = run(None);
+    assert!(
+        !limited.status.success(),
+        "strict's default depth is bounded"
+    );
+    let refusal = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&limited.stdout),
+        String::from_utf8_lossy(&limited.stderr)
+    );
+    assert!(
+        refusal.contains("call stack overflow") && refusal.contains("max 32"),
+        "expected the call-depth ceiling, not another execution failure: {refusal}"
+    );
+
+    let admitted = run(Some("64"));
+    assert!(
+        admitted.status.success(),
+        "explicit call-depth budget must admit the same program: {}",
+        String::from_utf8_lossy(&admitted.stderr)
+    );
+    let report = last_json_document(&String::from_utf8_lossy(&admitted.stdout));
+    assert_eq!(report["preflight"]["policy_mode"], "strict");
+    assert_eq!(report["receipt"]["profile"], "strict");
+    assert_eq!(report["receipt"]["policy_mode"], "strict");
+    assert_eq!(report["dispatch"]["captured_output"]["stdout"], "48\n");
+    assert_eq!(
+        report["receipt"]["execution_limits"],
+        report["dispatch"]["engine_decision"]["execution_limits"]
+    );
+    for lane in ["deterministic", "throughput"] {
+        let limits = &report["receipt"]["execution_limits"][lane];
+        assert_eq!(limits["max_call_depth"], 64);
+        assert_eq!(
+            limits["max_registers"],
+            if lane == "deterministic" { 128 } else { 256 }
+        );
+    }
+}
+
 /// Operator memory ceilings apply to the real native worker, including
 /// allocations made by ordinary array/object programs.
 #[test]

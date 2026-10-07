@@ -39,6 +39,8 @@ fn runtime_config() -> RuntimeConfig {
         lanes,
         drain_timeout_ms: None,
         max_instructions: None,
+        max_registers: None,
+        max_call_depth: None,
         max_heap_objects: None,
         max_total_memory_bytes: None,
         max_console_entries: None,

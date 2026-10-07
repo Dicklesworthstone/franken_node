@@ -690,6 +690,30 @@ fixed. Completed native run receipts and engine decisions include
 `execution_limits` with the effective limits for both lanes and `selected_lane`
 identifying the lane actually used.
 
+Function-frame capacity can be increased without selecting a different trust
+profile. Set `runtime.max_registers` to a value in **1–65,536** to replace the
+register window on both native lanes, or `runtime.max_call_depth` in
+**1–10,000** to replace the guest call-depth ceiling. These are independent of
+the instruction, parser, memory, and console budgets; exceeding any active
+limit still fails execution. Invalid overrides are rejected before execution.
+Register backing storage is bounded separately by the engine and is outside
+the reported heap-memory ceiling; a larger register window can substantially
+increase process memory. The engine's independent native-stack guard also
+continues to apply.
+Leaving them unset preserves the profile defaults:
+
+| Profile | Deterministic registers per frame | Throughput registers per frame | Guest call depth |
+|---|---:|---:|---:|
+| `strict` | 128 | 256 | 32 |
+| `balanced` | 256 | 4,096 | Engine default |
+| `legacy-risky` | 8,192 | 16,384 | 128 |
+
+For a function that needs more than balanced's 256 registers, an explicit
+`max_registers = 2_048` gives it a larger frame while retaining balanced's
+capability and trust rules. Effective register and call-depth ceilings are
+recorded for each lane under `execution_limits`. Historical receipts that did
+not record those two fields leave them absent; replay does not invent values.
+
 No profile—including `legacy-risky`—grants `process_spawn`. That capability is
 impossible by default and requires an expiring Ed25519-signed
 `ChildProcessSpawn` token bound to the complete resolved policy/config plus a
@@ -1132,6 +1156,12 @@ bulkhead_retry_after_ms = 50
 # strict 200M, balanced 1B, legacy-risky 5B). Also
 # FRANKEN_NODE_RUNTIME_MAX_INSTRUCTIONS. The wall-clock timeout still applies.
 # max_instructions = 1_000_000_000
+# Optional per-frame register and guest call-depth ceilings on both lanes.
+# Accepted ranges: registers 1..=65_536; call depth 1..=10_000.
+# max_registers = 2_048
+# max_call_depth = 128
+# Also FRANKEN_NODE_RUNTIME_MAX_REGISTERS and
+# FRANKEN_NODE_RUNTIME_MAX_CALL_DEPTH; environment overrides TOML.
 # Optional positive execution ceilings on both native lanes; omitted values
 # preserve the engine defaults listed under Runtime Profiles.
 # max_heap_objects = 200_000
@@ -2227,6 +2257,8 @@ convention. The most common:
 | `FRANKEN_NODE_PROFILE` | `profile` | `strict`, `balanced`, or `legacy-risky` |
 | `FRANKEN_NODE_RUNTIME_PREFERRED` | `runtime.preferred` | `auto`, `node`, `bun`, or `franken-engine` |
 | `FRANKEN_NODE_RUNTIME_MAX_INSTRUCTIONS` | `runtime.max_instructions` | Instruction budget for one `run` (> 0); replaces the profile default |
+| `FRANKEN_NODE_RUNTIME_MAX_REGISTERS` | `runtime.max_registers` | Registers per call frame on both native lanes (1–65,536); replaces profile defaults |
+| `FRANKEN_NODE_RUNTIME_MAX_CALL_DEPTH` | `runtime.max_call_depth` | Guest call depth on both native lanes (1–10,000); replaces the profile default |
 | `FRANKEN_NODE_RUNTIME_MAX_HEAP_OBJECTS` | `runtime.max_heap_objects` | Positive allocation ceiling on both native lanes; not a live-object count |
 | `FRANKEN_NODE_RUNTIME_MAX_TOTAL_MEMORY_BYTES` | `runtime.max_total_memory_bytes` | Positive engine-accounted memory ceiling in bytes; excludes console text and is not RSS |
 | `FRANKEN_NODE_RUNTIME_MAX_CONSOLE_ENTRIES` | `runtime.max_console_entries` | Positive console-entry ceiling on both lanes; overflow fails and the fixed byte ceiling still applies |
