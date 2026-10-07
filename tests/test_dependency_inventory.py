@@ -1,12 +1,17 @@
 """Real metadata and scanner-CLI regressions for transitive npm inventory."""
 import json
+import ast
+import copy
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
-from unittest.mock import patch
+from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -296,6 +301,154 @@ class DependencyInventoryTests(unittest.TestCase):
         report = json.loads(process.stdout)
         self.assertEqual(report["summary"]["migration_readiness"], "not-ready")
         self.assertEqual(report["dependencies"][0]["source"], "packages/runtime/package.json")
+
+
+class ReportDependencyAssessmentTests(unittest.TestCase):
+    """Execute the checked-in report boundary without an execution backend.
+
+    Inventory, files, scanning and report orchestration are real. Scoring,
+    rewrite advice and execution observations are mocked explicitly; these are
+    unit/integration boundary tests, not proof of native runtime execution.
+    """
+
+    def setUp(self):
+        self.scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(self.scratch.cleanup)
+        self.root = Path(self.scratch.name)
+
+        def raise_walk_error(error):
+            raise error
+
+        self.scorer = Mock()
+        self.scorer.score_report.return_value = {"risk_score": 0, "difficulty": {"level": "low"}}
+        self.rewriter = Mock()
+        self.rewriter.produce_report.side_effect = lambda _scan: {
+            "suggestions": [], "summary": {"by_category": {}}}
+        self.runner = SimpleNamespace(raise_walk_error=raise_walk_error,
+                                      DEFAULT_BASELINE_COMMAND=("node",),
+                                      DEFAULT_MIGRATION_COMMAND=("franken-node",))
+        self.replay = SimpleNamespace(unique_object=inventory._unique, reject_constant=inventory._constant)
+        self.namespace = {"Path": Path, "os": os, "json": json, "time": time,
+                          "tempfile": tempfile, "datetime": datetime, "timezone": timezone,
+                          "inventory_mod": inventory, "scanner_mod": scanner,
+                          "scorer_mod": self.scorer, "rewrite_mod": self.rewriter,
+                          "runner": self.runner, "replay": self.replay,
+                          "MAX_SCAN_SOURCE_BYTES": 10 * 1024 * 1024}
+        path = ROOT / "scripts/migrate_report.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        names = {"assess_snapshot", "dependency_review_reasons", "generate_full_report", "preflight_destinations"}
+        functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
+        self.assertEqual({node.name for node in functions}, names)
+        exec(compile(ast.Module(body=functions, type_ignores=[]), str(path), "exec"), self.namespace)
+
+    def write(self, name, value):
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value), encoding="utf-8")
+
+    def assess(self):
+        return self.namespace["assess_snapshot"](self.root, "project", {}, time.monotonic() + 30)
+
+    def test_actual_report_assessment_includes_transitive_native_risks(self):
+        self.write("package.json", {"dependencies": {"web": "1"}})
+        self.write("package-lock.json", {"lockfileVersion": 3, "packages": {
+            "node_modules/web": {"version": "1"},
+            "node_modules/web/node_modules/sharp": {"version": "2"}}})
+        assessment = self.assess()
+        scan = assessment["scan"]
+        self.assertEqual(scan["summary"]["migration_readiness"], "not-ready")
+        self.assertEqual(scan["summary"]["risk_distribution"]["critical"], 1)
+        self.scorer.score_report.assert_called_once_with(scan)
+        self.rewriter.produce_report.assert_called_once_with(scan)
+        self.assertEqual(len(self.namespace["dependency_review_reasons"](scan)), 1)
+        self.assertFalse(assessment["rewrite_suggestions"]["applied"])
+        self.assertTrue(assessment["rewrite_suggestions"]["advisory_only"])
+
+    def test_report_keeps_install_script_review_even_with_low_heuristic_score(self):
+        self.write("package-lock.json", {"lockfileVersion": 3, "packages": {
+            "node_modules/assets": {"version": "1", "hasInstallScript": True}}})
+        assessment = self.assess()
+        self.assertEqual(assessment["risk_assessment"]["risk_score"], 0)  # explicitly mocked
+        self.assertEqual(assessment["scan"]["summary"]["migration_readiness"], "partial")
+        self.assertEqual(assessment["scan"]["summary"]["risk_distribution"]["high"], 1)
+        self.assertEqual(assessment["scan"]["recommendations"][0]["category"], "high-risk")
+        self.assertTrue(self.namespace["dependency_review_reasons"](assessment["scan"]))
+
+    def test_non_workspace_manifest_coverage_is_preserved_and_alias_is_resolved(self):
+        self.write("examples/plugin/package.json", {"dependencies": {"hidden": "npm:sharp@1"}})
+        assessment = self.assess()
+        row = assessment["scan"]["dependencies"][0]
+        self.assertEqual(row["name"], "sharp")
+        self.assertEqual(row["source"], "examples/plugin/package.json")
+        self.assertEqual(assessment["scan"]["summary"]["migration_readiness"], "not-ready")
+
+    def test_report_does_not_double_count_workspace_declarations_and_locked_packages(self):
+        self.write("package.json", {"workspaces": ["packages/*"]})
+        self.write("packages/api/package.json", {"name": "api", "dependencies": {"sharp": "^1"}})
+        self.write("package-lock.json", {"lockfileVersion": 3, "packages": {
+            "node_modules/sharp": {"version": "1.2"}}})
+        self.assertEqual(len(self.assess()["scan"]["dependencies"]), 1)
+
+    def test_malformed_lock_stops_assessment_before_risk_or_rewrite_advice(self):
+        (self.root / "package-lock.json").write_text("{")
+        with self.assertRaises(inventory.InventoryError):
+            self.assess()
+        self.scorer.score_report.assert_not_called()
+        self.rewriter.produce_report.assert_not_called()
+
+    def test_assessment_metadata_budget_refuses_instead_of_truncating(self):
+        self.write("examples/package.json", {"name": "example", "dependencies": {"sharp": "1"}})
+        with patch.object(inventory, "MAX_MANIFEST_BYTES", 10):
+            with self.assertRaises(ValueError):
+                self.assess()
+
+    def test_expired_assessment_deadline_does_not_produce_empty_success(self):
+        with self.assertRaises(TimeoutError):
+            self.namespace["assess_snapshot"](self.root, "project", {}, time.monotonic() - 1)
+
+    def test_additional_manifest_observations_cannot_override_or_escape_root(self):
+        self.write("package.json", {"dependencies": {"sharp": "1"}})
+        for supplied in ({"package.json": {}}, {"../package.json": {}}, {"other.json": {}},
+                         {"nested/package.json": []}):
+            with self.subTest(manifests=supplied), self.assertRaises(inventory.InventoryError):
+                inventory.scan_dependencies(self.root, scanner.NATIVE_ADDON_PACKAGES,
+                                            additional_manifests=supplied)
+
+    def test_report_decision_cannot_waive_dependency_review_after_optimistic_validation(self):
+        # Controlled execution observations isolate report decision propagation.
+        # No native process is executed or claimed to pass by this test.
+        self.replay.LEGS = ("baseline", "migration")
+        self.replay.checked_options = lambda _options: {"total_timeout_seconds": 30}
+        self.replay.runtime_bindings = lambda *_args: ({"baseline": ["node"], "migration": ["franken-node"]}, {})
+        self.runner.capture_project = lambda *_args: ({}, "captured-input")
+        self.runner.stage_project = lambda _snapshot, path, _deadline: path.mkdir()
+        self.runner.validate_project = lambda *_args, **_kwargs: {
+            "summary": {"verdict": "PASS"},
+            "inputs": {"baseline_sha256": "captured-input", "migration_sha256": "captured-input"},
+            "errors": []}
+        self.namespace["confidence_mod"] = SimpleNamespace(generate_report=lambda *_args: {
+            "go_decision": {"proceed": True, "blocking_reasons": [], "rationale": "mock validation"},
+            "confidence": {"confidence_score": 100}})
+        self.namespace["planner_mod"] = SimpleNamespace(generate_plan=lambda *_args: {
+            "phases": [{"name": "shadow"}, {"name": "canary"}]})
+        for level in ("low", "high", "critical"):
+            with self.subTest(level=level):
+                assessment = {"scan": {"summary": {"total_apis_detected": 0},
+                                       "dependencies": [{"name": "package", "risk_level": level}]},
+                              "risk_assessment": {"risk_score": 0, "difficulty": {"level": "low"}},
+                              "rewrite_suggestions": {"suggestions": [], "summary": {"by_category": {}}}}
+                self.namespace["assess_snapshot"] = lambda *_args: copy.deepcopy(assessment)
+                with patch.object(scanner, "load_registry", return_value={"present": True}):
+                    report = self.namespace["generate_full_report"](self.root, execute=True)
+                blocked = level != "low"
+                self.assertEqual(report["errors"], [])
+                self.assertEqual(report["executive_summary"]["go_decision"], "NO-GO" if blocked else "GO")
+                self.assertEqual(report["workflow_status"], "BLOCKED" if blocked else "VALIDATED")
+                self.assertEqual(report["confidence"]["go_decision"]["proceed"], not blocked)
+                self.assertEqual(report["rollout_plan"]["validation_gate"]["passed"], not blocked)
+                self.assertEqual(report["rollout_plan"]["phases"][0]["status"],
+                                 "blocked" if blocked else "eligible_for_evaluation")
+                self.assertFalse(report["rollout_plan"]["execution_authorized"])
 
 
 if __name__ == "__main__":

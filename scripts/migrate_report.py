@@ -29,6 +29,7 @@ import migration_validation_runner as runner
 import project_scanner as scanner_mod
 import rewrite_suggestion_engine as rewrite_mod
 import rollout_planner as planner_mod
+from scripts import dependency_inventory as inventory_mod
 
 MAX_SCAN_SOURCE_BYTES = 10 * 1024 * 1024
 
@@ -98,7 +99,8 @@ def assess_snapshot(root: Path, display_path: str, registry: dict, deadline: flo
     unreadable inputs are errors, not a clean scan. This remains a regex/API
     inventory, not a complete static security analysis.
     """
-    usage, dependencies = [], []
+    usage, manifests = [], {}
+    metadata_bytes = 0
     for directory, names, files in os.walk(root, followlinks=False, onerror=runner.raise_walk_error):
         names[:] = sorted(name for name in names if name not in {".git", "node_modules"})
         for name in sorted(files):
@@ -109,6 +111,12 @@ def assess_snapshot(root: Path, display_path: str, registry: dict, deadline: flo
                 continue
             if path.stat().st_size > MAX_SCAN_SOURCE_BYTES:
                 raise ValueError("assessment source exceeds the 10 MiB bound")
+            if name == "package.json":
+                size = path.stat().st_size
+                metadata_bytes += size
+                if (size > inventory_mod.MAX_MANIFEST_BYTES
+                        or metadata_bytes > inventory_mod.MAX_LOCK_BYTES):
+                    raise ValueError("assessment package metadata exceeds inventory byte budget")
             # Surface encoding/read failures that the legacy scanner suppresses.
             text = path.read_text(encoding="utf-8")
             relative = path.relative_to(root).as_posix()
@@ -117,39 +125,49 @@ def assess_snapshot(root: Path, display_path: str, registry: dict, deadline: flo
                                      parse_constant=replay.reject_constant)
                 if not isinstance(package, dict):
                     raise ValueError(f"package manifest must be an object: {relative}")
-                for section in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
-                    declared = package.get(section, {})
-                    if not isinstance(declared, dict) or any(not isinstance(version, str) for version in declared.values()):
-                        raise ValueError(f"invalid {section} in {relative}")
-                    for dependency, version in sorted(declared.items()):
-                        native = dependency in scanner_mod.NATIVE_ADDON_PACKAGES
-                        dependencies.append({"name": dependency, "version": version, "manifest": relative,
-                                             "section": section, "has_native_addon": native,
-                                             "risk_level": "critical" if native else "low",
-                                             "notes": "Native addon — requires port or replacement" if native else None})
+                manifests[relative] = package
+                if len(manifests) > inventory_mod.MAX_WORKSPACES + 1:
+                    raise ValueError("assessment package count exceeds inventory limit")
             else:
                 found = scanner_mod.scan_file(path, registry)
                 for item in found:
                     item["source_file"] = relative
                 usage.extend(found)
+    if time.monotonic() >= deadline:
+        raise TimeoutError("migration assessment exhausted total budget")
+    dependencies = inventory_mod.scan_dependencies(
+        root, scanner_mod.NATIVE_ADDON_PACKAGES, additional_manifests=manifests)
+    if time.monotonic() >= deadline:
+        raise TimeoutError("migration dependency assessment exhausted total budget")
     usage.sort(key=lambda item: (item["source_file"], item["api_family"], item["api_name"]))
     distribution = {level: 0 for level in ("low", "medium", "high", "critical")}
     for item in usage:
         distribution[item["risk_level"]] += 1
-    distribution["critical"] += sum(item["has_native_addon"] for item in dependencies)
+    for item in dependencies:
+        if item["risk_level"] in ("high", "critical"):
+            distribution[item["risk_level"]] += 1
     scan = {"project": display_path, "scan_timestamp": datetime.now(timezone.utc).isoformat(),
-            "analysis_scope": "regex API inventory and declared dependency risks",
+            "analysis_scope": "regex API inventory and npm lock/declaration metadata risks; not authenticated resolution",
             "summary": {"total_apis_detected": len(usage), "risk_distribution": distribution,
                         "migration_readiness": scanner_mod.compute_readiness(distribution)},
             "api_usage": usage, "dependencies": dependencies,
             "recommendations": [{"category": "blocking", "severity": "error", "message": "Resolve critical findings"}]
                                if distribution["critical"] else []}
+    if distribution["high"]:
+        scan["recommendations"].append({"category": "high-risk", "severity": "warning",
+                                        "message": "Review high-risk API and dependency findings"})
     rewrites = rewrite_mod.produce_report(scan)
     # Suggestions are not an applied patch or an executed rollback. In
     # particular, legacy shell strings are never used as executable commands.
     rewrites["applied"] = False
     rewrites["advisory_only"] = True
     return {"scan": scan, "risk_assessment": scorer_mod.score_report(scan), "rewrite_suggestions": rewrites}
+
+
+def dependency_review_reasons(scan: dict) -> list[str]:
+    """A small heuristic score cannot waive a concrete dependency review item."""
+    count = sum(item["risk_level"] in ("high", "critical") for item in scan["dependencies"])
+    return [f"{count} candidate dependency inventory items still require review"] if count else []
 
 
 def generate_full_report(project_dir: Path, *, migrated_project: Path | None = None,
@@ -251,6 +269,7 @@ def generate_full_report(project_dir: Path, *, migrated_project: Path | None = N
                                                         result["validation"])
             result["confidence"] = confidence
             blockers = list(confidence["go_decision"]["blocking_reasons"])
+            blockers.extend(dependency_review_reasons(candidate["scan"]))
             categories = candidate["rewrite_suggestions"]["summary"]["by_category"]
             if any(categories.get(category, 0) for category in ("adapter-needed", "removal-needed", "manual-review")):
                 blockers.append("candidate rewrite suggestions still require review")

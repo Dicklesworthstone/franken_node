@@ -329,17 +329,34 @@ def _locked_from_workspace(directory: str, name: str, locations: dict[str, dict]
     return None
 
 
-def scan_dependencies(project: Path, native: set[str]) -> list[dict]:
+def scan_dependencies(project: Path, native: set[str], *,
+                      additional_manifests: dict[str, dict] | None = None) -> list[dict]:
     """Inventory all locked locations, retaining unresolved root declarations.
 
     Lockfile v2's legacy projection is never unioned with its packages table.
     Both npm lock filenames are accepted individually; coexistence is rejected
     because their precedence differs between npm <=11 and npm >=12. No hidden
     node_modules lock, external link, registry, or package manager is consulted.
+
+    A captured-project assessor may supply additional project-relative manifests
+    it already read, preserving its broader non-workspace package coverage. The
+    caller owns their byte budget; conflicting observations are never merged.
     """
     project = Path(project)
     package = _read(project / "package.json", MAX_MANIFEST_BYTES)
-    manifests = [("package.json", package or {}), *_workspace_manifests(project, package or {})]
+    manifests = dict([("package.json", package or {}), *_workspace_manifests(project, package or {})])
+    if additional_manifests is not None:
+        if not isinstance(additional_manifests, dict) or len(additional_manifests) > MAX_WORKSPACES + 1:
+            raise InventoryError("additional manifests exceed inventory limit")
+        for source, manifest in additional_manifests.items():
+            _path(source)
+            if source.split("/")[-1] != "package.json" or not isinstance(manifest, dict):
+                raise InventoryError("additional manifest must be a project package.json object")
+            if source in manifests and manifests[source] != manifest:
+                raise InventoryError("manifest changed between captured observations")
+            manifests[source] = manifest
+        if len(manifests) > MAX_WORKSPACES + 1:
+            raise InventoryError("combined manifest count exceeds inventory limit")
     paths = [project / name for name in ("package-lock.json", "npm-shrinkwrap.json")
              if os.path.lexists(project / name)]
     if len(paths) > 1:
@@ -354,7 +371,7 @@ def scan_dependencies(project: Path, native: set[str]) -> list[dict]:
             raise InventoryError("unsupported npm lockfileVersion (expected 1, 2 or 3)")
         rows, roots = (_legacy if version == 1 else _modern)(lock, paths[0].name, native)
     locations = {row["package_path"]: row for row in rows}
-    for source, manifest in manifests:
+    for source, manifest in sorted(manifests.items()):
         directory = source.rpartition("/")[0]
         for installed_as, (request, section) in sorted(_declarations(manifest).items()):
             name, version = _alias(installed_as, request)
