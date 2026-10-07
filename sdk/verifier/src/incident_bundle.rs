@@ -14,7 +14,10 @@
 //! 3. the Ed25519 signature over
 //!    `b"replay_bundle_sig_v1:" || u64_le(len) || integrity_hash` verifies
 //!    strictly under a public key the VERIFIER supplies — the key embedded in
-//!    the bundle and its derived key ID must match that trust anchor.
+//!    the bundle and its derived key ID must match that trust anchor;
+//! 4. timeline sequencing, timestamps, causal parents, deterministic bundle ID,
+//!    manifest endpoints and spans, canonical chunk boundaries and chunk hashes
+//!    are independently checked against the authenticated events.
 //!
 //! The signature envelope's human-readable `signing_identity` label is outside
 //! the signed integrity view. Verified signer identity is therefore the
@@ -24,8 +27,11 @@
 //! escaped spellings of the same member name. A signature must not authenticate
 //! different evidence depending on a consumer's first/last-member convention.
 //! Unknown top-level fields are rejected so no unsigned data can ride along.
-//! The chunk layout (gzip sizing) is covered by the integrity hash but is not
-//! independently re-derived here.
+//! Gzip byte counts remain signed producer assertions: compression is optional
+//! in the product. This verifier checks replay structure, not guest execution.
+
+#[path = "incident_bundle_structure.rs"]
+mod structure;
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
@@ -92,6 +98,7 @@ pub enum IncidentBundleError {
     IntegrityMismatch { expected: String, actual: String },
     DecisionSequenceMismatch { expected: String, actual: String },
     EventCountMismatch { manifest: u64, timeline: usize },
+    Structure { path: String, reason: &'static str },
     SignatureAlgorithmUnsupported { algorithm: String },
     SignatureTrustScopeMismatch { actual: String },
     SignatureKeySourceUntrusted,
@@ -136,6 +143,9 @@ impl std::fmt::Display for IncidentBundleError {
                 f,
                 "manifest event_count {manifest} does not match timeline length {timeline}"
             ),
+            Self::Structure { path, reason } => {
+                write!(f, "incident bundle structure invalid at {path}: {reason}")
+            }
             Self::SignatureAlgorithmUnsupported { algorithm } => {
                 write!(f, "unsupported bundle signature algorithm `{algorithm}`")
             }
@@ -505,6 +515,10 @@ pub fn verify_incident_bundle(
     // Preserve the envelope's required-string validation without promoting its
     // unsigned human-readable label to an authenticated signer identity.
     sig_str("signing_identity")?;
+
+    // A valid signer can still produce inconsistent evidence. Do not promote
+    // hashes and counts to a verified replay until their structure is checked.
+    structure::verify_structure(&object)?;
 
     Ok(VerifiedIncidentBundle {
         bundle_id: string_field(&object, "bundle_id")?.to_string(),
