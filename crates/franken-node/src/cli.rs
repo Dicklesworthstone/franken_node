@@ -281,9 +281,10 @@ pub struct RunArgs {
     #[arg(default_value = "", value_parser = parse_safe_content_pathbuf)]
     pub app_path: PathBuf,
 
-    /// Policy mode to enforce at runtime.
-    #[arg(long, default_value = "balanced")]
-    pub policy: String,
+    /// Override the configured runtime profile. When omitted, use
+    /// FRANKEN_NODE_PROFILE, the config file's profile, or balanced by default.
+    #[arg(long)]
+    pub policy: Option<String>,
 
     /// Emit a machine-readable trust pre-flight report. Early failures emit
     /// `franken-node/run-error-cli/v1` then exit 1. A blocked preflight
@@ -3585,9 +3586,19 @@ mod parser_contract_extra_tests {
         };
         assert_eq!(args.app_path, PathBuf::from("app.js"));
         assert_eq!(args.runtime.as_deref(), Some("node"));
-        assert_eq!(args.policy, "strict");
+        assert_eq!(args.policy.as_deref(), Some("strict"));
         assert!(args.json);
         Ok(())
+    }
+
+    #[test]
+    fn run_without_policy_preserves_configured_profile_selection() {
+        let cli = parse(&["franken-node", "run", "app.js"])
+            .expect("run without a policy override must parse");
+        let Command::Run(args) = cli.command else {
+            panic!("expected run command");
+        };
+        assert!(args.policy.is_none());
     }
 
     #[test]

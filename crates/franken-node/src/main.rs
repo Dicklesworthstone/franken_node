@@ -33744,7 +33744,7 @@ fn main() -> Result<()> {
                 app_args,
             } = args;
 
-            let profile_override = match parse_profile_override(Some(&policy)) {
+            let profile_override = match parse_profile_override(policy.as_deref()) {
                 Ok(profile) => profile,
                 Err(err) => {
                     return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
@@ -33763,6 +33763,10 @@ fn main() -> Result<()> {
                     return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
                 }
             };
+            // An omitted flag must preserve the configured or environment
+            // profile. Use the resolved selection consistently for execution,
+            // containment, receipts, and incident evidence.
+            let policy = resolved.selected_profile.to_string();
 
             // Resolve one canonical authority before consulting trust state.
             // The dispatcher and private worker revalidate these exact paths

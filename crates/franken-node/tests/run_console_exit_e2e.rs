@@ -181,6 +181,179 @@ fn default_run_executes_fixture_js_through_embedded_engine_without_degraded_fall
     );
     let _workspace = dir;
 }
+
+fn profile_selection_workspace(profile: Option<&str>) -> tempfile::TempDir {
+    let dir = tempfile::TempDir::new().expect("profile-selection workspace");
+    std::fs::write(
+        dir.path().join("app.js"),
+        "console.log('profile-selected');\n",
+    )
+    .expect("write profile-selection app");
+    let init = Command::new(franken_node_bin())
+        .args([
+            "init",
+            "--profile",
+            profile.unwrap_or("balanced"),
+            "--out-dir",
+            ".",
+        ])
+        .env_remove("FRANKEN_NODE_PROFILE")
+        .current_dir(dir.path())
+        .output()
+        .expect("bootstrap profile-selection workspace");
+    assert!(
+        init.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    if profile.is_none() {
+        // Keep the real init-provisioned keys while exercising the resolver's
+        // default when neither the document nor the environment selects one.
+        let config_path = dir.path().join("franken_node.toml");
+        let mut config: toml::Value = toml::from_str(
+            &std::fs::read_to_string(&config_path).expect("read initialized config"),
+        )
+        .expect("parse initialized config");
+        config
+            .as_table_mut()
+            .expect("config is a table")
+            .remove("profile");
+        std::fs::write(
+            config_path,
+            toml::to_string(&config).expect("serialize config without a profile"),
+        )
+        .expect("write config without a profile");
+    }
+    dir
+}
+
+fn run_with_profile_sources(
+    workspace: &std::path::Path,
+    environment_profile: Option<&str>,
+    cli_policy: Option<&str>,
+) -> RunOutcome {
+    let mut command = Command::new(franken_node_bin());
+    command
+        .args(["run", "app.js", "--json"])
+        .env_remove("FRANKEN_NODE_PROFILE")
+        .current_dir(workspace);
+    if let Some(profile) = environment_profile {
+        command.env("FRANKEN_NODE_PROFILE", profile);
+    }
+    if let Some(policy) = cli_policy {
+        command.args(["--policy", policy]);
+    }
+    let output = command.output().expect("run with selected profile sources");
+    RunOutcome {
+        exit_code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+/// A defaulted CLI value used to overwrite both file and environment policy,
+/// silently turning configured strict runs into balanced runs. Verify the
+/// actual engine budget and signed receipt as well as the preflight label.
+#[test]
+fn run_profile_selection_preserves_file_environment_and_explicit_cli_precedence() {
+    for (file_profile, environment_profile, cli_policy, expected) in [
+        (Some("strict"), None, None, "strict"),
+        (Some("balanced"), Some("strict"), None, "strict"),
+        (Some("strict"), Some("strict"), Some("balanced"), "balanced"),
+        (Some("balanced"), None, Some("STRICT"), "strict"),
+        (None, None, None, "balanced"),
+    ] {
+        let dir = profile_selection_workspace(file_profile);
+        let outcome = run_with_profile_sources(dir.path(), environment_profile, cli_policy);
+        assert_eq!(
+            outcome.exit_code,
+            Some(0),
+            "file={file_profile:?}, env={environment_profile:?}, CLI={cli_policy:?}: {}",
+            outcome.stderr
+        );
+        let report = last_json_document(&outcome.stdout);
+        assert_eq!(report["preflight"]["policy_mode"], expected);
+        assert_eq!(report["receipt"]["profile"], expected);
+        assert_eq!(report["receipt"]["policy_mode"], expected);
+        assert_eq!(
+            report["dispatch"]["captured_output"]["stdout"],
+            "profile-selected\n"
+        );
+        let expected_token_budget = if expected == "strict" { 32_768 } else { 65_536 };
+        assert_eq!(
+            report["dispatch"]["engine_decision"]["parser_budget"]["max_token_count"],
+            expected_token_budget,
+            "the actual engine configuration must follow the selected profile"
+        );
+    }
+}
+
+/// An omitted --policy must retain strict's real admission rule, not merely
+/// print "strict" on a receipt while allowing the high-risk dependency.
+#[test]
+fn run_profile_selection_enforces_configured_and_environment_strict_admission() {
+    for (file_profile, environment_profile) in [("strict", None), ("balanced", Some("strict"))] {
+        let dir = profile_selection_workspace(Some(file_profile));
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"profile-admission","version":"1.0.0","dependencies":{"lodahs":"1.0.0"}}"#,
+        )
+        .expect("write dependency that the real offline scan detects as a typosquat");
+        let scan = Command::new(franken_node_bin())
+            .args(["trust", "scan", ".", "--json"])
+            .env_remove("FRANKEN_NODE_PROFILE")
+            .current_dir(dir.path())
+            .output()
+            .expect("scan high-risk dependency");
+        assert!(
+            scan.status.success(),
+            "trust scan failed: {}",
+            String::from_utf8_lossy(&scan.stderr)
+        );
+
+        let strict = run_with_profile_sources(dir.path(), environment_profile, None);
+        assert_ne!(
+            strict.exit_code,
+            Some(0),
+            "strict must refuse the dependency"
+        );
+        let blocked = last_json_document(&strict.stdout);
+        assert_eq!(blocked["policy_mode"], "strict");
+        assert_eq!(blocked["verdict"]["status"], "blocked");
+        assert!(
+            blocked["verdict"]["violations"]
+                .as_array()
+                .is_some_and(|violations| violations.iter().any(|violation| {
+                    violation["kind"] == "high_risk" && violation["extension_id"] == "npm:lodahs"
+                })),
+            "strict must enforce the trust card's high-risk finding: {blocked}"
+        );
+        assert!(blocked.get("dispatch").is_none());
+        assert!(!strict.stdout.contains("profile-selected"));
+
+        let balanced = run_with_profile_sources(dir.path(), environment_profile, Some("balanced"));
+        assert_eq!(balanced.exit_code, Some(0), "{}", balanced.stderr);
+        let admitted = last_json_document(&balanced.stdout);
+        assert_eq!(admitted["preflight"]["policy_mode"], "balanced");
+        assert_eq!(admitted["preflight"]["verdict"]["status"], "passed");
+        assert_eq!(admitted["receipt"]["policy_mode"], "balanced");
+        assert_eq!(admitted["receipt"]["profile"], "balanced");
+        assert_eq!(
+            admitted["dispatch"]["captured_output"]["stdout"],
+            "profile-selected\n"
+        );
+        assert!(
+            admitted["preflight"]["verdict"]["warnings"]
+                .as_array()
+                .is_some_and(|warnings| warnings.iter().any(|warning| warning
+                    .as_str()
+                    .is_some_and(|text| text.contains("npm:lodahs") && text.contains("risk")))),
+            "an explicit balanced override must retain the risk warning: {admitted}"
+        );
+    }
+}
+
 /// HostIo and telemetry behind one killable session boundary. A loopback server
 /// confirms that an HTTP effect reached its real socket, then withholds the
 /// response; the parent deadline must still kill/reap the worker before returning.
