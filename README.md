@@ -809,7 +809,7 @@ every leaf command available in the current build.
 | `franken-node verify corpus <path>` | Verify corpus schema and coverage. The corpus path is handler-required so `--json` failures emit `verifier-cli-contract-v1` instead of a human clap error. Flags: `--json`. |
 | `franken-node verify lockstep <path>` | Compare runtimes in lockstep. Default `--runtimes bun,franken-node`. Use `--runtimes node,bun,franken-node` only when `node` is real Node.js; Node is then the spec and matching only Bun stays fail. The project path is handler-required so `--json` failures emit `franken-node/verify-lockstep-error-cli/v1` instead of a human clap error. `--emit-fixtures` writes divergence fixtures. Flags: `--json` (stderr banner off; early failures `franken-node/verify-lockstep-error-cli/v1`). |
 | `franken-node verify release <path>` | Verify release artifact signatures. The release path and `--key-dir` are handler-required so `--json` failures emit `franken-node/verify-release-error-cli/v1` instead of a human clap error. **Fails closed without `--key-dir`.** Flags: `--json` (`franken-node/verify-release-cli/v1`; early failures `franken-node/verify-release-error-cli/v1`). |
-| `franken-node verify transparency-log <path>` | Verify transparency-log hash chain: a JSONL export, or the durable ledger `run` appends to (`.franken-node/state/evidence-ledger.db`). The log path is handler-required so `--json` failures emit `franken-node/verify-transparency-log-error-cli/v1` instead of a human clap error. Empty logs fail closed. Without `--public-key`, signatures are `unproven` (non-zero exit), not PASS. Flags: `--json` (`franken-node/verify-transparency-log-cli/v1`; early failures `franken-node/verify-transparency-log-error-cli/v1`). |
+| `franken-node verify transparency-log <path>` | Verify a complete retained chain from a JSONL export or `.franken-node/state/evidence-ledger.db`. `--public-key` verifies contents and predecessor-bound signatures; legacy standalone signatures leave chain history `unproven` with nonzero exit. `--expected-head-hash <64 lowercase hex>` additionally checks a trusted, separately retained checkpoint and requires `--public-key`. Empty or oversized logs fail closed. JSON: `franken-node/verify-transparency-log-cli/v1`; handler failures: `franken-node/verify-transparency-log-error-cli/v1`. |
 | `franken-node verify recovery-runbook` | Generate a recovery runbook from a `--readiness-input` snapshot (not a live broker). Flags: `--json` (early failures `franken-node/verify-recovery-runbook-error-cli/v1`). |
 
 ### Trust and supply chain
@@ -1775,6 +1775,30 @@ A requested coverage floor fails when
 the measured population is empty, unreadable, or unauthenticated. Its reported
 `population_scope` does not establish historical completeness after deletion
 or rollback of the local inventory and trust material.
+
+Durable decisions use `chain-v1:<hex>` Ed25519 signatures. A distinct signing
+domain binds the entry contents and its exact predecessor before the append
+transaction commits. Deleting a middle entry and editing the next link therefore
+invalidates the signature, even when the remaining hash links match. The
+in-memory ledger refuses to fill in or normalize a predecessor covered by this
+signature. Standalone content signatures retain their existing contract.
+
+`verify transparency-log --public-key` requires an empty predecessor at genesis
+and authenticated links throughout the retained chain. JSON reports
+`chain_links_authenticated`, `unbound_signature_entries`, and `head_hash`.
+An older log with valid standalone signatures has `signatures_verified: true`
+but `status: "unproven"` and exits nonzero; coverage refuses to treat that log as
+an authenticated inventory. Existing rows are preserved and never silently
+re-signed into proof of a history that was not authenticated at append time.
+
+A genuine older prefix still has valid signatures. To detect that rollback,
+retain an authenticated `head_hash` separately and supply it later with
+`--expected-head-hash`. A matching authenticated chain reports
+`checkpoint_verified: true`; a different or truncated head reports a checkpoint
+error and exits nonzero. The checkpoint establishes the expected retained head,
+not freshness beyond the operator's trusted observation. Without a checkpoint,
+`valid` establishes the retained chain only. The verifier rejects logs exceeding
+its 10,000-entry limit instead of silently checking a truncated window.
 
 The exported bundle's fields (`tools::replay_bundle::ReplayBundle`):
 

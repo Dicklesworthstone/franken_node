@@ -11259,7 +11259,8 @@ fn authenticated_run_decision_inventory(
     verifying_key: &ed25519_dalek::VerifyingKey,
 ) -> Result<Vec<observability::evidence_ledger::EvidenceEntry>> {
     use observability::evidence_ledger::{
-        EvidenceEntry, evidence_entry_hash_hex, verify_evidence_entry,
+        EvidenceEntry, evidence_entry_has_chained_signature, evidence_entry_hash_hex,
+        verify_evidence_entry,
     };
     use observability::evidence_ledger_durable::{DurableEvidenceLedger, durable_store_path};
 
@@ -11284,6 +11285,13 @@ fn authenticated_run_decision_inventory(
             .with_context(|| format!("durable decision row {} is invalid", index + 1))?;
         verify_evidence_entry(&entry, verifying_key)
             .with_context(|| format!("durable decision row {} failed authentication", index + 1))?;
+        if !evidence_entry_has_chained_signature(&entry) {
+            anyhow::bail!(
+                "durable decision row {} has a legacy signature that authenticates contents \
+                 but not its predecessor; authenticated chain inventory is unavailable",
+                index + 1
+            );
+        }
         if !security::constant_time::ct_eq(&entry.prev_entry_hash, &previous_hash) {
             anyhow::bail!(
                 "durable decision inventory chain is inconsistent at row {}",
@@ -28828,15 +28836,118 @@ fn handle_verify_release(args: &VerifyReleaseArgs) -> Result<()> {
     Ok(())
 }
 
-fn handle_verify_transparency_log(args: &VerifyTransparencyLogArgs) -> Result<i32> {
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct TransparencyLogVerification {
+    status: &'static str,
+    total_entries: usize,
+    hash_chain_errors: Vec<String>,
+    signature_errors: Vec<String>,
+    unbound_signature_entries: Vec<usize>,
+    checkpoint_errors: Vec<String>,
+    total_errors: usize,
+    signatures_verified: bool,
+    chain_links_authenticated: bool,
+    head_hash: Option<String>,
+    checkpoint_verified: bool,
+}
+
+/// Verify the complete retained chain from its genesis. Legacy signatures can
+/// authenticate entry contents but cannot prove these predecessor links. A
+/// separately retained head is needed to detect truncation to a genuine prefix.
+fn verify_transparency_entries(
+    entries: &[observability::evidence_ledger::EvidenceEntry],
+    verifying_key: Option<&ed25519_dalek::VerifyingKey>,
+    expected_head_hash: Option<&str>,
+) -> TransparencyLogVerification {
     use observability::evidence_ledger::{
-        EvidenceEntry, evidence_entry_hash_hex, verify_evidence_entry,
+        evidence_entry_has_chained_signature, evidence_entry_hash_hex, verify_evidence_entry,
     };
+
+    let mut hash_chain_errors = Vec::new();
+    let mut signature_errors = Vec::new();
+    let mut unbound_signature_entries = Vec::new();
+    let mut checkpoint_errors = Vec::new();
+    let mut previous_hash = String::new();
+    for (index, entry) in entries.iter().enumerate() {
+        if !security::constant_time::ct_eq(&entry.prev_entry_hash, &previous_hash) {
+            hash_chain_errors.push(format!(
+                "Entry {index} hash chain broken: expected predecessor {previous_hash:?}, got {:?}",
+                entry.prev_entry_hash
+            ));
+        }
+        if !evidence_entry_has_chained_signature(entry) {
+            unbound_signature_entries.push(index);
+        }
+        if let Some(key) = verifying_key
+            && let Err(error) = verify_evidence_entry(entry, key)
+        {
+            signature_errors.push(format!("Entry {index} signature invalid: {error}"));
+        }
+        previous_hash = evidence_entry_hash_hex(entry);
+    }
+    let head_hash = (!entries.is_empty()).then_some(previous_hash);
+    if let Some(expected) = expected_head_hash
+        && !head_hash
+            .as_deref()
+            .is_some_and(|actual| security::constant_time::ct_eq(actual, expected))
+    {
+        checkpoint_errors.push(format!(
+            "Retained chain head does not match the trusted checkpoint: expected {expected}, got {}",
+            head_hash.as_deref().unwrap_or("<empty>")
+        ));
+    }
+    let signatures_verified =
+        !entries.is_empty() && verifying_key.is_some() && signature_errors.is_empty();
+    let chain_links_authenticated =
+        signatures_verified && hash_chain_errors.is_empty() && unbound_signature_entries.is_empty();
+    let checkpoint_verified =
+        expected_head_hash.is_some() && chain_links_authenticated && checkpoint_errors.is_empty();
+    let total_errors = hash_chain_errors.len() + signature_errors.len() + checkpoint_errors.len();
+    let status = if entries.is_empty() {
+        "empty"
+    } else if total_errors != 0 {
+        "invalid"
+    } else if chain_links_authenticated {
+        "valid"
+    } else {
+        "unproven"
+    };
+    TransparencyLogVerification {
+        status,
+        total_entries: entries.len(),
+        hash_chain_errors,
+        signature_errors,
+        unbound_signature_entries,
+        checkpoint_errors,
+        total_errors,
+        signatures_verified,
+        chain_links_authenticated,
+        head_hash,
+        checkpoint_verified,
+    }
+}
+
+fn handle_verify_transparency_log(args: &VerifyTransparencyLogArgs) -> Result<i32> {
+    use observability::evidence_ledger::EvidenceEntry;
     use std::fs::File;
     use std::io::{BufRead, BufReader};
 
     if args.log_path.as_os_str().is_empty() {
         anyhow::bail!("`verify transparency-log` requires a log path");
+    }
+    if let Some(expected) = &args.expected_head_hash {
+        if expected.len() != 64
+            || !expected
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
+            anyhow::bail!(
+                "--expected-head-hash must be exactly 64 lowercase hexadecimal characters"
+            );
+        }
+        if args.public_key.is_none() {
+            anyhow::bail!("--expected-head-hash requires --public-key to authenticate the chain");
+        }
     }
 
     // Validate path
@@ -28859,13 +28970,35 @@ fn handle_verify_transparency_log(args: &VerifyTransparencyLogArgs) -> Result<i3
         }
         let store = observability::evidence_ledger_durable::DurableEvidenceLedger::open(state_dir)
             .with_context(|| format!("Failed to open evidence ledger {:?}", args.log_path))?;
+        let expected_rows = store
+            .count()
+            .context("Failed counting evidence ledger entries")?;
+        if usize::try_from(expected_rows).unwrap_or(usize::MAX) > MAX_EVIDENCE_ENTRIES_PER_OPERATION
+        {
+            anyhow::bail!(
+                "transparency log exceeds {MAX_EVIDENCE_ENTRIES_PER_OPERATION} entries; \
+                 refusing to verify a truncated population"
+            );
+        }
         let rows = store
             .entries_json()
             .with_context(|| format!("Failed to read evidence ledger {:?}", args.log_path))?;
+        if u64::try_from(rows.len()).unwrap_or(u64::MAX) != expected_rows {
+            anyhow::bail!(
+                "transparency log changed or contains unreadable rows; \
+                 refusing to verify an incomplete population, retry after checking the store"
+            );
+        }
         for (index, row) in rows.iter().enumerate() {
+            if entries.len() == MAX_EVIDENCE_ENTRIES_PER_OPERATION {
+                anyhow::bail!(
+                    "transparency log exceeds {MAX_EVIDENCE_ENTRIES_PER_OPERATION} entries; \
+                     refusing to verify a truncated population"
+                );
+            }
             let entry: EvidenceEntry = serde_json::from_str(row)
                 .with_context(|| format!("Invalid JSON in ledger row {}: {}", index + 1, row))?;
-            push_bounded(&mut entries, entry, MAX_EVIDENCE_ENTRIES_PER_OPERATION);
+            entries.push(entry);
         }
     } else {
         let file = File::open(&args.log_path)
@@ -28879,37 +29012,18 @@ fn handle_verify_transparency_log(args: &VerifyTransparencyLogArgs) -> Result<i3
             if line.trim().is_empty() {
                 continue;
             }
+            if entries.len() == MAX_EVIDENCE_ENTRIES_PER_OPERATION {
+                anyhow::bail!(
+                    "transparency log exceeds {MAX_EVIDENCE_ENTRIES_PER_OPERATION} entries; \
+                     refusing to verify a truncated population"
+                );
+            }
 
             let entry: EvidenceEntry = serde_json::from_str(&line)
                 .with_context(|| format!("Invalid JSON at line {}: {}", line_number, line))?;
-            push_bounded(&mut entries, entry, MAX_EVIDENCE_ENTRIES_PER_OPERATION);
+            entries.push(entry);
         }
     }
-
-    if entries.is_empty() {
-        if args.json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "schema_version": "franken-node/verify-transparency-log-cli/v1",
-                    "command": "verify.transparency-log",
-                    "status": "empty",
-                    "message": "No entries in transparency log; verify fails closed",
-                    "total_entries": 0,
-                    "hash_chain_errors": [],
-                    "signature_errors": [],
-                    "total_errors": 0,
-                    "signatures_verified": false,
-                }))?
-            );
-        } else {
-            eprintln!("Transparency log is empty; verification fails closed");
-        }
-        return Ok(1);
-    }
-
-    let mut hash_chain_errors = Vec::new();
-    let mut signature_errors = Vec::new();
 
     // Load verifying key if provided
     let verifying_key = if let Some(key_path) = &args.public_key {
@@ -28925,94 +29039,77 @@ fn handle_verify_transparency_log(args: &VerifyTransparencyLogArgs) -> Result<i3
         None
     };
 
-    // Verify hash chain and signatures
-    let mut expected_prev_hash: Option<String> = None;
-
-    for (index, entry) in entries.iter().enumerate() {
-        // Verify hash chain
-        if let Some(ref expected) = expected_prev_hash {
-            if entry.prev_entry_hash.is_empty() && index > 0 {
-                hash_chain_errors.push(format!(
-                    "Entry {} missing prev_entry_hash (expected: {})",
-                    index, expected
-                ));
-            } else if !entry.prev_entry_hash.is_empty()
-                && !security::constant_time::ct_eq(&entry.prev_entry_hash, expected)
-            {
-                hash_chain_errors.push(format!(
-                    "Entry {} hash chain broken: expected {}, got {}",
-                    index, expected, entry.prev_entry_hash
-                ));
-            }
-        } else if index > 0 && entry.prev_entry_hash.is_empty() {
-            hash_chain_errors.push(format!("Entry {} missing prev_entry_hash", index));
-        }
-
-        expected_prev_hash = Some(evidence_entry_hash_hex(entry));
-
-        // Verify signature if verifying key provided
-        if let Some(ref key) = verifying_key
-            && let Err(e) = verify_evidence_entry(entry, key)
-        {
-            signature_errors.push(format!("Entry {} signature invalid: {}", index, e));
-        }
-    }
-
-    let total_entries = entries.len();
-    let total_errors = hash_chain_errors.len() + signature_errors.len();
-    let status = if total_errors != 0 {
-        "invalid"
-    } else if verifying_key.is_none() {
-        "unproven"
-    } else {
-        "valid"
-    };
+    let report = verify_transparency_entries(
+        &entries,
+        verifying_key.as_ref(),
+        args.expected_head_hash.as_deref(),
+    );
 
     if args.json {
-        let result = serde_json::json!({
-            "schema_version": "franken-node/verify-transparency-log-cli/v1",
-            "command": "verify.transparency-log",
-            "status": status,
-            "total_entries": total_entries,
-            "hash_chain_errors": hash_chain_errors,
-            "signature_errors": signature_errors,
-            "total_errors": total_errors,
-            "signatures_verified": verifying_key.is_some(),
-        });
+        let mut result = serde_json::to_value(&report)?;
+        result["schema_version"] =
+            serde_json::Value::String("franken-node/verify-transparency-log-cli/v1".to_string());
+        result["command"] = serde_json::Value::String("verify.transparency-log".to_string());
+        if report.status == "empty" {
+            result["message"] = serde_json::Value::String(
+                "No entries in transparency log; verify fails closed".to_string(),
+            );
+        }
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else {
         eprintln!("Transparency log verification results:");
-        eprintln!("  Total entries: {}", total_entries);
-        eprintln!("  Hash chain errors: {}", hash_chain_errors.len());
-        eprintln!("  Signature errors: {}", signature_errors.len());
-        eprintln!("  Signatures verified: {}", verifying_key.is_some());
+        eprintln!("  Total entries: {}", report.total_entries);
+        eprintln!("  Hash chain errors: {}", report.hash_chain_errors.len());
+        eprintln!("  Signature errors: {}", report.signature_errors.len());
+        eprintln!("  Signatures verified: {}", report.signatures_verified);
+        eprintln!(
+            "  Chain links authenticated: {}",
+            report.chain_links_authenticated
+        );
+        eprintln!(
+            "  Trusted checkpoint verified: {}",
+            report.checkpoint_verified
+        );
+        if let Some(head) = &report.head_hash {
+            eprintln!("  Retained chain head: {head}");
+        }
 
-        if !hash_chain_errors.is_empty() {
+        if !report.hash_chain_errors.is_empty() {
             eprintln!("\nHash chain errors:");
-            for error in &hash_chain_errors {
+            for error in &report.hash_chain_errors {
                 eprintln!("  - {}", error);
             }
         }
 
-        if !signature_errors.is_empty() {
+        if !report.signature_errors.is_empty() {
             eprintln!("\nSignature errors:");
-            for error in &signature_errors {
+            for error in &report.signature_errors {
                 eprintln!("  - {}", error);
             }
         }
 
-        if status == "valid" {
-            eprintln!("\n✓ Transparency log verification PASSED");
-        } else if status == "unproven" {
+        for index in &report.unbound_signature_entries {
             eprintln!(
-                "\n✗ Transparency log hash chain has no errors, but signatures were not verified (pass --public-key)"
+                "  Entry {index} has no predecessor-bound signature; its historical position is unproven"
             );
+        }
+        for error in &report.checkpoint_errors {
+            eprintln!("  Checkpoint error: {error}");
+        }
+        if report.status == "valid" {
+            eprintln!("\n✓ Transparency log verification PASSED");
+        } else if report.status == "unproven" {
+            eprintln!(
+                "\n✗ Transparency log chain is unproven; every entry needs a predecessor-bound signature verified with --public-key"
+            );
+        } else if report.status == "empty" {
+            eprintln!("\n✗ Transparency log is empty; verification fails closed");
         } else {
             eprintln!("\n✗ Transparency log verification FAILED");
         }
     }
 
-    Ok(if status == "valid" { 0 } else { 1 })
+    Ok(if report.status == "valid" { 0 } else { 1 })
 }
 
 fn handle_verify_recovery_runbook(args: &VerifyRecoveryRunbookArgs) -> Result<()> {
@@ -36273,6 +36370,95 @@ mod run_trust_gate_tests {
                 "the parent-observed interrupted boundary must participate in receipt identity"
             );
         }
+    }
+
+    #[test]
+    fn transparency_verification_rejects_splices_and_pinned_prefix_truncation() {
+        use observability::evidence_ledger::{
+            evidence_entry_hash_hex, sign_chained_evidence_entry, sign_evidence_entry, test_entry,
+        };
+
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x59; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let mut previous_hash = String::new();
+        let mut entries = Vec::new();
+        for (index, decision) in ["A", "B", "C"].into_iter().enumerate() {
+            let mut entry = test_entry(decision, index as u64 + 1);
+            entry.prev_entry_hash = previous_hash;
+            sign_chained_evidence_entry(&mut entry, &signing_key);
+            previous_hash = evidence_entry_hash_hex(&entry);
+            entries.push(entry);
+        }
+        let trusted_head = previous_hash;
+        let complete =
+            verify_transparency_entries(&entries, Some(&verifying_key), Some(&trusted_head));
+        assert_eq!(complete.status, "valid");
+        assert!(complete.signatures_verified);
+        assert!(complete.chain_links_authenticated);
+        assert!(complete.checkpoint_verified);
+        assert_eq!(complete.head_hash.as_deref(), Some(trusted_head.as_str()));
+
+        let mut relinked = vec![entries[0].clone(), entries[2].clone()];
+        relinked[1].prev_entry_hash = evidence_entry_hash_hex(&relinked[0]);
+        let splice = verify_transparency_entries(&relinked, Some(&verifying_key), None);
+        assert_eq!(splice.status, "invalid");
+        assert!(splice.hash_chain_errors.is_empty());
+        assert_eq!(splice.signature_errors.len(), 1);
+        assert!(!splice.chain_links_authenticated);
+
+        let missing_genesis =
+            verify_transparency_entries(&entries[1..], Some(&verifying_key), None);
+        assert_eq!(missing_genesis.status, "invalid");
+        assert_eq!(missing_genesis.hash_chain_errors.len(), 1);
+        assert!(missing_genesis.signature_errors.is_empty());
+
+        let prefix = verify_transparency_entries(&entries[..2], Some(&verifying_key), None);
+        assert_eq!(prefix.status, "valid");
+        assert!(prefix.chain_links_authenticated);
+        assert!(!prefix.checkpoint_verified);
+        let truncated =
+            verify_transparency_entries(&entries[..2], Some(&verifying_key), Some(&trusted_head));
+        assert_eq!(truncated.status, "invalid");
+        assert_eq!(truncated.checkpoint_errors.len(), 1);
+        assert!(truncated.signature_errors.is_empty());
+        assert!(!truncated.checkpoint_verified);
+
+        let mut legacy = entries;
+        previous_hash = String::new();
+        for entry in &mut legacy {
+            entry.prev_entry_hash = previous_hash;
+            sign_evidence_entry(entry, &signing_key);
+            previous_hash = evidence_entry_hash_hex(entry);
+        }
+        let unbound = verify_transparency_entries(&legacy, Some(&verifying_key), None);
+        assert_eq!(unbound.status, "unproven");
+        assert!(unbound.signatures_verified);
+        assert_eq!(unbound.total_errors, 0);
+        assert_eq!(unbound.unbound_signature_entries, vec![0, 1, 2]);
+        assert!(!unbound.chain_links_authenticated);
+    }
+
+    #[test]
+    fn transparency_verification_needs_entries_and_a_trusted_key() {
+        use observability::evidence_ledger::{
+            evidence_entry_hash_hex, sign_chained_evidence_entry, test_entry,
+        };
+
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x5A; 32]);
+        let mut entry = test_entry("genesis", 1);
+        sign_chained_evidence_entry(&mut entry, &signing_key);
+        let head = evidence_entry_hash_hex(&entry);
+        let unchecked = verify_transparency_entries(&[entry], None, Some(&head));
+        assert_eq!(unchecked.status, "unproven");
+        assert!(!unchecked.signatures_verified);
+        assert!(!unchecked.chain_links_authenticated);
+        assert!(!unchecked.checkpoint_verified);
+
+        let empty = verify_transparency_entries(&[], Some(&signing_key.verifying_key()), None);
+        assert_eq!(empty.status, "empty");
+        assert!(!empty.signatures_verified);
+        assert!(!empty.chain_links_authenticated);
+        assert!(empty.head_hash.is_none());
     }
 
     #[test]

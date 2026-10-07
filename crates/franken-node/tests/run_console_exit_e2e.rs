@@ -2922,6 +2922,10 @@ fn runs_append_signed_chained_entries_to_the_durable_evidence_ledger() {
         .expect("32-byte seed");
     let verifying_key = ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key();
     for (entry, report) in entries.iter().zip([&first_report, &second_report]) {
+        assert!(
+            entry.signature.starts_with("chain-v1:"),
+            "durable run signatures must bind their actual predecessor"
+        );
         verify_evidence_entry(entry, &verifying_key).expect("entry signature verifies");
         assert_eq!(
             entry.decision_id,
@@ -2949,6 +2953,12 @@ fn runs_append_signed_chained_entries_to_the_durable_evidence_ledger() {
     let mut tampered = entries[1].clone();
     tampered.payload["exit_code"] = serde_json::json!(1);
     assert!(verify_evidence_entry(&tampered, &verifying_key).is_err());
+    let mut relinked = entries[1].clone();
+    relinked.prev_entry_hash.clear();
+    assert!(
+        verify_evidence_entry(&relinked, &verifying_key).is_err(),
+        "a later real run cannot be relinked into a new genesis"
+    );
 
     // init also wrote the matching public key.
     let public_key =
@@ -2989,6 +2999,157 @@ fn runs_append_signed_chained_entries_to_the_durable_evidence_ledger() {
     assert_eq!(code, Some(0), "{report}");
     assert_eq!(report["status"], "valid");
     assert_eq!(report["signatures_verified"], true);
+    assert_eq!(report["chain_links_authenticated"], true);
+    assert_eq!(report["unbound_signature_entries"], serde_json::json!([]));
+    assert_eq!(report["head_hash"], evidence_entry_hash_hex(&entries[1]));
+}
+
+#[test]
+fn transparency_log_authenticates_predecessors_and_checks_a_retained_head() {
+    use frankenengine_node::observability::evidence_ledger::{
+        EvidenceEntry, evidence_entry_hash_hex, sign_chained_evidence_entry, sign_evidence_entry,
+        test_entry, verify_evidence_entry,
+    };
+
+    let dir = tempfile::TempDir::new().expect("transparency fixture workspace");
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[38_u8; 32]);
+    let verifying_key = signing_key.verifying_key();
+    std::fs::write(
+        dir.path().join("receipt.pub"),
+        hex::encode(verifying_key.to_bytes()),
+    )
+    .expect("write independently supplied public key");
+    let make_chain = |chained: bool| {
+        let mut entries = Vec::new();
+        let mut previous_hash = String::new();
+        for (decision_id, epoch) in [("A", 1), ("B", 2), ("C", 3)] {
+            let mut entry = test_entry(decision_id, epoch);
+            entry.prev_entry_hash = previous_hash;
+            if chained {
+                sign_chained_evidence_entry(&mut entry, &signing_key);
+            } else {
+                sign_evidence_entry(&mut entry, &signing_key);
+            }
+            verify_evidence_entry(&entry, &verifying_key).expect("actual fixture signature");
+            previous_hash = evidence_entry_hash_hex(&entry);
+            entries.push(entry);
+        }
+        entries
+    };
+    let write_log = |name: &str, entries: &[EvidenceEntry]| {
+        let jsonl = entries
+            .iter()
+            .map(|entry| serde_json::to_string(entry).expect("serialize signed entry"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(dir.path().join(name), &jsonl).expect("write independent candidate log");
+        jsonl
+    };
+    let verify = |name: &str, expected_head: Option<&str>| {
+        let mut args = vec![
+            "verify",
+            "transparency-log",
+            name,
+            "--public-key",
+            "receipt.pub",
+            "--json",
+        ];
+        if let Some(expected_head) = expected_head {
+            args.extend(["--expected-head-hash", expected_head]);
+        }
+        let (outcome, report) = run_workspace_json(dir.path(), &args);
+        assert_eq!(
+            report["schema_version"],
+            "franken-node/verify-transparency-log-cli/v1"
+        );
+        (outcome.exit_code, report)
+    };
+
+    let entries = make_chain(true);
+    let original = write_log("original-abc.jsonl", &entries);
+    let original_head = evidence_entry_hash_hex(&entries[2]);
+    let (code, report) = verify("original-abc.jsonl", None);
+    assert_eq!(code, Some(0), "{report}");
+    assert_eq!(report["status"], "valid");
+    assert_eq!(report["total_entries"], 3);
+    assert_eq!(report["signatures_verified"], true);
+    assert_eq!(report["chain_links_authenticated"], true);
+    assert_eq!(report["unbound_signature_entries"], serde_json::json!([]));
+    assert_eq!(report["head_hash"], original_head);
+    assert_eq!(report["total_errors"], 0);
+    let (code, report) = verify("original-abc.jsonl", Some(&original_head));
+    assert_eq!(code, Some(0), "{report}");
+    assert_eq!(report["checkpoint_verified"], true);
+    assert_eq!(report["checkpoint_errors"], serde_json::json!([]));
+
+    // An attacker can recompute the visible link after omitting B. The
+    // retained C signature must still expose the changed predecessor.
+    let mut relinked = vec![entries[0].clone(), entries[2].clone()];
+    relinked[1].prev_entry_hash = evidence_entry_hash_hex(&relinked[0]);
+    write_log("forged-ac.jsonl", &relinked);
+    let (code, report) = verify("forged-ac.jsonl", None);
+    assert_eq!(code, Some(1), "{report}");
+    assert_eq!(report["status"], "invalid");
+    assert_eq!(report["total_entries"], 2);
+    assert_eq!(report["hash_chain_errors"], serde_json::json!([]));
+    assert_eq!(report["signature_errors"].as_array().unwrap().len(), 1);
+    assert_eq!(report["total_errors"], 1);
+    assert_eq!(report["chain_links_authenticated"], false);
+    assert_eq!(report["unbound_signature_entries"], serde_json::json!([]));
+
+    // Legacy signatures remain valid for entry contents, but cannot prove
+    // which predecessor was present when those contents were signed.
+    let legacy = make_chain(false);
+    write_log("legacy-abc.jsonl", &legacy);
+    let (code, report) = verify("legacy-abc.jsonl", None);
+    assert_eq!(code, Some(1), "{report}");
+    assert_eq!(report["status"], "unproven");
+    assert_eq!(report["total_entries"], 3);
+    assert_eq!(report["signatures_verified"], true);
+    assert_eq!(report["hash_chain_errors"], serde_json::json!([]));
+    assert_eq!(report["signature_errors"], serde_json::json!([]));
+    assert_eq!(report["total_errors"], 0);
+    assert_eq!(report["chain_links_authenticated"], false);
+    assert_eq!(
+        report["unbound_signature_entries"],
+        serde_json::json!([0, 1, 2])
+    );
+
+    // A retained suffix has genuine signatures and an internally consistent
+    // B-to-C link, but B's signed predecessor is not the required genesis.
+    write_log("missing-genesis-bc.jsonl", &entries[1..]);
+    let (code, report) = verify("missing-genesis-bc.jsonl", None);
+    assert_eq!(code, Some(1), "{report}");
+    assert_eq!(report["status"], "invalid");
+    assert_eq!(report["signature_errors"], serde_json::json!([]));
+    assert_eq!(report["hash_chain_errors"].as_array().unwrap().len(), 1);
+    assert_eq!(report["chain_links_authenticated"], false);
+
+    // A genuine older prefix is a valid retained chain. Only a separately
+    // retained head can distinguish it from the later complete ABC history.
+    write_log("older-prefix-ab.jsonl", &entries[..2]);
+    let older_head = evidence_entry_hash_hex(&entries[1]);
+    let (code, report) = verify("older-prefix-ab.jsonl", None);
+    assert_eq!(code, Some(0), "{report}");
+    assert_eq!(report["status"], "valid");
+    assert_eq!(report["chain_links_authenticated"], true);
+    assert_eq!(report["head_hash"], older_head);
+    let (code, report) = verify("older-prefix-ab.jsonl", Some(&original_head));
+    assert_eq!(code, Some(1), "{report}");
+    assert_eq!(report["status"], "invalid");
+    assert_eq!(report["hash_chain_errors"], serde_json::json!([]));
+    assert_eq!(report["signature_errors"], serde_json::json!([]));
+    assert_eq!(report["head_hash"], older_head);
+    assert_eq!(report["checkpoint_verified"], false);
+    assert_eq!(report["checkpoint_errors"].as_array().unwrap().len(), 1);
+    assert_eq!(report["total_errors"], 1);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("original-abc.jsonl"))
+            .expect("read preserved original log"),
+        original,
+        "all tampered candidates are separate files; the original remains intact"
+    );
 }
 
 /// bd-reality-20260923-26n9r.15 deliverable 6: operator trust decisions and

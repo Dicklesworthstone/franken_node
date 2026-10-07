@@ -144,6 +144,7 @@ fn record_append_elapsed_us(elapsed_us: u64) {
 const MIN_SEEN_SIGNATURES: usize = 8192;
 const ED25519_SIGNATURE_BYTES: usize = 64;
 const SHA256_DIGEST_BYTES: usize = 32;
+const CHAINED_EVIDENCE_SIGNATURE_PREFIX: &str = "chain-v1:";
 const REPLAY_TIMESTAMP_BYTES: usize = 8;
 const REPLAY_KEY_BYTES: usize = REPLAY_TIMESTAMP_BYTES + ED25519_SIGNATURE_BYTES;
 const SPILL_FILE_BUFFER_BYTES: usize = 64 * 1024;
@@ -235,8 +236,9 @@ pub struct EvidenceEntry {
     /// The ledger derives its own budget accounting during append.
     #[serde(default)]
     pub size_bytes: usize,
-    /// Ed25519 signature over the canonical entry representation.
-    /// Required by ledgers constructed with a verifying key.
+    /// Ed25519 signature over the canonical entry representation. Legacy
+    /// signatures are lowercase hex; `chain-v1:<hex>` also authenticates the
+    /// predecessor. Required by ledgers constructed with a verifying key.
     #[serde(default)]
     pub signature: String,
     /// SHA-256 hash of the previous entry for hash chain integrity.
@@ -602,6 +604,23 @@ fn canonical_entry_bytes_with_payload_bytes(
     hasher.finalize().into()
 }
 
+/// A separately versioned signature preimage commits to the already stable
+/// entry digest and the exact predecessor chosen by the append transaction.
+/// The predecessor belongs to an earlier entry, so this is not circular.
+fn canonical_chained_entry_bytes_with_payload_bytes(
+    entry: &EvidenceEntry,
+    payload_json_bytes: Option<&[u8]>,
+) -> [u8; SHA256_DIGEST_BYTES] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"evidence_ledger_chained_entry_v1:");
+    hasher.update(canonical_entry_bytes_with_payload_bytes(
+        entry,
+        payload_json_bytes,
+    ));
+    update_hash_len_prefixed(&mut hasher, entry.prev_entry_hash.as_bytes());
+    hasher.finalize().into()
+}
+
 fn update_hash_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
     let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     hasher.update(len.to_le_bytes());
@@ -714,7 +733,44 @@ pub fn sign_evidence_entry(entry: &mut EvidenceEntry, signing_key: &SigningKey) 
     entry.signature = hex::encode(signature_bytes);
 }
 
+/// Sign an entry and its exact predecessor using the `chain-v1` contract.
+///
+/// The caller must assign `prev_entry_hash` before signing. The durable ledger
+/// does this inside its append transaction. Unlike the legacy standalone
+/// signature, a chained signature becomes invalid if a retained row is relinked
+/// to hide a deleted predecessor. The existing entry hash already includes the
+/// signature, so it commits to this authenticated linkage without changing the
+/// frozen legacy hash representation.
+pub fn sign_chained_evidence_entry(entry: &mut EvidenceEntry, signing_key: &SigningKey) {
+    let payload_json_bytes = serialized_json_bytes(&entry.payload).ok();
+    let canonical_bytes =
+        canonical_chained_entry_bytes_with_payload_bytes(entry, payload_json_bytes.as_deref());
+    let signature_bytes = signing_key.sign(&canonical_bytes).to_bytes();
+    entry.signature = format!(
+        "{CHAINED_EVIDENCE_SIGNATURE_PREFIX}{}",
+        hex::encode(signature_bytes)
+    );
+}
+
+/// Whether the entry carries the supported chained-signature format.
+///
+/// This checks the exact version tag and canonical encoding only. It does not
+/// authenticate the entry; callers must also use [`verify_evidence_entry`] with
+/// their trusted key and validate the predecessor against the retained chain.
+#[must_use]
+pub fn evidence_entry_has_chained_signature(entry: &EvidenceEntry) -> bool {
+    entry
+        .signature
+        .strip_prefix(CHAINED_EVIDENCE_SIGNATURE_PREFIX)
+        .is_some_and(|signature| {
+            signature.len() == ED25519_SIGNATURE_BYTES * 2 && is_canonical_lower_hex(signature)
+        })
+}
+
 /// Verify the signature on an evidence entry using an Ed25519 verifying key.
+/// Both legacy standalone signatures and predecessor-bound `chain-v1`
+/// signatures are supported. A failed chained verification never retries the
+/// legacy signature domain.
 ///
 /// # Examples
 ///
@@ -826,8 +882,20 @@ fn verify_evidence_entry_bytes_with_payload_bytes(
     verifying_key: &VerifyingKey,
     payload_json_bytes: Option<&[u8]>,
 ) -> Result<ReplaySignature, LedgerError> {
-    let canonical_bytes = canonical_entry_bytes_with_payload_bytes(entry, payload_json_bytes);
-    let signature_bytes = decode_replay_signature(&entry.signature)?;
+    let (canonical_bytes, encoded_signature) = match entry
+        .signature
+        .strip_prefix(CHAINED_EVIDENCE_SIGNATURE_PREFIX)
+    {
+        Some(signature) => (
+            canonical_chained_entry_bytes_with_payload_bytes(entry, payload_json_bytes),
+            signature,
+        ),
+        None => (
+            canonical_entry_bytes_with_payload_bytes(entry, payload_json_bytes),
+            entry.signature.as_str(),
+        ),
+    };
+    let signature_bytes = decode_replay_signature(encoded_signature)?;
 
     // Use trait-based verification for better abstraction
     let verifier = Ed25519Verifier::new(*verifying_key);
@@ -1319,6 +1387,19 @@ impl EvidenceLedger {
             .last_entry_hash
             .as_ref()
             .map_or_else(String::new, encode_entry_hash);
+
+        // The legacy standalone contract permits the ledger to fill in or
+        // normalize the predecessor. Doing that to a chained signature would
+        // invalidate the signed entry after verification, so require an exact
+        // match even when the supplied predecessor is empty.
+        if evidence_entry_has_chained_signature(&entry)
+            && !constant_time::ct_eq(&entry.prev_entry_hash, &expected_prev_hash)
+        {
+            return Err(LedgerError::HashChainBroken {
+                expected_hash: expected_prev_hash,
+                provided_hash: entry.prev_entry_hash.clone(),
+            });
+        }
 
         // SECURITY: Validate hash chain integrity if client provided prev_entry_hash
         if !entry.prev_entry_hash.is_empty() {
@@ -7241,6 +7322,194 @@ mod tests {
     }
 
     // ── Signature Verification Tests ──────────────────────────────────
+
+    #[test]
+    fn chained_signatures_authenticate_the_root_and_each_predecessor() {
+        let (signing_key, verifying_key) = test_keys();
+        let mut root = test_entry("CHAIN-ROOT", 1);
+        sign_chained_evidence_entry(&mut root, &signing_key);
+        let mut second = test_entry("CHAIN-SECOND", 2);
+        second.prev_entry_hash = evidence_entry_hash_hex(&root);
+        sign_chained_evidence_entry(&mut second, &signing_key);
+
+        for entry in [&root, &second] {
+            assert!(evidence_entry_has_chained_signature(entry));
+            verify_evidence_entry(entry, &verifying_key).expect("authentic chained entry");
+
+            let mut changed_parent = entry.clone();
+            changed_parent.prev_entry_hash = "f".repeat(64);
+            assert_ne!(changed_parent.prev_entry_hash, entry.prev_entry_hash);
+            assert!(
+                verify_evidence_entry(&changed_parent, &verifying_key).is_err(),
+                "both the empty genesis parent and each subsequent parent are authenticated"
+            );
+
+            let mut changed_decision = entry.clone();
+            changed_decision.decision_id.push_str("-forged");
+            assert!(
+                verify_evidence_entry(&changed_decision, &verifying_key).is_err(),
+                "binding the parent must retain authentication of the entry's contents"
+            );
+        }
+    }
+
+    #[test]
+    fn chained_signatures_reject_middle_deletion_and_relinking() {
+        let (signing_key, verifying_key) = test_keys();
+        let mut entries = Vec::new();
+        let mut previous_hash = String::new();
+        for (id, epoch) in [("CHAIN-A", 1), ("CHAIN-B", 2), ("CHAIN-C", 3)] {
+            let mut entry = test_entry(id, epoch);
+            entry.prev_entry_hash = previous_hash;
+            sign_chained_evidence_entry(&mut entry, &signing_key);
+            verify_evidence_entry(&entry, &verifying_key).expect("original chain signature");
+            previous_hash = evidence_entry_hash_hex(&entry);
+            entries.push(entry);
+        }
+
+        // Remove B and rewrite C's visible link to A without the signing key.
+        // The old unbound format authenticated this edited retained population.
+        let mut retained = vec![entries[0].clone(), entries[2].clone()];
+        retained[1].prev_entry_hash = evidence_entry_hash_hex(&retained[0]);
+        assert_eq!(retained[1].signature, entries[2].signature);
+        assert_eq!(
+            retained[1].prev_entry_hash,
+            evidence_entry_hash_hex(&retained[0]),
+            "the attacker repaired the visible link"
+        );
+        assert!(evidence_entry_has_chained_signature(&retained[1]));
+        verify_evidence_entry(&retained[0], &verifying_key).expect("retained root is authentic");
+        assert!(
+            verify_evidence_entry(&retained[1], &verifying_key).is_err(),
+            "relinking a retained successor must require a new authentic signature"
+        );
+
+        sign_chained_evidence_entry(&mut retained[1], &signing_key);
+        assert_ne!(retained[1].signature, entries[2].signature);
+        assert_ne!(
+            evidence_entry_hash_hex(&retained[1]),
+            evidence_entry_hash_hex(&entries[2]),
+            "an authorized different predecessor produces a different signed entry and chain head"
+        );
+    }
+
+    #[test]
+    fn chained_signature_versions_cannot_downgrade_or_wrap_legacy_signatures() {
+        let (signing_key, verifying_key) = test_keys();
+        let mut legacy = test_entry("SIGNATURE-VERSIONS", 1);
+        sign_evidence_entry(&mut legacy, &signing_key);
+        assert!(!evidence_entry_has_chained_signature(&legacy));
+        verify_evidence_entry(&legacy, &verifying_key).expect("legacy standalone remains valid");
+
+        let mut chained = legacy.clone();
+        sign_chained_evidence_entry(&mut chained, &signing_key);
+        verify_evidence_entry(&chained, &verifying_key).expect("supported chain version");
+        let signature_hex = chained
+            .signature
+            .strip_prefix(CHAINED_EVIDENCE_SIGNATURE_PREFIX)
+            .expect("chained signature prefix");
+        for replacement in [
+            signature_hex.to_string(),
+            format!("chain-v2:{signature_hex}"),
+            format!("CHAIN-V1:{signature_hex}"),
+            format!("chain-v1:{}", legacy.signature),
+            format!("chain-v1:{signature_hex}00"),
+            "chain-v1:".to_string(),
+        ] {
+            let mut tampered = chained.clone();
+            tampered.signature = replacement;
+            assert!(
+                verify_evidence_entry(&tampered, &verifying_key).is_err(),
+                "a stripped, unknown, malformed, or legacy-wrapped signature must fail closed"
+            );
+        }
+
+        let mut structurally_valid_forgery = chained;
+        structurally_valid_forgery.signature = format!("chain-v1:{}", "0".repeat(128));
+        assert!(evidence_entry_has_chained_signature(
+            &structurally_valid_forgery
+        ));
+        assert!(
+            verify_evidence_entry(&structurally_valid_forgery, &verifying_key).is_err(),
+            "the public format predicate is not authentication"
+        );
+    }
+
+    #[test]
+    fn chained_append_rejects_missing_or_normalized_predecessors() {
+        let (signing_key, verifying_key) = test_keys();
+        let mut ledger =
+            EvidenceLedger::with_verifying_key(LedgerCapacity::new(10, 100_000), verifying_key);
+        let mut root = test_entry("APPEND-CHAIN-ROOT", 1);
+        sign_chained_evidence_entry(&mut root, &signing_key);
+        ledger.append(root).expect("append signed genesis");
+        let snapshot = ledger.snapshot();
+        let expected_parent = evidence_entry_hash_hex(&snapshot.entries[0].1);
+
+        let uppercase_parent = expected_parent.to_uppercase();
+        assert_ne!(uppercase_parent, expected_parent);
+        for supplied_parent in [String::new(), uppercase_parent] {
+            let mut next = test_entry("APPEND-CHAIN-SECOND", 2);
+            next.prev_entry_hash = supplied_parent.clone();
+            sign_chained_evidence_entry(&mut next, &signing_key);
+            verify_evidence_entry(&next, &verifying_key)
+                .expect("the supplied parent was signed correctly");
+            let error = ledger
+                .append(next)
+                .expect_err("append cannot fill or normalize an authenticated parent");
+            match error {
+                LedgerError::HashChainBroken {
+                    expected_hash,
+                    provided_hash,
+                } => {
+                    assert_eq!(expected_hash, expected_parent);
+                    assert_eq!(provided_hash, supplied_parent);
+                }
+                other => panic!("expected predecessor mismatch, got {other}"),
+            }
+            assert_eq!(
+                ledger.len(),
+                1,
+                "rejected append does not mutate the ledger"
+            );
+        }
+
+        let mut next = test_entry("APPEND-CHAIN-SECOND", 2);
+        next.prev_entry_hash = expected_parent.clone();
+        sign_chained_evidence_entry(&mut next, &signing_key);
+        let expected_signature = next.signature.clone();
+        ledger
+            .append(next)
+            .expect("append exact authenticated parent");
+        let snapshot = ledger.snapshot();
+        let stored = &snapshot.entries[1].1;
+        assert_eq!(stored.prev_entry_hash, expected_parent);
+        assert_eq!(stored.signature, expected_signature);
+        verify_evidence_entry(stored, &verifying_key)
+            .expect("server size accounting preserves the chained signature");
+    }
+
+    #[test]
+    fn legacy_standalone_append_keeps_its_existing_signature_contract() {
+        let (signing_key, verifying_key) = test_keys();
+        let mut ledger =
+            EvidenceLedger::with_verifying_key(LedgerCapacity::new(10, 100_000), verifying_key);
+        let mut signatures = Vec::new();
+        for (id, epoch) in [("LEGACY-A", 1), ("LEGACY-B", 2)] {
+            let mut entry = test_entry(id, epoch);
+            sign_evidence_entry(&mut entry, &signing_key);
+            signatures.push(entry.signature.clone());
+            ledger.append(entry).expect("legacy standalone append");
+        }
+        let snapshot = ledger.snapshot();
+        assert!(!snapshot.entries[1].1.prev_entry_hash.is_empty());
+        for ((_, entry), expected_signature) in snapshot.entries.iter().zip(&signatures) {
+            assert_eq!(&entry.signature, expected_signature);
+            assert!(!evidence_entry_has_chained_signature(entry));
+            verify_evidence_entry(entry, &verifying_key)
+                .expect("legacy predecessor assignment does not alter standalone authentication");
+        }
+    }
 
     #[test]
     fn test_signed_entry_accepted() {

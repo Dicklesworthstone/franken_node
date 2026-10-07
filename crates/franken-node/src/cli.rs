@@ -1272,6 +1272,11 @@ pub struct VerifyTransparencyLogArgs {
     #[arg(long, value_parser = parse_safe_content_pathbuf)]
     pub public_key: Option<PathBuf>,
 
+    /// Require the final entry hash to match a trusted, separately retained
+    /// checkpoint (64 lowercase hexadecimal characters). Requires --public-key.
+    #[arg(long)]
+    pub expected_head_hash: Option<String>,
+
     /// Emit schema-versioned JSON (`franken-node/verify-transparency-log-cli/v1`).
     /// Early failures emit `franken-node/verify-transparency-log-error-cli/v1`
     /// then exit 1.

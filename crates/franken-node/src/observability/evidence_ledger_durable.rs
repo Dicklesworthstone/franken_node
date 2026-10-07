@@ -31,7 +31,7 @@ use fsqlite::compat::TransactionExt;
 use fsqlite::{Connection, SqliteValue};
 
 use crate::observability::evidence_ledger::{
-    EvidenceEntry, evidence_entry_hash_hex, sign_evidence_entry,
+    EvidenceEntry, evidence_entry_hash_hex, sign_chained_evidence_entry,
 };
 
 /// Historical spill-file candidates, oldest convention first. Shared with the
@@ -200,9 +200,12 @@ impl DurableEvidenceLedger {
         })
     }
 
-    /// Link `entry` to the newest stored entry (`prev_entry_hash`), sign it
-    /// and append it, all inside one committed transaction so concurrent
-    /// appenders cannot fork the chain. Returns the entry as stored.
+    /// Link `entry` to the newest stored entry (`prev_entry_hash`), sign its
+    /// contents and exact predecessor with the `chain-v1` contract, and append
+    /// it, all inside one committed transaction so concurrent appenders cannot
+    /// fork the chain. Returns the entry as stored. Existing legacy entries
+    /// remain unchanged and individually verifiable; appending does not upgrade
+    /// their unauthenticated predecessor links.
     ///
     /// # Errors
     ///
@@ -220,8 +223,8 @@ impl DurableEvidenceLedger {
             let rows = connection
                 .query("SELECT entry_json FROM evidence_entries ORDER BY seq DESC LIMIT 1;")
                 .map_err(|err| io::Error::other(format!("read chain head: {err}")))?;
-            entry.prev_entry_hash = match rows.first().and_then(|row| row.values().first()) {
-                Some(SqliteValue::Text(previous_json)) => {
+            entry.prev_entry_hash = match rows.first().map(|row| row.values().first()) {
+                Some(Some(SqliteValue::Text(previous_json))) => {
                     let previous: EvidenceEntry = serde_json::from_str(previous_json.as_ref())
                         .map_err(|err| {
                             io::Error::new(
@@ -231,9 +234,15 @@ impl DurableEvidenceLedger {
                         })?;
                     evidence_entry_hash_hex(&previous)
                 }
-                _ => String::new(),
+                None => String::new(),
+                Some(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "newest stored row is not a text evidence entry; refusing to reset the chain",
+                    ));
+                }
             };
-            sign_evidence_entry(&mut entry, signing_key);
+            sign_chained_evidence_entry(&mut entry, signing_key);
             let entry_json = serde_json::to_string(&entry)
                 .map_err(|err| io::Error::other(format!("encode entry: {err}")))?;
             tx.execute_with_params(
@@ -504,11 +513,141 @@ pub fn count_durable_entries(state_dir: &Path) -> io::Result<Option<u64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::observability::evidence_ledger::{
+        evidence_entry_has_chained_signature, sign_evidence_entry, test_entry,
+        verify_evidence_entry,
+    };
 
     fn temp_state_dir(tag: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
         let state_dir = dir.path().join(format!("{tag}-state"));
         (dir, state_dir)
+    }
+
+    #[test]
+    fn chained_append_authenticates_persisted_predecessors_and_preserves_opaque_payloads() {
+        let (_dir, state_dir) = temp_state_dir("chained-signatures");
+        let signing_key = SigningKey::from_bytes(&[0xA7; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let ledger = DurableEvidenceLedger::open(&state_dir).expect("open durable chain");
+        let payloads = [
+            serde_json::Value::Null,
+            serde_json::json!(["opaque", 42, true]),
+            serde_json::json!({"receipt_id": "run-c", "nested": {"denied": true}}),
+        ];
+        let mut previous_hash = String::new();
+        let mut expected_entries = Vec::new();
+        for (index, payload) in payloads.iter().enumerate() {
+            let mut entry = test_entry(
+                &format!("DURABLE-CHAIN-{index}"),
+                u64::try_from(index + 1).expect("small fixture epoch"),
+            );
+            entry.payload = payload.clone();
+            entry.prev_entry_hash =
+                "caller cannot select the transaction's predecessor".to_string();
+            let stored = ledger
+                .append_signed_chained(entry, &signing_key)
+                .expect("append transaction signs its chosen predecessor");
+            assert_eq!(stored.prev_entry_hash, previous_hash);
+            assert_eq!(&stored.payload, payload);
+            assert!(evidence_entry_has_chained_signature(&stored));
+            verify_evidence_entry(&stored, &verifying_key).expect("durable chained signature");
+            previous_hash = evidence_entry_hash_hex(&stored);
+            expected_entries.push(stored);
+        }
+        drop(ledger);
+
+        let reopened = DurableEvidenceLedger::open(&state_dir).expect("reopen committed chain");
+        let persisted = reopened
+            .entries_json()
+            .expect("read committed chain")
+            .iter()
+            .map(|row| serde_json::from_str::<EvidenceEntry>(row).expect("decode committed entry"))
+            .collect::<Vec<_>>();
+        assert_eq!(persisted, expected_entries);
+        for entry in &persisted {
+            verify_evidence_entry(entry, &verifying_key).expect("signature survives reopen");
+        }
+
+        let mut relinked_successor = persisted[2].clone();
+        relinked_successor.prev_entry_hash = evidence_entry_hash_hex(&persisted[0]);
+        assert!(
+            verify_evidence_entry(&relinked_successor, &verifying_key).is_err(),
+            "deleting the persisted middle entry cannot be hidden by relinking its successor"
+        );
+    }
+
+    #[test]
+    fn chained_append_does_not_resign_or_upgrade_existing_legacy_entries() {
+        let (_dir, state_dir) = temp_state_dir("legacy-chain-boundary");
+        let signing_key = SigningKey::from_bytes(&[0xB8; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let ledger = DurableEvidenceLedger::open(&state_dir).expect("open durable chain");
+        let mut legacy = test_entry("LEGACY-RETAINED", 1);
+        sign_evidence_entry(&mut legacy, &signing_key);
+        let legacy_json = serde_json::to_string(&legacy).expect("encode legacy entry");
+        ledger
+            .append_json(&legacy_json)
+            .expect("retain existing legacy row");
+
+        let appended = ledger
+            .append_signed_chained(test_entry("BOUND-AFTER-LEGACY", 2), &signing_key)
+            .expect("append a bound successor");
+        assert_eq!(appended.prev_entry_hash, evidence_entry_hash_hex(&legacy));
+        assert!(evidence_entry_has_chained_signature(&appended));
+        verify_evidence_entry(&appended, &verifying_key)
+            .expect("new successor authenticates parent");
+        let rows = ledger.entries_json().expect("read mixed-version rows");
+        assert_eq!(
+            rows[0], legacy_json,
+            "the earlier row is not silently re-signed"
+        );
+        assert!(!evidence_entry_has_chained_signature(&legacy));
+        verify_evidence_entry(&legacy, &verifying_key).expect("legacy contents remain verifiable");
+    }
+
+    #[test]
+    fn chained_append_refuses_an_unreadable_head_without_minting_a_new_genesis() {
+        let (_dir, state_dir) = temp_state_dir("corrupted-chain-head");
+        let signing_key = SigningKey::from_bytes(&[0xC9; 32]);
+        let ledger = DurableEvidenceLedger::open(&state_dir).expect("open durable chain");
+        ledger
+            .append_signed_chained(test_entry("ORIGINAL-GENESIS", 1), &signing_key)
+            .expect("append original signed genesis");
+        ledger
+            .with_connection(|connection| {
+                let mut tx = connection.transaction().map_err(|error| {
+                    io::Error::other(format!("begin corrupt-head fixture: {error}"))
+                })?;
+                tx.execute_batch("UPDATE evidence_entries SET entry_json = X'00';")
+                    .map_err(|error| {
+                        io::Error::other(format!("write corrupt-head fixture: {error}"))
+                    })?;
+                tx.commit().map_err(|error| {
+                    io::Error::other(format!("commit corrupt-head fixture: {error}"))
+                })
+            })
+            .expect("store an actual non-Text BLOB as the newest row");
+        let rows_before = ledger.count().expect("count corrupt-head rows");
+        assert_eq!(rows_before, 1);
+        assert!(
+            ledger
+                .entries_json()
+                .expect("read stored BLOB fixture")
+                .is_empty(),
+            "the stored BLOB is not exposed as a Text entry"
+        );
+
+        let error = ledger
+            .append_signed_chained(test_entry("REFUSED-NEW-GENESIS", 2), &signing_key)
+            .expect_err("a present unreadable head cannot become an empty predecessor");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("refusing to reset the chain"));
+        assert_eq!(
+            ledger.count().expect("count rows after refused append"),
+            rows_before,
+            "the refused append must not mint or persist another signed genesis"
+        );
     }
 
     #[test]
