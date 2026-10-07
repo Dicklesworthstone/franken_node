@@ -14,7 +14,11 @@
 //! 3. the Ed25519 signature over
 //!    `b"replay_bundle_sig_v1:" || u64_le(len) || integrity_hash` verifies
 //!    strictly under a public key the VERIFIER supplies — the key embedded in
-//!    the bundle is only accepted when it equals that trust anchor.
+//!    the bundle and its derived key ID must match that trust anchor.
+//!
+//! The signature envelope's human-readable `signing_identity` label is outside
+//! the signed integrity view. Verified signer identity is therefore the
+//! canonical key ID derived from the verifier's trust anchor.
 //!
 //! Unknown top-level fields are rejected so no unsigned data can ride along.
 //! The chunk layout (gzip sizing) is covered by the integrity hash but is not
@@ -61,7 +65,13 @@ pub struct VerifiedIncidentBundle {
     pub event_count: usize,
     pub integrity_hash: String,
     pub decision_sequence_hash: String,
+    /// Lowercase hexadecimal encoding of the verifier-supplied trusted public key.
     pub signer_public_key_hex: String,
+    /// Canonical artifact-signing key ID derived from the trusted public key.
+    ///
+    /// For authenticated attribution, this field contains the key ID instead of
+    /// the bundle's unsigned `signature.signing_identity` label. Applications
+    /// needing a human-readable name must use their own trusted key-to-name mapping.
     pub signing_identity: String,
 }
 
@@ -204,6 +214,17 @@ pub fn incident_bundle_canonical_digest(
 
 fn ct_str_eq(left: &str, right: &str) -> bool {
     left.len() == right.len() && bool::from(left.as_bytes().ct_eq(right.as_bytes()))
+}
+
+fn trusted_signer_key_id(trusted_signer: &VerifyingKey) -> String {
+    // Match the product's artifact_signing::KeyId::from_verifying_key exactly.
+    let public_key = trusted_signer.as_bytes();
+    let mut hasher = Sha256::new();
+    hasher.update(b"artifact_signing_keyid_v1:");
+    hasher.update((public_key.len() as u64).to_le_bytes());
+    hasher.update(public_key);
+    let hash = hasher.finalize();
+    hex::encode(&hash[..8])
 }
 
 fn string_field<'a>(
@@ -383,6 +404,10 @@ pub fn verify_incident_bundle(
     if !ct_str_eq(&public_key_hex.to_ascii_lowercase(), &anchor_hex) {
         return Err(IncidentBundleError::SignerNotTrusted);
     }
+    let anchor_key_id = trusted_signer_key_id(trusted_signer);
+    if !ct_str_eq(sig_str("key_id")?, &anchor_key_id) {
+        return Err(IncidentBundleError::SignerNotTrusted);
+    }
     let payload = incident_bundle_signature_payload(&recorded_integrity);
     if !ct_str_eq(
         sig_str("signed_payload_sha256")?,
@@ -398,6 +423,10 @@ pub fn verify_incident_bundle(
         .verify_strict(&payload, &signature)
         .map_err(|_| IncidentBundleError::SignatureInvalid)?;
 
+    // Preserve the envelope's required-string validation without promoting its
+    // unsigned human-readable label to an authenticated signer identity.
+    sig_str("signing_identity")?;
+
     Ok(VerifiedIncidentBundle {
         bundle_id: string_field(&object, "bundle_id")?.to_string(),
         incident_id: string_field(&object, "incident_id")?.to_string(),
@@ -407,6 +436,6 @@ pub fn verify_incident_bundle(
         integrity_hash: recorded_integrity,
         decision_sequence_hash: recomputed_sequence,
         signer_public_key_hex: anchor_hex,
-        signing_identity: sig_str("signing_identity")?.to_string(),
+        signing_identity: anchor_key_id,
     })
 }

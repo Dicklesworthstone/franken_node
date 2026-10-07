@@ -26,6 +26,8 @@ const FIXTURE: &[u8] = include_bytes!("fixtures/cli_incident_bundle/INC-SDK-FIXT
 /// RFC 8032 section 7.1 TEST 1 public key.
 const RFC8032_TEST1_PUBLIC_KEY_HEX: &str =
     "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+/// Product artifact-signing key ID for the independently supplied trust anchor.
+const RFC8032_TEST1_KEY_ID: &str = "339eefa3a988f613";
 
 fn anchor() -> VerifyingKey {
     let mut bytes = [0_u8; 32];
@@ -54,6 +56,7 @@ fn sdk_verifies_real_cli_incident_bundle_under_independent_anchor() {
     assert_eq!(verified.incident_id, "INC-SDK-FIXTURE-1");
     assert_eq!(verified.event_count, 3);
     assert_eq!(verified.signer_public_key_hex, RFC8032_TEST1_PUBLIC_KEY_HEX);
+    assert_eq!(verified.signing_identity, RFC8032_TEST1_KEY_ID);
     assert_eq!(
         verified.integrity_hash,
         fixture_value()["integrity_hash"].as_str().unwrap()
@@ -66,6 +69,83 @@ fn foreign_trust_anchor_is_rejected() {
     assert_eq!(
         verify_incident_bundle(FIXTURE, &other),
         Err(IncidentBundleError::SignerNotTrusted)
+    );
+}
+
+#[test]
+fn forged_key_id_is_rejected_despite_valid_original_signature() {
+    let mut value = fixture_value();
+    value["signature"]["key_id"] = Value::String("0".repeat(16));
+
+    // The key ID is outside the signed integrity view, so changing it leaves
+    // the original cryptography valid. Verification must bind it to the anchor.
+    let payload = incident_bundle_signature_payload(value["integrity_hash"].as_str().unwrap());
+    let signature_bytes =
+        hex::decode(value["signature"]["signature_hex"].as_str().unwrap()).unwrap();
+    let signature = ed25519_dalek::Signature::from_slice(&signature_bytes).unwrap();
+    anchor().verify_strict(&payload, &signature).unwrap();
+    assert_eq!(
+        verify_incident_bundle(&serde_json::to_vec(&value).unwrap(), &anchor()),
+        Err(IncidentBundleError::SignerNotTrusted)
+    );
+}
+
+#[test]
+fn missing_or_non_string_key_id_is_rejected() {
+    let mut missing = fixture_value();
+    missing["signature"]
+        .as_object_mut()
+        .unwrap()
+        .remove("key_id");
+    assert_eq!(
+        verify_incident_bundle(&serde_json::to_vec(&missing).unwrap(), &anchor()),
+        Err(IncidentBundleError::MissingField { field: "key_id" })
+    );
+
+    let mut non_string = fixture_value();
+    non_string["signature"]["key_id"] = Value::from(42);
+    assert_eq!(
+        verify_incident_bundle(&serde_json::to_vec(&non_string).unwrap(), &anchor()),
+        Err(IncidentBundleError::MissingField { field: "key_id" })
+    );
+}
+
+#[test]
+fn unsigned_signer_relabeling_cannot_change_verified_identity() {
+    let original = verify_incident_bundle(FIXTURE, &anchor()).unwrap();
+    let mut relabeled = fixture_value();
+    relabeled["signature"]["signing_identity"] =
+        Value::String("attacker-chosen-operator-label".into());
+
+    // Only the unsigned label changes: no resealing or signing key is needed,
+    // and successful SDK verification still checks the original signature.
+    let verified = verify_incident_bundle(&serde_json::to_vec(&relabeled).unwrap(), &anchor())
+        .expect("unsigned label must not affect verified facts");
+    assert_eq!(verified.signing_identity, RFC8032_TEST1_KEY_ID);
+    assert_eq!(verified, original);
+}
+
+#[test]
+fn missing_or_non_string_signing_identity_is_still_rejected() {
+    let mut missing = fixture_value();
+    missing["signature"]
+        .as_object_mut()
+        .unwrap()
+        .remove("signing_identity");
+    assert_eq!(
+        verify_incident_bundle(&serde_json::to_vec(&missing).unwrap(), &anchor()),
+        Err(IncidentBundleError::MissingField {
+            field: "signing_identity"
+        })
+    );
+
+    let mut non_string = fixture_value();
+    non_string["signature"]["signing_identity"] = Value::Null;
+    assert_eq!(
+        verify_incident_bundle(&serde_json::to_vec(&non_string).unwrap(), &anchor()),
+        Err(IncidentBundleError::MissingField {
+            field: "signing_identity"
+        })
     );
 }
 
