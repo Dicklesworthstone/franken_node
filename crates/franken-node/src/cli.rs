@@ -328,7 +328,8 @@ pub struct RunArgs {
 
     /// Retain the entry source and raw host-I/O results for offline native
     /// re-execution with `incident replay --execute`. Captured data may contain
-    /// application secrets. Only supported, finalized native runs qualify.
+    /// application secrets. Supports completed native runs and certified
+    /// uncaught-exception prefixes; the original run's exit status is retained.
     #[arg(long)]
     pub capture_replay: bool,
 
@@ -2295,8 +2296,9 @@ pub struct IncidentReplayArgs {
     pub trusted_key_dir: Option<PathBuf>,
 
     /// Re-execute captured JavaScript with recorded host-I/O results and
-    /// verify its guest execution. Runtime module loading is disabled; policy
-    /// decisions are compared separately under that restricted authority.
+    /// verify guest completion or a certified uncaught-exception prefix.
+    /// Runtime module loading is disabled; policy decisions are compared
+    /// separately when available under that restricted authority.
     /// Requires a signed bundle from `run --capture-replay`.
     #[arg(long)]
     pub execute: bool,

@@ -69,9 +69,11 @@ Under `franken-node`:
   is more than 5 minutes old. Under `balanced` the same staleness is a
   preflight warning (1-hour window).
 - If the malicious behavior had already executed, `incident bundle` +
-  `incident replay` integrity-verify the recorded bundle (not live
-  re-execution), and `incident counterfactual --policy strict` scores
-  an alternative policy against that recorded evidence.
+  `incident replay` integrity-verify the recorded bundle. Runs recorded with
+  `--capture-replay` also support `incident replay --execute` for native guest
+  execution or a certified uncaught-exception prefix, using captured host-I/O
+  results. `incident counterfactual --policy strict` scores an alternative
+  policy against the recorded evidence.
 
 Every gate above is a runtime default, not an external scanner. Each `run`
 (including a preflight refusal) and each `trust revoke`/`quarantine`/`release`
@@ -147,7 +149,7 @@ replay part of the runtime contract, so JS/TS velocity comes with:
 |---|---|
 | Trust cards | Per-extension provenance, risk score, audit history, camouflage assessment, revocation state |
 | Revocation freshness gates | Risky and dangerous actions fail closed when trust state is stale |
-| Deterministic incident replay | Signed bundles with timeline, evidence, policy decisions; replay re-derives the recorded decision sequence and verifies it against the bundle's signed hash, fail-closed on mismatch |
+| Deterministic incident replay | Signed bundles with timeline, evidence, policy decisions; default replay verifies the recorded sequence. Opt-in native capture supports guest re-execution and certified uncaught-exception prefixes, failing closed on mismatch. |
 | Counterfactual simulator | Re-evaluate the recorded incident decision trace under a different policy mode and inspect the diff |
 | Migration autopilot | Audit, rewrite, validate, and rollout. `--emit-rollback` is unsigned JSON (not Ed25519-signed); `migrate validate` is static+smoke, not `verify lockstep` |
 | Compatibility oracle | Lockstep vs Node (spec) plus Bun as a second reference; matching only Bun stays fail |
@@ -542,6 +544,51 @@ artifacts referenced during the incident. The counterfactual report
 includes a diff of decisions, actions taken vs. blocked, and any newly
 emitted evidence.
 
+#### Re-execute captured native JavaScript
+
+Opt in when recording a run to retain its entry source, execution settings,
+arguments, and raw host-I/O results in the signed run record. The capture is
+limited to 4 MiB and may contain application secrets.
+
+```bash
+franken-node init --profile balanced --out-dir .
+franken-node run app.js --capture-replay --json > run.json
+
+# Read receipt.receipt_id from run.json, including when the guest threw.
+franken-node incident capture --from-run RUN_RECEIPT_ID --json
+# Use incident_id from that capture result.
+franken-node incident bundle --id INCIDENT_ID --verify
+franken-node incident replay --bundle INCIDENT_ID.fnbundle --execute \
+    --trusted-public-key .franken-node/keys/receipt-signing.pub --json
+```
+
+Replay authenticates the bundle before executing its captured source through
+the native engine. It consumes the exact recorded host requests and responses;
+it does not repeat filesystem writes or network requests, and the original
+source and input files may be missing or changed. An unused transcript suffix,
+an unexpected request, or a different result fails verification.
+
+| Replay mode | Verified result |
+|---|---|
+| Default, `replay_kind: recorded_trace` | Signature, bundle integrity, and the recorded decision sequence. |
+| `--execute`, `verification_scope: guest_execution` | Fresh guest output, value, IR3/IR4 witness, instruction count, nondeterminism trace, lane, exit code, and host-I/O transcript. |
+| `--execute`, `verification_scope: guest_failure_prefix` | The same uncaught exception, console output, execution trace identity, and finalized host-I/O prefix. Completed-witness, instruction-count, nondeterminism, lane, exit-code, and policy comparisons remain `null`. |
+
+A captured exception leaves the original `run` failed with exit status 1 and
+its original error and output. A later replay exits successfully when it
+reproduces that failure. Runs without host effects receive a completion or
+failure timeline event, without inventing an effect receipt.
+
+Runtime module loading is disabled during replay; source capture for loaded
+modules is not available. A certified exception prefix involving runtime module
+loading can be captured, but `--execute` will refuse that module access.
+Process-spawn and ambient environment authority,
+timeouts, interrupted sessions, and uncertified engine failures remain outside
+this replay scope. For completed runs, `decisions_match` is informational:
+withholding module authority changes the capability population used by Bayesian
+policy evaluation, so the guest verdict does not certify identical policy
+decisions. `--execute` requires a build with the `engine` feature.
+
 ### Day 22 — Release
 
 ```bash
@@ -882,7 +929,7 @@ franken-node fleet status --json   # transport=http, live_control_plane=true
 | Command | Purpose |
 |---|---|
 | `franken-node incident bundle` | Export a deterministic incident bundle. `--id` is handler-required so `--json` failures emit `franken-node/incident-error-cli/v1`. Reads `--evidence-path` or `<project-root>/.franken-node/state/incidents/<slug>/evidence.v1.json`. `run` automatically signs captured source evidence when SSRF checks, a denied host effect, or Sentinel trips; the incident id is `INC-RUN-<host-effect chain head>`. Captured sources must authenticate against the configured receipt authority before export. An export signing-key override does not replace that authority. Explicit operator-authored inputs remain supported; JSON reports `source_authenticated`. `--verify` checks the generated bundle. Flags: `--json`. |
-| `franken-node incident replay` | Integrity-verified replay of a recorded incident bundle (not live re-execution). `--bundle` is handler-required so `--json` failures emit `franken-node/incident-error-cli/v1` instead of a human clap error. **Also fails closed without `--trusted-public-key` or `--key-dir`.** Flags: `--json`. |
+| `franken-node incident replay` | Verifies recorded bundle integrity by default; `--execute` also re-executes captured native guest inputs. `--bundle` is handler-required so `--json` failures emit `franken-node/incident-error-cli/v1` instead of a human clap error. **Also fails closed without `--trusted-public-key` or `--key-dir`.** Flags: `--execute`, `--json`. |
 | `franken-node incident counterfactual` | Simulate alternative policy actions. Same trust-anchor requirement as `replay`. `--bundle` and `--policy` are handler-required so `--json` failures emit `franken-node/incident-error-cli/v1` instead of a human clap error. Optional: `--promote`, `--promotion-signing-key`, `--operator-id`. `--model synthetic` (default) is the sandboxed risk-score stand-in. `--model production` re-decides every host effect a run-captured incident recorded (its signed effect-receipt chain entry) under the runtime profile named by `--policy` (`strict`, `balanced`, `legacy-risky`), using the run path's own capability table: an effect whose capability the profile does not grant is refused at the capability gate; one it grants gets the recorded outcome of the profile-independent SSRF / flow / sandbox gates; spawns keep their admission-bound outcome. Decisions after the first divergence are labelled `determination=path_assumed`. Bundles without recorded effects, and non-profile policies, are refused. The model is bound into the counterfactual digest. Flags: `--json`. |
 | `franken-node incident list` | List recorded incidents. Filter: `--severity`. Flags: `--json` (failures `franken-node/incident-error-cli/v1`). |
 | `franken-node incident capture` | Capture a recorded native run as incident evidence. `--from-run <receipt-id\|receipt-path>` verifies the product-signed run record and complete receipt snapshot, then the engine ledger's counts, hash chain, detached signature, and product-root-signed session identity before sealing the captured source. An existing source is returned as `already_captured` only after its signature and run bindings authenticate. Legacy unsigned records require a new run. Flags: `--severity`, `--json` (`franken-node/incident-capture-cli/v1`). |
@@ -1674,8 +1721,9 @@ sequence of segments without trusting the producer.
 ### Time-travel replay engine
 
 `replay::time_travel_engine` is a library API that no CLI command calls
-yet. `incident replay` does an integrity re-derivation of the recorded
-bundle instead. The engine captures a `WorkflowTrace`: the sequence of
+yet. `incident replay` re-derives recorded bundle integrity by default;
+its `--execute` path uses `ops::native_replay` and the native execution
+orchestrator. The separate library engine captures a `WorkflowTrace`: the sequence of
 steps, their inputs and outputs, the environment snapshot at the start of
 the workflow, schema version metadata, and the side-effect declarations
 required to reproduce them. Its replay re-executes the trace against the
@@ -1816,10 +1864,11 @@ The exported bundle's fields (`tools::replay_bundle::ReplayBundle`):
 
 `incident replay` recomputes the integrity hash, verifies the signature
 against the operator-supplied trust anchor, and re-derives the
-decision-sequence hash from the recorded timeline. It is an integrity
-re-derivation of the **recorded** evidence, not a live re-execution of the
-original program (see [Limitations](#limitations)), and it certifies only
-what the evidence package contains.
+decision-sequence hash from the recorded timeline. This default mode reports
+`replay_kind: recorded_trace`. With `--execute`, a bundle carrying authenticated
+native replay inputs also re-executes the captured guest and reports its
+separate `execution_result`; the supported comparison scopes are described in
+[Re-execute captured native JavaScript](#re-execute-captured-native-javascript).
 
 Independent verification: `frankenengine_verifier_sdk::incident_bundle::verify_incident_bundle`
 re-derives the integrity hash and the decision-sequence hash from the raw
@@ -2387,7 +2436,7 @@ corresponding tests under `tests/conformance/`:
 }
 ```
 
-**Replay verdict** (`incident replay`). The underlying `ReplayResult`
+**WorkflowTrace library verdict** (`replay::time_travel_engine`). Its `ReplayResult`
 serializes to this shape, with `verdict` rendered as `"identical"` or
 `"diverged"` (the `Diverged` variant carries a `usize` count):
 
@@ -3105,7 +3154,8 @@ into the corresponding section above.
 | Lift quarantine | `franken-node fleet release --incident INC-… --json` |
 | Reconcile fleet | `franken-node fleet reconcile --json` |
 | Snapshot incident | `franken-node incident bundle --id INC-… --verify` |
-| Replay recorded incident (not live re-execution) | `franken-node incident replay --bundle …fnbundle --trusted-public-key …pub` |
+| Verify recorded incident | `franken-node incident replay --bundle …fnbundle --trusted-public-key …pub` |
+| Re-execute captured native guest | `franken-node incident replay --bundle …fnbundle --trusted-public-key …pub --execute` |
 | Run a counterfactual | `franken-node incident counterfactual --bundle … --trusted-public-key … --policy strict` |
 | Diagnose environment | `franken-node doctor --verbose --json` |
 | Workspace pressure | `franken-node doctor workspace-pressure` (human stdout; `--human-output <path>` writes a file) |
@@ -3561,12 +3611,13 @@ one pass.
   capability-metered effects — is still in active development under the
   engine-split program; do not yet rely on it as a complete drop-in for
   arbitrary host-effect workloads.
-- **`incident replay` is an integrity-verified replay of the recorded
-  incident**, not a live re-execution of the original program. It
-  deterministically re-derives the recorded decision sequence from the bundle
-  and verifies it against the bundle's signed hash, failing closed on any
-  mismatch. Live re-execution under the engine is part of the runtime-of-record
-  work above.
+- **`incident replay` verifies the recorded incident by default.** Explicit
+  `--execute` re-executes source and host-I/O captured with `run --capture-replay`.
+  Completed guests and certified uncaught-exception prefixes have distinct
+  verification scopes; a failed prefix has no completed IR4 witness or final
+  instruction-count/nondeterminism comparison. Runtime module source capture,
+  process-spawn/environment replay, and interrupted execution remain unsupported.
+  Original policy decisions are not certified by the guest replay verdict.
 - **Source builds require the sibling `franken_engine` repository** to be
   checked out next to this one (engine-split contract). The one-line
   installer side-steps this by shipping prebuilt binaries.

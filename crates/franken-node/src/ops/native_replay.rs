@@ -11,9 +11,17 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const NATIVE_REPLAY_CAPTURE_SCHEMA: &str = "franken-node/native-replay-capture/v1";
-pub const NATIVE_REPLAY_OUTCOME_SCHEMA: &str = "franken-node/native-replay-outcome/v1";
+pub const NATIVE_REPLAY_CAPTURE_SCHEMA: &str = "franken-node/native-replay-capture/v2";
+pub const NATIVE_REPLAY_OUTCOME_SCHEMA: &str = "franken-node/native-replay-outcome/v2";
 pub const MAX_NATIVE_REPLAY_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
+
+/// The engine terminal state the authenticated capture describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeReplayTerminalState {
+    Completed,
+    UncaughtException,
+}
 
 /// Exact serialized execution inputs, bound into the signed run receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +54,25 @@ impl NativeReplayCapture {
         }
         Ok(())
     }
+
+    /// Read the captured terminal state without linking the engine. This is
+    /// descriptive metadata; execution still validates the complete typed
+    /// payload after authenticating its containing record.
+    pub fn terminal_state(&self) -> Result<NativeReplayTerminalState, String> {
+        #[derive(Deserialize)]
+        struct ExpectedTerminalState {
+            terminal_state: NativeReplayTerminalState,
+        }
+        #[derive(Deserialize)]
+        struct PayloadTerminalState {
+            expected: ExpectedTerminalState,
+        }
+
+        self.validate()?;
+        let payload: PayloadTerminalState = serde_json::from_str(&self.payload_json)
+            .map_err(|error| format!("invalid native replay terminal state: {error}"))?;
+        Ok(payload.expected.terminal_state)
+    }
 }
 
 /// Comparisons of fresh native execution with the authenticated original.
@@ -61,19 +88,25 @@ pub struct NativeReplayOutcome {
     pub divergences: Vec<String>,
     pub captured_trace_id: String,
     pub replay_trace_id: String,
-    pub ir3_hash_match: bool,
-    pub ir4_witness_match: bool,
-    pub execution_value_match: bool,
-    pub instruction_count_match: bool,
+    pub captured_terminal_state: NativeReplayTerminalState,
+    pub replay_terminal_state: NativeReplayTerminalState,
+    pub terminal_state_match: bool,
+    /// Completed executions have these witnesses. Failed prefixes do not;
+    /// unavailable comparisons serialize as null and never as successful.
+    pub ir3_hash_match: Option<bool>,
+    pub ir4_witness_match: Option<bool>,
+    pub execution_value_match: Option<bool>,
+    pub instruction_count_match: Option<bool>,
     pub console_match: bool,
     pub host_effects_match: bool,
-    pub nondeterminism_trace_match: bool,
-    pub lane_match: bool,
-    pub exit_code_match: bool,
+    pub nondeterminism_trace_match: Option<bool>,
+    pub lane_match: Option<bool>,
+    pub exit_code_match: Option<bool>,
+    pub exception_value_match: Option<bool>,
     /// Informational: withholding ModuleLoad changes the declared capability
     /// population the engine uses for Bayesian evidence. This is not included
     /// in the guest execution verdict.
-    pub decisions_match: bool,
+    pub decisions_match: Option<bool>,
     pub policy_comparison_note: String,
 }
 
@@ -89,19 +122,22 @@ mod engine {
     use std::sync::Arc;
 
     use frankenengine_engine::ast::ParseGoal;
-    use frankenengine_engine::baseline_interpreter::{ConsoleEntry, LaneChoice};
+    use frankenengine_engine::baseline_interpreter::{ConsoleEntry, InterpreterError, LaneChoice};
     use frankenengine_engine::capability::RuntimeCapability;
     use frankenengine_engine::deterministic_replay::NondeterminismTrace;
     use frankenengine_engine::evidence_ledger::RuntimeEvidenceAuthority;
     use frankenengine_engine::execution_orchestrator::{
         ExecutionOrchestrator, ExtensionPackage, LossMatrixPreset, OrchestratorConfig,
-        OrchestratorResult,
+        OrchestratorError, OrchestratorResult,
     };
     use frankenengine_engine::ir_contract::{ExecutionOutcome, Ir4Module};
     use frankenengine_engine::lowering_pipeline::AmbientAuthorityGrant;
     use frankenengine_engine::parser::ParserOptions;
     use frankenengine_engine::runtime_config::RuntimeConfig;
     use frankenengine_engine::security_epoch::SecurityEpoch;
+    use frankenengine_extension_host::host_effect_journal::{
+        HostEffectJournalAttemptRecord, HostEffectJournalEntry,
+    };
     use frankenengine_extension_host::host_io::{
         HostIoCapability, HostIoControl, HostIoError, HostIoExceptionProvenance, HostIoOutcome,
         HostIoProvider, HostIoRecorder, HostIoRequest, InMemoryHostIoTranscript,
@@ -187,6 +223,21 @@ mod engine {
         decisions: serde_json::Value,
     }
 
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct CapturedGuestException {
+        trace_id: String,
+        exception_value: String,
+        console_output: Vec<ConsoleEntry>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(tag = "terminal_state", rename_all = "snake_case")]
+    enum CapturedAttempt {
+        Completed(CapturedExecution),
+        UncaughtException(CapturedGuestException),
+    }
+
     fn execution_decisions(result: &OrchestratorResult) -> Result<serde_json::Value, String> {
         serde_json::to_value((
             &result.posterior,
@@ -209,7 +260,7 @@ mod engine {
         host_io_exception_provenance: HostIoExceptionProvenance,
         process_argv: Vec<String>,
         host_effect_transcript: Vec<(HostIoRequest, HostIoOutcome)>,
-        expected: CapturedExecution,
+        expected: CapturedAttempt,
     }
 
     impl NativeReplayPayload {
@@ -244,38 +295,56 @@ mod engine {
                     None => return Err(format!("unrecognized captured capability {capability}")),
                 }
             }
-            if self.expected.ir4_witness.outcome != ExecutionOutcome::Completed {
-                return Err(
-                    "native replay requires a finalized successful engine attempt".to_string(),
-                );
+            match &self.expected {
+                CapturedAttempt::Completed(expected) => {
+                    if expected.ir4_witness.outcome != ExecutionOutcome::Completed {
+                        return Err(
+                            "native replay requires a finalized successful engine attempt"
+                                .to_string(),
+                        );
+                    }
+                    if expected
+                        .ir4_witness
+                        .hostcall_decisions
+                        .iter()
+                        .any(|decision| {
+                            RuntimeCapability::from_tag_str(&decision.capability.0)
+                                == Some(RuntimeCapability::ModuleLoad)
+                        })
+                    {
+                        return Err(
+                            "native replay does not support runtime module loading; module source capture is required"
+                                .to_string(),
+                        );
+                    }
+                    if expected.ir4_witness.instructions_executed != expected.instructions_executed
+                    {
+                        return Err(
+                            "native replay witness instruction count does not match the captured result"
+                                .to_string(),
+                        );
+                    }
+                    expected
+                        .nondeterminism_trace
+                        .validate_for_replay()
+                        .map_err(|error| {
+                            format!("invalid captured nondeterminism trace: {error}")
+                        })?;
+                    if expected.trace_id.trim().is_empty() {
+                        return Err("native replay requires a captured execution trace".to_string());
+                    }
+                }
+                CapturedAttempt::UncaughtException(expected) => {
+                    if expected.trace_id.trim().is_empty() {
+                        return Err(
+                            "native failure replay requires a captured execution trace".to_string()
+                        );
+                    }
+                    // The thrown value may legitimately be the empty string.
+                    // Only the authenticated recorder boundary, not its length,
+                    // establishes that this is a real failed guest attempt.
+                }
             }
-            if self
-                .expected
-                .ir4_witness
-                .hostcall_decisions
-                .iter()
-                .any(|decision| {
-                    RuntimeCapability::from_tag_str(&decision.capability.0)
-                        == Some(RuntimeCapability::ModuleLoad)
-                })
-            {
-                return Err(
-                    "native replay does not support runtime module loading; module source capture is required"
-                        .to_string(),
-                );
-            }
-            if self.expected.ir4_witness.instructions_executed
-                != self.expected.instructions_executed
-            {
-                return Err(
-                    "native replay witness instruction count does not match the captured result"
-                        .to_string(),
-                );
-            }
-            self.expected
-                .nondeterminism_trace
-                .validate_for_replay()
-                .map_err(|error| format!("invalid captured nondeterminism trace: {error}"))?;
             Ok(())
         }
     }
@@ -388,6 +457,103 @@ mod engine {
         })
     }
 
+    /// Accept only an actual uncaught guest exception whose recorder and cell
+    /// both finalized. An error prefix with an unknown effect boundary cannot
+    /// become replay evidence merely because some console output was retained.
+    fn observe_guest_exception(
+        orchestrator: &ExecutionOrchestrator,
+        error: &OrchestratorError,
+    ) -> Result<(CapturedGuestException, Vec<(HostIoRequest, HostIoOutcome)>), String> {
+        let OrchestratorError::Interpreter(InterpreterError::UncaughtException { value }) =
+            error.primary_error()
+        else {
+            return Err(
+                "native failure replay supports only a certified uncaught guest exception"
+                    .to_string(),
+            );
+        };
+        let failure = error.post_cell_failure().ok_or_else(|| {
+            "native failure replay requires execution-cell cleanup evidence".to_string()
+        })?;
+        if !failure.cleanup.close_succeeded()
+            || !failure.additional_errors.is_empty()
+            || failure.uncommitted_evidence_chain.is_some()
+            || failure.containment_saga_failure.is_some()
+        {
+            return Err(
+                "native failure replay refuses incomplete recorder, evidence, or cell cleanup"
+                    .to_string(),
+            );
+        }
+        let trace_id = orchestrator
+            .last_failed_trace_id()
+            .filter(|trace_id| !trace_id.trim().is_empty())
+            .ok_or_else(|| {
+                "native failure replay requires a finalized effect boundary and trace".to_string()
+            })?;
+        if failure.cleanup.trace_id != trace_id {
+            return Err(
+                "native failure replay cleanup does not belong to the failed trace".to_string(),
+            );
+        }
+        let cell_transcript = failure
+            .cleanup
+            .cell_execution_transcript
+            .as_ref()
+            .ok_or_else(|| {
+                "native failure replay requires a certified execution-cell transcript".to_string()
+            })?;
+        if cell_transcript.authority.trace_id != trace_id
+            || cell_transcript.authority.cell_id != failure.cleanup.cell_id
+        {
+            return Err(
+                "native failure replay cell transcript does not belong to the failed trace"
+                    .to_string(),
+            );
+        }
+        cell_transcript.verify().map_err(|error| {
+            format!("native failure replay cell transcript is invalid: {error}")
+        })?;
+
+        let entries = orchestrator.last_failed_host_effect_journal();
+        let records = orchestrator.last_failed_host_effect_journal_records();
+        if entries.len() != records.len()
+            || records
+                .iter()
+                .zip(entries)
+                .enumerate()
+                .any(|(index, (record, entry))| {
+                    !matches!(record,
+                HostEffectJournalAttemptRecord::Completed { sequence, entry: recorded }
+                    if usize::try_from(*sequence) == Ok(index) && recorded == entry)
+                })
+        {
+            return Err(
+                "native failure replay refuses an incomplete or discontinuous effect journal"
+                    .to_string(),
+            );
+        }
+        let host_effect_transcript = entries
+            .iter()
+            .map(|entry| match entry {
+                HostEffectJournalEntry::HostIo { request, outcome } => {
+                    Ok((request.clone(), outcome.clone()))
+                }
+                HostEffectJournalEntry::ProcessSpawn { .. } => {
+                    Err("native failure replay does not support process journals".to_string())
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((
+            CapturedGuestException {
+                trace_id: trace_id.to_string(),
+                exception_value: value.clone(),
+                console_output: orchestrator.last_failed_console_output(),
+            },
+            host_effect_transcript,
+        ))
+    }
+
     impl NativeReplayCapture {
         /// Capture the source actually passed to the native engine and its
         /// finalized response, before either can be discarded or reread.
@@ -418,7 +584,7 @@ mod engine {
                 host_io_exception_provenance: HostIoExceptionProvenance::ProviderInternal,
                 process_argv: process_argv.to_vec(),
                 host_effect_transcript: result.host_effect_transcript.clone(),
-                expected: CapturedExecution {
+                expected: CapturedAttempt::Completed(CapturedExecution {
                     trace_id: result.trace_id.clone(),
                     ir4_witness: result.ir4_witness.clone(),
                     execution_value: result.execution_value.clone(),
@@ -428,7 +594,33 @@ mod engine {
                     lane: result.lane,
                     exit_code: result.exit_code,
                     decisions: execution_decisions(result)?,
-                },
+                }),
+            };
+            payload.validate()?;
+            encode_capture(&payload)
+        }
+
+        /// Capture an uncaught guest exception and its finalized effect prefix.
+        /// No successful IR4 witness or finalized nondeterminism trace is
+        /// manufactured for an attempt the engine reported as failed.
+        pub fn from_failed_execution(
+            package: &ExtensionPackage,
+            orchestrator_config: &OrchestratorConfig,
+            runtime_config: &RuntimeConfig,
+            process_argv: &[String],
+            orchestrator: &ExecutionOrchestrator,
+            error: &OrchestratorError,
+        ) -> Result<Self, String> {
+            let (expected, host_effect_transcript) = observe_guest_exception(orchestrator, error)?;
+            let payload = NativeReplayPayload {
+                package: package.clone(),
+                orchestrator: CapturedOrchestratorSettings::capture(orchestrator_config)?,
+                runtime: runtime_config.clone(),
+                ambient_authority: AmbientAuthorityGrant::DenyAll,
+                host_io_exception_provenance: HostIoExceptionProvenance::ProviderInternal,
+                process_argv: process_argv.to_vec(),
+                host_effect_transcript,
+                expected: CapturedAttempt::UncaughtException(expected),
             };
             payload.validate()?;
             encode_capture(&payload)
@@ -439,7 +631,9 @@ mod engine {
         payload: &NativeReplayPayload,
         replayed: &OrchestratorResult,
     ) -> Result<NativeReplayOutcome, String> {
-        let expected = &payload.expected;
+        let CapturedAttempt::Completed(expected) = &payload.expected else {
+            return Err("completed execution comparison requires a completed capture".to_string());
+        };
         let mut outcome = NativeReplayOutcome {
             schema_version: NATIVE_REPLAY_OUTCOME_SCHEMA.to_string(),
             replay_kind: "native_reexecution".to_string(),
@@ -449,31 +643,47 @@ mod engine {
             divergences: Vec::new(),
             captured_trace_id: expected.trace_id.clone(),
             replay_trace_id: replayed.trace_id.clone(),
-            ir3_hash_match: expected.ir4_witness.executed_ir3_hash
-                == replayed.ir4_witness.executed_ir3_hash,
-            ir4_witness_match: expected.ir4_witness == replayed.ir4_witness,
-            execution_value_match: expected.execution_value == replayed.execution_value,
-            instruction_count_match: expected.instructions_executed
-                == replayed.instructions_executed,
+            captured_terminal_state: NativeReplayTerminalState::Completed,
+            replay_terminal_state: NativeReplayTerminalState::Completed,
+            terminal_state_match: true,
+            ir3_hash_match: Some(expected.ir4_witness.executed_ir3_hash
+                == replayed.ir4_witness.executed_ir3_hash),
+            ir4_witness_match: Some(expected.ir4_witness == replayed.ir4_witness),
+            execution_value_match: Some(expected.execution_value == replayed.execution_value),
+            instruction_count_match: Some(expected.instructions_executed
+                == replayed.instructions_executed),
             console_match: expected.console_output == replayed.console_output,
             host_effects_match: payload.host_effect_transcript == replayed.host_effect_transcript,
-            nondeterminism_trace_match: expected.nondeterminism_trace
-                == replayed.nondeterminism_trace,
-            lane_match: expected.lane == replayed.lane,
-            exit_code_match: expected.exit_code == replayed.exit_code,
-            decisions_match: expected.decisions == execution_decisions(replayed)?,
+            nondeterminism_trace_match: Some(expected.nondeterminism_trace
+                == replayed.nondeterminism_trace),
+            lane_match: Some(expected.lane == replayed.lane),
+            exit_code_match: Some(expected.exit_code == replayed.exit_code),
+            exception_value_match: None,
+            decisions_match: Some(expected.decisions == execution_decisions(replayed)?),
             policy_comparison_note: "Replay disables runtime module loading. Its changed declared-capability population can change Bayesian and containment decisions; decisions_match is informational and is excluded from the guest execution verdict.".to_string(),
         };
         for (matches, subject) in [
-            (outcome.ir3_hash_match, "executed IR3"),
-            (outcome.ir4_witness_match, "IR4 execution witness"),
-            (outcome.execution_value_match, "execution value"),
-            (outcome.instruction_count_match, "instruction count"),
+            (outcome.ir3_hash_match == Some(true), "executed IR3"),
+            (
+                outcome.ir4_witness_match == Some(true),
+                "IR4 execution witness",
+            ),
+            (
+                outcome.execution_value_match == Some(true),
+                "execution value",
+            ),
+            (
+                outcome.instruction_count_match == Some(true),
+                "instruction count",
+            ),
             (outcome.console_match, "console output"),
             (outcome.host_effects_match, "host-effect transcript"),
-            (outcome.nondeterminism_trace_match, "nondeterminism trace"),
-            (outcome.lane_match, "execution lane"),
-            (outcome.exit_code_match, "guest exit code"),
+            (
+                outcome.nondeterminism_trace_match == Some(true),
+                "nondeterminism trace",
+            ),
+            (outcome.lane_match == Some(true), "execution lane"),
+            (outcome.exit_code_match == Some(true), "guest exit code"),
             (
                 expected.trace_id == replayed.trace_id,
                 "execution trace identity",
@@ -487,6 +697,67 @@ mod engine {
         }
         outcome.matched = outcome.divergences.is_empty();
         Ok(outcome)
+    }
+
+    struct GuestTerminalObservation {
+        terminal_state: NativeReplayTerminalState,
+        trace_id: String,
+        exception_value: Option<String>,
+        console_output: Vec<ConsoleEntry>,
+        host_effect_transcript: Vec<(HostIoRequest, HostIoOutcome)>,
+    }
+
+    fn compare_failure_observation(
+        expected: &CapturedGuestException,
+        expected_effects: &[(HostIoRequest, HostIoOutcome)],
+        replayed: &GuestTerminalObservation,
+    ) -> NativeReplayOutcome {
+        let mut outcome = NativeReplayOutcome {
+            schema_version: NATIVE_REPLAY_OUTCOME_SCHEMA.to_string(),
+            replay_kind: "native_reexecution".to_string(),
+            verification_scope: "guest_failure_prefix".to_string(),
+            module_load_disabled: true,
+            matched: false,
+            divergences: Vec::new(),
+            captured_trace_id: expected.trace_id.clone(),
+            replay_trace_id: replayed.trace_id.clone(),
+            captured_terminal_state: NativeReplayTerminalState::UncaughtException,
+            replay_terminal_state: replayed.terminal_state,
+            terminal_state_match: replayed.terminal_state == NativeReplayTerminalState::UncaughtException,
+            ir3_hash_match: None,
+            ir4_witness_match: None,
+            execution_value_match: None,
+            instruction_count_match: None,
+            console_match: expected.console_output == replayed.console_output,
+            host_effects_match: expected_effects == replayed.host_effect_transcript,
+            nondeterminism_trace_match: None,
+            lane_match: None,
+            exit_code_match: None,
+            exception_value_match: Some(replayed.exception_value.as_deref() == Some(expected.exception_value.as_str())),
+            decisions_match: None,
+            policy_comparison_note: "This verdict verifies an uncaught guest exception, captured console, and finalized host-effect prefix. The failed run has no completed IR4 witness, finalized nondeterminism trace, total instruction count, or completed runtime decision to compare. Runtime module loading remains disabled.".to_string(),
+        };
+        for (matches, subject) in [
+            (outcome.terminal_state_match, "terminal state"),
+            (
+                outcome.exception_value_match == Some(true),
+                "exception value",
+            ),
+            (outcome.console_match, "console output"),
+            (outcome.host_effects_match, "host-effect prefix"),
+            (
+                expected.trace_id == replayed.trace_id,
+                "execution trace identity",
+            ),
+        ] {
+            if !matches {
+                outcome.divergences.push(format!(
+                    "re-executed {subject} differs from the captured failure"
+                ));
+            }
+        }
+        outcome.matched = outcome.divergences.is_empty();
+        outcome
     }
 
     pub(super) fn reexecute(capture: &NativeReplayCapture) -> Result<NativeReplayOutcome, String> {
@@ -537,10 +808,52 @@ mod engine {
                         payload.host_effect_transcript.clone(),
                     ))),
                 );
-                let replayed = orchestrator
-                    .execute(&package)
-                    .map_err(|error| format!("native re-execution failed: {error}"))?;
-                compare_execution(&payload, &replayed)
+                let result = orchestrator.execute(&package);
+                match (&payload.expected, result) {
+                    (CapturedAttempt::Completed(_), Ok(replayed)) => {
+                        compare_execution(&payload, &replayed)
+                    }
+                    (CapturedAttempt::Completed(_), Err(error)) => {
+                        Err(format!("native re-execution failed: {error}"))
+                    }
+                    (CapturedAttempt::UncaughtException(expected), Err(error)) => {
+                        let (observed, host_effect_transcript) = observe_guest_exception(
+                            &orchestrator,
+                            &error,
+                        )
+                        .map_err(|reason| {
+                            format!(
+                                "native failure re-execution is not certified: {reason}; {error}"
+                            )
+                        })?;
+                        let replayed = GuestTerminalObservation {
+                            terminal_state: NativeReplayTerminalState::UncaughtException,
+                            trace_id: observed.trace_id,
+                            exception_value: Some(observed.exception_value),
+                            console_output: observed.console_output,
+                            host_effect_transcript,
+                        };
+                        Ok(compare_failure_observation(
+                            expected,
+                            &payload.host_effect_transcript,
+                            &replayed,
+                        ))
+                    }
+                    (CapturedAttempt::UncaughtException(expected), Ok(replayed)) => {
+                        let replayed = GuestTerminalObservation {
+                            terminal_state: NativeReplayTerminalState::Completed,
+                            trace_id: replayed.trace_id,
+                            exception_value: None,
+                            console_output: replayed.console_output,
+                            host_effect_transcript: replayed.host_effect_transcript,
+                        };
+                        Ok(compare_failure_observation(
+                            expected,
+                            &payload.host_effect_transcript,
+                            &replayed,
+                        ))
+                    }
+                }
             })
             .map_err(|error| format!("start native replay worker: {error}"))?
             .join()
@@ -608,11 +921,20 @@ mod engine {
                 Arc::new(SandboxedHostIo::with_root(root).expect("real filesystem provider")),
                 Some(Arc::new(InMemoryHostIoTranscript::recording())),
             );
-            let result = orchestrator
-                .execute(&package)
-                .expect("record real execution");
-            NativeReplayCapture::from_execution(&package, &config, &runtime, &[], &result)
-                .expect("capture actual native result")
+            match orchestrator.execute(&package) {
+                Ok(result) => {
+                    NativeReplayCapture::from_execution(&package, &config, &runtime, &[], &result)
+                }
+                Err(error) => NativeReplayCapture::from_failed_execution(
+                    &package,
+                    &config,
+                    &runtime,
+                    &[],
+                    &orchestrator,
+                    &error,
+                ),
+            }
+            .expect("capture actual native result")
         }
 
         #[test]
@@ -661,11 +983,14 @@ mod engine {
                 let capture = record(root.path(), "console.log('authentic-output');");
                 let mut payload: NativeReplayPayload =
                     serde_json::from_str(&capture.payload_json).expect("captured input");
-                payload.expected.execution_value = "forged-result".to_string();
+                let CapturedAttempt::Completed(expected) = &mut payload.expected else {
+                    panic!("successful run must capture a completed attempt");
+                };
+                expected.execution_value = "forged-result".to_string();
                 let changed = encode_capture(&payload).expect("changed expected result");
                 let outcome = reexecute(&changed).expect("the source still executes");
                 assert!(!outcome.matched);
-                assert!(!outcome.execution_value_match);
+                assert_eq!(outcome.execution_value_match, Some(false));
                 assert!(outcome.console_match);
 
                 payload.host_effect_transcript.push((
@@ -679,6 +1004,109 @@ mod engine {
                 let trailing = encode_capture(&payload).expect("transcript suffix");
                 let error = reexecute(&trailing).expect_err("unused data is not a replay");
                 assert!(error.contains("unused transcript entries"), "{error}");
+            });
+        }
+
+        #[test]
+        fn native_reexecution_reproduces_uncaught_exception_without_repeating_effects() {
+            on_native_stack(|| {
+                let root = tempfile::tempdir().expect("original application");
+                std::fs::write(root.path().join("input.txt"), "before-throw")
+                    .expect("original input");
+                let capture = record(
+                    root.path(),
+                    "const fs = require('fs'); const value = fs.readFileSync('input.txt', 'utf8'); fs.writeFileSync('output.txt', value); console.log(value); throw 'captured-guest-failure';",
+                );
+                assert_eq!(
+                    capture.terminal_state().expect("captured failure state"),
+                    NativeReplayTerminalState::UncaughtException
+                );
+                for name in ["app.cjs", "input.txt", "output.txt"] {
+                    std::fs::rename(
+                        root.path().join(name),
+                        root.path().join(format!("saved-{name}")),
+                    )
+                    .expect("preserve original failure files");
+                }
+                let outcome = reexecute(&capture).expect("re-execute recorded guest failure");
+                assert!(outcome.matched, "{outcome:?}");
+                assert_eq!(outcome.verification_scope, "guest_failure_prefix");
+                assert!(outcome.terminal_state_match);
+                assert_eq!(outcome.exception_value_match, Some(true));
+                assert!(outcome.console_match);
+                assert!(outcome.host_effects_match);
+                assert_eq!(outcome.ir3_hash_match, None);
+                assert_eq!(outcome.ir4_witness_match, None);
+                assert_eq!(outcome.execution_value_match, None);
+                assert_eq!(outcome.instruction_count_match, None);
+                assert_eq!(outcome.nondeterminism_trace_match, None);
+                assert_eq!(outcome.lane_match, None);
+                assert_eq!(outcome.exit_code_match, None);
+                assert_eq!(outcome.decisions_match, None);
+                assert!(!root.path().join("app.cjs").exists());
+                assert!(!root.path().join("input.txt").exists());
+                assert!(!root.path().join("output.txt").exists());
+                assert_eq!(
+                    std::fs::read_to_string(root.path().join("saved-output.txt"))
+                        .expect("preserved original effect"),
+                    "before-throw"
+                );
+            });
+        }
+
+        #[test]
+        fn failure_reexecution_rejects_changed_exception_unused_effects_and_success() {
+            on_native_stack(|| {
+                let root = tempfile::tempdir().expect("original application");
+                let capture = record(
+                    root.path(),
+                    "console.log('before-throw'); throw 'original-failure';",
+                );
+                let mut payload: NativeReplayPayload =
+                    serde_json::from_str(&capture.payload_json).expect("captured failure input");
+                let CapturedAttempt::UncaughtException(expected) = &mut payload.expected else {
+                    panic!("throwing run must capture an uncaught exception");
+                };
+                expected.exception_value = "different-failure".to_string();
+                let changed = encode_capture(&payload).expect("changed expected exception");
+                let outcome = reexecute(&changed).expect("re-executed guest still throws");
+                assert!(!outcome.matched);
+                assert!(outcome.terminal_state_match);
+                assert_eq!(outcome.exception_value_match, Some(false));
+                assert!(outcome.console_match);
+                assert!(outcome.host_effects_match);
+
+                let mut trailing: NativeReplayPayload =
+                    serde_json::from_str(&capture.payload_json).expect("original capture");
+                trailing.host_effect_transcript.push((
+                    HostIoRequest::FsRead {
+                        path: "unused.txt".to_string(),
+                    },
+                    Ok(HostIoResponse::FsRead {
+                        bytes: b"unconsumed".to_vec(),
+                    }),
+                ));
+                let trailing = encode_capture(&trailing).expect("unused failure transcript");
+                let error = reexecute(&trailing)
+                    .expect_err("a matching exception cannot hide an unfinalized transcript");
+                assert!(error.contains("unused transcript entries"), "{error}");
+
+                let mut no_throw: NativeReplayPayload =
+                    serde_json::from_str(&capture.payload_json).expect("original capture");
+                no_throw.package.source = "console.log('before-throw');".to_string();
+                let no_throw = encode_capture(&no_throw).expect("source that now completes");
+                let outcome =
+                    reexecute(&no_throw).expect("completed replay is a reported mismatch");
+                assert!(!outcome.matched);
+                assert!(!outcome.terminal_state_match);
+                assert_eq!(
+                    outcome.replay_terminal_state,
+                    NativeReplayTerminalState::Completed
+                );
+                assert_eq!(outcome.exception_value_match, Some(false));
+                assert!(outcome.console_match);
+                assert!(outcome.host_effects_match);
+                assert_eq!(outcome.ir4_witness_match, None);
             });
         }
 
@@ -754,5 +1182,37 @@ mod tests {
                 .expect_err("bounded")
                 .contains("bytes")
         );
+    }
+
+    #[test]
+    fn replay_terminal_state_is_typed_and_bound_to_exact_payload_bytes() {
+        let completed = envelope("{\"expected\":{\"terminal_state\":\"completed\"}}");
+        assert_eq!(
+            completed.terminal_state().expect("completed metadata"),
+            NativeReplayTerminalState::Completed
+        );
+        let failed = envelope(
+            "{\"expected\":{\"terminal_state\":\"uncaught_exception\",\"exception_value\":\"\"}}",
+        );
+        assert_eq!(
+            failed.terminal_state().expect("failed metadata"),
+            NativeReplayTerminalState::UncaughtException
+        );
+        let mut changed = completed;
+        changed.payload_json = failed.payload_json;
+        assert!(
+            changed
+                .terminal_state()
+                .expect_err("changed terminal state")
+                .contains("SHA-256")
+        );
+        for invalid in [
+            "{\"expected\":{}}",
+            "{\"expected\":{\"terminal_state\":\"unknown\"}}",
+            "{\"expected\":{\"terminal_state\":\"completed\",\"terminal_state\":\"uncaught_exception\"}}",
+            "{\"expected\":{\"terminal_state\":\"completed\"},\"expected\":{\"terminal_state\":\"uncaught_exception\"}}",
+        ] {
+            assert!(envelope(invalid).terminal_state().is_err(), "{invalid}");
+        }
     }
 }

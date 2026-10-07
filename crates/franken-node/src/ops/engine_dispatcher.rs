@@ -420,6 +420,9 @@ enum NativeSessionResponse {
         /// it is trusted.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         host_effect_ledger: Option<HostEffectLedger>,
+        /// Complete inputs for a certified uncaught guest exception.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        native_replay: Option<crate::ops::native_replay::NativeReplayCapture>,
         /// What the guest printed before failing, encoded like `Completed`'s
         /// streams. Empty when execution never began or printed nothing.
         #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -2061,6 +2064,7 @@ fn native_engine_spawn_error_with_telemetry_cleanup(
             ),
             telemetry_report: None,
             host_effect_ledger: None,
+            native_replay: None,
             guest_output: (Vec::new(), Vec::new()),
         };
     };
@@ -2073,6 +2077,7 @@ fn native_engine_spawn_error_with_telemetry_cleanup(
             ),
             telemetry_report: Some(Box::new(report)),
             host_effect_ledger: None,
+            native_replay: None,
             guest_output: (Vec::new(), Vec::new()),
         },
         Ok(report) => EngineProcessError::Spawn {
@@ -2082,6 +2087,7 @@ fn native_engine_spawn_error_with_telemetry_cleanup(
             ),
             telemetry_report: Some(Box::new(report)),
             host_effect_ledger: None,
+            native_replay: None,
             guest_output: (Vec::new(), Vec::new()),
         },
         Err(cleanup_error) => EngineProcessError::Spawn {
@@ -2090,6 +2096,7 @@ fn native_engine_spawn_error_with_telemetry_cleanup(
             ),
             telemetry_report: None,
             host_effect_ledger: None,
+            native_replay: None,
             guest_output: (Vec::new(), Vec::new()),
         },
     }
@@ -3266,6 +3273,8 @@ impl std::error::Error for NativeRunInterruption {}
 pub struct NativeRunFailure {
     actionable: ActionableError,
     host_effect_ledger: Option<Box<HostEffectLedger>>,
+    #[cfg(feature = "engine")]
+    native_replay: Option<Box<crate::ops::native_replay::NativeReplayCapture>>,
     guest_output: CapturedProcessOutput,
     #[cfg(feature = "engine")]
     telemetry_report: Option<Box<TelemetryRuntimeReport>>,
@@ -3339,7 +3348,7 @@ impl NativeRunFailure {
                 .runtime_evidence_identity_capture_path
                 .take(),
             engine_decision: None,
-            native_replay: None,
+            native_replay: self.native_replay.take().map(|capture| *capture),
         });
         self.dispatch_report = Some(Box::new(report));
     }
@@ -3444,6 +3453,8 @@ enum EngineProcessError {
         /// the `engine` feature never reads the field.
         #[cfg_attr(not(feature = "engine"), allow(dead_code))]
         host_effect_ledger: Option<Box<HostEffectLedger>>,
+        #[cfg_attr(not(feature = "engine"), allow(dead_code))]
+        native_replay: Option<Box<crate::ops::native_replay::NativeReplayCapture>>,
         /// The `(stdout, stderr)` bytes the guest printed before the attempt
         /// failed, rendered exactly as a completed run's streams are. Empty
         /// when execution never began or printed nothing.
@@ -3473,6 +3484,16 @@ impl EngineProcessError {
     fn with_guest_output(mut self, stdout: Vec<u8>, stderr: Vec<u8>) -> Self {
         if let Self::Spawn { guest_output, .. } = &mut self {
             *guest_output = (stdout, stderr);
+        }
+        self
+    }
+
+    fn with_native_replay(
+        mut self,
+        capture: Option<crate::ops::native_replay::NativeReplayCapture>,
+    ) -> Self {
+        if let Self::Spawn { native_replay, .. } = &mut self {
+            *native_replay = capture.map(Box::new);
         }
         self
     }
@@ -5845,6 +5866,7 @@ impl EngineDispatcher {
                     telemetry_report: None,
                     // The worker never started, so no effect could have run.
                     host_effect_ledger: None,
+                    native_replay: None,
                     stdout_base64: String::new(),
                     stderr_base64: String::new(),
                 });
@@ -5882,6 +5904,7 @@ impl EngineDispatcher {
                                     // unusable. Losing the effects here would be
                                     // the same evidence gap on a rarer path.
                                     host_effect_ledger,
+                                    native_replay: None,
                                     stdout_base64: base64::engine::general_purpose::STANDARD
                                         .encode(&output.stdout),
                                     stderr_base64: base64::engine::general_purpose::STANDARD
@@ -5907,6 +5930,7 @@ impl EngineDispatcher {
                             message,
                             telemetry_report,
                             host_effect_ledger,
+                            native_replay,
                             guest_output: (stdout, stderr),
                         }) => NativeSessionResponse::ExecutionFailed {
                             schema_version: NATIVE_SESSION_SCHEMA.to_string(),
@@ -5914,6 +5938,7 @@ impl EngineDispatcher {
                             message,
                             telemetry_report,
                             host_effect_ledger: host_effect_ledger.map(|ledger| *ledger),
+                            native_replay: native_replay.map(|capture| *capture),
                             stdout_base64: base64::engine::general_purpose::STANDARD.encode(stdout),
                             stderr_base64: base64::engine::general_purpose::STANDARD.encode(stderr),
                         },
@@ -5952,6 +5977,7 @@ impl EngineDispatcher {
                     // effect boundary is unknown. Emitting an empty ledger here
                     // would assert "no effects occurred" without evidence.
                     host_effect_ledger: None,
+                    native_replay: None,
                     stdout_base64: String::new(),
                     stderr_base64: String::new(),
                 }
@@ -7109,16 +7135,24 @@ impl EngineDispatcher {
                     };
                     return Err(dispatch_error.to_actionable().into());
                 }
-                let replay_validation =
-                    if native_replay.is_some() != capture_replay {
-                        Err("native-session replay capture did not match the requested capture mode"
-                        .to_string())
-                    } else {
-                        native_replay.as_ref().map_or(
-                            Ok(()),
-                            crate::ops::native_replay::NativeReplayCapture::validate,
-                        )
-                    };
+                let replay_validation = if native_replay.is_some() != capture_replay {
+                    Err(
+                        "native-session replay capture did not match the requested capture mode"
+                            .to_string(),
+                    )
+                } else {
+                    native_replay.as_ref().map_or(Ok(()), |capture| {
+                        match capture.terminal_state()? {
+                            crate::ops::native_replay::NativeReplayTerminalState::Completed => {
+                                Ok(())
+                            }
+                            _ => Err(
+                                "completed native-session response carried a failed replay capture"
+                                    .to_string(),
+                            ),
+                        }
+                    })
+                };
                 replay_validation.map_err(|message| {
                     EngineDispatchError::EngineExecutionError {
                         app_path: app_path_buf.clone(),
@@ -7190,6 +7224,7 @@ impl EngineDispatcher {
                 message,
                 telemetry_report,
                 host_effect_ledger,
+                native_replay,
                 stdout_base64,
                 stderr_base64,
             } => {
@@ -7235,15 +7270,40 @@ impl EngineDispatcher {
                             format!("; guest output was withheld: {rejection}"),
                         ),
                     };
+                let (native_replay, replay_note) = match native_replay {
+                    Some(capture) => {
+                        let validation = if !capture_replay {
+                            Err("replay inputs were not requested".to_string())
+                        } else if host_effect_ledger.is_none() || !output_note.is_empty() {
+                            Err("the captured failure's effects or console could not be authenticated".to_string())
+                        } else {
+                            capture.terminal_state().and_then(|state| {
+                                if state == crate::ops::native_replay::NativeReplayTerminalState::UncaughtException {
+                                    Ok(())
+                                } else {
+                                    Err("failed response carried a completed replay capture".to_string())
+                                }
+                            })
+                        };
+                        match validation {
+                            Ok(()) => (Some(Box::new(capture)), String::new()),
+                            Err(rejection) => {
+                                (None, format!("; replay capture was withheld: {rejection}"))
+                            }
+                        }
+                    }
+                    None => (None, String::new()),
+                };
                 let dispatch_error = EngineDispatchError::EngineExecutionError {
                     app_path: app_path_buf,
-                    error_message: format!("{message}{evidence_note}{output_note}"),
+                    error_message: format!("{message}{evidence_note}{output_note}{replay_note}"),
                     phase: "execution".to_string(),
                 };
                 let actionable = dispatch_error.to_actionable();
                 Err(anyhow::Error::new(NativeRunFailure {
                     actionable,
                     host_effect_ledger: host_effect_ledger.map(Box::new),
+                    native_replay,
                     guest_output,
                     telemetry_report,
                     runtime_evidence_identity_capture: Some(expected_evidence_capture),
@@ -8309,11 +8369,38 @@ impl EngineDispatcher {
                     // completed run does.
                     let (stdout, stderr) =
                         render_console_streams(&orchestrator.last_failed_console_output());
+                    let native_replay = match (replay_configs.as_ref(), replay_argv.as_ref()) {
+                        (Some((orchestrator_config, runtime_config)), Some(process_argv)) => {
+                            match crate::ops::native_replay::NativeReplayCapture::from_failed_execution(
+                                &package,
+                                orchestrator_config,
+                                runtime_config,
+                                process_argv,
+                                &orchestrator,
+                                &error,
+                            ) {
+                                Ok(capture) => Some(capture),
+                                Err(capture_error) => {
+                                    // Only a certified guest exception has a
+                                    // complete replayable failure prefix. Keep
+                                    // other native failures and their evidence,
+                                    // without inventing unavailable inputs.
+                                    tracing::warn!(
+                                        error = %capture_error,
+                                        "Native failure replay capture was unavailable"
+                                    );
+                                    None
+                                }
+                            }
+                        }
+                        _ => None,
+                    };
                     return Err(native_engine_spawn_error_with_telemetry_cleanup(
                         native_execution_failure_message(&error, parser_budget),
                         &mut telemetry_guard,
                     )
                     .with_host_effect_ledger(host_effect_ledger)
+                    .with_native_replay(native_replay)
                     .with_guest_output(stdout, stderr));
                 }
             }
@@ -9147,6 +9234,7 @@ impl EngineDispatcher {
                         ),
                         telemetry_report: Some(Box::new(report)),
                         host_effect_ledger: None,
+                        native_replay: None,
                         guest_output: (Vec::new(), Vec::new()),
                     }),
                     Ok(report) => Err(EngineProcessError::Spawn {
@@ -9156,6 +9244,7 @@ impl EngineDispatcher {
                         ),
                         telemetry_report: Some(Box::new(report)),
                         host_effect_ledger: None,
+                        native_replay: None,
                         guest_output: (Vec::new(), Vec::new()),
                     }),
                     Err(cleanup_err) => Err(EngineProcessError::Spawn {
@@ -9164,6 +9253,7 @@ impl EngineDispatcher {
                         ),
                         telemetry_report: None,
                         host_effect_ledger: None,
+                        native_replay: None,
                         guest_output: (Vec::new(), Vec::new()),
                     }),
                 }
@@ -9695,6 +9785,7 @@ mod tests {
     #[test]
     fn native_failed_dispatch_report_preserves_verified_evidence_and_output() {
         use frankenengine_extension_host::host_io::{HostIoError, HostIoRequest};
+        use sha2::{Digest, Sha256};
 
         let session_nonce = uuid::Uuid::now_v7().to_string();
         let grant = runtime_evidence_grant_for_test(&session_nonce, [0xA1; 32], [0xB2; 32]);
@@ -9734,11 +9825,20 @@ mod tests {
         let expected_telemetry =
             serde_json::to_value(&telemetry).expect("serialize expected telemetry");
         let capture_path = PathBuf::from("/var/lib/franken-node-state/failed-capture.json");
+        // This test exercises transport of the authenticated opaque payload;
+        // actual execution and typed exception validation live in native_replay.
+        let payload_json = r#"{"expected":{"terminal_state":"uncaught_exception"}}"#.to_string();
+        let replay_capture = crate::ops::native_replay::NativeReplayCapture {
+            schema_version: crate::ops::native_replay::NATIVE_REPLAY_CAPTURE_SCHEMA.to_string(),
+            payload_sha256: hex::encode(Sha256::digest(payload_json.as_bytes())),
+            payload_json,
+        };
         let actionable = ActionableError::new("guest execution failed", "inspect the run evidence");
         let expected_error = actionable.to_string();
         let mut failure = NativeRunFailure {
             actionable,
             host_effect_ledger: Some(Box::new(ledger)),
+            native_replay: Some(Box::new(replay_capture.clone())),
             guest_output: CapturedProcessOutput {
                 stdout: "before failure\n".to_string(),
                 stderr: "guest warning\n".to_string(),
@@ -9767,6 +9867,7 @@ mod tests {
         assert_eq!(report.started_at_utc, started_at.to_rfc3339());
         assert_eq!(report.duration_ms, 42);
         assert!(report.engine_decision.is_none());
+        assert_eq!(report.native_replay.as_ref(), Some(&replay_capture));
         assert_eq!(
             report.runtime_evidence_identity_capture,
             Some(capture.clone())
@@ -9816,6 +9917,7 @@ mod tests {
         let mut failure = NativeRunFailure {
             actionable: ActionableError::new("parse failed before execution", "fix the source"),
             host_effect_ledger: None,
+            native_replay: None,
             guest_output: CapturedProcessOutput::default(),
             telemetry_report: None,
             runtime_evidence_identity_capture: Some(capture),
@@ -9840,6 +9942,7 @@ mod tests {
         assert!(report.telemetry.is_none());
         assert!(report.sentinel.is_none());
         assert!(report.engine_decision.is_none());
+        assert!(report.native_replay.is_none());
         assert!(failure.host_effect_ledger().is_none());
         assert!(failure.guest_output().stdout.is_empty());
         assert!(failure.guest_output().stderr.is_empty());

@@ -10803,7 +10803,8 @@ struct RunIncidentSource<'a> {
     sentinel_enforced: bool,
     ledger: &'a ops::engine_dispatcher::HostEffectLedger,
     native_replay: Option<&'a ops::native_replay::NativeReplayCapture>,
-    completed_at: &'a str,
+    ended_at: &'a str,
+    execution_failure: Option<&'a str>,
     severity: tools::replay_bundle::IncidentSeverity,
     detector: &'a str,
     title: String,
@@ -10849,20 +10850,36 @@ fn build_run_incident_evidence(
                 "a run without host effects requires captured native execution evidence"
             )
         })?;
-        // This is the completed execution observed by the worker, not an
-        // invented host effect. The source signature binds its originating
-        // receipt and exact native execution payload.
+        // The signed receipt distinguishes a completed guest from a certified
+        // exception prefix. Neither is represented as an invented host effect.
+        let (event_id, payload) = match source.execution_failure {
+            Some(failure) => (
+                "run-failed",
+                serde_json::json!({
+                    "native_execution_failed": {
+                        "run_receipt_id": source.receipt_id,
+                        "run_receipt_hash": source.receipt_hash,
+                        "payload_sha256": replay.payload_sha256,
+                        "execution_failure": failure,
+                    },
+                }),
+            ),
+            None => (
+                "run-completed",
+                serde_json::json!({
+                    "native_execution_completed": {
+                        "run_receipt_id": source.receipt_id,
+                        "run_receipt_hash": source.receipt_hash,
+                        "payload_sha256": replay.payload_sha256,
+                    },
+                }),
+            ),
+        };
         events.push(IncidentEvidenceEvent {
-            event_id: "run-completed".to_string(),
-            timestamp: source.completed_at.to_string(),
+            event_id: event_id.to_string(),
+            timestamp: source.ended_at.to_string(),
             event_type: EventType::StateChange,
-            payload: serde_json::json!({
-                "native_execution_completed": {
-                    "run_receipt_id": source.receipt_id,
-                    "run_receipt_hash": source.receipt_hash,
-                    "payload_sha256": replay.payload_sha256,
-                },
-            }),
+            payload,
             provenance_ref: source.receipt_ref.to_string(),
             parent_event_id: None,
             state_snapshot: None,
@@ -10880,6 +10897,10 @@ fn build_run_incident_evidence(
         "ssrf_violations": source.ssrf_violations,
         "sentinel_enforced": source.sentinel_enforced,
     });
+    if let Some(failure) = source.execution_failure {
+        initial_state_snapshot["execution_failure"] =
+            serde_json::Value::String(failure.to_string());
+    }
     if let Some(capture) = source.native_replay {
         capture
             .validate()
@@ -10947,7 +10968,8 @@ fn maybe_capture_run_incident(
         sentinel_enforced: receipt.core.sentinel_enforcement.is_some(),
         ledger,
         native_replay: dispatch.native_replay.as_ref(),
-        completed_at: &receipt.core.end_time_utc,
+        ended_at: &receipt.core.end_time_utc,
+        execution_failure: receipt.core.execution_failure.as_deref(),
         severity: tools::replay_bundle::IncidentSeverity::High,
         detector: "franken-node run (automatic capture)",
         title: format!("Run of {app_display} tripped a runtime security control"),
@@ -11108,6 +11130,23 @@ fn verify_native_replay_receipt_binding(
             if binding.and_then(serde_json::Value::as_str) != Some(capture.payload_sha256.as_str())
             {
                 anyhow::bail!("native replay payload does not match its authenticated run receipt");
+            }
+            let terminal_state = capture.terminal_state().map_err(|error| {
+                anyhow::anyhow!("native replay terminal state is invalid: {error}")
+            })?;
+            let receipt_failed = match receipt.get("execution_failure") {
+                None => false,
+                Some(serde_json::Value::String(failure)) if !failure.is_empty() => true,
+                Some(_) => anyhow::bail!("captured run receipt has an invalid execution failure"),
+            };
+            let capture_failed = matches!(
+                terminal_state,
+                ops::native_replay::NativeReplayTerminalState::UncaughtException
+            );
+            if capture_failed != receipt_failed {
+                anyhow::bail!(
+                    "native replay terminal state does not match its authenticated run receipt"
+                );
             }
         }
         None if binding.is_some() => {
@@ -11273,9 +11312,12 @@ fn handle_incident_capture_command(args: &cli::IncidentCaptureArgs) -> Result<()
             sentinel_enforced: record.sentinel_enforced,
             ledger,
             native_replay: record.native_replay.as_ref(),
-            completed_at: receipt["end_time_utc"]
+            ended_at: receipt["end_time_utc"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("run receipt has no end_time_utc"))?,
+            execution_failure: receipt
+                .get("execution_failure")
+                .and_then(serde_json::Value::as_str),
             severity,
             detector: "franken-node incident capture --from-run (operator)",
             title: format!("Operator capture of the run of {}", record.app_path),
@@ -36524,10 +36566,11 @@ mod run_trust_gate_tests {
     fn signed_run_record_requires_its_exact_native_replay_payload() {
         use ops::native_replay::{NATIVE_REPLAY_CAPTURE_SCHEMA, NativeReplayCapture};
 
+        let payload_json = "{\"expected\":{\"terminal_state\":\"completed\"}}";
         let capture = NativeReplayCapture {
             schema_version: NATIVE_REPLAY_CAPTURE_SCHEMA.to_string(),
-            payload_json: "{}".to_string(),
-            payload_sha256: hex::encode(sha2::Sha256::digest(b"{}")),
+            payload_json: payload_json.to_string(),
+            payload_sha256: hex::encode(sha2::Sha256::digest(payload_json.as_bytes())),
         };
         let receipt = serde_json::json!({"native_replay_payload_sha256": capture.payload_sha256});
         verify_native_replay_receipt_binding(Some(&capture), &receipt)
@@ -36550,6 +36593,46 @@ mod run_trust_gate_tests {
             verify_native_replay_receipt_binding(Some(&altered), &receipt).is_err(),
             "rehashing replacement source does not authenticate it as the recorded run"
         );
+    }
+
+    #[test]
+    fn native_replay_terminal_state_must_match_signed_run_failure() {
+        use ops::native_replay::{NATIVE_REPLAY_CAPTURE_SCHEMA, NativeReplayCapture};
+
+        for (terminal_state, should_fail) in [("completed", false), ("uncaught_exception", true)] {
+            let payload_json =
+                format!("{{\"expected\":{{\"terminal_state\":\"{terminal_state}\"}}}}");
+            let capture = NativeReplayCapture {
+                schema_version: NATIVE_REPLAY_CAPTURE_SCHEMA.to_string(),
+                payload_sha256: hex::encode(sha2::Sha256::digest(payload_json.as_bytes())),
+                payload_json,
+            };
+            let completed_receipt = serde_json::json!({
+                "native_replay_payload_sha256": capture.payload_sha256,
+            });
+            let mut failed_receipt = completed_receipt.clone();
+            failed_receipt["execution_failure"] = serde_json::json!("uncaught guest exception");
+            assert_eq!(
+                verify_native_replay_receipt_binding(Some(&capture), &completed_receipt).is_err(),
+                should_fail,
+                "{terminal_state} must match a successful receipt only for completed execution"
+            );
+            assert_eq!(
+                verify_native_replay_receipt_binding(Some(&capture), &failed_receipt).is_ok(),
+                should_fail,
+                "{terminal_state} must match a failed receipt only for a captured exception"
+            );
+            for invalid in [
+                serde_json::Value::Null,
+                serde_json::json!(""),
+                serde_json::json!(false),
+            ] {
+                failed_receipt["execution_failure"] = invalid;
+                assert!(
+                    verify_native_replay_receipt_binding(Some(&capture), &failed_receipt).is_err()
+                );
+            }
+        }
     }
 
     #[cfg(feature = "engine")]

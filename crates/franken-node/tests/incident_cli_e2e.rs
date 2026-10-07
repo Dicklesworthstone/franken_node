@@ -1984,6 +1984,14 @@ fn incident_coverage_excludes_only_independently_authenticated_clean_external_ru
 
 #[cfg(feature = "engine")]
 fn native_replay_workspace(source: &str) -> (tempfile::TempDir, serde_json::Value) {
+    native_replay_workspace_with_outcome(source, true)
+}
+
+#[cfg(feature = "engine")]
+fn native_replay_workspace_with_outcome(
+    source: &str,
+    expect_success: bool,
+) -> (tempfile::TempDir, serde_json::Value) {
     let workspace = tempfile::tempdir().expect("native replay workspace");
     fs::write(workspace.path().join("app.js"), source).expect("write actual guest program");
     fs::write(workspace.path().join("input.txt"), "ORIGINAL").expect("write live guest input");
@@ -2000,19 +2008,23 @@ fn native_replay_workspace(source: &str) -> (tempfile::TempDir, serde_json::Valu
         workspace.path(),
         &["run", "app.js", "--capture-replay", "--json"],
     );
-    assert!(
+    assert_eq!(
         recorded.status.success(),
-        "actual native capture failed: stdout={} stderr={}",
+        expect_success,
+        "actual native capture returned the wrong guest outcome: stdout={} stderr={}",
         String::from_utf8_lossy(&recorded.stdout),
         String::from_utf8_lossy(&recorded.stderr)
     );
+    if !expect_success {
+        assert_eq!(recorded.status.code(), Some(1));
+    }
     let report: serde_json::Value =
         serde_json::from_slice(&recorded.stdout).expect("single captured-run JSON document");
-    assert_eq!(report["success"], true);
+    assert_eq!(report["success"], expect_success);
     let capture = &report["dispatch"]["native_replay"];
     assert!(
         capture.is_object(),
-        "successful capture must retain its inputs"
+        "certified capture must retain its inputs: {report}"
     );
     assert_eq!(
         report["receipt"]["native_replay_payload_sha256"], capture["payload_sha256"],
@@ -2078,6 +2090,70 @@ fn execute_native_replay(workspace: &Path, bundle_name: &str) -> Output {
             "--json",
         ],
     )
+}
+
+#[cfg(feature = "engine")]
+fn write_authenticated_native_candidate(
+    workspace: &Path,
+    bundle: &serde_json::Value,
+    file_name: &str,
+    payload_json: String,
+) {
+    use frankenengine_node::ops::native_replay::NativeReplayCapture;
+    use frankenengine_node::tools::replay_bundle::{
+        ReplayBundleSigningMaterial, generate_replay_bundle_from_evidence, sign_replay_bundle,
+        to_canonical_json,
+    };
+    use sha2::{Digest, Sha256};
+
+    let incident_id = bundle["incident_id"].as_str().expect("incident id");
+    let source_path = workspace.join(format!(
+        ".franken-node/state/incidents/{incident_id}/evidence.v1.json",
+    ));
+    let mut source: IncidentEvidencePackage = serde_json::from_slice(
+        &fs::read(&source_path).expect("genuine source produced by authenticated capture"),
+    )
+    .expect("captured source");
+    let mut capture: NativeReplayCapture =
+        serde_json::from_value(source.initial_state_snapshot["native_replay"].clone())
+            .expect("actual native capture");
+    capture.validate().expect("actual native capture digest");
+    capture.payload_sha256 = hex::encode(Sha256::digest(payload_json.as_bytes()));
+    capture.payload_json = payload_json;
+    capture.validate().expect("valid candidate envelope");
+    source.initial_state_snapshot["native_replay"] =
+        serde_json::to_value(capture).expect("candidate capture JSON");
+
+    let mut seed = [0_u8; 32];
+    hex::decode_to_slice(
+        fs::read_to_string(workspace.join(".franken-node/keys/receipt-signing.key"))
+            .expect("init signing key")
+            .trim(),
+        &mut seed,
+    )
+    .expect("decode init signing key");
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let mut candidate = generate_replay_bundle_from_evidence(&source)
+        .expect("derive real integrity and recorded sequence hashes");
+    sign_replay_bundle(
+        &mut candidate,
+        &ReplayBundleSigningMaterial {
+            signing_key: &signing_key,
+            key_source: "configured",
+            signing_identity: "adversarial-native-replay-test",
+        },
+    )
+    .expect("authenticate the adversarial producer's claim");
+    fs::write(
+        workspace.join(file_name),
+        to_canonical_json(&candidate).unwrap(),
+    )
+    .expect("write authenticated candidate");
+    frankenengine_verifier_sdk::incident_bundle::verify_incident_bundle(
+        &fs::read(workspace.join(file_name)).unwrap(),
+        &signing_key.verifying_key(),
+    )
+    .expect("independent SDK accepts structure and signature before guest execution is tested");
 }
 
 #[cfg(feature = "engine")]
@@ -2216,11 +2292,6 @@ fn native_incident_replay_captures_pure_programs_without_inventing_host_effects(
 #[test]
 fn native_incident_replay_rejects_authenticated_wrong_outputs_and_unused_io() {
     use frankenengine_node::ops::native_replay::NativeReplayCapture;
-    use frankenengine_node::tools::replay_bundle::{
-        ReplayBundleSigningMaterial, generate_replay_bundle_from_evidence, sign_replay_bundle,
-        to_canonical_json,
-    };
-    use sha2::{Digest, Sha256};
 
     let (workspace, run) = native_replay_workspace(
         "const { readFileSync } = require('fs');\nconsole.log('from-capture:' + readFileSync('input.txt', 'utf8'));\n",
@@ -2229,69 +2300,18 @@ fn native_incident_replay_rejects_authenticated_wrong_outputs_and_unused_io() {
         workspace.path(),
         run["receipt"]["receipt_id"].as_str().expect("receipt id"),
     );
-    let incident_id = bundle["incident_id"].as_str().expect("incident id");
-    let source_path = workspace.path().join(format!(
-        ".franken-node/state/incidents/{incident_id}/evidence.v1.json",
-    ));
-    let source: IncidentEvidencePackage = serde_json::from_slice(
-        &fs::read(&source_path).expect("genuine source produced by authenticated capture"),
-    )
-    .expect("captured source");
     let capture: NativeReplayCapture =
-        serde_json::from_value(source.initial_state_snapshot["native_replay"].clone())
+        serde_json::from_value(bundle["initial_state_snapshot"]["native_replay"].clone())
             .expect("actual native capture");
     capture.validate().expect("actual native capture digest");
-    let mut seed = [0_u8; 32];
-    hex::decode_to_slice(
-        fs::read_to_string(
-            workspace
-                .path()
-                .join(".franken-node/keys/receipt-signing.key"),
-        )
-        .expect("init signing key")
-        .trim(),
-        &mut seed,
-    )
-    .expect("decode init signing key");
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
-    let write_authenticated_candidate = |file_name: &str, payload_json: String| {
-        let mut candidate_source = source.clone();
-        let mut candidate_capture = capture.clone();
-        candidate_capture.payload_sha256 = hex::encode(Sha256::digest(payload_json.as_bytes()));
-        candidate_capture.payload_json = payload_json;
-        candidate_capture
-            .validate()
-            .expect("valid candidate envelope");
-        candidate_source.initial_state_snapshot["native_replay"] =
-            serde_json::to_value(candidate_capture).expect("candidate capture JSON");
-        let mut candidate = generate_replay_bundle_from_evidence(&candidate_source)
-            .expect("derive real integrity and recorded sequence hashes");
-        sign_replay_bundle(
-            &mut candidate,
-            &ReplayBundleSigningMaterial {
-                signing_key: &signing_key,
-                key_source: "configured",
-                signing_identity: "adversarial-native-replay-test",
-            },
-        )
-        .expect("authenticate the adversarial producer's claim");
-        fs::write(
-            workspace.path().join(file_name),
-            to_canonical_json(&candidate).unwrap(),
-        )
-        .expect("write authenticated candidate");
-        frankenengine_verifier_sdk::incident_bundle::verify_incident_bundle(
-            &fs::read(workspace.path().join(file_name)).unwrap(),
-            &signing_key.verifying_key(),
-        )
-        .expect("independent SDK accepts structure and signature before guest execution is tested");
-    };
 
     // Retain canonical typed field order while changing only the recorded
     // expected console output. The original JavaScript remains untouched.
     let genuine_console = "\"message\":\"from-capture:ORIGINAL\"";
     assert_eq!(capture.payload_json.matches(genuine_console).count(), 1);
-    write_authenticated_candidate(
+    write_authenticated_native_candidate(
+        workspace.path(),
+        &bundle,
         "wrong-output.fnbundle",
         capture
             .payload_json
@@ -2327,7 +2347,9 @@ fn native_incident_replay_rejects_authenticated_wrong_outputs_and_unused_io() {
     let extra_read = serde_json::to_string(&extra_read).unwrap();
     let transcript_field = "\"host_effect_transcript\":[";
     assert_eq!(capture.payload_json.matches(transcript_field).count(), 1);
-    write_authenticated_candidate(
+    write_authenticated_native_candidate(
+        workspace.path(),
+        &bundle,
         "unused-input.fnbundle",
         capture.payload_json.replacen(
             transcript_field,
@@ -2350,4 +2372,278 @@ fn native_incident_replay_rejects_authenticated_wrong_outputs_and_unused_io() {
         unused["error"].as_str().expect("error").contains("unused"),
         "{unused}"
     );
+}
+
+#[cfg(feature = "engine")]
+#[test]
+fn native_incident_replay_reproduces_uncaught_exception_with_captured_io() {
+    let (workspace, run) = native_replay_workspace_with_outcome(
+        "const { readFileSync } = require('fs');\nconsole.log('before-throw:' + readFileSync('input.txt', 'utf8'));\nthrow 'CAPTURED_EXCEPTION';\n",
+        false,
+    );
+    assert_eq!(
+        run["schema_version"],
+        "franken-node/run-failure-effect-evidence/v2"
+    );
+    assert_eq!(run["dispatch"]["exit_code"], 1);
+    assert_eq!(run["receipt"]["exit_code"], 1);
+    assert_eq!(run["captured_output"]["stdout"], "before-throw:ORIGINAL\n");
+    assert_eq!(run["dispatch"]["captured_output"], run["captured_output"]);
+    for failure in [&run["error"], &run["receipt"]["execution_failure"]] {
+        assert!(
+            failure
+                .as_str()
+                .expect("original guest failure")
+                .contains("CAPTURED_EXCEPTION")
+        );
+    }
+    let receipt_id = run["receipt"]["receipt_id"].as_str().expect("receipt id");
+    let (bundle_name, bundle) = capture_native_run_bundle(workspace.path(), receipt_id);
+    assert_eq!(
+        bundle["initial_state_snapshot"]["execution_failure"],
+        run["receipt"]["execution_failure"]
+    );
+    let payload: serde_json::Value = serde_json::from_str(
+        bundle["initial_state_snapshot"]["native_replay"]["payload_json"]
+            .as_str()
+            .unwrap(),
+    )
+    .expect("captured failure payload");
+    assert_eq!(payload["expected"]["terminal_state"], "uncaught_exception");
+    for unavailable in [
+        "ir4_witness",
+        "nondeterminism_trace",
+        "instructions_executed",
+    ] {
+        assert!(
+            payload["expected"].get(unavailable).is_none(),
+            "failed execution must not manufacture {unavailable}"
+        );
+    }
+    for name in ["app.js", "input.txt"] {
+        fs::rename(
+            workspace.path().join(name),
+            workspace.path().join(format!("saved-{name}")),
+        )
+        .expect("preserve original files away from their execution paths");
+    }
+    let replay = execute_native_replay(workspace.path(), &bundle_name);
+    assert!(
+        replay.status.success(),
+        "matching the captured exception verifies the failure: stdout={} stderr={}",
+        String::from_utf8_lossy(&replay.stdout),
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    let replay: serde_json::Value =
+        serde_json::from_slice(&replay.stdout).expect("failure replay JSON");
+    assert_eq!(replay["replay_kind"], "native_reexecution");
+    assert_eq!(replay["replay_result"]["matched"], true, "{replay}");
+    let execution = &replay["execution_result"];
+    assert_eq!(execution["verification_scope"], "guest_failure_prefix");
+    assert_eq!(execution["captured_terminal_state"], "uncaught_exception");
+    assert_eq!(execution["replay_terminal_state"], "uncaught_exception");
+    for comparison in [
+        "matched",
+        "terminal_state_match",
+        "exception_value_match",
+        "console_match",
+        "host_effects_match",
+    ] {
+        assert_eq!(execution[comparison], true, "{comparison}: {replay}");
+    }
+    for unavailable in [
+        "ir3_hash_match",
+        "ir4_witness_match",
+        "execution_value_match",
+        "instruction_count_match",
+        "nondeterminism_trace_match",
+        "lane_match",
+        "exit_code_match",
+        "decisions_match",
+    ] {
+        assert!(
+            execution
+                .get(unavailable)
+                .is_some_and(serde_json::Value::is_null),
+            "{unavailable} must explicitly remain unverified: {replay}"
+        );
+    }
+}
+
+#[cfg(feature = "engine")]
+#[test]
+fn native_incident_replay_records_pure_exception_as_failure_without_fake_effects() {
+    let (workspace, run) = native_replay_workspace_with_outcome(
+        "console.log('before-pure-throw'); throw 'PURE_CAPTURED_EXCEPTION';\n",
+        false,
+    );
+    let receipt_id = run["receipt"]["receipt_id"].as_str().expect("receipt id");
+    let (bundle_name, bundle) = capture_native_run_bundle(workspace.path(), receipt_id);
+    assert_eq!(bundle["initial_state_snapshot"]["effect_count"], 0);
+    let events = bundle["timeline"].as_array().expect("failure timeline");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["event_type"], "state_change");
+    let payload = &events[0]["payload"];
+    assert!(payload.get("effect_receipt_chain_entry").is_none());
+    assert!(payload.get("native_execution_completed").is_none());
+    assert_eq!(
+        payload["native_execution_failed"]["run_receipt_id"],
+        receipt_id
+    );
+    assert_eq!(
+        payload["native_execution_failed"]["execution_failure"],
+        run["receipt"]["execution_failure"]
+    );
+    let replay = execute_native_replay(workspace.path(), &bundle_name);
+    assert!(
+        replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    let replay: serde_json::Value =
+        serde_json::from_slice(&replay.stdout).expect("pure exception replay");
+    assert_eq!(
+        replay["execution_result"]["verification_scope"],
+        "guest_failure_prefix"
+    );
+    assert_eq!(replay["execution_result"]["exception_value_match"], true);
+    assert_eq!(replay["replay_result"]["matched"], true);
+}
+
+#[cfg(feature = "engine")]
+#[test]
+fn native_incident_replay_rejects_authenticated_wrong_exception_and_unused_failure_io() {
+    use frankenengine_node::ops::native_replay::NativeReplayCapture;
+
+    let (workspace, run) = native_replay_workspace_with_outcome(
+        "const { readFileSync } = require('fs'); console.log(readFileSync('input.txt', 'utf8')); throw 'AUTHENTIC_EXCEPTION';\n",
+        false,
+    );
+    let (_, bundle) = capture_native_run_bundle(
+        workspace.path(),
+        run["receipt"]["receipt_id"].as_str().expect("receipt id"),
+    );
+    let capture: NativeReplayCapture =
+        serde_json::from_value(bundle["initial_state_snapshot"]["native_replay"].clone())
+            .expect("captured exception envelope");
+    let payload: serde_json::Value = serde_json::from_str(&capture.payload_json).unwrap();
+    let exception_value = payload["expected"]["exception_value"]
+        .as_str()
+        .expect("captured exception");
+    assert!(exception_value.contains("AUTHENTIC_EXCEPTION"));
+    let exception_field = format!(
+        "\"exception_value\":{}",
+        serde_json::to_string(exception_value).unwrap()
+    );
+    assert_eq!(capture.payload_json.matches(&exception_field).count(), 1);
+    write_authenticated_native_candidate(
+        workspace.path(),
+        &bundle,
+        "wrong-exception.fnbundle",
+        capture.payload_json.replacen(
+            &exception_field,
+            "\"exception_value\":\"FORGED_EXCEPTION\"",
+            1,
+        ),
+    );
+    let mismatched = execute_native_replay(workspace.path(), "wrong-exception.fnbundle");
+    assert!(
+        !mismatched.status.success(),
+        "a signed false exception claim must fail execution verification"
+    );
+    let mismatched: serde_json::Value =
+        serde_json::from_slice(&mismatched.stdout).expect("one exception mismatch JSON");
+    assert_eq!(
+        mismatched["execution_result"]["exception_value_match"], false,
+        "{mismatched}"
+    );
+    assert_eq!(mismatched["execution_result"]["console_match"], true);
+    assert_eq!(mismatched["execution_result"]["host_effects_match"], true);
+    assert_eq!(mismatched["replay_result"]["matched"], false);
+    assert_eq!(
+        mismatched["replay_result"]["expected_sequence_hash"],
+        mismatched["replay_result"]["replayed_sequence_hash"]
+    );
+
+    let transcript = payload["host_effect_transcript"]
+        .as_array()
+        .expect("captured read before exception");
+    assert_eq!(transcript.len(), 1);
+    let extra_read: (
+        frankenengine_extension_host::host_io::HostIoRequest,
+        frankenengine_extension_host::host_io::HostIoOutcome,
+    ) = serde_json::from_value(transcript[0].clone()).expect("typed captured host exchange");
+    let transcript_field = "\"host_effect_transcript\":[";
+    assert_eq!(capture.payload_json.matches(transcript_field).count(), 1);
+    write_authenticated_native_candidate(
+        workspace.path(),
+        &bundle,
+        "unused-failure-input.fnbundle",
+        capture.payload_json.replacen(
+            transcript_field,
+            &format!(
+                "{transcript_field}{},",
+                serde_json::to_string(&extra_read).unwrap()
+            ),
+            1,
+        ),
+    );
+    let unused = execute_native_replay(workspace.path(), "unused-failure-input.fnbundle");
+    assert!(
+        !unused.status.success(),
+        "a caught prefix cannot certify an unused transcript suffix"
+    );
+    let unused: serde_json::Value =
+        serde_json::from_slice(&unused.stdout).expect("one incomplete failure replay refusal");
+    assert_eq!(
+        unused["schema_version"],
+        "franken-node/incident-error-cli/v1"
+    );
+    assert!(
+        unused["error"].as_str().expect("error").contains("unused"),
+        "{unused}"
+    );
+}
+
+#[cfg(feature = "engine")]
+#[test]
+fn native_replay_capture_preserves_unsupported_failure_without_certifying_it() {
+    let (workspace, _) = native_replay_workspace("console.log('initialize capture project');\n");
+    fs::write(
+        workspace.path().join("denied.js"),
+        "console.log('before-denial'); const fs = require('fs'); fs.writeFileSync('forbidden.txt', 'must not write');\n",
+    ).expect("write capability-denied fixture");
+    let denied = run_cli_in_workspace(
+        workspace.path(),
+        &["run", "denied.js", "--capture-replay", "--json"],
+    );
+    assert_eq!(denied.status.code(), Some(1));
+    let denied: serde_json::Value =
+        serde_json::from_slice(&denied.stdout).expect("original unsupported failure JSON");
+    assert_eq!(denied["success"], false);
+    assert!(
+        denied["dispatch"]["native_replay"].is_null(),
+        "uncertified error must not acquire replay inputs: {denied}"
+    );
+    assert!(
+        denied["receipt"]
+            .get("native_replay_payload_sha256")
+            .is_none()
+    );
+    assert!(
+        denied["error"]
+            .as_str()
+            .expect("original capability refusal")
+            .contains("capability denied"),
+        "{denied}"
+    );
+    assert!(
+        denied["receipt"]["execution_failure"]
+            .as_str()
+            .expect("signed original failure")
+            .contains("capability denied"),
+        "{denied}"
+    );
+    assert_eq!(denied["captured_output"]["stdout"], "before-denial\n");
+    assert!(!workspace.path().join("forbidden.txt").exists());
 }
