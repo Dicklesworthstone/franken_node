@@ -19516,7 +19516,9 @@ fn read_package_manifest_object(
 
     let raw = bounded_read_to_string(&resolved, MAX_MANIFEST_FILE_BYTES)
         .with_context(|| format!("failed reading dependency manifest {}", resolved.display()))?;
-    let manifest = serde_json::from_str::<serde_json::Value>(&raw).with_context(|| {
+    let manifest = serde_json::from_str::<serde_json::Value>(
+        raw.strip_prefix('\u{feff}').unwrap_or(&raw),
+    ).with_context(|| {
         format!(
             "invalid dependency manifest JSON while evaluating {context}: {}",
             resolved.display()

@@ -2725,6 +2725,130 @@ fn run_type_module_package_executes_js_entry_as_esm() {
 }
 
 #[test]
+fn run_package_scope_executes_extensionless_module_entry() {
+    let outcome = run_directory_target(
+        &[
+            (
+                "pkg/package.json",
+                r#"{"name":"pkg","main":"entry","type":"module"}"#,
+            ),
+            (
+                "pkg/entry",
+                "export const value = 42;\nconsole.log(String(value));\n",
+            ),
+        ],
+        "pkg",
+    );
+    assert_eq!(outcome.exit_code, Some(0), "stderr:\n{}", outcome.stderr);
+    assert_eq!(outcome.stdout, "42\n");
+}
+
+#[test]
+fn run_package_scope_does_not_inherit_an_outer_projects_module_type() {
+    let outcome = run_directory_target(
+        &[
+            ("package.json", r#"{"type":"module"}"#),
+            (
+                "selected/index.js",
+                "module.exports = 7;\nconsole.log('bounded-commonjs');\n",
+            ),
+        ],
+        "selected",
+    );
+    assert_eq!(outcome.exit_code, Some(0), "stderr:\n{}", outcome.stderr);
+    assert_eq!(outcome.stdout, "bounded-commonjs\n");
+}
+
+#[test]
+fn run_package_scope_nested_package_and_node_modules_remain_commonjs() {
+    for entry in ["nested/index.js", "node_modules/untyped/index.js"] {
+        let manifest = format!(r#"{{"main":"{entry}","type":"module"}}"#);
+        let outcome = run_directory_target(
+            &[
+                ("package.json", &manifest),
+                ("nested/package.json", "{}"),
+                (entry, "module.exports = 7;\nconsole.log('own-scope');\n"),
+            ],
+            ".",
+        );
+        assert_eq!(
+            outcome.exit_code,
+            Some(0),
+            "{entry}: stderr:\n{}",
+            outcome.stderr
+        );
+        assert_eq!(outcome.stdout, "own-scope\n", "{entry}");
+    }
+}
+
+#[test]
+fn run_package_scope_rejects_invalid_metadata_before_any_guest_output() {
+    for metadata in ["{broken", "[]", "null", r#"{"type":42}"#] {
+        for target in ["pkg", "pkg/index.js"] {
+            let outcome = run_directory_target(
+                &[
+                    ("pkg/package.json", metadata),
+                    ("pkg/index.js", "console.log('guest-must-not-start');\n"),
+                ],
+                target,
+            );
+            assert_ne!(outcome.exit_code, Some(0), "{metadata}: {target}");
+            assert!(!outcome.stdout.contains("guest-must-not-start"));
+            assert!(
+                outcome.stderr.contains("Invalid package manifest")
+                    && outcome.stderr.contains("package.json"),
+                "{metadata}: {target}: {}",
+                outcome.stderr
+            );
+        }
+    }
+}
+
+#[test]
+fn run_package_scope_accepts_bom_prefixed_package_metadata() {
+    let outcome = run_directory_target(
+        &[
+            (
+                "pkg/package.json",
+                "\u{feff}{\"name\":\"pkg\",\"main\":\"entry.js\",\"type\":\"module\"}",
+            ),
+            (
+                "pkg/entry.js",
+                "export const value = 42;\nconsole.log(String(value));\n",
+            ),
+        ],
+        "pkg",
+    );
+    assert_eq!(outcome.exit_code, Some(0), "stderr:\n{}", outcome.stderr);
+    assert_eq!(outcome.stdout, "42\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn run_package_scope_refuses_manifest_symlinks_before_guest_execution() {
+    for target in ["pkg", "pkg/index.js"] {
+        let outcome = run_project_target_with_setup(
+            &[
+                ("outside.json", r#"{"main":"index.js","type":"module"}"#),
+                ("pkg/index.js", "console.log('guest-must-not-start');\n"),
+            ],
+            target,
+            |root, _| {
+                std::os::unix::fs::symlink("../outside.json", root.join("pkg/package.json"))
+                    .expect("link package manifest outside selected root");
+            },
+        );
+        assert_ne!(outcome.exit_code, Some(0), "{target}");
+        assert!(!outcome.stdout.contains("guest-must-not-start"));
+        assert!(
+            outcome.stderr.contains("package.json") && outcome.stderr.contains("symlinks"),
+            "{target}: {}",
+            outcome.stderr
+        );
+    }
+}
+
+#[test]
 fn run_directory_target_falls_back_to_index_js() {
     let outcome = run_directory_target(
         &[

@@ -150,24 +150,279 @@ fn process_shape_ambient_grant_is_legacy_risky_only_bd_y30zw() {
 #[cfg(feature = "engine")]
 fn mjs_entrypoints_select_module_goal_bd_ergy0() {
     let config = config_with_profile(Profile::LegacyRisky);
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("fixture.mjs"), "export const value = 1;\n")
+        .expect("write explicit module");
+    let module = RunProjectPaths::resolve(Path::new("fixture.mjs"), dir.path())
+        .expect("resolve explicit module");
     assert_eq!(
         EngineDispatcher::map_config_to_orchestrator_config_for_entrypoint_for_tests(
-            &config,
-            Path::new("fixture.mjs"),
+            &config, &module,
         )
         .parse_goal,
         ParseGoal::Module
     );
     for script_path in ["fixture.js", "fixture.cjs", "fixture", "fixture.MJS"] {
+        std::fs::write(dir.path().join(script_path), "module.exports = 1;\n")
+            .expect("write script");
+        let script =
+            RunProjectPaths::resolve(Path::new(script_path), dir.path()).expect("resolve script");
         assert_eq!(
             EngineDispatcher::map_config_to_orchestrator_config_for_entrypoint_for_tests(
-                &config,
-                Path::new(script_path),
+                &config, &script,
             )
             .parse_goal,
             ParseGoal::Script,
             "{script_path} must retain ScriptGoal"
         );
+    }
+}
+
+#[test]
+fn run_package_scope_selects_nearest_manifest_for_js_and_extensionless_entries() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(dir.path().join("src")).expect("source directory");
+    std::fs::write(dir.path().join("package.json"), r#"{"type":"module"}"#).expect("module scope");
+    for name in ["main.js", "entry"] {
+        std::fs::write(
+            dir.path().join("src").join(name),
+            "export const value = 1;\n",
+        )
+        .expect("entrypoint");
+    }
+    let config = config_with_profile(Profile::Balanced);
+    for name in ["src/main.js", "src/entry"] {
+        let paths = RunProjectPaths::resolve(Path::new(name), dir.path()).expect("module paths");
+        let mapped = EngineDispatcher::map_config_to_orchestrator_config_for_entrypoint_for_tests(
+            &config, &paths,
+        );
+        assert_eq!(mapped.parse_goal, ParseGoal::Module, "{name}");
+        assert!(!mapped.commonjs_entry, "{name}");
+    }
+
+    for metadata in ["{}", r#"{"type":"commonjs"}"#, r#"{"type":"unrecognized"}"#] {
+        std::fs::write(dir.path().join("src/package.json"), metadata).expect("nested scope");
+        for name in ["src/main.js", "src/entry"] {
+            let paths =
+                RunProjectPaths::resolve(Path::new(name), dir.path()).expect("script paths");
+            let mapped =
+                EngineDispatcher::map_config_to_orchestrator_config_for_entrypoint_for_tests(
+                    &config, &paths,
+                );
+            assert_eq!(mapped.parse_goal, ParseGoal::Script, "{name}: {metadata}");
+            assert!(mapped.commonjs_entry, "{name}: {metadata}");
+        }
+    }
+}
+
+#[test]
+fn run_package_scope_cannot_inherit_metadata_outside_its_authority() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let selected = dir.path().join("selected");
+    std::fs::create_dir(&selected).expect("selected project");
+    std::fs::write(selected.join("index.js"), "module.exports = 1;\n").expect("entrypoint");
+    let config = config_with_profile(Profile::Balanced);
+    for metadata in [r#"{"type":"module"}"#, "{broken"] {
+        std::fs::write(dir.path().join("package.json"), metadata).expect("outside metadata");
+        for target in [Path::new("index.js"), Path::new(".")] {
+            let paths = RunProjectPaths::resolve(target, &selected).expect("authority-local paths");
+            let mapped =
+                EngineDispatcher::map_config_to_orchestrator_config_for_entrypoint_for_tests(
+                    &config, &paths,
+                );
+            assert_eq!(mapped.parse_goal, ParseGoal::Script, "{metadata}");
+        }
+    }
+}
+
+#[test]
+fn run_package_scope_stops_before_node_modules_even_inside_one_project() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("node_modules/untyped/src"))
+        .expect("dependency directories");
+    std::fs::write(dir.path().join("package.json"), r#"{"type":"module"}"#)
+        .expect("parent module scope");
+    std::fs::write(
+        dir.path().join("node_modules/package.json"),
+        "{must-not-be-read",
+    )
+    .expect("container is not a package scope");
+    std::fs::write(
+        dir.path().join("node_modules/untyped/src/main.js"),
+        "module.exports = 1;\n",
+    )
+    .expect("dependency entrypoint");
+    let paths = RunProjectPaths::resolve(Path::new("node_modules/untyped/src/main.js"), dir.path())
+        .expect("untyped dependency paths");
+    let mapped = EngineDispatcher::map_config_to_orchestrator_config_for_entrypoint_for_tests(
+        &config_with_profile(Profile::Balanced),
+        &paths,
+    );
+    assert_eq!(mapped.parse_goal, ParseGoal::Script);
+    assert!(mapped.commonjs_entry);
+}
+
+#[test]
+fn run_package_scope_rejects_invalid_metadata_without_changing_explicit_formats() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for name in ["main.js", "entry", "main.cjs", "main.mjs"] {
+        std::fs::write(dir.path().join(name), "console.log('entry');\n").expect("entrypoint");
+    }
+    let config = config_with_profile(Profile::Balanced);
+    for metadata in [
+        "{broken",
+        "[]",
+        "null",
+        r#"{"type":42}"#,
+        r#"{"type":null}"#,
+    ] {
+        std::fs::write(dir.path().join("package.json"), metadata).expect("invalid manifest");
+        for name in ["main.js", "entry"] {
+            let error = RunProjectPaths::resolve(Path::new(name), dir.path())
+                .expect_err("invalid package metadata must not select CommonJS")
+                .to_string();
+            assert!(
+                error.contains("Invalid package manifest"),
+                "{name}: {error}"
+            );
+            assert!(error.contains("package.json"), "{error}");
+        }
+        for (name, goal) in [
+            ("main.cjs", ParseGoal::Script),
+            ("main.mjs", ParseGoal::Module),
+        ] {
+            let paths = RunProjectPaths::resolve(Path::new(name), dir.path())
+                .expect("explicit format bypasses package metadata");
+            let mapped =
+                EngineDispatcher::map_config_to_orchestrator_config_for_entrypoint_for_tests(
+                    &config, &paths,
+                );
+            assert_eq!(mapped.parse_goal, goal, "{metadata}");
+        }
+    }
+}
+
+#[test]
+fn run_package_scope_accepts_bom_and_bounds_directory_and_file_manifests() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("app.js"), "export const value = 1;\n").expect("entrypoint");
+    std::fs::write(
+        dir.path().join("package.json"),
+        "\u{feff}{\"main\":\"app.js\",\"type\":\"module\"}",
+    )
+    .expect("BOM manifest");
+    let config = config_with_profile(Profile::Balanced);
+    for target in [Path::new("app.js"), Path::new(".")] {
+        let paths = RunProjectPaths::resolve(target, dir.path()).expect("BOM package paths");
+        let mapped = EngineDispatcher::map_config_to_orchestrator_config_for_entrypoint_for_tests(
+            &config, &paths,
+        );
+        assert_eq!(mapped.parse_goal, ParseGoal::Module);
+    }
+    let prefix = r#"{"main":"app.js","type":"module","padding":""#;
+    let suffix = "\"}";
+    let at_limit = format!(
+        "{prefix}{}{suffix}",
+        "x".repeat((1 << 20) - prefix.len() - suffix.len())
+    );
+    assert_eq!(at_limit.len(), 1 << 20);
+    std::fs::write(dir.path().join("package.json"), at_limit).expect("boundary manifest");
+    for target in [Path::new("app.js"), Path::new(".")] {
+        RunProjectPaths::resolve(target, dir.path()).expect("manifest at the limit is admitted");
+    }
+    let oversized = format!("{{\"padding\":\"{}\"}}", "x".repeat((1 << 20) + 1));
+    std::fs::write(dir.path().join("package.json"), oversized).expect("oversized manifest");
+    for target in [Path::new("app.js"), Path::new(".")] {
+        let error = RunProjectPaths::resolve(target, dir.path())
+            .expect_err("both resolution paths must enforce the manifest byte bound")
+            .to_string();
+        assert!(error.contains("1048576-byte limit"), "{error}");
+    }
+}
+
+#[test]
+fn run_package_scope_metadata_changes_are_rejected_before_worker_launch() {
+    use frankenengine_node::config::PreferredRuntime;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(dir.path().join("lib")).expect("source directory");
+    std::fs::write(dir.path().join("lib/main.js"), "console.log('entry');\n").expect("entrypoint");
+    std::fs::write(
+        dir.path().join("lib/package.json"),
+        r#"{"type":"commonjs"}"#,
+    )
+    .expect("nested scope");
+    std::fs::write(
+        dir.path().join("package.json"),
+        r#"{"main":"lib/main.js","version":"1"}"#,
+    )
+    .expect("directory entry manifest");
+    let paths = RunProjectPaths::resolve(dir.path(), dir.path()).expect("preflight paths");
+    // Neither the entry filename nor its parse goal changes. The consumed main
+    // manifest still belongs to the admitted metadata and must remain bound.
+    std::fs::write(
+        dir.path().join("package.json"),
+        r#"{"main":"lib/main.js","version":"2"}"#,
+    )
+    .expect("change metadata after preflight");
+    let error = EngineDispatcher::new(None, PreferredRuntime::FrankenEngine)
+        .with_project_paths(paths)
+        .with_native_session_worker_path(dir.path().join("worker-does-not-exist"))
+        .dispatch_run(
+            dir.path(),
+            &config_with_profile(Profile::Balanced),
+            "balanced",
+            &[],
+            2_000,
+        )
+        .expect_err("metadata changes must refuse before worker resolution")
+        .to_string();
+    assert!(
+        error.contains("run project authority changed after preflight"),
+        "{error}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn run_package_scope_refuses_manifest_symlinks_and_nonregular_files() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for name in ["linked", "nonregular", "dangling", "fifo"] {
+        std::fs::create_dir(dir.path().join(name)).expect("project directory");
+        std::fs::write(
+            dir.path().join(name).join("index.js"),
+            "console.log('entry');\n",
+        )
+        .expect("entrypoint");
+    }
+    std::fs::write(
+        dir.path().join("outside.json"),
+        r#"{"type":"module","main":"index.js"}"#,
+    )
+    .expect("outside manifest");
+    std::os::unix::fs::symlink("../outside.json", dir.path().join("linked/package.json"))
+        .expect("escaping manifest link");
+    std::os::unix::fs::symlink("../missing.json", dir.path().join("dangling/package.json"))
+        .expect("dangling manifest link");
+    std::fs::create_dir(dir.path().join("nonregular/package.json")).expect("nonregular manifest");
+    rustix::fs::mkfifoat(
+        rustix::fs::CWD,
+        dir.path().join("fifo/package.json"),
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+    )
+    .expect("FIFO manifest must refuse without blocking on an absent writer");
+    for name in ["linked", "nonregular", "dangling", "fifo"] {
+        let project = dir.path().join(name);
+        for target in [Path::new("index.js"), Path::new(".")] {
+            let error = RunProjectPaths::resolve(target, &project)
+                .expect_err("manifest link or nonregular file must fail closed")
+                .to_string();
+            assert!(error.contains("package.json"), "{name}: {error}");
+            assert!(
+                error.contains("symlinks") || error.contains("regular file"),
+                "{name}: {error}"
+            );
+        }
     }
 }
 
@@ -419,11 +674,15 @@ fn runtime_parse_budget_overrides_reach_the_engine_without_changing_trust() {
 #[cfg(feature = "engine")]
 fn script_entries_are_commonjs_modules_and_module_entries_are_not() {
     let config = config_with_profile(Profile::Balanced);
+    let directory = tempfile::tempdir().expect("tempdir");
     let mapped = |path: &str| {
+        std::fs::write(directory.path().join(path), "console.log('entry');\n")
+            .expect("write entrypoint");
+        let paths = RunProjectPaths::resolve(Path::new(path), directory.path())
+            .expect("resolve entrypoint format");
         let orchestrator =
             EngineDispatcher::map_config_to_orchestrator_config_for_entrypoint_for_tests(
-                &config,
-                Path::new(path),
+                &config, &paths,
             );
         (orchestrator.parse_goal, orchestrator.commonjs_entry)
     };
@@ -440,11 +699,19 @@ fn script_entries_are_commonjs_modules_and_module_entries_are_not() {
 #[cfg(feature = "engine")]
 fn js_entry_goal_follows_nearest_package_json_type() {
     let config = config_with_profile(Profile::Balanced);
-    let goal = |path: &Path| {
-        EngineDispatcher::map_config_to_orchestrator_config_for_entrypoint_for_tests(&config, path)
-            .parse_goal
-    };
     let workspace = tempfile::tempdir().expect("tempdir");
+    let goal = |path: &Path| {
+        std::fs::write(path, "console.log('entry');\n").expect("write entrypoint");
+        let selected = path
+            .strip_prefix(workspace.path())
+            .expect("workspace-relative entrypoint");
+        let paths = RunProjectPaths::resolve(selected, workspace.path())
+            .expect("resolve entrypoint format");
+        EngineDispatcher::map_config_to_orchestrator_config_for_entrypoint_for_tests(
+            &config, &paths,
+        )
+        .parse_goal
+    };
     let esm = workspace.path().join("esm");
     std::fs::create_dir_all(esm.join("src/nested")).expect("esm dirs");
     std::fs::write(esm.join("package.json"), r#"{"type":"module"}"#).expect("esm manifest");
@@ -465,7 +732,11 @@ fn js_entry_goal_follows_nearest_package_json_type() {
     let broken = workspace.path().join("broken");
     std::fs::create_dir_all(&broken).expect("broken dir");
     std::fs::write(broken.join("package.json"), b"{not json").expect("broken manifest");
-    assert_eq!(goal(&broken.join("index.js")), ParseGoal::Script);
+    std::fs::write(broken.join("index.js"), "console.log('entry');\n").expect("entrypoint");
+    let error = RunProjectPaths::resolve(Path::new("broken/index.js"), workspace.path())
+        .expect_err("invalid metadata cannot silently change the entrypoint format")
+        .to_string();
+    assert!(error.contains("Invalid package manifest"), "{error}");
 }
 
 /// Conformance test: Strict profile must produce conservative security settings

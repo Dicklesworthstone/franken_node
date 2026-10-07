@@ -2598,6 +2598,249 @@ fn validate_target_path(target_path: &Path) -> Result<()> {
     Ok(())
 }
 
+const MAX_RUN_PACKAGE_MANIFEST_BYTES: u64 = 1 << 20;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RunEntrypointFormat {
+    CommonJs,
+    EsModule,
+}
+
+/// Only metadata actually used to select the entrypoint or its format is
+/// retained. The hash binds all original bytes, including a possible UTF-8 BOM,
+/// so a subsequent worker cannot silently accept rewritten package metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunPackageManifest {
+    relative_path: PathBuf,
+    content_sha256: String,
+    main: Option<String>,
+    package_type: Option<String>,
+}
+
+/// Open through retained directory descriptors. Checking a canonical path and
+/// subsequently opening it would allow a replaced parent or manifest symlink
+/// to redirect a privileged preflight read. NONBLOCK also prevents a FIFO from
+/// hanging the preflight before its file type can be inspected.
+#[cfg(unix)]
+fn open_run_package_manifest(directory: &Path) -> io::Result<Option<std::fs::File>> {
+    use rustix::fs::{Mode, OFlags, open, openat};
+    use std::path::Component;
+
+    if !directory.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "package directory must be canonical and absolute",
+        ));
+    }
+    let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut descriptor = std::fs::File::from(open("/", directory_flags, Mode::empty())?);
+    for component in directory.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(name) => {
+                descriptor =
+                    std::fs::File::from(openat(&descriptor, name, directory_flags, Mode::empty())?);
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "package directory must not contain traversal components",
+                ));
+            }
+        }
+    }
+    match openat(
+        &descriptor,
+        "package.json",
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(file) => Ok(Some(std::fs::File::from(file))),
+        Err(rustix::io::Errno::NOENT) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(not(unix))]
+fn open_run_package_manifest(directory: &Path) -> io::Result<Option<std::fs::File>> {
+    // The canonical authority is checked again on the authenticated worker.
+    // Reject metadata links rather than allowing them to choose another scope.
+    let path = directory.join("package.json");
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+        Ok(metadata) if !metadata.is_file() || metadata.is_symlink() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "package manifest must be a regular file, not a symlink",
+            ));
+        }
+        Ok(_) => {}
+    }
+    if directory.canonicalize()? != directory {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package directory changed after authority resolution",
+        ));
+    }
+    std::fs::File::open(path).map(Some)
+}
+
+fn read_run_package_manifest(
+    project_root: &Path,
+    directory: &Path,
+    manifests: &mut Vec<RunPackageManifest>,
+) -> Result<Option<RunPackageManifest>, String> {
+    use sha2::{Digest, Sha256};
+
+    let relative_directory = directory.strip_prefix(project_root).map_err(|_| {
+        format!(
+            "Package directory {} escapes selected project root {}",
+            directory.display(),
+            project_root.display()
+        )
+    })?;
+    let relative_path = relative_directory.join("package.json");
+    if let Some(manifest) = manifests
+        .iter()
+        .find(|manifest| manifest.relative_path == relative_path)
+    {
+        return Ok(Some(manifest.clone()));
+    }
+    let path = directory.join("package.json");
+    let Some(file) = open_run_package_manifest(directory).map_err(|error| {
+        format!(
+            "Failed to open package manifest {} inside the selected project; \
+             metadata symlinks and nonregular files are not allowed: {error}",
+            path.display()
+        )
+    })?
+    else {
+        return Ok(None);
+    };
+    let before = file
+        .metadata()
+        .map_err(|error| format!("Failed to inspect {}: {error}", path.display()))?;
+    if !before.is_file() {
+        return Err(format!(
+            "Package manifest {} must be a regular file",
+            path.display()
+        ));
+    }
+    if before.len() > MAX_RUN_PACKAGE_MANIFEST_BYTES {
+        return Err(format!(
+            "Package manifest {} exceeds the {MAX_RUN_PACKAGE_MANIFEST_BYTES}-byte limit",
+            path.display()
+        ));
+    }
+    let mut bytes = Vec::new();
+    (&file)
+        .take(MAX_RUN_PACKAGE_MANIFEST_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("Failed to read {}: {error}", path.display()))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_RUN_PACKAGE_MANIFEST_BYTES {
+        return Err(format!(
+            "Package manifest {} exceeds the {MAX_RUN_PACKAGE_MANIFEST_BYTES}-byte limit",
+            path.display()
+        ));
+    }
+    let after = file
+        .metadata()
+        .map_err(|error| format!("Failed to recheck {}: {error}", path.display()))?;
+    #[cfg(unix)]
+    let identity_changed = {
+        use std::os::unix::fs::MetadataExt;
+
+        before.dev() != after.dev()
+            || before.ino() != after.ino()
+            || before.ctime() != after.ctime()
+            || before.ctime_nsec() != after.ctime_nsec()
+    };
+    #[cfg(not(unix))]
+    let identity_changed = false;
+    if before.len() != after.len()
+        || before.modified().ok() != after.modified().ok()
+        || before.len() != u64::try_from(bytes.len()).unwrap_or(u64::MAX)
+        || identity_changed
+    {
+        return Err(format!(
+            "Package manifest {} changed while it was being read",
+            path.display()
+        ));
+    }
+    let json_bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
+    let document: serde_json::Value = serde_json::from_slice(json_bytes)
+        .map_err(|error| format!("Invalid package manifest {}: {error}", path.display()))?;
+    let object = document.as_object().ok_or_else(|| {
+        format!(
+            "Invalid package manifest {}: the top-level JSON value must be an object",
+            path.display()
+        )
+    })?;
+    let package_type = match object.get("type") {
+        None => None,
+        Some(serde_json::Value::String(value)) => Some(value.clone()),
+        Some(_) => {
+            return Err(format!(
+                "Invalid package manifest {}: `type` must be a string",
+                path.display()
+            ));
+        }
+    };
+    let manifest = RunPackageManifest {
+        relative_path,
+        content_sha256: hex::encode(Sha256::digest(&bytes)),
+        main: object
+            .get("main")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        package_type,
+    };
+    manifests.push(manifest.clone());
+    Ok(Some(manifest))
+}
+
+/// Resolve only inside the selected authority. Node's package boundary also
+/// stops before a node_modules directory; its parent's type must never turn an
+/// untyped dependency into an ES module. Explicit extensions bypass the scope.
+fn resolve_run_entrypoint_format(
+    app_path: &Path,
+    project_root: &Path,
+    manifests: &mut Vec<RunPackageManifest>,
+) -> Result<RunEntrypointFormat, String> {
+    match app_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+    {
+        Some("mjs") => return Ok(RunEntrypointFormat::EsModule),
+        Some("js") | None => {}
+        _ => return Ok(RunEntrypointFormat::CommonJs),
+    }
+    let mut directory = app_path
+        .parent()
+        .ok_or_else(|| "Run entrypoint has no parent directory".to_string())?;
+    loop {
+        if directory.file_name() == Some(std::ffi::OsStr::new("node_modules")) {
+            return Ok(RunEntrypointFormat::CommonJs);
+        }
+        if let Some(manifest) = read_run_package_manifest(project_root, directory, manifests)? {
+            return Ok(if manifest.package_type.as_deref() == Some("module") {
+                RunEntrypointFormat::EsModule
+            } else {
+                RunEntrypointFormat::CommonJs
+            });
+        }
+        if directory == project_root {
+            return Ok(RunEntrypointFormat::CommonJs);
+        }
+        directory = directory
+            .parent()
+            .ok_or_else(|| "Package-scope search escaped its project boundary".to_string())?;
+    }
+}
+
 /// Canonical filesystem authority selected for one product run.
 ///
 /// Directory targets select that directory, even when `main` is nested. A
@@ -2610,6 +2853,8 @@ pub struct RunProjectPaths {
     target: PathBuf,
     entrypoint: PathBuf,
     project_root: PathBuf,
+    entrypoint_format: RunEntrypointFormat,
+    package_manifests: Vec<RunPackageManifest>,
 }
 
 impl RunProjectPaths {
@@ -2631,9 +2876,11 @@ impl RunProjectPaths {
         let target_metadata = std::fs::metadata(&target)
             .with_context(|| format!("inspect run target {}", target.display()))?;
 
+        let mut package_manifests = Vec::new();
         let (project_root, entrypoint) = if target_metadata.is_dir() {
-            let entrypoint = EngineDispatcher::resolve_directory_entrypoint(&target)
-                .map_err(anyhow::Error::msg)?;
+            let entrypoint =
+                EngineDispatcher::resolve_directory_entrypoint(&target, &mut package_manifests)
+                    .map_err(anyhow::Error::msg)?;
             (target.clone(), entrypoint)
         } else if target_metadata.is_file() {
             // Use the selected path's parent before following the final file
@@ -2693,10 +2940,16 @@ impl RunProjectPaths {
                 project_root.display()
             );
         }
+        let entrypoint_format =
+            resolve_run_entrypoint_format(&entrypoint, &project_root, &mut package_manifests)
+                .map_err(anyhow::Error::msg)?;
+        package_manifests.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
         Ok(Self {
             target,
             entrypoint,
             project_root,
+            entrypoint_format,
+            package_manifests,
         })
     }
 
@@ -4307,25 +4560,6 @@ fn run_exit_status(containment_exit_code: i32, program_exit_code: Option<i32>) -
     }
 }
 
-/// Node's package-scope rule for `.js` files: the nearest ancestor
-/// `package.json` decides, and `"type": "module"` makes the file ESM. A scope
-/// file that cannot be read or parsed counts as CommonJS.
-#[cfg(feature = "engine")]
-fn package_scope_is_module(app_path: &Path) -> bool {
-    let absolute = std::path::absolute(app_path).unwrap_or_else(|_| app_path.to_path_buf());
-    let Some(scope_dir) = absolute
-        .ancestors()
-        .skip(1)
-        .find(|dir| dir.join("package.json").is_file())
-    else {
-        return false;
-    };
-    std::fs::read(scope_dir.join("package.json"))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .is_some_and(|manifest| manifest.get("type").and_then(|t| t.as_str()) == Some("module"))
-}
-
 #[cfg(feature = "engine")]
 fn engine_containment_decision(
     result: &frankenengine_engine::execution_orchestrator::OrchestratorResult,
@@ -4732,17 +4966,14 @@ impl EngineDispatcher {
     /// does: package.json `main` (as a file, with `.js` appended, or as a
     /// directory holding `index.js`), falling back to `index.js`. `main` may
     /// not leave the package directory.
-    fn resolve_directory_entrypoint(dir: &Path) -> std::result::Result<PathBuf, String> {
-        const MAX_PACKAGE_MANIFEST_BYTES: u64 = 1 << 20;
-        let manifest_path = dir.join("package.json");
-        if manifest_path.is_file() {
-            let raw = crate::bounded_read(&manifest_path, MAX_PACKAGE_MANIFEST_BYTES)
-                .map_err(|error| format!("Failed to read {}: {error}", manifest_path.display()))?;
-            let manifest: serde_json::Value = serde_json::from_slice(&raw)
-                .map_err(|error| format!("Invalid {}: {error}", manifest_path.display()))?;
+    fn resolve_directory_entrypoint(
+        dir: &Path,
+        manifests: &mut Vec<RunPackageManifest>,
+    ) -> std::result::Result<PathBuf, String> {
+        if let Some(manifest) = read_run_package_manifest(dir, dir, manifests)? {
             if let Some(main) = manifest
-                .get("main")
-                .and_then(serde_json::Value::as_str)
+                .main
+                .as_deref()
                 .map(str::trim)
                 .filter(|main| !main.is_empty())
             {
@@ -8140,7 +8371,7 @@ impl EngineDispatcher {
 
         // Configure orchestrator with policy settings
         let mut orchestrator_config =
-            Self::map_config_to_orchestrator_config_for_entrypoint(config, execution_app_path); // bd-wlkks/bd-ergy0
+            Self::map_config_to_orchestrator_config_for_entrypoint(config, &project_paths); // bd-wlkks/bd-ergy0
         orchestrator_config.policy_id =
             Self::generate_opaque_policy_id(config.profile, Some(policy_mode)); // bd-3rlp8: Opaque policy ID with policy_mode
         // bd-656a2: capture a stable trace label for the SSRF gate's audit records
@@ -9290,24 +9521,17 @@ impl EngineDispatcher {
     }
 
     #[cfg(feature = "engine")]
-    fn parse_goal_for_entrypoint(app_path: &Path) -> ParseGoal {
-        match app_path
-            .extension()
-            .and_then(|extension| extension.to_str())
-        {
-            Some("mjs") => ParseGoal::Module,
-            Some("js") if package_scope_is_module(app_path) => ParseGoal::Module,
-            _ => ParseGoal::Script,
-        }
-    }
-
-    #[cfg(feature = "engine")]
     fn map_config_to_orchestrator_config_for_entrypoint(
         config: &Config,
-        app_path: &Path,
+        project_paths: &RunProjectPaths,
     ) -> OrchestratorConfig {
         let mut orchestrator_config = Self::map_config_to_orchestrator_config(config);
-        orchestrator_config.parse_goal = Self::parse_goal_for_entrypoint(app_path);
+        // Use the selection bound to dependency preflight and revalidated by
+        // the authenticated worker. No ambient package-scope read happens here.
+        orchestrator_config.parse_goal = match project_paths.entrypoint_format {
+            RunEntrypointFormat::EsModule => ParseGoal::Module,
+            RunEntrypointFormat::CommonJs => ParseGoal::Script,
+        };
         // bd-rff5g: as in Node, an entry that is not an ES module is a
         // CommonJS module, so it gets require/module/exports/__filename/
         // __dirname and can require files beside it (inside the module root).
@@ -9319,9 +9543,9 @@ impl EngineDispatcher {
     #[cfg(feature = "engine")]
     pub fn map_config_to_orchestrator_config_for_entrypoint_for_tests(
         config: &Config,
-        app_path: &Path,
+        project_paths: &RunProjectPaths,
     ) -> OrchestratorConfig {
-        Self::map_config_to_orchestrator_config_for_entrypoint(config, app_path)
+        Self::map_config_to_orchestrator_config_for_entrypoint(config, project_paths)
     }
 
     #[cfg(feature = "engine")]
@@ -15867,6 +16091,8 @@ mod tests {
                 target: PathBuf::from("/tmp/native-session-frame/app.js"),
                 entrypoint: PathBuf::from("/tmp/native-session-frame/app.js"),
                 project_root: PathBuf::from("/tmp/native-session-frame"),
+                entrypoint_format: RunEntrypointFormat::CommonJs,
+                package_manifests: Vec::new(),
             },
             policy_mode: "balanced".to_string(),
             config: Config::for_profile(Profile::Balanced),
