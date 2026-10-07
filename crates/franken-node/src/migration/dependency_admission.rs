@@ -343,7 +343,7 @@ fn legacy(lock: &Value, deadline: Instant) -> Result<BTreeMap<String, LockedPack
     Ok(result)
 }
 
-fn package_findings(report: &mut DependencyAdmission, packages: &BTreeMap<String, LockedPackage>, source: &str) -> Result<()> {
+fn package_findings(report: &mut DependencyAdmission, packages: &BTreeMap<String, LockedPackage>, source: &str, workspace_links: &std::collections::BTreeSet<String>) -> Result<()> {
     for package in packages.values() {
         let mut add = |code: &str, detail: &str| report.finding(DependencyFinding {
             code: code.into(), source: source.into(), package: package.name.clone(),
@@ -359,7 +359,7 @@ fn package_findings(report: &mut DependencyAdmission, packages: &BTreeMap<String
         if package.unresolved {
             add("unresolved_package", "Recorded installation has no complete version/target metadata")?;
         }
-        if package.linked {
+        if package.linked && !workspace_links.contains(&package.path) {
             add("local_link", "Local package link needs captured manifest assessment before checked execution")?;
         }
     }
@@ -391,7 +391,10 @@ fn declarations(report: &mut DependencyAdmission, manifest: &Value, packages: &B
             let request = bounded_text(request, "dependency request")?;
             let (actual, _) = alias(installed_as, Some(request))?;
             let represented = nearest_package(packages, source, installed_as)
-                .is_some_and(|package| package.name == actual && !package.unresolved);
+                .is_some_and(|package| package.name == actual && !package.unresolved
+                    // npm aliases, URL/Git and file requests are not authority
+                    // to substitute a same-named local workspace installation.
+                    && (!package.linked || !request.contains([':', '/', '\\'])));
             let native = native_addon(actual) || native_addon(installed_as);
             if !represented || native {
                 report.finding(DependencyFinding {
@@ -431,20 +434,13 @@ pub fn inspect(project: &Path, deadline: Instant) -> Result<DependencyAdmission>
         schema_version: "franken-node/native-dependency-admission/v1".into(), scope: SCOPE.into(),
         packages_scanned: packages.len(), manifests_scanned: manifests.len(), inputs: Vec::new(), findings: Vec::new(),
     };
-    package_findings(&mut report, &packages, source)?;
+    let workspace_links = workspaces::bind_links(&mut capture, &manifests, lock.as_ref(), &packages, &mut report)?;
+    package_findings(&mut report, &packages, source, &workspace_links)?;
     let mut declared = 0;
     for (directory, manifest) in &manifests {
         let source = workspaces::manifest_path(directory);
         declarations(&mut report, manifest, &packages, &source, &mut declared, deadline)?;
         workspaces::manifest_findings(&mut report, manifest, &source)?;
-        if !directory.is_empty() {
-            report.finding(DependencyFinding {
-                code: "workspace_review".into(), source,
-                package: manifest["name"].as_str().unwrap_or_default().into(),
-                installed_as: String::new(), package_path: Some(directory.clone()), version: None,
-                detail: "Workspace declarations were inspected; the local link still requires lockfile-to-capture binding".into(),
-            })?;
-        }
     }
     time_remaining(deadline)?;
     report.inputs = capture.inputs.into_values().collect();

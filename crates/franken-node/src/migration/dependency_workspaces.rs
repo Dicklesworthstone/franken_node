@@ -6,8 +6,9 @@
 //! fallback to trusting the lockfile's workspace projection.
 
 use super::{
-    Capture, DependencyAdmission, DependencyFinding, MAX_DEPTH, MAX_MANIFEST_BYTES,
-    bounded_text, identity, name, relative, time_remaining,
+    Capture, DependencyAdmission, DependencyFinding, LockedPackage, MAX_DEPTH,
+    MAX_LOCK_BYTES, MAX_MANIFEST_BYTES, SECTIONS, bounded_text, flag, identity,
+    name, relative, time_remaining,
 };
 use anyhow::{Context, Result, ensure};
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, openat, statat};
@@ -202,6 +203,93 @@ pub(super) fn manifest_findings(report: &mut DependencyAdmission, manifest: &Val
     Ok(())
 }
 
+fn workspace_finding(report: &mut DependencyAdmission, manifest: &Value, directory: &str, code: &str, detail: &str) -> Result<()> {
+    let package = manifest.get("name").and_then(Value::as_str).unwrap_or_default();
+    report.finding(DependencyFinding {
+        code: code.into(), source: manifest_path(directory), package: package.into(),
+        installed_as: package.into(), package_path: Some(directory.into()),
+        version: manifest.get("version").and_then(Value::as_str).map(str::to_owned),
+        detail: detail.into(),
+    })
+}
+
+fn dependency_metadata_matches(manifest: &Value, recorded: &Value) -> bool {
+    // Missing and empty declaration maps are equivalent. Do not conflate null
+    // or another type with an empty map, or silently discard peer metadata.
+    SECTIONS.iter().copied().chain(["peerDependenciesMeta"]).all(|field| {
+        let empty = serde_json::Map::new();
+        let left = match manifest.get(field) {
+            None => Some(&empty),
+            Some(value) => value.as_object(),
+        };
+        let right = match recorded.get(field) {
+            None => Some(&empty),
+            Some(value) => value.as_object(),
+        };
+        left.is_some() && left == right
+    })
+}
+
+/// Only the canonical root installation of an explicitly selected workspace
+/// may clear local-link review. Its target, name, version and dependency maps
+/// must agree with the captured manifest. Arbitrary links and lockfile-only
+/// workspace descriptors never gain this authorization.
+pub(super) fn bind_links(
+    capture: &mut Capture,
+    manifests: &BTreeMap<String, Value>,
+    lock: Option<&Value>,
+    packages: &BTreeMap<String, LockedPackage>,
+    report: &mut DependencyAdmission,
+) -> Result<BTreeSet<String>> {
+    let recorded = lock.and_then(|lock| lock.get("packages")).and_then(Value::as_object);
+    let mut admitted = BTreeSet::new();
+    for (path, manifest) in manifests {
+        time_remaining(capture.deadline)?;
+        let fd = directory(&capture.root, path)?;
+        let has_binding = match statat(&fd, "binding.gyp", AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(_) => true,
+            Err(rustix::io::Errno::NOENT) => false,
+            Err(error) => return Err(error).context("inspect captured native-build marker"),
+        };
+        let gypfile = flag(manifest.as_object().context("captured manifest must be an object")?, "gypfile")?;
+        if has_binding || gypfile {
+            workspace_finding(report, manifest, path, "native_build",
+                "Captured package has a binding.gyp marker or declares gypfile; native-build review required")?;
+        }
+        if path.is_empty() { continue; }
+        for filename in ["package-lock.json", "npm-shrinkwrap.json"] {
+            if capture.read(&format!("{path}/{filename}"), MAX_LOCK_BYTES)?.is_some() {
+                workspace_finding(report, manifest, path, "workspace_lockfile",
+                    "Workspace has an independent lockfile; assess it as a separate project instead of mixing lock authorities")?;
+            }
+        }
+        let package = name(bounded_text(manifest.get("name").context("workspace name missing")?, "workspace name")?)?;
+        let version = manifest.get("version").map(|value| bounded_text(value, "workspace version")).transpose()?;
+        let location = format!("node_modules/{package}");
+        let record = recorded.and_then(|records| records.get(path));
+        let link = recorded.and_then(|records| records.get(&location));
+        let matched = match (version, record, link, packages.get(&location)) {
+            (Some(version), Some(record), Some(link), Some(locked)) => {
+                locked.linked && !locked.unresolved && locked.name == package
+                    && locked.installed_as == package
+                    && locked.version.as_deref() == Some(version)
+                    && link.get("resolved").and_then(Value::as_str) == Some(path.as_str())
+                    && record.get("version").and_then(Value::as_str) == Some(version)
+                    && record.get("name").is_none_or(|value| value.as_str() == Some(package))
+                    && dependency_metadata_matches(manifest, record)
+            }
+            _ => false,
+        };
+        if matched {
+            admitted.insert(location);
+        } else {
+            workspace_finding(report, manifest, path, "workspace_review",
+                "Workspace root link, target identity, version or dependency metadata does not match the captured manifest")?;
+        }
+    }
+    Ok(admitted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,5 +449,164 @@ mod tests {
         let s = pattern.step(&s, "a");
         assert_eq!(s.last(), Some(&true));
         assert!(!pattern.step(&s, "b").iter().any(|active| *active));
+    }
+
+    fn linked_fixture() -> tempfile::TempDir {
+        let root = fixture(json!({"name":"root","workspaces":["packages/*"],"dependencies":{"a":"^1"}}),
+            Some(modern_fixture(json!({
+                "node_modules/a":{"link":true,"resolved":"packages/a"},
+                "packages/a":{"name":"a","version":"1.0.0","dependencies":{"dep":"^1"}},
+                "node_modules/dep":{"version":"1.2.3"}
+            }))));
+        write(root.path(), "packages/a", json!({"name":"a","version":"1.0.0","dependencies":{"dep":"^1"}}));
+        root
+    }
+
+    #[test]
+    fn captured_workspace_link_and_hoisted_dependency_can_pass_metadata_admission() {
+        let root = linked_fixture();
+        let report = inspect(root.path(), deadline()).unwrap();
+        assert!(!report.requires_review(), "{report:#?}");
+        assert_eq!(report.packages_scanned, 2);
+        assert_eq!(report.manifests_scanned, 2);
+        assert_eq!(report.inputs.iter().map(|input| input.path.as_str()).collect::<Vec<_>>(),
+            ["package-lock.json", "package.json", "packages/a/package.json"]);
+        // Metadata inspection neither installs a link nor runs the project.
+        assert!(!root.path().join("node_modules").exists());
+        assert_eq!(report, inspect(root.path(), deadline()).unwrap());
+    }
+
+    #[test]
+    fn inter_workspace_cycles_and_scoped_names_resolve_without_recursing_through_links() {
+        let root = fixture(json!({"workspaces":["packages/*"]}), Some(modern_fixture(json!({
+            "node_modules/@team/a":{"link":true,"resolved":"packages/a"},
+            "node_modules/b":{"link":true,"resolved":"packages/b"},
+            "packages/a":{"name":"@team/a","version":"1.0.0","dependencies":{"b":"^1"}},
+            "packages/b":{"name":"b","version":"1.0.0","dependencies":{"@team/a":"^1"}}
+        }))));
+        write(root.path(), "packages/a", json!({"name":"@team/a","version":"1.0.0","dependencies":{"b":"^1"}}));
+        write(root.path(), "packages/b", json!({"name":"b","version":"1.0.0","dependencies":{"@team/a":"^1"}}));
+        let report = inspect(root.path(), deadline()).unwrap();
+        assert!(!report.requires_review(), "{report:#?}");
+        assert_eq!(report.packages_scanned, 2);
+        assert_eq!(report.manifests_scanned, 3);
+    }
+
+    #[test]
+    fn changed_workspace_name_version_or_declaration_maps_cannot_clear_link_review() {
+        for changed in [
+            json!({"name":"other","version":"1.0.0","dependencies":{"dep":"^1"}}),
+            json!({"name":"a","version":"2.0.0","dependencies":{"dep":"^1"}}),
+            json!({"name":"a","dependencies":{"dep":"^1"}}),
+            json!({"name":"a","version":"1.0.0","dependencies":{"dep":"^2"}}),
+            json!({"name":"a","version":"1.0.0","dependencies":{"dep":"^1"},"peerDependenciesMeta":{"dep":{"optional":true}}}),
+        ] {
+            let root = linked_fixture();
+            write(root.path(), "packages/a", changed);
+            let report = inspect(root.path(), deadline()).unwrap();
+            assert!(codes(&report).contains(&"workspace_review"), "{report:#?}");
+            assert!(codes(&report).contains(&"local_link"), "{report:#?}");
+        }
+    }
+
+    #[test]
+    fn selected_manifest_cannot_authorize_unselected_or_nested_local_links() {
+        for (location, target, descriptor) in [
+            ("node_modules/extra", "unselected", json!({"name":"extra","version":"1.0.0"})),
+            ("packages/a/node_modules/a", "packages/a", json!({"name":"a","version":"1.0.0","dependencies":{"dep":"^1"}})),
+        ] {
+            let root = linked_fixture();
+            let path = root.path().join("package-lock.json");
+            let mut lock: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            lock["packages"][location] = json!({"link":true,"resolved":target});
+            lock["packages"][target] = descriptor;
+            fs::write(path, serde_json::to_vec(&lock).unwrap()).unwrap();
+            let report = inspect(root.path(), deadline()).unwrap();
+            assert!(report.findings.iter().any(|finding| finding.code == "local_link"
+                && finding.package_path.as_deref() == Some(location)), "{report:#?}");
+        }
+    }
+
+    #[test]
+    fn wrong_root_link_target_or_missing_target_descriptor_never_passes() {
+        for missing in [false, true] {
+            let root = linked_fixture();
+            let path = root.path().join("package-lock.json");
+            let mut lock: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            if missing {
+                lock["packages"].as_object_mut().unwrap().remove("packages/a");
+            } else {
+                lock["packages"]["node_modules/a"]["resolved"] = json!("packages/other");
+                lock["packages"]["packages/other"] = json!({"name":"a","version":"1.0.0","dependencies":{"dep":"^1"}});
+            }
+            fs::write(path, serde_json::to_vec(&lock).unwrap()).unwrap();
+            let report = inspect(root.path(), deadline()).unwrap();
+            assert!(codes(&report).contains(&"workspace_review"), "{report:#?}");
+        }
+    }
+
+    #[test]
+    fn captured_lifecycle_and_native_build_markers_remain_blockers_after_link_binding() {
+        for kind in ["script", "gypfile", "binding"] {
+            let root = linked_fixture();
+            let mut manifest = json!({"name":"a","version":"1.0.0","dependencies":{"dep":"^1"}});
+            match kind {
+                "script" => manifest["scripts"] = json!({"prepare":"touch MUST_NOT_EXIST"}),
+                "gypfile" => manifest["gypfile"] = json!(true),
+                _ => fs::write(root.path().join("packages/a/binding.gyp"), "{}").unwrap(),
+            }
+            write(root.path(), "packages/a", manifest);
+            let report = inspect(root.path(), deadline()).unwrap();
+            let expected = if kind == "script" { "install_script" } else { "native_build" };
+            assert!(codes(&report).contains(&expected), "{report:#?}");
+            assert!(!codes(&report).contains(&"workspace_review"));
+            assert!(!codes(&report).contains(&"local_link"));
+            assert!(!root.path().join("packages/a/MUST_NOT_EXIST").exists());
+        }
+    }
+
+    #[test]
+    fn independent_workspace_lock_authorities_remain_review_items() {
+        for filename in ["package-lock.json", "npm-shrinkwrap.json"] {
+            let root = linked_fixture();
+            fs::write(root.path().join("packages/a").join(filename), r#"{"lockfileVersion":3,"packages":{}}"#).unwrap();
+            let report = inspect(root.path(), deadline()).unwrap();
+            assert!(codes(&report).contains(&"workspace_lockfile"), "{report:#?}");
+            assert!(report.inputs.iter().any(|input| input.path == format!("packages/a/{filename}")));
+        }
+    }
+
+    #[test]
+    fn symlinked_or_malformed_nested_lockfiles_are_errors_not_unobserved_approval() {
+        use std::os::unix::fs::symlink;
+        let root = linked_fixture();
+        symlink("../../package-lock.json", root.path().join("packages/a/package-lock.json")).unwrap();
+        assert!(inspect(root.path(), deadline()).is_err());
+        let root = linked_fixture();
+        fs::write(root.path().join("packages/a/package-lock.json"), "invalid").unwrap();
+        assert!(inspect(root.path(), deadline()).is_err());
+    }
+
+    #[test]
+    fn external_or_alias_requests_are_not_substituted_with_same_named_workspaces() {
+        for request in ["npm:a@1", "file:../external", "https://example.invalid/a.tgz", "owner/repo"] {
+            let root = linked_fixture();
+            fs::write(root.path().join("package.json"), serde_json::to_vec(&json!({
+                "name":"root","workspaces":["packages/*"],"dependencies":{"a":request}
+            })).unwrap()).unwrap();
+            let report = inspect(root.path(), deadline()).unwrap();
+            assert!(report.findings.iter().any(|finding| finding.source == "package.json#dependencies"
+                && finding.code == "unresolved_declaration"), "{request}: {report:#?}");
+        }
+    }
+
+    #[test]
+    fn stale_locked_workspace_projection_cannot_hide_a_new_native_dependency() {
+        let root = linked_fixture();
+        write(root.path(), "packages/a", json!({"name":"a","version":"1.0.0","dependencies":{"image":"npm:sharp@^1"}}));
+        let report = inspect(root.path(), deadline()).unwrap();
+        assert!(report.findings.iter().any(|finding| finding.source == "packages/a/package.json#dependencies"
+            && finding.package == "sharp" && finding.code == "native_addon"));
+        assert!(codes(&report).contains(&"workspace_review"));
     }
 }
