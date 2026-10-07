@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as FmtWrite;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -34,6 +34,17 @@ const MAX_PREPARED_EVENTS: usize = 50000; // Hardening: prevent unbounded prepar
 const DEFAULT_POLICY_VERSION: &str = "0.1.0";
 const DEFAULT_CREATED_AT: &str = "1970-01-01T00:00:00.000000Z";
 pub const INCIDENT_EVIDENCE_SCHEMA: &str = "franken-node/incident-evidence-source/v1";
+pub const INCIDENT_EVIDENCE_SOURCE_SIGNATURE_SCHEMA: &str =
+    "franken-node/incident-evidence-source-signature/v1";
+const INCIDENT_EVIDENCE_SOURCE_SIGNATURE_DOMAIN: &[u8] =
+    b"franken-node/incident-evidence-source-signature/v1\0";
+const MAX_INCIDENT_EVIDENCE_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+pub const RUN_EXECUTION_RECEIPT_SCHEMA: &str = "franken-node/run-execution-receipt/v1";
+pub const RUN_HOST_EFFECT_LEDGER_RECORD_SCHEMA: &str =
+    "franken-node/run-host-effect-ledger-record/v1";
+const RUN_LEDGER_RECORD_SIGNATURE_DOMAIN: &[u8] =
+    b"franken-node/run-host-effect-ledger-record-signature/v1\0";
+const MAX_RUN_LEDGER_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 const REPLAY_BUNDLE_SIGNATURE_ALGORITHM: &str = "ed25519";
 const REPLAY_BUNDLE_SIGNATURE_TRUST_SCOPE: &str = "incident_replay_bundle";
 const REPLAY_BUNDLE_SIGNATURE_PAYLOAD_DOMAIN: &[u8] = b"replay_bundle_sig_v1:";
@@ -168,6 +179,37 @@ pub enum ReplayBundleError {
     SignatureMalformed { detail: String },
     #[error("replay bundle signature verification failed")]
     SignatureInvalid,
+    #[error("incident evidence source signature schema mismatch: expected {expected}, found {actual}")]
+    EvidenceSourceSignatureSchemaMismatch {
+        actual: String,
+        expected: &'static str,
+    },
+    #[error("unsupported incident evidence source signature algorithm {algorithm}")]
+    EvidenceSourceSignatureAlgorithmUnsupported { algorithm: String },
+    #[error("incident evidence source signature key is not trusted")]
+    EvidenceSourceSignatureKeyUntrusted,
+    #[error("incident evidence source signed payload hash does not match")]
+    EvidenceSourcePayloadHashMismatch,
+    #[error("incident evidence source signature bytes are malformed: {detail}")]
+    EvidenceSourceSignatureMalformed { detail: String },
+    #[error("incident evidence source signature verification failed")]
+    EvidenceSourceSignatureInvalid,
+    #[error("incident evidence source exceeds {max_bytes} bytes")]
+    EvidenceSourceTooLarge { max_bytes: u64 },
+    #[error("run host-effect ledger record is invalid: {detail}")]
+    RunLedgerRecordInvalid { detail: String },
+    #[error("run host-effect ledger record is missing its complete receipt snapshot")]
+    RunLedgerReceiptSnapshotMissing,
+    #[error("run host-effect ledger record signature is missing")]
+    RunLedgerRecordSignatureMissing,
+    #[error("run host-effect ledger record signature bytes are malformed: {detail}")]
+    RunLedgerRecordSignatureMalformed { detail: String },
+    #[error("run host-effect ledger record signature verification failed")]
+    RunLedgerRecordSignatureInvalid,
+    #[error("run receipt does not match the authenticated complete receipt snapshot")]
+    RunLedgerReceiptMismatch,
+    #[error("run host-effect ledger record exceeds {max_bytes} bytes")]
+    RunLedgerRecordTooLarge { max_bytes: u64 },
     #[error("incident evidence schema mismatch: expected `{expected}`, found `{actual}`")]
     EvidenceSchemaMismatch {
         expected: &'static str,
@@ -470,6 +512,225 @@ pub struct IncidentEvidencePackage {
     pub metadata: IncidentEvidenceMetadata,
 }
 
+/// Collected incident evidence sealed by the configured product receipt authority.
+///
+/// The evidence fields remain at the top level for existing evidence consumers.
+/// Authentication requires a caller-supplied trusted key; this envelope never
+/// supplies its own trust anchor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SignedIncidentEvidencePackage {
+    #[serde(flatten)]
+    pub evidence: IncidentEvidencePackage,
+    pub source_signature: IncidentEvidenceSourceSignature,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IncidentEvidenceSourceSignature {
+    pub schema_version: String,
+    pub algorithm: String,
+    pub key_id: String,
+    pub signed_payload_sha256: String,
+    pub signature_hex: String,
+}
+
+/// Preserve the exact JSON data model while rejecting duplicate keys before
+/// serde_json::Value or a typed model can collapse them.
+struct UniqueEvidenceJson(Value);
+
+impl<'de> Deserialize<'de> for UniqueEvidenceJson {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct UniqueJsonVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for UniqueJsonVisitor {
+            type Value = Value;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("JSON without duplicate object keys")
+            }
+
+            fn visit_bool<E>(self, value: bool) -> Result<Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(Value::Bool(value))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(Value::Number(value.into()))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(Value::Number(value.into()))
+            }
+
+            fn visit_f64<E>(self, value: f64) -> Result<Value, E>
+            where
+                E: serde::de::Error,
+            {
+                serde_json::Number::from_f64(value)
+                    .map(Value::Number)
+                    .ok_or_else(|| E::custom("JSON number must be finite"))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(Value::String(value.to_owned()))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(Value::String(value))
+            }
+
+            fn visit_unit<E>(self) -> Result<Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(Value::Null)
+            }
+
+            fn visit_none<E>(self) -> Result<Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(Value::Null)
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut values = Vec::new();
+                while let Some(value) = sequence.next_element::<UniqueEvidenceJson>()? {
+                    values.push(value.0);
+                }
+                Ok(Value::Array(values))
+            }
+
+            fn visit_map<A>(self, mut object: A) -> Result<Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut values = Map::new();
+                while let Some(key) = object.next_key::<String>()? {
+                    if values.contains_key(&key) {
+                        return Err(<A::Error as serde::de::Error>::custom(format!(
+                            "duplicate JSON field {key}"
+                        )));
+                    }
+                    let value = object.next_value::<UniqueEvidenceJson>()?;
+                    values.insert(key, value.0);
+                }
+                Ok(Value::Object(values))
+            }
+        }
+
+        deserializer.deserialize_any(UniqueJsonVisitor).map(Self)
+    }
+}
+
+fn check_evidence_source_fields(value: &Value) -> Result<(), String> {
+    fn check_object(value: &Value, allowed: &[&str], path: &str) -> Result<(), String> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| format!("{path} must be an object"))?;
+        for field in object.keys() {
+            if !allowed.contains(&field.as_str()) {
+                return Err(format!("unknown incident evidence field {path}.{field}"));
+            }
+        }
+        Ok(())
+    }
+
+    check_object(
+        value,
+        &[
+            "schema_version",
+            "incident_id",
+            "collected_at",
+            "trace_id",
+            "severity",
+            "incident_type",
+            "detector",
+            "policy_version",
+            "initial_state_snapshot",
+            "events",
+            "evidence_refs",
+            "metadata",
+            "source_signature",
+        ],
+        "$",
+    )?;
+    if let Some(metadata) = value.get("metadata") {
+        check_object(
+            metadata,
+            &["title", "affected_components", "tags"],
+            "$.metadata",
+        )?;
+    }
+    if let Some(events) = value.get("events") {
+        let events = events
+            .as_array()
+            .ok_or_else(|| "$.events must be an array".to_string())?;
+        for (index, event) in events.iter().enumerate() {
+            check_object(
+                event,
+                &[
+                    "event_id",
+                    "timestamp",
+                    "event_type",
+                    "payload",
+                    "provenance_ref",
+                    "parent_event_id",
+                    "state_snapshot",
+                    "policy_version",
+                ],
+                &format!("$.events[{index}]"),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+impl<'de> Deserialize<'de> for SignedIncidentEvidencePackage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut value = UniqueEvidenceJson::deserialize(deserializer)?.0;
+        check_evidence_source_fields(&value)
+            .map_err(<D::Error as serde::de::Error>::custom)?;
+        let signature = value
+            .as_object_mut()
+            .and_then(|object| object.remove("source_signature"))
+            .ok_or_else(|| {
+                <D::Error as serde::de::Error>::missing_field("source_signature")
+            })?;
+        let source_signature = serde_json::from_value(signature)
+            .map_err(<D::Error as serde::de::Error>::custom)?;
+        let evidence = serde_json::from_value(value)
+            .map_err(<D::Error as serde::de::Error>::custom)?;
+        Ok(Self {
+            evidence,
+            source_signature,
+        })
+    }
+}
+
 #[derive(Debug)]
 struct PreparedEvent {
     normalized_timestamp: String,
@@ -508,6 +769,319 @@ struct ReplayBundleIntegrityView<'a> {
     trust_artifact_refs: &'a [String],
 }
 
+fn validate_run_ledger_record(record: &Value) -> Result<&Value, ReplayBundleError> {
+    let invalid = |detail: String| ReplayBundleError::RunLedgerRecordInvalid { detail };
+    let object = record
+        .as_object()
+        .ok_or_else(|| invalid("record must be an object".to_string()))?;
+    if record.get("schema_version").and_then(Value::as_str)
+        != Some(RUN_HOST_EFFECT_LEDGER_RECORD_SCHEMA)
+    {
+        return Err(invalid("unexpected record schema_version".to_string()));
+    }
+    for field in [
+        "receipt_id",
+        "receipt_hash",
+        "receipt_path",
+        "app_path",
+        "policy_mode",
+        "trace_id",
+    ] {
+        if object
+            .get(field)
+            .and_then(Value::as_str)
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err(invalid(format!("{field} must be a nonempty string")));
+        }
+    }
+    if !record.get("host_effect_ledger").is_some_and(Value::is_object) {
+        return Err(invalid("host_effect_ledger must be an object".to_string()));
+    }
+    if !record
+        .get("ssrf_violations")
+        .and_then(Value::as_array)
+        .is_some_and(|values| values.iter().all(Value::is_string))
+    {
+        return Err(invalid("ssrf_violations must be an array of strings".to_string()));
+    }
+    let sentinel_enforced = record
+        .get("sentinel_enforced")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| invalid("sentinel_enforced must be a boolean".to_string()))?;
+    let snapshot = record
+        .get("receipt_snapshot")
+        .filter(|value| value.is_object())
+        .ok_or(ReplayBundleError::RunLedgerReceiptSnapshotMissing)?;
+    if snapshot.get("schema_version").and_then(Value::as_str)
+        != Some(RUN_EXECUTION_RECEIPT_SCHEMA)
+    {
+        return Err(invalid("unexpected receipt snapshot schema_version".to_string()));
+    }
+    for field in [
+        "receipt_id",
+        "receipt_hash",
+        "app_path",
+        "policy_mode",
+        "ssrf_violations",
+    ] {
+        if record.get(field) != snapshot.get(field) {
+            return Err(invalid(format!(
+                "{field} does not match the complete receipt snapshot"
+            )));
+        }
+    }
+    let snapshot_sentinel = snapshot
+        .get("sentinel_enforcement")
+        .filter(|value| !value.is_null());
+    if snapshot_sentinel.is_some_and(|value| !value.is_object())
+        || sentinel_enforced != snapshot_sentinel.is_some()
+    {
+        return Err(invalid(
+            "sentinel_enforced does not match the receipt snapshot".to_string(),
+        ));
+    }
+    Ok(snapshot)
+}
+
+fn run_ledger_record_signing_bytes(record: &Value) -> Result<Vec<u8>, ReplayBundleError> {
+    validate_run_ledger_record(record)?;
+    let mut counter = ByteCounter::default();
+    serde_json::to_writer(&mut counter, record)?;
+    if counter.len as u64 > MAX_RUN_LEDGER_RECORD_BYTES {
+        return Err(ReplayBundleError::RunLedgerRecordTooLarge {
+            max_bytes: MAX_RUN_LEDGER_RECORD_BYTES,
+        });
+    }
+    let mut canonical = record.clone();
+    canonical
+        .as_object_mut()
+        .expect("validated record object")
+        .remove("record_signature");
+    // Complete execution receipts include finite floating-point telemetry. Sort
+    // every object while preserving those JSON numbers, unlike incident events.
+    canonical.sort_all_objects();
+    let mut payload = Vec::with_capacity(
+        RUN_LEDGER_RECORD_SIGNATURE_DOMAIN.len() + counter.len,
+    );
+    payload.extend_from_slice(RUN_LEDGER_RECORD_SIGNATURE_DOMAIN);
+    serde_json::to_writer(&mut payload, &canonical)?;
+    Ok(payload)
+}
+
+/// Bind the full receipt snapshot, run metadata and engine ledger to the product
+/// receipt authority. Only the record_signature field is excluded from the seal.
+///
+/// The caller must separately verify the engine session identity, signature and
+/// host-effect chain. This signature does not replace engine-ledger verification.
+pub fn sign_run_ledger_record(
+    record: &Value,
+    signing_key: &ed25519_dalek::SigningKey,
+) -> Result<String, ReplayBundleError> {
+    let payload = run_ledger_record_signing_bytes(record)?;
+    let signature = hex::encode(signing_key.sign(&payload).to_bytes());
+    let mut signed = record.clone();
+    signed
+        .as_object_mut()
+        .expect("validated record object")
+        .insert("record_signature".to_string(), Value::String(signature.clone()));
+    let mut counter = ByteCounter::default();
+    serde_json::to_writer_pretty(&mut counter, &signed)?;
+    if counter.len as u64 > MAX_RUN_LEDGER_RECORD_BYTES {
+        return Err(ReplayBundleError::RunLedgerRecordTooLarge {
+            max_bytes: MAX_RUN_LEDGER_RECORD_BYTES,
+        });
+    }
+    Ok(signature)
+}
+
+/// Authenticate the complete raw record and its exact receipt snapshot against
+/// a caller-supplied product key, before converting it to a narrower typed model.
+pub fn verify_run_ledger_record_receipt(
+    record: &Value,
+    receipt: &Value,
+    trusted_key: &ed25519_dalek::VerifyingKey,
+) -> Result<(), ReplayBundleError> {
+    let payload = run_ledger_record_signing_bytes(record)?;
+    let signature_hex = record
+        .get("record_signature")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or(ReplayBundleError::RunLedgerRecordSignatureMissing)?;
+    let mut signature_bytes = [0_u8; ED25519_SIGNATURE_BYTES];
+    hex::decode_to_slice(signature_hex, &mut signature_bytes).map_err(|source| {
+        ReplayBundleError::RunLedgerRecordSignatureMalformed {
+            detail: source.to_string(),
+        }
+    })?;
+    trusted_key
+        .verify_strict(
+            &payload,
+            &ed25519_dalek::Signature::from_bytes(&signature_bytes),
+        )
+        .map_err(|_| ReplayBundleError::RunLedgerRecordSignatureInvalid)?;
+    if record.get("receipt_snapshot") != Some(receipt) {
+        return Err(ReplayBundleError::RunLedgerReceiptMismatch);
+    }
+    Ok(())
+}
+
+/// Parse and authenticate one bounded raw record without collapsing duplicate
+/// keys or stripping future fields. Typed deserialization belongs after this
+/// check; all retained fields except record_signature are authenticated.
+pub fn parse_verified_run_ledger_record(
+    bytes: &[u8],
+    receipt: &Value,
+    trusted_key: &ed25519_dalek::VerifyingKey,
+) -> Result<Value, ReplayBundleError> {
+    if bytes.len() as u64 > MAX_RUN_LEDGER_RECORD_BYTES {
+        return Err(ReplayBundleError::RunLedgerRecordTooLarge {
+            max_bytes: MAX_RUN_LEDGER_RECORD_BYTES,
+        });
+    }
+    let record = serde_json::from_slice::<UniqueEvidenceJson>(bytes)?.0;
+    verify_run_ledger_record_receipt(&record, receipt, trusted_key)?;
+    Ok(record)
+}
+
+fn incident_evidence_source_signing_bytes(
+    evidence: &IncidentEvidencePackage,
+) -> Result<Vec<u8>, ReplayBundleError> {
+    let mut counter = ByteCounter::default();
+    serde_json::to_writer(&mut counter, evidence)?;
+    if counter.len as u64 > MAX_INCIDENT_EVIDENCE_SOURCE_BYTES {
+        return Err(ReplayBundleError::EvidenceSourceTooLarge {
+            max_bytes: MAX_INCIDENT_EVIDENCE_SOURCE_BYTES,
+        });
+    }
+    let canonical = canonicalize_value(
+        &serde_json::to_value(evidence)?,
+        "$.incident_evidence_source",
+    )?;
+    let mut payload = Vec::with_capacity(
+        INCIDENT_EVIDENCE_SOURCE_SIGNATURE_DOMAIN.len() + counter.len,
+    );
+    payload.extend_from_slice(INCIDENT_EVIDENCE_SOURCE_SIGNATURE_DOMAIN);
+    serde_json::to_writer(&mut payload, &canonical)?;
+    Ok(payload)
+}
+
+/// Seal the complete collected source package before persisting or exporting it.
+///
+/// Callers must authenticate the originating run receipt and engine ledger first.
+/// Signing operator-authored data alone cannot establish runtime provenance.
+pub fn sign_incident_evidence_package(
+    evidence: IncidentEvidencePackage,
+    signing_key: &ed25519_dalek::SigningKey,
+) -> Result<SignedIncidentEvidencePackage, ReplayBundleError> {
+    validate_incident_evidence_package(&evidence, None)?;
+    let payload = incident_evidence_source_signing_bytes(&evidence)?;
+    let verifying_key = signing_key.verifying_key();
+    let source_signature = IncidentEvidenceSourceSignature {
+        schema_version: INCIDENT_EVIDENCE_SOURCE_SIGNATURE_SCHEMA.to_string(),
+        algorithm: "ed25519".to_string(),
+        key_id: crate::supply_chain::artifact_signing::KeyId::from_verifying_key(&verifying_key)
+            .to_string(),
+        signed_payload_sha256: hex::encode(Sha256::digest(&payload)),
+        signature_hex: hex::encode(signing_key.sign(&payload).to_bytes()),
+    };
+    let signed = SignedIncidentEvidencePackage {
+        evidence,
+        source_signature,
+    };
+    // The CLI persists pretty JSON. Do not produce an envelope that the bounded
+    // reader cannot consume once the signature and formatting are added.
+    let mut counter = ByteCounter::default();
+    serde_json::to_writer_pretty(&mut counter, &signed)?;
+    if counter.len as u64 > MAX_INCIDENT_EVIDENCE_SOURCE_BYTES {
+        return Err(ReplayBundleError::EvidenceSourceTooLarge {
+            max_bytes: MAX_INCIDENT_EVIDENCE_SOURCE_BYTES,
+        });
+    }
+    Ok(signed)
+}
+
+/// Authenticate all source fields against an independently supplied product key.
+pub fn verify_incident_evidence_source(
+    signed: &SignedIncidentEvidencePackage,
+    expected_incident_id: Option<&str>,
+    trusted_key: &ed25519_dalek::VerifyingKey,
+) -> Result<(), ReplayBundleError> {
+    let signature = &signed.source_signature;
+    if signature.schema_version != INCIDENT_EVIDENCE_SOURCE_SIGNATURE_SCHEMA {
+        return Err(ReplayBundleError::EvidenceSourceSignatureSchemaMismatch {
+            actual: signature.schema_version.clone(),
+            expected: INCIDENT_EVIDENCE_SOURCE_SIGNATURE_SCHEMA,
+        });
+    }
+    if signature.algorithm != "ed25519" {
+        return Err(ReplayBundleError::EvidenceSourceSignatureAlgorithmUnsupported {
+            algorithm: signature.algorithm.clone(),
+        });
+    }
+    let trusted_key_id =
+        crate::supply_chain::artifact_signing::KeyId::from_verifying_key(trusted_key).to_string();
+    if !constant_time::ct_eq(&signature.key_id, &trusted_key_id) {
+        return Err(ReplayBundleError::EvidenceSourceSignatureKeyUntrusted);
+    }
+    validate_incident_evidence_package(&signed.evidence, expected_incident_id)?;
+    let payload = incident_evidence_source_signing_bytes(&signed.evidence)?;
+    let expected_hash = hex::encode(Sha256::digest(&payload));
+    if !constant_time::ct_eq(&signature.signed_payload_sha256, &expected_hash) {
+        return Err(ReplayBundleError::EvidenceSourcePayloadHashMismatch);
+    }
+    let mut signature_bytes = [0_u8; ED25519_SIGNATURE_BYTES];
+    hex::decode_to_slice(&signature.signature_hex, &mut signature_bytes).map_err(|source| {
+        ReplayBundleError::EvidenceSourceSignatureMalformed {
+            detail: source.to_string(),
+        }
+    })?;
+    trusted_key
+        .verify_strict(
+            &payload,
+            &ed25519_dalek::Signature::from_bytes(&signature_bytes),
+        )
+        .map_err(|_| ReplayBundleError::EvidenceSourceSignatureInvalid)
+}
+
+/// Verify the same bytes used to classify a source, without a second file read.
+pub fn parse_verified_incident_evidence_package(
+    bytes: &[u8],
+    expected_incident_id: Option<&str>,
+    trusted_key: &ed25519_dalek::VerifyingKey,
+) -> Result<IncidentEvidencePackage, ReplayBundleError> {
+    if bytes.len() as u64 > MAX_INCIDENT_EVIDENCE_SOURCE_BYTES {
+        return Err(ReplayBundleError::EvidenceSourceTooLarge {
+            max_bytes: MAX_INCIDENT_EVIDENCE_SOURCE_BYTES,
+        });
+    }
+    let signed: SignedIncidentEvidencePackage = serde_json::from_slice(bytes)?;
+    verify_incident_evidence_source(&signed, expected_incident_id, trusted_key)?;
+    Ok(signed.evidence)
+}
+
+/// Read an authenticated captured source with a bounded, single file read.
+pub fn read_verified_incident_evidence_package(
+    path: &Path,
+    expected_incident_id: Option<&str>,
+    trusted_key: &ed25519_dalek::VerifyingKey,
+) -> Result<IncidentEvidencePackage, ReplayBundleError> {
+    let file = std::fs::File::open(path)?;
+    if file.metadata()?.len() > MAX_INCIDENT_EVIDENCE_SOURCE_BYTES {
+        return Err(ReplayBundleError::EvidenceSourceTooLarge {
+            max_bytes: MAX_INCIDENT_EVIDENCE_SOURCE_BYTES,
+        });
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_INCIDENT_EVIDENCE_SOURCE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    parse_verified_incident_evidence_package(&bytes, expected_incident_id, trusted_key)
+}
+
+/// Read a structurally valid, explicitly operator-authored evidence package.
+///
+/// Captured runtime sources must use read_verified_incident_evidence_package
+/// with the configured product receipt authority.
 pub fn read_incident_evidence_package(
     path: &Path,
     expected_incident_id: Option<&str>,
@@ -2814,6 +3388,576 @@ mod tests {
                 tags: vec!["test".to_string()],
             },
         }
+    }
+
+
+    fn signed_incident_source_fixture(incident_id: &str) -> SignedIncidentEvidencePackage {
+        let mut package = fixture_evidence_package(incident_id);
+        package.incident_type = "runtime-security-control".to_string();
+        package.initial_state_snapshot = serde_json::json!({
+            "run_receipt_id": "run-source-001",
+            "run_receipt_hash": "receipt-hash-001",
+            "host_effect_chain_head": "chain-head-001",
+            "mode": "strict",
+        });
+        sign_incident_evidence_package(package, &fixture_signing_key()).expect("sign source")
+    }
+
+    #[test]
+    fn signed_incident_source_roundtrip_preserves_the_complete_collected_package() {
+        let signed = signed_incident_source_fixture("INC-SOURCE-ROUNDTRIP");
+        let json = serde_json::to_value(&signed).expect("source JSON");
+        assert_eq!(json["schema_version"], INCIDENT_EVIDENCE_SCHEMA);
+        assert!(json.get("evidence").is_none(), "evidence stays flattened");
+        assert!(json.get("source_signature").is_some());
+        let generic: IncidentEvidencePackage =
+            serde_json::from_value(json).expect("existing evidence readers can parse the package");
+        assert_eq!(generic, signed.evidence);
+        let bytes = serde_json::to_vec_pretty(&signed).expect("source bytes");
+        let trusted_key = fixture_signing_key().verifying_key();
+        let parsed = parse_verified_incident_evidence_package(
+            &bytes,
+            Some("INC-SOURCE-ROUNDTRIP"),
+            &trusted_key,
+        )
+        .expect("authenticated source");
+        assert_eq!(parsed, signed.evidence);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("evidence.v1.json");
+        std::fs::write(&path, bytes).expect("write source");
+        assert_eq!(
+            read_verified_incident_evidence_package(
+                &path,
+                Some("INC-SOURCE-ROUNDTRIP"),
+                &trusted_key,
+            )
+            .expect("read signed source"),
+            signed.evidence,
+        );
+    }
+
+    #[test]
+    fn signed_incident_source_authenticates_events_metadata_and_run_bindings() {
+        let original = signed_incident_source_fixture("INC-SOURCE-MUTATIONS");
+        let mutations: &[(&str, fn(&mut IncidentEvidencePackage))] = &[
+            ("incident id", |p| p.incident_id = "INC-SOURCE-OTHER".to_string()),
+            ("collected timestamp", |p| {
+                p.collected_at = "2026-02-20T10:06:00.000000Z".to_string();
+            }),
+            ("trace", |p| p.trace_id = "forged-trace".to_string()),
+            ("severity", |p| p.severity = IncidentSeverity::Low),
+            ("incident type", |p| p.incident_type = "operator-note".to_string()),
+            ("detector", |p| p.detector = "forged-detector".to_string()),
+            ("policy", |p| p.policy_version = "9.9.9".to_string()),
+            ("receipt id", |p| {
+                p.initial_state_snapshot["run_receipt_id"] = serde_json::json!("another-run");
+            }),
+            ("receipt hash", |p| {
+                p.initial_state_snapshot["run_receipt_hash"] = serde_json::json!("forged-hash");
+            }),
+            ("chain head", |p| {
+                p.initial_state_snapshot["host_effect_chain_head"] =
+                    serde_json::json!("forged-chain");
+            }),
+            ("event payload", |p| {
+                p.events[0].payload["severity"] = serde_json::json!("low");
+            }),
+            ("event type", |p| p.events[0].event_type = EventType::StateChange),
+            ("event timestamp", |p| {
+                p.events[2].timestamp = "2026-02-20T10:00:00.000400Z".to_string();
+            }),
+            ("event snapshot", |p| {
+                p.events[0].state_snapshot = Some(serde_json::json!({"forged": true}));
+            }),
+            ("event policy", |p| p.events[0].policy_version = Some("9.9.9".to_string())),
+            ("event parent", |p| p.events[2].parent_event_id = Some("evt-001".to_string())),
+            ("event identity", |p| {
+                p.events[0].event_id = "evt-forged".to_string();
+                p.events[1].parent_event_id = Some("evt-forged".to_string());
+            }),
+            ("provenance", |p| {
+                p.events[0].provenance_ref = "refs/logs/event-002.json".to_string();
+            }),
+            ("evidence refs", |p| p.evidence_refs.push("refs/extra.json".to_string())),
+            ("title", |p| p.metadata.title = "forged title".to_string()),
+            ("components", |p| p.metadata.affected_components.push("forged".to_string())),
+            ("tags", |p| p.metadata.tags.push("forged".to_string())),
+        ];
+        let trusted_key = fixture_signing_key().verifying_key();
+        for (name, mutate) in mutations {
+            let mut altered = original.clone();
+            mutate(&mut altered.evidence);
+            validate_incident_evidence_package(&altered.evidence, None)
+                .unwrap_or_else(|error| panic!("{name} should remain structurally valid: {error}"));
+            assert!(matches!(
+                verify_incident_evidence_source(&altered, None, &trusted_key),
+                Err(ReplayBundleError::EvidenceSourcePayloadHashMismatch)
+            ), "{name} must be authenticated");
+            let forged_payload =
+                incident_evidence_source_signing_bytes(&altered.evidence).expect("canonical source");
+            altered.source_signature.signed_payload_sha256 =
+                hex::encode(Sha256::digest(&forged_payload));
+            assert!(matches!(
+                verify_incident_evidence_source(&altered, None, &trusted_key),
+                Err(ReplayBundleError::EvidenceSourceSignatureInvalid)
+            ), "recomputing the advertised hash must not authenticate {name}");
+        }
+    }
+
+    #[test]
+    fn signed_incident_source_requires_the_independent_product_key_and_incident_id() {
+        let signed = signed_incident_source_fixture("INC-SOURCE-TRUST");
+        let trusted_key = fixture_signing_key().verifying_key();
+        let other_key = ed25519_dalek::SigningKey::from_bytes(&[99_u8; 32]).verifying_key();
+        assert!(matches!(
+            verify_incident_evidence_source(&signed, None, &other_key),
+            Err(ReplayBundleError::EvidenceSourceSignatureKeyUntrusted)
+        ));
+        let mut altered = signed.clone();
+        altered.source_signature.key_id =
+            crate::supply_chain::artifact_signing::KeyId::from_verifying_key(&other_key).to_string();
+        assert!(matches!(
+            verify_incident_evidence_source(&altered, None, &other_key),
+            Err(ReplayBundleError::EvidenceSourceSignatureInvalid)
+        ));
+        assert!(matches!(
+            verify_incident_evidence_source(&signed, Some("INC-OTHER"), &trusted_key),
+            Err(ReplayBundleError::EvidenceIncidentIdMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn signed_incident_source_refuses_other_signature_domains() {
+        let original = signed_incident_source_fixture("INC-SOURCE-DOMAINS");
+        let signing_key = fixture_signing_key();
+        let payload = incident_evidence_source_signing_bytes(&original.evidence)
+            .expect("source signing bytes");
+        let canonical = &payload[INCIDENT_EVIDENCE_SOURCE_SIGNATURE_DOMAIN.len()..];
+        for domain in [b"".as_slice(), REPLAY_BUNDLE_SIGNATURE_PAYLOAD_DOMAIN] {
+            let mut wrong_payload = domain.to_vec();
+            wrong_payload.extend_from_slice(canonical);
+            let mut altered = original.clone();
+            altered.source_signature.signature_hex =
+                hex::encode(signing_key.sign(&wrong_payload).to_bytes());
+            assert!(matches!(
+                verify_incident_evidence_source(&altered, None, &signing_key.verifying_key()),
+                Err(ReplayBundleError::EvidenceSourceSignatureInvalid)
+            ));
+        }
+        let bundle = signed_fixture_bundle("INC-SOURCE-DOMAINS");
+        let mut altered = original;
+        altered.source_signature.signature_hex =
+            bundle.signature.expect("bundle signature").signature_hex;
+        assert!(matches!(
+            verify_incident_evidence_source(&altered, None, &signing_key.verifying_key()),
+            Err(ReplayBundleError::EvidenceSourceSignatureInvalid)
+        ));
+    }
+
+    #[test]
+    fn signed_incident_source_refuses_bad_signature_metadata_and_bytes() {
+        let original = signed_incident_source_fixture("INC-SOURCE-BAD-SIGNATURE");
+        let trusted_key = fixture_signing_key().verifying_key();
+        let mut altered = original.clone();
+        altered.source_signature.schema_version = "unrecognized-schema".to_string();
+        assert!(matches!(
+            verify_incident_evidence_source(&altered, None, &trusted_key),
+            Err(ReplayBundleError::EvidenceSourceSignatureSchemaMismatch { .. })
+        ));
+        altered = original.clone();
+        altered.source_signature.algorithm = "none".to_string();
+        assert!(matches!(
+            verify_incident_evidence_source(&altered, None, &trusted_key),
+            Err(ReplayBundleError::EvidenceSourceSignatureAlgorithmUnsupported { .. })
+        ));
+        altered = original.clone();
+        altered.source_signature.signed_payload_sha256 = "00".repeat(32);
+        assert!(matches!(
+            verify_incident_evidence_source(&altered, None, &trusted_key),
+            Err(ReplayBundleError::EvidenceSourcePayloadHashMismatch)
+        ));
+        for bad_hex in ["".to_string(), "ab".to_string(), "zz".repeat(64)] {
+            altered = original.clone();
+            altered.source_signature.signature_hex = bad_hex;
+            assert!(matches!(
+                verify_incident_evidence_source(&altered, None, &trusted_key),
+                Err(ReplayBundleError::EvidenceSourceSignatureMalformed { .. })
+            ));
+        }
+        altered = original;
+        altered.source_signature.signature_hex = "00".repeat(64);
+        assert!(matches!(
+            verify_incident_evidence_source(&altered, None, &trusted_key),
+            Err(ReplayBundleError::EvidenceSourceSignatureInvalid)
+        ));
+    }
+
+    #[test]
+    fn signed_incident_source_reader_never_downgrades_missing_or_invalid_signatures() {
+        let signed = signed_incident_source_fixture("INC-SOURCE-NO-DOWNGRADE");
+        let trusted_key = fixture_signing_key().verifying_key();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("evidence.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&signed.evidence).expect("unsigned source"),
+        )
+        .expect("write source");
+        assert!(read_incident_evidence_package(&path, None).is_ok());
+        assert!(read_verified_incident_evidence_package(&path, None, &trusted_key).is_err());
+
+        for signature in [Value::Null, serde_json::json!({})] {
+            let mut value = serde_json::to_value(&signed).expect("source");
+            value["source_signature"] = signature;
+            let bytes = serde_json::to_vec(&value).expect("source bytes");
+            assert!(parse_verified_incident_evidence_package(&bytes, None, &trusted_key).is_err());
+        }
+        let mut altered = signed;
+        altered.source_signature.signature_hex = "00".repeat(64);
+        std::fs::write(&path, serde_json::to_vec(&altered).expect("source"))
+            .expect("write altered source");
+        assert!(matches!(
+            read_verified_incident_evidence_package(&path, None, &trusted_key),
+            Err(ReplayBundleError::EvidenceSourceSignatureInvalid)
+        ));
+    }
+
+    #[test]
+    fn signed_incident_source_rejects_unknown_fields_and_duplicate_keys_at_any_depth() {
+        let signed = signed_incident_source_fixture("INC-SOURCE-STRICT-JSON");
+        let trusted_key = fixture_signing_key().verifying_key();
+        for pointer in ["", "/events/0", "/metadata", "/source_signature"] {
+            let mut value = serde_json::to_value(&signed).expect("source");
+            value
+                .pointer_mut(pointer)
+                .and_then(Value::as_object_mut)
+                .expect("object")
+                .insert("unsigned_extension".to_string(), serde_json::json!(true));
+            let bytes = serde_json::to_vec(&value).expect("JSON");
+            assert!(
+                parse_verified_incident_evidence_package(&bytes, None, &trusted_key).is_err(),
+                "unknown schema field at {pointer} must not be stripped before verification"
+            );
+        }
+
+        let json = serde_json::to_string(&signed).expect("source JSON");
+        for (needle, replacement) in [
+            ("\"trace_id\":", "\"trace_id\":\"duplicate\",\"trace_id\":"),
+            ("\"event_id\":", "\"event_id\":\"duplicate\",\"event_id\":"),
+            ("\"payload\":{", "\"payload\":{\"duplicate\":1,\"duplicate\":2,"),
+            ("\"algorithm\":", "\"algorithm\":\"ed25519\",\"algorithm\":"),
+            ("\"run_receipt_id\":", "\"run_receipt_id\":\"duplicate\",\"run_receipt_id\":"),
+        ] {
+            let duplicate = json.replacen(needle, replacement, 1);
+            assert_ne!(duplicate, json, "fixture must exercise {needle}");
+            let error = parse_verified_incident_evidence_package(
+                duplicate.as_bytes(),
+                None,
+                &trusted_key,
+            )
+            .expect_err("duplicate JSON field must fail");
+            assert!(error.to_string().contains("duplicate JSON field"));
+        }
+        let trailing = format!("{json} {{}}");
+        assert!(
+            parse_verified_incident_evidence_package(trailing.as_bytes(), None, &trusted_key)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn signed_incident_source_reader_bounds_file_size_before_parsing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("oversized.json");
+        std::fs::File::create(&path)
+            .expect("create sparse file")
+            .set_len(MAX_INCIDENT_EVIDENCE_SOURCE_BYTES + 1)
+            .expect("extend sparse file");
+        assert!(matches!(
+            read_verified_incident_evidence_package(
+                &path,
+                None,
+                &fixture_signing_key().verifying_key(),
+            ),
+            Err(ReplayBundleError::EvidenceSourceTooLarge { .. })
+        ));
+    }
+
+
+    fn signed_run_ledger_record_fixture() -> (Value, Value) {
+        let receipt = serde_json::json!({
+            "schema_version": RUN_EXECUTION_RECEIPT_SCHEMA,
+            "receipt_id": "run-provenance-001",
+            "receipt_hash": "receipt-hash-001",
+            "app_path": "fixtures/denied.js",
+            "policy_mode": "strict",
+            "profile": "native",
+            "duration_ms": 17,
+            "exit_code": 1,
+            "telemetry_summary": {"cpu_percent": 12.5, "rss_bytes": 4096},
+            "ssrf_violations": ["blocked.example"],
+            "sentinel_enforcement": {"action": "terminate", "posterior": 0.98},
+            "incident_capture": {
+                "incident_id": "INC-RUN-CHAIN",
+                "evidence_path": ".franken-node/state/incidents/INC-RUN-CHAIN/evidence.v1.json",
+            },
+        });
+        // This fixture tests the product record's complete binding. Its engine
+        // ledger is deliberately synthetic; the CLI must also run the existing
+        // engine identity/signature/chain verifier on a real collected ledger.
+        let mut record = serde_json::json!({
+            "schema_version": RUN_HOST_EFFECT_LEDGER_RECORD_SCHEMA,
+            "receipt_id": receipt["receipt_id"],
+            "receipt_hash": receipt["receipt_hash"],
+            "receipt_path": ".franken-node/state/run-receipts/run-provenance-001.json",
+            "app_path": receipt["app_path"],
+            "policy_mode": receipt["policy_mode"],
+            "trace_id": "trace-provenance-001",
+            "ssrf_violations": receipt["ssrf_violations"],
+            "sentinel_enforced": true,
+            "runtime_evidence_identity_capture_path": "identity/session-001.json",
+            "host_effect_ledger": {
+                "effect_count": 1,
+                "denied_count": 1,
+                "allowed_count": 0,
+                "failed_count": 0,
+                "chain_head_hash": "chain-head-001",
+                "effects": [{
+                    "sequence": 0,
+                    "payload": {"operation": "connect", "outcome": "deny"},
+                    "receipt_hash": "effect-hash-001",
+                }],
+            },
+            "receipt_snapshot": receipt,
+        });
+        record["record_signature"] =
+            serde_json::json!(sign_run_ledger_record(&record, &fixture_signing_key())
+                .expect("sign run record"));
+        (record, receipt)
+    }
+
+    #[test]
+    fn run_ledger_record_signature_roundtrip_covers_complete_receipt_and_finite_telemetry() {
+        let (record, receipt) = signed_run_ledger_record_fixture();
+        let trusted_key = fixture_signing_key().verifying_key();
+        verify_run_ledger_record_receipt(&record, &receipt, &trusted_key)
+            .expect("authentic record");
+        assert_eq!(record["record_signature"].as_str().expect("signature").len(), 128);
+        let bytes = serde_json::to_vec_pretty(&record).expect("record JSON");
+        let parsed = parse_verified_run_ledger_record(&bytes, &receipt, &trusted_key)
+            .expect("authenticated raw record");
+        assert_eq!(parsed, record);
+        assert_eq!(parsed["receipt_snapshot"], receipt);
+        assert_eq!(parsed["receipt_snapshot"]["telemetry_summary"]["cpu_percent"], 12.5);
+        assert_eq!(
+            sign_run_ledger_record(&parsed, &fixture_signing_key()).expect("stable signature"),
+            record["record_signature"].as_str().expect("signature"),
+        );
+    }
+
+    #[test]
+    fn run_ledger_record_signature_rejects_receipt_edits_and_coordinated_hash_replacement() {
+        let (record, receipt) = signed_run_ledger_record_fixture();
+        let trusted_key = fixture_signing_key().verifying_key();
+        for pointer in [
+            "/receipt_hash",
+            "/app_path",
+            "/policy_mode",
+            "/profile",
+            "/incident_capture/evidence_path",
+        ] {
+            let mut altered_receipt = receipt.clone();
+            *altered_receipt.pointer_mut(pointer).expect("receipt field") =
+                serde_json::json!("forged");
+            assert!(matches!(
+                verify_run_ledger_record_receipt(&record, &altered_receipt, &trusted_key),
+                Err(ReplayBundleError::RunLedgerReceiptMismatch)
+            ), "receipt field {pointer} must remain bound");
+        }
+        let mut altered = record.clone();
+        altered["receipt_hash"] = serde_json::json!("forged-advertised-hash");
+        altered["receipt_snapshot"]["receipt_hash"] =
+            serde_json::json!("forged-advertised-hash");
+        let altered_receipt = altered["receipt_snapshot"].clone();
+        validate_run_ledger_record(&altered).expect("coordinated edit remains structurally valid");
+        assert!(matches!(
+            verify_run_ledger_record_receipt(&altered, &altered_receipt, &trusted_key),
+            Err(ReplayBundleError::RunLedgerRecordSignatureInvalid)
+        ));
+
+        let mut substituted = receipt;
+        substituted["telemetry_summary"]["cpu_percent"] = serde_json::json!(0.1);
+        assert!(matches!(
+            verify_run_ledger_record_receipt(&record, &substituted, &trusted_key),
+            Err(ReplayBundleError::RunLedgerReceiptMismatch)
+        ), "matching advertised id/hash cannot authenticate a substituted receipt");
+    }
+
+    #[test]
+    fn run_ledger_record_signature_binds_metadata_identity_capture_and_effect_chain() {
+        let (record, _) = signed_run_ledger_record_fixture();
+        let trusted_key = fixture_signing_key().verifying_key();
+        let mutations: &[(&str, fn(&mut Value))] = &[
+            ("trace", |r| r["trace_id"] = serde_json::json!("forged-trace")),
+            ("receipt path", |r| r["receipt_path"] = serde_json::json!("another/receipt.json")),
+            ("app", |r| {
+                r["app_path"] = serde_json::json!("another.js");
+                r["receipt_snapshot"]["app_path"] = serde_json::json!("another.js");
+            }),
+            ("policy", |r| {
+                r["policy_mode"] = serde_json::json!("permissive");
+                r["receipt_snapshot"]["policy_mode"] = serde_json::json!("permissive");
+            }),
+            ("receipt id", |r| {
+                r["receipt_id"] = serde_json::json!("another-run");
+                r["receipt_snapshot"]["receipt_id"] = serde_json::json!("another-run");
+            }),
+            ("identity capture", |r| {
+                r["runtime_evidence_identity_capture_path"] = serde_json::json!("forged/session.json");
+            }),
+            ("chain head", |r| {
+                r["host_effect_ledger"]["chain_head_hash"] = serde_json::json!("forged-chain");
+            }),
+            ("effect payload", |r| {
+                r["host_effect_ledger"]["effects"][0]["payload"]["outcome"] =
+                    serde_json::json!("allow");
+            }),
+            ("outcome count", |r| r["host_effect_ledger"]["denied_count"] = serde_json::json!(0)),
+            ("incident pointer", |r| {
+                r["receipt_snapshot"]["incident_capture"]["evidence_path"] =
+                    serde_json::json!("forged/evidence.json");
+            }),
+            ("security outcome", |r| {
+                r["ssrf_violations"] = serde_json::json!([]);
+                r["receipt_snapshot"]["ssrf_violations"] = serde_json::json!([]);
+            }),
+        ];
+        for (name, mutate) in mutations {
+            let mut altered = record.clone();
+            mutate(&mut altered);
+            validate_run_ledger_record(&altered)
+                .unwrap_or_else(|error| panic!("{name} should remain structurally valid: {error}"));
+            let receipt = altered["receipt_snapshot"].clone();
+            assert!(matches!(
+                verify_run_ledger_record_receipt(&altered, &receipt, &trusted_key),
+                Err(ReplayBundleError::RunLedgerRecordSignatureInvalid)
+            ), "product signature must cover {name}");
+        }
+    }
+
+    #[test]
+    fn run_ledger_record_signature_refuses_missing_fields_and_malformed_records() {
+        let (record, receipt) = signed_run_ledger_record_fixture();
+        let trusted_key = fixture_signing_key().verifying_key();
+        let mut missing = record.clone();
+        missing.as_object_mut().expect("record").remove("record_signature");
+        assert!(matches!(
+            verify_run_ledger_record_receipt(&missing, &receipt, &trusted_key),
+            Err(ReplayBundleError::RunLedgerRecordSignatureMissing)
+        ));
+        missing = record.clone();
+        missing.as_object_mut().expect("record").remove("receipt_snapshot");
+        assert!(matches!(
+            verify_run_ledger_record_receipt(&missing, &receipt, &trusted_key),
+            Err(ReplayBundleError::RunLedgerReceiptSnapshotMissing)
+        ));
+        for field in ["receipt_id", "receipt_hash", "receipt_path", "app_path", "policy_mode", "trace_id"] {
+            let mut altered = record.clone();
+            altered[field] = serde_json::json!("");
+            assert!(sign_run_ledger_record(&altered, &fixture_signing_key()).is_err());
+            altered.as_object_mut().expect("record").remove(field);
+            assert!(verify_run_ledger_record_receipt(&altered, &receipt, &trusted_key).is_err());
+        }
+        for pointer in [
+            "/schema_version",
+            "/receipt_snapshot/schema_version",
+            "/host_effect_ledger",
+            "/ssrf_violations",
+            "/sentinel_enforced",
+        ] {
+            let mut altered = record.clone();
+            *altered.pointer_mut(pointer).expect("field") = serde_json::json!("invalid");
+            assert!(sign_run_ledger_record(&altered, &fixture_signing_key()).is_err());
+        }
+        for bad_signature in ["".to_string(), "aa".to_string(), "zz".repeat(64), "00".repeat(64)] {
+            let mut altered = record.clone();
+            altered["record_signature"] = serde_json::json!(bad_signature);
+            assert!(verify_run_ledger_record_receipt(&altered, &receipt, &trusted_key).is_err());
+        }
+    }
+
+    #[test]
+    fn run_ledger_record_signature_refuses_wrong_product_keys_and_other_domains() {
+        let (record, receipt) = signed_run_ledger_record_fixture();
+        let signing_key = fixture_signing_key();
+        let other_key = ed25519_dalek::SigningKey::from_bytes(&[98_u8; 32]).verifying_key();
+        assert!(matches!(
+            verify_run_ledger_record_receipt(&record, &receipt, &other_key),
+            Err(ReplayBundleError::RunLedgerRecordSignatureInvalid)
+        ));
+        let payload = run_ledger_record_signing_bytes(&record).expect("record payload");
+        let canonical = &payload[RUN_LEDGER_RECORD_SIGNATURE_DOMAIN.len()..];
+        for domain in [
+            b"".as_slice(),
+            INCIDENT_EVIDENCE_SOURCE_SIGNATURE_DOMAIN,
+            REPLAY_BUNDLE_SIGNATURE_PAYLOAD_DOMAIN,
+        ] {
+            let mut wrong_payload = domain.to_vec();
+            wrong_payload.extend_from_slice(canonical);
+            let mut altered = record.clone();
+            altered["record_signature"] =
+                serde_json::json!(hex::encode(signing_key.sign(&wrong_payload).to_bytes()));
+            assert!(matches!(
+                verify_run_ledger_record_receipt(&altered, &receipt, &signing_key.verifying_key()),
+                Err(ReplayBundleError::RunLedgerRecordSignatureInvalid)
+            ));
+        }
+    }
+
+    #[test]
+    fn run_ledger_record_parser_rejects_duplicate_keys_and_unsigned_new_fields() {
+        let (record, receipt) = signed_run_ledger_record_fixture();
+        let trusted_key = fixture_signing_key().verifying_key();
+        let mut extended = record.clone();
+        extended["future_extension"] = serde_json::json!({"limit": 3, "ratio": 0.25});
+        let unsigned_extension = serde_json::to_vec(&extended).expect("record JSON");
+        assert!(matches!(
+            parse_verified_run_ledger_record(&unsigned_extension, &receipt, &trusted_key),
+            Err(ReplayBundleError::RunLedgerRecordSignatureInvalid)
+        ));
+        extended["record_signature"] =
+            serde_json::json!(sign_run_ledger_record(&extended, &fixture_signing_key())
+                .expect("sign complete extended record"));
+        let bytes = serde_json::to_vec(&extended).expect("record JSON");
+        assert_eq!(
+            parse_verified_run_ledger_record(&bytes, &receipt, &trusted_key)
+                .expect("signed future fields remain authenticated"),
+            extended,
+        );
+
+        let json = serde_json::to_string(&record).expect("record JSON");
+        for (needle, replacement) in [
+            ("\"trace_id\":", "\"trace_id\":\"duplicate\",\"trace_id\":"),
+            ("\"receipt_snapshot\":{", "\"receipt_snapshot\":{\"duplicate\":1,\"duplicate\":2,"),
+            ("\"payload\":{", "\"payload\":{\"duplicate\":1,\"duplicate\":2,"),
+        ] {
+            let duplicate = json.replacen(needle, replacement, 1);
+            assert_ne!(duplicate, json, "fixture must exercise {needle}");
+            let error = parse_verified_run_ledger_record(
+                duplicate.as_bytes(),
+                &receipt,
+                &trusted_key,
+            )
+            .expect_err("duplicate record fields must fail before collapsing");
+            assert!(error.to_string().contains("duplicate JSON field"));
+        }
+        assert!(parse_verified_run_ledger_record(
+            format!("{json} {{}}").as_bytes(),
+            &receipt,
+            &trusted_key,
+        )
+        .is_err());
     }
 
     fn chunked_fixture_bundle() -> ReplayBundle {

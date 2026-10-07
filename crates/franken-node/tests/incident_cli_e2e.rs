@@ -6,7 +6,8 @@ use std::time::Instant;
 use frankenengine_node::tools::replay_bundle::{
     EventType, INCIDENT_EVIDENCE_SCHEMA, IncidentEvidenceEvent, IncidentEvidenceMetadata,
     IncidentEvidencePackage, IncidentSeverity, ReplayBundle,
-    read_bundle_from_path_with_trusted_key, validate_bundle_integrity,
+    read_bundle_from_path_with_trusted_key, sign_incident_evidence_package,
+    validate_bundle_integrity,
 };
 use serde_json::json;
 
@@ -471,6 +472,7 @@ fn incident_bundle_accepts_explicit_evidence_path_and_writes_bundle() {
         .expect("incident bundle --json stdout must be JSON");
     assert_eq!(payload["schema_version"], "incident-bundle-cli-v1");
     assert_eq!(payload["command"], "incident.bundle");
+    assert_eq!(payload["source_authenticated"], false);
     assert_eq!(payload["incident_id"], "INC-E2E-001");
     let json_stderr = String::from_utf8_lossy(&json_output.stderr);
     assert!(
@@ -1620,4 +1622,299 @@ fn write_malformed_evidence_invalid_provenance(path: &Path, incident_id: &str) {
     let json_str =
         serde_json::to_string_pretty(&package).expect("serialize invalid provenance package");
     fs::write(path, json_str).expect("write malformed evidence file");
+}
+
+#[test]
+fn incident_store_authenticates_captures_and_rejects_signature_downgrade() {
+    let workspace = config_only_workspace();
+    configure_replay_bundle_signing_key(workspace.path());
+    let incident_id = "INC-AUTHENTICATED-SOURCE";
+    let evidence_path = workspace.path().join(
+        ".franken-node/state/incidents/INC-AUTHENTICATED-SOURCE/evidence.v1.json",
+    );
+    write_fixture_incident_evidence(&evidence_path, incident_id);
+    let package: IncidentEvidencePackage =
+        serde_json::from_slice(&fs::read(&evidence_path).expect("read evidence"))
+            .expect("parse evidence");
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x42_u8; 32]);
+    let signed = sign_incident_evidence_package(package, &signing_key)
+        .expect("sign captured source");
+    let genuine = serde_json::to_value(&signed).expect("serialize captured source");
+    fs::write(
+        &evidence_path,
+        serde_json::to_vec_pretty(&genuine).expect("encode capture"),
+    )
+    .expect("write signed capture");
+
+    let bundle = || {
+        run_cli_in_workspace(
+            workspace.path(),
+            &["incident", "bundle", "--id", incident_id, "--verify", "--json"],
+        )
+    };
+    let valid = bundle();
+    assert!(
+        valid.status.success(),
+        "signed source refused: {}",
+        String::from_utf8_lossy(&valid.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&valid.stdout).expect("bundle JSON");
+    assert_eq!(report["source_authenticated"], true);
+    let bundle_path = workspace.path().join(format!("{incident_id}.fnbundle"));
+    let original_bundle = fs::read(&bundle_path).expect("read genuine bundle");
+
+    let mut tampered = genuine.clone();
+    tampered["events"][1]["payload"]["decision"] = json!("allow");
+    fs::write(
+        &evidence_path,
+        serde_json::to_vec_pretty(&tampered).expect("encode tampered capture"),
+    )
+    .expect("write tampered capture");
+    let refused = bundle();
+    assert!(!refused.status.success(), "tampered capture was exported");
+    assert_eq!(
+        fs::read(&bundle_path).expect("read retained bundle"),
+        original_bundle,
+        "failed authentication must preserve the existing bundle"
+    );
+
+    let listing = run_cli_in_workspace(workspace.path(), &["incident", "list", "--json"]);
+    assert!(
+        listing.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listing.stderr)
+    );
+    let listing: serde_json::Value = serde_json::from_slice(&listing.stdout).expect("list JSON");
+    let captured = listing["incidents"]
+        .as_array()
+        .expect("incidents")
+        .iter()
+        .find(|entry| entry["incident_id"] == incident_id && entry["source"] == "captured")
+        .expect("invalid capture must remain visible");
+    assert!(
+        captured["status"].as_str().expect("capture status").starts_with("invalid:"),
+        "{captured}"
+    );
+
+    tampered.as_object_mut().expect("capture object").remove("source_signature");
+    fs::write(
+        &evidence_path,
+        serde_json::to_vec_pretty(&tampered).expect("encode stripped capture"),
+    )
+    .expect("strip source signature");
+    let evidence_arg = evidence_path.to_string_lossy().to_string();
+    let downgrade = run_cli_in_workspace(
+        workspace.path(),
+        &[
+            "incident", "bundle", "--id", incident_id, "--evidence-path",
+            &evidence_arg, "--verify", "--json",
+        ],
+    );
+    assert!(
+        !downgrade.status.success(),
+        "explicit managed-store path must not downgrade a capture to unsigned input"
+    );
+    assert_eq!(
+        fs::read(&bundle_path).expect("read retained genuine bundle"),
+        original_bundle
+    );
+}
+
+#[test]
+fn incident_capture_source_authority_is_independent_of_export_key() {
+    let workspace = config_only_workspace();
+    configure_replay_bundle_signing_key(workspace.path());
+    let incident_id = "INC-SOURCE-AUTHORITY";
+    let evidence_path = workspace.path().join(
+        ".franken-node/state/incidents/INC-SOURCE-AUTHORITY/evidence.v1.json",
+    );
+    write_fixture_incident_evidence(&evidence_path, incident_id);
+    let package: IncidentEvidencePackage =
+        serde_json::from_slice(&fs::read(&evidence_path).expect("read evidence"))
+            .expect("parse evidence");
+    let source_key = ed25519_dalek::SigningKey::from_bytes(&[0x42_u8; 32]);
+    let export_key = ed25519_dalek::SigningKey::from_bytes(&[0x24_u8; 32]);
+    let export_key_path = workspace.path().join("keys/export-signing.key");
+    fs::write(&export_key_path, hex::encode(export_key.to_bytes())).expect("write export key");
+    let export_key_arg = export_key_path.to_string_lossy().to_string();
+    let signed = sign_incident_evidence_package(package.clone(), &source_key)
+        .expect("sign with configured source authority");
+    fs::write(
+        &evidence_path,
+        serde_json::to_vec_pretty(&signed).expect("encode source"),
+    )
+    .expect("write source");
+
+    let export = || {
+        run_cli_in_workspace(
+            workspace.path(),
+            &[
+                "incident", "bundle", "--id", incident_id, "--receipt-signing-key",
+                &export_key_arg, "--verify", "--json",
+            ],
+        )
+    };
+    let valid = export();
+    assert!(
+        valid.status.success(),
+        "an independent export signer must accept an authentic source: {}",
+        String::from_utf8_lossy(&valid.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&valid.stdout).expect("export JSON");
+    assert_eq!(report["source_authenticated"], true);
+    let bundle_path = workspace.path().join(format!("{incident_id}.fnbundle"));
+    let export_key_id =
+        frankenengine_node::supply_chain::artifact_signing::KeyId::from_verifying_key(
+            &export_key.verifying_key(),
+        )
+        .to_string();
+    read_bundle_from_path_with_trusted_key(&bundle_path, Some(&export_key_id))
+        .expect("exported bundle must authenticate with the selected output key");
+    let original_bundle = fs::read(&bundle_path).expect("read valid export");
+
+    let foreign_source = sign_incident_evidence_package(package, &export_key)
+        .expect("sign attacker source with output authority");
+    fs::write(
+        &evidence_path,
+        serde_json::to_vec_pretty(&foreign_source).expect("encode foreign source"),
+    )
+    .expect("replace source authority");
+    let refused = export();
+    assert!(
+        !refused.status.success(),
+        "an export signing-key override must never replace the source trust anchor"
+    );
+    assert_eq!(
+        fs::read(&bundle_path).expect("read retained valid export"),
+        original_bundle
+    );
+}
+
+#[test]
+fn incident_coverage_refuses_empty_or_unreadable_populations() {
+    let workspace = config_only_workspace();
+    configure_replay_bundle_signing_key(workspace.path());
+    let coverage = || {
+        run_cli_in_workspace(
+            workspace.path(),
+            &["ops", "incident-coverage", "--min-coverage", "1", "--json"],
+        )
+    };
+    let empty = coverage();
+    assert!(!empty.status.success(), "an empty population cannot establish full coverage");
+    let empty_report: serde_json::Value =
+        serde_json::from_slice(&empty.stdout).expect("empty coverage JSON");
+    assert!(empty_report["replay_coverage"].is_null());
+    assert_eq!(empty_report["high_severity_events"], 0);
+
+    let receipt_path = workspace.path().join(
+        ".franken-node/state/execution-receipts/2026-10-07/corrupted.json",
+    );
+    fs::create_dir_all(receipt_path.parent().expect("receipt directory"))
+        .expect("create receipt directory");
+    fs::write(&receipt_path, b"{ truncated").expect("write corrupt receipt");
+    let unreadable = coverage();
+    assert!(
+        !unreadable.status.success(),
+        "an unreadable receipt must not disappear from the coverage gate"
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&unreadable.stdout).expect("unreadable coverage JSON");
+    assert_eq!(report["unreadable_receipts"], 1);
+    assert_eq!(report["population_authenticated"], false);
+    assert!(
+        !report["source_errors"].as_array().expect("source errors").is_empty(),
+        "{report}"
+    );
+}
+
+#[test]
+fn incident_coverage_excludes_only_independently_authenticated_clean_external_runs() {
+    use frankenengine_node::observability::evidence_ledger::{DecisionKind, EvidenceEntry};
+    use frankenengine_node::observability::evidence_ledger_durable::DurableEvidenceLedger;
+
+    let workspace = config_only_workspace();
+    configure_replay_bundle_signing_key(workspace.path());
+    let receipt_id = "clean-node-run";
+    let receipt_hash = "sha256:authenticated-external-receipt";
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x42_u8; 32]);
+    let entry = EvidenceEntry {
+        schema_version: "franken-node/run-decision-evidence/v1".to_string(),
+        entry_id: Some(receipt_id.to_string()),
+        decision_id: receipt_id.to_string(),
+        decision_kind: DecisionKind::Admit,
+        decision_time: "2026-10-07T00:00:00Z".to_string(),
+        timestamp_ms: 1_791_331_200_000,
+        trace_id: "trace-clean-external-coverage".to_string(),
+        epoch_id: 0,
+        payload: json!({
+            "runtime": "node",
+            "exit_code": 0,
+            "violation_count": 0,
+            "host_effects_denied": null,
+            "containment_verdict": null,
+            "receipt_hash": receipt_hash,
+        }),
+        size_bytes: 0,
+        signature: String::new(),
+        prev_entry_hash: String::new(),
+    };
+    DurableEvidenceLedger::open_default(workspace.path())
+        .expect("open durable inventory")
+        .append_signed_chained(entry, &signing_key)
+        .expect("append authentic clean external decision");
+    let receipt_dir = workspace.path().join(
+        ".franken-node/state/execution-receipts/2026-10-07",
+    );
+    fs::create_dir_all(&receipt_dir).expect("create receipt directory");
+    fs::write(
+        receipt_dir.join(format!("{receipt_id}.json")),
+        serde_json::to_vec(&json!({
+            "schema_version": "franken-node/run-execution-receipt/v1",
+            "receipt_id": receipt_id,
+            "receipt_hash": receipt_hash,
+            "runtime_used": "node",
+        }))
+        .expect("encode external receipt selector"),
+    )
+    .expect("write discoverable external receipt");
+    let coverage = || {
+        run_cli_in_workspace(workspace.path(), &["ops", "incident-coverage", "--json"])
+    };
+    let clean = coverage();
+    assert!(
+        clean.status.success(),
+        "{}",
+        String::from_utf8_lossy(&clean.stderr)
+    );
+    let clean: serde_json::Value = serde_json::from_slice(&clean.stdout).expect("coverage JSON");
+    assert_eq!(clean["population_authenticated"], true, "{clean}");
+    assert_eq!(clean["excluded_non_native_receipts"], 1);
+    assert_eq!(clean["authenticated_receipts"], 0);
+    assert_eq!(clean["high_severity_events"], 0);
+
+    fs::write(
+        receipt_dir.join("forged-node-run.json"),
+        serde_json::to_vec(&json!({
+            "schema_version": "franken-node/run-execution-receipt/v1",
+            "receipt_id": "forged-node-run",
+            "receipt_hash": "sha256:untrusted",
+            "runtime_used": "node",
+        }))
+        .expect("encode forged external receipt"),
+    )
+    .expect("write unsigned external claim");
+    let forged = coverage();
+    assert!(
+        forged.status.success(),
+        "ungated inspection should still return its report"
+    );
+    let forged: serde_json::Value =
+        serde_json::from_slice(&forged.stdout).expect("forged coverage JSON");
+    assert_eq!(forged["excluded_non_native_receipts"], 1);
+    assert_eq!(forged["population_authenticated"], false, "{forged}");
+    assert!(
+        !forged["source_errors"].as_array().expect("source errors").is_empty(),
+        "an editable runtime label must not bypass source authentication"
+    );
 }

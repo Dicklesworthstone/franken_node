@@ -881,11 +881,11 @@ franken-node fleet status --json   # transport=http, live_control_plane=true
 
 | Command | Purpose |
 |---|---|
-| `franken-node incident bundle` | Export deterministic incident bundle. `--id` is handler-required so `--json` failures emit `franken-node/incident-error-cli/v1` instead of a human clap error. Reads evidence from `--evidence-path` or `<project-root>/.franken-node/state/incidents/<slug>/evidence.v1.json`. `run` writes that evidence automatically when a run trips a runtime security control (SSRF violation, denied host effect, or Sentinel escalation). The incident id is `INC-RUN-<host-effect chain head>`, and each event is one signed host-effect receipt with its recorded timestamp. `--verify` checks the bundle after writing. Optional receipt-signing controls. Flags: `--json`. |
+| `franken-node incident bundle` | Export a deterministic incident bundle. `--id` is handler-required so `--json` failures emit `franken-node/incident-error-cli/v1`. Reads `--evidence-path` or `<project-root>/.franken-node/state/incidents/<slug>/evidence.v1.json`. `run` automatically signs captured source evidence when SSRF checks, a denied host effect, or Sentinel trips; the incident id is `INC-RUN-<host-effect chain head>`. Captured sources must authenticate against the configured receipt authority before export. An export signing-key override does not replace that authority. Explicit operator-authored inputs remain supported; JSON reports `source_authenticated`. `--verify` checks the generated bundle. Flags: `--json`. |
 | `franken-node incident replay` | Integrity-verified replay of a recorded incident bundle (not live re-execution). `--bundle` is handler-required so `--json` failures emit `franken-node/incident-error-cli/v1` instead of a human clap error. **Also fails closed without `--trusted-public-key` or `--key-dir`.** Flags: `--json`. |
 | `franken-node incident counterfactual` | Simulate alternative policy actions. Same trust-anchor requirement as `replay`. `--bundle` and `--policy` are handler-required so `--json` failures emit `franken-node/incident-error-cli/v1` instead of a human clap error. Optional: `--promote`, `--promotion-signing-key`, `--operator-id`. `--model synthetic` (default) is the sandboxed risk-score stand-in. `--model production` re-decides every host effect a run-captured incident recorded (its signed effect-receipt chain entry) under the runtime profile named by `--policy` (`strict`, `balanced`, `legacy-risky`), using the run path's own capability table: an effect whose capability the profile does not grant is refused at the capability gate; one it grants gets the recorded outcome of the profile-independent SSRF / flow / sandbox gates; spawns keep their admission-bound outcome. Decisions after the first divergence are labelled `determination=path_assumed`. Bundles without recorded effects, and non-profile policies, are refused. The model is bound into the counterfactual digest. Flags: `--json`. |
 | `franken-node incident list` | List recorded incidents. Filter: `--severity`. Flags: `--json` (failures `franken-node/incident-error-cli/v1`). |
-| `franken-node incident capture` | Capture any recorded native run as incident evidence after the fact. Every native `run` persists its signed host-effect ledger under `.franken-node/state/run-ledgers/`; `--from-run <receipt-id\|receipt-path>` re-verifies that ledger (outcome counts, hash chain, and the detached signature against the product-root-signed session identity) and its binding to the receipt hash before writing evidence. An incident `run` already captured is reported `already_captured`, never overwritten. Flags: `--severity`, `--json` (`franken-node/incident-capture-cli/v1`). |
+| `franken-node incident capture` | Capture a recorded native run as incident evidence. `--from-run <receipt-id\|receipt-path>` verifies the product-signed run record and complete receipt snapshot, then the engine ledger's counts, hash chain, detached signature, and product-root-signed session identity before sealing the captured source. An existing source is returned as `already_captured` only after its signature and run bindings authenticate. Legacy unsigned records require a new run. Flags: `--severity`, `--json` (`franken-node/incident-capture-cli/v1`). |
 
 ### Long-term verifiability (LTV)
 
@@ -917,7 +917,7 @@ franken-node fleet status --json   # transport=http, live_control_plane=true
 | `franken-node ops validation-closeout` | Render closeout summary from a `--receipt` snapshot (not a live broker). `--bead-id` and `--receipt` are handler-required so `--json` failures emit `franken-node/ops-error-cli/v1` instead of a human clap error. Flags: `--json`. |
 | `franken-node ops config-audit` | Audit active config across profiles. Flags: `--json` (`franken-node/ops-config-audit-cli/v1`). |
 | `franken-node ops metrics` | Emit operator metrics (Prometheus by default). Flags: `--json` (`franken-node/ops-metrics-cli/v1`). |
-| `franken-node ops incident-coverage` | The charter's replay-availability metric from the project's own records: of the persisted runs that tripped a runtime security control (their receipts carry `incident_capture`), how many incidents have valid captured evidence and how many are replayable from a signature-verified bundle. Lists the incidents still missing either. `--min-coverage <0..1>` fails closed when replay coverage is below the floor. Flags: `--json` (`franken-node/ops-incident-coverage-cli/v1`). |
+| `franken-node ops incident-coverage` | Replay availability over retained durable run decisions and discoverable run records. Authenticated security outcomes determine the population; each counted capture must authenticate and each replayable bundle must match its source and trusted signature. JSON includes `population_scope`, authentication status, and `source_errors`. `--min-coverage <0..1>` fails when the population is empty, incomplete, unauthenticated, or below the floor. This local inventory does not establish deletion-resistant historical completeness. Flags: `--json` (`franken-node/ops-incident-coverage-cli/v1`). |
 | `franken-node ops compat-corpus-run` | Run the committed compatibility corpus through bun + native franken-engine lockstep and write the digest-bound results artifact. `--corpus-root` and `--out` are handler-required so `--json` failures emit `franken-node/ops-error-cli/v1` instead of a human clap error. `--policy` selects the profile the franken leg runs under (default `legacy-risky`, the artifact of record). The artifact's `run_provenance` block records the binary's sha256, the embedded git revision, the policy and the host's CPU count and load. Flags: `--json` (`franken-node/ops-compat-corpus-run-cli/v1`), `--require-node-reference`, `--policy`, `--case-timeout-secs`. |
 | `franken-node ops proof-carrying-evidence` | Produce a 3-effect host-IO evidence chain from a real native-engine run. This is an **additional L1 conjunct**, not a substitute for corpus ≥95%. L1 GREEN still requires the compatibility corpus floor. Flags: `--json`, `--out`, `--merge-corpus`, `--merge-l1-verdict`. |
 | `franken-node doctor workspace-pressure` | Probe local disk, memory, RCH slots, and build counts; apply balanced/conservative/permissive pressure policy. Default human report is stdout. `--human-output <path>` writes that report to a file (not a boolean flag). Flags: `--json`, `--output`, `--human-output`, `--conservative`, `--permissive` (failures `franken-node/doctor-error-cli/v1`). |
@@ -1706,7 +1706,42 @@ torn write.
 A `.fnbundle` produced by `franken-node incident bundle` is a single
 canonical JSON artifact (keys sorted, no floats) built from an incident
 evidence package (`.franken-node/state/incidents/<id>/evidence.v1.json`).
-Its fields (`tools::replay_bundle::ReplayBundle`):
+
+Captured source packages retain their evidence fields at the top level and add
+`source_signature`. This Ed25519 seal covers the complete canonical source:
+events, metadata, detector, severity, trace, evidence references, and run receipt
+and host-effect chain bindings. Its signature domain is separate from bundle
+signatures. The configured receipt-signing authority authenticates the source
+before export; `--receipt-signing-key` selects the exported bundle signer and
+does not replace that source authority. Missing or invalid source signatures,
+duplicate JSON keys, and unknown source-schema fields are rejected.
+
+Recorded native runs also bind a complete `receipt_snapshot` to their run
+metadata and engine ledger under a product record signature. Capture verifies
+this record and the engine's session identity, signature, and effect chain.
+Editing both advertised receipt hashes or substituting receipt metadata cannot
+satisfy that binding. Existing unsigned run records must be recreated by a
+fresh run before they can supply authenticated runtime capture.
+
+An explicit `--evidence-path` can still import operator-authored evidence;
+the export reports `source_authenticated: false`. Captured-store files and inputs
+that contain source signatures or runtime-run claims still require source
+authentication, including when an explicit path is supplied. Listing a corrupted
+captured source reports it as invalid, and repeated capture authenticates an
+existing source before returning `already_captured`.
+
+`ops incident-coverage` measures retained durable run decisions and discoverable
+run records, derives incident eligibility from authenticated security outcomes,
+and matches captured sources to their signed bundles. Missing files associated
+with retained decisions remain visible. Clean successful Node/Bun runs are
+excluded from native-ledger checks only by their authenticated durable decisions,
+never by an editable receipt runtime label; JSON counts those exclusions separately.
+A requested coverage floor fails when
+the measured population is empty, unreadable, or unauthenticated. Its reported
+`population_scope` does not establish historical completeness after deletion
+or rollback of the local inventory and trust material.
+
+The exported bundle's fields (`tools::replay_bundle::ReplayBundle`):
 
 | Field | Purpose |
 |---|---|
@@ -2026,7 +2061,8 @@ bootstrap layout is:
 | Path | Purpose |
 |---|---|
 | `.franken-node/state/` | State root |
-| `.franken-node/state/incidents/<incident-id>/evidence.v1.json` | Authoritative incident evidence consumed by `incident bundle` |
+| `.franken-node/state/incidents/<incident-id>/evidence.v1.json` | Signed captured incident source, authenticated before listing or bundle export |
+| `.franken-node/state/run-ledgers/<day>/<receipt-id>.json` | Product-signed run metadata, complete execution receipt snapshot, and engine-signed host-effect ledger |
 | `.franken-node/state/execution-receipts/` | Transient execution receipts; excluded from version control by the generated `.gitignore` |
 | `.franken-node/state/fleet/` | Durable fleet transport state (signed decision receipts, per-node convergence) |
 | `.franken-node/state/registry/` | Local registry artifact store root |
@@ -2036,7 +2072,7 @@ bootstrap layout is:
 | `.franken-node/state/trust-card-registry.v1.db` | Durable trust-card registry store (WAL frankensqlite; the legacy `.v1.json` pair is a one-time import source only) |
 | `.franken-node/safe-mode/state.json` | Unsigned JSON safe-mode controller persist (not Ed25519-signed); override with `--state-dir` |
 | `.franken-node/keys/` | Signing key material; excluded from version control by the generated `.gitignore` |
-| `.franken-node/keys/receipt-signing.key` | Default Ed25519 seed (mode 0600) for decision receipts, incident bundles, close-condition receipts and evidence-ledger entries, used when neither `--receipt-signing-key`, `FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH` nor `security.decision_receipt_signing_key_path` is set |
+| `.franken-node/keys/receipt-signing.key` | Default Ed25519 seed (mode 0600) for decision receipts, captured incident sources, run-ledger records, incident bundles, close-condition receipts and evidence-ledger entries, used when neither `--receipt-signing-key`, `FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH` nor `security.decision_receipt_signing_key_path` is set |
 | `.franken-node/keys/receipt-signing.pub` | Matching public key (hex), for `verify transparency-log --public-key` and `incident replay --trusted-public-key` |
 | `.franken-node/state/evidence-ledger.db` | Durable evidence ledger: one signed, hash-chained entry per `run` (WAL frankensqlite) |
 | `.franken-node/keys/remotecap-signing.key` | RemoteCap signing key (mode 0600), used when `FRANKEN_NODE_REMOTECAP_KEY` is unset |
