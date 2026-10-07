@@ -1248,6 +1248,8 @@ mod tests {
             lanes,
             drain_timeout_ms: None,
             max_instructions: None,
+            max_parse_source_bytes: None,
+            max_parse_tokens: None,
         }
     }
 

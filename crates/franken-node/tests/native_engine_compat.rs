@@ -209,6 +209,118 @@ fn create_test_app(dir: &Path, filename: &str, content: &str) -> PathBuf {
     app_path
 }
 
+/// bd-fkdzv: an imported package crosses the default 64K-token boundary,
+/// then executes through the real product worker with an explicit bounded
+/// opt-in. This exercises config serialization, IPC, both parser handoffs,
+/// CommonJS loading, guest output, and persisted receipt disclosure.
+#[test]
+#[cfg(feature = "engine")]
+fn runtime_parse_budget_admits_large_required_module_and_records_effective_limits() {
+    let workspace = TempDir::new().expect("large module workspace");
+    let package_dir = workspace.path().join("node_modules/budget-fixture");
+    std::fs::create_dir_all(&package_dir).expect("package directory");
+    std::fs::write(
+        package_dir.join("package.json"),
+        r#"{"name":"budget-fixture","version":"1.0.0","main":"index.js"}"#,
+    )
+    .expect("package manifest");
+    // Empty statements consume real parser tokens without needing tens of
+    // thousands of live registers or imposing an unrelated execution limit.
+    let module_source = format!("{}\nmodule.exports = 42;\n", ";".repeat(70_000));
+    std::fs::write(package_dir.join("index.js"), &module_source).expect("large package");
+    let app = create_test_app(
+        workspace.path(),
+        "app.cjs",
+        "console.log(require('budget-fixture'));\n",
+    );
+    let mut config = balanced_config();
+    let default =
+        invoke_product_supervisor(&app, &config, "balanced", Path::new(franken_node_bin()))
+            .expect("default-budget run");
+    assert!(
+        !default.status.success(),
+        "64K default must reject this package"
+    );
+    let diagnostics = format!("{}\n{}", default.stdout, default.stderr);
+    assert!(diagnostics.contains("BudgetExceeded"), "{diagnostics}");
+    assert!(
+        diagnostics.contains("runtime.max_parse_tokens"),
+        "{diagnostics}"
+    );
+
+    config.runtime.max_parse_tokens = Some(100_000);
+    let admitted =
+        invoke_product_supervisor(&app, &config, "balanced", Path::new(franken_node_bin()))
+            .expect("configured-budget run");
+    assert!(
+        admitted.status.success(),
+        "explicit token opt-in must admit the imported package: stdout={} stderr={}",
+        admitted.stdout,
+        admitted.stderr,
+    );
+    let dispatch = parse_product_dispatch(&admitted).expect("successful dispatch");
+    assert_eq!(dispatch.captured_output.stdout, "42\n");
+    let budget = dispatch
+        .engine_decision
+        .expect("engine decision")
+        .parser_budget;
+    assert_eq!(budget.max_source_bytes, 1_048_576);
+    assert_eq!(budget.max_token_count, 100_000);
+    assert_eq!(budget.max_recursion_depth, 256);
+    let envelope: serde_json::Value = serde_json::from_str(&admitted.stdout).expect("run JSON");
+    let expected = serde_json::to_value(budget).expect("budget JSON");
+    assert_eq!(envelope["receipt"]["parser_budget"], expected);
+    let receipt_path = Path::new(envelope["receipt_path"].as_str().expect("receipt path"));
+    let receipt_path = if receipt_path.is_absolute() {
+        receipt_path.to_path_buf()
+    } else {
+        workspace.path().join(receipt_path)
+    };
+    let persisted: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(receipt_path).expect("persisted run receipt"))
+            .expect("persisted receipt JSON");
+    assert_eq!(persisted["parser_budget"], expected);
+
+    // A larger token budget does not bypass the independent source-byte cap.
+    config.runtime.max_parse_source_bytes = Some(1_024);
+    let denied =
+        invoke_product_supervisor(&app, &config, "balanced", Path::new(franken_node_bin()))
+            .expect("source-limited import");
+    assert!(
+        !denied.status.success(),
+        "import source budget must remain enforced"
+    );
+    let diagnostics = format!("{}\n{}", denied.stdout, denied.stderr);
+    assert!(
+        diagnostics.contains("runtime.max_parse_source_bytes"),
+        "{diagnostics}"
+    );
+}
+
+#[test]
+#[cfg(feature = "engine")]
+fn runtime_parse_budget_rejects_oversized_entry_before_guest_execution() {
+    let workspace = TempDir::new().expect("source budget workspace");
+    let source = format!("console.log('must-not-run');\n{}", " ".repeat(2_048));
+    let app = create_test_app(workspace.path(), "app.js", &source);
+    let mut config = balanced_config();
+    config.runtime.max_parse_source_bytes = Some(1_024);
+    let denied =
+        invoke_product_supervisor(&app, &config, "balanced", Path::new(franken_node_bin()))
+            .expect("source-limited run");
+    assert!(!denied.status.success());
+    assert!(
+        !denied.stdout.contains("must-not-run"),
+        "guest code must not execute"
+    );
+    let diagnostics = format!("{}\n{}", denied.stdout, denied.stderr);
+    assert!(
+        diagnostics.contains("runtime.max_parse_source_bytes=1024"),
+        "{diagnostics}"
+    );
+    assert!(diagnostics.contains("app.js"), "{diagnostics}");
+}
+
 /// Create a controlled franken-engine fixture binary for subprocess testing.
 fn create_fixture_engine_binary(dir: &Path) -> PathBuf {
     let engine_path = dir.join("franken-engine");

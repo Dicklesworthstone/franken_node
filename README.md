@@ -601,6 +601,29 @@ profile**, not the packaging profile:
 | `balanced` | Default for most teams | Reasonable freshness windows, revocation gates on risky and dangerous classes, lockstep recommended as a separate `verify lockstep` stage |
 | `legacy-risky` | Constrained migration windows on legacy codebases | Permits insecure compatibility behaviors when explicitly enabled by policy. Not a long-term mode. |
 
+Native execution also applies the following independent resource limits:
+
+| Profile | Instructions per `run` | Source bytes per module | Tokens per module | Parser recursion depth |
+|---|---:|---:|---:|---:|
+| `strict` | 200,000,000 | 256,000 | 32,768 | 128 |
+| `balanced` | 1,000,000,000 | 1,048,576 | 65,536 | 256 |
+| `legacy-risky` | 5,000,000,000 | 2,097,152 | 131,072 | 384 |
+
+`runtime.max_instructions` replaces the instruction budget. The optional
+`runtime.max_parse_source_bytes` and `runtime.max_parse_tokens` settings replace
+their respective parser limits for the entry file and every required/imported
+JavaScript module. Source bytes and tokens are separate limits: a file can fit
+within the byte limit and still exceed the token limit. Recursion depth remains
+profile-governed, and the wall-clock timeout still applies.
+
+For a large npm dependency such as lodash, an operator can keep `balanced` and
+explicitly set `max_parse_tokens = 131_072`. This admits additional parser work
+without changing the profile's trust requirements or other resource limits.
+The allowed override ranges are **1–2,097,152 source bytes** and **1–131,072
+tokens**; zero, malformed values, and values above these caps fail configuration
+validation. Overrides never silently clamp. The effective source, token, and
+recursion limits are included in native run receipts and engine decisions.
+
 No profile—including `legacy-risky`—grants `process_spawn`. That capability is
 impossible by default and requires an expiring Ed25519-signed
 `ChildProcessSpawn` token bound to the complete resolved policy/config plus a
@@ -1043,6 +1066,14 @@ bulkhead_retry_after_ms = 50
 # strict 200M, balanced 1B, legacy-risky 5B). Also
 # FRANKEN_NODE_RUNTIME_MAX_INSTRUCTIONS. The wall-clock timeout still applies.
 # max_instructions = 1_000_000_000
+# Independent per-module parser limits, including required/imported modules.
+# Defaults are listed under Runtime Profiles. Accepted override ranges:
+# source bytes 1..=2_097_152; tokens 1..=131_072. Invalid values fail closed.
+# A balanced-profile opt-in for larger npm modules, without changing profile:
+# max_parse_tokens = 131_072
+# max_parse_source_bytes = 1_048_576
+# Also FRANKEN_NODE_RUNTIME_MAX_PARSE_TOKENS and
+# FRANKEN_NODE_RUNTIME_MAX_PARSE_SOURCE_BYTES; environment overrides TOML.
 
 [runtime.lanes.cancel]
 max_concurrent = 12
@@ -2026,6 +2057,8 @@ convention. The most common:
 | `FRANKEN_NODE_PROFILE` | `profile` | `strict`, `balanced`, or `legacy-risky` |
 | `FRANKEN_NODE_RUNTIME_PREFERRED` | `runtime.preferred` | `auto`, `node`, `bun`, or `franken-engine` |
 | `FRANKEN_NODE_RUNTIME_MAX_INSTRUCTIONS` | `runtime.max_instructions` | Instruction budget for one `run` (> 0); replaces the profile default |
+| `FRANKEN_NODE_RUNTIME_MAX_PARSE_SOURCE_BYTES` | `runtime.max_parse_source_bytes` | Source bytes per entry/required/imported JavaScript module (1–2,097,152); replaces the profile default |
+| `FRANKEN_NODE_RUNTIME_MAX_PARSE_TOKENS` | `runtime.max_parse_tokens` | Tokens per entry/required/imported JavaScript module (1–131,072); replaces the profile default |
 | `FRANKEN_NODE_ENGINE_BINARY_PATH` | `engine.binary_path` | Override the resolved `franken_engine` binary path |
 | `FRANKEN_NODE_COMPATIBILITY_MODE` | `compatibility.mode` | API compatibility mode |
 | `FRANKEN_NODE_COMPATIBILITY_EMIT_DIVERGENCE_RECEIPTS` | `compatibility.emit_divergence_receipts` | `true`/`false` |

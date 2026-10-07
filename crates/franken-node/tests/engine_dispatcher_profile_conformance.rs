@@ -89,6 +89,37 @@ fn runtime_max_instructions_overrides_the_profile_budget() {
     }
 }
 
+/// Parser limits may be configured without changing effect capabilities,
+/// recursion depth, or instruction budgets (bd-fkdzv).
+#[test]
+#[cfg(feature = "engine")]
+fn runtime_parse_budget_overrides_reach_the_engine_without_changing_trust() {
+    for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+        let original = config_with_profile(profile);
+        let before = EngineDispatcher::map_config_to_orchestrator_config_for_tests(&original);
+        let mut configured = original.clone();
+        configured.runtime.max_parse_source_bytes = Some(900_000);
+        configured.runtime.max_parse_tokens = Some(125_000);
+        configured
+            .runtime
+            .validate_parse_budget()
+            .expect("valid parser override");
+        let after = EngineDispatcher::map_config_to_orchestrator_config_for_tests(&configured);
+        assert_eq!(after.parser_options.budget.max_source_bytes, 900_000);
+        assert_eq!(after.parser_options.budget.max_token_count, 125_000);
+        assert_eq!(
+            after.parser_options.budget.max_recursion_depth,
+            before.parser_options.budget.max_recursion_depth
+        );
+        assert_eq!(after.policy_id, before.policy_id);
+        assert_eq!(after.epoch, before.epoch);
+        assert_eq!(
+            EngineDispatcher::map_config_to_runtime_config_for_tests(&configured),
+            EngineDispatcher::map_config_to_runtime_config_for_tests(&original),
+        );
+    }
+}
+
 /// bd-rff5g: every entry that is not an ES module runs as a CommonJS module,
 /// so it can `require` files beside it; ES module entries never do.
 #[test]

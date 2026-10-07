@@ -22,6 +22,11 @@ pub mod timeouts;
 pub const DEFAULT_MAX_MERGE_DECISIONS: usize = 100;
 const MIN_REGISTRY_SIGNING_KEY_BYTES: usize = 32;
 
+/// Largest operator-configurable source size for one native JavaScript module.
+pub const MAX_PARSE_SOURCE_BYTES: u64 = 2_097_152;
+/// Largest operator-configurable token budget for one native JavaScript module.
+pub const MAX_PARSE_TOKENS: u64 = 131_072;
+
 /// Maximum allowed config file size to prevent DoS via parser bombs.
 /// 1MB should be more than sufficient for any reasonable configuration.
 const MAX_CONFIG_FILE_BYTES: u64 = 1 << 20; // 1 MiB
@@ -1419,6 +1424,22 @@ impl Config {
                     MAX_MERGE_DECISIONS,
                 );
             }
+            if let Some(value) = section.max_parse_source_bytes {
+                self.runtime.max_parse_source_bytes = Some(value);
+                push_bounded(
+                    decisions,
+                    MergeDecision::new(stage.clone(), "runtime.max_parse_source_bytes", value),
+                    MAX_MERGE_DECISIONS,
+                );
+            }
+            if let Some(value) = section.max_parse_tokens {
+                self.runtime.max_parse_tokens = Some(value);
+                push_bounded(
+                    decisions,
+                    MergeDecision::new(stage.clone(), "runtime.max_parse_tokens", value),
+                    MAX_MERGE_DECISIONS,
+                );
+            }
         }
 
         if let Some(section) = &overrides.thresholds {
@@ -2013,6 +2034,24 @@ impl Config {
                 MAX_MERGE_DECISIONS,
             );
         }
+        if let Some(raw) = env_lookup("FRANKEN_NODE_RUNTIME_MAX_PARSE_SOURCE_BYTES") {
+            let parsed = parse_env_u64("FRANKEN_NODE_RUNTIME_MAX_PARSE_SOURCE_BYTES", &raw)?;
+            self.runtime.max_parse_source_bytes = Some(parsed);
+            push_bounded(
+                decisions,
+                MergeDecision::new(MergeStage::Env, "runtime.max_parse_source_bytes", parsed),
+                MAX_MERGE_DECISIONS,
+            );
+        }
+        if let Some(raw) = env_lookup("FRANKEN_NODE_RUNTIME_MAX_PARSE_TOKENS") {
+            let parsed = parse_env_u64("FRANKEN_NODE_RUNTIME_MAX_PARSE_TOKENS", &raw)?;
+            self.runtime.max_parse_tokens = Some(parsed);
+            push_bounded(
+                decisions,
+                MergeDecision::new(MergeStage::Env, "runtime.max_parse_tokens", parsed),
+                MAX_MERGE_DECISIONS,
+            );
+        }
 
         apply_env_field_opt_f64(
             "FRANKEN_NODE_THRESHOLDS_MAX_FAILURE_RATE",
@@ -2214,6 +2253,7 @@ impl Config {
                 "runtime.max_instructions must be > 0".to_string(),
             ));
         }
+        self.runtime.validate_parse_budget()?;
         validate_opt_score(
             "migration.verification_threshold",
             self.migration.verification_threshold,
@@ -3133,6 +3173,8 @@ struct RuntimeOverrides {
     pub lanes: Option<BTreeMap<String, RuntimeLaneOverrides>>,
     pub drain_timeout_ms: Option<u64>,
     pub max_instructions: Option<u64>,
+    pub max_parse_source_bytes: Option<u64>,
+    pub max_parse_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -3877,9 +3919,95 @@ pub struct RuntimeConfig {
     /// legacy-risky 5B). The wall-clock timeout still applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_instructions: Option<u64>,
+    /// Source-byte budget for each entry, required, or imported module in the
+    /// native engine. Replaces the profile default; valid range is
+    /// `1..=MAX_PARSE_SOURCE_BYTES`. Token and recursion budgets still apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_parse_source_bytes: Option<u64>,
+    /// Token budget for each entry, required, or imported module in the native
+    /// engine. Replaces the profile default; valid range is
+    /// `1..=MAX_PARSE_TOKENS`. Source-byte and recursion budgets still apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_parse_tokens: Option<u64>,
+}
+
+/// Effective native parser limits shared by execution and its receipts.
+///
+/// All three independent limits apply separately to each entry, required, or
+/// imported module. Source length is measured in bytes, not Unicode characters.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeParseBudget {
+    pub max_source_bytes: u64,
+    pub max_token_count: u64,
+    pub max_recursion_depth: u64,
 }
 
 impl RuntimeConfig {
+    /// Reject invalid explicit parser limits before native engine admission.
+    ///
+    /// The resolver calls this after applying configuration precedence. Native
+    /// dispatch must also call it for configurations constructed directly by
+    /// Rust callers, since public fields can bypass the resolver.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::ValidationFailed`] naming the config field,
+    /// environment variable, and accepted range if a limit is zero or exceeds
+    /// the absolute product cap.
+    pub fn validate_parse_budget(&self) -> Result<(), ConfigError> {
+        if let Some(value) = self.max_parse_source_bytes
+            && !(1..=MAX_PARSE_SOURCE_BYTES).contains(&value)
+        {
+            return Err(ConfigError::ValidationFailed(format!(
+                "runtime.max_parse_source_bytes must be in 1..={MAX_PARSE_SOURCE_BYTES} \
+                 (FRANKEN_NODE_RUNTIME_MAX_PARSE_SOURCE_BYTES); got {value}"
+            )));
+        }
+        if let Some(value) = self.max_parse_tokens
+            && !(1..=MAX_PARSE_TOKENS).contains(&value)
+        {
+            return Err(ConfigError::ValidationFailed(format!(
+                "runtime.max_parse_tokens must be in 1..={MAX_PARSE_TOKENS} \
+                 (FRANKEN_NODE_RUNTIME_MAX_PARSE_TOKENS); got {value}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Resolve the native parser budget for a runtime policy profile.
+    ///
+    /// Explicit source-byte and token overrides replace only their respective
+    /// limits. Recursion depth remains governed by the profile. Configuration
+    /// loading validates overrides against the absolute caps; callers that
+    /// construct configs directly must call [`Self::validate_parse_budget`]
+    /// before admission. This method never silently clamps an invalid value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use frankenengine_node::config::{Profile, RuntimeConfig};
+    ///
+    /// let mut config = RuntimeConfig::balanced_defaults();
+    /// config.max_parse_tokens = Some(131_072);
+    /// let budget = config.effective_parse_budget(Profile::Balanced);
+    /// assert_eq!(budget.max_source_bytes, 1_048_576);
+    /// assert_eq!(budget.max_token_count, 131_072);
+    /// assert_eq!(budget.max_recursion_depth, 256);
+    /// ```
+    #[must_use]
+    pub fn effective_parse_budget(&self, profile: Profile) -> RuntimeParseBudget {
+        let (max_source_bytes, max_token_count, max_recursion_depth) = match profile {
+            Profile::Strict => (256_000, 32_768, 128),
+            Profile::Balanced => (1_048_576, 65_536, 256),
+            Profile::LegacyRisky => (2_097_152, 131_072, 384),
+        };
+        RuntimeParseBudget {
+            max_source_bytes: self.max_parse_source_bytes.unwrap_or(max_source_bytes),
+            max_token_count: self.max_parse_tokens.unwrap_or(max_token_count),
+            max_recursion_depth,
+        }
+    }
+
     /// Return strict runtime lane and bulkhead defaults.
     ///
     /// # Examples
@@ -3908,6 +4036,8 @@ impl RuntimeConfig {
             ),
             drain_timeout_ms: None,
             max_instructions: None,
+            max_parse_source_bytes: None,
+            max_parse_tokens: None,
         }
     }
 
@@ -3936,6 +4066,8 @@ impl RuntimeConfig {
             ),
             drain_timeout_ms: None,
             max_instructions: None,
+            max_parse_source_bytes: None,
+            max_parse_tokens: None,
         }
     }
 
@@ -3964,6 +4096,8 @@ impl RuntimeConfig {
             ),
             drain_timeout_ms: None,
             max_instructions: None,
+            max_parse_source_bytes: None,
+            max_parse_tokens: None,
         }
     }
 }
@@ -5030,6 +5164,133 @@ mod tests {
     }
 
     #[test]
+    fn runtime_parse_budget_preserves_profile_defaults() {
+        for (profile, max_source_bytes, max_token_count, max_recursion_depth) in [
+            (Profile::Strict, 256_000, 32_768, 128),
+            (Profile::Balanced, 1_048_576, 65_536, 256),
+            (Profile::LegacyRisky, 2_097_152, 131_072, 384),
+        ] {
+            let config = Config::for_profile(profile);
+            assert_eq!(config.runtime.max_parse_source_bytes, None);
+            assert_eq!(config.runtime.max_parse_tokens, None);
+            config.runtime.validate_parse_budget().unwrap();
+            assert_eq!(
+                config.runtime.effective_parse_budget(profile),
+                RuntimeParseBudget {
+                    max_source_bytes,
+                    max_token_count,
+                    max_recursion_depth,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_parse_budget_overrides_preserve_other_profile_limits() {
+        for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+            let mut config = Config::for_profile(profile);
+            let defaults = config.runtime.effective_parse_budget(profile);
+            config.runtime.max_parse_tokens = Some(MAX_PARSE_TOKENS);
+            config.runtime.validate_parse_budget().unwrap();
+            assert_eq!(
+                config.runtime.effective_parse_budget(profile),
+                RuntimeParseBudget {
+                    max_token_count: 131_072,
+                    ..defaults
+                }
+            );
+
+            config.runtime.max_parse_tokens = None;
+            config.runtime.max_parse_source_bytes = Some(MAX_PARSE_SOURCE_BYTES);
+            config.runtime.validate_parse_budget().unwrap();
+            assert_eq!(
+                config.runtime.effective_parse_budget(profile),
+                RuntimeParseBudget {
+                    max_source_bytes: 2_097_152,
+                    ..defaults
+                }
+            );
+
+            config.runtime.max_parse_source_bytes = Some(1);
+            config.runtime.max_parse_tokens = Some(1);
+            config.runtime.validate_parse_budget().unwrap();
+            assert_eq!(
+                config.runtime.effective_parse_budget(profile),
+                RuntimeParseBudget {
+                    max_source_bytes: 1,
+                    max_token_count: 1,
+                    max_recursion_depth: defaults.max_recursion_depth,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_parse_budget_rejects_invalid_direct_configs_without_clamping() {
+        for (field, max_value, source_bytes) in [
+            (
+                "runtime.max_parse_source_bytes",
+                MAX_PARSE_SOURCE_BYTES,
+                true,
+            ),
+            ("runtime.max_parse_tokens", MAX_PARSE_TOKENS, false),
+        ] {
+            for value in [0, max_value + 1, u64::MAX] {
+                let mut config = valid_base_config(Profile::Balanced);
+                if source_bytes {
+                    config.runtime.max_parse_source_bytes = Some(value);
+                } else {
+                    config.runtime.max_parse_tokens = Some(value);
+                }
+                let err = config.runtime.validate_parse_budget().unwrap_err();
+                assert!(err.to_string().contains(field), "{err}");
+                assert!(err.to_string().contains(&max_value.to_string()), "{err}");
+                assert!(config.validate().is_err());
+                let budget = config.runtime.effective_parse_budget(config.profile);
+                assert_eq!(
+                    if source_bytes {
+                        budget.max_source_bytes
+                    } else {
+                        budget.max_token_count
+                    },
+                    value,
+                    "validation must reject the original value, never silently clamp it"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_parse_budget_roundtrips_through_config_resolution_and_receipt_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("franken_node.toml");
+        for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+            let mut config = valid_base_config(profile);
+            config.runtime.max_parse_source_bytes = Some(MAX_PARSE_SOURCE_BYTES);
+            config.runtime.max_parse_tokens = Some(MAX_PARSE_TOKENS);
+            let encoded = config.to_toml().unwrap();
+            assert!(encoded.contains("max_parse_source_bytes = 2097152"));
+            assert!(encoded.contains("max_parse_tokens = 131072"));
+            std::fs::write(&path, encoded).unwrap();
+            let resolved = Config::resolve_with_env(
+                Some(&path),
+                CliOverrides::default(),
+                &map_lookup(BTreeMap::new()),
+            )
+            .unwrap();
+            assert_eq!(resolved.config, config);
+            let budget = resolved.config.runtime.effective_parse_budget(profile);
+            let json = serde_json::to_value(budget).unwrap();
+            assert_eq!(json["max_source_bytes"], 2_097_152);
+            assert_eq!(json["max_token_count"], 131_072);
+            assert_eq!(
+                serde_json::from_value::<RuntimeParseBudget>(json).unwrap(),
+                budget
+            );
+        }
+    }
+
+    #[test]
     fn profile_defaults_do_not_embed_registry_signing_key() {
         for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
             let config = Config::for_profile(profile);
@@ -5679,6 +5940,167 @@ registry_signing_key = "x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c="
         assert_eq!(resolved.config.runtime.preferred, PreferredRuntime::Node);
         assert_eq!(resolved.config.runtime.remote_max_in_flight, 66);
         assert_eq!(resolved.config.runtime.bulkhead_retry_after_ms, 17);
+    }
+
+    #[test]
+    fn runtime_parse_budget_resolves_file_profile_and_env_precedence_with_provenance() {
+        let (_dir, path) = security_baseline_file();
+        let baseline = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "{baseline}\n[runtime]\nmax_parse_source_bytes = 500000\nmax_parse_tokens = 70000\n\
+                 [profiles.balanced.runtime]\nmax_parse_source_bytes = 750000\nmax_parse_tokens = 90000\n"
+            ),
+        )
+        .unwrap();
+
+        let profile_resolved = Config::resolve_with_env(
+            Some(&path),
+            CliOverrides::default(),
+            &map_lookup(BTreeMap::new()),
+        )
+        .unwrap();
+        assert_eq!(
+            profile_resolved
+                .config
+                .runtime
+                .effective_parse_budget(Profile::Balanced),
+            RuntimeParseBudget {
+                max_source_bytes: 750_000,
+                max_token_count: 90_000,
+                max_recursion_depth: 256,
+            }
+        );
+
+        let env = BTreeMap::from([
+            (
+                "FRANKEN_NODE_RUNTIME_MAX_PARSE_SOURCE_BYTES".to_string(),
+                "1048576".to_string(),
+            ),
+            (
+                "FRANKEN_NODE_RUNTIME_MAX_PARSE_TOKENS".to_string(),
+                "131072".to_string(),
+            ),
+        ]);
+        let resolved =
+            Config::resolve_with_env(Some(&path), CliOverrides::default(), &map_lookup(env))
+                .unwrap();
+        assert_eq!(resolved.config.profile, Profile::Balanced);
+        assert_eq!(
+            resolved
+                .config
+                .runtime
+                .effective_parse_budget(Profile::Balanced),
+            RuntimeParseBudget {
+                max_source_bytes: 1_048_576,
+                max_token_count: 131_072,
+                max_recursion_depth: 256,
+            }
+        );
+        for (field, values) in [
+            (
+                "runtime.max_parse_source_bytes",
+                [500_000, 750_000, 1_048_576],
+            ),
+            ("runtime.max_parse_tokens", [70_000, 90_000, 131_072]),
+        ] {
+            let decisions: Vec<_> = resolved
+                .decisions
+                .iter()
+                .filter(|decision| decision.field == field)
+                .cloned()
+                .collect();
+            assert_eq!(
+                decisions,
+                vec![
+                    MergeDecision::new(MergeStage::File, field, values[0]),
+                    MergeDecision::new(MergeStage::Profile, field, values[1]),
+                    MergeDecision::new(MergeStage::Env, field, values[2]),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_parse_budget_rejects_invalid_toml_values() {
+        let (_dir, path) = security_baseline_file();
+        let baseline = std::fs::read_to_string(&path).unwrap();
+        for (field, maximum) in [
+            ("max_parse_source_bytes", MAX_PARSE_SOURCE_BYTES),
+            ("max_parse_tokens", MAX_PARSE_TOKENS),
+        ] {
+            for value in ["0".to_string(), (maximum + 1).to_string()] {
+                std::fs::write(&path, format!("{baseline}\n[runtime]\n{field} = {value}\n"))
+                    .unwrap();
+                let err = Config::resolve_with_env(
+                    Some(&path),
+                    CliOverrides::default(),
+                    &map_lookup(BTreeMap::new()),
+                )
+                .unwrap_err();
+                assert!(matches!(err, ConfigError::ValidationFailed(_)), "{err}");
+                assert!(
+                    err.to_string().contains(&format!("runtime.{field}")),
+                    "{err}"
+                );
+                assert!(err.to_string().contains(&maximum.to_string()), "{err}");
+            }
+            for value in ["-1", "1.5", "\"large\"", "true"] {
+                std::fs::write(&path, format!("{baseline}\n[runtime]\n{field} = {value}\n"))
+                    .unwrap();
+                let err = Config::resolve_with_env(
+                    Some(&path),
+                    CliOverrides::default(),
+                    &map_lookup(BTreeMap::new()),
+                )
+                .unwrap_err();
+                assert!(matches!(err, ConfigError::ParseFailed(..)), "{err}");
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_parse_budget_rejects_invalid_env_values() {
+        let (_dir, path) = security_baseline_file();
+        for (env_key, field, maximum) in [
+            (
+                "FRANKEN_NODE_RUNTIME_MAX_PARSE_SOURCE_BYTES",
+                "runtime.max_parse_source_bytes",
+                MAX_PARSE_SOURCE_BYTES,
+            ),
+            (
+                "FRANKEN_NODE_RUNTIME_MAX_PARSE_TOKENS",
+                "runtime.max_parse_tokens",
+                MAX_PARSE_TOKENS,
+            ),
+        ] {
+            for value in ["0".to_string(), (maximum + 1).to_string()] {
+                let env = BTreeMap::from([(env_key.to_string(), value)]);
+                let err = Config::resolve_with_env(
+                    Some(&path),
+                    CliOverrides::default(),
+                    &map_lookup(env),
+                )
+                .unwrap_err();
+                assert!(matches!(err, ConfigError::ValidationFailed(_)), "{err}");
+                assert!(err.to_string().contains(field), "{err}");
+                assert!(err.to_string().contains(env_key), "{err}");
+            }
+            for value in ["", "-1", "1.5", "large", "18446744073709551616"] {
+                let env = BTreeMap::from([(env_key.to_string(), value.to_string())]);
+                let err = Config::resolve_with_env(
+                    Some(&path),
+                    CliOverrides::default(),
+                    &map_lookup(env),
+                )
+                .unwrap_err();
+                assert!(
+                    matches!(&err, ConfigError::EnvParseFailed { key, .. } if key == env_key),
+                    "{err}"
+                );
+            }
+        }
     }
 
     #[test]

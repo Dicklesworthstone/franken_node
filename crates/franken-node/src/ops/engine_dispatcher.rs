@@ -5,7 +5,7 @@ use crate::runtime::lockstep_harness::LockstepHarness;
 use crate::storage::frankensqlite_adapter::FrankensqliteAdapter;
 use crate::{
     ActionableError,
-    config::{Config, PreferredRuntime, Profile},
+    config::{Config, PreferredRuntime, Profile, RuntimeParseBudget},
     security::impossible_default::{
         ChildProcessSpawnAdmission, configured_child_process_spawn_admission,
         configured_child_process_spawn_admission_from_authenticated_run_key,
@@ -2633,7 +2633,8 @@ pub struct RunDispatchReport {
 /// this carries the MAP risk state and posterior the run's evidence produced,
 /// the action the expected-loss selector chose before any override, and the
 /// stopping rule that crossed, if one did. Copied from the engine's
-/// `OrchestratorResult`; nothing here is recomputed by the product.
+/// `OrchestratorResult`; the parser budget records the resolved product
+/// configuration supplied to that execution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EngineContainmentDecision {
     pub containment_action: String,
@@ -2657,6 +2658,9 @@ pub struct EngineContainmentDecision {
     /// stopping override, benign-completion downgrade).
     pub decision_rationale: Option<String>,
     pub instructions_executed: u64,
+    /// Parser limits applied to the entrypoint and every imported module.
+    /// Captured from the same resolved configuration handed to the engine.
+    pub parser_budget: RuntimeParseBudget,
 }
 
 /// bd-5r99w.12: the trust-native effect ledger surfaced by `franken-node run`.
@@ -3961,6 +3965,7 @@ fn package_scope_is_module(app_path: &Path) -> bool {
 #[cfg(feature = "engine")]
 fn engine_containment_decision(
     result: &frankenengine_engine::execution_orchestrator::OrchestratorResult,
+    parser_budget: RuntimeParseBudget,
 ) -> EngineContainmentDecision {
     let stopping = result.optimal_stopping_certificate.as_ref();
     let security_entry = result.evidence_entries.iter().find(|entry| {
@@ -3983,6 +3988,85 @@ fn engine_containment_decision(
             .and_then(|entry| entry.metadata.get("guardplane_last_action").cloned()),
         decision_rationale: security_entry.map(|entry| entry.chosen_action.rationale.clone()),
         instructions_executed: result.instructions_executed,
+        parser_budget,
+    }
+}
+
+/// Enforce the source-byte budget before allocating the complete entrypoint.
+/// Reading one extra byte detects files that grow after open without trusting
+/// metadata or allowing an unbounded read before the parser checks its budget.
+#[cfg(feature = "engine")]
+fn read_native_entry_source(path: &Path, max_source_bytes: u64) -> Result<String, String> {
+    let source_file = std::fs::File::open(path).map_err(|error| {
+        format!(
+            "Failed to open application source at {}: {error}",
+            path.display()
+        )
+    })?;
+    let mut bytes = Vec::new();
+    source_file
+        .take(max_source_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            format!(
+                "Failed to read application source at {}: {error}",
+                path.display()
+            )
+        })?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_source_bytes {
+        return Err(format!(
+            "Application source at {} exceeds runtime.max_parse_source_bytes={max_source_bytes}; \
+             configure runtime.max_parse_source_bytes or FRANKEN_NODE_RUNTIME_MAX_PARSE_SOURCE_BYTES \
+             within the supported limit of {} bytes",
+            path.display(),
+            crate::config::MAX_PARSE_SOURCE_BYTES,
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| {
+        format!(
+            "Application source at {} is not valid UTF-8: {error}",
+            path.display()
+        )
+    })
+}
+
+#[cfg(feature = "engine")]
+fn native_execution_failure_message(
+    error: &frankenengine_engine::execution_orchestrator::OrchestratorError,
+    budget: RuntimeParseBudget,
+) -> String {
+    use frankenengine_engine::baseline_interpreter::InterpreterError;
+    use frankenengine_engine::execution_orchestrator::OrchestratorError;
+    use frankenengine_engine::parser::ParseErrorCode;
+
+    let detail = format!("Native execution failed: {error}");
+    // ModuleParseFailed retains the parser diagnostic as text. Inspect only
+    // that diagnostic, never a guest exception or user-controlled source path.
+    let parser_budget_exceeded = match error.primary_error() {
+        OrchestratorError::Parse(error) => matches!(
+            error.code,
+            ParseErrorCode::BudgetExceeded | ParseErrorCode::SourceTooLarge
+        ),
+        OrchestratorError::Interpreter(InterpreterError::ModuleParseFailed { error, .. }) => {
+            error.starts_with("BudgetExceeded:") || error.starts_with("SourceTooLarge:")
+        }
+        _ => false,
+    };
+    if parser_budget_exceeded {
+        format!(
+            "{detail}; effective parser limits: runtime.max_parse_source_bytes={}, \
+             runtime.max_parse_tokens={}, max_recursion_depth={}. \
+             Configure the source/token limits in [runtime] or with \
+             FRANKEN_NODE_RUNTIME_MAX_PARSE_SOURCE_BYTES / FRANKEN_NODE_RUNTIME_MAX_PARSE_TOKENS; \
+             supported maxima are {} bytes and {} tokens; recursion remains profile-bounded",
+            budget.max_source_bytes,
+            budget.max_token_count,
+            budget.max_recursion_depth,
+            crate::config::MAX_PARSE_SOURCE_BYTES,
+            crate::config::MAX_PARSE_TOKENS,
+        )
+    } else {
+        detail
     }
 }
 
@@ -4454,6 +4538,11 @@ impl EngineDispatcher {
                 "Use a valid policy mode: --policy strict, --policy balanced, or --policy legacy-risky"
             ).into());
         }
+
+        // Library callers can construct Config directly, so enforce the same
+        // absolute parser envelope as the TOML/environment resolver before any
+        // execution-side effect.
+        config.runtime.validate_parse_budget()?;
 
         // An external executable named by --engine-bin, the environment, or
         // project config has no authenticated identity. In builds without the
@@ -5147,6 +5236,7 @@ impl EngineDispatcher {
         ) {
             anyhow::bail!("native-session request policy mode was invalid");
         }
+        request.config.runtime.validate_parse_budget()?;
         if !crate::security::constant_time::ct_eq(
             &request.runtime_evidence_grant.capture.session_nonce,
             &request.nonce,
@@ -7293,34 +7383,16 @@ impl EngineDispatcher {
 
         // Profile-based timeouts and limits (independent of runtime config for orchestrator)
 
-        // Configure parser options based on profile
-        // Note: Parser budgets operate on different dimensions than execution budgets:
-        // - ExecutionConfig.deterministic_budget: instruction-level execution limit
-        // - ParserOptions.budget: source code parsing limits (bytes, tokens, recursion)
-        // These are complementary constraints that do not conflict.
-        // bd-1lmtm: Absolute hard caps to prevent DoS via profile manipulation
-        const ABSOLUTE_MAX_SOURCE_BYTES: u64 = 2_097_152; // 2MB absolute limit - prevents 4MB LegacyRisky DoS
-        const ABSOLUTE_MAX_TOKEN_COUNT: u64 = 131_072; // 128K tokens absolute limit - prevents 256K DoS
-        const ABSOLUTE_MAX_RECURSION_DEPTH: u32 = 384; // 384 depth absolute limit - prevents 512 DoS
-
+        // bd-fkdzv: resolve the operator's source/token budget independently
+        // of the trust profile. Configuration validation retains the existing
+        // absolute envelope; no override silently clamps or widens authority.
+        let budget = config.runtime.effective_parse_budget(config.profile);
         let parser_options = ParserOptions {
             mode: frankenengine_engine::parser::ParserMode::ScalarReference,
             budget: frankenengine_engine::parser::ParserBudget {
-                max_source_bytes: match config.profile {
-                    Profile::Strict => 256_000,     // 256KB source limit
-                    Profile::Balanced => 1_048_576, // 1MB source limit (default)
-                    Profile::LegacyRisky => ABSOLUTE_MAX_SOURCE_BYTES.min(4_194_304), // Capped at 2MB absolute max
-                },
-                max_token_count: match config.profile {
-                    Profile::Strict => 32_768,   // 32K tokens
-                    Profile::Balanced => 65_536, // 64K tokens (default)
-                    Profile::LegacyRisky => ABSOLUTE_MAX_TOKEN_COUNT.min(262_144), // Capped at 128K absolute max
-                },
-                max_recursion_depth: match config.profile {
-                    Profile::Strict => 128u64,   // Shallow recursion for safety
-                    Profile::Balanced => 256u64, // Standard recursion depth (default)
-                    Profile::LegacyRisky => u64::from(ABSOLUTE_MAX_RECURSION_DEPTH), // Capped at 384 absolute max
-                },
+                max_source_bytes: budget.max_source_bytes,
+                max_token_count: budget.max_token_count,
+                max_recursion_depth: budget.max_recursion_depth,
             },
         };
 
@@ -7399,7 +7471,6 @@ impl EngineDispatcher {
         use frankenengine_extension_host::host_io::{
             HostIoRecorder, InMemoryHostIoTranscript, SandboxedHostIo,
         };
-        use std::fs;
 
         let NativeEngineRunContext {
             telemetry_guard,
@@ -7419,6 +7490,13 @@ impl EngineDispatcher {
         .entered();
 
         let setup_start = Instant::now();
+        config.runtime.validate_parse_budget().map_err(|error| {
+            native_engine_spawn_error_with_telemetry_cleanup(
+                error.to_string(),
+                &mut telemetry_guard,
+            )
+        })?;
+        let parser_budget = config.runtime.effective_parse_budget(config.profile);
 
         // `run` accepts relative entrypoints and the compatibility runner uses
         // a basename plus a sandbox cwd.  Preserve that concrete filesystem
@@ -7466,17 +7544,12 @@ impl EngineDispatcher {
             )
         };
 
-        // Read the application source code
-        let source_code = fs::read_to_string(&execution_app_path).map_err(|error| {
-            native_engine_spawn_error_with_telemetry_cleanup(
-                format!(
-                    "Failed to read application source at {}: {}",
-                    execution_app_path.display(),
-                    error
-                ),
-                &mut telemetry_guard,
-            )
-        })?;
+        let source_code =
+            read_native_entry_source(&execution_app_path, parser_budget.max_source_bytes).map_err(
+                |error| {
+                    native_engine_spawn_error_with_telemetry_cleanup(error, &mut telemetry_guard)
+                },
+            )?;
 
         // Create extension package from source
         let package = ExtensionPackage {
@@ -7747,7 +7820,7 @@ impl EngineDispatcher {
                     let (stdout, stderr) =
                         render_console_streams(&orchestrator.last_failed_console_output());
                     return Err(native_engine_spawn_error_with_telemetry_cleanup(
-                        format!("Native execution failed: {error}"),
+                        native_execution_failure_message(&error, parser_budget),
                         &mut telemetry_guard,
                     )
                     .with_host_effect_ledger(host_effect_ledger)
@@ -7839,7 +7912,7 @@ impl EngineDispatcher {
             stdout,
             stderr,
         };
-        let engine_decision = engine_containment_decision(&execution_result);
+        let engine_decision = engine_containment_decision(&execution_result, parser_budget);
 
         // Stop telemetry and return
         let telemetry_guard = telemetry_guard.take().ok_or_else(|| {
@@ -8668,6 +8741,90 @@ impl EngineDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn native_entry_source_budget_accepts_exact_bytes_and_rejects_overflow() {
+        let directory = tempfile::tempdir().expect("source budget directory");
+        let path = directory.path().join("entry.js");
+        let source = "console.log('é');";
+        std::fs::write(&path, source).expect("write UTF-8 source");
+        let budget = u64::try_from(source.len()).expect("source length");
+        assert_eq!(
+            read_native_entry_source(&path, budget).expect("exact bound"),
+            source
+        );
+        let error = read_native_entry_source(&path, budget - 1).expect_err("over byte bound");
+        assert!(error.contains("runtime.max_parse_source_bytes"), "{error}");
+        assert!(error.contains("entry.js"), "{error}");
+
+        // The loader must bound allocation even when the on-disk file is much
+        // larger than the configured parser budget.
+        std::fs::write(&path, vec![b'x'; 1_048_576]).expect("write oversized source");
+        assert!(
+            read_native_entry_source(&path, 16)
+                .expect_err("oversized")
+                .contains("=16")
+        );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn native_entry_source_budget_preserves_utf8_and_io_errors() {
+        let directory = tempfile::tempdir().expect("source error directory");
+        let path = directory.path().join("entry.js");
+        assert!(
+            read_native_entry_source(&path, 32)
+                .expect_err("missing source")
+                .contains("Failed to open")
+        );
+        std::fs::write(&path, [0xff, 0xfe]).expect("write invalid UTF-8");
+        assert!(
+            read_native_entry_source(&path, 32)
+                .expect_err("invalid UTF-8")
+                .contains("not valid UTF-8")
+        );
+        std::fs::write(&path, []).expect("write empty source");
+        assert_eq!(read_native_entry_source(&path, 32).expect("empty read"), "");
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn native_parser_budget_hints_require_a_parser_failure() {
+        use frankenengine_engine::baseline_interpreter::InterpreterError;
+        use frankenengine_engine::execution_orchestrator::OrchestratorError;
+
+        let budget = Config::default()
+            .runtime
+            .effective_parse_budget(Profile::Balanced);
+        let module_error = OrchestratorError::Interpreter(InterpreterError::ModuleParseFailed {
+            specifier: "node_modules/large/index.js".to_string(),
+            error: "BudgetExceeded: token budget exceeded: token_count=70000 max_token_count=65536"
+                .to_string(),
+        });
+        let message = native_execution_failure_message(&module_error, budget);
+        assert!(
+            message.contains("runtime.max_parse_tokens=65536"),
+            "{message}"
+        );
+        for error in [
+            InterpreterError::UncaughtException {
+                value: "BudgetExceeded: forged guest text".to_string(),
+            },
+            InterpreterError::ModuleReadFailed {
+                specifier: "BudgetExceeded.js".to_string(),
+                error: "missing file".to_string(),
+            },
+            InterpreterError::ModuleParseFailed {
+                specifier: "SourceTooLarge.js".to_string(),
+                error: "UnexpectedToken: invalid syntax".to_string(),
+            },
+        ] {
+            let message =
+                native_execution_failure_message(&OrchestratorError::Interpreter(error), budget);
+            assert!(!message.contains("effective parser limits"), "{message}");
+        }
+    }
     use crate::supply_chain::certification::{EvidenceType, VerifiedEvidenceRef};
     use crate::supply_chain::trust_card::{
         BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,

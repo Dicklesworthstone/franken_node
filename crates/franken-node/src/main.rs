@@ -837,6 +837,9 @@ struct RunExecutionReceiptCore {
     exit_code: Option<i32>,
     runtime_used: String,
     runtime_version: Option<String>,
+    /// Effective entrypoint/import parser limits for a completed native run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parser_budget: Option<config::RuntimeParseBudget>,
     preflight_verdict: PreFlightVerdict,
     telemetry_summary: Option<RunExecutionTelemetrySummary>,
     ssrf_violations: Vec<String>,
@@ -8575,6 +8578,10 @@ fn build_run_execution_receipt(
         exit_code: dispatch.exit_code,
         runtime_used: dispatch.runtime.clone(),
         runtime_version: None,
+        parser_budget: dispatch
+            .engine_decision
+            .as_ref()
+            .map(|decision| decision.parser_budget),
         preflight_verdict: preflight.verdict.clone(),
         telemetry_summary: summarize_run_telemetry(dispatch.telemetry.as_ref()),
         ssrf_violations,
@@ -10871,7 +10878,11 @@ fn persist_run_host_effect_ledger(
 
 /// Find `<root>/<day>/<id>.json` (and, under `include_archive`,
 /// `<root>/archive/<day>/<id>.json`).
-fn find_dated_record(root: &Path, record_id: &str, include_archive: bool) -> Result<Option<PathBuf>> {
+fn find_dated_record(
+    root: &Path,
+    record_id: &str,
+    include_archive: bool,
+) -> Result<Option<PathBuf>> {
     let file_name = format!("{record_id}.json");
     let mut roots = vec![root.to_path_buf()];
     if include_archive {
@@ -10934,8 +10945,7 @@ fn handle_incident_capture_command(args: &cli::IncidentCaptureArgs) -> Result<()
     if selector.is_empty() {
         anyhow::bail!("`incident capture` requires --from-run <receipt-id|receipt-path>");
     }
-    let project_root =
-        std::env::current_dir().context("failed resolving the project directory")?;
+    let project_root = std::env::current_dir().context("failed resolving the project directory")?;
     let receipt_path = {
         let as_path = Path::new(selector);
         if as_path.is_file() {
@@ -10971,13 +10981,17 @@ fn handle_incident_capture_command(args: &cli::IncidentCaptureArgs) -> Result<()
         .ok_or_else(|| anyhow::anyhow!("run receipt has no receipt_hash"))?
         .to_string();
 
-    let record_path = find_dated_record(&project_root.join(RUN_LEDGER_RELATIVE_DIR), &receipt_id, false)?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "run {receipt_id} has no persisted host-effect ledger; only native engine runs \
+    let record_path = find_dated_record(
+        &project_root.join(RUN_LEDGER_RELATIVE_DIR),
+        &receipt_id,
+        false,
+    )?
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "run {receipt_id} has no persisted host-effect ledger; only native engine runs \
                  record one"
-            )
-        })?;
+        )
+    })?;
     let record: RunHostEffectLedgerRecord = serde_json::from_str(
         &bounded_read_to_string(&record_path, MAX_EVIDENCE_INPUT_BYTES)
             .with_context(|| format!("failed reading {}", record_path.display()))?,
@@ -11070,7 +11084,10 @@ fn handle_incident_capture_command(args: &cli::IncidentCaptureArgs) -> Result<()
 }
 
 #[cfg(feature = "engine")]
-fn verify_run_ledger_record(project_root: &Path, record: &RunHostEffectLedgerRecord) -> Result<String> {
+fn verify_run_ledger_record(
+    project_root: &Path,
+    record: &RunHostEffectLedgerRecord,
+) -> Result<String> {
     let capture_path = record
         .runtime_evidence_identity_capture_path
         .as_deref()
@@ -11095,7 +11112,10 @@ fn verify_run_ledger_record(project_root: &Path, record: &RunHostEffectLedgerRec
 }
 
 #[cfg(not(feature = "engine"))]
-fn verify_run_ledger_record(_project_root: &Path, record: &RunHostEffectLedgerRecord) -> Result<String> {
+fn verify_run_ledger_record(
+    _project_root: &Path,
+    record: &RunHostEffectLedgerRecord,
+) -> Result<String> {
     anyhow::bail!(
         "verifying the host-effect ledger of run {} needs the `engine` feature",
         record.receipt_id
@@ -11111,8 +11131,7 @@ const OPS_INCIDENT_COVERAGE_CLI_SCHEMA_VERSION: &str = "franken-node/ops-inciden
 /// as); an incident counts as captured when its evidence package validates
 /// and as replayable when a signature-verified bundle for it exists.
 fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<()> {
-    let project_root =
-        std::env::current_dir().context("failed resolving the project directory")?;
+    let project_root = std::env::current_dir().context("failed resolving the project directory")?;
     if let Some(min) = args.min_coverage
         && !(0.0..=1.0).contains(&min)
     {
@@ -11132,7 +11151,10 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
         if let Some(incident_id) = receipt["incident_capture"]["incident_id"].as_str() {
             observed.insert(
                 incident_id.to_string(),
-                receipt["receipt_id"].as_str().unwrap_or_default().to_string(),
+                receipt["receipt_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
             );
         }
     }
@@ -11143,10 +11165,14 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
     let mut unbundled = Vec::new();
     for incident_id in observed.keys() {
         let is_captured = entries.iter().any(|entry| {
-            entry.source == "captured" && entry.status == "valid" && &entry.incident_id == incident_id
+            entry.source == "captured"
+                && entry.status == "valid"
+                && &entry.incident_id == incident_id
         });
         let is_bundled = entries.iter().any(|entry| {
-            entry.source == "bundle" && entry.status == "verified" && &entry.incident_id == incident_id
+            entry.source == "bundle"
+                && entry.status == "verified"
+                && &entry.incident_id == incident_id
         });
         if is_captured {
             captured.push(incident_id.clone());
@@ -11186,7 +11212,10 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         let percent = |value: Option<f64>| {
-            value.map_or_else(|| "n/a".to_string(), |value| format!("{:.1}%", value * 100.0))
+            value.map_or_else(
+                || "n/a".to_string(),
+                |value| format!("{:.1}%", value * 100.0),
+            )
         };
         println!(
             "incident coverage: high_severity_events={} captured={} ({}) replayable={} ({}) receipts_scanned={}",
@@ -11198,7 +11227,9 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
             receipts.len()
         );
         for incident_id in &unbundled {
-            println!("  not replayable yet: {incident_id} (franken-node incident bundle --id {incident_id} --verify)");
+            println!(
+                "  not replayable yet: {incident_id} (franken-node incident bundle --id {incident_id} --verify)"
+            );
         }
     }
     if let Some(min) = args.min_coverage
