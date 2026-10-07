@@ -56,7 +56,7 @@ struct RunOutcome {
 #[test]
 fn private_native_session_worker_refuses_direct_cli_invocation() {
     let missing_nonce = Command::new(franken_node_bin())
-        .arg("__franken-native-session-worker-v5")
+        .arg("__franken-native-session-worker-v6")
         .stdin(Stdio::null())
         .output()
         .expect("invoke private worker marker directly");
@@ -75,7 +75,7 @@ fn private_native_session_worker_refuses_direct_cli_invocation() {
     {
         let forged_nonce = Command::new(franken_node_bin())
             .args([
-                "__franken-native-session-worker-v5",
+                "__franken-native-session-worker-v6",
                 "00000000-0000-4000-8000-000000000001",
             ])
             .stdin(Stdio::null())
@@ -1495,6 +1495,14 @@ fn run_emits_correlated_structured_logs() {
 
 /// `run <dir>` in an initialised workspace holding `files`, console-only.
 fn run_directory_target(files: &[(&str, &str)], target: &str) -> RunOutcome {
+    run_project_target_with_setup(files, target, |_, _| {})
+}
+
+fn run_project_target_with_setup(
+    files: &[(&str, &str)],
+    target: &str,
+    setup: impl FnOnce(&std::path::Path, &mut Command),
+) -> RunOutcome {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let init = Command::new(franken_node_bin())
         .args(["init", "--profile", "balanced", "--out-dir", "."])
@@ -1507,7 +1515,8 @@ fn run_directory_target(files: &[(&str, &str)], target: &str) -> RunOutcome {
         std::fs::create_dir_all(path.parent().expect("fixture parent")).expect("fixture dir");
         std::fs::write(&path, contents).expect("write fixture");
     }
-    let output = Command::new(franken_node_bin())
+    let mut command = Command::new(franken_node_bin());
+    command
         .args([
             "run",
             target,
@@ -1519,9 +1528,9 @@ fn run_directory_target(files: &[(&str, &str)], target: &str) -> RunOutcome {
             franken_node_bin(),
             "--console-only",
         ])
-        .current_dir(dir.path())
-        .output()
-        .expect("spawn franken-node run");
+        .current_dir(dir.path());
+    setup(dir.path(), &mut command);
+    let output = command.output().expect("spawn franken-node run");
     RunOutcome {
         exit_code: output.status.code(),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -1547,6 +1556,216 @@ fn run_directory_target_executes_package_main() {
     );
     assert_eq!(outcome.exit_code, Some(0), "stderr:\n{}", outcome.stderr);
     assert_eq!(outcome.stdout, "from-main\n");
+}
+
+/// A nested package main retains the explicitly selected package as both its
+/// module boundary and its filesystem root. Resolving `main` must not move
+/// `readFileSync('data.txt')` into the source directory.
+#[test]
+fn run_project_authority_directory_main_reads_sibling_data() {
+    let outcome = run_directory_target(
+        &[
+            (
+                "pkg/package.json",
+                r#"{"name":"pkg","version":"1.0.0","main":"lib/start.js"}"#,
+            ),
+            (
+                "pkg/lib/start.js",
+                "const fs = require('fs');\nconsole.log(fs.readFileSync('data.txt', 'utf8'));\n",
+            ),
+            ("pkg/data.txt", "project-data"),
+            ("pkg/lib/data.txt", "wrong-source-directory"),
+        ],
+        "pkg",
+    );
+    assert_eq!(outcome.exit_code, Some(0), "stderr:\n{}", outcome.stderr);
+    assert_eq!(outcome.stdout, "project-data\n");
+}
+
+#[test]
+fn run_project_authority_nested_file_reads_root_data_and_modules() {
+    let outcome = run_directory_target(
+        &[
+            (
+                "src/main.js",
+                "const fs = require('fs');\n\
+                 const value = require('../support/value.js');\n\
+                 console.log(value + ':' + fs.readFileSync('data.txt', 'utf8'));\n",
+            ),
+            ("support/value.js", "module.exports = 'support-module';\n"),
+            ("data.txt", "project-data"),
+            ("src/data.txt", "wrong-source-directory"),
+        ],
+        "src/main.js",
+    );
+    assert_eq!(outcome.exit_code, Some(0), "stderr:\n{}", outcome.stderr);
+    assert_eq!(outcome.stdout, "support-module:project-data\n");
+}
+
+#[test]
+fn run_project_authority_refuses_module_escape() {
+    let outcome = run_directory_target(
+        &[
+            ("pkg/package.json", r#"{"name":"pkg","main":"app.js"}"#),
+            ("pkg/app.js", "require('../outside.js');\n"),
+            ("outside.js", "console.log('outside-module-executed');\n"),
+        ],
+        "pkg",
+    );
+    assert_ne!(outcome.exit_code, Some(0));
+    assert!(
+        !outcome.stdout.contains("outside-module-executed"),
+        "a module outside the selected project must not execute: {}",
+        outcome.stdout
+    );
+    assert!(
+        outcome.stderr.contains("outside") || outcome.stderr.contains("escape"),
+        "the error must identify the refused module: {}",
+        outcome.stderr
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn run_project_authority_refuses_directory_main_symlink_escape() {
+    let outcome = run_project_target_with_setup(
+        &[
+            ("pkg/package.json", r#"{"name":"pkg","main":"main.js"}"#),
+            ("outside.js", "console.log('outside-main-executed');\n"),
+        ],
+        "pkg",
+        |root, _| {
+            std::os::unix::fs::symlink("../outside.js", root.join("pkg/main.js"))
+                .expect("link package main outside its root");
+        },
+    );
+    assert_ne!(outcome.exit_code, Some(0));
+    assert!(!outcome.stdout.contains("outside-main-executed"));
+    assert!(
+        outcome.stderr.contains("escapes selected project root"),
+        "entrypoint containment must refuse before execution: {}",
+        outcome.stderr
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn run_project_authority_refuses_module_symlink_escape() {
+    let outcome = run_project_target_with_setup(
+        &[
+            ("pkg/package.json", r#"{"name":"pkg","main":"main.js"}"#),
+            ("pkg/main.js", "require('./linked.js');\n"),
+            ("outside.js", "console.log('outside-module-executed');\n"),
+        ],
+        "pkg",
+        |root, _| {
+            std::os::unix::fs::symlink("../outside.js", root.join("pkg/linked.js"))
+                .expect("link imported module outside its root");
+        },
+    );
+    assert_ne!(outcome.exit_code, Some(0));
+    assert!(!outcome.stdout.contains("outside-module-executed"));
+    assert!(
+        outcome.stderr.contains("outside") || outcome.stderr.contains("escape"),
+        "the refused import must identify its boundary: {}",
+        outcome.stderr
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn run_project_authority_explicit_directory_symlink_keeps_canonical_root() {
+    let outcome = run_project_target_with_setup(
+        &[
+            ("pkg/package.json", r#"{"name":"pkg","main":"lib/main.js"}"#),
+            (
+                "pkg/lib/main.js",
+                "console.log(require('fs').readFileSync('data.txt', 'utf8'));\n",
+            ),
+            ("pkg/data.txt", "canonical-project-data"),
+        ],
+        "selected-project",
+        |root, _| {
+            std::os::unix::fs::symlink("pkg", root.join("selected-project"))
+                .expect("link explicitly selected project");
+        },
+    );
+    assert_eq!(outcome.exit_code, Some(0), "stderr:\n{}", outcome.stderr);
+    assert_eq!(outcome.stdout, "canonical-project-data\n");
+}
+
+#[test]
+fn run_project_authority_refuses_evidence_home_anywhere_inside_project() {
+    let outcome = run_project_target_with_setup(
+        &[("src/main.js", "console.log('guest-must-not-start');\n")],
+        "src/main.js",
+        |root, command| {
+            // This is outside the entrypoint's parent but inside the selected
+            // project. Checking only `src/` would expose the signing authority.
+            command.env("XDG_STATE_HOME", root.join("private-state"));
+        },
+    );
+    assert_ne!(outcome.exit_code, Some(0));
+    assert!(!outcome.stdout.contains("guest-must-not-start"));
+    assert!(
+        outcome
+            .stderr
+            .contains("must remain outside guest filesystem root"),
+        "the evidence authority must reject the shared guest root before launch: {}",
+        outcome.stderr
+    );
+}
+
+#[test]
+fn run_project_authority_refuses_overlap_with_protected_evidence_subtree() {
+    for target in [
+        "state/franken-node",
+        "state/franken-node/runtime-evidence/keys",
+    ] {
+        let package_manifest = format!("{target}/package.json");
+        let app_path = format!("{target}/app.js");
+        let outcome = run_project_target_with_setup(
+            &[
+                (package_manifest.as_str(), r#"{"main":"app.js"}"#),
+                (app_path.as_str(), "console.log('guest-must-not-start');\n"),
+            ],
+            target,
+            |root, command| {
+                // The state home is an ancestor, so a state-home-only check
+                // misses both the guest containing keys and the guest rooted
+                // inside the protected keys directory.
+                command.env("XDG_STATE_HOME", root.join("state"));
+            },
+        );
+        assert_ne!(outcome.exit_code, Some(0), "{target}");
+        assert!(!outcome.stdout.contains("guest-must-not-start"));
+        assert!(
+            outcome
+                .stderr
+                .contains("protected subtree and guest project must not overlap"),
+            "{target}: protected authority overlap must refuse before keys or guest execution: {}",
+            outcome.stderr
+        );
+    }
+}
+
+#[test]
+fn run_project_authority_allows_disjoint_project_beneath_state_home() {
+    let outcome = run_project_target_with_setup(
+        &[
+            ("state/projects/app/package.json", r#"{"main":"app.js"}"#),
+            (
+                "state/projects/app/app.js",
+                "console.log('disjoint-project');\n",
+            ),
+        ],
+        "state/projects/app",
+        |root, command| {
+            command.env("XDG_STATE_HOME", root.join("state"));
+        },
+    );
+    assert_eq!(outcome.exit_code, Some(0), "stderr:\n{}", outcome.stderr);
+    assert_eq!(outcome.stdout, "disjoint-project\n");
 }
 
 /// bd-reality-20260923-26n9r.4 / engine bd-rff5g: a CommonJS entry requires a

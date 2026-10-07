@@ -152,6 +152,7 @@ use frankenengine_node::control_plane::fleet_transport::{
     wait_until_fleet_converged_or_timeout,
 };
 use frankenengine_node::control_plane::fleet_transport_durable;
+use frankenengine_node::ops::engine_dispatcher::RunProjectPaths;
 #[cfg(test)]
 use frankenengine_node::tools::replay_bundle::{fixture_incident_events, generate_replay_bundle};
 pub use frankenengine_node::{capacity_defaults, connector, control_plane, supply_chain};
@@ -11361,15 +11362,17 @@ fn quarantine_trusted_run_dependencies(
 
 /// Content address of the run target's bytes; the identity a sentinel
 /// quarantine record is keyed by (paths can move, bytes are what escalated).
-fn sentinel_subject_content_hash(app_path: &Path) -> Result<String> {
-    let bytes = crate::bounded_read(app_path, MAX_SENTINEL_QUARANTINE_SUBJECT_BYTES).with_context(
-        || {
+fn sentinel_subject_content_hash(entrypoint: &Path) -> Result<String> {
+    // Callers pass the selected entrypoint, including for directory targets.
+    // Re-resolving package `main` after execution could quarantine different
+    // code if the application modified its manifest during the run.
+    let bytes = crate::bounded_read(entrypoint, MAX_SENTINEL_QUARANTINE_SUBJECT_BYTES)
+        .with_context(|| {
             format!(
-                "failed reading run target {} for sentinel subject hashing",
-                app_path.display()
+                "failed reading run entrypoint {} for sentinel subject hashing",
+                entrypoint.display()
             )
-        },
-    )?;
+        })?;
     Ok(format!(
         "sha256:{}",
         hex::encode(sha2::Sha256::digest(&bytes))
@@ -11442,7 +11445,7 @@ fn sentinel_release_command(app_path: &str) -> String {
 /// superseded by a fresh escalation.
 #[allow(clippy::too_many_arguments)]
 fn maybe_enforce_sentinel_escalation(
-    project_root: &Path,
+    project_paths: &RunProjectPaths,
     config: &config::Config,
     profile: Profile,
     policy_mode: &str,
@@ -11465,7 +11468,8 @@ fn maybe_enforce_sentinel_escalation(
         return Ok(None);
     };
 
-    let app_content_hash = sentinel_subject_content_hash(app_path)?;
+    let project_root = project_paths.project_root();
+    let app_content_hash = sentinel_subject_content_hash(project_paths.entrypoint())?;
     let release_command = sentinel_release_command(&app_path.display().to_string());
     if !config.trust.quarantine_on_high_risk {
         return Ok(Some(SentinelEnforcementSummary {
@@ -11550,10 +11554,11 @@ fn maybe_enforce_sentinel_escalation(
 /// exact release command.
 fn apply_sentinel_subject_quarantine_gate(
     verdict: PreFlightVerdict,
-    project_root: &Path,
+    project_paths: &RunProjectPaths,
     app_path: &Path,
 ) -> Result<PreFlightVerdict> {
-    let app_content_hash = match sentinel_subject_content_hash(app_path) {
+    let project_root = project_paths.project_root();
+    let app_content_hash = match sentinel_subject_content_hash(project_paths.entrypoint()) {
         Ok(hash) => hash,
         Err(err) => {
             // The dispatcher fails on an unreadable target anyway; an
@@ -11887,9 +11892,10 @@ fn handle_trust_release_command(args: &cli::TrustReleaseArgs) -> Result<()> {
         }
         anyhow::bail!("{message}");
     }
-    let project_root = run_project_root(&args.app);
-    let app_content_hash = sentinel_subject_content_hash(&args.app)?;
-    let record_path = sentinel_quarantine_record_path(&project_root, &app_content_hash)?;
+    let project_paths = RunProjectPaths::resolve(&args.app, &std::env::current_dir()?)?;
+    let project_root = project_paths.project_root();
+    let app_content_hash = sentinel_subject_content_hash(project_paths.entrypoint())?;
+    let record_path = sentinel_quarantine_record_path(project_root, &app_content_hash)?;
     let Some(mut record) = load_sentinel_quarantine_record(&record_path)? else {
         let message = format!(
             "no sentinel quarantine record exists for {} ({})",
@@ -11927,7 +11933,7 @@ fn handle_trust_release_command(args: &cli::TrustReleaseArgs) -> Result<()> {
     record.release_reason = Some(args.reason.clone());
     persist_sentinel_quarantine_record(&record_path, &record)?;
     record_trust_decision_evidence(
-        &project_ledger_dir(&project_root),
+        &project_ledger_dir(project_root),
         &format!("trust-release:{app_content_hash}:{released_at}"),
         observability::evidence_ledger::DecisionKind::Release,
         serde_json::json!({
@@ -18915,18 +18921,6 @@ fn trust_registry_config_for_project(project_root: &Path) -> Result<config::Conf
     Ok(config::Config::for_profile(Profile::Balanced))
 }
 
-fn run_project_root(app_path: &Path) -> PathBuf {
-    if app_path.is_dir() {
-        return app_path.to_path_buf();
-    }
-
-    app_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
-        .to_path_buf()
-}
-
 fn dependency_extension_id(dependency_name: &str) -> String {
     if dependency_name.starts_with("npm:") {
         dependency_name.to_string()
@@ -20341,12 +20335,13 @@ fn build_run_preflight_receipt(
 
 fn evaluate_run_trust_preflight(
     app_path: &Path,
+    project_paths: &RunProjectPaths,
     policy_mode: Profile,
     config: &config::Config,
     now_secs: u64,
 ) -> Result<RunPreFlightReport> {
-    let project_root = run_project_root(app_path);
-    let dependencies = collect_run_package_dependencies(&project_root)?;
+    let project_root = project_paths.project_root();
+    let dependencies = collect_run_package_dependencies(project_root)?;
     let mut registry_path = None::<PathBuf>;
 
     let verdict = match dependencies {
@@ -20362,9 +20357,9 @@ fn evaluate_run_trust_preflight(
             results: Vec::new(),
         },
         Some(dependencies) => {
-            ensure_state_dir(&project_root)?;
+            ensure_state_dir(project_root)?;
             let authoritative_registry =
-                supply_chain::trust_card_registry_store::registry_snapshot_path(&project_root);
+                supply_chain::trust_card_registry_store::registry_snapshot_path(project_root);
             registry_path = Some(authoritative_registry.clone());
 
             // The durable frankensqlite store is the authority; either surface
@@ -20630,11 +20625,11 @@ fn evaluate_run_trust_preflight(
 
     // bd-fp1je: the sentinel subject gate composes over the dependency
     // verdict and fails closed in every policy mode.
-    let verdict = apply_sentinel_subject_quarantine_gate(verdict, &project_root, app_path)?;
+    let verdict = apply_sentinel_subject_quarantine_gate(verdict, project_paths, app_path)?;
 
     let receipt = build_run_preflight_receipt(
         app_path,
-        &project_root,
+        project_root,
         policy_mode,
         registry_path.as_deref(),
         &verdict,
@@ -32990,8 +32985,21 @@ fn main() -> Result<()> {
                 }
             };
 
+            // Resolve one canonical authority before consulting trust state.
+            // The dispatcher and private worker revalidate these exact paths
+            // instead of rediscovering a different root after preflight.
+            let project_paths = match std::env::current_dir()
+                .map_err(anyhow::Error::from)
+                .and_then(|working_dir| RunProjectPaths::resolve(&app_path, &working_dir))
+            {
+                Ok(project_paths) => project_paths,
+                Err(err) => {
+                    return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
+                }
+            };
             let preflight = match evaluate_run_trust_preflight(
                 &app_path,
+                &project_paths,
                 resolved.selected_profile,
                 &resolved.config,
                 now_unix_secs(),
@@ -33011,7 +33019,7 @@ fn main() -> Result<()> {
                 // The refusal is a decision too: record it before exiting.
                 // A ledger failure is reported, never allowed to unblock.
                 if let Err(err) = append_decision_evidence(
-                    &project_ledger_dir(&run_project_root(&app_path)),
+                    &project_ledger_dir(project_paths.project_root()),
                     RUN_PREFLIGHT_DENIAL_EVIDENCE_SCHEMA,
                     &preflight.receipt.receipt_id,
                     observability::evidence_ledger::DecisionKind::Deny,
@@ -33037,7 +33045,7 @@ fn main() -> Result<()> {
                     return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
                 }
             };
-            let project_root = run_project_root(&app_path);
+            let project_root = project_paths.project_root().to_path_buf();
             let compat_preflight_report = if compat_preflight {
                 Some(run_compat_preflight_report(
                     &project_root,
@@ -33070,6 +33078,7 @@ fn main() -> Result<()> {
             let dispatcher =
                 ops::engine_dispatcher::EngineDispatcher::new(engine_bin, requested_runtime)
                     .with_native_session_worker_path(native_session_worker_path)
+                    .with_project_paths(project_paths.clone())
                     .with_app_args(app_args);
             let dispatch = match dispatcher.dispatch_run(
                 &app_path,
@@ -33159,7 +33168,7 @@ fn main() -> Result<()> {
             // (run-subject auto-quarantine + trust-card risk bump) per the
             // resolved profile's `trust.quarantine_on_high_risk`.
             let sentinel_enforcement = maybe_enforce_sentinel_escalation(
-                &project_root,
+                &project_paths,
                 &resolved.config,
                 resolved.selected_profile,
                 &policy,
@@ -35143,6 +35152,7 @@ mod run_trust_gate_tests {
     fn evaluate_preflight(root: &Path, policy_mode: Profile) -> RunPreFlightReport {
         evaluate_run_trust_preflight(
             root,
+            &RunProjectPaths::resolve(root, root).expect("run project authority"),
             policy_mode,
             &config::Config::for_profile(policy_mode),
             2_000,
@@ -35201,7 +35211,14 @@ mod run_trust_gate_tests {
             runtime: "franken_engine".to_string(),
             runtime_path: "/usr/local/bin/franken-engine".to_string(),
             target: app_path.display().to_string(),
-            working_dir: run_project_root(app_path).display().to_string(),
+            working_dir: RunProjectPaths::resolve(
+                app_path,
+                &std::env::current_dir().expect("current directory"),
+            )
+            .expect("run project root")
+            .project_root()
+            .display()
+            .to_string(),
             used_fallback_runtime: false,
             started_at_utc: started_at_utc.to_string(),
             finished_at_utc: finished_at_utc.to_string(),
@@ -35226,6 +35243,8 @@ mod run_trust_gate_tests {
     #[test]
     fn trust_gate_skips_when_package_manifest_missing() {
         let tmp = TempDir::new().expect("tempdir");
+        std::fs::write(tmp.path().join("index.js"), "console.log('standalone');\n")
+            .expect("write executable target without a package manifest");
         let report = evaluate_preflight(tmp.path(), Profile::Balanced);
 
         match &report.verdict {
@@ -35742,6 +35761,7 @@ mod run_trust_gate_tests {
         let stale_now = mtime.saturating_add(301);
         let report = evaluate_run_trust_preflight(
             tmp.path(),
+            &RunProjectPaths::resolve(tmp.path(), tmp.path()).expect("run project authority"),
             Profile::Strict,
             &config::Config::for_profile(Profile::Strict),
             stale_now,

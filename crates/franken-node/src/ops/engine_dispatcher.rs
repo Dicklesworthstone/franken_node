@@ -98,13 +98,13 @@ const NATIVE_ENGINE_WORKER_NAME: &str = "franken-node-native-engine";
 /// before Clap so the worker can never recursively enter the public `run`
 /// command.
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_WORKER_ARG: &str = "__franken-native-session-worker-v5";
+const NATIVE_SESSION_WORKER_ARG: &str = "__franken-native-session-worker-v6";
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_SCHEMA: &str = "franken-node/native-session/v5";
+const NATIVE_SESSION_SCHEMA: &str = "franken-node/native-session/v6";
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_FRAME_MAGIC: &[u8; 12] = b"FNNS-IPC-V5\0";
+const NATIVE_SESSION_FRAME_MAGIC: &[u8; 12] = b"FNNS-IPC-V6\0";
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_PROTOCOL_VERSION: u32 = 5;
+const NATIVE_SESSION_PROTOCOL_VERSION: u32 = 6;
 #[cfg(feature = "engine")]
 const NATIVE_SESSION_FRAME_HEADER_BYTES: usize = 12 + 4 + 8 + 32;
 #[cfg(feature = "engine")]
@@ -253,6 +253,7 @@ struct NativeSessionRequest {
     nonce: String,
     app_path: PathBuf,
     working_dir: PathBuf,
+    project_paths: RunProjectPaths,
     policy_mode: String,
     config: Config,
     telemetry_socket_path: PathBuf,
@@ -735,6 +736,24 @@ fn validate_runtime_evidence_state_outside_guest(
 }
 
 #[cfg(feature = "engine")]
+fn validate_runtime_evidence_protected_root(
+    protected_root: &Path,
+    guest_project_root: &Path,
+) -> Result<()> {
+    if protected_root.starts_with(guest_project_root)
+        || guest_project_root.starts_with(protected_root)
+    {
+        anyhow::bail!(
+            "runtime evidence protected state root {} must remain outside guest filesystem root {}; \
+             the protected subtree and guest project must not overlap",
+            protected_root.display(),
+            guest_project_root.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "engine")]
 fn runtime_evidence_user_state_home() -> Result<PathBuf> {
     let state_home = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
@@ -784,10 +803,20 @@ fn prepare_runtime_evidence_directories(
 
     let product_state_root = state_home.join(RUNTIME_EVIDENCE_PRODUCT_STATE_DIRECTORY);
     let state_root = product_state_root.join(RUNTIME_EVIDENCE_STATE_DIRECTORY);
+    // Checking only state_home misses a selected project below that directory:
+    // `state_home/franken-node` would otherwise contain our signing keys.
+    // Reject both overlap directions before creating any protected state.
+    validate_runtime_evidence_protected_root(&state_root, guest_project_root)?;
     let key_directory = state_root.join("keys");
     let capture_directory = state_root.join(RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH);
     ensure_runtime_evidence_directory(&product_state_root, true)?;
     ensure_runtime_evidence_directory(&state_root, true)?;
+    validate_runtime_evidence_protected_root(
+        &state_root
+            .canonicalize()
+            .context("resolve runtime evidence protected state root")?,
+        guest_project_root,
+    )?;
     ensure_runtime_evidence_directory(&key_directory, true)?;
     ensure_runtime_evidence_directory(&capture_directory, true)?;
     Ok((
@@ -2383,6 +2412,7 @@ struct NativeEngineRunContext {
     process_spawn_admission: Option<ChildProcessSpawnAdmission>,
     evidence_authority: RuntimeEvidenceAuthority,
     effect_wal: Option<NativeEffectWalEmitter>,
+    project_paths: RunProjectPaths,
     /// The program's own arguments, for `process.argv` (bd-my9hk).
     app_args: Vec<String>,
 }
@@ -2552,6 +2582,131 @@ fn validate_target_path(target_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Canonical filesystem authority selected for one product run.
+///
+/// Directory targets select that directory, even when `main` is nested. A
+/// relative file uses its nearest project marker at or below the invocation
+/// directory, or its own parent when none exists. Absolute files select only
+/// their parent. Every entrypoint must remain inside the selected root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunProjectPaths {
+    target: PathBuf,
+    entrypoint: PathBuf,
+    project_root: PathBuf,
+}
+
+impl RunProjectPaths {
+    /// Resolve a run target without reading or executing application source.
+    ///
+    /// Marker discovery never crosses the invocation directory. Canonical
+    /// containment checks reject entrypoint and directory-main symlink escapes.
+    pub fn resolve(app_path: &Path, working_dir: &Path) -> Result<Self> {
+        let invocation_root = working_dir.canonicalize().with_context(|| {
+            format!("resolve run invocation directory {}", working_dir.display())
+        })?;
+        if !invocation_root.is_dir() {
+            anyhow::bail!("run invocation directory is not a directory");
+        }
+        let anchored = EngineDispatcher::lexical_execution_app_path(app_path, &invocation_root);
+        let target = anchored
+            .canonicalize()
+            .with_context(|| format!("resolve run target {}", anchored.display()))?;
+        let target_metadata = std::fs::metadata(&target)
+            .with_context(|| format!("inspect run target {}", target.display()))?;
+
+        let (project_root, entrypoint) = if target_metadata.is_dir() {
+            let entrypoint = EngineDispatcher::resolve_directory_entrypoint(&target)
+                .map_err(anyhow::Error::msg)?;
+            (target.clone(), entrypoint)
+        } else if target_metadata.is_file() {
+            // Use the selected path's parent before following the final file
+            // symlink. Otherwise a symlink could choose its own broader root.
+            let parent = anchored
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("run file has no parent directory"))?
+                .canonicalize()
+                .context("resolve run entrypoint parent")?;
+            let mut project_root = parent.clone();
+            if !app_path.is_absolute() {
+                if !parent.starts_with(&invocation_root) {
+                    anyhow::bail!(
+                        "relative run entrypoint {} escapes invocation directory {}; \
+                         select the project directory explicitly",
+                        anchored.display(),
+                        invocation_root.display()
+                    );
+                }
+                let mut candidate = parent.as_path();
+                loop {
+                    if candidate.join("package.json").is_file()
+                        || candidate.join("franken_node.toml").is_file()
+                    {
+                        project_root = candidate.to_path_buf();
+                        break;
+                    }
+                    if candidate == invocation_root {
+                        break;
+                    }
+                    candidate = candidate.parent().ok_or_else(|| {
+                        anyhow::anyhow!("run project search escaped its invocation boundary")
+                    })?;
+                }
+            }
+            (project_root, target.clone())
+        } else {
+            anyhow::bail!(
+                "run target {} is not a regular file or directory",
+                target.display()
+            );
+        };
+
+        let entrypoint = entrypoint
+            .canonicalize()
+            .with_context(|| format!("resolve run entrypoint {}", entrypoint.display()))?;
+        if !entrypoint.is_file() {
+            anyhow::bail!(
+                "run entrypoint {} is not a regular file",
+                entrypoint.display()
+            );
+        }
+        if !entrypoint.starts_with(&project_root) {
+            anyhow::bail!(
+                "run entrypoint {} escapes selected project root {}",
+                entrypoint.display(),
+                project_root.display()
+            );
+        }
+        Ok(Self {
+            target,
+            entrypoint,
+            project_root,
+        })
+    }
+
+    /// The entrypoint whose source will execute inside this authority.
+    #[must_use]
+    pub fn entrypoint(&self) -> &Path {
+        &self.entrypoint
+    }
+
+    /// The shared root for trust state, modules, and guest filesystem effects.
+    #[must_use]
+    pub fn project_root(&self) -> &Path {
+        &self.project_root
+    }
+
+    fn verify_target(&self, app_path: &Path, working_dir: &Path) -> Result<()> {
+        let observed = Self::resolve(app_path, working_dir)?;
+        if observed != *self {
+            anyhow::bail!(
+                "run project authority changed after preflight; resolve and verify the project again"
+            );
+        }
+        Ok(())
+    }
+}
+
 pub struct EngineDispatcher {
     engine_bin_path: String,
     configured_path: Option<PathBuf>,
@@ -2560,6 +2715,8 @@ pub struct EngineDispatcher {
     /// protocol. The product CLI supplies its own absolute path explicitly;
     /// direct library callers may do the same through the builder below.
     native_session_worker_path: Option<PathBuf>,
+    /// The authority already selected by the product's dependency preflight.
+    project_paths: Option<RunProjectPaths>,
     /// The program's own arguments (`run app.js -- a b`), which become
     /// `process.argv[2..]` (bd-my9hk).
     app_args: Vec<String>,
@@ -3632,29 +3789,6 @@ fn project_root_for_path(app_path: &Path) -> &Path {
     }
 }
 
-#[cfg(feature = "engine")]
-fn runtime_evidence_project_root(app_path: &Path, working_dir: &Path) -> Result<PathBuf> {
-    let absolute_app_path = if app_path.is_absolute() {
-        app_path.to_path_buf()
-    } else {
-        working_dir.join(app_path)
-    };
-    let root = project_root_for_path(&absolute_app_path);
-    let canonical = root.canonicalize().with_context(|| {
-        format!(
-            "resolve runtime evidence project root for {}",
-            absolute_app_path.display()
-        )
-    })?;
-    if !canonical.is_dir() {
-        anyhow::bail!(
-            "runtime evidence project root is not a directory: {}",
-            canonical.display()
-        );
-    }
-    Ok(canonical)
-}
-
 fn project_prefers_bun(app_path: &Path) -> bool {
     if app_path
         .extension()
@@ -4319,18 +4453,15 @@ impl Default for EngineDispatcher {
             configured_path: None,
             requested_runtime: PreferredRuntime::Auto,
             native_session_worker_path: None,
+            project_paths: None,
             app_args: Vec::new(),
         }
     }
 }
 
 impl EngineDispatcher {
-    /// Anchor a concrete application entrypoint to the directory from which the
-    /// operator invoked `franken-node`, without resolving symlinks.  Keeping
-    /// this lexical preserves the operator-selected module and host-I/O root;
-    /// the engine separately canonicalizes imported candidates when enforcing
-    /// containment.
-    #[cfg(feature = "engine")]
+    /// Anchor the operator's target before the project resolver canonicalizes
+    /// and verifies its entrypoint against the selected authority boundary.
     fn lexical_execution_app_path(app_path: &Path, current_dir: &Path) -> PathBuf {
         if app_path.is_absolute() {
             app_path.to_path_buf()
@@ -4339,19 +4470,10 @@ impl EngineDispatcher {
         }
     }
 
-    /// Declare the operator-selected working directory as the containment root
-    /// only when it was also used to anchor a relative entrypoint. Absolute
-    /// entrypoints retain the engine's fail-closed parent-directory default.
-    #[cfg(feature = "engine")]
-    fn explicit_module_root(app_path: &Path, current_dir: &Path) -> Option<PathBuf> {
-        (!app_path.is_absolute()).then(|| current_dir.to_path_buf())
-    }
-
     /// Resolve the entry file of a directory target the way `node <dir>`
     /// does: package.json `main` (as a file, with `.js` appended, or as a
     /// directory holding `index.js`), falling back to `index.js`. `main` may
     /// not leave the package directory.
-    #[cfg(feature = "engine")]
     fn resolve_directory_entrypoint(dir: &Path) -> std::result::Result<PathBuf, String> {
         const MAX_PACKAGE_MANIFEST_BYTES: u64 = 1 << 20;
         let manifest_path = dir.join("package.json");
@@ -4501,6 +4623,13 @@ impl EngineDispatcher {
         self
     }
 
+    /// Pin the project authority already used by dependency preflight.
+    #[must_use]
+    pub fn with_project_paths(mut self, paths: RunProjectPaths) -> Self {
+        self.project_paths = Some(paths);
+        self
+    }
+
     /// Set the program's own arguments (`run app.js -- a b`): they follow the
     /// runtime and script paths in `process.argv` (bd-my9hk).
     #[must_use]
@@ -4550,6 +4679,16 @@ impl EngineDispatcher {
         // or Node masquerade as the policy-enforcing runtime. Fail before any
         // dispatcher side effect or guest execution instead.
         Self::require_embedded_engine_for_profile_governed_run()?;
+
+        let working_dir =
+            std::env::current_dir().context("failed resolving run invocation directory")?;
+        let project_paths = match self.project_paths.as_ref() {
+            Some(paths) => {
+                paths.verify_target(app_path, &working_dir)?;
+                paths.clone()
+            }
+            None => RunProjectPaths::resolve(app_path, &working_dir)?,
+        };
 
         // The compatibility runner may supply a public key through its
         // kernel-authenticated exact-parent channel. These environment values
@@ -4603,10 +4742,10 @@ impl EngineDispatcher {
         // the freshness recheck and the revoked-since-preflight re-read were
         // silently skipped on every real workspace. Resolve the same
         // authoritative registry as the run preflight instead.
-        let project_root = project_root_for_path(app_path).to_path_buf();
+        let project_root = project_paths.project_root();
         let authoritative_registry =
             frankenengine_node::supply_chain::trust_card_registry_store::registry_snapshot_path(
-                &project_root,
+                project_root,
             );
         let durable_authoritative =
             frankenengine_node::supply_chain::trust_card_registry_store::durable_store_path(
@@ -5013,6 +5152,7 @@ impl EngineDispatcher {
             let native_session_worker_path = self.resolve_native_session_worker_path()?;
             Self::run_engine_native_with_error_handling(
                 app_path,
+                &project_paths,
                 config,
                 policy_mode,
                 Path::new(&socket_path),
@@ -5053,7 +5193,7 @@ impl EngineDispatcher {
             runtime: "franken_engine",
             runtime_path: Path::new(&bin_path),
             target: app_path,
-            working_dir: project_root_for_path(app_path),
+            working_dir: project_paths.project_root(),
             used_fallback_runtime: false,
             started_at,
             duration: started.elapsed(),
@@ -5270,6 +5410,10 @@ impl EngineDispatcher {
                 actual_working_dir.display()
             );
         }
+        request
+            .project_paths
+            .verify_target(&request.app_path, &actual_working_dir)
+            .context("native-session project authority no longer matches preflight")?;
 
         #[cfg(target_os = "linux")]
         let process_spawn_admission = {
@@ -5387,6 +5531,7 @@ impl EngineDispatcher {
         let cleanup_probe = telemetry_guard.cleanup_probe();
         let cleanup_for_worker = Arc::clone(&cleanup_probe);
         let app_path = request.app_path;
+        let project_paths = request.project_paths;
         let config = request.config;
         let policy_mode = request.policy_mode;
         let app_args = request.app_args;
@@ -5404,6 +5549,7 @@ impl EngineDispatcher {
                     process_spawn_admission,
                     evidence_authority,
                     effect_wal: Some(effect_wal),
+                    project_paths,
                     app_args,
                 },
             )
@@ -5544,6 +5690,7 @@ impl EngineDispatcher {
     #[allow(clippy::too_many_arguments)]
     fn run_engine_native_with_error_handling(
         app_path: &Path,
+        project_paths: &RunProjectPaths,
         config: &Config,
         policy_mode: &str,
         telemetry_socket_path: &Path,
@@ -5563,6 +5710,7 @@ impl EngineDispatcher {
 
         Self::run_engine_native_with_timeout(
             app_path,
+            project_paths,
             config,
             policy_mode,
             telemetry_socket_path,
@@ -5595,6 +5743,7 @@ impl EngineDispatcher {
     #[allow(clippy::too_many_arguments)]
     fn run_engine_native_with_timeout(
         app_path: &Path,
+        project_paths: &RunProjectPaths,
         config: &Config,
         policy_mode: &str,
         telemetry_socket_path: &Path,
@@ -6031,23 +6180,15 @@ impl EngineDispatcher {
             anyhow::Error::new(dispatch_error.to_actionable())
         })?;
         let nonce = uuid::Uuid::now_v7().to_string();
-        let evidence_project_root = runtime_evidence_project_root(&app_path_buf, &working_dir)
-            .map_err(|error| {
-                EngineDispatchError::EngineExecutionError {
-                    app_path: app_path_buf.clone(),
-                    error_message: format!(
-                        "failed resolving product evidence authority root: {error}"
-                    ),
-                    phase: "worker startup".to_string(),
-                }
-                .to_actionable()
-            })?;
+        project_paths
+            .verify_target(&app_path_buf, &working_dir)
+            .context("project authority changed before native-session launch")?;
         let ProvisionedRuntimeEvidenceSession {
             grant: runtime_evidence_grant,
             capture_path: evidence_capture_path,
             protected_state_root: runtime_evidence_state_root,
         } = provision_runtime_evidence_session(
-            &evidence_project_root,
+            project_paths.project_root(),
             &nonce,
             security_epoch_for_profile(config.profile),
         )
@@ -6067,6 +6208,7 @@ impl EngineDispatcher {
             nonce: nonce.clone(),
             app_path: app_path_buf.clone(),
             working_dir: working_dir.clone(),
+            project_paths: project_paths.clone(),
             policy_mode: policy_mode.to_string(),
             config: config.clone(),
             telemetry_socket_path: telemetry_socket_path.to_path_buf(),
@@ -6175,15 +6317,13 @@ impl EngineDispatcher {
                     &runtime_evidence_state_root,
                 )
                 .context("mask runtime evidence state inside Bubblewrap")?;
-                let execution_root = app_path_buf.parent();
-                if let Some(execution_root) = execution_root {
-                    command
-                        .arg("--bind")
-                        .arg(execution_root)
-                        .arg(execution_root);
-                }
+                let execution_root = project_paths.project_root();
+                command
+                    .arg("--bind")
+                    .arg(execution_root)
+                    .arg(execution_root);
                 if let Some(telemetry_root) = telemetry_socket_path.parent()
-                    && Some(telemetry_root) != execution_root
+                    && telemetry_root != execution_root
                 {
                     command
                         .arg("--bind")
@@ -7462,16 +7602,27 @@ impl EngineDispatcher {
             None,
         )
         .expect("test-only runtime evidence authority");
+        let mut telemetry_guard = Some(NativeTelemetryGuard::new(telemetry_handle));
+        let project_paths = std::env::current_dir()
+            .map_err(anyhow::Error::from)
+            .and_then(|working_dir| RunProjectPaths::resolve(app_path, &working_dir))
+            .map_err(|error| {
+                native_engine_spawn_error_with_telemetry_cleanup(
+                    format!("Failed to resolve run project authority: {error:#}"),
+                    &mut telemetry_guard,
+                )
+            })?;
         Self::run_engine_native_guarded(
             app_path,
             config,
             policy_mode,
             NativeEngineRunContext {
-                telemetry_guard: NativeTelemetryGuard::new(telemetry_handle),
+                telemetry_guard: telemetry_guard.take().expect("telemetry guard exists"),
                 cancellation: NativeEngineCancellation::new(),
                 process_spawn_admission: None,
                 evidence_authority,
                 effect_wal: None,
+                project_paths,
                 app_args: Vec::new(),
             },
         )
@@ -7496,6 +7647,7 @@ impl EngineDispatcher {
             process_spawn_admission,
             evidence_authority,
             effect_wal,
+            project_paths,
             app_args,
         } = run_context;
         let mut telemetry_guard = Some(telemetry_guard);
@@ -7516,54 +7668,37 @@ impl EngineDispatcher {
         })?;
         let parser_budget = config.runtime.effective_parse_budget(config.profile);
 
-        // `run` accepts relative entrypoints and the compatibility runner uses
-        // a basename plus a sandbox cwd.  Preserve that concrete filesystem
-        // identity in the package: forwarding the basename as `source_file`
-        // makes `Path::parent()` an empty path in the engine, so relative
-        // imports fail before resolution can enforce its module-root boundary.
-        // Do not canonicalize here; a symlinked entrypoint must keep the
-        // operator-selected directory as both its module and host-I/O root.
-        //
-        // `run <dir>` executes the directory's entry file (package.json
-        // `main`, else index.js) exactly as `node <dir>` does; the directory
-        // itself stays the project root everywhere else.
-        let resolved_entry;
-        let app_path = if app_path.is_dir() {
-            resolved_entry = Self::resolve_directory_entrypoint(app_path).map_err(|error| {
-                native_engine_spawn_error_with_telemetry_cleanup(error, &mut telemetry_guard)
-            })?;
-            resolved_entry.as_path()
-        } else {
-            app_path
-        };
-        let (execution_app_path, module_root) = if app_path.is_absolute() {
-            (app_path.to_path_buf(), None)
-        } else {
-            let current_dir = std::env::current_dir().map_err(|error| {
+        // The parent selected this authority before dependency preflight and
+        // checked that its evidence root is outside it. Retain the same root
+        // when a directory target's entrypoint lives in a nested source folder.
+        let current_dir = std::env::current_dir().map_err(|error| {
+            native_engine_spawn_error_with_telemetry_cleanup(
+                format!("Failed to resolve current working directory: {error}"),
+                &mut telemetry_guard,
+            )
+        })?;
+        project_paths
+            .verify_target(app_path, &current_dir)
+            .map_err(|error| {
                 native_engine_spawn_error_with_telemetry_cleanup(
-                    format!("Failed to resolve current working directory: {error}"),
+                    format!("Run project authority changed before execution: {error:#}"),
                     &mut telemetry_guard,
                 )
             })?;
-            let module_root = Self::explicit_module_root(app_path, &current_dir)
-                .and_then(|root| root.to_str().map(str::to_owned))
-                .ok_or_else(|| {
-                    native_engine_spawn_error_with_telemetry_cleanup(
-                        format!(
-                            "Application working directory is not valid UTF-8: {}",
-                            current_dir.display()
-                        ),
-                        &mut telemetry_guard,
-                    )
-                })?;
-            (
-                Self::lexical_execution_app_path(app_path, &current_dir),
-                Some(module_root),
-            )
-        };
+        let execution_app_path = project_paths.entrypoint();
+        let module_root = project_paths
+            .project_root()
+            .to_str()
+            .ok_or_else(|| {
+                native_engine_spawn_error_with_telemetry_cleanup(
+                    "Run project root is not valid UTF-8".to_string(),
+                    &mut telemetry_guard,
+                )
+            })?
+            .to_owned();
 
         let source_code =
-            read_native_entry_source(&execution_app_path, parser_budget.max_source_bytes).map_err(
+            read_native_entry_source(execution_app_path, parser_budget.max_source_bytes).map_err(
                 |error| {
                     native_engine_spawn_error_with_telemetry_cleanup(error, &mut telemetry_guard)
                 },
@@ -7580,7 +7715,7 @@ impl EngineDispatcher {
             ),
             source: source_code,
             source_file: Some(execution_app_path.to_string_lossy().to_string()),
-            module_root,
+            module_root: Some(module_root),
             capabilities: {
                 Self::resolve_capabilities_for_execution(config, process_spawn_admission.as_ref())
                     .map_err(|error| {
@@ -7596,7 +7731,7 @@ impl EngineDispatcher {
 
         // Configure orchestrator with policy settings
         let mut orchestrator_config =
-            Self::map_config_to_orchestrator_config_for_entrypoint(config, &execution_app_path); // bd-wlkks/bd-ergy0
+            Self::map_config_to_orchestrator_config_for_entrypoint(config, execution_app_path); // bd-wlkks/bd-ergy0
         orchestrator_config.policy_id =
             Self::generate_opaque_policy_id(config.profile, Some(policy_mode)); // bd-3rlp8: Opaque policy ID with policy_mode
         // bd-656a2: capture a stable trace label for the SSRF gate's audit records
@@ -7629,12 +7764,7 @@ impl EngineDispatcher {
             |_| "franken-node".to_string(),
             |path| path.display().to_string(),
         ));
-        process_argv.push(
-            std::path::absolute(app_path)
-                .unwrap_or_else(|_| app_path.to_path_buf())
-                .display()
-                .to_string(),
-        );
+        process_argv.push(execution_app_path.display().to_string());
         process_argv.extend(app_args);
         orchestrator.set_process_argv(process_argv);
 
@@ -7676,17 +7806,21 @@ impl EngineDispatcher {
         // the denied ones), confined to the application directory. The recorder's
         // transcript is surfaced on `OrchestratorResult::host_effect_transcript`
         // and harvested below into a signed, SDK-verifiable effect ledger. The
-        // sandbox root is the app's parent directory so relative paths in the
-        // program resolve naturally and stay confined to the app dir. If the root
+        // sandbox root is the same selected project authority used by module
+        // loading and dependency trust. If the root
         // cannot be established the run proceeds with no provider installed —
         // host effects then fail closed (the ledger is honestly empty), never
         // faked.
-        let sandbox_root = execution_app_path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-        match SandboxedHostIo::with_root(&sandbox_root) {
+        let sandbox_root = project_paths.project_root();
+        match SandboxedHostIo::with_root(sandbox_root) {
             Ok(provider) => {
+                if provider.root() != sandbox_root {
+                    return Err(native_engine_spawn_error_with_telemetry_cleanup(
+                        "Run project root changed while opening the filesystem authority"
+                            .to_string(),
+                        &mut telemetry_guard,
+                    ));
+                }
                 // bd-3894s slice (5): operator-configured extra TLS trust anchors
                 // (private CAs / test anchors) for guest `https` egress. ADDED to
                 // the provider's built-in webpki roots. Fail-closed: a missing or
@@ -9887,18 +10021,31 @@ mod tests {
     #[cfg(feature = "engine")]
     #[test]
     fn bd_mnz7p_relative_entrypoint_uses_invocation_directory_as_module_root() {
-        let current_dir = std::env::temp_dir().join("franken-node-bd-mnz7p-sandbox");
+        let sandbox = tempfile::tempdir().expect("project sandbox");
+        let current_dir = sandbox.path().canonicalize().expect("canonical sandbox");
+        std::fs::create_dir(current_dir.join("nested")).expect("nested source directory");
+        std::fs::write(
+            current_dir.join("franken_node.toml"),
+            "profile = 'balanced'\n",
+        )
+        .expect("project marker");
+        let nested = current_dir.join("nested/relative_support_import.mjs");
+        std::fs::write(&nested, "export const value = 1;\n").expect("nested module");
 
         assert_eq!(
-            EngineDispatcher::explicit_module_root(
+            RunProjectPaths::resolve(
                 Path::new("nested/relative_support_import.mjs"),
                 &current_dir,
-            ),
-            Some(current_dir.clone())
+            )
+            .expect("relative project entry")
+            .project_root(),
+            current_dir
         );
         assert_eq!(
-            EngineDispatcher::explicit_module_root(&current_dir.join("absolute.mjs"), &current_dir),
-            None
+            RunProjectPaths::resolve(&nested, &current_dir)
+                .expect("absolute file retains parent-only authority")
+                .project_root(),
+            current_dir.join("nested")
         );
     }
 
@@ -14855,6 +15002,11 @@ mod tests {
             nonce: nonce.clone(),
             app_path: PathBuf::from("app.js"),
             working_dir: PathBuf::from("/tmp/native-session-frame"),
+            project_paths: RunProjectPaths {
+                target: PathBuf::from("/tmp/native-session-frame/app.js"),
+                entrypoint: PathBuf::from("/tmp/native-session-frame/app.js"),
+                project_root: PathBuf::from("/tmp/native-session-frame"),
+            },
             policy_mode: "balanced".to_string(),
             config: Config::for_profile(Profile::Balanced),
             telemetry_socket_path: PathBuf::from("/tmp/native-session-frame.sock"),
@@ -14870,6 +15022,7 @@ mod tests {
         assert_eq!(decoded.schema_version, NATIVE_SESSION_SCHEMA);
         assert_eq!(decoded.nonce, request.nonce);
         assert_eq!(decoded.config, request.config);
+        assert_eq!(decoded.project_paths, request.project_paths);
         assert_eq!(decoded.app_args, request.app_args);
         assert_eq!(
             decoded.process_spawn_trust_key_hex,
@@ -15291,9 +15444,12 @@ mod tests {
             PathBuf::from("/usr/bin/bwrap"),
         );
         let timeout = Duration::from_secs(2);
+        let project_paths = RunProjectPaths::resolve(&app_path, temp_dir.path())
+            .expect("resolve containment project");
         let started = Instant::now();
         let result = EngineDispatcher::run_engine_native_with_timeout(
             &app_path,
+            &project_paths,
             &config,
             "balanced",
             &telemetry_path,
@@ -15346,9 +15502,12 @@ mod tests {
         // level coverage separately proves both lanes observe the token while
         // executing an unbounded jump loop.
         let timeout = Duration::from_millis(1);
+        let project_paths =
+            RunProjectPaths::resolve(&app_path, temp_dir.path()).expect("resolve timeout project");
         let start = Instant::now();
         let result = EngineDispatcher::run_engine_native_with_timeout(
             &app_path,
+            &project_paths,
             &config,
             "balanced",
             &socket_path,

@@ -294,6 +294,135 @@ fn dispatch_without_trusted_dependencies_reaches_worker_launch() {
     );
 }
 
+/// A nested relative entry may load modules from its project root, so its
+/// dependency preflight must consult that root's real durable authority too.
+/// This drives the public CLI with an installed, revoked dependency; merely
+/// checking the entrypoint's parent would skip preflight and execute it.
+#[cfg(feature = "engine")]
+#[test]
+fn run_project_authority_nested_entry_blocks_revoked_root_dependency() {
+    use frankenengine_node::config::{Config, Profile};
+    use frankenengine_node::supply_chain::trust_card_registry_store::{
+        record_revocation_frontier, registry_snapshot_path,
+    };
+    use std::process::Command;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    fs::create_dir_all(dir.path().join("src")).expect("create source directory");
+    fs::create_dir_all(dir.path().join("node_modules/@acme/auth-guard"))
+        .expect("install dependency directory");
+    fs::write(
+        dir.path().join("package.json"),
+        r#"{"name":"project-root-trust","dependencies":{"@acme/auth-guard":"2.1.0"}}"#,
+    )
+    .expect("write root dependency manifest");
+    fs::write(
+        dir.path().join("src/main.js"),
+        "require('@acme/auth-guard');\n\
+         require('fs').writeFileSync('unexpected-effect.txt', 'executed');\n",
+    )
+    .expect("write nested entrypoint");
+    fs::write(
+        dir.path().join("node_modules/@acme/auth-guard/index.js"),
+        "console.log('revoked-dependency-executed');\n",
+    )
+    .expect("install dependency source");
+
+    let mut config = Config::for_profile(Profile::Balanced);
+    config.synthesize_init_security_defaults();
+    fs::write(
+        dir.path().join("franken_node.toml"),
+        config.to_toml().expect("serialize operator config"),
+    )
+    .expect("write operator config");
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_secs();
+    let registry_path = registry_snapshot_path(dir.path());
+    let mut registry =
+        TrustCardRegistry::from_config(&config.trust).expect("configured authoritative registry");
+    registry
+        .create(fixture_input(), now_secs, "trace-nested-project-create")
+        .expect("register installed dependency");
+    registry
+        .update(
+            "npm:@acme/auth-guard",
+            revocation_mutation(),
+            now_secs,
+            "trace-nested-project-revoke",
+        )
+        .expect("revoke installed dependency");
+    registry
+        .persist_authoritative_state(&registry_path)
+        .expect("persist real durable authority");
+    record_revocation_frontier(
+        &registry_path,
+        &config.trust,
+        now_secs,
+        "test: current revoked dependency",
+    )
+    .expect("record authenticated revocation frontier");
+    drop(registry);
+
+    for profile in ["strict", "balanced", "legacy-risky"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_franken-node"))
+            .args([
+                "run",
+                "src/main.js",
+                "--policy",
+                profile,
+                "--runtime",
+                "franken-engine",
+                "--engine-bin",
+                env!("CARGO_BIN_EXE_franken-node"),
+                "--json",
+            ])
+            .current_dir(dir.path())
+            .output()
+            .expect("run nested entry through actual CLI");
+        assert!(
+            !output.status.success(),
+            "{profile}: a revoked root dependency must block nested entry execution"
+        );
+        let report: serde_json::Value =
+            serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+                panic!(
+                    "{profile}: expected blocked preflight JSON ({error}); stdout={} stderr={}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            });
+        assert_eq!(report["verdict"]["status"], "blocked", "{report}");
+        assert_eq!(
+            report["project_root"],
+            dir.path()
+                .canonicalize()
+                .expect("canonical project root")
+                .display()
+                .to_string()
+        );
+        assert!(
+            report["verdict"]["violations"]
+                .as_array()
+                .expect("preflight violations")
+                .iter()
+                .any(|violation| {
+                    violation["kind"] == "revoked"
+                        && violation["extension_id"] == "npm:@acme/auth-guard"
+                }),
+            "{profile}: refusal must come from the root's revoked card: {report}"
+        );
+        assert_eq!(report["receipt"]["decision"], "denied");
+        assert!(
+            !String::from_utf8_lossy(&output.stdout).contains("revoked-dependency-executed"),
+            "the installed dependency must never execute"
+        );
+        assert!(!dir.path().join("unexpected-effect.txt").exists());
+        assert!(!dir.path().join("src/unexpected-effect.txt").exists());
+    }
+}
+
 #[test]
 fn legacy_json_pair_imports_once_and_seeds_the_durable_store() {
     let dir = tempfile::tempdir().expect("tempdir");

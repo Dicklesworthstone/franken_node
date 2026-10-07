@@ -11,7 +11,7 @@
 use frankenengine_engine::{ast::ParseGoal, lowering_pipeline::AmbientAuthorityGrant};
 use frankenengine_node::{
     config::{Config, Profile},
-    ops::engine_dispatcher::EngineDispatcher,
+    ops::engine_dispatcher::{EngineDispatcher, RunProjectPaths},
 };
 use std::path::Path;
 
@@ -20,6 +20,113 @@ fn config_with_profile(profile: Profile) -> Config {
         profile,
         ..Config::default()
     }
+}
+
+#[test]
+fn run_project_authority_stops_marker_search_at_invocation_directory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let invocation = dir.path().join("invocation");
+    let source = invocation.join("src");
+    std::fs::create_dir_all(&source).expect("create nested source directory");
+    std::fs::write(source.join("main.js"), "console.log('scoped');\n").expect("write entrypoint");
+    std::fs::write(dir.path().join("package.json"), "{}")
+        .expect("write marker above invocation boundary");
+
+    let without_marker = RunProjectPaths::resolve(Path::new("src/main.js"), &invocation)
+        .expect("resolve standalone nested file");
+    assert_eq!(
+        without_marker.project_root(),
+        source.canonicalize().unwrap()
+    );
+
+    std::fs::write(invocation.join("franken_node.toml"), "")
+        .expect("write invocation project marker");
+    let with_marker = RunProjectPaths::resolve(Path::new("src/main.js"), &invocation)
+        .expect("resolve marked project");
+    assert_eq!(
+        with_marker.project_root(),
+        invocation.canonicalize().unwrap()
+    );
+
+    // An absolute file selection stays scoped to its parent even when a
+    // project marker exists above it. Broader authority requires a relative
+    // invocation inside that project or an explicit directory selection.
+    let absolute = RunProjectPaths::resolve(&source.join("main.js"), &invocation)
+        .expect("resolve absolute file");
+    assert_eq!(absolute.project_root(), source.canonicalize().unwrap());
+}
+
+#[test]
+fn run_project_authority_uses_nearest_nested_package_marker() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let package = dir.path().join("packages/app");
+    std::fs::create_dir_all(package.join("src")).expect("create nested package");
+    std::fs::write(dir.path().join("franken_node.toml"), "").expect("write workspace marker");
+    std::fs::write(package.join("package.json"), "{}").expect("write nested package marker");
+    std::fs::write(package.join("src/main.js"), "console.log('nested');\n")
+        .expect("write entrypoint");
+    let paths = RunProjectPaths::resolve(Path::new("packages/app/src/main.js"), dir.path())
+        .expect("resolve nested package entrypoint");
+    assert_eq!(paths.project_root(), package.canonicalize().unwrap());
+}
+
+#[cfg(unix)]
+#[test]
+fn run_project_authority_refuses_relative_directory_symlink_escape() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let invocation = dir.path().join("invocation");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&invocation).expect("create invocation directory");
+    std::fs::create_dir_all(&outside).expect("create outside directory");
+    std::fs::write(outside.join("main.js"), "console.log('outside');\n")
+        .expect("write outside entrypoint");
+    std::fs::write(outside.join("package.json"), r#"{"main":"main.js"}"#)
+        .expect("write explicitly selectable project manifest");
+    std::os::unix::fs::symlink(&outside, invocation.join("src"))
+        .expect("link source directory outside invocation");
+
+    let error = RunProjectPaths::resolve(Path::new("src/main.js"), &invocation)
+        .expect_err("relative source symlink cannot select authority outside invocation")
+        .to_string();
+    assert!(error.contains("escapes invocation directory"), "{error}");
+
+    let explicit = RunProjectPaths::resolve(Path::new("src"), &invocation)
+        .expect("operator may explicitly select the linked project directory");
+    assert_eq!(explicit.project_root(), outside.canonicalize().unwrap());
+}
+
+#[cfg(feature = "engine")]
+#[test]
+fn run_project_authority_refuses_retargeted_main_after_preflight() {
+    use frankenengine_node::config::PreferredRuntime;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("package.json"), r#"{"main":"before.js"}"#)
+        .expect("write original package main");
+    std::fs::write(dir.path().join("before.js"), "console.log('before');\n")
+        .expect("write original entrypoint");
+    std::fs::write(dir.path().join("after.js"), "console.log('after');\n")
+        .expect("write alternate entrypoint");
+    let paths = RunProjectPaths::resolve(dir.path(), dir.path()).expect("preflight paths");
+    std::fs::write(dir.path().join("package.json"), r#"{"main":"after.js"}"#)
+        .expect("retarget package after preflight");
+
+    let error = EngineDispatcher::new(None, PreferredRuntime::FrankenEngine)
+        .with_project_paths(paths)
+        .with_native_session_worker_path(dir.path().join("worker-does-not-exist"))
+        .dispatch_run(
+            dir.path(),
+            &Config::for_profile(Profile::Balanced),
+            "balanced",
+            &[],
+            2_000,
+        )
+        .expect_err("authority change must refuse before worker resolution")
+        .to_string();
+    assert!(
+        error.contains("run project authority changed after preflight"),
+        "{error}"
+    );
 }
 
 #[test]

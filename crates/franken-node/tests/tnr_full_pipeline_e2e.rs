@@ -919,6 +919,38 @@ fn sentinel_enforcement_leg(workspace: &Path, run: &RunReport, trace_id: &str) {
         "exit!=0, reason names sentinel quarantine + release command",
     );
 
+    // The same real, quarantined bytes remain blocked when selected through a
+    // directory's package main. Hashing the directory itself used to skip this
+    // gate, even though the file invocation immediately above was refused.
+    std::fs::write(workspace.join("package.json"), r#"{"main":"app.js"}"#)
+        .expect("select quarantined entrypoint as package main");
+    let directory_blocked = run_cli(
+        workspace,
+        &[
+            "run",
+            ".",
+            "--policy",
+            "legacy-risky",
+            "--runtime",
+            "franken-engine",
+            "--engine-bin",
+            franken_node_bin(),
+            "--json",
+        ],
+    );
+    assert!(!directory_blocked.status.success());
+    let directory_report: Value = serde_json::from_slice(&directory_blocked.stdout)
+        .expect("directory invocation emits blocked preflight JSON");
+    assert!(
+        directory_report["verdict"]["violations"]
+            .as_array()
+            .expect("directory preflight violations")
+            .iter()
+            .any(|violation| violation["kind"] == "sentinel_quarantined"),
+        "directory invocation must consult the same active subject quarantine: {directory_report}"
+    );
+    assert_eq!(directory_report["receipt"]["decision"], json!("denied"));
+
     // Audited operator release, then the subject runs again.
     let release = run_cli(
         workspace,
@@ -926,7 +958,7 @@ fn sentinel_enforcement_leg(workspace: &Path, run: &RunReport, trace_id: &str) {
             "trust",
             "release",
             "--app",
-            "app.js",
+            ".",
             "--operator-id",
             "tnr-e2e-operator",
             "--reason",
