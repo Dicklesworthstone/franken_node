@@ -8,7 +8,7 @@ use std::sync::{Arc, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::{
     collections::BTreeSet,
     fs::{self, File, OpenOptions, TryLockError},
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{Condvar, Mutex, OnceLock},
     thread,
@@ -52,7 +52,7 @@ const FLEET_SHARED_STATE_LOCK_FILE: &str = "shared-state.snapshot.lock";
 const MAX_NODE_ID_LEN: usize = 128;
 const MAX_ZONE_ID_LEN: usize = 128;
 const MAX_ACTION_ID_LEN: usize = 128;
-const MAX_ACTION_RECORD_BYTES: usize = 2_048;
+pub(super) const MAX_ACTION_RECORD_BYTES: usize = 2_048;
 const MAX_ACTION_RECORD_LINE_BYTES: usize = MAX_ACTION_RECORD_BYTES * 2;
 pub const ERR_FLEET_JSONL_LINE_TOO_LARGE: &str = ERR_BOUNDED_INPUT_CAP_EXCEEDED;
 pub const FLEET_ACTION_RECORD_LINE_POLICY: BoundedInputPolicy = BoundedInputPolicy::new(
@@ -310,6 +310,8 @@ pub enum FleetTransportError {
     SerializationError { detail: String },
     #[error("fleet transport lock contention: {detail}")]
     LockContention { detail: String },
+    #[error("fleet transport action conflict: {detail}")]
+    ActionConflict { detail: String },
     #[error("fleet transport stale state: {detail}")]
     StaleState { detail: String },
     #[error("fleet transport not initialized: {detail}")]
@@ -334,6 +336,13 @@ impl FleetTransportError {
     #[must_use]
     pub fn lock_contention(detail: impl Into<String>) -> Self {
         Self::LockContention {
+            detail: detail.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn action_conflict(detail: impl Into<String>) -> Self {
+        Self::ActionConflict {
             detail: detail.into(),
         }
     }
@@ -569,6 +578,10 @@ pub trait FleetTransport {
     /// Fleet actions represent operations performed across the distributed fleet,
     /// such as quarantine requests, rollback commands, or configuration changes.
     /// Actions are timestamped and stored in chronological order.
+    /// A retained `action_id` identifies one immutable record, including its
+    /// original timestamp. Retrying that exact record succeeds without adding
+    /// another action. Reusing its ID with different contents fails with
+    /// [`FleetTransportError::ActionConflict`] and preserves the original.
     ///
     /// # Parameters
     ///
@@ -576,8 +589,9 @@ pub trait FleetTransport {
     ///
     /// # Errors
     ///
-    /// Returns [`FleetTransportError::Io`] for storage failures or
-    /// [`FleetTransportError::Serialization`] for encoding issues.
+    /// Returns [`FleetTransportError::IoError`] for storage failures or
+    /// [`FleetTransportError::SerializationError`] for invalid records and
+    /// [`FleetTransportError::ActionConflict`] for a conflicting action ID.
     ///
     /// # Example
     ///
@@ -942,6 +956,21 @@ impl FleetTransport for AsupersyncFleetTransport {
         {
             let mut state = self.network.write_state()?;
             self.ensure_initialized(&state)?;
+            if let Some(existing) = state
+                .actions
+                .iter()
+                .find(|existing| existing.action_id == action.action_id)
+            {
+                if existing != action {
+                    return Err(FleetTransportError::action_conflict(format!(
+                        "action_id `{}` already identifies a different fleet action",
+                        action.action_id
+                    )));
+                }
+                drop(state);
+                self.record_event("publish_action")?;
+                return Ok(());
+            }
             let mut actions = state.actions.as_ref().clone();
             push_bounded(&mut actions, action.clone(), MAX_ACTION_LOG_ENTRIES);
             state.actions = Arc::new(actions);
@@ -1513,6 +1542,41 @@ impl FleetTransport for FileFleetTransport {
             lock_file_with_backoff(&file, self.layout.actions_path(), false)?;
 
             let write_result = (|| {
+                // The comparison and append share the same process, snapshot
+                // and file locks. A concurrent publisher cannot replace the
+                // decision between admission and its durable append.
+                let existing =
+                    parse_jsonl_records::<FleetActionRecord>(&file, self.layout.actions_path())?;
+                let mut already_published = false;
+                for record in &existing {
+                    validate_action_record(record)?;
+                    if record.action_id == action.action_id {
+                        if record != action {
+                            return Err(FleetTransportError::action_conflict(format!(
+                                "action_id `{}` already identifies a different fleet action",
+                                action.action_id
+                            )));
+                        }
+                        already_published = true;
+                    }
+                }
+                if already_published {
+                    // The previous attempt may have written the whole record
+                    // before failing to sync. An exact retry must establish
+                    // the same durability boundary as a fresh publication.
+                    return file.sync_all().map_err(|err| {
+                        FleetTransportError::io(format!(
+                            "failed syncing fleet action log {}: {err}",
+                            self.layout.actions_path().display()
+                        ))
+                    });
+                }
+                if existing.len() >= MAX_ACTION_LOG_ENTRIES {
+                    return Err(FleetTransportError::serialization(format!(
+                        "fleet action log {} already contains the maximum {MAX_ACTION_LOG_ENTRIES} entries",
+                        self.layout.actions_path().display()
+                    )));
+                }
                 let payload = serde_json::to_vec(action).map_err(|err| {
                     FleetTransportError::serialization(format!(
                         "failed serializing fleet action {}: {err}",
@@ -1527,6 +1591,35 @@ impl FleetTransport for FileFleetTransport {
                 }
 
                 let mut handle = &file;
+                let length = handle.seek(SeekFrom::End(0)).map_err(|err| {
+                    FleetTransportError::io(format!(
+                        "failed seeking fleet action log {}: {err}",
+                        self.layout.actions_path().display()
+                    ))
+                })?;
+                if length > 0 {
+                    let mut last_byte = [0_u8];
+                    handle
+                        .seek(SeekFrom::End(-1))
+                        .and_then(|_| handle.read_exact(&mut last_byte))
+                        .map_err(|err| {
+                            FleetTransportError::io(format!(
+                                "failed reading fleet action log delimiter {}: {err}",
+                                self.layout.actions_path().display()
+                            ))
+                        })?;
+                    // A crash can leave a complete, valid JSON record without
+                    // its newline. It has already passed validation above;
+                    // preserve it and separate the next record before append.
+                    if last_byte[0] != b'\n' {
+                        handle.write_all(b"\n").map_err(|err| {
+                            FleetTransportError::io(format!(
+                                "failed completing fleet action delimiter {}: {err}",
+                                self.layout.actions_path().display()
+                            ))
+                        })?;
+                    }
+                }
                 handle.write_all(&payload).map_err(|err| {
                     FleetTransportError::io(format!(
                         "failed writing fleet action log {}: {err}",
@@ -1656,7 +1749,8 @@ fn validate_transport_identifier<'a>(
 }
 
 /// Validate one action record with the same rules every transport applies on
-/// ingest (identifier charset/length, non-empty single-line text fields).
+/// ingest (identifier charset/length, non-empty single-line text fields and
+/// the serialized record byte limit).
 ///
 /// # Errors
 ///
@@ -1718,6 +1812,15 @@ pub fn validate_action_record(action: &FleetActionRecord) -> Result<(), FleetTra
             validate_action_text_field("revoke extension_id", extension_id)?;
             validate_action_text_field("revoke reason", &scope.reason)?;
         }
+    }
+
+    let payload = serde_json::to_vec(action)
+        .map_err(|err| FleetTransportError::serialization(err.to_string()))?;
+    if payload.len() > MAX_ACTION_RECORD_BYTES {
+        return Err(FleetTransportError::serialization(format!(
+            "serialized fleet action {} exceeds {} bytes",
+            action.action_id, MAX_ACTION_RECORD_BYTES
+        )));
     }
 
     Ok(())

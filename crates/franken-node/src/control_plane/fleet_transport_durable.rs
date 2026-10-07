@@ -13,9 +13,9 @@
 //! without a separate checkpoint step (Tier-1 semantics of
 //! `docs/specs/frankensqlite_persistence_contract.md`).
 //!
-//! Divergence from [`FileFleetTransport`] (deliberate, documented):
-//! * actions are keyed by `action_id`; republishing the same id is an
-//!   idempotent overwrite instead of a duplicate log line;
+//! Storage behavior under the shared [`FleetTransport`] contract:
+//! * actions are keyed by `action_id`; exact retries are deduplicated and
+//!   different records with the same ID are rejected without changing history;
 //! * torn trailing lines cannot happen (transactions are atomic);
 //! * cross-process contention is handled by SQLite busy-timeout instead of
 //!   ad-hoc flock files.
@@ -29,7 +29,8 @@ use fsqlite::{Connection, SqliteValue};
 
 use super::fleet_transport::{
     FLEET_ACTION_LOG_FILE, FleetAction, FleetActionRecord, FleetSharedState, FleetTransport,
-    FleetTransportError, NodeStatus,
+    FleetTransportError, MAX_ACTION_RECORD_BYTES, NodeStatus, validate_action_record,
+    validate_node_status,
 };
 
 const FLEET_DB_FILE: &str = "fleet-state.db";
@@ -83,6 +84,19 @@ fn parse_row_json<T: serde::de::DeserializeOwned>(
     let raw = text(value, column)?;
     serde_json::from_str(&raw)
         .map_err(|err| FleetTransportError::serialization(format!("column {column}: {err}")))
+}
+
+fn parse_action_row(value: &SqliteValue) -> Result<FleetActionRecord, FleetTransportError> {
+    let raw = text(value, "action_json")?;
+    if raw.len() > MAX_ACTION_RECORD_BYTES {
+        return Err(FleetTransportError::serialization(format!(
+            "stored fleet action exceeds {MAX_ACTION_RECORD_BYTES} bytes"
+        )));
+    }
+    let record: FleetActionRecord = serde_json::from_str(&raw)
+        .map_err(|err| FleetTransportError::serialization(format!("column action_json: {err}")))?;
+    validate_action_record(&record)?;
+    Ok(record)
 }
 
 /// Durable WAL-backed implementation of [`FleetTransport`].
@@ -144,9 +158,9 @@ impl DurableFleetTransport {
         &self,
         operation: impl Fn(&Connection) -> Result<T, FleetTransportError>,
     ) -> Result<T, FleetTransportError> {
-        // bd-ymbjw: snapshot conflicts abort the failing statement without
-        // persisting anything (single autocommit statement per operation in
-        // this transport), so re-running the closure from scratch is safe.
+        // bd-ymbjw: publication/status transactions roll back before an error
+        // escapes the closure. Retry the complete operation with a fresh
+        // snapshot; never retry only the last statement of an admission.
         let mut attempt = 0_u32;
         loop {
             let guard = self
@@ -294,6 +308,7 @@ impl DurableFleetTransport {
         connection: &Connection,
         record: &FleetActionRecord,
     ) -> Result<(), FleetTransportError> {
+        validate_action_record(record)?;
         let action_json = serde_json::to_string(record)
             .map_err(|err| FleetTransportError::serialization(err.to_string()))?;
         // Explicit transaction: the commit is the WAL-durable boundary under
@@ -305,9 +320,7 @@ impl DurableFleetTransport {
         tx.execute_with_params(
             "INSERT INTO fleet_actions(action_id, emitted_at, action_json)
              VALUES (?1, ?2, ?3)
-             ON CONFLICT(action_id) DO UPDATE SET
-                emitted_at = excluded.emitted_at,
-                action_json = excluded.action_json;",
+             ON CONFLICT(action_id) DO NOTHING;",
             &[
                 SqliteValue::Text(record.action_id.clone().into()),
                 SqliteValue::Text(record.emitted_at.to_rfc3339().into()),
@@ -315,6 +328,28 @@ impl DurableFleetTransport {
             ],
         )
         .map_err(|err| FleetTransportError::io(err.to_string()))?;
+        // Compare inside the same transaction that admitted the ID. The
+        // unique index chooses one record even across independent processes;
+        // snapshot conflicts retry the complete transaction, never an update.
+        // A mismatched retry rolls back and cannot rewrite a past quarantine,
+        // release, timestamp or target that another node already consumed.
+        let rows = tx
+            .query_with_params(
+                "SELECT action_json FROM fleet_actions WHERE action_id = ?1;",
+                &[SqliteValue::Text(record.action_id.clone().into())],
+            )
+            .map_err(|err| FleetTransportError::io(err.to_string()))?;
+        let [row] = rows.as_slice() else {
+            return Err(FleetTransportError::io(
+                "fleet action admission did not resolve exactly one stored record",
+            ));
+        };
+        if parse_action_row(&row.values()[0])? != *record {
+            return Err(FleetTransportError::action_conflict(format!(
+                "action_id `{}` already identifies a different fleet action",
+                record.action_id
+            )));
+        }
         tx.commit()
             .map_err(|err| FleetTransportError::io(err.to_string()))?;
         Ok(())
@@ -324,6 +359,7 @@ impl DurableFleetTransport {
         connection: &Connection,
         status: &NodeStatus,
     ) -> Result<(), FleetTransportError> {
+        validate_node_status(status)?;
         let status_json = serde_json::to_string(status)
             .map_err(|err| FleetTransportError::serialization(err.to_string()))?;
         let mut tx = connection
@@ -358,7 +394,7 @@ impl DurableFleetTransport {
             )
             .map_err(|err| FleetTransportError::io(err.to_string()))?;
         rows.iter()
-            .map(|row| parse_row_json(&row.values()[0], "action_json"))
+            .map(|row| parse_action_row(&row.values()[0]))
             .collect()
     }
 
@@ -367,7 +403,11 @@ impl DurableFleetTransport {
             .query("SELECT status_json FROM fleet_nodes ORDER BY zone_id ASC, node_id ASC;")
             .map_err(|err| FleetTransportError::io(err.to_string()))?;
         rows.iter()
-            .map(|row| parse_row_json(&row.values()[0], "status_json"))
+            .map(|row| {
+                let status = parse_row_json(&row.values()[0], "status_json")?;
+                validate_node_status(&status)?;
+                Ok(status)
+            })
             .collect()
     }
 

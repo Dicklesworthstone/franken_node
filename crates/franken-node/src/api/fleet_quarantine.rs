@@ -2143,7 +2143,11 @@ pub struct FleetControlManager {
     events: Vec<FleetControlEvent>,
     /// Counter for generating operation IDs.
     next_op_id: u64,
-    /// Optional epoch component for non-default operation ID domains.
+    /// Full UUID namespace unique to this manager incarnation. Keeping it
+    /// separate from the control epoch prevents restarts and independent
+    /// managers sharing a durable log from reusing operation identifiers.
+    operation_namespace: u128,
+    /// Control epoch bound into signed positive validations.
     op_epoch: u64,
     /// Set after the final unique operation ID has been allocated.
     operation_ids_exhausted: bool,
@@ -2168,28 +2172,38 @@ pub struct FleetControlManager {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct OperationSlot {
     epoch: u64,
+    namespace: u128,
     sequence: u64,
 }
 
 impl OperationSlot {
     fn operation_id(self) -> String {
-        if self.epoch == 0 {
-            format!("fleet-op-{}", self.sequence)
-        } else {
-            format!("fleet-op-{:016x}-{:016x}", self.epoch, self.sequence)
-        }
+        format!(
+            "fleet-op-{:016x}-{:032x}-{:016x}",
+            self.epoch, self.namespace, self.sequence
+        )
     }
 }
 
 fn parse_operation_slot(operation_id: &str) -> Option<OperationSlot> {
     let raw = operation_id.strip_prefix("fleet-op-")?;
     match raw.split_once('-') {
-        Some((epoch, sequence)) => Some(OperationSlot {
-            epoch: u64::from_str_radix(epoch, 16).ok()?,
-            sequence: u64::from_str_radix(sequence, 16).ok()?,
-        }),
+        Some((epoch, remainder)) => {
+            let (namespace, sequence) = match remainder.split_once('-') {
+                Some((namespace, sequence)) => {
+                    (u128::from_str_radix(namespace, 16).ok()?, sequence)
+                }
+                None => (0, remainder),
+            };
+            Some(OperationSlot {
+                epoch: u64::from_str_radix(epoch, 16).ok()?,
+                namespace,
+                sequence: u64::from_str_radix(sequence, 16).ok()?,
+            })
+        }
         None => Some(OperationSlot {
             epoch: 0,
+            namespace: 0,
             sequence: raw.parse().ok()?,
         }),
     }
@@ -2418,6 +2432,7 @@ impl FleetControlManager {
             zone_status: BTreeMap::new(),
             events: Vec::new(),
             next_op_id: 1,
+            operation_namespace: uuid::Uuid::now_v7().as_u128(),
             op_epoch: 0,
             operation_ids_exhausted: false,
             decision_signing_material,
@@ -2461,6 +2476,7 @@ impl FleetControlManager {
             zone_status: BTreeMap::new(),
             events: Vec::new(),
             next_op_id: 1,
+            operation_namespace: uuid::Uuid::now_v7().as_u128(),
             op_epoch: 0,
             operation_ids_exhausted: false,
             decision_signing_material: signing_material,
@@ -3147,6 +3163,7 @@ impl FleetControlManager {
 
         Ok(OperationSlot {
             epoch: self.op_epoch,
+            namespace: self.operation_namespace,
             sequence: self.next_op_id,
         })
     }
@@ -3158,6 +3175,7 @@ impl FleetControlManager {
 
         let slot = OperationSlot {
             epoch: self.op_epoch,
+            namespace: self.operation_namespace,
             sequence: self.next_op_id,
         };
 
@@ -3182,6 +3200,7 @@ impl FleetControlManager {
             .min_by_key(|(incident_id, _)| {
                 incident_operation_slot(incident_id).unwrap_or(OperationSlot {
                     epoch: u64::MAX,
+                    namespace: u128::MAX,
                     sequence: u64::MAX,
                 })
             })
@@ -3250,6 +3269,7 @@ impl FleetControlManager {
                 Some((
                     incident_operation_slot(incident_id).unwrap_or(OperationSlot {
                         epoch: u64::MAX,
+                        namespace: u128::MAX,
                         sequence: u64::MAX,
                     }),
                     convergence.clone(),
@@ -3458,10 +3478,10 @@ impl FleetControlManager {
         Ok(())
     }
 
-    /// Control epoch bound into positive validations for an incident. Derived
-    /// deterministically from the incident's operation slot so each incarnation of
-    /// an action (each quarantine) has a distinct epoch and validations cannot be
-    /// replayed across re-quarantines.
+    /// Control epoch bound into positive validations for an incident. The full
+    /// incident ID also binds the manager namespace and operation sequence, so
+    /// validations cannot be replayed across manager restarts or re-quarantines
+    /// even when the control epoch is unchanged.
     /// Deterministic control epoch a release validation must bind to for
     /// `incident_id`. This is the exact epoch [`Self::submit_release_validation`]
     /// checks `PositiveValidation::control_epoch` against, so it is exposed for
@@ -6195,7 +6215,13 @@ mod tests {
         mgr.next_op_id = u64::MAX;
 
         let final_id = mgr.next_operation_id().expect("final id");
-        assert_eq!(final_id, "fleet-op-18446744073709551615");
+        assert_eq!(
+            final_id,
+            format!(
+                "fleet-op-0000000000000000-{:032x}-ffffffffffffffff",
+                mgr.operation_namespace
+            )
+        );
         assert!(mgr.operation_ids_exhausted);
         assert_eq!(mgr.next_op_id, u64::MAX);
         assert_eq!(mgr.op_epoch, 0);
@@ -6213,7 +6239,13 @@ mod tests {
         mgr.next_op_id = u64::MAX;
 
         let final_id = mgr.next_operation_id().expect("last id");
-        assert_eq!(final_id, "fleet-op-ffffffffffffffff-ffffffffffffffff");
+        assert_eq!(
+            final_id,
+            format!(
+                "fleet-op-ffffffffffffffff-{:032x}-ffffffffffffffff",
+                mgr.operation_namespace
+            )
+        );
 
         let err = mgr
             .next_operation_id()
@@ -6231,15 +6263,13 @@ mod tests {
         let first = mgr
             .quarantine("ext-final", &scope, &admin_identity(), &test_trace())
             .expect("final quarantine");
-        assert_eq!(first.operation_id, "fleet-op-18446744073709551615");
-        assert_eq!(
-            first.receipt.receipt_id,
-            "rcpt-fleet-op-18446744073709551615"
+        let expected_id = format!(
+            "fleet-op-0000000000000000-{:032x}-ffffffffffffffff",
+            mgr.operation_namespace
         );
-        assert!(
-            mgr.incidents
-                .contains_key("inc-fleet-op-18446744073709551615")
-        );
+        assert_eq!(first.operation_id, expected_id);
+        assert_eq!(first.receipt.receipt_id, format!("rcpt-{expected_id}"));
+        assert!(mgr.incidents.contains_key(&format!("inc-{expected_id}")));
         assert!(mgr.operation_ids_exhausted);
 
         let err = mgr

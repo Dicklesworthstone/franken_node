@@ -163,9 +163,9 @@ impl FleetControlPlaneUrl {
     /// or fragments, and plaintext `http://` to a non-loopback host.
     pub fn parse(raw: &str) -> Result<Self, String> {
         let trimmed = raw.trim();
-        let (scheme, rest) = trimmed
-            .split_once("://")
-            .ok_or_else(|| format!("fleet control-plane URL `{trimmed}` must start with http:// or https://"))?;
+        let (scheme, rest) = trimmed.split_once("://").ok_or_else(|| {
+            format!("fleet control-plane URL `{trimmed}` must start with http:// or https://")
+        })?;
         let scheme = scheme.to_ascii_lowercase();
         if scheme != "http" && scheme != "https" {
             return Err(format!(
@@ -173,7 +173,9 @@ impl FleetControlPlaneUrl {
             ));
         }
         if rest.contains('?') || rest.contains('#') {
-            return Err("fleet control-plane URL must not carry a query string or fragment".to_string());
+            return Err(
+                "fleet control-plane URL must not carry a query string or fragment".to_string(),
+            );
         }
         let authority = rest.split('/').next().unwrap_or_default();
         if authority.is_empty() {
@@ -181,7 +183,8 @@ impl FleetControlPlaneUrl {
         }
         if authority.contains('@') {
             return Err(
-                "fleet control-plane URL must not embed credentials; use the token file".to_string(),
+                "fleet control-plane URL must not embed credentials; use the token file"
+                    .to_string(),
             );
         }
         let host = authority_host(authority);
@@ -228,13 +231,15 @@ fn authority_host(authority: &str) -> &str {
         // IPv6 literal: `[::1]:9440`.
         return rest.split(']').next().unwrap_or_default();
     }
-    authority.rsplit_once(':').map_or(authority, |(host, port)| {
-        if port.bytes().all(|byte| byte.is_ascii_digit()) {
-            host
-        } else {
-            authority
-        }
-    })
+    authority
+        .rsplit_once(':')
+        .map_or(authority, |(host, port)| {
+            if port.bytes().all(|byte| byte.is_ascii_digit()) {
+                host
+            } else {
+                authority
+            }
+        })
 }
 
 /// Loopback hosts for which plaintext HTTP is acceptable.
@@ -319,7 +324,10 @@ impl HttpFleetTransport {
         authenticated: bool,
     ) -> Result<T, FleetTransportError> {
         let endpoint = self.url.endpoint(path);
-        let mut request = self.agent.get(&endpoint).header("Accept", "application/json");
+        let mut request = self
+            .agent
+            .get(&endpoint)
+            .header("Accept", "application/json");
         if authenticated {
             request = request.header("Authorization", &self.authorization());
         }
@@ -386,7 +394,10 @@ impl HttpFleetTransport {
                 400 | 413 | 422 => FleetTransportError::serialization(format!(
                     "fleet control plane at {endpoint} rejected the request (HTTP {status}): {detail}"
                 )),
-                409 | 423 | 429 | 503 => FleetTransportError::lock_contention(format!(
+                409 => FleetTransportError::action_conflict(format!(
+                    "fleet control plane at {endpoint} rejected a conflicting action (HTTP {status}): {detail}"
+                )),
+                423 | 429 | 503 => FleetTransportError::lock_contention(format!(
                     "fleet control plane at {endpoint} is busy (HTTP {status}): {detail}"
                 )),
                 _ => FleetTransportError::io(format!(
@@ -590,11 +601,21 @@ mod tests {
     #[test]
     fn client_construction_rejects_bad_inputs_without_network() {
         let token = "0123456789abcdef0123456789abcdef";
-        assert!(HttpFleetTransport::new("http://10.1.2.3:1", token, FLEET_HTTP_DEFAULT_TIMEOUT).is_err());
-        assert!(HttpFleetTransport::new("http://127.0.0.1:1", "short", FLEET_HTTP_DEFAULT_TIMEOUT).is_err());
-        let client = HttpFleetTransport::new("http://127.0.0.1:1", token, FLEET_HTTP_DEFAULT_TIMEOUT)
-            .expect("valid client");
-        assert!(!format!("{client:?}").contains(token), "token must be redacted");
+        assert!(
+            HttpFleetTransport::new("http://10.1.2.3:1", token, FLEET_HTTP_DEFAULT_TIMEOUT)
+                .is_err()
+        );
+        assert!(
+            HttpFleetTransport::new("http://127.0.0.1:1", "short", FLEET_HTTP_DEFAULT_TIMEOUT)
+                .is_err()
+        );
+        let client =
+            HttpFleetTransport::new("http://127.0.0.1:1", token, FLEET_HTTP_DEFAULT_TIMEOUT)
+                .expect("valid client");
+        assert!(
+            !format!("{client:?}").contains(token),
+            "token must be redacted"
+        );
     }
 
     #[test]

@@ -318,6 +318,62 @@ fn asupersync_fleet_transport_read_snapshots_record_events_independently() {
 }
 
 #[test]
+fn asupersync_fleet_transport_exact_retries_are_immutable() {
+    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+    let network = AsupersyncFleetNetwork::new();
+    let mut writer = AsupersyncFleetTransport::with_cx(
+        runtime.request_cx_with_budget(Budget::INFINITE),
+        "writer",
+        network.clone(),
+    );
+    let mut other_writer = AsupersyncFleetTransport::with_cx(
+        runtime.request_cx_with_budget(Budget::INFINITE),
+        "other-writer",
+        network,
+    );
+    writer.initialize().expect("initialize");
+    let original = FleetActionRecord {
+        action_id: "immutable-asupersync-action".into(),
+        emitted_at: DateTime::parse_from_rfc3339("2026-10-07T12:00:00Z")
+            .expect("timestamp")
+            .with_timezone(&Utc),
+        action: FleetAction::Quarantine {
+            zone_id: "zone-a".into(),
+            incident_id: "inc-protected".into(),
+            target_id: "sha256:protected".into(),
+            target_kind: FleetTargetKind::Artifact,
+            reason: "immutable containment decision".into(),
+            quarantine_version: 1,
+        },
+    };
+    writer.publish_action(&original).expect("publish");
+    other_writer
+        .publish_action(&original)
+        .expect("exact retry through another writer");
+    let mut conflicting = original.clone();
+    conflicting.action = FleetAction::Release {
+        zone_id: "zone-a".into(),
+        incident_id: "inc-protected".into(),
+        reason: Some("conflicting operation".into()),
+    };
+    assert!(matches!(
+        other_writer.publish_action(&conflicting),
+        Err(FleetTransportError::ActionConflict { .. })
+    ));
+    assert_eq!(
+        writer.list_actions().expect("original action"),
+        vec![original.clone()]
+    );
+    assert_eq!(
+        other_writer
+            .read_shared_state()
+            .expect("same shared state")
+            .actions,
+        vec![original]
+    );
+}
+
+#[test]
 fn asupersync_fleet_transport_requires_a_caller_context() {
     assert!(Cx::current().is_none());
     let network = AsupersyncFleetNetwork::new();

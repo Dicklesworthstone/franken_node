@@ -1078,6 +1078,133 @@ fn fleet_log_quorum_equivocation_and_mmr_prefix_proof_e2e() {
 }
 
 #[test]
+fn release_control_epoch_preserves_existing_and_namespaced_incident_bindings() {
+    for (incident_id, expected_epoch) in [
+        ("inc-fleet-op-42", 0),
+        ("inc-fleet-op-000000000000002a-0000000000000001", 42),
+        (
+            "inc-fleet-op-000000000000002a-01900000000070008000000000000001-0000000000000001",
+            42,
+        ),
+        (
+            "inc-fleet-op-ffffffffffffffff-01900000000070008000000000000001-ffffffffffffffff",
+            u64::MAX,
+        ),
+    ] {
+        assert_eq!(
+            FleetControlManager::expected_control_epoch(incident_id),
+            expected_epoch,
+            "the signed control epoch must not be replaced with namespace or sequence bits"
+        );
+    }
+}
+
+#[test]
+fn independent_and_restarted_managers_keep_actions_unique_in_the_same_durable_log() {
+    let temp_dir = tempdir().expect("tempdir");
+    let state_root = temp_dir.path().join("shared-manager-transport");
+    let create_manager = || {
+        let mut manager = FleetControlManager::with_file_transport_and_signing_key_for_tests(
+            FileFleetTransport::new(&state_root),
+            ed25519_dalek::SigningKey::from_bytes(&[62_u8; 32]),
+            "fleet-quarantine-e2e-full",
+            "fleet-manager-restart-e2e",
+        )
+        .expect("open manager on shared durable transport");
+        manager.activate();
+        manager
+    };
+    let scope = QuarantineScope {
+        zone_id: "zone-manager-restart".to_string(),
+        tenant_id: None,
+        affected_nodes: 1,
+        reason: "retain every independent quarantine decision".to_string(),
+    };
+
+    // Both managers start their local sequence at one, sharing the same log.
+    // They must each own a distinct namespace even without an intervening
+    // sleep or a persisted per-manager counter.
+    let mut first = create_manager();
+    let mut second = create_manager();
+    let first_result = first
+        .quarantine(
+            "ext-first",
+            &scope,
+            &e2e_identity(),
+            &e2e_trace("first-manager"),
+        )
+        .expect("first manager publishes");
+    let second_result = second
+        .quarantine(
+            "ext-second",
+            &scope,
+            &e2e_identity(),
+            &e2e_trace("second-manager"),
+        )
+        .expect("independent manager publishes without reusing the first ID");
+    assert_ne!(first_result.operation_id, second_result.operation_id);
+    drop(first);
+    drop(second);
+
+    let mut reader = FileFleetTransport::new(&state_root);
+    reader.initialize().expect("open persisted decisions");
+    let before_restart = reader.list_actions().expect("two retained decisions");
+    assert_eq!(before_restart.len(), 2);
+    let mut restarted = create_manager();
+    let restarted_result = restarted
+        .quarantine(
+            "ext-restarted",
+            &scope,
+            &e2e_identity(),
+            &e2e_trace("restarted-manager"),
+        )
+        .expect("restarted manager publishes without colliding with retained history");
+    drop(restarted);
+
+    let results = [first_result, second_result, restarted_result];
+    let unique_ids: BTreeSet<_> = results.iter().map(|result| &result.operation_id).collect();
+    assert_eq!(unique_ids.len(), 3);
+    let actions = reader.list_actions().expect("all manager decisions");
+    assert_eq!(actions.len(), 3);
+    for original in &before_restart {
+        assert!(
+            actions.contains(original),
+            "restart must preserve earlier records"
+        );
+        reader
+            .publish_action(original)
+            .expect("exact retry keeps the original logical operation");
+    }
+    assert_eq!(
+        reader.list_actions().expect("deduplicated exact retries"),
+        actions
+    );
+    for (result, expected_extension) in
+        results
+            .iter()
+            .zip(["ext-first", "ext-second", "ext-restarted"])
+    {
+        assert_eq!(result.receipt.operation_id, result.operation_id);
+        let record = actions
+            .iter()
+            .find(|record| record.action_id == result.operation_id)
+            .expect("each signed operation identifies its own persisted action");
+        match &record.action {
+            PersistedFleetAction::Quarantine {
+                incident_id,
+                target_id,
+                ..
+            } => {
+                assert_eq!(target_id, expected_extension);
+                assert_eq!(incident_id, &format!("inc-{}", result.operation_id));
+                assert_eq!(FleetControlManager::expected_control_epoch(incident_id), 0);
+            }
+            other => panic!("expected retained quarantine, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn quarantine_handler_reports_internal_error_for_broken_transport_persistence() {
     let _guard = HANDLER_TEST_LOCK.lock().expect("handler test lock");
     reset_shared_fleet_control_manager_for_tests();

@@ -345,7 +345,9 @@ impl FleetControlPlaneService {
     /// for its answer.
     fn with_transport(
         &self,
-        operation: impl FnOnce(&mut DurableFleetTransport) -> Result<FleetHttpResponse, FleetTransportError>
+        operation: impl FnOnce(
+            &mut DurableFleetTransport,
+        ) -> Result<FleetHttpResponse, FleetTransportError>
         + Send
         + 'static,
     ) -> FleetHttpResponse {
@@ -401,16 +403,24 @@ fn method_not_allowed(method: &str, path: &str) -> FleetHttpResponse {
 
 fn store_error(err: &FleetTransportError) -> FleetHttpResponse {
     match err {
-        FleetTransportError::LockContention { .. } => FleetHttpResponse::problem(
-            503,
-            "busy",
-            "FLEET_HTTP_STORE_BUSY",
+        FleetTransportError::ActionConflict { .. } => FleetHttpResponse::problem(
+            409,
+            "conflict",
+            "FLEET_HTTP_ACTION_CONFLICT",
             err.to_string(),
         ),
+        FleetTransportError::LockContention { .. } => {
+            FleetHttpResponse::problem(503, "busy", "FLEET_HTTP_STORE_BUSY", err.to_string())
+        }
         FleetTransportError::SerializationError { .. } => {
             FleetHttpResponse::problem(422, "invalid", "FLEET_HTTP_INVALID_RECORD", err.to_string())
         }
-        _ => FleetHttpResponse::problem(500, "store_error", "FLEET_HTTP_STORE_ERROR", err.to_string()),
+        _ => FleetHttpResponse::problem(
+            500,
+            "store_error",
+            "FLEET_HTTP_STORE_ERROR",
+            err.to_string(),
+        ),
     }
 }
 
@@ -537,10 +547,13 @@ pub fn serve_fleet_control_plane(
     use fastapi_rust::http::ParseLimits;
     use fastapi_rust::{Cx, ServerConfig, ServerError, TcpServer};
 
-    let bind: SocketAddr = config.bind.parse().map_err(|err| FleetHttpServerError::Bind {
-        bind: config.bind.clone(),
-        detail: format!("expected ip:port ({err})"),
-    })?;
+    let bind: SocketAddr = config
+        .bind
+        .parse()
+        .map_err(|err| FleetHttpServerError::Bind {
+            bind: config.bind.clone(),
+            detail: format!("expected ip:port ({err})"),
+        })?;
     let server_config = ServerConfig::new(bind.to_string())
         .with_request_timeout_secs(30)
         .with_keep_alive_timeout_secs(5)
@@ -579,11 +592,12 @@ pub fn serve_fleet_control_plane(
         })
     };
 
-    let runtime = RuntimeBuilder::current_thread()
-        .build()
-        .map_err(|err| FleetHttpServerError::Runtime {
-            detail: err.to_string(),
-        })?;
+    let runtime =
+        RuntimeBuilder::current_thread()
+            .build()
+            .map_err(|err| FleetHttpServerError::Runtime {
+                detail: err.to_string(),
+            })?;
     let serve_sink = Arc::clone(&on_event);
     let outcome = runtime.block_on(async move {
         let cx = Cx::current().ok_or_else(|| FleetHttpServerError::Runtime {
@@ -772,17 +786,48 @@ mod tests {
         let (_dir, service) = service();
         let auth = bearer();
         let body = serde_json::to_vec(&quarantine_action("op-1")).expect("encode");
-        let published = service.handle(request("POST", FLEET_HTTP_ACTIONS_PATH, Some(&auth), &body));
+        let published =
+            service.handle(request("POST", FLEET_HTTP_ACTIONS_PATH, Some(&auth), &body));
         assert_eq!(published.status, 201);
         let ack: FleetHttpAck = serde_json::from_slice(&published.body).expect("ack");
         assert_eq!(ack.accepted, "op-1");
-        // Republishing the same id overwrites instead of duplicating.
+        // Retrying the exact record succeeds without changing or duplicating it.
         let again = service.handle(request("POST", FLEET_HTTP_ACTIONS_PATH, Some(&auth), &body));
         assert_eq!(again.status, 201);
 
         let listed = service.handle(request("GET", FLEET_HTTP_ACTIONS_PATH, Some(&auth), b""));
         let list: FleetHttpActionList = serde_json::from_slice(&listed.body).expect("list");
         assert_eq!(list.actions, vec![quarantine_action("op-1")]);
+    }
+
+    #[test]
+    fn conflicting_action_id_returns_409_and_preserves_the_original() {
+        let (_dir, service) = service();
+        let auth = bearer();
+        let original = quarantine_action("op-conflict");
+        let body = serde_json::to_vec(&original).expect("encode original");
+        assert_eq!(
+            service
+                .handle(request("POST", FLEET_HTTP_ACTIONS_PATH, Some(&auth), &body))
+                .status,
+            201
+        );
+
+        let mut changed = original.clone();
+        changed.action = FleetAction::Release {
+            zone_id: "zone-a".into(),
+            incident_id: "inc-1".into(),
+            reason: Some("conflicting retry".into()),
+        };
+        let body = serde_json::to_vec(&changed).expect("encode conflicting retry");
+        let response = service.handle(request("POST", FLEET_HTTP_ACTIONS_PATH, Some(&auth), &body));
+        assert_eq!(response.status, 409);
+        let problem: FleetHttpProblem = serde_json::from_slice(&response.body).expect("problem");
+        assert_eq!(problem.code, "FLEET_HTTP_ACTION_CONFLICT");
+
+        let listed = service.handle(request("GET", FLEET_HTTP_ACTIONS_PATH, Some(&auth), b""));
+        let list: FleetHttpActionList = serde_json::from_slice(&listed.body).expect("list");
+        assert_eq!(list.actions, vec![original]);
     }
 
     #[test]
@@ -794,7 +839,10 @@ mod tests {
         assert_eq!(response.status, 200);
         let ack: FleetHttpAck = serde_json::from_slice(&response.body).expect("ack");
         assert_eq!(ack.accepted, "zone-a/node-1");
-        assert_eq!(ack.recorded_at.as_deref(), Some(fixed_clock().to_rfc3339().as_str()));
+        assert_eq!(
+            ack.recorded_at.as_deref(),
+            Some(fixed_clock().to_rfc3339().as_str())
+        );
 
         let listed = service.handle(request("GET", FLEET_HTTP_NODES_PATH, Some(&auth), b""));
         let nodes: FleetHttpNodeList = serde_json::from_slice(&listed.body).expect("nodes");
@@ -810,7 +858,12 @@ mod tests {
         let node = serde_json::to_vec(&heartbeat("node-2")).expect("encode");
         assert_eq!(
             service
-                .handle(request("POST", FLEET_HTTP_ACTIONS_PATH, Some(&auth), &action))
+                .handle(request(
+                    "POST",
+                    FLEET_HTTP_ACTIONS_PATH,
+                    Some(&auth),
+                    &action
+                ))
                 .status,
             201
         );
@@ -846,7 +899,8 @@ mod tests {
         assert_eq!(invalid.status, 422);
 
         let huge = vec![b' '; FLEET_HTTP_MAX_REQUEST_BYTES + 1];
-        let too_large = service.handle(request("POST", FLEET_HTTP_ACTIONS_PATH, Some(&auth), &huge));
+        let too_large =
+            service.handle(request("POST", FLEET_HTTP_ACTIONS_PATH, Some(&auth), &huge));
         assert_eq!(too_large.status, 413);
 
         // Nothing invalid was persisted.
@@ -860,15 +914,21 @@ mod tests {
         let (_dir, service) = service();
         let auth = bearer();
         assert_eq!(
-            service.handle(request("GET", "/v1/fleet/admin", Some(&auth), b"")).status,
+            service
+                .handle(request("GET", "/v1/fleet/admin", Some(&auth), b""))
+                .status,
             404
         );
         assert_eq!(
-            service.handle(request("DELETE", FLEET_HTTP_ACTIONS_PATH, Some(&auth), b"")).status,
+            service
+                .handle(request("DELETE", FLEET_HTTP_ACTIONS_PATH, Some(&auth), b""))
+                .status,
             405
         );
         assert_eq!(
-            service.handle(request("POST", FLEET_HTTP_HEALTH_PATH, None, b"")).status,
+            service
+                .handle(request("POST", FLEET_HTTP_HEALTH_PATH, None, b""))
+                .status,
             405
         );
         // Query strings and trailing slashes do not change routing.
