@@ -20,11 +20,15 @@
 //! the signed integrity view. Verified signer identity is therefore the
 //! canonical key ID derived from the verifier's trust anchor.
 //!
+//! Duplicate object members are rejected before canonicalization, including
+//! escaped spellings of the same member name. A signature must not authenticate
+//! different evidence depending on a consumer's first/last-member convention.
 //! Unknown top-level fields are rejected so no unsigned data can ride along.
 //! The chunk layout (gzip sizing) is covered by the integrity hash but is not
 //! independently re-derived here.
 
 use ed25519_dalek::{Signature, VerifyingKey};
+use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -160,6 +164,81 @@ impl std::fmt::Display for IncidentBundleError {
 }
 
 impl std::error::Error for IncidentBundleError {}
+
+/// Preserve the JSON value model without Value's last-member-wins parsing.
+/// Checking after deserialization is too late: duplicate evidence has already
+/// disappeared from the value that gets hashed. This visitor checks every
+/// object, including objects inside arrays and the unsigned signature envelope.
+/// serde_json's normal recursion limit and end-of-input check remain enabled.
+struct UnambiguousJson(Value);
+
+impl<'de> Deserialize<'de> for UnambiguousJson {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct JsonVisitor;
+
+        impl<'de> Visitor<'de> for JsonVisitor {
+            type Value = UnambiguousJson;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("JSON without duplicate object members")
+            }
+
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(UnambiguousJson(Value::Null))
+            }
+
+            fn visit_bool<E: de::Error>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(UnambiguousJson(Value::Bool(value)))
+            }
+
+            fn visit_i64<E: de::Error>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(UnambiguousJson(Value::Number(value.into())))
+            }
+
+            fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(UnambiguousJson(Value::Number(value.into())))
+            }
+
+            fn visit_f64<E: de::Error>(self, value: f64) -> Result<Self::Value, E> {
+                serde_json::Number::from_f64(value)
+                    .map(|number| UnambiguousJson(Value::Number(number)))
+                    .ok_or_else(|| E::custom("non-finite JSON number"))
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                self.visit_string(value.to_owned())
+            }
+
+            fn visit_string<E: de::Error>(self, value: String) -> Result<Self::Value, E> {
+                Ok(UnambiguousJson(Value::String(value)))
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
+                let mut values = Vec::new();
+                while let Some(UnambiguousJson(value)) = sequence.next_element()? {
+                    values.push(value);
+                }
+                Ok(UnambiguousJson(Value::Array(values)))
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut object: A) -> Result<Self::Value, A::Error> {
+                let mut values = Map::new();
+                while let Some(key) = object.next_key::<String>()? {
+                    // Keys are decoded before comparison, so e.g. "id" and
+                    // "\u0069d" cannot smuggle two interpretations of a field.
+                    if values.contains_key(&key) {
+                        return Err(de::Error::custom("duplicate JSON object member"));
+                    }
+                    let UnambiguousJson(value) = object.next_value()?;
+                    values.insert(key, value);
+                }
+                Ok(UnambiguousJson(Value::Object(values)))
+            }
+        }
+
+        deserializer.deserialize_any(JsonVisitor)
+    }
+}
 
 fn canonicalize(value: &Value, path: &str) -> Result<Value, IncidentBundleError> {
     match value {
@@ -299,7 +378,7 @@ pub fn verify_incident_bundle(
     if bytes.len() > MAX_INCIDENT_BUNDLE_BYTES {
         return Err(IncidentBundleError::TooLarge { bytes: bytes.len() });
     }
-    let value: Value =
+    let UnambiguousJson(value) =
         serde_json::from_slice(bytes).map_err(|err| IncidentBundleError::Json(err.to_string()))?;
     let Value::Object(object) = value else {
         return Err(IncidentBundleError::NotAnObject);
@@ -438,4 +517,136 @@ pub fn verify_incident_bundle(
         signer_public_key_hex: anchor_hex,
         signing_identity: anchor_key_id,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CLI_BUNDLE: &str =
+        include_str!("../tests/fixtures/cli_incident_bundle/INC-SDK-FIXTURE-1.fnbundle");
+
+    fn trusted_key() -> VerifyingKey {
+        let mut bytes = [0_u8; 32];
+        hex::decode_to_slice(
+            "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+            &mut bytes,
+        )
+        .unwrap();
+        VerifyingKey::from_bytes(&bytes).unwrap()
+    }
+
+    #[test]
+    fn real_cli_bundle_remains_verifiable_with_unambiguous_json() {
+        let verified = verify_incident_bundle(CLI_BUNDLE.as_bytes(), &trusted_key()).unwrap();
+        assert_eq!(verified.incident_id, "INC-SDK-FIXTURE-1");
+        assert_eq!(verified.event_count, 3);
+        assert_eq!(verified.signing_identity, "339eefa3a988f613");
+    }
+
+    #[test]
+    fn duplicate_members_cannot_hide_behind_an_unchanged_valid_signature() {
+        let original: Value = serde_json::from_str(CLI_BUNDLE).unwrap();
+        verify_incident_bundle(CLI_BUNDLE.as_bytes(), &trusted_key()).unwrap();
+        for (needle, replacement) in [
+            (
+                r#""incident_id":"#,
+                r#""incident_id":"OTHER","incident_id":"#,
+            ),
+            (
+                r#""incident_id":"#,
+                r#""incident\u005fid":"OTHER","incident_id":"#,
+            ),
+            (r#""timeline":"#, r#""timeline":[],"timeline":"#),
+            (r#""event_count":3"#, r#""event_count":0,"event_count":3"#),
+            (
+                r#""signal":"anomaly""#,
+                r#""signal":"benign","signal":"anomaly""#,
+            ),
+            (
+                r#""signal":"anomaly""#,
+                r#""signal":"anomaly","signal":"anomaly""#,
+            ),
+            (
+                r#""public_key_hex":"#,
+                r#""public_key_hex":"untrusted","public_key_hex":"#,
+            ),
+            (
+                r#""key_source":"cli""#,
+                r#""key_source":"local","key_source":"cli""#,
+            ),
+        ] {
+            assert!(CLI_BUNDLE.contains(needle), "fixture must exercise {needle}");
+            let ambiguous = CLI_BUNDLE.replacen(needle, replacement, 1);
+            // The old parser erases the injected member, leaving exactly the
+            // original authenticated value and its still-valid signature.
+            assert_eq!(serde_json::from_str::<Value>(&ambiguous).unwrap(), original);
+            let error = verify_incident_bundle(ambiguous.as_bytes(), &trusted_key()).unwrap_err();
+            assert!(
+                matches!(error, IncidentBundleError::Json(ref detail)
+                    if detail.contains("duplicate JSON object member")),
+                "{needle}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_checks_reach_nested_timeline_and_manifest_objects() {
+        // The first signal occurs in chunks. Mutate only the last occurrence
+        // here so a chunk failure cannot mask acceptance of a timeline duplicate.
+        for (needle, replacement) in [
+            (
+                r#""signal":"anomaly""#,
+                r#""signal":null,"signal":"anomaly""#,
+            ),
+            (
+                r#""decision_sequence_hash":"#,
+                r#""decision_sequence_hash":"","decision_sequence_hash":"#,
+            ),
+        ] {
+            let (before, after) = CLI_BUNDLE.rsplit_once(needle).unwrap();
+            let ambiguous = format!("{before}{replacement}{after}");
+            assert_ne!(ambiguous, CLI_BUNDLE);
+            assert_eq!(
+                serde_json::from_str::<Value>(&ambiguous).unwrap(),
+                serde_json::from_str::<Value>(CLI_BUNDLE).unwrap()
+            );
+            assert!(matches!(
+                verify_incident_bundle(ambiguous.as_bytes(), &trusted_key()),
+                Err(IncidentBundleError::Json(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn strict_parser_preserves_json_types_and_full_integer_precision() {
+        let input = br#"{"min":-9223372036854775808,"max":18446744073709551615,"items":[null,true,false,"\u0061",{},[]],"siblings":[{"id":1},{"id":2}]}"#;
+        let parsed: UnambiguousJson = serde_json::from_slice(input).unwrap();
+        assert_eq!(parsed.0, serde_json::from_slice::<Value>(input).unwrap());
+        assert_eq!(parsed.0["min"].as_i64(), Some(i64::MIN));
+        assert_eq!(parsed.0["max"].as_u64(), Some(u64::MAX));
+    }
+
+    #[test]
+    fn strict_parser_retains_float_rejection_at_the_canonical_boundary() {
+        let parsed: UnambiguousJson = serde_json::from_slice(br#"{"x":1.5}"#).unwrap();
+        assert!(matches!(
+            incident_bundle_canonical_digest(&parsed.0, "$"),
+            Err(IncidentBundleError::NonDeterministicFloat { path }) if path == "$.x"
+        ));
+    }
+
+    #[test]
+    fn strict_parser_keeps_recursion_utf8_and_trailing_data_checks() {
+        let nested = format!("{}0{}", "[".repeat(256), "]".repeat(256));
+        assert!(serde_json::from_str::<UnambiguousJson>(&nested).is_err());
+        assert!(serde_json::from_slice::<UnambiguousJson>(b"{\"x\":\"\xff\"}").is_err());
+        let trailing = format!("{CLI_BUNDLE} {{}}");
+        assert!(matches!(
+            verify_incident_bundle(trailing.as_bytes(), &trusted_key()),
+            Err(IncidentBundleError::Json(_))
+        ));
+        let whitespace = format!("{CLI_BUNDLE}\n\t ");
+        assert!(verify_incident_bundle(whitespace.as_bytes(), &trusted_key()).is_ok());
+    }
 }
