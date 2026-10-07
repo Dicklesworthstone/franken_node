@@ -8,6 +8,7 @@ Spec: https://docs.npmjs.com/cli/v11/configuring-npm/package-lock-json/
 from __future__ import annotations
 
 import json
+from fnmatch import fnmatchcase
 import os
 from pathlib import Path
 import stat
@@ -17,6 +18,10 @@ MAX_LOCK_BYTES = 16 * 1024 * 1024
 MAX_PACKAGES = 50_000
 MAX_DEPTH = 64
 SECTIONS = ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies")
+MAX_WORKSPACES = 1024
+MAX_WORKSPACE_ENTRIES = 100_000
+WORKSPACE_EXCLUSIONS = frozenset({"node_modules", ".git", ".beads", ".franken-node",
+                                  ".migrate-backup", ".franken-rewrite"})
 
 
 class InventoryError(ValueError):
@@ -36,7 +41,7 @@ def _constant(_value):
     raise InventoryError("non-finite dependency metadata value")
 
 
-def _read(path: Path, limit: int):
+def _read(path: Path, limit: int, *, budget: list[int] | None = None):
     try:
         before = path.lstat()
     except FileNotFoundError:
@@ -52,6 +57,10 @@ def _read(path: Path, limit: int):
     if (len(raw) > limit or identity(before) != identity(opened)
             or identity(opened) != identity(after) or identity(after) != identity(path.lstat())):
         raise InventoryError(f"{path.name}: metadata changed during capture")
+    if budget is not None:
+        budget[0] -= len(raw)
+        if budget[0] < 0:
+            raise InventoryError("workspace metadata exceeds aggregate byte limit")
     try:
         value = json.loads(raw, object_pairs_hook=_unique, parse_constant=_constant)
     except (ValueError, UnicodeError, RecursionError) as error:
@@ -225,6 +234,101 @@ def _legacy(lock: dict, source: str, native: set[str]) -> tuple[list[dict], set[
     return rows, roots
 
 
+def _workspace_states(pattern: tuple[str, ...], parts: tuple[str, ...]) -> set[int]:
+    """Component glob matching with **, also used to prune unrelated subtrees."""
+    def closure(states):
+        result = set(states)
+        for index in range(len(pattern)):
+            if index in result and pattern[index] == "**":
+                result.add(index + 1)
+        return result
+    states = closure({0})
+    for part in parts:
+        following = set()
+        for index in states:
+            if index == len(pattern):
+                continue
+            if pattern[index] == "**":
+                following.add(index)
+            elif fnmatchcase(part, pattern[index]):
+                following.add(index + 1)
+        states = closure(following)
+    return states
+
+
+def _workspace_manifests(project: Path, package: dict) -> list[tuple[str, dict]]:
+    """Read explicitly selected workspace manifests, never installed packages.
+
+    Exact paths, component * globs and ** directory globs are supported. Other
+    glob dialects fail explicitly instead of silently omitting a workspace.
+    No filesystem symlinks are followed, even when their target is contained.
+    """
+    raw = package.get("workspaces", [])
+    if not isinstance(raw, list) or len(raw) > MAX_WORKSPACES:
+        raise InventoryError("workspaces must be a bounded array of relative directory patterns")
+    patterns = []
+    for value in raw:
+        value = _path(value)
+        parts = tuple(value.split("/"))
+        if (any(char in value for char in "!?[]{}()")
+                or any("**" in part and part != "**" for part in parts)
+                or set(parts) & WORKSPACE_EXCLUSIONS):
+            raise InventoryError("unsupported workspace pattern; use relative paths, * or ** components")
+        patterns.append(parts)
+    if not patterns:
+        return []
+    pending = [(project, ())]
+    result, names = {}, {}
+    budget = [MAX_LOCK_BYTES]
+    entries_seen = 0
+    while pending:
+        directory, parts = pending.pop()
+        if len(parts) > MAX_DEPTH:
+            raise InventoryError("workspace traversal exceeds depth limit")
+        states = [_workspace_states(pattern, parts) for pattern in patterns]
+        if parts and any(len(pattern) in state for pattern, state in zip(patterns, states)):
+            relative = "/".join((*parts, "package.json"))
+            manifest = _read(project / relative, min(MAX_MANIFEST_BYTES, budget[0]), budget=budget)
+            if manifest is not None:
+                name = _name(manifest.get("name"))
+                if name in names and names[name] != relative:
+                    raise InventoryError("duplicate workspace package name")
+                names[name] = relative
+                result[relative] = manifest
+                if len(result) > MAX_WORKSPACES:
+                    raise InventoryError("workspace count exceeds inventory limit")
+        # An exact match does not authorize recursion below that directory.
+        if not any(any(index < len(pattern) for index in state)
+                   for pattern, state in zip(patterns, states)):
+            continue
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                entries_seen += 1
+                if entries_seen > MAX_WORKSPACE_ENTRIES:
+                    raise InventoryError("workspace traversal exceeds entry limit")
+                if entry.name in WORKSPACE_EXCLUSIONS:
+                    continue
+                child = (*parts, entry.name)
+                if not any(_workspace_states(pattern, child) for pattern in patterns):
+                    continue
+                if entry.is_symlink():
+                    raise InventoryError("workspace traversal cannot follow symlinks")
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append((Path(entry.path), child))
+    return sorted(result.items())
+
+
+def _locked_from_workspace(directory: str, name: str, locations: dict[str, dict]) -> dict | None:
+    # Resolve only the recorded install location. This does NOT prove a
+    # semver range is satisfied or that the package is present on disk.
+    parts = directory.split("/") if directory else []
+    for length in range(len(parts), -1, -1):
+        candidate = "/".join([*parts[:length], "node_modules", name])
+        if candidate in locations:
+            return locations[candidate]
+    return None
+
+
 def scan_dependencies(project: Path, native: set[str]) -> list[dict]:
     """Inventory all locked locations, retaining unresolved root declarations.
 
@@ -235,7 +339,7 @@ def scan_dependencies(project: Path, native: set[str]) -> list[dict]:
     """
     project = Path(project)
     package = _read(project / "package.json", MAX_MANIFEST_BYTES)
-    declared = _declarations(package or {})
+    manifests = [("package.json", package or {}), *_workspace_manifests(project, package or {})]
     paths = [project / name for name in ("package-lock.json", "npm-shrinkwrap.json")
              if os.path.lexists(project / name)]
     if len(paths) > 1:
@@ -249,14 +353,27 @@ def scan_dependencies(project: Path, native: set[str]) -> list[dict]:
         if type(version) is not int or version not in (1, 2, 3):
             raise InventoryError("unsupported npm lockfileVersion (expected 1, 2 or 3)")
         rows, roots = (_legacy if version == 1 else _modern)(lock, paths[0].name, native)
-    for installed_as, (request, section) in sorted(declared.items()):
-        if installed_as in roots:
-            continue
-        name, version = _alias(installed_as, request)
-        row = _row(name, version, native, source="package.json", location=None,
-                   unresolved=bool(paths), alias=installed_as)
-        row["dependency_kind"] = section
-        rows.append(row)
+    locations = {row["package_path"]: row for row in rows}
+    for source, manifest in manifests:
+        directory = source.rpartition("/")[0]
+        for installed_as, (request, section) in sorted(_declarations(manifest).items()):
+            name, version = _alias(installed_as, request)
+            locked = _locked_from_workspace(directory, installed_as, locations)
+            # A previous package at the same alias/location cannot hide a
+            # newly declared package identity. A matching name still makes no
+            # claim that the recorded version satisfies the requested range.
+            if locked is not None and locked["name"] == name:
+                continue
+            row = _row(name, version, native, source=source, location=None,
+                       unresolved=bool(paths), alias=installed_as)
+            row["dependency_kind"] = section
+            row["declared_in"] = source
+            if locked is not None:
+                row["notes"] = (row["notes"] or "") + "; locked package identity differs from declaration"
+            rows.append(row)
+            if len(rows) > MAX_PACKAGES:
+                raise InventoryError("dependency count exceeds inventory limit")
     if len(rows) > MAX_PACKAGES:
         raise InventoryError("dependency count exceeds inventory limit")
-    return sorted(rows, key=lambda row: (row["name"], row["version"] or "", row["package_path"] or ""))
+    return sorted(rows, key=lambda row: (row["name"], row["version"] or "",
+                                        row["package_path"] or "", row["source"]))

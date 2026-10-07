@@ -188,6 +188,115 @@ class DependencyInventoryTests(unittest.TestCase):
         self.assertEqual(result["status"], "error")
         self.assertNotIn("summary", result)
 
+    def workspace(self, directory, package):
+        target = self.root / directory
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "package.json").write_text(json.dumps(package))
+
+    def test_workspace_native_dependency_is_seen_without_a_lockfile(self):
+        self.write("package.json", {"workspaces": ["packages/*"]})
+        self.workspace("packages/api", {"name": "api", "dependencies": {"sharp": "^1"}})
+        report = scanner.scan_project(self.root)
+        self.assertEqual(report["summary"]["migration_readiness"], "not-ready")
+        self.assertEqual(report["dependencies"][0]["declared_in"], "packages/api/package.json")
+
+    def test_workspace_hoisted_and_private_locks_avoid_phantom_unresolved_rows(self):
+        self.write("package.json", {"workspaces": ["packages/*"]})
+        self.workspace("packages/api", {"name": "api", "dependencies": {"a": "^1", "b": "^2"}})
+        self.modern({"node_modules/a": {"version": "1.2"},
+                     "packages/api/node_modules/b": {"version": "2.5"}})
+        rows = self.scan()
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row["source"] == "package-lock.json" for row in rows))
+        self.assertTrue(all(row["risk_level"] == "low" for row in rows))
+
+    def test_workspace_missing_lock_record_is_not_silently_dropped(self):
+        self.write("package.json", {"workspaces": ["packages/*"]})
+        self.workspace("packages/api", {"name": "api", "dependencies": {"runtime": "^1"}})
+        self.modern({"node_modules/unrelated": {"version": "1"}})
+        row = next(row for row in self.scan() if row["name"] == "runtime")
+        self.assertEqual(row["risk_level"], "high")
+        self.assertEqual(row["source"], "packages/api/package.json")
+
+    def test_stale_locked_alias_cannot_hide_new_workspace_native_dependency(self):
+        self.write("package.json", {"workspaces": ["packages/*"]})
+        self.workspace("packages/api", {"name": "api", "dependencies": {"image": "npm:sharp@^1"}})
+        self.modern({"node_modules/image": {"name": "old-pure-js-package", "version": "1"}})
+        report = scanner.scan_project(self.root)
+        self.assertEqual(report["summary"]["migration_readiness"], "not-ready")
+        row = next(row for row in report["dependencies"] if row["name"] == "sharp")
+        self.assertIn("identity differs", row["notes"])
+        self.assertEqual(row["source"], "packages/api/package.json")
+
+    def test_stale_root_lock_cannot_suppress_invalid_alias_declaration(self):
+        self.write("package.json", {"dependencies": {"image": "npm:"}})
+        self.modern({"node_modules/image": {"version": "1"}})
+        with self.assertRaises(inventory.InventoryError):
+            self.scan()
+
+    def test_workspace_globstar_and_overlapping_selectors_are_deterministic(self):
+        self.write("package.json", {"workspaces": ["packages/**", "packages/a/*"]})
+        self.workspace("packages/a/b", {"name": "deep", "dependencies": {"canvas": "1"}})
+        self.workspace("packages/z", {"name": "last", "dependencies": {"bcrypt": "2"}})
+        rows = self.scan()
+        self.assertEqual([row["name"] for row in rows], ["bcrypt", "canvas"])
+        self.write("package.json", {"workspaces": ["packages/a/*", "packages/**"]})
+        self.assertEqual(self.scan(), rows)
+
+    def test_exact_workspace_does_not_scan_nested_packages(self):
+        self.write("package.json", {"workspaces": ["packages/api"]})
+        self.workspace("packages/api", {"name": "api", "dependencies": {"safe": "1"}})
+        self.workspace("packages/api/fixtures", {"name": "fixture", "dependencies": {"sharp": "1"}})
+        self.assertEqual([row["name"] for row in self.scan()], ["safe"])
+
+    def test_unselected_or_installed_manifests_cannot_poison_workspace_inventory(self):
+        self.write("package.json", {"workspaces": ["packages/*"]})
+        self.workspace("packages/api", {"name": "api"})
+        self.workspace("elsewhere/trap", {"name": "trap", "dependencies": []})
+        self.workspace("packages/node_modules/trap", {"name": "trap", "dependencies": []})
+        self.assertEqual(self.scan(), [])
+
+    def test_workspace_links_and_unsupported_globs_fail_explicitly(self):
+        self.workspace("actual", {"name": "a"})
+        (self.root / "packages").symlink_to("actual", target_is_directory=True)
+        self.write("package.json", {"workspaces": ["packages"]})
+        with self.assertRaises(inventory.InventoryError):
+            self.scan()
+        for pattern in ("../other", "packages/{a,b}", "!packages/a", "node_modules/*", "a/**b"):
+            self.write("package.json", {"workspaces": [pattern]})
+            with self.subTest(pattern=pattern), self.assertRaises(inventory.InventoryError):
+                self.scan()
+
+    def test_duplicate_workspace_names_and_broken_manifest_refuse_clean_report(self):
+        self.write("package.json", {"workspaces": ["packages/*"]})
+        self.workspace("packages/a", {"name": "duplicate"})
+        self.workspace("packages/b", {"name": "duplicate"})
+        with self.assertRaises(inventory.InventoryError):
+            self.scan()
+        (self.root / "packages/b/package.json").write_text("{")
+        with self.assertRaises(inventory.InventoryError):
+            self.scan()
+
+    def test_workspace_resource_limits_do_not_truncate_to_success(self):
+        self.write("package.json", {"workspaces": ["packages/*"]})
+        self.workspace("packages/a", {"name": "a"})
+        self.workspace("packages/b", {"name": "b"})
+        for key, value in (("MAX_WORKSPACES", 1), ("MAX_WORKSPACE_ENTRIES", 1),
+                           ("MAX_LOCK_BYTES", 10), ("MAX_DEPTH", 1)):
+            with self.subTest(limit=key), patch.object(inventory, key, value):
+                with self.assertRaises(inventory.InventoryError):
+                    self.scan()
+
+    def test_workspace_cli_reports_dependency_outside_root_manifest(self):
+        self.write("package.json", {"workspaces": ["packages/*"]})
+        self.workspace("packages/runtime", {"name": "runtime", "optionalDependencies": {"ffi-napi": "4"}})
+        process = subprocess.run([sys.executable, str(ROOT / "scripts/project_scanner.py"),
+                                  str(self.root), "--json"], capture_output=True, timeout=10)
+        self.assertEqual(process.returncode, 0, process.stderr)
+        report = json.loads(process.stdout)
+        self.assertEqual(report["summary"]["migration_readiness"], "not-ready")
+        self.assertEqual(report["dependencies"][0]["source"], "packages/runtime/package.json")
+
 
 if __name__ == "__main__":
     unittest.main()
