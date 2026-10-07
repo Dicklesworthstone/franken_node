@@ -21,6 +21,9 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::time::Instant;
 
+#[path = "dependency_workspaces.rs"]
+mod workspaces;
+
 const MAX_MANIFEST_BYTES: usize = 512 * 1024;
 const MAX_LOCK_BYTES: usize = 16 * 1024 * 1024;
 const MAX_METADATA_BYTES: usize = 64 * 1024 * 1024;
@@ -363,37 +366,43 @@ fn package_findings(report: &mut DependencyAdmission, packages: &BTreeMap<String
     Ok(())
 }
 
-fn declarations(report: &mut DependencyAdmission, manifest: &Value, packages: &BTreeMap<String, LockedPackage>) -> Result<()> {
-    let mut count = 0;
+/// Stop at the first recorded installation, even if its identity is wrong.
+/// A workspace-private shadow must never be rescued by a matching hoisted pin.
+fn nearest_package<'a>(packages: &'a BTreeMap<String, LockedPackage>, source: &str, installed_as: &str) -> Option<&'a LockedPackage> {
+    let mut directory = source.strip_suffix("/package.json").unwrap_or("");
+    loop {
+        let path = if directory.is_empty() { format!("node_modules/{installed_as}") }
+            else { format!("{directory}/node_modules/{installed_as}") };
+        if let Some(package) = packages.get(&path) { return Some(package); }
+        if directory.is_empty() { return None; }
+        directory = directory.rsplit_once('/').map_or("", |(parent, _)| parent);
+    }
+}
+
+fn declarations(report: &mut DependencyAdmission, manifest: &Value, packages: &BTreeMap<String, LockedPackage>, source: &str, count: &mut usize, deadline: Instant) -> Result<()> {
     for section in SECTIONS {
         let Some(value) = manifest.get(*section) else { continue; };
         let values = value.as_object().with_context(|| format!("{section} must be an object"))?;
         for (installed_as, request) in values {
-            count += 1;
-            ensure!(count <= MAX_PACKAGES, "declared dependency count exceeds limit");
+            time_remaining(deadline)?;
+            *count += 1;
+            ensure!(*count <= MAX_PACKAGES, "declared dependency count exceeds limit");
             name(installed_as)?;
             let request = bounded_text(request, "dependency request")?;
             let (actual, _) = alias(installed_as, Some(request))?;
-            let path = format!("node_modules/{installed_as}");
-            let represented = packages.get(&path).is_some_and(|package| package.name == actual && !package.unresolved);
+            let represented = nearest_package(packages, source, installed_as)
+                .is_some_and(|package| package.name == actual && !package.unresolved);
             let native = native_addon(actual) || native_addon(installed_as);
             if !represented || native {
                 report.finding(DependencyFinding {
                     code: if native { "native_addon" } else { "unresolved_declaration" }.into(),
-                    source: format!("package.json#{section}"), package: actual.into(),
+                    source: format!("{source}#{section}"), package: actual.into(),
                     installed_as: installed_as.clone(), package_path: None, version: Some(request.into()),
                     detail: if native { "Declared native-addon/build dependency requires explicit migration review" }
-                        else { "Declaration has no matching complete root lockfile identity; version satisfaction is not established" }.into(),
+                        else { "Declaration has no matching complete nearest lockfile identity; version satisfaction is not established" }.into(),
                 })?;
             }
         }
-    }
-    if manifest.get("workspaces").is_some() {
-        report.finding(DependencyFinding {
-            code: "workspace_review".into(), source: "package.json#workspaces".into(),
-            package: String::new(), installed_as: String::new(), package_path: None, version: None,
-            detail: "Workspace manifests require inventory before automatic checked execution".into(),
-        })?;
     }
     Ok(())
 }
@@ -417,12 +426,26 @@ pub fn inspect(project: &Path, deadline: Instant) -> Result<DependencyAdmission>
             _ => bail!("unsupported or missing npm lockfileVersion; expected 1, 2 or 3"),
         },
     };
+    let manifests = workspaces::capture(&mut capture, manifest)?;
     let mut report = DependencyAdmission {
         schema_version: "franken-node/native-dependency-admission/v1".into(), scope: SCOPE.into(),
-        packages_scanned: packages.len(), manifests_scanned: 1, inputs: Vec::new(), findings: Vec::new(),
+        packages_scanned: packages.len(), manifests_scanned: manifests.len(), inputs: Vec::new(), findings: Vec::new(),
     };
     package_findings(&mut report, &packages, source)?;
-    declarations(&mut report, &manifest, &packages)?;
+    let mut declared = 0;
+    for (directory, manifest) in &manifests {
+        let source = workspaces::manifest_path(directory);
+        declarations(&mut report, manifest, &packages, &source, &mut declared, deadline)?;
+        workspaces::manifest_findings(&mut report, manifest, &source)?;
+        if !directory.is_empty() {
+            report.finding(DependencyFinding {
+                code: "workspace_review".into(), source,
+                package: manifest["name"].as_str().unwrap_or_default().into(),
+                installed_as: String::new(), package_path: Some(directory.clone()), version: None,
+                detail: "Workspace declarations were inspected; the local link still requires lockfile-to-capture binding".into(),
+            })?;
+        }
+    }
     time_remaining(deadline)?;
     report.inputs = capture.inputs.into_values().collect();
     report.findings.sort_by(|left, right| (&left.source, &left.package_path, &left.package, &left.code)
