@@ -478,7 +478,11 @@ mod tests {
             r#"{"name":"checked-cjs","engines":{"node":">=20"}}"#,
         )
         .unwrap();
-        fs::write(root.path().join("package-lock.json"), "{}\n").unwrap();
+        fs::write(
+            root.path().join("package-lock.json"),
+            "{\"lockfileVersion\":3,\"packages\":{\"\":{}}}\n",
+        )
+        .unwrap();
         root
     }
     fn pair(root: &Path) -> super::super::CheckedRewriteReport {

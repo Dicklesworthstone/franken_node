@@ -4,6 +4,9 @@
 //! native product, optionally requiring agreement with an explicit Bun runtime.
 //! Validation is scoped to captured tests and persistent workspace changes;
 //! it is not release certification, a sandbox or a globally atomic transaction.
+//! Captured dependency metadata must pass native admission before any new
+//! candidate executes. Findings remain explicit review barriers, not scores
+//! that a passing test suite can outweigh.
 
 use super::rewrite_transaction::{Edit, RewriteTransaction};
 use super::validation_suite::rewrite_candidate::{Replacement, RewriteCandidate};
@@ -22,6 +25,9 @@ use std::time::{Duration, Instant};
 use super::module_specifiers::normalize_import_specifier;
 #[path = "checked_commonjs.rs"]
 mod checked_commonjs;
+
+#[path = "dependency_admission.rs"]
+pub mod dependency_admission;
 
 /// Explicit primary-command opt-in. An invalid selection must not fall back to
 /// the two-runtime checker. This is operator configuration, not project metadata.
@@ -43,6 +49,10 @@ pub struct CheckedRewriteReport {
     pub status: CheckedRewriteStatus,
     pub release_certification: bool,
     pub static_validation: Option<MigrationValidateReport>,
+    /// Native assessment of the same private input capture used for planning.
+    /// This is metadata review, not package authentication or compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency_admission: Option<dependency_admission::DependencyAdmission>,
     pub rewrite: Option<MigrationRewriteReport>,
     /// Two-runtime measurements only. Never a projection of three-runtime data.
     pub validation: Option<SuiteReport>,
@@ -141,6 +151,7 @@ fn run_with_evidence(
         status: CheckedRewriteStatus::Error,
         release_certification: false,
         static_validation: None,
+        dependency_admission: None,
         rewrite: None,
         validation: None,
         product_validation: None,
@@ -172,6 +183,17 @@ fn run_with_evidence(
                 "static prerequisites failed; no runtime or new rewrite installation attempted"
                     .into(),
             );
+            return Ok(());
+        }
+        let dependencies = dependency_admission::inspect(&staged, deadline)?;
+        let review_count = dependencies.findings.len();
+        let dependency_review = dependencies.requires_review();
+        report.dependency_admission = Some(dependencies);
+        if dependency_review {
+            report.status = CheckedRewriteStatus::Rejected;
+            report.errors.push(format!(
+                "{review_count} dependency review findings; no runtime or new rewrite installation attempted"
+            ));
             return Ok(());
         }
         let mut plan = run_rewrite(&staged, false)?;
@@ -277,6 +299,27 @@ pub fn render(report: &CheckedRewriteReport) -> String {
         "franken-node migrate rewrite --apply --verify\ntarget: {}\nstatus: {:?}\n",
         report.project_path, report.status
     );
+    if let Some(dependencies) = &report.dependency_admission {
+        let _ = writeln!(
+            text,
+            "dependency_packages={} dependency_manifests={} dependency_review_findings={}",
+            dependencies.packages_scanned,
+            dependencies.manifests_scanned,
+            dependencies.findings.len()
+        );
+        for finding in &dependencies.findings {
+            let _ = writeln!(
+                text,
+                "dependency_review={} source={} package={} location={}: {}",
+                finding.code,
+                finding.source,
+                finding.package,
+                finding.package_path.as_deref().unwrap_or("<declaration>"),
+                finding.detail
+            );
+        }
+        let _ = writeln!(text, "{}", dependencies.scope);
+    }
     if let Some(plan) = &report.rewrite {
         let _ = writeln!(
             text,
@@ -325,6 +368,7 @@ pub fn render(report: &CheckedRewriteReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
     use std::fs;
 
     fn project() -> tempfile::TempDir {
@@ -334,7 +378,11 @@ mod tests {
             r#"{"name":"checked","type":"module","engines":{"node":">=20"}}"#,
         )
         .unwrap();
-        fs::write(root.path().join("package-lock.json"), "{}\n").unwrap();
+        fs::write(
+            root.path().join("package-lock.json"),
+            "{\"lockfileVersion\":3,\"packages\":{\"\":{}}}\n",
+        )
+        .unwrap();
         fs::write(
             root.path().join("helper.mjs"),
             "import { basename } from \"path\";\nexport const value = basename('/tmp/42');\n",
@@ -352,6 +400,118 @@ mod tests {
     }
     fn source(root: &Path) -> String {
         fs::read_to_string(root.join("helper.mjs")).unwrap()
+    }
+
+    fn assert_dependency_rejection(root: &Path, code: &str) {
+        let original = source(root);
+        let report = run_with_evidence(root, |_| {
+            panic!("dependency review must precede every validation runtime")
+        });
+        assert_eq!(report.status, CheckedRewriteStatus::Rejected, "{report:#?}");
+        assert!(report.static_validation.as_ref().unwrap().is_pass());
+        let admission = report.dependency_admission.as_ref().unwrap();
+        assert!(admission.findings.iter().any(|finding| finding.code == code));
+        assert!(report.rewrite.is_none());
+        assert!(report.validation.is_none() && report.product_validation.is_none());
+        assert_eq!(source(root), original);
+        assert!(!root.join(".migrate-backup/helper.mjs").exists());
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["status"], "REJECTED");
+        assert!(json["dependency_admission"]["findings"].as_array().unwrap().iter()
+            .any(|finding| finding["code"] == code));
+        let text = render(&report);
+        assert!(text.contains(&format!("dependency_review={code}")));
+        assert!(text.contains("no runtime or new rewrite installation attempted"));
+    }
+
+    #[test]
+    fn native_dependency_admission_blocks_nested_native_addons_before_execution() {
+        let root = project();
+        fs::write(root.path().join("package-lock.json"), r#"{
+            "lockfileVersion":3,"packages":{
+                "":{},"node_modules/ordinary":{"version":"1.0.0"},
+                "node_modules/ordinary/node_modules/sharp":{"version":"0.33.0","optional":true}
+            }}"#).unwrap();
+        assert_dependency_rejection(root.path(), "native_addon");
+    }
+
+    #[test]
+    fn native_dependency_admission_blocks_recorded_install_scripts_before_execution() {
+        let root = project();
+        fs::write(root.path().join("package-lock.json"), r#"{
+            "lockfileVersion":3,"packages":{
+                "":{},"node_modules/ordinary":{"version":"1.0.0","hasInstallScript":true}
+            }}"#).unwrap();
+        assert_dependency_rejection(root.path(), "install_script");
+    }
+
+    #[test]
+    fn native_dependency_admission_blocks_unrepresented_peer_declarations() {
+        let root = project();
+        fs::write(root.path().join("package.json"), r#"{
+            "name":"checked","type":"module","engines":{"node":">=20"},
+            "peerDependencies":{"ordinary":"^1"}
+        }"#).unwrap();
+        assert_dependency_rejection(root.path(), "unresolved_declaration");
+    }
+
+    #[test]
+    fn native_dependency_admission_refuses_ambiguous_json_before_execution() {
+        let root = project();
+        let original = source(root.path());
+        fs::write(root.path().join("package-lock.json"), r#"{
+            "lockfileVersion":3,"packages":{
+                "node_modules/ordinary":{"version":"1","hasInstallScript":true,"hasInstallScript":false}
+            }}"#).unwrap();
+        let report = run_with_evidence(root.path(), |_| {
+            panic!("ambiguous dependency metadata must not execute")
+        });
+        assert_eq!(report.status, CheckedRewriteStatus::Error, "{report:#?}");
+        assert!(report.errors.iter().any(|error| error.contains("duplicate dependency JSON member")));
+        assert!(report.rewrite.is_none() && report.validation.is_none() && report.product_validation.is_none());
+        assert!(report.dependency_admission.is_none());
+        assert_eq!(source(root.path()), original);
+        assert!(!root.path().join(".migrate-backup/helper.mjs").exists());
+    }
+
+    #[test]
+    fn native_dependency_admission_is_shared_by_public_pair_and_product_entrypoints() {
+        let root = project();
+        fs::write(root.path().join("package-lock.json"), r#"{
+            "lockfileVersion":3,"packages":{"node_modules/sharp":{"version":"0.33.0"}}}
+        "#).unwrap();
+        for report in [
+            run_selected(root.path(), Path::new("/absent/native"), None, false),
+            run_product(root.path(), Path::new("/absent/native"), Path::new("/absent/bun")),
+        ] {
+            assert_eq!(report.status, CheckedRewriteStatus::Rejected, "{report:#?}");
+            assert!(report.dependency_admission.as_ref().unwrap().requires_review());
+            assert!(report.rewrite.is_none());
+            assert!(report.validation.is_none() && report.product_validation.is_none());
+        }
+    }
+
+    #[test]
+    fn native_dependency_admission_keeps_exact_staged_metadata_evidence() {
+        let root = project();
+        let original = source(root.path());
+        let lock = br#"{"lockfileVersion":3,"packages":{"node_modules/ordinary":{"version":"1.0.0"}}}"#;
+        fs::write(root.path().join("package-lock.json"), lock).unwrap();
+        let report = run_with_evidence(root.path(), |_| {
+            // A clean admission reaches the selected executor, but does not
+            // turn absence of a measurement into a successful installation.
+            fs::write(root.path().join("package-lock.json"), "changed after capture")?;
+            anyhow::bail!("validator intentionally stopped after dependency admission")
+        });
+        assert_eq!(report.status, CheckedRewriteStatus::Error, "{report:#?}");
+        let admission = report.dependency_admission.as_ref().unwrap();
+        assert!(!admission.requires_review());
+        let captured = admission.inputs.iter().find(|input| input.path == "package-lock.json").unwrap();
+        assert_eq!(captured.bytes, lock.len());
+        assert_eq!(captured.sha256, hex::encode(Sha256::digest(lock)));
+        assert_eq!(report.rewrite.as_ref().unwrap().rewrites_applied, 0);
+        assert_eq!(source(root.path()), original);
+        assert!(!root.path().join(".migrate-backup/helper.mjs").exists());
     }
 
     #[test]
