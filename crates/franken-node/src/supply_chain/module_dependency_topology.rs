@@ -61,6 +61,49 @@ pub struct Requirement {
     pub selection: Selection,
 }
 
+/// One declared identity that must be consulted by a package trust gate.
+/// The installation name can be an npm alias; `package_name` is its target.
+/// These are bounded metadata observations, not proof of installed contents
+/// or a complete inventory of dynamically loaded JavaScript.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TrustDependency {
+    pub importer: String,
+    pub dependency_name: String,
+    pub package_name: String,
+    pub requested_range: String,
+    pub dependency_kind: Option<DependencyKind>,
+    pub target: Option<String>,
+    pub pinned_version: Option<String>,
+    pub integrity: Option<String>,
+}
+
+#[derive(Debug)]
+struct TrustPin {
+    version: Option<String>,
+    integrity: Option<String>,
+}
+
+fn requested_package_name<'a>(
+    installed_as: &'a str,
+    requested_range: &'a str,
+) -> ModuleResolutionGraphResult<&'a str> {
+    super::validate_package_name(installed_as)?;
+    let Some(alias) = requested_range.strip_prefix("npm:") else {
+        return Ok(installed_as);
+    };
+    let name = match alias.rfind('@').filter(|index| *index > 0) {
+        Some(index) => {
+            if alias[index + 1..].is_empty() {
+                return invalid_metadata("npm alias version must not be empty");
+            }
+            &alias[..index]
+        }
+        None => alias,
+    };
+    super::validate_package_name(name)?;
+    Ok(name)
+}
+
 /// Constructed only by the bounded metadata builder. No unsigned JSON-import
 /// approval path: private graph storage keeps query indices consistent.
 #[derive(Debug, Serialize)]
@@ -76,6 +119,10 @@ pub struct DependencyTopology {
     forward: Vec<Vec<usize>>,
     #[serde(skip)]
     reverse: Vec<Vec<usize>>,
+    // Captured by the same parse as source_graph_hash, which binds these
+    // exact pins. Queries never reopen a lockfile or select by name alone.
+    #[serde(skip)]
+    trust_pins: BTreeMap<String, TrustPin>,
 }
 
 #[derive(Debug, Serialize)]
@@ -329,6 +376,20 @@ fn from_parts(
             .into_iter()
             .map(|row| row.into_iter().collect())
             .collect(),
+        trust_pins: graph
+            .lockfile_pins
+            .iter()
+            .filter(|pin| !details.links.contains_key(&pin.package_path))
+            .map(|pin| {
+                (
+                    pin.package_path.clone(),
+                    TrustPin {
+                        version: pin.version.clone(),
+                        integrity: pin.integrity.clone(),
+                    },
+                )
+            })
+            .collect(),
     };
     // Empty hash is a fixed sentinel in the preimage, not a recursive hash.
     let bytes =
@@ -353,6 +414,122 @@ impl DependencyTopology {
     }
     pub fn edges(&self) -> &[Requirement] {
         &self.edges
+    }
+
+    /// Select root and known transitive package identities for trust checks.
+    /// Production runs exclude development-only edges; scanning may include
+    /// them. Optional and peer requirements remain visible, even unresolved,
+    /// so absence of a lockfile pin never hides a known revoked identity.
+    /// Workspace links traverse their captured target before its dependencies.
+    /// Every location is visited once, including cyclic and nested installs.
+    pub fn trust_dependencies(
+        &self,
+        start: &str,
+        include_development: bool,
+    ) -> ModuleResolutionGraphResult<Vec<TrustDependency>> {
+        let start = self.index(start)?;
+        let mut outgoing = vec![Vec::new(); self.nodes.len()];
+        for (index, edge) in self.edges.iter().enumerate() {
+            if include_development || edge.dependency_kind != Some(DependencyKind::Development) {
+                outgoing[self.locations[&edge.importer]].push(index);
+            }
+        }
+        let mut visited = vec![false; self.nodes.len()];
+        let mut pending = VecDeque::from([start]);
+        visited[start] = true;
+        let mut result = Vec::new();
+        let mut text_bytes = 0;
+        while let Some(index) = pending.pop_front() {
+            let node = &self.nodes[index];
+            if let Some(target) = &node.link_target {
+                let next = self.index(target)?;
+                if !visited[next] {
+                    visited[next] = true;
+                    pending.push_back(next);
+                }
+            }
+            for &edge_index in &outgoing[index] {
+                let edge = &self.edges[edge_index];
+                let package_name =
+                    requested_package_name(&edge.dependency_name, &edge.requested_range)?;
+                if let Some(target) = &edge.target {
+                    let next = self.index(target)?;
+                    let selected = &self.nodes[next];
+                    if let Some(name) = &selected.name {
+                        // Older locks can omit an alias's actual name, in
+                        // which case the path-derived installation name is
+                        // all we know. It must never replace the explicit
+                        // alias target used for trust/revocation lookup.
+                        if name != package_name && name != &edge.dependency_name {
+                            return invalid_metadata(format!(
+                                "dependency {} from {} requests {package_name:?}, but its captured target {target:?} names {name:?}",
+                                edge.dependency_name, edge.importer
+                            ));
+                        }
+                    }
+                    if let Some(version) = &selected.version
+                        && version.starts_with("npm:")
+                        && requested_package_name(&edge.dependency_name, version)? != package_name
+                    {
+                        return invalid_metadata(format!(
+                            "dependency {} from {} has a conflicting captured npm alias",
+                            edge.dependency_name, edge.importer
+                        ));
+                    }
+                    if !visited[next] {
+                        visited[next] = true;
+                        pending.push_back(next);
+                    }
+                }
+                let pin = edge
+                    .target
+                    .as_ref()
+                    .and_then(|target| self.trust_pins.get(target));
+                let pinned_version =
+                    pin.and_then(|pin| pin.version.as_deref())
+                        .and_then(|version| {
+                            if let Some(alias) = version.strip_prefix("npm:") {
+                                alias
+                                    .rfind('@')
+                                    .filter(|index| *index > 0)
+                                    .map(|index| &alias[index + 1..])
+                            } else {
+                                Some(version)
+                            }
+                        });
+                let integrity = pin.and_then(|pin| pin.integrity.as_deref());
+                reserve_text(
+                    &mut text_bytes,
+                    edge.importer.len()
+                        + edge.dependency_name.len()
+                        + package_name.len()
+                        + edge.requested_range.len()
+                        + edge.target.as_ref().map_or(0, String::len)
+                        + pinned_version.map_or(0, str::len)
+                        + integrity.map_or(0, str::len),
+                )?;
+                result.push(TrustDependency {
+                    importer: edge.importer.clone(),
+                    dependency_name: edge.dependency_name.clone(),
+                    package_name: package_name.to_owned(),
+                    requested_range: edge.requested_range.clone(),
+                    dependency_kind: edge.dependency_kind,
+                    target: edge.target.clone(),
+                    pinned_version: pinned_version.map(str::to_owned),
+                    integrity: integrity.map(str::to_owned),
+                });
+            }
+        }
+        // Root observations precede transitive ones when callers deduplicate
+        // by registry identity; all locations were still traversed above.
+        result.sort_by(|left, right| {
+            (&left.importer, &left.dependency_kind, &left.dependency_name).cmp(&(
+                &right.importer,
+                &right.dependency_kind,
+                &right.dependency_name,
+            ))
+        });
+        Ok(result)
     }
 
     fn index(&self, location: &str) -> ModuleResolutionGraphResult<usize> {
@@ -510,6 +687,158 @@ mod tests {
             json!({"lockfileVersion":3, "packages":packages}),
         );
         root
+    }
+
+    #[test]
+    fn trust_walk_tracks_nested_pins_cycles_and_optional_peers_but_excludes_development() {
+        let root = fixture(json!({
+            "node_modules/a":{"version":"1", "dependencies":{"b":"2"},
+                "optionalDependencies":{"missing":"1"}, "peerDependencies":{"host":"*"}},
+            "node_modules/a/node_modules/b":{"version":"2", "integrity":"sha512-bmVzdGVk",
+                "dependencies":{"a":"1"}},
+            "node_modules/b":{"version":"9", "integrity":"sha512-dW5yZWFjaGVk"},
+            "node_modules/dev":{"dependencies":{"dev-child":"1"}},
+            "node_modules/dev-child":{"version":"1"}
+        }));
+        put(
+            root.path(),
+            "package.json",
+            json!({"dependencies":{"a":"1"},
+            "devDependencies":{"dev":"1"}}),
+        );
+        let topology = build(root.path()).unwrap();
+        let runtime = topology.trust_dependencies(".", false).unwrap();
+        assert_eq!(
+            runtime.len(),
+            5,
+            "cycle must terminate while retaining requirements"
+        );
+        assert!(
+            !runtime
+                .iter()
+                .any(|entry| entry.package_name.starts_with("dev"))
+        );
+        let nested = runtime
+            .iter()
+            .find(|entry| entry.package_name == "b")
+            .unwrap();
+        assert_eq!(
+            nested.target.as_deref(),
+            Some("node_modules/a/node_modules/b")
+        );
+        assert_eq!(nested.pinned_version.as_deref(), Some("2"));
+        assert_eq!(nested.integrity.as_deref(), Some("sha512-bmVzdGVk"));
+        for missing in ["missing", "host"] {
+            assert!(
+                runtime
+                    .iter()
+                    .any(|entry| entry.package_name == missing && entry.target.is_none())
+            );
+        }
+        let scan = topology.trust_dependencies(".", true).unwrap();
+        assert!(scan.iter().any(|entry| entry.package_name == "dev-child"));
+        // Metadata queries use the original capture, never a later name-only
+        // lookup against a replacement lockfile.
+        put(root.path(), "package-lock.json", json!({"packages":{}}));
+        assert_eq!(runtime, topology.trust_dependencies(".", false).unwrap());
+    }
+
+    #[test]
+    fn trust_aliases_keep_the_declared_target_and_refuse_conflicting_captured_names() {
+        let root = fixture(json!({"node_modules/a":{"name":"@scope/actual", "version":"2.3.4"}}));
+        put(
+            root.path(),
+            "package.json",
+            json!({"dependencies":{"a":"npm:@scope/actual@^2"}}),
+        );
+        let selected = build(root.path())
+            .unwrap()
+            .trust_dependencies(".", false)
+            .unwrap();
+        assert_eq!(selected[0].package_name, "@scope/actual");
+        assert_eq!(selected[0].dependency_name, "a");
+        assert_eq!(selected[0].pinned_version.as_deref(), Some("2.3.4"));
+        put(
+            root.path(),
+            "package-lock.json",
+            json!({"packages":{
+                "node_modules/a":{"name":"unrelated", "version":"2.3.4"}
+            }}),
+        );
+        assert!(
+            build(root.path())
+                .unwrap()
+                .trust_dependencies(".", false)
+                .is_err()
+        );
+        for malformed in [
+            "npm:",
+            "npm:@scope",
+            "npm:../escape@1",
+            "npm:actual@",
+            "npm:actual@1@2",
+        ] {
+            assert!(
+                requested_package_name("alias", malformed).is_err(),
+                "{malformed}"
+            );
+        }
+        assert!(requested_package_name("../escape", "npm:actual@1").is_err());
+        assert_eq!(
+            requested_package_name("alias", "npm:@scope/actual").unwrap(),
+            "@scope/actual"
+        );
+    }
+
+    #[test]
+    fn trust_walk_includes_legacy_requires_and_resolves_alias_pin_versions() {
+        let root = fixture(json!({}));
+        put(
+            root.path(),
+            "package.json",
+            json!({"dependencies":{"a":"npm:actual@^1"}}),
+        );
+        put(
+            root.path(),
+            "package-lock.json",
+            json!({"lockfileVersion":1,"dependencies":{
+                "a":{"version":"npm:actual@1.2.3", "requires":{"nested":"2"},
+                    "dependencies":{"nested":{"version":"2"}}}
+            }}),
+        );
+        let selected = build(root.path())
+            .unwrap()
+            .trust_dependencies(".", false)
+            .unwrap();
+        assert_eq!(selected[0].package_name, "actual");
+        assert_eq!(selected[0].pinned_version.as_deref(), Some("1.2.3"));
+        assert_eq!(selected[1].package_name, "nested");
+        assert_eq!(selected[1].dependency_kind, None);
+        assert_eq!(selected[1].pinned_version.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn trust_walk_uses_shrinkwrap_and_does_not_fall_back_after_its_failure() {
+        let root = fixture(json!({"node_modules/a":{"version":"1"}}));
+        put(
+            root.path(),
+            "npm-shrinkwrap.json",
+            json!({"lockfileVersion":3,"packages":{
+                "node_modules/a":{"version":"2", "dependencies":{"contained":"1"}}
+            }}),
+        );
+        let selected = build(root.path())
+            .unwrap()
+            .trust_dependencies(".", false)
+            .unwrap();
+        assert_eq!(selected[0].pinned_version.as_deref(), Some("2"));
+        assert!(
+            selected
+                .iter()
+                .any(|entry| entry.package_name == "contained")
+        );
+        std::fs::write(root.path().join("npm-shrinkwrap.json"), "{").unwrap();
+        assert!(build(root.path()).is_err());
     }
 
     #[test]
@@ -808,8 +1137,10 @@ mod tests {
 
     #[test]
     fn global_requirement_and_serialized_text_budgets_fail_without_partial_results() {
-        let mut details = LockfileDetails::default();
-        details.edges = super::super::MAX_LOCKFILE_DEPENDENCY_EDGES;
+        let mut details = LockfileDetails {
+            edges: super::super::MAX_LOCKFILE_DEPENDENCY_EDGES,
+            ..Default::default()
+        };
         assert!(
             details
                 .record(

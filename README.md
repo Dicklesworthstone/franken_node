@@ -2827,8 +2827,27 @@ decision receipts into immutable storage.
 
 ### Package registries
 
-`franken-node trust scan` reads `package.json` and, when present,
-`package-lock.json` for the resolved version and integrity hashes.
+`franken-node trust scan` inventories declared dependencies across the root
+and captured workspaces, including development dependencies and reachable
+transitive requirements. It uses `npm-shrinkwrap.json` when present, otherwise
+`package-lock.json`, and follows the nearest captured installation at each
+dependency location. Versions and integrity hashes come from that same capture;
+an unrelated hoisted package cannot supply a nested package's evidence. An npm
+alias is checked under its actual target identity (`npm:package-name`).
+
+`run` uses the same traversal for production, optional, and peer requirements
+from its selected project authority, excluding development-only branches.
+Known revoked or quarantined transitive identities therefore reach the existing
+profile-specific admission checks. These are bounded metadata checks: a lockfile
+does not authenticate installed source bytes or enumerate undeclared dynamic
+imports. Missing optional or peer targets remain visible as declared identities.
+
+Trust cards are keyed by package identity. When reachable installations contain
+multiple versions, or mix a pinned version with an unresolved requirement, a new
+card reports `multiple-or-unresolved`, has at least Medium risk, and carries a
+warning. Single-version `--deep`/`--audit` refresh is unavailable for that card;
+the scanner does not use one selected version to clear all the others.
+
 `--deep` fetches package metadata from the public npm registry
 (`registry.npmjs.org`) and dependent counts from `api.deps.dev`; those
 two hosts, over HTTPS, are the only ones the scan will contact, so

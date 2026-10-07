@@ -567,6 +567,8 @@ struct RunPackageDependency {
     version_requirement: String,
     section: String,
     extension_id: String,
+    #[serde(skip)]
+    lockfile_metadata: TrustScanLockfileMetadata,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -634,8 +636,25 @@ struct TrustScanReport {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct TrustScanLockfileMetadata {
-    resolved_version: Option<String>,
+    resolved_versions: BTreeSet<String>,
     integrity_hashes: Vec<String>,
+    has_unresolved_version: bool,
+    has_lockfile_pin: bool,
+}
+
+impl TrustScanLockfileMetadata {
+    fn resolved_version(&self) -> Option<&str> {
+        if self.resolved_versions.len() == 1 && !self.has_unresolved_version {
+            self.resolved_versions.first().map(String::as_str)
+        } else {
+            None
+        }
+    }
+
+    fn ambiguous_versions(&self) -> bool {
+        self.resolved_versions.len() > 1
+            || (self.has_unresolved_version && !self.resolved_versions.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -19492,42 +19511,30 @@ fn read_package_manifest_object(
     context: &str,
 ) -> Result<Option<serde_json::Map<String, serde_json::Value>>> {
     let package_json_path = project_root.join("package.json");
-    if !package_json_path.is_file() {
-        return Ok(None);
-    }
-    let root = project_root.canonicalize().with_context(|| {
-        format!(
-            "failed resolving project root while evaluating {context}: {}",
-            project_root.display()
-        )
-    })?;
-    let resolved = package_json_path.canonicalize().with_context(|| {
-        format!(
-            "failed resolving package.json while evaluating {context}: {}",
-            package_json_path.display()
-        )
-    })?;
-    if !resolved.starts_with(&root) {
-        anyhow::bail!(
-            "package.json must reside within {} while evaluating {context}",
-            project_root.display()
-        );
-    }
-
-    let raw = bounded_read_to_string(&resolved, MAX_MANIFEST_FILE_BYTES)
-        .with_context(|| format!("failed reading dependency manifest {}", resolved.display()))?;
-    let manifest = serde_json::from_str::<serde_json::Value>(
-        raw.strip_prefix('\u{feff}').unwrap_or(&raw),
-    ).with_context(|| {
+    let raw = match supply_chain::module_resolution_graph::read_project_metadata(
+        project_root,
+        Path::new("package.json"),
+        MAX_MANIFEST_FILE_BYTES,
+    ) {
+        Ok(raw) => raw,
+        Err(supply_chain::module_resolution_graph::ModuleResolutionGraphError::Io {
+            source,
+            ..
+        }) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("reading manifest for {context}")),
+    };
+    let manifest =
+        serde_json::from_str::<serde_json::Value>(raw.strip_prefix('\u{feff}').unwrap_or(&raw))
+            .with_context(|| {
         format!(
             "invalid dependency manifest JSON while evaluating {context}: {}",
-            resolved.display()
+            package_json_path.display()
         )
     })?;
     let object = manifest.as_object().cloned().ok_or_else(|| {
         anyhow::anyhow!(
             "dependency manifest must be a JSON object: {}",
-            resolved.display()
+            package_json_path.display()
         )
     })?;
 
@@ -19539,27 +19546,77 @@ fn collect_package_dependencies(
     sections: &[&str],
     context: &str,
 ) -> Result<Option<Vec<RunPackageDependency>>> {
-    let Some(object) = read_package_manifest_object(project_root, context)? else {
-        return Ok(None);
+    use supply_chain::module_resolution_graph::{
+        DependencyKind, ModuleResolutionGraphError, dependency_topology,
     };
-
-    let mut dependencies = BTreeMap::new();
-    for section in sections {
-        let Some(entries) = object.get(*section).and_then(serde_json::Value::as_object) else {
-            continue;
-        };
-
-        for (dependency_name, version_requirement) in entries {
-            dependencies
-                .entry(dependency_name.clone())
+    let topology = match dependency_topology::build(project_root) {
+        Ok(topology) => topology,
+        Err(ModuleResolutionGraphError::MissingRootManifest { .. }) => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("capturing dependencies for {context}"));
+        }
+    };
+    let include_development = sections.contains(&"devDependencies");
+    let mut roots = vec!["."];
+    if include_development {
+        // `trust scan` inventories the captured workspace as well as the root;
+        // `run` follows only the selected authority's executable dependency tree.
+        roots.extend(
+            topology
+                .nodes()
+                .iter()
+                .filter(|node| {
+                    node.source == dependency_topology::PackageSource::Manifest
+                        && node.location != "."
+                })
+                .map(|node| node.location.as_str()),
+        );
+    }
+    let mut dependencies: BTreeMap<String, RunPackageDependency> = BTreeMap::new();
+    for root in roots {
+        for dependency in topology.trust_dependencies(root, include_development)? {
+            let section = match dependency.dependency_kind {
+                Some(DependencyKind::Production) => "dependencies",
+                Some(DependencyKind::Development) => "devDependencies",
+                Some(DependencyKind::Peer) => "peerDependencies",
+                Some(DependencyKind::Optional) => "optionalDependencies",
+                None => "requires",
+            };
+            let mut source = if dependency.importer == "." {
+                section.to_owned()
+            } else {
+                format!("{}/package.json#{section}", dependency.importer)
+            };
+            if dependency.dependency_name != dependency.package_name {
+                source.push_str(&format!(" (installed as {})", dependency.dependency_name));
+            }
+            let entry = dependencies
+                .entry(dependency.package_name.clone())
                 .or_insert_with(|| RunPackageDependency {
-                    dependency_name: dependency_name.clone(),
-                    version_requirement: version_requirement
-                        .as_str()
-                        .map_or_else(|| version_requirement.to_string(), ToString::to_string),
-                    section: (*section).to_string(),
-                    extension_id: dependency_extension_id(dependency_name),
+                    extension_id: dependency_extension_id(&dependency.package_name),
+                    dependency_name: dependency.package_name.clone(),
+                    version_requirement: dependency.requested_range.clone(),
+                    section: source,
+                    lockfile_metadata: TrustScanLockfileMetadata::default(),
                 });
+            let metadata = &mut entry.lockfile_metadata;
+            // Carry pins from this exact capture and selected installation;
+            // a name-only second lockfile read can pick an unrelated version.
+            metadata.has_lockfile_pin |=
+                dependency.pinned_version.is_some() || dependency.integrity.is_some();
+            if let Some(version) = dependency.pinned_version {
+                metadata.resolved_versions.insert(version);
+            } else {
+                metadata.has_unresolved_version = true;
+            }
+            if let Some(integrity) = dependency
+                .integrity
+                .as_deref()
+                .and_then(normalize_integrity_hash)
+                && !metadata.integrity_hashes.contains(&integrity)
+            {
+                metadata.integrity_hashes.push(integrity);
+            }
         }
     }
 
@@ -19807,117 +19864,6 @@ fn trust_scan_registry_state(
         cache_ttl_secs: trust_registry_cache_ttl(trust_config),
         trust_config: trust_config.clone(),
     })
-}
-
-fn merge_trust_scan_lockfile_entry(
-    entries: &mut BTreeMap<String, TrustScanLockfileMetadata>,
-    dependency_name: &str,
-    resolved_version: Option<&str>,
-    integrity_hashes: impl IntoIterator<Item = String>,
-) {
-    let entry = entries.entry(dependency_name.to_string()).or_default();
-    if entry.resolved_version.is_none() {
-        entry.resolved_version = resolved_version.map(ToString::to_string);
-    }
-    for integrity_hash in integrity_hashes {
-        if !entry.integrity_hashes.contains(&integrity_hash) {
-            entry.integrity_hashes.push(integrity_hash);
-        }
-    }
-}
-
-fn parse_lockfile_dependency_name(
-    package_path: &str,
-    package_value: &serde_json::Value,
-) -> Option<String> {
-    if package_path.is_empty() {
-        return None;
-    }
-    if let Some(rest) = package_path.strip_prefix("node_modules/")
-        && rest.contains("/node_modules/")
-    {
-        return None;
-    }
-    if let Some(name) = package_value
-        .get("name")
-        .and_then(serde_json::Value::as_str)
-    {
-        return Some(name.to_string());
-    }
-
-    let rest = package_path.strip_prefix("node_modules/")?;
-    Some(rest.to_string())
-}
-
-fn parse_trust_scan_lockfile_metadata(
-    project_root: &Path,
-) -> Result<BTreeMap<String, TrustScanLockfileMetadata>> {
-    let mut entries = BTreeMap::new();
-    let mut lockfile_path = None;
-    for candidate in ["package-lock.json", "npm-shrinkwrap.json"] {
-        let path = project_root.join(candidate);
-        if path.is_file() {
-            lockfile_path = Some(path);
-            break;
-        }
-    }
-
-    let Some(lockfile_path) = lockfile_path else {
-        return Ok(entries);
-    };
-
-    let raw = bounded_read_to_string(&lockfile_path, MAX_LOCKFILE_BYTES)
-        .with_context(|| format!("failed reading lockfile {}", lockfile_path.display()))?;
-    let payload = serde_json::from_str::<serde_json::Value>(&raw)
-        .with_context(|| format!("invalid lockfile JSON: {}", lockfile_path.display()))?;
-
-    if let Some(packages) = payload
-        .get("packages")
-        .and_then(serde_json::Value::as_object)
-    {
-        for (package_path, package_value) in packages {
-            let Some(dependency_name) = parse_lockfile_dependency_name(package_path, package_value)
-            else {
-                continue;
-            };
-            let integrity_hashes = package_value
-                .get("integrity")
-                .and_then(serde_json::Value::as_str)
-                .and_then(normalize_integrity_hash)
-                .into_iter();
-            merge_trust_scan_lockfile_entry(
-                &mut entries,
-                &dependency_name,
-                package_value
-                    .get("version")
-                    .and_then(serde_json::Value::as_str),
-                integrity_hashes,
-            );
-        }
-    }
-
-    if let Some(dependencies) = payload
-        .get("dependencies")
-        .and_then(serde_json::Value::as_object)
-    {
-        for (dependency_name, dependency_value) in dependencies {
-            let integrity_hashes = dependency_value
-                .get("integrity")
-                .and_then(serde_json::Value::as_str)
-                .and_then(normalize_integrity_hash)
-                .into_iter();
-            merge_trust_scan_lockfile_entry(
-                &mut entries,
-                dependency_name,
-                dependency_value
-                    .get("version")
-                    .and_then(serde_json::Value::as_str),
-                integrity_hashes,
-            );
-        }
-    }
-
-    Ok(entries)
 }
 
 fn normalize_integrity_hash(raw: &str) -> Option<String> {
@@ -20386,10 +20332,17 @@ fn build_trust_scan_card_input(
     let timestamp = chrono::DateTime::from_timestamp(now_secs as i64, 0)
         .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
         .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string());
-    let version = lockfile_metadata
-        .and_then(|metadata| metadata.resolved_version.clone())
-        .or_else(|| deep_metadata.resolved_version.clone())
-        .unwrap_or_else(|| dependency.version_requirement.clone());
+    let ambiguous_versions =
+        lockfile_metadata.is_some_and(TrustScanLockfileMetadata::ambiguous_versions);
+    let version = if ambiguous_versions {
+        "multiple-or-unresolved".to_owned()
+    } else {
+        lockfile_metadata
+            .and_then(TrustScanLockfileMetadata::resolved_version)
+            .map(str::to_owned)
+            .or_else(|| deep_metadata.resolved_version.clone())
+            .unwrap_or_else(|| dependency.version_requirement.clone())
+    };
 
     let publisher = if let (Some(publisher_id), Some(display_name)) = (
         deep_metadata.publisher_id.clone(),
@@ -20425,7 +20378,7 @@ fn build_trust_scan_card_input(
         // A name built to be mistaken for a popular package is a high-risk
         // signal before any behaviour is observed (README scenario).
         RiskLevel::High
-    } else if artifact_hashes.is_empty() || new_package {
+    } else if artifact_hashes.is_empty() || new_package || ambiguous_versions {
         // A brand-new package has no track record: never Low.
         RiskLevel::Medium
     } else {
@@ -20462,6 +20415,12 @@ fn build_trust_scan_card_input(
         "Seeded from {} requirement `{}`",
         dependency.section, dependency.version_requirement
     )];
+    if ambiguous_versions {
+        summary_bits.push(
+            "Multiple or unresolved captured versions; no single-version vulnerability clearance"
+                .to_owned(),
+        );
+    }
     if let Some(published_at) = &deep_metadata.published_at {
         summary_bits.push(format!("published_at={published_at}"));
     }
@@ -20636,15 +20595,13 @@ fn render_trust_scan_human(report: &TrustScanReport) -> String {
 }
 
 fn run_trust_scan(project_root: &Path, deep: bool, audit: bool) -> Result<TrustScanReport> {
-    let project_root = if project_root.is_absolute() {
-        project_root.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .context("failed resolving current working directory for trust scan")?
-            .join(project_root)
-    };
+    let project_root = project_root.canonicalize().with_context(|| {
+        format!(
+            "failed resolving trust scan project {}",
+            project_root.display()
+        )
+    })?;
     let dependencies = collect_trust_scan_dependencies(&project_root)?;
-    let lockfile_metadata = parse_trust_scan_lockfile_metadata(&project_root)?;
     let now_secs = now_unix_secs();
     let config = trust_registry_config_for_project(&project_root)?;
     let mut state = trust_scan_registry_state(&project_root, &config.trust, now_secs)?;
@@ -20660,6 +20617,14 @@ fn run_trust_scan(project_root: &Path, deep: bool, audit: bool) -> Result<TrustS
     };
 
     for dependency in &dependencies {
+        let lockfile_entry = Some(&dependency.lockfile_metadata);
+        let ambiguous_versions = dependency.lockfile_metadata.ambiguous_versions();
+        if ambiguous_versions {
+            warnings.push(format!(
+                "{}: multiple or unresolved captured versions; card covers package identity, and single-version deep/audit refresh is unavailable",
+                dependency.extension_id
+            ));
+        }
         let existing = state
             .registry
             .read(&dependency.extension_id, now_secs, "trace-cli-trust-scan")
@@ -20680,17 +20645,16 @@ fn run_trust_scan(project_root: &Path, deep: bool, audit: bool) -> Result<TrustS
             continue;
         }
 
-        let lockfile_entry = lockfile_metadata.get(&dependency.dependency_name);
         let mut deep_metadata = TrustScanDeepMetadata::default();
         let mut deep_fetched = false;
         let mut audit_fetched = false;
-        if deep {
+        if deep && !ambiguous_versions {
             let remote_cap = remote_cap_context
                 .as_mut()
                 .expect("trust scan RemoteCap context initialized for deep scan");
             match fetch_trust_scan_npm_metadata(
                 &dependency.dependency_name,
-                lockfile_entry.and_then(|entry| entry.resolved_version.as_deref()),
+                lockfile_entry.and_then(TrustScanLockfileMetadata::resolved_version),
                 remote_cap,
             ) {
                 Ok(metadata) => {
@@ -20711,9 +20675,9 @@ fn run_trust_scan(project_root: &Path, deep: bool, audit: bool) -> Result<TrustS
         }
 
         let mut audit_metadata = TrustScanAuditMetadata::default();
-        if audit {
+        if audit && !ambiguous_versions {
             let resolved_version = lockfile_entry
-                .and_then(|entry| entry.resolved_version.as_deref())
+                .and_then(TrustScanLockfileMetadata::resolved_version)
                 .or(deep_metadata.resolved_version.as_deref());
             let remote_cap = remote_cap_context
                 .as_mut()
@@ -20755,7 +20719,7 @@ fn run_trust_scan(project_root: &Path, deep: bool, audit: bool) -> Result<TrustS
                 &existing,
                 &input,
                 deep_fetched || audit_fetched,
-                audit_fetched && audit_metadata.risk_lowering_authenticated,
+                audit_fetched && audit_metadata.risk_lowering_authenticated && !ambiguous_versions,
             ) {
                 warnings.push(format!(
                     "{}: existing card not refreshed: {reason}",
@@ -20807,7 +20771,7 @@ fn run_trust_scan(project_root: &Path, deep: bool, audit: bool) -> Result<TrustS
         created_cards,
         refreshed_cards,
         skipped_existing,
-        lockfile_entries: lockfile_metadata.len(),
+        lockfile_entries: dependencies.iter().filter(|dependency| dependency.lockfile_metadata.has_lockfile_pin).count(),
         deep,
         audit,
         warnings,
@@ -37567,24 +37531,28 @@ mod run_trust_gate_tests {
                     version_requirement: "^1.0.0".to_string(),
                     section: "dependencies".to_string(),
                     extension_id: "normal-ext".to_string(),
+                    lockfile_metadata: TrustScanLockfileMetadata::default(),
                 },
                 RunPackageDependency {
                     dependency_name: "".to_string(), // Empty name
                     version_requirement: "".to_string(),
                     section: "".to_string(),
                     extension_id: "".to_string(),
+                    lockfile_metadata: TrustScanLockfileMetadata::default(),
                 },
                 RunPackageDependency {
                     dependency_name: "\n\r\t".to_string(), // Control characters
                     version_requirement: ">=0.0.0, <999.999.999".to_string(),
                     section: "dev-dependencies".to_string(),
                     extension_id: "control-chars-ext".to_string(),
+                    lockfile_metadata: TrustScanLockfileMetadata::default(),
                 },
                 RunPackageDependency {
                     dependency_name: "very-long-".to_string() + &"x".repeat(10000),
                     version_requirement: "*".to_string(),
                     section: "dependencies".to_string(),
                     extension_id: "long-name-ext".to_string(),
+                    lockfile_metadata: TrustScanLockfileMetadata::default(),
                 },
             ];
 

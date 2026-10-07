@@ -15,6 +15,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -208,6 +209,127 @@ struct DependencySpec {
 
 pub type ModuleResolutionGraphResult<T> = Result<T, ModuleResolutionGraphError>;
 
+/// Read one bounded metadata file through the selected project authority.
+/// The Unix path walks retained directory descriptors without following links;
+/// a FIFO or device is refused before reading. Callers receive the captured
+/// bytes rather than reopening a path after validating its contents.
+pub fn read_project_metadata(
+    project_root: &Path,
+    relative_path: &Path,
+    limit: u64,
+) -> ModuleResolutionGraphResult<String> {
+    use std::path::Component;
+    let components: Vec<_> = relative_path.components().collect();
+    if components.is_empty()
+        || components.len() > 64
+        || components
+            .iter()
+            .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        return invalid_metadata("metadata path must be bounded and project-relative");
+    }
+    let path = project_root.join(relative_path);
+    let read = || -> std::io::Result<String> {
+        // An absolute root has already selected an authority. Do not
+        // canonicalize it again: a replacement symlink must be refused,
+        // not followed into a different project. Relative callers select
+        // their authority once from the current working directory.
+        let root = if project_root.is_absolute() {
+            project_root.to_path_buf()
+        } else {
+            project_root.canonicalize()?
+        };
+        if root
+            .components()
+            .any(|part| matches!(part, Component::ParentDir))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "metadata authority must not contain parent traversal",
+            ));
+        }
+        #[cfg(unix)]
+        let file = {
+            use rustix::fs::{Mode, OFlags, open, openat};
+            let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+            let mut directory = std::fs::File::from(open("/", flags, Mode::empty())?);
+            for part in root.components() {
+                if let Component::Normal(name) = part {
+                    directory =
+                        std::fs::File::from(openat(&directory, name, flags, Mode::empty())?);
+                }
+            }
+            for part in &components[..components.len() - 1] {
+                directory = std::fs::File::from(openat(
+                    &directory,
+                    part.as_os_str(),
+                    flags,
+                    Mode::empty(),
+                )?);
+            }
+            std::fs::File::from(openat(
+                &directory,
+                components.last().expect("nonempty path").as_os_str(),
+                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                Mode::empty(),
+            )?)
+        };
+        #[cfg(not(unix))]
+        let file = {
+            let mut checked = std::path::PathBuf::new();
+            for part in root.components().chain(components.iter().copied()) {
+                checked.push(part.as_os_str());
+                if std::fs::symlink_metadata(&checked)?.is_symlink() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "metadata symlinks are not allowed",
+                    ));
+                }
+            }
+            std::fs::File::open(checked)?
+        };
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.len() > limit {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "metadata must be a regular file within its byte bound",
+            ));
+        }
+        let mut raw = String::new();
+        (&file)
+            .take(limit.saturating_add(1))
+            .read_to_string(&mut raw)?;
+        if raw.len() as u64 > limit {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "metadata exceeded its byte bound while reading",
+            ));
+        }
+        let after = file.metadata()?;
+        #[cfg(unix)]
+        let changed = {
+            use std::os::unix::fs::MetadataExt;
+            metadata.dev() != after.dev()
+                || metadata.ino() != after.ino()
+                || metadata.len() != after.len()
+                || metadata.mtime() != after.mtime()
+                || metadata.mtime_nsec() != after.mtime_nsec()
+                || metadata.ctime() != after.ctime()
+                || metadata.ctime_nsec() != after.ctime_nsec()
+        };
+        #[cfg(not(unix))]
+        let changed = metadata.len() != after.len() || metadata.modified()? != after.modified()?;
+        if changed || !after.is_file() || after.len() != raw.len() as u64 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "metadata changed while reading",
+            ));
+        }
+        Ok(raw)
+    };
+    read().map_err(|source| ModuleResolutionGraphError::Io { path, source })
+}
+
 pub fn build_canonical_module_resolution_graph(
     project_root: impl AsRef<Path>,
 ) -> ModuleResolutionGraphResult<ModuleResolutionGraph> {
@@ -220,7 +342,9 @@ fn build_graph_parts(
     project_root: &Path,
 ) -> ModuleResolutionGraphResult<(ModuleResolutionGraph, LockfileDetails)> {
     let root_manifest_path = project_root.join("package.json");
-    if !root_manifest_path.exists() {
+    if std::fs::symlink_metadata(&root_manifest_path)
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
         return Err(ModuleResolutionGraphError::MissingRootManifest {
             path: root_manifest_path,
         });
@@ -380,17 +504,18 @@ fn parse_manifest(
     manifest_path: &Path,
     workspace: bool,
 ) -> ModuleResolutionGraphResult<ParsedManifest> {
-    let raw =
-        crate::bounded_read_to_string(manifest_path, MAX_PACKAGE_JSON_BYTES).map_err(|source| {
-            ModuleResolutionGraphError::Io {
+    let relative_path = manifest_path.strip_prefix(project_root).map_err(|_| {
+        ModuleResolutionGraphError::InvalidMetadata {
+            detail: "package manifest escaped its project root".into(),
+        }
+    })?;
+    let raw = read_project_metadata(project_root, relative_path, MAX_PACKAGE_JSON_BYTES)?;
+    let value: Value =
+        serde_json::from_str(raw.strip_prefix('\u{feff}').unwrap_or(&raw)).map_err(|source| {
+            ModuleResolutionGraphError::Json {
                 path: manifest_path.to_path_buf(),
                 source,
             }
-        })?;
-    let value: Value =
-        serde_json::from_str(&raw).map_err(|source| ModuleResolutionGraphError::Json {
-            path: manifest_path.to_path_buf(),
-            source,
         })?;
 
     if !value.is_object() {
@@ -854,17 +979,24 @@ fn optional_string(package: &Value, field: &str) -> ModuleResolutionGraphResult<
 }
 
 fn read_package_lock(project_root: &Path) -> ModuleResolutionGraphResult<Lockfile> {
-    let lockfile_path = project_root.join("package-lock.json");
-    if !lockfile_path.exists() {
-        return Ok(Lockfile::default());
-    }
-    let raw =
-        crate::bounded_read_to_string(&lockfile_path, MAX_LOCKFILE_BYTES).map_err(|source| {
-            ModuleResolutionGraphError::Io {
-                path: lockfile_path.clone(),
-                source,
+    // npm's published lockfile contract gives shrinkwrap precedence. A
+    // malformed or unreadable preferred file must not fall back to another
+    // dependency tree that omits a revoked transitive package.
+    let mut captured = None;
+    for name in ["npm-shrinkwrap.json", "package-lock.json"] {
+        match read_project_metadata(project_root, Path::new(name), MAX_LOCKFILE_BYTES) {
+            Ok(raw) => {
+                captured = Some((project_root.join(name), raw));
+                break;
             }
-        })?;
+            Err(ModuleResolutionGraphError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let Some((lockfile_path, raw)) = captured else {
+        return Ok(Lockfile::default());
+    };
     let value: Value =
         serde_json::from_str(&raw).map_err(|source| ModuleResolutionGraphError::Json {
             path: lockfile_path.clone(),
@@ -872,7 +1004,7 @@ fn read_package_lock(project_root: &Path) -> ModuleResolutionGraphResult<Lockfil
         })?;
 
     if !value.is_object() {
-        return invalid_metadata("package-lock.json must contain an object");
+        return invalid_metadata("npm lockfile must contain an object");
     }
     if let Some(version) = value.get("lockfileVersion")
         && !matches!(version.as_u64(), Some(1..=3))
@@ -1241,6 +1373,54 @@ mod tests {
             canonical_module_resolution_graph_bytes(&first).expect("first bytes"),
             canonical_module_resolution_graph_bytes(&second).expect("second bytes")
         );
+    }
+
+    #[test]
+    fn metadata_reads_accept_exact_bound_and_bom_but_refuse_overflow_and_parent_paths() {
+        let tmp = tempdir().expect("tempdir");
+        let raw = "\u{feff}{\"dependencies\":{\"package\":\"1\"}}";
+        std::fs::write(tmp.path().join("package.json"), raw).unwrap();
+        assert_eq!(
+            read_project_metadata(tmp.path(), Path::new("package.json"), raw.len() as u64).unwrap(),
+            raw
+        );
+        assert!(
+            read_project_metadata(tmp.path(), Path::new("package.json"), raw.len() as u64 - 1)
+                .is_err()
+        );
+        assert!(read_project_metadata(tmp.path(), Path::new("../package.json"), 1024).is_err());
+        let graph = build_canonical_module_resolution_graph(tmp.path()).unwrap();
+        assert_eq!(graph.dependency_edges.len(), 1);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn metadata_reads_refuse_symlinks_fifos_and_replaced_project_authorities() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempdir().expect("tempdir");
+        let root = tmp.path().join("project");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("package.json"), "{}").unwrap();
+        symlink(outside.join("package.json"), root.join("linked.json")).unwrap();
+        symlink(&outside, root.join("linked-dir")).unwrap();
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            root.join("fifo.json"),
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )
+        .unwrap();
+        for path in ["linked.json", "linked-dir/package.json", "fifo.json"] {
+            assert!(
+                read_project_metadata(&root, Path::new(path), 1024).is_err(),
+                "{path}"
+            );
+        }
+        let authority = root.canonicalize().unwrap();
+        std::fs::rename(&root, tmp.path().join("original-project")).unwrap();
+        symlink(&outside, &root).unwrap();
+        assert!(read_project_metadata(&authority, Path::new("package.json"), 1024).is_err());
     }
 
     #[test]

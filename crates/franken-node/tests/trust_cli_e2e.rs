@@ -522,6 +522,53 @@ fn write_run_package_manifest(workspace: &Path, dependencies: &[(&str, &str)]) {
     fs::write(workspace.join("index.js"), "console.log('hello');\n").expect("write index.js");
 }
 
+fn run_native_trust_check(workspace: &Path) -> Output {
+    let binary = resolve_binary_path();
+    run_cli_in_workspace(
+        workspace,
+        &[
+            "run",
+            ".",
+            "--policy",
+            "balanced",
+            "--runtime",
+            "franken-engine",
+            "--engine-bin",
+            binary.to_str().expect("binary path"),
+            "--json",
+        ],
+    )
+}
+
+fn assert_revoked_dependency_blocks_run(output: &Output, extension_id: &str) -> Value {
+    assert!(
+        !output.status.success(),
+        "revoked dependency must block the guest: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let report = parse_json_stdout(output, "revoked dependency preflight");
+    assert_eq!(report["verdict"]["status"], "blocked", "{report:#}");
+    assert_eq!(report["receipt"]["decision"], "denied", "{report:#}");
+    assert!(
+        report["verdict"]["violations"]
+            .as_array()
+            .expect("violations")
+            .iter()
+            .any(|violation| violation["kind"] == "revoked"
+                && violation["extension_id"] == extension_id),
+        "revocation must name the actual package: {report:#}"
+    );
+    assert!(
+        report.get("dispatch").is_none(),
+        "guest must not dispatch: {report:#}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("guest-must-not-start"),
+        "guest console must not run before refusal"
+    );
+    report
+}
+
 fn parse_json_stdout(output: &Output, context: &str) -> Value {
     let stdout = String::from_utf8_lossy(&output.stdout);
     serde_json::from_str(&stdout)
@@ -2946,6 +2993,472 @@ fn trust_scan_seeds_registry_from_manifest_and_lockfile() {
         payload["provenance_summary"]["artifact_hashes"][0],
         "sha512:01020304"
     );
+}
+
+#[test]
+fn trust_transitive_revocation_blocks_native_run_before_guest_execution() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    write_run_package_manifest(workspace.path(), &[("entry-package", "^1.0.0")]);
+    fs::write(
+        workspace.path().join("index.js"),
+        "console.log('guest-must-not-start');\n",
+    )
+    .expect("guest marker");
+    fs::write(
+        workspace.path().join("package-lock.json"),
+        serde_json::json!({
+            "lockfileVersion": 3,
+            "packages": {
+                "": {},
+                "node_modules/entry-package": {
+                    "version": "1.0.0",
+                    "dependencies": {"@acme/nested-runtime": "^2.0.0"}
+                },
+                "node_modules/entry-package/node_modules/@acme/nested-runtime": {
+                    "version": "2.3.4",
+                    "integrity": "sha512-AQIDBA=="
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("nested installed dependency tree");
+    let init = run_cli_in_workspace(
+        workspace.path(),
+        &["init", "--out-dir", ".", "--scan", "--json"],
+    );
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    assert_eq!(
+        parse_json_stdout(&init, "init with transitive scan")["trust_scan"]["created_cards"],
+        2
+    );
+    let revoked = run_cli_in_workspace(
+        workspace.path(),
+        &["trust", "revoke", "npm:@acme/nested-runtime"],
+    );
+    assert!(
+        revoked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&revoked.stderr)
+    );
+
+    let report = assert_revoked_dependency_blocks_run(
+        &run_native_trust_check(workspace.path()),
+        "npm:@acme/nested-runtime",
+    );
+    let nested = report["verdict"]["results"]
+        .as_array()
+        .expect("trust results")
+        .iter()
+        .find(|result| result["extension_id"] == "npm:@acme/nested-runtime")
+        .expect("transitive trust result");
+    assert_eq!(nested["status"], "revoked");
+    assert!(
+        nested["section"]
+            .as_str()
+            .expect("importer context")
+            .contains("node_modules/entry-package")
+    );
+}
+
+#[test]
+fn trust_npm_alias_uses_actual_identity_and_cannot_hide_revocation() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    write_run_package_manifest(
+        workspace.path(),
+        &[("friendly-name", "npm:@acme/actual-runtime@^2.0.0")],
+    );
+    fs::write(
+        workspace.path().join("index.js"),
+        "console.log('guest-must-not-start');\n",
+    )
+    .expect("guest marker");
+    fs::write(
+        workspace.path().join("package-lock.json"),
+        serde_json::json!({
+            "lockfileVersion": 3,
+            "packages": {
+                "": {},
+                "node_modules/friendly-name": {
+                    "name": "@acme/actual-runtime",
+                    "version": "2.3.4",
+                    "integrity": "sha512-AQIDBA=="
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("aliased package pin");
+    let init = run_cli_in_workspace(
+        workspace.path(),
+        &["init", "--out-dir", ".", "--scan", "--json"],
+    );
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let initialized = parse_json_stdout(&init, "alias inventory");
+    let items = initialized["trust_scan"]["items"]
+        .as_array()
+        .expect("scan items");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["dependency_name"], "@acme/actual-runtime");
+    assert_eq!(items[0]["extension_id"], "npm:@acme/actual-runtime");
+    assert_eq!(items[0]["extension_version"], "2.3.4");
+    let revoked = run_cli_in_workspace(
+        workspace.path(),
+        &["trust", "revoke", "npm:@acme/actual-runtime"],
+    );
+    assert!(
+        revoked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&revoked.stderr)
+    );
+
+    let report = assert_revoked_dependency_blocks_run(
+        &run_native_trust_check(workspace.path()),
+        "npm:@acme/actual-runtime",
+    );
+    let results = report["verdict"]["results"]
+        .as_array()
+        .expect("trust results");
+    assert_eq!(results.len(), 1);
+    assert!(
+        results[0]["section"]
+            .as_str()
+            .expect("alias context")
+            .contains("installed as friendly-name")
+    );
+}
+
+#[test]
+fn trust_scan_transitive_pin_uses_nearest_location_version_and_integrity() {
+    let workspace = config_only_workspace();
+    write_run_package_manifest(workspace.path(), &[("entry-package", "^1.0.0")]);
+    fs::write(
+        workspace.path().join("package-lock.json"),
+        serde_json::json!({
+            "lockfileVersion": 3,
+            "packages": {
+                "": {},
+                "node_modules/entry-package": {
+                    "version": "1.0.0",
+                    "dependencies": {"@acme/runtime": "^2.0.0"}
+                },
+                "node_modules/@acme/runtime": {
+                    "version": "9.9.9", "integrity": "sha512-CQoLDA=="
+                },
+                "node_modules/entry-package/node_modules/@acme/runtime": {
+                    "version": "2.7.3", "integrity": "sha512-AQIDBA=="
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("nested and hoisted same-name pins");
+    let scan = run_cli_in_workspace(workspace.path(), &["trust", "scan", ".", "--json"]);
+    assert!(
+        scan.status.success(),
+        "{}",
+        String::from_utf8_lossy(&scan.stderr)
+    );
+    let report = parse_json_stdout(&scan, "transitive pin inventory");
+    assert_eq!(report["scanned_dependencies"], 2);
+    let item = report["items"]
+        .as_array()
+        .expect("scan items")
+        .iter()
+        .find(|item| item["extension_id"] == "npm:@acme/runtime")
+        .expect("nested dependency card");
+    assert_eq!(item["extension_version"], "2.7.3");
+    let exported = run_cli_in_workspace(
+        workspace.path(),
+        &["trust-card", "export", "npm:@acme/runtime", "--json"],
+    );
+    assert!(
+        exported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    let card = parse_json_stdout(&exported, "nested pinned card");
+    assert_eq!(card["extension"]["version"], "2.7.3");
+    assert_eq!(
+        card["provenance_summary"]["artifact_hashes"],
+        serde_json::json!(["sha512:01020304"])
+    );
+}
+
+#[test]
+fn trust_scan_multiple_installed_versions_do_not_claim_one_verified_version() {
+    let workspace = config_only_workspace();
+    write_run_package_manifest(
+        workspace.path(),
+        &[("parent-one", "^1.0.0"), ("parent-two", "^1.0.0")],
+    );
+    fs::write(
+        workspace.path().join("package-lock.json"),
+        serde_json::json!({
+            "lockfileVersion": 3,
+            "packages": {
+                "": {},
+                "node_modules/parent-one": {
+                    "version": "1.0.0",
+                    "dependencies": {"@acme/shared-runtime": "^1.0.0"}
+                },
+                "node_modules/parent-two": {
+                    "version": "1.0.0",
+                    "dependencies": {"@acme/shared-runtime": "^2.0.0"}
+                },
+                "node_modules/parent-one/node_modules/@acme/shared-runtime": {
+                    "version": "1.2.3", "integrity": "sha512-AQIDBA=="
+                },
+                "node_modules/parent-two/node_modules/@acme/shared-runtime": {
+                    "version": "2.4.6", "integrity": "sha512-CQoLDA=="
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("one package family at two installed versions");
+    let scan = run_cli_in_workspace(workspace.path(), &["trust", "scan", ".", "--json"]);
+    assert!(
+        scan.status.success(),
+        "{}",
+        String::from_utf8_lossy(&scan.stderr)
+    );
+    let report = parse_json_stdout(&scan, "multiple-version inventory");
+    assert_eq!(report["scanned_dependencies"], 3);
+    let item = report["items"]
+        .as_array()
+        .expect("scan items")
+        .iter()
+        .find(|item| item["extension_id"] == "npm:@acme/shared-runtime")
+        .expect("shared package family");
+    assert_eq!(item["extension_version"], "multiple-or-unresolved");
+    assert!(
+        matches!(
+            item["risk_level"].as_str(),
+            Some("medium" | "high" | "critical")
+        ),
+        "mixed versions cannot receive a Low risk clearance: {item:#}"
+    );
+    assert_eq!(item["integrity_hash_count"], 2);
+    assert!(
+        report["warnings"]
+            .as_array()
+            .expect("scan warnings")
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|warning| warning.contains("npm:@acme/shared-runtime")
+                && warning.contains("multiple or unresolved captured versions")),
+        "version ambiguity must be visible to the operator: {report:#}"
+    );
+}
+
+#[test]
+fn trust_scan_covers_dev_subtree_but_revoked_dev_dependency_does_not_block_run() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    write_pipeline_package_manifest(workspace.path(), &[], &[("build-tool", "^1.0.0")], &[]);
+    write_engine_probe_script(
+        workspace.path(),
+        "index.js",
+        "production-without-build-dependencies",
+    );
+    fs::write(
+        workspace.path().join("package-lock.json"),
+        serde_json::json!({
+            "lockfileVersion": 3,
+            "packages": {
+                "": {},
+                "node_modules/build-tool": {
+                    "version": "1.0.0", "dev": true,
+                    "dependencies": {"@acme/build-helper": "^2.0.0"}
+                },
+                "node_modules/build-tool/node_modules/@acme/build-helper": {
+                    "version": "2.3.4", "dev": true
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("development-only dependency subtree");
+    let init = run_cli_in_workspace(
+        workspace.path(),
+        &["init", "--out-dir", ".", "--scan", "--json"],
+    );
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    assert_eq!(
+        parse_json_stdout(&init, "development inventory")["trust_scan"]["created_cards"],
+        2
+    );
+    let revoked = run_cli_in_workspace(
+        workspace.path(),
+        &["trust", "revoke", "npm:@acme/build-helper"],
+    );
+    assert!(
+        revoked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&revoked.stderr)
+    );
+
+    let run = run_native_trust_check(workspace.path());
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let report = parse_json_stdout(&run, "production run without dev dependencies");
+    assert_eq!(report["preflight"]["verdict"]["status"], "passed");
+    assert_eq!(report["preflight"]["verdict"]["checked"], 0);
+    assert_eq!(
+        report["preflight"]["verdict"]["results"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        parse_captured_runtime_probe(&report, "executed production entry")["marker"],
+        "production-without-build-dependencies"
+    );
+}
+
+#[test]
+fn trust_shrinkwrap_precedence_controls_scan_and_revocation_admission() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    write_run_package_manifest(workspace.path(), &[("entry-package", "^1.0.0")]);
+    fs::write(
+        workspace.path().join("index.js"),
+        "console.log('guest-must-not-start');\n",
+    )
+    .expect("guest marker");
+    for (name, nested, version, integrity) in [
+        (
+            "package-lock.json",
+            "@acme/obsolete-runtime",
+            "1.0.0",
+            "sha512-CQoLDA==",
+        ),
+        (
+            "npm-shrinkwrap.json",
+            "@acme/effective-runtime",
+            "2.4.6",
+            "sha512-AQIDBA==",
+        ),
+    ] {
+        let dependencies =
+            serde_json::Map::from_iter([(nested.to_string(), Value::String("*".into()))]);
+        let nested_path = format!("node_modules/entry-package/node_modules/{nested}");
+        let mut packages = serde_json::Map::from_iter([
+            (String::new(), serde_json::json!({})),
+            (
+                "node_modules/entry-package".to_string(),
+                serde_json::json!({
+                    "version": "1.0.0", "dependencies": dependencies
+                }),
+            ),
+        ]);
+        packages.insert(
+            nested_path,
+            serde_json::json!({"version": version, "integrity": integrity}),
+        );
+        fs::write(
+            workspace.path().join(name),
+            serde_json::json!({
+                "lockfileVersion": 3, "packages": packages
+            })
+            .to_string(),
+        )
+        .expect("competing lockfile");
+    }
+    let init = run_cli_in_workspace(
+        workspace.path(),
+        &["init", "--out-dir", ".", "--scan", "--json"],
+    );
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let initialized = parse_json_stdout(&init, "shrinkwrap inventory");
+    let items = initialized["trust_scan"]["items"]
+        .as_array()
+        .expect("scan items");
+    assert_eq!(items.len(), 2);
+    assert!(
+        items
+            .iter()
+            .all(|item| item["extension_id"] != "npm:@acme/obsolete-runtime")
+    );
+    let effective = items
+        .iter()
+        .find(|item| item["extension_id"] == "npm:@acme/effective-runtime")
+        .expect("shrinkwrap-only transitive package");
+    assert_eq!(effective["extension_version"], "2.4.6");
+    let revoked = run_cli_in_workspace(
+        workspace.path(),
+        &["trust", "revoke", "npm:@acme/effective-runtime"],
+    );
+    assert!(
+        revoked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&revoked.stderr)
+    );
+    assert_revoked_dependency_blocks_run(
+        &run_native_trust_check(workspace.path()),
+        "npm:@acme/effective-runtime",
+    );
+}
+
+#[test]
+fn trust_scan_includes_unreferenced_workspace_dependencies_and_development_tools() {
+    let workspace = config_only_workspace();
+    fs::write(
+        workspace.path().join("package.json"),
+        serde_json::json!({
+            "name": "workspace-root", "workspaces": ["packages/*"]
+        })
+        .to_string(),
+    )
+    .expect("workspace root");
+    fs::create_dir_all(workspace.path().join("packages/app")).expect("workspace package directory");
+    fs::write(
+        workspace.path().join("packages/app/package.json"),
+        serde_json::json!({
+            "name": "@acme/workspace-app",
+            "dependencies": {"@acme/runtime": "^2.0.0"},
+            "devDependencies": {"@acme/checker": "^1.0.0"}
+        })
+        .to_string(),
+    )
+    .expect("unreferenced workspace package");
+    let scan = run_cli_in_workspace(workspace.path(), &["trust", "scan", ".", "--json"]);
+    assert!(
+        scan.status.success(),
+        "{}",
+        String::from_utf8_lossy(&scan.stderr)
+    );
+    let report = parse_json_stdout(&scan, "workspace dependency inventory");
+    assert_eq!(report["scanned_dependencies"], 2);
+    let items = report["items"].as_array().expect("scan items");
+    for identity in ["npm:@acme/runtime", "npm:@acme/checker"] {
+        let item = items
+            .iter()
+            .find(|item| item["extension_id"] == identity)
+            .expect("workspace package dependency");
+        assert!(
+            item["section"]
+                .as_str()
+                .expect("workspace importer context")
+                .contains("packages/app")
+        );
+    }
 }
 
 #[test]
