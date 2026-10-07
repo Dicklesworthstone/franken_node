@@ -1861,6 +1861,11 @@ pub struct FleetReleaseArgs {
     #[arg(long, default_value = "")]
     pub incident: String,
 
+    /// Exact incident zone, required when the ID exists in multiple zones.
+    /// Use `all` to select a fleet-wide incident.
+    #[arg(long)]
+    pub zone: Option<String>,
+
     /// Emit JSON instead of human-readable output.
     /// Includes `transport` (`file` or `http`) and `live_control_plane`.
     #[arg(long)]
@@ -4622,6 +4627,29 @@ mod tests {
             Command::Fleet(FleetCommand::Release(args)) => {
                 assert!(args.json);
                 assert!(args.incident.is_empty());
+                assert!(args.zone.is_none());
+            }
+            other => panic!("expected fleet release, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fleet_release_selects_explicit_zone() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "franken-node",
+            "fleet",
+            "release",
+            "--incident",
+            "same-id",
+            "--zone",
+            "all",
+            "--json",
+        ])
+        .expect("scoped release must parse");
+        match cli.command {
+            Command::Fleet(FleetCommand::Release(args)) => {
+                assert_eq!(args.incident, "same-id");
+                assert_eq!(args.zone.as_deref(), Some("all"));
             }
             other => panic!("expected fleet release, got {other:?}"),
         }

@@ -18080,7 +18080,7 @@ mod fleet_command_tests {
 
     #[test]
     fn derive_active_fleet_incidents_excludes_released_incidents() {
-        let state = FleetSharedState {
+        let mut state = FleetSharedState {
             schema_version: control_plane::fleet_transport::FLEET_SHARED_STATE_SCHEMA.to_string(),
             actions: vec![
                 PersistedFleetActionRecord {
@@ -18131,24 +18131,44 @@ mod fleet_command_tests {
                     .with_timezone(&Utc),
                 quarantine_version: 4,
                 health: PersistedNodeHealth::Healthy,
+                applied_actions: None,
             }],
         };
 
         let incidents = derive_active_fleet_incidents(&state, &[]);
         assert_eq!(incidents.len(), 1);
         assert_eq!(incidents[0].incident_id, "inc-q2");
+        assert_eq!(incidents[0].convergence.progress_pct, 0);
+        state.nodes[0].applied_actions = Some(
+            control_plane::fleet_transport::fleet_application_checkpoint(&state.actions, "prod")
+                .expect("application checkpoint"),
+        );
+        let incidents = derive_active_fleet_incidents(&state, &[]);
         assert_eq!(incidents[0].convergence.progress_pct, 100);
     }
 
     #[test]
     fn fleet_status_from_loaded_state_uses_real_shared_state_counts() {
-        let loaded = LoadedFleetState {
+        let mut loaded = LoadedFleetState {
             state_dir: PathBuf::from("/tmp/fleet"),
             convergence_timeout_seconds: 120,
             state: FleetSharedState {
                 schema_version: control_plane::fleet_transport::FLEET_SHARED_STATE_SCHEMA
                     .to_string(),
-                actions: Vec::new(),
+                actions: vec![PersistedFleetActionRecord {
+                    action_id: "status-quarantine".to_string(),
+                    emitted_at: DateTime::parse_from_rfc3339("2026-04-06T01:05:00Z")
+                        .expect("timestamp")
+                        .with_timezone(&Utc),
+                    action: PersistedFleetAction::Quarantine {
+                        zone_id: "prod".to_string(),
+                        incident_id: "inc-q2".to_string(),
+                        target_id: "sha256:q2".to_string(),
+                        target_kind: PersistedFleetTargetKind::Artifact,
+                        reason: "quarantine-2".to_string(),
+                        quarantine_version: 4,
+                    },
+                }],
                 nodes: vec![
                     PersistedNodeStatus {
                         zone_id: "prod".to_string(),
@@ -18158,6 +18178,7 @@ mod fleet_command_tests {
                             .with_timezone(&Utc),
                         quarantine_version: 4,
                         health: PersistedNodeHealth::Healthy,
+                        applied_actions: None,
                     },
                     PersistedNodeStatus {
                         zone_id: "prod".to_string(),
@@ -18167,6 +18188,7 @@ mod fleet_command_tests {
                             .with_timezone(&Utc),
                         quarantine_version: 1,
                         health: PersistedNodeHealth::Degraded,
+                        applied_actions: None,
                     },
                 ],
             },
@@ -18178,26 +18200,20 @@ mod fleet_command_tests {
                     .with_timezone(&Utc),
                 quarantine_version: 1,
                 health: PersistedNodeHealth::Degraded,
+                applied_actions: None,
             }],
-            active_incidents: vec![FleetCliPendingIncident {
-                incident_id: "inc-q2".to_string(),
-                zone_id: "prod".to_string(),
-                target_id: "sha256:q2".to_string(),
-                target_kind: PersistedFleetTargetKind::Artifact,
-                reason: "quarantine-2".to_string(),
-                quarantine_version: 4,
-                emitted_at: DateTime::parse_from_rfc3339("2026-04-06T01:05:00Z")
-                    .expect("timestamp")
-                    .with_timezone(&Utc),
-                convergence: ConvergenceState {
-                    converged_nodes: 1,
-                    total_nodes: 2,
-                    progress_pct: 50,
-                    eta_seconds: None,
-                    phase: ConvergencePhase::TimedOut,
-                },
-            }],
+            active_incidents: Vec::new(),
+            transport_kind: FleetTransportKind::File,
+            control_plane_url: None,
         };
+        loaded.state.nodes[0].applied_actions = Some(
+            control_plane::fleet_transport::fleet_application_checkpoint(
+                &loaded.state.actions,
+                "prod",
+            )
+            .expect("status checkpoint"),
+        );
+        loaded.active_incidents = derive_active_fleet_incidents(&loaded.state, &loaded.stale_nodes);
 
         let status = fleet_status_from_loaded_state(&loaded, "prod");
         assert!(!status.activated);
@@ -18267,6 +18283,7 @@ mod fleet_command_tests {
                 .with_timezone(&Utc),
             quarantine_version: 1,
             health: PersistedNodeHealth::Healthy,
+            applied_actions: None,
         };
         assert!(node_matches_filter(&node, "all"));
         assert!(node_matches_filter(&node, "prod"));
@@ -18287,6 +18304,7 @@ mod fleet_command_tests {
                 .with_timezone(&Utc),
             quarantine_version: 1,
             health: PersistedNodeHealth::Healthy,
+            applied_actions: None,
         };
         assert!(!node_matches_filter(&node, "prod"));
         assert!(!node_matches_filter(&node, "west"));
@@ -18335,50 +18353,59 @@ mod fleet_command_tests {
     }
 
     #[test]
-    fn fleet_aggregate_convergence_prefers_timed_out_incidents() {
+    fn fleet_snapshot_convergence_counts_nodes_once_across_overlapping_scopes() {
         let emitted_at = DateTime::parse_from_rfc3339("2026-04-06T01:00:00Z")
             .expect("timestamp")
             .with_timezone(&Utc);
-        let incidents = vec![
-            FleetCliPendingIncident {
-                incident_id: "inc-propagating".to_string(),
-                zone_id: "prod".to_string(),
-                target_id: "sha256:p".to_string(),
-                target_kind: PersistedFleetTargetKind::Artifact,
-                reason: "propagating".to_string(),
-                quarantine_version: 3,
+        let actions = ["all", "prod"]
+            .into_iter()
+            .map(|zone| PersistedFleetActionRecord {
+                action_id: format!("release-{zone}"),
                 emitted_at,
-                convergence: ConvergenceState {
-                    converged_nodes: 1,
-                    total_nodes: 3,
-                    progress_pct: 33,
-                    eta_seconds: Some(2),
-                    phase: ConvergencePhase::Propagating,
+                action: PersistedFleetAction::Release {
+                    zone_id: zone.to_string(),
+                    incident_id: "retired-incident".to_string(),
+                    reason: None,
                 },
+            })
+            .collect::<Vec<_>>();
+        let fresh = PersistedNodeStatus {
+            zone_id: "prod".to_string(),
+            node_id: "fresh".to_string(),
+            last_seen: emitted_at,
+            quarantine_version: 0,
+            health: PersistedNodeHealth::Healthy,
+            applied_actions: Some(
+                control_plane::fleet_transport::fleet_application_checkpoint(&actions, "prod")
+                    .expect("checkpoint"),
+            ),
+        };
+        let stale = PersistedNodeStatus {
+            zone_id: "prod".to_string(),
+            node_id: "stale".to_string(),
+            last_seen: emitted_at,
+            quarantine_version: 0,
+            health: PersistedNodeHealth::Degraded,
+            applied_actions: None,
+        };
+        let loaded = LoadedFleetState {
+            state_dir: PathBuf::from("/tmp/fleet"),
+            convergence_timeout_seconds: 120,
+            state: FleetSharedState {
+                schema_version: control_plane::fleet_transport::FLEET_SHARED_STATE_SCHEMA
+                    .to_string(),
+                actions,
+                nodes: vec![fresh, stale.clone()],
             },
-            FleetCliPendingIncident {
-                incident_id: "inc-timeout".to_string(),
-                zone_id: "prod".to_string(),
-                target_id: "sha256:t".to_string(),
-                target_kind: PersistedFleetTargetKind::Artifact,
-                reason: "timeout".to_string(),
-                quarantine_version: 4,
-                emitted_at,
-                convergence: ConvergenceState {
-                    converged_nodes: 1,
-                    total_nodes: 2,
-                    progress_pct: 50,
-                    eta_seconds: None,
-                    phase: ConvergencePhase::TimedOut,
-                },
-            },
-        ];
-
-        let aggregate = aggregate_convergence(&incidents).expect("aggregate");
-
-        assert_eq!(aggregate.converged_nodes, 2);
-        assert_eq!(aggregate.total_nodes, 5);
-        assert_eq!(aggregate.progress_pct, 40);
+            stale_nodes: vec![stale],
+            active_incidents: Vec::new(),
+            transport_kind: FleetTransportKind::File,
+            control_plane_url: None,
+        };
+        let aggregate = fleet_snapshot_convergence(&loaded, "all").expect("snapshot rollup");
+        assert_eq!(aggregate.converged_nodes, 1);
+        assert_eq!(aggregate.total_nodes, 2);
+        assert_eq!(aggregate.progress_pct, 50);
         assert_eq!(aggregate.phase, ConvergencePhase::TimedOut);
         assert_eq!(aggregate.eta_seconds, None);
     }
@@ -18422,6 +18449,7 @@ mod fleet_command_tests {
                     .with_timezone(&Utc),
                 quarantine_version: 3,
                 health: PersistedNodeHealth::Healthy,
+                applied_actions: None,
             }],
         };
 
@@ -18485,6 +18513,7 @@ mod fleet_command_tests {
                     .with_timezone(&Utc),
                 quarantine_version: 2,
                 health: PersistedNodeHealth::Healthy,
+                applied_actions: None,
             }],
         };
 
@@ -18494,7 +18523,10 @@ mod fleet_command_tests {
         assert_eq!(incidents[0].incident_id, "inc-repeat");
         assert_eq!(incidents[0].target_id, "sha256:new");
         assert_eq!(incidents[0].quarantine_version, 2);
-        assert_eq!(incidents[0].convergence.phase, ConvergencePhase::Converged);
+        assert_eq!(
+            incidents[0].convergence.phase,
+            ConvergencePhase::Propagating
+        );
     }
 }
 
@@ -25866,18 +25898,35 @@ fn duration_millis_u64(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
+fn fleet_expected_application_checkpoints(
+    state: &FleetSharedState,
+) -> BTreeMap<String, control_plane::fleet_transport::FleetApplicationCheckpoint> {
+    state
+        .nodes
+        .iter()
+        .map(|node| node.zone_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|zone| {
+            control_plane::fleet_transport::fleet_application_checkpoint(&state.actions, &zone)
+                .ok()
+                .map(|checkpoint| (zone, checkpoint))
+        })
+        .collect()
+}
+
 fn derive_active_fleet_incidents(
     state: &FleetSharedState,
     stale_nodes: &[PersistedNodeStatus],
 ) -> Vec<FleetCliPendingIncident> {
-    let mut active_by_incident = BTreeMap::<String, PersistedFleetActionRecord>::new();
+    let mut active_by_incident = BTreeMap::<(String, String), PersistedFleetActionRecord>::new();
     for action in &state.actions {
         match &action.action {
-            PersistedFleetAction::Quarantine { incident_id, .. } => {
-                active_by_incident.insert(incident_id.clone(), action.clone());
+            PersistedFleetAction::Quarantine { zone_id, incident_id, .. } => {
+                active_by_incident.insert((zone_id.clone(), incident_id.clone()), action.clone());
             }
-            PersistedFleetAction::Release { incident_id, .. } => {
-                active_by_incident.remove(incident_id);
+            PersistedFleetAction::Release { zone_id, incident_id, .. } => {
+                active_by_incident.remove(&(zone_id.clone(), incident_id.clone()));
             }
             #[cfg(feature = "control-plane")]
             PersistedFleetAction::Revoke { .. } => {}
@@ -25885,9 +25934,23 @@ fn derive_active_fleet_incidents(
         }
     }
 
-    let stale_ids: BTreeSet<&str> = stale_nodes
+    let expected_checkpoints = fleet_expected_application_checkpoints(state);
+    let active_ids_by_zone: BTreeMap<String, BTreeSet<&str>> = expected_checkpoints
+        .keys()
+        .map(|zone| {
+            (
+                zone.clone(),
+                active_fleet_quarantines(&state.actions, zone)
+                    .into_values()
+                    .flatten()
+                    .map(|record| record.action_id.as_str())
+                    .collect(),
+            )
+        })
+        .collect();
+    let stale_ids: BTreeSet<(&str, &str)> = stale_nodes
         .iter()
-        .map(|node| node.node_id.as_str())
+        .map(|node| (node.zone_id.as_str(), node.node_id.as_str()))
         .collect();
     let mut incidents = active_by_incident
         .into_values()
@@ -25904,18 +25967,23 @@ fn derive_active_fleet_incidents(
                     .nodes
                     .iter()
                     .filter(|node| node_matches_filter(node, &zone_id))
+                    .filter(|node| active_ids_by_zone.get(&node.zone_id)
+                        .is_some_and(|ids| ids.contains(record.action_id.as_str())))
                     .collect();
                 let stale_node_count = relevant_nodes
                     .iter()
-                    .filter(|node| stale_ids.contains(node.node_id.as_str()))
+                    .filter(|node| stale_ids.contains(&(node.zone_id.as_str(), node.node_id.as_str())))
                     .count();
                 let total_nodes = u32::try_from(relevant_nodes.len()).unwrap_or(u32::MAX);
                 let converged_nodes = u32::try_from(
                     relevant_nodes
                         .iter()
                         .filter(|node| {
-                            !stale_ids.contains(node.node_id.as_str())
-                                && node.quarantine_version >= quarantine_version
+                            node.health == PersistedNodeHealth::Healthy
+                                && !stale_ids.contains(&(node.zone_id.as_str(), node.node_id.as_str()))
+                                && node.applied_actions.as_ref().is_some_and(|checkpoint| {
+                                    expected_checkpoints.get(&node.zone_id) == Some(checkpoint)
+                                })
                         })
                         .count(),
                 )
@@ -26004,10 +26072,10 @@ fn load_fleet_state(project_root: &Path) -> Result<LoadedFleetState> {
 }
 
 fn fleet_status_from_loaded_state(loaded: &LoadedFleetState, requested_zone: &str) -> FleetStatus {
-    let stale_ids: BTreeSet<&str> = loaded
+    let stale_ids: BTreeSet<(&str, &str)> = loaded
         .stale_nodes
         .iter()
-        .map(|node| node.node_id.as_str())
+        .map(|node| (node.zone_id.as_str(), node.node_id.as_str()))
         .collect();
     let relevant_nodes: Vec<&PersistedNodeStatus> = loaded
         .state
@@ -26020,22 +26088,24 @@ fn fleet_status_from_loaded_state(loaded: &LoadedFleetState, requested_zone: &st
             .iter()
             .filter(|node| {
                 node.health == PersistedNodeHealth::Healthy
-                    && !stale_ids.contains(node.node_id.as_str())
+                    && !stale_ids.contains(&(node.zone_id.as_str(), node.node_id.as_str()))
             })
             .count(),
     )
     .unwrap_or(u32::MAX);
     let total_nodes = u32::try_from(relevant_nodes.len()).unwrap_or(u32::MAX);
-    let pending_convergences = loaded
+    let active_quarantines = loaded
         .active_incidents
         .iter()
         .filter(|incident| zone_matches_filter(&incident.zone_id, requested_zone))
-        .map(|incident| incident.convergence.clone())
-        .collect::<Vec<_>>();
+        .count();
+    let pending_convergences = fleet_snapshot_convergence(loaded, requested_zone)
+        .into_iter()
+        .collect();
 
     FleetStatus {
         zone_id: requested_zone.to_string(),
-        active_quarantines: u32::try_from(pending_convergences.len()).unwrap_or(u32::MAX),
+        active_quarantines: u32::try_from(active_quarantines).unwrap_or(u32::MAX),
         active_revocations: count_active_fleet_revocations(&loaded.state, requested_zone),
         healthy_nodes,
         total_nodes,
@@ -26116,34 +26186,71 @@ fn fleet_describe_report(
     })
 }
 
-fn aggregate_convergence(active_incidents: &[FleetCliPendingIncident]) -> Option<ConvergenceState> {
-    if active_incidents.is_empty() {
+/// Reconcile and status cover every retained action, including histories with
+/// no active quarantine. Count each applicable node once and require coverage
+/// of every explicitly targeted scope before certifying the full snapshot.
+fn fleet_snapshot_convergence(
+    loaded: &LoadedFleetState,
+    requested_zone: &str,
+) -> Option<ConvergenceState> {
+    let action_zones: BTreeSet<&str> = loaded
+        .state
+        .actions
+        .iter()
+        .map(|record| persisted_fleet_action_zone(&record.action))
+        .filter(|zone| zone_matches_filter(zone, requested_zone))
+        .collect();
+    if action_zones.is_empty() {
         return None;
     }
-
-    let converged_nodes = active_incidents.iter().fold(0_u32, |acc, incident| {
-        acc.saturating_add(incident.convergence.converged_nodes)
+    let relevant_nodes: Vec<&PersistedNodeStatus> = loaded
+        .state
+        .nodes
+        .iter()
+        .filter(|node| {
+            node_matches_filter(node, requested_zone)
+                && (action_zones.contains("all") || action_zones.contains(node.zone_id.as_str()))
+        })
+        .collect();
+    let registered_zones: BTreeSet<&str> = relevant_nodes
+        .iter()
+        .map(|node| node.zone_id.as_str())
+        .collect();
+    let uncovered_scope = action_zones.iter().any(|zone| {
+        if *zone == "all" {
+            relevant_nodes.is_empty()
+        } else {
+            !registered_zones.contains(zone)
+        }
     });
-    let total_nodes = active_incidents.iter().fold(0_u32, |acc, incident| {
-        acc.saturating_add(incident.convergence.total_nodes)
-    });
-    let phase = if active_incidents
+    let expected_checkpoints = fleet_expected_application_checkpoints(&loaded.state);
+    let stale_ids: BTreeSet<(&str, &str)> = loaded
+        .stale_nodes
         .iter()
-        .any(|incident| incident.convergence.phase == ConvergencePhase::TimedOut)
-    {
-        ConvergencePhase::TimedOut
-    } else if active_incidents
+        .map(|node| (node.zone_id.as_str(), node.node_id.as_str()))
+        .collect();
+    let total_nodes = u32::try_from(relevant_nodes.len()).unwrap_or(u32::MAX);
+    let converged_nodes = u32::try_from(
+        relevant_nodes
+            .iter()
+            .filter(|node| {
+                node.health == PersistedNodeHealth::Healthy
+                    && !stale_ids.contains(&(node.zone_id.as_str(), node.node_id.as_str()))
+                    && node.applied_actions.as_ref().is_some_and(|checkpoint| {
+                        expected_checkpoints.get(&node.zone_id) == Some(checkpoint)
+                    })
+            })
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
+    let stale_count = relevant_nodes
         .iter()
-        .all(|incident| incident.convergence.phase == ConvergencePhase::Converged)
-    {
-        ConvergencePhase::Converged
-    } else if active_incidents
-        .iter()
-        .all(|incident| incident.convergence.phase == ConvergencePhase::Pending)
-    {
+        .filter(|node| stale_ids.contains(&(node.zone_id.as_str(), node.node_id.as_str())))
+        .count();
+    let phase = if uncovered_scope {
         ConvergencePhase::Pending
     } else {
-        ConvergencePhase::Propagating
+        convergence_phase(total_nodes, converged_nodes, stale_count)
     };
     let eta_seconds = match phase {
         ConvergencePhase::Converged => Some(0),
@@ -26155,16 +26262,15 @@ fn aggregate_convergence(active_incidents: &[FleetCliPendingIncident]) -> Option
     Some(ConvergenceState {
         converged_nodes,
         total_nodes,
-        progress_pct: convergence_progress(converged_nodes, total_nodes),
+        // Scope coverage is unknown until a node registers there; a healthy
+        // node in another scope cannot turn that absence into 100% progress.
+        progress_pct: if uncovered_scope {
+            0
+        } else {
+            convergence_progress(converged_nodes, total_nodes)
+        },
         eta_seconds,
         phase,
-    })
-}
-
-fn fleet_incidents_converged(active_incidents: &[FleetCliPendingIncident]) -> bool {
-    active_incidents.iter().all(|incident| {
-        incident.convergence.total_nodes == 0
-            || incident.convergence.phase == ConvergencePhase::Converged
     })
 }
 
@@ -26174,7 +26280,8 @@ fn wait_for_fleet_cli_convergence(project_root: &Path) -> Result<(LoadedFleetSta
     let outcome = wait_until_fleet_converged_or_timeout(timeout, || {
         loaded = load_fleet_state(project_root)
             .map_err(|err| FleetTransportError::stale_state(err.to_string()))?;
-        Ok(fleet_incidents_converged(&loaded.active_incidents))
+        Ok(fleet_snapshot_convergence(&loaded, "all")
+            .is_none_or(|convergence| convergence.phase == ConvergencePhase::Converged))
     })
     .map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
@@ -26188,12 +26295,17 @@ fn wait_for_fleet_cli_convergence(project_root: &Path) -> Result<(LoadedFleetSta
 fn fleet_release_convergence_state(
     loaded: &LoadedFleetState,
     zone_id: &str,
-    release_emitted_at: DateTime<Utc>,
+    release_action_id: &str,
 ) -> ConvergenceState {
-    let stale_ids: BTreeSet<&str> = loaded
+    let expected_checkpoints = fleet_expected_application_checkpoints(&loaded.state);
+    let release_retained = loaded.state.actions.iter().any(|action| {
+        action.action_id == release_action_id
+            && matches!(&action.action, PersistedFleetAction::Release { zone_id: release_zone, .. } if release_zone == zone_id)
+    });
+    let stale_ids: BTreeSet<(&str, &str)> = loaded
         .stale_nodes
         .iter()
-        .map(|node| node.node_id.as_str())
+        .map(|node| (node.zone_id.as_str(), node.node_id.as_str()))
         .collect();
     let relevant_nodes = loaded
         .state
@@ -26206,18 +26318,23 @@ fn fleet_release_convergence_state(
         relevant_nodes
             .iter()
             .filter(|node| {
-                node.health == PersistedNodeHealth::Healthy
-                    && !stale_ids.contains(node.node_id.as_str())
-                    && node.last_seen >= release_emitted_at
+                release_retained
+                    && node.health == PersistedNodeHealth::Healthy
+                    && !stale_ids.contains(&(node.zone_id.as_str(), node.node_id.as_str()))
+                    && node.applied_actions.as_ref().is_some_and(|checkpoint| {
+                        expected_checkpoints.get(&node.zone_id) == Some(checkpoint)
+                    })
             })
             .count(),
     )
     .unwrap_or(u32::MAX);
-    let phase = if converged_nodes == total_nodes {
+    let phase = if total_nodes == 0 || !release_retained {
+        ConvergencePhase::Pending
+    } else if converged_nodes == total_nodes {
         ConvergencePhase::Converged
     } else if relevant_nodes
         .iter()
-        .any(|node| stale_ids.contains(node.node_id.as_str()))
+        .any(|node| stale_ids.contains(&(node.zone_id.as_str(), node.node_id.as_str())))
     {
         ConvergencePhase::TimedOut
     } else {
@@ -26229,11 +26346,7 @@ fn fleet_release_convergence_state(
         ConvergencePhase::Propagating => Some(total_nodes.saturating_sub(converged_nodes)),
         ConvergencePhase::TimedOut => None,
     };
-    let progress_pct = if total_nodes == 0 {
-        100
-    } else {
-        convergence_progress(converged_nodes, total_nodes)
-    };
+    let progress_pct = convergence_progress(converged_nodes, total_nodes);
 
     ConvergenceState {
         converged_nodes,
@@ -26248,14 +26361,14 @@ fn fleet_release_converged(
     loaded: &LoadedFleetState,
     zone_id: &str,
     incident_id: &str,
-    release_emitted_at: DateTime<Utc>,
+    release_action_id: &str,
 ) -> bool {
     let incident_cleared = loaded
         .active_incidents
         .iter()
-        .all(|incident| incident.incident_id != incident_id);
+        .all(|incident| incident.zone_id != zone_id || incident.incident_id != incident_id);
     incident_cleared
-        && fleet_release_convergence_state(loaded, zone_id, release_emitted_at).phase
+        && fleet_release_convergence_state(loaded, zone_id, release_action_id).phase
             == ConvergencePhase::Converged
 }
 
@@ -26263,7 +26376,7 @@ fn wait_for_fleet_cli_release_convergence(
     project_root: &Path,
     zone_id: &str,
     incident_id: &str,
-    release_emitted_at: DateTime<Utc>,
+    release_action_id: &str,
 ) -> Result<(LoadedFleetState, bool, u64)> {
     let mut loaded = load_fleet_state(project_root)?;
     let timeout = Duration::from_secs(loaded.convergence_timeout_seconds);
@@ -26274,7 +26387,7 @@ fn wait_for_fleet_cli_release_convergence(
             &loaded,
             zone_id,
             incident_id,
-            release_emitted_at,
+            release_action_id,
         ))
     })
     .map_err(|err| anyhow::anyhow!(err.to_string()))?;
@@ -26293,9 +26406,7 @@ fn fleet_convergence_verdict(
     convergence: &Option<ConvergenceState>,
 ) -> &'static str {
     let converged = match convergence {
-        Some(convergence) => {
-            convergence.total_nodes == 0 || convergence.phase == ConvergencePhase::Converged
-        }
+        Some(convergence) => convergence.phase == ConvergencePhase::Converged,
         None => true,
     };
     fleet_convergence_receipt_verdict(timed_out, elapsed_ms, timeout_seconds, converged)
@@ -26336,27 +26447,28 @@ fn build_fleet_convergence_receipt(
 }
 
 fn fleet_action_report(
-    project_root: &Path,
+    loaded: &LoadedFleetState,
     requested_zone: &str,
     action: FleetActionResult,
     convergence_receipt: Option<FleetCliConvergenceReceipt>,
 ) -> Result<FleetCliActionReport> {
-    let loaded = load_fleet_state(project_root)?;
-    let status = fleet_status_from_loaded_state(&loaded, requested_zone);
+    // Keep the report and its signed convergence receipt on the same observed
+    // snapshot. A later publication must not be attached to an earlier proof.
+    let status = fleet_status_from_loaded_state(loaded, requested_zone);
     Ok(FleetCliActionReport {
         schema_version: FLEET_CLI_ACTION_SCHEMA_VERSION,
         transport: loaded.transport_kind.label(),
         live_control_plane: loaded.transport_kind.live(),
         activated_source: loaded.transport_kind.activated_source(),
-        control_plane_url: loaded.control_plane_url,
+        control_plane_url: loaded.control_plane_url.clone(),
         action,
         convergence_receipt,
         status,
-        state_dir: loaded.state_dir,
+        state_dir: loaded.state_dir.clone(),
         convergence_timeout_seconds: loaded.convergence_timeout_seconds,
-        stale_nodes: loaded.stale_nodes,
-        active_incidents: loaded.active_incidents,
-        state: loaded.state,
+        stale_nodes: loaded.stale_nodes.clone(),
+        active_incidents: loaded.active_incidents.clone(),
+        state: loaded.state.clone(),
     })
 }
 
@@ -26826,12 +26938,24 @@ fn apply_fleet_quarantine_action(
         "trace-cli-fleet-agent-quarantine-lookup",
     )?;
     if target_extension_ids.is_empty() {
-        return Ok(Vec::new());
+        anyhow::bail!(
+            "fleet quarantine target `{target_id}` is not present in the local trust registry; application remains pending and will be retried"
+        );
     }
 
     let now_rfc3339 = rfc3339_timestamp_from_secs(now_secs);
     let mut updated_extensions = Vec::with_capacity(target_extension_ids.len());
+    let mut changed = false;
     for extension_id in target_extension_ids {
+        let card = state
+            .registry
+            .read(&extension_id, now_secs, "trace-cli-fleet-agent-quarantine-current")
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?
+            .ok_or_else(|| anyhow::anyhow!("fleet quarantine target `{extension_id}` disappeared"))?;
+        if card.active_quarantine {
+            updated_extensions.push(extension_id);
+            continue;
+        }
         state
             .registry
             .update(
@@ -26850,10 +26974,13 @@ fn apply_fleet_quarantine_action(
                 "trace-cli-fleet-agent-quarantine",
             )
             .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        changed = true;
         updated_extensions.push(extension_id);
     }
 
-    persist_trust_card_cli_registry(&state)?;
+    if changed {
+        persist_trust_card_cli_registry(&state)?;
+    }
     Ok(updated_extensions)
 }
 
@@ -26877,8 +27004,13 @@ fn apply_fleet_revoke_action(
             "trace-cli-fleet-agent-revoke-lookup",
         )
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-    if existing.is_none() {
-        return Ok(false);
+    let existing = existing.ok_or_else(|| anyhow::anyhow!(
+        "fleet revocation target `{extension_id}` is not present in the local trust registry; application remains pending and will be retried"
+    ))?;
+    if existing.active_quarantine
+        && matches!(existing.revocation_status, RevocationStatus::Revoked { .. })
+    {
+        return Ok(true);
     }
 
     let severity = match scope.severity {
@@ -26916,58 +27048,66 @@ fn apply_fleet_revoke_action(
     Ok(true)
 }
 
-fn apply_fleet_release_action(
-    project_root: &Path,
+/// Resolve the desired quarantine set from the complete authoritative snapshot.
+/// A release only retires its own (zone, incident), including the explicit `all`
+/// scope. Independent and later quarantines remain live on agent restart.
+fn active_fleet_quarantines<'a>(
+    actions: &'a [PersistedFleetActionRecord],
     agent_zone: &str,
-    incident_id: &str,
-    action_history: &[PersistedFleetActionRecord],
-    now_secs: u64,
-) -> Result<Vec<String>> {
-    let mut state = fleet_agent_registry_state(project_root, now_secs)?;
-    let mut active_quarantine_targets = BTreeMap::<String, Vec<String>>::new();
-
-    for action in action_history
-        .iter()
-        .take(action_history.len().saturating_sub(1))
-    {
-        match &action.action {
+) -> BTreeMap<(&'a str, &'a str), Vec<&'a PersistedFleetActionRecord>> {
+    let mut active = BTreeMap::<(&str, &str), Vec<&PersistedFleetActionRecord>>::new();
+    for record in actions {
+        match &record.action {
             PersistedFleetAction::Quarantine {
                 zone_id,
                 incident_id,
-                target_id,
                 ..
             } if fleet_action_applies_to_zone(zone_id, agent_zone) => {
-                let targets = active_quarantine_targets
-                    .entry(incident_id.clone())
-                    .or_default();
-                if !targets.iter().any(|existing| existing == target_id) {
-                    targets.push(target_id.clone());
-                }
+                active
+                    .entry((zone_id, incident_id))
+                    .or_default()
+                    .push(record);
             }
             PersistedFleetAction::Release {
                 zone_id,
                 incident_id,
                 ..
             } if fleet_action_applies_to_zone(zone_id, agent_zone) => {
-                active_quarantine_targets.remove(incident_id);
+                active.remove(&(zone_id.as_str(), incident_id.as_str()));
             }
-            PersistedFleetAction::Quarantine { .. }
-            | PersistedFleetAction::Release { .. }
-            | PersistedFleetAction::PolicyUpdate { .. } => {}
-            #[cfg(feature = "control-plane")]
-            PersistedFleetAction::Revoke { .. } => {}
+            _ => {}
         }
     }
+    active
+}
 
-    let Some(target_ids_to_release) = active_quarantine_targets.remove(incident_id) else {
+fn apply_fleet_release_action(
+    project_root: &Path,
+    agent_zone: &str,
+    release_zone: &str,
+    incident_id: &str,
+    action_history: &[PersistedFleetActionRecord],
+    current_actions: &[PersistedFleetActionRecord],
+    now_secs: u64,
+) -> Result<Vec<String>> {
+    let mut state = fleet_agent_registry_state(project_root, now_secs)?;
+    let mut before_release = active_fleet_quarantines(
+        &action_history[..action_history.len().saturating_sub(1)],
+        agent_zone,
+    );
+
+    let Some(records_to_release) = before_release.remove(&(release_zone, incident_id)) else {
         return Ok(Vec::new());
     };
 
     let mut targets_to_release = std::collections::BTreeSet::new();
-    for target_id in target_ids_to_release {
+    for record in records_to_release {
+        let PersistedFleetAction::Quarantine { target_id, .. } = &record.action else {
+            continue;
+        };
         for extension_id in resolve_fleet_agent_action_targets(
             &mut state.registry,
-            &target_id,
+            target_id,
             now_secs,
             "trace-cli-fleet-agent-release-lookup",
         )? {
@@ -26979,8 +27119,11 @@ fn apply_fleet_release_action(
     }
 
     let mut still_quarantined_targets = std::collections::BTreeSet::new();
-    for target_ids in active_quarantine_targets.values() {
-        for target_id in target_ids {
+    for records in active_fleet_quarantines(current_actions, agent_zone).values() {
+        for record in records {
+            let PersistedFleetAction::Quarantine { target_id, .. } = &record.action else {
+                continue;
+            };
             for extension_id in resolve_fleet_agent_action_targets(
                 &mut state.registry,
                 target_id,
@@ -27003,6 +27146,16 @@ fn apply_fleet_release_action(
     let now_rfc3339 = rfc3339_timestamp_from_secs(now_secs);
     let mut released = Vec::new();
     for extension_id in releasable_targets {
+        let card = state.registry
+            .read(&extension_id, now_secs, "trace-cli-fleet-agent-release-current")
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?
+            .ok_or_else(|| anyhow::anyhow!("fleet release target `{extension_id}` disappeared"))?;
+        // A quarantine release never weakens a mandatory revocation.
+        if !card.active_quarantine
+            || matches!(card.revocation_status, RevocationStatus::Revoked { .. })
+        {
+            continue;
+        }
         state
             .registry
             .update(
@@ -27023,7 +27176,9 @@ fn apply_fleet_release_action(
             .map_err(|err| anyhow::anyhow!(err.to_string()))?;
         released.push(extension_id);
     }
-    persist_trust_card_cli_registry(&state)?;
+    if !released.is_empty() {
+        persist_trust_card_cli_registry(&state)?;
+    }
     Ok(released)
 }
 
@@ -27143,7 +27298,7 @@ fn run_fleet_serve(_args: &cli::FleetServeArgs) -> Result<()> {
 /// Run the fleet agent polling loop.
 fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
     use control_plane::fleet_transport::{
-        FleetAction as PersistedFleetAction, NodeHealth, NodeStatus,
+        FleetAction as PersistedFleetAction, NodeHealth, NodeStatus, fleet_application_checkpoint,
     };
     use std::sync::atomic::Ordering;
 
@@ -27230,7 +27385,9 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
     }
 
     let mut last_seen_action_id: Option<String> = None;
-    let mut last_seen_action_emitted_at: Option<chrono::DateTime<Utc>> = None;
+    // Producer timestamps are not delivery cursors. A newly published action
+    // from a machine with a slow clock must still be applied on the next poll.
+    let mut seen_action_ids = BTreeSet::<String>::new();
     let mut quarantine_version: u64 = 0;
     let mut cycle: u64 = 0;
 
@@ -27264,35 +27421,55 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
                 .then_with(|| left.action_id.cmp(&right.action_id))
         });
 
-        // Filter to actions for our zone, after last seen
-        let new_actions: Vec<_> = actions
+        let expected_checkpoint = fleet_application_checkpoint(&actions, &resolved.zone_id)
+            .map_err(|err| anyhow::anyhow!("invalid fleet action snapshot: {err}"))?;
+        let retained_ids: BTreeSet<&str> = actions
+            .iter()
+            .map(|action| action.action_id.as_str())
+            .collect();
+        seen_action_ids.retain(|id| retained_ids.contains(id.as_str()));
+        let active_quarantine_ids: BTreeSet<&str> =
+            active_fleet_quarantines(&actions, &resolved.zone_id)
+                .into_values()
+                .flatten()
+                .map(|record| record.action_id.as_str())
+                .collect();
+
+        // Reconcile current desired containment on every poll, including
+        // targets installed after an earlier poll. A missing target or an
+        // unsupported effect cannot be acknowledged merely because its action
+        // was observed; other independent containment actions still proceed.
+        let relevant_actions: Vec<_> = actions
             .iter()
             .enumerate()
             .filter(|action| {
-                let zone_matches = fleet_action_applies_to_zone(
+                fleet_action_applies_to_zone(
                     persisted_fleet_action_zone(&action.1.action),
                     &resolved.zone_id,
-                );
-                if !zone_matches {
-                    return false;
-                }
-                match (&last_seen_action_emitted_at, &last_seen_action_id) {
-                    (Some(last_emitted_at), Some(last_id)) => {
-                        action.1.emitted_at > *last_emitted_at
-                            || (action.1.emitted_at == *last_emitted_at
-                                && action.1.action_id > *last_id)
-                    }
-                    _ => true,
-                }
+                )
             })
             .collect();
 
         let mut actions_processed = 0_u64;
 
         // Apply each action and track quarantine version
-        for (action_index, action) in new_actions {
-            actions_processed = actions_processed.saturating_add(1);
+        for (action_index, action) in relevant_actions {
+            let newly_observed = !seen_action_ids.contains(&action.action_id);
+            if newly_observed {
+                actions_processed = actions_processed.saturating_add(1);
+            }
             let apply_result = match &action.action {
+                PersistedFleetAction::Quarantine { quarantine_version: qv, .. }
+                    if !active_quarantine_ids.contains(action.action_id.as_str()) =>
+                {
+                    // A later release already retired this incident. Applying
+                    // its historical quarantine would create a transient
+                    // restriction that is not part of the desired snapshot.
+                    // Retain the observed counter for status continuity; it
+                    // is never used as evidence that an action was applied.
+                    quarantine_version = quarantine_version.max(*qv);
+                    Ok(())
+                }
                 PersistedFleetAction::Quarantine {
                     incident_id,
                     target_id,
@@ -27324,15 +27501,18 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
                     }
                     Err(err) => Err(err),
                 },
+                PersistedFleetAction::Release { .. } if !newly_observed => Ok(()),
                 PersistedFleetAction::Release {
+                    zone_id,
                     incident_id,
                     reason,
-                    ..
                 } => match apply_fleet_release_action(
                     Path::new("."),
                     &resolved.zone_id,
+                    zone_id,
                     incident_id,
                     &actions[..=action_index],
+                    &actions,
                     now_secs,
                 ) {
                     Ok(released_extensions) => {
@@ -27365,15 +27545,17 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
                         zone_id = resolved.zone_id.as_str(),
                         policy_version = policy_version.as_str(),
                         changed_fields = ?changed_fields,
-                        "fleet agent observed policy update action"
+                        "fleet agent cannot apply policy update without an executable policy artifact"
                     );
                     if !resolved.json {
                         eprintln!(
-                            "fleet agent: applying policy update version={} fields={:?}",
+                            "fleet agent: unsupported policy update version={} fields={:?}",
                             policy_version, changed_fields
                         );
                     }
-                    Ok::<(), anyhow::Error>(())
+                    Err(anyhow::anyhow!(
+                        "policy update `{policy_version}` carries field names without executable policy contents; application is not acknowledged"
+                    ))
                 }
                 #[cfg(feature = "control-plane")]
                 PersistedFleetAction::Revoke {
@@ -27416,10 +27598,12 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
                         action.action_id
                     );
                 }
-                break;
+                continue;
             }
-            last_seen_action_id = Some(action.action_id.clone());
-            last_seen_action_emitted_at = Some(action.emitted_at);
+            if newly_observed {
+                last_seen_action_id = Some(action.action_id.clone());
+            }
+            seen_action_ids.insert(action.action_id.clone());
         }
 
         // Update node status (heartbeat)
@@ -27429,6 +27613,10 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
             last_seen: poll_timestamp,
             quarantine_version,
             health: node_health,
+            // Each effect persisted before this atomic heartbeat write. A
+            // crash before publication causes idempotent reconciliation on
+            // restart. Failure replaces any earlier checkpoint with None.
+            applied_actions: (node_health == NodeHealth::Healthy).then_some(expected_checkpoint),
         };
         transport
             .upsert_node_status(&node_status)
@@ -35030,26 +35218,40 @@ fn main() -> Result<()> {
                         "`fleet release` requires --incident",
                     );
                 }
+                if let Some(zone) = args.zone.as_deref()
+                    && let Err(err) = control_plane::fleet_transport::validate_zone_id(zone)
+                {
+                    return fleet_fail("fleet.release", args.json, err);
+                }
                 let identity = fleet_cli_identity();
                 let trace = fleet_cli_trace("trace-cli-fleet-release");
                 let loaded = match load_fleet_state(Path::new(".")) {
                     Ok(loaded) => loaded,
                     Err(err) => return fleet_fail("fleet.release", args.json, err),
                 };
-                let incident = match loaded
+                let matching_incidents = loaded
                     .active_incidents
                     .iter()
-                    .find(|incident| incident.incident_id == args.incident)
+                    .filter(|incident| incident.incident_id == args.incident
+                        && args.zone.as_ref().is_none_or(|zone| incident.zone_id == *zone))
                     .cloned()
-                {
-                    Some(incident) => incident,
-                    None => {
+                    .collect::<Vec<_>>();
+                let incident = match matching_incidents.as_slice() {
+                    [incident] => incident.clone(),
+                    [] => {
                         return fleet_fail(
                             "fleet.release",
                             args.json,
-                            format!("incident `{}` not found", args.incident),
+                            match args.zone.as_deref() {
+                                Some(zone) => format!("incident `{}` not found in zone `{zone}`", args.incident),
+                                None => format!("incident `{}` not found", args.incident),
+                            },
                         );
                     }
+                    _ => return fleet_fail(
+                        "fleet.release", args.json,
+                        format!("incident `{}` exists in multiple zones; select its exact scope with --zone", args.incident),
+                    ),
                 };
                 let fleet_signing_material = match load_fleet_signing_material() {
                     Ok(material) => material,
@@ -35078,7 +35280,7 @@ fn main() -> Result<()> {
                         Path::new("."),
                         &incident.zone_id,
                         &incident.incident_id,
-                        release_emitted_at,
+                        &operation_id,
                     ) {
                         Ok(result) => result,
                         Err(err) => return fleet_fail("fleet.release", args.json, err),
@@ -35086,7 +35288,7 @@ fn main() -> Result<()> {
                 let convergence = fleet_release_convergence_state(
                     &converged_state,
                     &incident.zone_id,
-                    release_emitted_at,
+                    &operation_id,
                 );
                 if timed_out {
                     return fleet_fail(
@@ -35099,7 +35301,7 @@ fn main() -> Result<()> {
                     );
                 }
                 let report = match fleet_action_report(
-                    Path::new("."),
+                    &converged_state,
                     &incident.zone_id,
                     FleetActionResult {
                         operation_id: operation_id.clone(),
@@ -35195,7 +35397,7 @@ fn main() -> Result<()> {
                         Ok(result) => result,
                         Err(err) => return fleet_fail("fleet.reconcile", args.json, err),
                     };
-                let convergence = aggregate_convergence(&converged_state.active_incidents);
+                let convergence = fleet_snapshot_convergence(&converged_state, "all");
                 let fleet_signing_material = match load_fleet_signing_material() {
                     Ok(material) => material,
                     Err(err) => return fleet_fail("fleet.reconcile", args.json, err),
@@ -35224,7 +35426,7 @@ fn main() -> Result<()> {
                     Err(err) => return fleet_fail("fleet.reconcile", args.json, err),
                 };
                 let report = match fleet_action_report(
-                    Path::new("."),
+                    &converged_state,
                     "all",
                     FleetActionResult {
                         operation_id: operation_id.clone(),

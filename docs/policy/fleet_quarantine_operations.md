@@ -2,11 +2,11 @@
 
 **Section:** 10.8 | **Bead:** bd-tg2
 
-The default CLI fleet path is a **local file-transport JSONL log**
-(`live_control_plane=false`). `franken-node fleet status` / `reconcile` /
-`release` / `agent` inspect or append that log; they are not a live
-multi-node heartbeat. The policy below is the in-library quarantine
-state machine and target operational contract.
+The CLI uses a local FrankenSQLite durable store by default
+(`live_control_plane=false`). Configuring `[fleet] control_plane_url` routes
+`status`, `reconcile`, `release`, `agent`, and `trust quarantine` through the live
+authenticated HTTP coordinator served by `franken-node fleet serve`. The explicit
+file transport remains available through the library.
 
 ## Purpose
 
@@ -47,11 +47,17 @@ Permanently revokes trust credentials for a zone/tenant. Three severity levels:
 
 ### Release
 
-Rolls back a quarantine or revocation, restoring the affected zone/tenant to normal operations.
+The CLI retires the selected quarantine incident. A release does not clear a
+mandatory revocation or another active fleet incident affecting the same target.
+Incident IDs are scoped by zone: use `fleet release --incident <id> --zone <zone>`
+when an ID exists in several zones. `--zone all` selects a fleet-wide incident;
+an omitted zone is accepted only when the incident is unambiguous.
+Releasing the `all` incident preserves a separately scoped incident with the
+same ID, and releasing a specific zone preserves the fleet-wide incident.
 
 - Produces event `FLEET-004 (FLEET_RELEASED)`
 - Sets `IncidentHandle` status to `Released`
-- **Invariant INV-FLEET-ROLLBACK**: Release deterministically rolls back all quarantine/revocation state.
+- **Invariant INV-FLEET-ROLLBACK**: Release reconciles the selected incident's quarantine state while retaining independent containment.
 
 ### Status
 
@@ -72,6 +78,46 @@ All fleet operations track propagation convergence:
 - Phases: Pending, Propagating, Converged, TimedOut
 
 **Invariant INV-FLEET-CONVERGENCE**: Every operation that affects fleet state must track convergence with progress percentage and ETA.
+
+CLI convergence requires a fresh, healthy node heartbeat carrying an
+`applied_actions` checkpoint. Its domain-separated SHA-256 digest and record count
+bind the complete immutable action snapshot relevant to that node's zone,
+including `all` actions. High quarantine counters, later timestamps, and older
+checkpoints cannot prove application of a new action. Historical heartbeats
+without a checkpoint remain readable and do not count as converged. A zone with
+no registered nodes remains pending.
+
+Reconcile and status roll up the whole relevant snapshot, including policy-only,
+revocation-only, and release-only histories. Each applicable node is counted
+once, and every explicitly targeted zone must contain an applying node. Missing
+zone coverage remains pending with unknown progress; unrelated zones do not
+block a scoped history. Only an empty relevant action history is a no-op.
+
+The agent reconciles active quarantines and mandatory revocations on every poll.
+Targets absent from the local trust registry remain pending and are retried when
+they appear. Action delivery does not use issuer timestamps as a cursor, so a
+slow issuer clock cannot hide a newly delivered independent incident. Conflicting
+records for the same scoped incident retain the protocol's deterministic
+`(emitted_at, action_id)` ordering. Unsupported
+`PolicyUpdate` records contain field names without executable policy contents;
+the agent reports degraded health and publishes no checkpoint instead of
+acknowledging a log message as a policy change. Independent containment actions
+still proceed.
+
+Each registry effect is durably persisted before its checkpoint heartbeat. A
+crash between those writes causes idempotent desired-state reconciliation on
+restart; a failed poll clears an earlier checkpoint. The checkpoint represents
+the entire applied snapshot, so partial application conservatively remains
+non-converged. It is an authenticated agent claim through the existing transport,
+not a cryptographic attestation tied to an independently identified node: HTTP
+currently authenticates a shared bearer token.
+
+Compaction retains unresolved quarantine history and unexpired incident history;
+revocations have no age-based expiry. A full in-memory action log refuses new
+publication rather than discarding older containment decisions. Source ownership
+for an independent local quarantine is not represented by the trust card's single
+quarantine boolean; the snapshot checkpoint covers the fleet incident state and
+does not establish separate local quarantine provenance.
 
 ## Decision Receipts
 

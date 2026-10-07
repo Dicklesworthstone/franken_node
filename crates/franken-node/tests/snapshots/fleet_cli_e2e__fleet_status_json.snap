@@ -76,7 +76,11 @@ expression: "&matrix[\"status_all\"]"
         "node_id": "node-golden-fresh",
         "last_seen": "[last_seen]",
         "quarantine_version": 3,
-        "health": "healthy"
+        "health": "healthy",
+        "applied_actions": {
+          "action_count": 1,
+          "actions_sha256": "[actions-sha256]"
+        }
       },
       {
         "zone_id": "zone-golden-status",

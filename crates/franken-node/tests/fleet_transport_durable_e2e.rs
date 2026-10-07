@@ -16,7 +16,7 @@ use std::time::Duration;
 use chrono::Utc;
 use frankenengine_node::control_plane::fleet_transport::{
     FileFleetTransport, FleetAction, FleetActionRecord, FleetTargetKind, FleetTransport,
-    FleetTransportError, NodeHealth, NodeStatus,
+    FleetTransportError, NodeHealth, NodeStatus, fleet_application_checkpoint,
 };
 use frankenengine_node::control_plane::fleet_transport_durable::{
     DurableFleetTransport, count_active_quarantine_actions,
@@ -59,7 +59,142 @@ fn sample_node(node_id: &str) -> NodeStatus {
         last_seen: Utc::now(),
         quarantine_version: 0,
         health: NodeHealth::Healthy,
+        applied_actions: None,
     }
+}
+
+#[test]
+fn application_checkpoints_bind_zone_wildcards_and_complete_immutable_records() {
+    let first = sample_action("checkpoint-a", "incident-a");
+    let mut wildcard = sample_action("checkpoint-global", "incident-global");
+    if let FleetAction::Quarantine { zone_id, .. } = &mut wildcard.action {
+        *zone_id = "all".to_string();
+    }
+    let mut other_zone = sample_action("checkpoint-b", "incident-b");
+    if let FleetAction::Quarantine { zone_id, .. } = &mut other_zone.action {
+        *zone_id = "zone-b".to_string();
+    }
+    let actions = vec![first.clone(), wildcard.clone(), other_zone.clone()];
+    let expected = fleet_application_checkpoint(&actions, "zone-a").expect("checkpoint");
+    assert_eq!(expected.action_count, 2);
+    assert_eq!(
+        expected,
+        fleet_application_checkpoint(
+            &[other_zone.clone(), wildcard.clone(), first.clone()],
+            "zone-a"
+        )
+        .expect("delivery-order invariant")
+    );
+    assert_eq!(
+        expected,
+        fleet_application_checkpoint(&[first.clone(), wildcard.clone()], "zone-a")
+            .expect("unrelated zone excluded")
+    );
+    assert_ne!(
+        expected,
+        fleet_application_checkpoint(&actions, "zone-b").expect("other zone")
+    );
+    let mut changed_time = first.clone();
+    changed_time.emitted_at -= chrono::TimeDelta::seconds(1);
+    assert_ne!(
+        expected,
+        fleet_application_checkpoint(&[changed_time, wildcard.clone()], "zone-a")
+            .expect("timestamp is immutable evidence")
+    );
+    let mut changed_target = first.clone();
+    if let FleetAction::Quarantine { target_id, .. } = &mut changed_target.action {
+        *target_id = "another-extension".to_string();
+    }
+    assert_ne!(
+        expected,
+        fleet_application_checkpoint(&[changed_target, wildcard], "zone-a")
+            .expect("target is immutable evidence")
+    );
+    assert!(
+        fleet_application_checkpoint(&[first.clone(), first], "zone-a").is_err(),
+        "ambiguous duplicate IDs cannot yield an application checkpoint"
+    );
+}
+
+#[test]
+fn application_checkpoints_survive_file_and_sql_storage_and_failed_poll_clears_them() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let action = sample_action("checkpoint-persist", "checkpoint-incident");
+    let expected =
+        fleet_application_checkpoint(std::slice::from_ref(&action), "zone-a").expect("checkpoint");
+    for durable in [false, true] {
+        let root = dir.path().join(if durable { "sql" } else { "file" });
+        let mut transport: Box<dyn FleetTransport> = if durable {
+            Box::new(DurableFleetTransport::new(&root).expect("durable transport"))
+        } else {
+            Box::new(FileFleetTransport::new(&root))
+        };
+        transport.initialize().expect("initialize");
+        transport.publish_action(&action).expect("publish");
+        let mut node = sample_node("checkpoint-node");
+        transport
+            .upsert_node_status(&node)
+            .expect("historical heartbeat");
+        assert!(
+            transport.list_node_statuses().expect("nodes")[0]
+                .applied_actions
+                .is_none()
+        );
+        node.applied_actions = Some(expected.clone());
+        transport
+            .upsert_node_status(&node)
+            .expect("applied heartbeat");
+        assert_eq!(
+            transport.read_shared_state().expect("state").nodes[0].applied_actions,
+            Some(expected.clone())
+        );
+        let mut invalid = node.clone();
+        invalid.health = NodeHealth::Degraded;
+        assert!(
+            transport.upsert_node_status(&invalid).is_err(),
+            "a degraded node must clear its earlier application checkpoint"
+        );
+        assert_eq!(
+            transport.list_node_statuses().expect("unchanged node")[0],
+            node
+        );
+        invalid
+            .applied_actions
+            .as_mut()
+            .expect("checkpoint")
+            .actions_sha256 = "Z".repeat(64);
+        invalid.health = NodeHealth::Healthy;
+        assert!(
+            transport.upsert_node_status(&invalid).is_err(),
+            "invalid digest rejected"
+        );
+        node.health = NodeHealth::Degraded;
+        node.applied_actions = None;
+        transport
+            .upsert_node_status(&node)
+            .expect("failed poll clears proof");
+        drop(transport);
+        let mut reopened: Box<dyn FleetTransport> = if durable {
+            Box::new(DurableFleetTransport::new(&root).expect("reopen SQL"))
+        } else {
+            Box::new(FileFleetTransport::new(&root))
+        };
+        reopened.initialize().expect("reinitialize");
+        assert_eq!(
+            reopened.list_node_statuses().expect("reopened nodes"),
+            vec![node]
+        );
+    }
+    let historical = serde_json::json!({
+        "zone_id":"zone-a", "node_id":"legacy-node", "last_seen":Utc::now(),
+        "quarantine_version":u64::MAX, "health":"healthy"
+    });
+    let decoded: NodeStatus = serde_json::from_value(historical.clone()).expect("legacy heartbeat");
+    assert!(decoded.applied_actions.is_none());
+    assert_eq!(
+        serde_json::to_value(decoded).expect("same historical bytes"),
+        historical
+    );
 }
 
 #[test]
@@ -452,6 +587,20 @@ fn live_http_conflict_is_nonretryable_and_preserves_the_durable_action() {
         vec![original.clone()]
     );
 
+    let mut node = sample_node("http-applied-node");
+    node.applied_actions = Some(
+        fleet_application_checkpoint(std::slice::from_ref(&original), "zone-a")
+            .expect("application checkpoint"),
+    );
+    client
+        .upsert_node_status(&node)
+        .expect("checkpoint heartbeat over socket");
+    let received = client
+        .read_shared_state()
+        .expect("checkpoint state over socket");
+    assert_eq!(received.nodes.len(), 1);
+    assert_eq!(received.nodes[0].applied_actions, node.applied_actions);
+
     stop.0.request_shutdown();
     server
         .join()
@@ -462,6 +611,13 @@ fn live_http_conflict_is_nonretryable_and_preserves_the_durable_action() {
     assert_eq!(
         reopened.list_actions().expect("unchanged durable record"),
         vec![original]
+    );
+    assert_eq!(
+        reopened
+            .list_node_statuses()
+            .expect("durable HTTP acknowledgement")[0]
+            .applied_actions,
+        node.applied_actions
     );
 }
 

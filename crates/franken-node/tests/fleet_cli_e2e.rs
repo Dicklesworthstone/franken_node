@@ -10,11 +10,12 @@ use frankenengine_node::control_plane::fleet_transport::{
 };
 use frankenengine_node::control_plane::fleet_transport::{
     FleetAction, FleetActionRecord, FleetTargetKind, FleetTransport, NodeHealth, NodeStatus,
-    canonical_fleet_convergence_receipt_payload, fleet_convergence_receipt_verdict,
+    canonical_fleet_convergence_receipt_payload, fleet_application_checkpoint,
+    fleet_convergence_receipt_verdict,
 };
 use frankenengine_node::supply_chain::trust_card::{
-    ReputationTrend, RiskAssessment, RiskLevel, SnapshotSourceContext, TrustCardMutation,
-    TrustCardRegistry,
+    ReputationTrend, RiskAssessment, RiskLevel, SnapshotSourceContext, TrustCardInput,
+    TrustCardMutation, TrustCardRegistry,
 };
 use insta::{assert_json_snapshot, assert_snapshot};
 use sha2::{Digest, Sha256};
@@ -128,6 +129,87 @@ fn seed_transport(
     fleet_state_dir: &std::path::Path,
 ) -> frankenengine_node::control_plane::fleet_transport_durable::DurableFleetTransport {
     seed_durable_transport(fleet_state_dir)
+}
+
+/// A real agent first applies the quarantine and then applies the release once
+/// the operator publishes it. This replaces vacuous zero-node success fixtures.
+fn run_release_agent(
+    project_root: &std::path::Path,
+    fleet_state_dir: &std::path::Path,
+    agent_zone: &str,
+    release_zone: &str,
+    incident: &str,
+) -> std::thread::JoinHandle<()> {
+    let first = run_cli_in_dir_with_fleet_state(
+        project_root,
+        &[
+            "fleet",
+            "agent",
+            "--node-id",
+            "release-agent",
+            "--zone",
+            agent_zone,
+            "--once",
+            "--json",
+        ],
+        fleet_state_dir,
+    );
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(
+        json_stdout(&first, "initial release agent")["node_health"],
+        "healthy"
+    );
+    let project_root = project_root.to_path_buf();
+    let fleet_state_dir = fleet_state_dir.to_path_buf();
+    let agent_zone = agent_zone.to_string();
+    let release_zone = release_zone.to_string();
+    let incident = incident.to_string();
+    std::thread::spawn(move || {
+        let observer = seed_durable_transport(&fleet_state_dir);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if observer.list_actions().is_ok_and(|actions| {
+                actions.iter().any(|record| {
+                    matches!(&record.action, FleetAction::Release { zone_id, incident_id, .. }
+                    if zone_id == &release_zone && incident_id == &incident)
+                })
+            }) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "operator never published the expected release"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let applied = run_cli_in_dir_with_fleet_state(
+            &project_root,
+            &[
+                "fleet",
+                "agent",
+                "--node-id",
+                "release-agent",
+                "--zone",
+                &agent_zone,
+                "--once",
+                "--json",
+            ],
+            &fleet_state_dir,
+        );
+        assert!(
+            applied.status.success(),
+            "{}",
+            String::from_utf8_lossy(&applied.stderr)
+        );
+        assert_eq!(
+            json_stdout(&applied, "release agent application")["node_health"],
+            "healthy"
+        );
+    })
 }
 
 fn write_test_signing_key(
@@ -314,6 +396,7 @@ fn seed_realistic_multi_zone_fleet(
                 last_seen: base_time - TimeDelta::seconds(*stale_seconds),
                 quarantine_version: 3, // Current baseline
                 health: *health,
+                applied_actions: None,
             })
             .expect("upsert node status");
     }
@@ -436,6 +519,7 @@ fn seed_partial_reconcile_scenario(
                 last_seen: base_time - TimeDelta::seconds(stale_seconds),
                 quarantine_version,
                 health,
+                applied_actions: None,
             })
             .expect("upsert mixed reconcile node");
     }
@@ -592,6 +676,9 @@ fn canonicalize_fleet_reconcile_snapshot(
                         "signed_payload_sha256" => {
                             *nested =
                                 serde_json::Value::String("[signed-payload-sha256]".to_string());
+                        }
+                        "actions_sha256" => {
+                            *nested = serde_json::Value::String("[actions-sha256]".to_string());
                         }
                         "payload_hash" => {
                             *nested = serde_json::Value::String("[payload-hash]".to_string());
@@ -951,6 +1038,8 @@ fn fleet_status_uses_transport_shared_state_counts_realistic_multi_node() {
 #[test]
 fn fleet_release_publishes_release_action_to_transport() {
     let fleet_state = tempdir().expect("tempdir");
+    write_fail_closed_cli_config_for_fixture_trust_cards(fleet_state.path());
+    write_fixture_registry_to(fleet_state.path());
     let fleet_state_dir = fleet_state.path().join("fleet-state");
     let (signing_key_path, signing_key) =
         write_test_signing_key(fleet_state.path(), "keys/fleet.key", 23);
@@ -965,13 +1054,21 @@ fn fleet_release_publishes_release_action_to_transport() {
             action: FleetAction::Quarantine {
                 zone_id: "zone-1".to_string(),
                 incident_id: "inc-release-1".to_string(),
-                target_id: "sha256:release".to_string(),
-                target_kind: FleetTargetKind::Artifact,
+                target_id: "npm:@acme/auth-guard".to_string(),
+                target_kind: FleetTargetKind::Extension,
                 reason: "release verification".to_string(),
                 quarantine_version: 7,
             },
         })
         .expect("publish quarantine");
+
+    let agent = run_release_agent(
+        fleet_state.path(),
+        &fleet_state_dir,
+        "zone-1",
+        "zone-1",
+        "inc-release-1",
+    );
 
     let output = run_cli_in_dir_with_fleet_state_and_env(
         &repo_root(),
@@ -982,6 +1079,7 @@ fn fleet_release_publishes_release_action_to_transport() {
             signing_key_path.as_str(),
         )],
     );
+    agent.join().expect("real release agent");
     assert!(
         output.status.success(),
         "fleet release failed: {}",
@@ -1074,6 +1172,7 @@ fn fleet_release_fails_on_convergence_timeout() {
             last_seen: now - TimeDelta::seconds(60),
             quarantine_version: 8,
             health: NodeHealth::Healthy,
+            applied_actions: None,
         })
         .expect("write pre-release node heartbeat");
 
@@ -1221,6 +1320,13 @@ fn fleet_reconcile_waits_for_delayed_node_convergence_receipt() {
             last_seen: now,
             quarantine_version: 9,
             health: NodeHealth::Healthy,
+            applied_actions: Some(
+                fleet_application_checkpoint(
+                    &transport.list_actions().expect("actions"),
+                    "zone-delayed",
+                )
+                .expect("checkpoint"),
+            ),
         })
         .expect("write converged node");
     transport
@@ -1230,6 +1336,7 @@ fn fleet_reconcile_waits_for_delayed_node_convergence_receipt() {
             last_seen: now - TimeDelta::seconds(600),
             quarantine_version: 1,
             health: NodeHealth::Degraded,
+            applied_actions: None,
         })
         .expect("write delayed stale node");
 
@@ -1261,15 +1368,21 @@ fn fleet_reconcile_waits_for_delayed_node_convergence_receipt() {
                             )
                     }) {
                         std::thread::sleep(delay);
-                        delayed_agent
-                            .upsert_node_status(&NodeStatus {
-                                zone_id: "zone-delayed".to_string(),
-                                node_id: "node-delayed".to_string(),
-                                last_seen: Utc::now(),
-                                quarantine_version: 9,
-                                health: NodeHealth::Healthy,
-                            })
-                            .expect("write delayed node convergence");
+                        for node_id in ["node-delayed", "node-converged"] {
+                            delayed_agent
+                                .upsert_node_status(&NodeStatus {
+                                    zone_id: "zone-delayed".to_string(),
+                                    node_id: node_id.to_string(),
+                                    last_seen: Utc::now(),
+                                    quarantine_version: 9,
+                                    health: NodeHealth::Healthy,
+                                    applied_actions: Some(
+                                        fleet_application_checkpoint(&actions, "zone-delayed")
+                                            .expect("checkpoint"),
+                                    ),
+                                })
+                                .expect("write delayed node convergence");
+                        }
                         return;
                     }
                 }
@@ -1393,6 +1506,7 @@ fn asupersync_fleet_transport_converges_simulated_two_node_mode() {
             last_seen: Utc::now(),
             quarantine_version: 7,
             health: NodeHealth::Healthy,
+            applied_actions: None,
         })
         .expect("node-a status");
     node_b
@@ -1402,6 +1516,7 @@ fn asupersync_fleet_transport_converges_simulated_two_node_mode() {
             last_seen: Utc::now(),
             quarantine_version: 7,
             health: NodeHealth::Healthy,
+            applied_actions: None,
         })
         .expect("node-b status");
 
@@ -2110,21 +2225,27 @@ fn fleet_agent_release_actions_clear_local_quarantine_state_across_poll_cycles()
 }
 
 #[test]
-fn fleet_agent_processes_later_actions_with_lower_lexicographic_ids() {
+fn fleet_agent_applies_later_deliveries_despite_lower_ids_and_issuer_clock_skew() {
     let fleet_state = tempdir().expect("tempdir");
     let fleet_state_dir = fleet_state.path().join("fleet-state");
     let mut transport = seed_transport(&fleet_state_dir);
+    write_fail_closed_cli_config_for_fixture_trust_cards(fleet_state.path());
+    write_fixture_registry_to(fleet_state.path());
+    let first_timestamp = Utc::now();
     transport
         .publish_action(&FleetActionRecord {
             action_id: "fleet-op-zz-first".to_string(),
-            emitted_at: Utc::now(),
-            action: FleetAction::PolicyUpdate {
+            emitted_at: first_timestamp,
+            action: FleetAction::Quarantine {
                 zone_id: "zone-ordering".to_string(),
-                policy_version: "policy-v1".to_string(),
-                changed_fields: vec!["risk_threshold".to_string()],
+                incident_id: "inc-order-first".to_string(),
+                target_id: "npm:@acme/auth-guard".to_string(),
+                target_kind: FleetTargetKind::Extension,
+                reason: "first incident".to_string(),
+                quarantine_version: 100,
             },
         })
-        .expect("publish first policy update");
+        .expect("publish first quarantine");
 
     let publisher_state_dir = fleet_state_dir.clone();
     let publisher = std::thread::spawn(move || {
@@ -2139,14 +2260,17 @@ fn fleet_agent_processes_later_actions_with_lower_lexicographic_ids() {
                 transport
                     .publish_action(&FleetActionRecord {
                         action_id: "fleet-op-aa-second".to_string(),
-                        emitted_at: Utc::now(),
-                        action: FleetAction::PolicyUpdate {
+                        emitted_at: first_timestamp - TimeDelta::hours(1),
+                        action: FleetAction::Quarantine {
                             zone_id: "zone-ordering".to_string(),
-                            policy_version: "policy-v2".to_string(),
-                            changed_fields: vec!["policy_mode".to_string()],
+                            incident_id: "inc-order-second".to_string(),
+                            target_id: "npm:@acme/auth-guard".to_string(),
+                            target_kind: FleetTargetKind::Extension,
+                            reason: "new incident from a slow issuer clock".to_string(),
+                            quarantine_version: 1,
                         },
                     })
-                    .expect("publish second policy update");
+                    .expect("publish second quarantine");
                 return;
             }
             assert!(
@@ -2157,7 +2281,8 @@ fn fleet_agent_processes_later_actions_with_lower_lexicographic_ids() {
         }
     });
 
-    let output = run_cli_with_fleet_state(
+    let output = run_cli_in_dir_with_fleet_state(
+        fleet_state.path(),
         &[
             "fleet",
             "agent",
@@ -2194,6 +2319,762 @@ fn fleet_agent_processes_later_actions_with_lower_lexicographic_ids() {
     assert_eq!(second["actions_processed"], 1);
     assert_eq!(second["last_action_id"], "fleet-op-aa-second");
     assert_eq!(second["node_health"], "healthy");
+    let nodes = transport.list_node_statuses().expect("nodes");
+    let node = nodes
+        .iter()
+        .find(|node| node.node_id == "agent-ordering-1")
+        .expect("agent");
+    assert_eq!(
+        node.quarantine_version, 100,
+        "a larger unrelated counter is not evidence"
+    );
+    assert_eq!(
+        node.applied_actions,
+        Some(
+            fleet_application_checkpoint(
+                &transport.list_actions().expect("actions"),
+                "zone-ordering"
+            )
+            .expect("checkpoint")
+        )
+    );
+}
+
+#[test]
+fn fleet_agent_retries_missing_targets_in_the_same_process_before_acknowledging() {
+    let project = tempdir().expect("project");
+    write_fail_closed_cli_config_for_fixture_trust_cards(project.path());
+    let fleet_state_dir = project.path().join("fleet-state");
+    let mut transport = seed_durable_transport(&fleet_state_dir);
+    transport
+        .publish_action(&FleetActionRecord {
+            action_id: "quarantine-before-install".to_string(),
+            emitted_at: Utc::now(),
+            action: FleetAction::Quarantine {
+                zone_id: "all".to_string(),
+                incident_id: "inc-before-install".to_string(),
+                target_id: "npm:@acme/auth-guard".to_string(),
+                target_kind: FleetTargetKind::Extension,
+                reason: "contain before the extension reaches this node".to_string(),
+                quarantine_version: 1,
+            },
+        })
+        .expect("publish pending quarantine");
+
+    let install_root = project.path().to_path_buf();
+    let install_fleet = fleet_state_dir.clone();
+    let installer = std::thread::spawn(move || {
+        let observer = seed_durable_transport(&install_fleet);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let nodes = observer.list_node_statuses().expect("pending heartbeat");
+            if let Some(node) = nodes.iter().find(|node| node.node_id == "pending-agent") {
+                assert_eq!(node.health, NodeHealth::Degraded);
+                assert!(
+                    node.applied_actions.is_none(),
+                    "observation alone is not application"
+                );
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "agent never reported the pending target"
+            );
+            std::thread::sleep(Duration::from_millis(30));
+        }
+
+        // Add the target through the real durable registry API, preserving the
+        // empty registry's authenticated predecessor instead of replacing it.
+        let registry_path = install_root.join(".franken-node/state/trust-card-registry.v1.json");
+        let mut registry = TrustCardRegistry::load_authoritative_state(
+            &registry_path,
+            60,
+            3_000,
+            SnapshotSourceContext::TrustedFile,
+        )
+        .expect("load empty registry");
+        let mut fixtures = frankenengine_node::supply_chain::trust_card::fixture_registry(3_000)
+            .expect("fixture source");
+        let card = fixtures
+            .read("npm:@acme/auth-guard", 3_000, "fleet-late-install")
+            .expect("read fixture")
+            .expect("fixture card");
+        registry
+            .create(
+                TrustCardInput {
+                    extension: card.extension,
+                    publisher: card.publisher,
+                    certification_level: card.certification_level,
+                    capability_declarations: card.capability_declarations,
+                    behavioral_profile: card.behavioral_profile,
+                    revocation_status: card.revocation_status,
+                    provenance_summary: card.provenance_summary,
+                    reputation_score_basis_points: card.reputation_score_basis_points,
+                    reputation_trend: card.reputation_trend,
+                    active_quarantine: false,
+                    dependency_trust_summary: card.dependency_trust_summary,
+                    last_verified_timestamp: card.last_verified_timestamp,
+                    user_facing_risk_assessment: card.user_facing_risk_assessment,
+                    evidence_refs: card
+                        .derivation_evidence
+                        .expect("fixture evidence")
+                        .evidence_refs,
+                },
+                3_000,
+                "fleet-late-install",
+            )
+            .expect("install trust card");
+        registry
+            .persist_authoritative_state(&registry_path)
+            .expect("persist installed target");
+    });
+
+    let output = run_cli_in_dir_with_fleet_state(
+        project.path(),
+        &[
+            "fleet",
+            "agent",
+            "--node-id",
+            "pending-agent",
+            "--zone",
+            "zone-pending",
+            "--poll-interval-secs",
+            "3",
+            "--max-cycles",
+            "3",
+            "--json",
+        ],
+        &fleet_state_dir,
+    );
+    installer.join().expect("target installer");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let polls: Vec<serde_json::Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("poll"))
+        .collect();
+    assert_eq!(polls.len(), 3);
+    assert_eq!(polls[0]["node_health"], "degraded");
+    assert_eq!(polls[2]["node_health"], "healthy");
+    let nodes = transport.list_node_statuses().expect("final heartbeat");
+    let node = nodes
+        .iter()
+        .find(|node| node.node_id == "pending-agent")
+        .expect("agent");
+    assert_eq!(
+        node.applied_actions,
+        Some(
+            fleet_application_checkpoint(
+                &transport.list_actions().expect("actions"),
+                "zone-pending"
+            )
+            .expect("checkpoint")
+        )
+    );
+    let mut registry = TrustCardRegistry::load_authoritative_state(
+        &project
+            .path()
+            .join(".franken-node/state/trust-card-registry.v1.json"),
+        60,
+        3_100,
+        SnapshotSourceContext::TrustedFile,
+    )
+    .expect("reload target");
+    let card = registry
+        .read("npm:@acme/auth-guard", 3_100, "fleet-retry-final")
+        .expect("read target")
+        .expect("target");
+    assert!(card.active_quarantine);
+    assert_eq!(
+        card.trust_card_version, 2,
+        "later polls reconcile without rewriting an unchanged restriction"
+    );
+}
+
+#[test]
+fn fleet_agent_cannot_acknowledge_logging_only_policy_updates_or_old_heartbeats() {
+    let project = tempdir().expect("project");
+    write_fail_closed_cli_config_for_fixture_trust_cards(project.path());
+    write_fixture_registry_to(project.path());
+    let fleet_state_dir = project.path().join("fleet-state");
+    let mut transport = seed_durable_transport(&fleet_state_dir);
+    let now = Utc::now();
+    transport
+        .upsert_node_status(&NodeStatus {
+            zone_id: "zone-policy".to_string(),
+            node_id: "policy-agent".to_string(),
+            last_seen: now,
+            quarantine_version: u64::MAX,
+            health: NodeHealth::Healthy,
+            applied_actions: Some(
+                fleet_application_checkpoint(&[], "zone-policy").expect("empty checkpoint"),
+            ),
+        })
+        .expect("old healthy heartbeat");
+    transport
+        .publish_action(&FleetActionRecord {
+            action_id: "policy-needs-content".to_string(),
+            emitted_at: now - TimeDelta::seconds(2),
+            action: FleetAction::PolicyUpdate {
+                zone_id: "all".to_string(),
+                policy_version: "not-an-executable-policy".to_string(),
+                changed_fields: vec!["security.policy".to_string()],
+            },
+        })
+        .expect("publish unsupported policy");
+    transport
+        .publish_action(&FleetActionRecord {
+            action_id: "quarantine-after-unsupported-policy".to_string(),
+            emitted_at: now - TimeDelta::seconds(1),
+            action: FleetAction::Quarantine {
+                zone_id: "zone-policy".to_string(),
+                incident_id: "inc-policy-boundary".to_string(),
+                target_id: "npm:@acme/auth-guard".to_string(),
+                target_kind: FleetTargetKind::Extension,
+                reason: "containment proceeds despite an unsupported independent action"
+                    .to_string(),
+                quarantine_version: 1,
+            },
+        })
+        .expect("publish quarantine");
+    let status = run_cli_in_dir_with_fleet_state(
+        project.path(),
+        &["fleet", "status", "--zone", "zone-policy", "--json"],
+        &fleet_state_dir,
+    );
+    assert!(status.status.success());
+    let status = json_stdout(&status, "status before application");
+    assert_eq!(
+        status["active_incidents"][0]["convergence"]["converged_nodes"],
+        0
+    );
+
+    let output = run_cli_in_dir_with_fleet_state(
+        project.path(),
+        &[
+            "fleet",
+            "agent",
+            "--node-id",
+            "policy-agent",
+            "--zone",
+            "zone-policy",
+            "--once",
+            "--json",
+        ],
+        &fleet_state_dir,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let poll = json_stdout(&output, "unsupported policy poll");
+    assert_eq!(poll["node_health"], "degraded");
+    let nodes = transport
+        .list_node_statuses()
+        .expect("failed application heartbeat");
+    let node = nodes
+        .iter()
+        .find(|node| node.node_id == "policy-agent")
+        .expect("agent");
+    assert!(
+        node.applied_actions.is_none(),
+        "a failed poll must clear its previous application checkpoint"
+    );
+    let mut registry = TrustCardRegistry::load_authoritative_state(
+        &project
+            .path()
+            .join(".franken-node/state/trust-card-registry.v1.json"),
+        60,
+        3_100,
+        SnapshotSourceContext::TrustedFile,
+    )
+    .expect("reload registry");
+    assert!(
+        registry
+            .read(
+                "npm:@acme/auth-guard",
+                3_100,
+                "fleet-policy-independent-containment"
+            )
+            .expect("read target")
+            .expect("target")
+            .active_quarantine
+    );
+}
+
+#[test]
+#[cfg(feature = "control-plane")]
+fn fleet_reconcile_requires_application_for_policy_only_and_revoke_only_snapshots() {
+    use frankenengine_node::api::fleet_quarantine::{RevocationScope, RevocationSeverity};
+
+    let actions = [
+        FleetAction::PolicyUpdate {
+            zone_id: "all".to_string(),
+            policy_version: "missing-executable-policy".to_string(),
+            changed_fields: vec!["security.policy".to_string()],
+        },
+        FleetAction::Revoke {
+            extension_id: "npm:@acme/not-installed".to_string(),
+            scope: RevocationScope {
+                zone_id: "east".to_string(),
+                tenant_id: None,
+                severity: RevocationSeverity::Mandatory,
+                reason: "mandatory containment awaiting local target".to_string(),
+            },
+        },
+    ];
+    for (index, action) in actions.into_iter().enumerate() {
+        let project = tempdir().expect("project");
+        write_fail_closed_cli_config_for_fixture_trust_cards(project.path());
+        write_fixture_registry_to(project.path());
+        let fleet_state_dir = project.path().join("fleet-state");
+        let mut transport = seed_durable_transport(&fleet_state_dir);
+        transport
+            .publish_action(&FleetActionRecord {
+                action_id: format!("unapplied-only-action-{index}"),
+                emitted_at: Utc::now(),
+                action,
+            })
+            .expect("publish unapplied action");
+        let agent = run_cli_in_dir_with_fleet_state(
+            project.path(),
+            &[
+                "fleet",
+                "agent",
+                "--node-id",
+                "unapplied-agent",
+                "--zone",
+                "east",
+                "--once",
+                "--json",
+            ],
+            &fleet_state_dir,
+        );
+        assert!(
+            agent.status.success(),
+            "{}",
+            String::from_utf8_lossy(&agent.stderr)
+        );
+        assert_eq!(
+            json_stdout(&agent, "unapplied action poll")["node_health"],
+            "degraded"
+        );
+        assert!(
+            transport.list_node_statuses().expect("failed heartbeat")[0]
+                .applied_actions
+                .is_none()
+        );
+
+        let status = run_cli_in_dir_with_fleet_state(
+            project.path(),
+            &["fleet", "status", "--json"],
+            &fleet_state_dir,
+        );
+        assert!(status.status.success());
+        let status = json_stdout(&status, "non-quarantine application status");
+        assert!(
+            status["active_incidents"]
+                .as_array()
+                .expect("incidents")
+                .is_empty()
+        );
+        assert_eq!(status["status"]["active_quarantines"], 0);
+        let rollup = &status["status"]["pending_convergences"][0];
+        assert_eq!(rollup["converged_nodes"], 0);
+        assert_eq!(rollup["total_nodes"], 1);
+        assert_eq!(rollup["phase"], "Propagating");
+
+        let (key_path, _) = write_test_signing_key(project.path(), "keys/fleet.key", 63);
+        let key_path = key_path.display().to_string();
+        let reconcile = run_cli_in_dir_with_fleet_state_and_env(
+            project.path(),
+            &["fleet", "reconcile", "--json"],
+            &fleet_state_dir,
+            &[
+                (
+                    "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
+                    key_path.as_str(),
+                ),
+                ("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", "1"),
+            ],
+        );
+        assert!(
+            !reconcile.status.success(),
+            "unapplied non-quarantine action cannot converge"
+        );
+        let error = json_stdout(&reconcile, "unapplied snapshot reconcile");
+        assert!(
+            error["error"]
+                .as_str()
+                .expect("error")
+                .contains("convergence timed out")
+        );
+        assert!(
+            error.get("convergence_receipt").is_none(),
+            "no signed success receipt"
+        );
+        assert_eq!(transport.list_actions().expect("retained intent").len(), 1);
+    }
+}
+
+#[test]
+fn fleet_reconcile_requires_target_zone_coverage_and_counts_relevant_nodes_once() {
+    for include_global in [false, true] {
+        let project = tempdir().expect("project");
+        write_fail_closed_cli_config_for_fixture_trust_cards(project.path());
+        write_fixture_registry_to(project.path());
+        let fleet_state_dir = project.path().join("fleet-state");
+        let mut transport = seed_durable_transport(&fleet_state_dir);
+        for zone in if include_global {
+            vec!["east", "all"]
+        } else {
+            vec!["east"]
+        } {
+            transport
+                .publish_action(&FleetActionRecord {
+                    action_id: format!("release-only-{zone}"),
+                    emitted_at: Utc::now(),
+                    action: FleetAction::Release {
+                        zone_id: zone.to_string(),
+                        incident_id: format!("retired-{zone}"),
+                        reason: None,
+                    },
+                })
+                .expect("retained release history");
+        }
+        let actions = transport.list_actions().expect("actions");
+        transport
+            .upsert_node_status(&NodeStatus {
+                zone_id: "west".to_string(),
+                node_id: "west-agent".to_string(),
+                last_seen: Utc::now(),
+                quarantine_version: u64::MAX,
+                health: NodeHealth::Healthy,
+                applied_actions: Some(
+                    fleet_application_checkpoint(&actions, "west").expect("west checkpoint"),
+                ),
+            })
+            .expect("west heartbeat without east coverage");
+        let status = run_cli_in_dir_with_fleet_state(
+            project.path(),
+            &["fleet", "status", "--json"],
+            &fleet_state_dir,
+        );
+        assert!(status.status.success());
+        let status = json_stdout(&status, "missing target zone status");
+        let rollup = &status["status"]["pending_convergences"][0];
+        assert_eq!(rollup["phase"], "Pending");
+        assert_eq!(rollup["progress_pct"], 0);
+        assert_eq!(rollup["total_nodes"], if include_global { 1 } else { 0 });
+
+        let (key_path, key) = write_test_signing_key(project.path(), "keys/fleet.key", 64);
+        let key_path = key_path.display().to_string();
+        let missing = run_cli_in_dir_with_fleet_state_and_env(
+            project.path(),
+            &["fleet", "reconcile", "--json"],
+            &fleet_state_dir,
+            &[
+                (
+                    "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
+                    key_path.as_str(),
+                ),
+                ("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", "1"),
+            ],
+        );
+        assert!(
+            !missing.status.success(),
+            "west cannot acknowledge east's action scope"
+        );
+        assert!(
+            json_stdout(&missing, "missing zone reconcile")["error"]
+                .as_str()
+                .expect("error")
+                .contains("convergence timed out")
+        );
+
+        for zone in if include_global {
+            vec!["east", "west"]
+        } else {
+            vec!["east"]
+        } {
+            let node_id = format!("{zone}-agent");
+            let agent = run_cli_in_dir_with_fleet_state(
+                project.path(),
+                &[
+                    "fleet",
+                    "agent",
+                    "--node-id",
+                    &node_id,
+                    "--zone",
+                    zone,
+                    "--once",
+                    "--json",
+                ],
+                &fleet_state_dir,
+            );
+            assert!(
+                agent.status.success(),
+                "{}",
+                String::from_utf8_lossy(&agent.stderr)
+            );
+            assert_eq!(
+                json_stdout(&agent, "release-only application")["node_health"],
+                "healthy"
+            );
+        }
+        if !include_global {
+            transport
+                .upsert_node_status(&NodeStatus {
+                    zone_id: "west".to_string(),
+                    node_id: "west-agent".to_string(),
+                    last_seen: Utc::now(),
+                    quarantine_version: 0,
+                    health: NodeHealth::Degraded,
+                    applied_actions: None,
+                })
+                .expect("unrelated degraded node");
+        }
+        let complete = run_cli_in_dir_with_fleet_state_and_env(
+            project.path(),
+            &["fleet", "reconcile", "--json"],
+            &fleet_state_dir,
+            &[
+                (
+                    "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
+                    key_path.as_str(),
+                ),
+                ("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", "5"),
+            ],
+        );
+        assert!(
+            complete.status.success(),
+            "{}",
+            String::from_utf8_lossy(&complete.stderr)
+        );
+        let payload = json_stdout(&complete, "applied release-only reconcile");
+        let rollup = &payload["action"]["convergence"];
+        let expected_nodes = if include_global { 2 } else { 1 };
+        assert_eq!(rollup["converged_nodes"], expected_nodes);
+        assert_eq!(rollup["total_nodes"], expected_nodes);
+        assert_eq!(rollup["phase"], "Converged");
+        assert_eq!(rollup, &payload["convergence_receipt"]["convergence"]);
+        assert_eq!(rollup, &payload["status"]["pending_convergences"][0]);
+        assert_convergence_receipt_signature_round_trips(&payload["convergence_receipt"], &key);
+    }
+}
+
+#[test]
+fn fleet_release_requires_zone_for_ambiguous_incidents_and_preserves_other_zones() {
+    let project = tempdir().expect("project");
+    write_fail_closed_cli_config(project.path());
+    let fleet_state_dir = project.path().join("fleet-state");
+    let mut transport = seed_durable_transport(&fleet_state_dir);
+    let now = Utc::now();
+    for zone in ["east", "west"] {
+        transport
+            .publish_action(&FleetActionRecord {
+                action_id: format!("zone-quarantine-{zone}"),
+                emitted_at: now,
+                action: FleetAction::Quarantine {
+                    zone_id: zone.to_string(),
+                    incident_id: "shared-incident-id".to_string(),
+                    target_id: "npm:@acme/auth-guard".to_string(),
+                    target_kind: FleetTargetKind::Extension,
+                    reason: "separate zone incident".to_string(),
+                    quarantine_version: 1,
+                },
+            })
+            .expect("publish scoped incident");
+    }
+    let ambiguous = run_cli_in_dir_with_fleet_state(
+        project.path(),
+        &[
+            "fleet",
+            "release",
+            "--incident",
+            "shared-incident-id",
+            "--json",
+        ],
+        &fleet_state_dir,
+    );
+    assert!(!ambiguous.status.success());
+    assert!(
+        json_stdout(&ambiguous, "ambiguous release")["error"]
+            .as_str()
+            .expect("error")
+            .contains("--zone")
+    );
+    assert_eq!(
+        transport
+            .list_actions()
+            .expect("no ambiguous publication")
+            .len(),
+        2
+    );
+
+    let (key_path, _) = write_test_signing_key(project.path(), "keys/zone-release.key", 61);
+    let key_path = key_path.display().to_string();
+    let selected = run_cli_in_dir_with_fleet_state_and_env(
+        project.path(),
+        &[
+            "fleet",
+            "release",
+            "--incident",
+            "shared-incident-id",
+            "--zone",
+            "east",
+            "--json",
+        ],
+        &fleet_state_dir,
+        &[
+            (
+                "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
+                key_path.as_str(),
+            ),
+            ("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", "1"),
+        ],
+    );
+    assert!(
+        !selected.status.success(),
+        "no registered agents cannot establish convergence"
+    );
+    assert!(
+        json_stdout(&selected, "pending scoped release")["error"]
+            .as_str()
+            .expect("error")
+            .contains("convergence timed out")
+    );
+    let actions = transport.list_actions().expect("selected publication");
+    assert_eq!(actions.len(), 3);
+    assert!(
+        matches!(&actions[2].action, FleetAction::Release { zone_id, incident_id, .. }
+        if zone_id == "east" && incident_id == "shared-incident-id")
+    );
+    let status = run_cli_in_dir_with_fleet_state(
+        project.path(),
+        &["fleet", "status", "--json"],
+        &fleet_state_dir,
+    );
+    assert!(status.status.success());
+    let status = json_stdout(&status, "remaining west incident");
+    let active = status["active_incidents"].as_array().expect("incidents");
+    assert_eq!(
+        active.len(),
+        1,
+        "east's release must not retire west's incident"
+    );
+    assert_eq!(active[0]["zone_id"], "west");
+    assert_eq!(active[0]["convergence"]["phase"], "Pending");
+}
+
+#[test]
+fn fleet_release_preserves_same_id_containment_in_independent_global_and_local_scopes() {
+    for (released_zone, remaining_zone) in [("east", "all"), ("all", "east")] {
+        let project = tempdir().expect("project");
+        write_fail_closed_cli_config_for_fixture_trust_cards(project.path());
+        write_fixture_registry_to(project.path());
+        let fleet_state_dir = project.path().join("fleet-state");
+        let mut transport = seed_durable_transport(&fleet_state_dir);
+        for zone in ["all", "east"] {
+            transport
+                .publish_action(&FleetActionRecord {
+                    action_id: format!("overlap-quarantine-{zone}"),
+                    emitted_at: Utc::now(),
+                    action: FleetAction::Quarantine {
+                        zone_id: zone.to_string(),
+                        incident_id: "shared-scope-id".to_string(),
+                        target_id: "npm:@acme/auth-guard".to_string(),
+                        target_kind: FleetTargetKind::Extension,
+                        reason: "independently scoped containment".to_string(),
+                        quarantine_version: 1,
+                    },
+                })
+                .expect("publish scoped quarantine");
+        }
+        let (signing_key_path, _) = write_test_signing_key(project.path(), "keys/fleet.key", 62);
+        let signing_key_path = signing_key_path.display().to_string();
+        let agent = run_release_agent(
+            project.path(),
+            &fleet_state_dir,
+            "east",
+            released_zone,
+            "shared-scope-id",
+        );
+        let output = run_cli_in_dir_with_fleet_state_and_env(
+            project.path(),
+            &[
+                "fleet",
+                "release",
+                "--incident",
+                "shared-scope-id",
+                "--zone",
+                released_zone,
+                "--json",
+            ],
+            &fleet_state_dir,
+            &[
+                (
+                    "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
+                    signing_key_path.as_str(),
+                ),
+                ("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", "5"),
+            ],
+        );
+        agent.join().expect("scoped release agent");
+        assert!(
+            output.status.success(),
+            "release {released_zone}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let payload = json_stdout(&output, "independent scope release");
+        assert_eq!(payload["action"]["convergence"]["converged_nodes"], 1);
+        let active = payload["active_incidents"]
+            .as_array()
+            .expect("active incidents");
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0]["zone_id"], remaining_zone);
+        assert_eq!(active[0]["incident_id"], "shared-scope-id");
+        assert_eq!(active[0]["convergence"]["phase"], "Converged");
+        let node = transport
+            .list_node_statuses()
+            .expect("agent checkpoint")
+            .remove(0);
+        assert_eq!(
+            node.applied_actions,
+            Some(
+                fleet_application_checkpoint(
+                    &transport.list_actions().expect("retained actions"),
+                    "east",
+                )
+                .expect("complete scope checkpoint")
+            )
+        );
+        let mut registry = TrustCardRegistry::load_authoritative_state(
+            &project
+                .path()
+                .join(".franken-node/state/trust-card-registry.v1.json"),
+            60,
+            3_100,
+            SnapshotSourceContext::TrustedFile,
+        )
+        .expect("reload registry");
+        let card = registry
+            .read("npm:@acme/auth-guard", 3_100, "scope-release-replay")
+            .expect("read target")
+            .expect("target card");
+        assert!(
+            card.active_quarantine,
+            "release {released_zone} must preserve {remaining_zone}"
+        );
+        assert_eq!(
+            card.trust_card_version, 2,
+            "replay must not transiently clear or rewrite containment"
+        );
+    }
 }
 
 #[test]
@@ -2593,6 +3474,7 @@ fn fleet_describe_json_reports_node_state_and_zone_context() {
             last_seen: now,
             quarantine_version: 3,
             health: NodeHealth::Healthy,
+            applied_actions: None,
         })
         .expect("write described node");
 
@@ -2925,11 +3807,33 @@ fn ops_rotate_key_command_is_not_exposed_until_real_rotation_exists() {
 #[test]
 fn fleet_release_human_output_shape_is_stable() {
     let fleet_state = tempdir().expect("tempdir");
+    write_fail_closed_cli_config_for_fixture_trust_cards(fleet_state.path());
+    write_fixture_registry_to(fleet_state.path());
     let fleet_state_dir = fleet_state.path().join("fleet-state");
     let (signing_key_path, _) = write_test_signing_key(fleet_state.path(), "keys/fleet.key", 32);
     let signing_key_path = signing_key_path.display().to_string();
     let mut transport = seed_transport(&fleet_state_dir);
-    seed_fleet_quarantine(&mut transport, "zone-release-human", "inc-release-human", 4);
+    transport
+        .publish_action(&FleetActionRecord {
+            action_id: "fleet-op-inc-release-human".to_string(),
+            emitted_at: Utc::now(),
+            action: FleetAction::Quarantine {
+                zone_id: "zone-release-human".to_string(),
+                incident_id: "inc-release-human".to_string(),
+                target_id: "npm:@acme/auth-guard".to_string(),
+                target_kind: FleetTargetKind::Extension,
+                reason: "e2e contract quarantine".to_string(),
+                quarantine_version: 4,
+            },
+        })
+        .expect("publish quarantine");
+    let agent = run_release_agent(
+        fleet_state.path(),
+        &fleet_state_dir,
+        "zone-release-human",
+        "zone-release-human",
+        "inc-release-human",
+    );
 
     let output = run_cli_in_dir_with_fleet_state_and_env(
         &repo_root(),
@@ -2940,6 +3844,7 @@ fn fleet_release_human_output_shape_is_stable() {
             signing_key_path.as_str(),
         )],
     );
+    agent.join().expect("real release agent");
     assert!(
         output.status.success(),
         "fleet release failed: {}",
@@ -2955,7 +3860,7 @@ fn fleet_release_human_output_shape_is_stable() {
     assert!(lines[3].contains(" issuer=cli-fleet-operator zone=zone-release-human"));
     assert_eq!(
         lines[4],
-        "  convergence=0/0 (100%) phase=Converged eta_seconds=Some(0)"
+        "  convergence=1/1 (100%) phase=Converged eta_seconds=Some(0)"
     );
     assert_eq!(
         lines[5],
@@ -3133,6 +4038,13 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
             last_seen: now,
             quarantine_version: 3,
             health: NodeHealth::Healthy,
+            applied_actions: Some(
+                fleet_application_checkpoint(
+                    &status_transport.list_actions().expect("actions"),
+                    "zone-golden-status",
+                )
+                .expect("checkpoint"),
+            ),
         })
         .expect("write fresh status node");
     status_transport
@@ -3142,6 +4054,7 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
             last_seen: now - TimeDelta::seconds(600),
             quarantine_version: 1,
             health: NodeHealth::Degraded,
+            applied_actions: None,
         })
         .expect("write stale status node");
 
@@ -3193,17 +4106,33 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
     );
 
     let release_state = tempdir().expect("release tempdir");
-    write_fail_closed_cli_config(release_state.path());
+    write_fail_closed_cli_config_for_fixture_trust_cards(release_state.path());
+    write_fixture_registry_to(release_state.path());
     let release_state_dir = release_state.path().join("fleet-state");
     let (release_signing_key_path, release_signing_key) =
         write_test_signing_key(release_state.path(), "keys/fleet.key", 41);
     let release_signing_key_path = release_signing_key_path.display().to_string();
     let mut release_transport = seed_transport(&release_state_dir);
-    seed_fleet_quarantine(
-        &mut release_transport,
+    release_transport
+        .publish_action(&FleetActionRecord {
+            action_id: "fleet-op-inc-golden-release".to_string(),
+            emitted_at: Utc::now(),
+            action: FleetAction::Quarantine {
+                zone_id: "zone-golden-release".to_string(),
+                incident_id: "inc-golden-release".to_string(),
+                target_id: "npm:@acme/auth-guard".to_string(),
+                target_kind: FleetTargetKind::Extension,
+                reason: "e2e contract quarantine".to_string(),
+                quarantine_version: 5,
+            },
+        })
+        .expect("publish quarantine");
+    let release_agent = run_release_agent(
+        release_state.path(),
+        &release_state_dir,
+        "zone-golden-release",
         "zone-golden-release",
         "inc-golden-release",
-        5,
     );
     let release_output = run_cli_in_dir_with_fleet_state_and_env(
         release_state.path(),
@@ -3220,6 +4149,7 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
             release_signing_key_path.as_str(),
         )],
     );
+    release_agent.join().expect("real golden release agent");
     assert!(
         release_output.status.success(),
         "fleet release json failed: {}",
@@ -3251,6 +4181,7 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
             last_seen: Utc::now() - TimeDelta::seconds(600),
             quarantine_version: 1,
             health: NodeHealth::Degraded,
+            applied_actions: None,
         })
         .expect("write timeout node");
     let timeout_output = run_cli_in_dir_with_fleet_state_and_env(
@@ -3681,6 +4612,8 @@ fn fleet_release_with_structured_logging_and_real_pipeline() {
 
     log.phase("setup");
     let fleet_state = tempdir().expect("tempdir");
+    write_fail_closed_cli_config_for_fixture_trust_cards(fleet_state.path());
+    write_fixture_registry_to(fleet_state.path());
     let fleet_state_dir = fleet_state.path().join("fleet-state");
     let (signing_key_path, signing_key) =
         write_test_signing_key(fleet_state.path(), "keys/fleet.key", 25);
@@ -3696,8 +4629,8 @@ fn fleet_release_with_structured_logging_and_real_pipeline() {
             action: FleetAction::Quarantine {
                 zone_id: "zone-structured".to_string(),
                 incident_id: "inc-structured".to_string(),
-                target_id: "sha256:structured".to_string(),
-                target_kind: FleetTargetKind::Artifact,
+                target_id: "npm:@acme/auth-guard".to_string(),
+                target_kind: FleetTargetKind::Extension,
                 reason: "structured logging test".to_string(),
                 quarantine_version: 8,
             },
@@ -3705,6 +4638,13 @@ fn fleet_release_with_structured_logging_and_real_pipeline() {
         .expect("publish setup quarantine");
 
     log.transport_snapshot(&transport, "after_setup_quarantine");
+    let agent = run_release_agent(
+        fleet_state.path(),
+        &fleet_state_dir,
+        "zone-structured",
+        "zone-structured",
+        "inc-structured",
+    );
 
     log.phase("act");
     let start_act = Instant::now();
@@ -3718,6 +4658,7 @@ fn fleet_release_with_structured_logging_and_real_pipeline() {
         )],
     );
     let act_duration = start_act.elapsed().as_millis() as u64;
+    agent.join().expect("real structured release agent");
 
     eprintln!(
         "{}",
@@ -3829,9 +4770,8 @@ fn fleet_release_handles_realistic_partial_release_scenarios_across_multi_incide
 
     // Seed realistic multi-zone fleet to test release propagation
     seed_realistic_multi_zone_fleet(&mut transport, now);
-    // bd-ymbjw: release convergence requires the zone nodes to check in AFTER
-    // the release action is published (fleet_release_convergence_state counts
-    // only nodes with last_seen >= emitted_at). Simulate the fleet agent on
+    // Release convergence requires a checkpoint of the exact snapshot containing
+    // the release; a fresh heartbeat by itself is insufficient. Simulate the agent on
     // the two healthy us-east-1-production nodes applying the action, exactly
     // like fleet_reconcile_waits_for_delayed_node_convergence_receipt does.
     // The agent keeps ONE connection and treats transient fsqlite contention
@@ -3876,6 +4816,13 @@ fn fleet_release_handles_realistic_partial_release_scenarios_across_multi_incide
                     last_seen: Utc::now(),
                     quarantine_version: 6,
                     health: NodeHealth::Healthy,
+                    applied_actions: Some(
+                        fleet_application_checkpoint(
+                            &agent_transport.list_actions().expect("actions"),
+                            "us-east-1-production",
+                        )
+                        .expect("checkpoint"),
+                    ),
                 })
                 .expect("agent node check-in");
         }
@@ -4033,6 +4980,7 @@ fn fleet_reconcile_with_complete_transport_verification() {
             last_seen: now - TimeDelta::seconds(300), // 5 minutes stale
             quarantine_version: 8,                    // Behind by 1 version
             health: NodeHealth::Healthy,
+            applied_actions: None,
         })
         .expect("upsert stale node");
 
@@ -4182,6 +5130,13 @@ fn fleet_reconcile_with_complete_transport_verification() {
                 last_seen: Utc::now(),
                 quarantine_version: 9,
                 health: NodeHealth::Healthy,
+                applied_actions: Some(
+                    fleet_application_checkpoint(
+                        &agent_transport.list_actions().expect("actions"),
+                        "zone-reconcile-verify",
+                    )
+                    .expect("checkpoint"),
+                ),
             })
             .expect("agent applies republished quarantine");
     });

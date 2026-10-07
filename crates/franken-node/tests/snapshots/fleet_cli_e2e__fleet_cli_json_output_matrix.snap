@@ -77,7 +77,11 @@ expression: matrix
           "node_id": "node-golden-fresh",
           "last_seen": "[last_seen]",
           "quarantine_version": 3,
-          "health": "healthy"
+          "health": "healthy",
+          "applied_actions": {
+            "action_count": 1,
+            "actions_sha256": "[actions-sha256]"
+          }
         },
         {
           "zone_id": "zone-golden-status",
@@ -163,7 +167,11 @@ expression: matrix
           "node_id": "node-golden-fresh",
           "last_seen": "[last_seen]",
           "quarantine_version": 3,
-          "health": "healthy"
+          "health": "healthy",
+          "applied_actions": {
+            "action_count": 1,
+            "actions_sha256": "[actions-sha256]"
+          }
         },
         {
           "zone_id": "zone-golden-status",
@@ -292,8 +300,8 @@ expression: matrix
         }
       },
       "convergence": {
-        "converged_nodes": 0,
-        "total_nodes": 0,
+        "converged_nodes": 1,
+        "total_nodes": 1,
         "progress_pct": 100,
         "eta_seconds": 0,
         "phase": "Converged"
@@ -312,8 +320,8 @@ expression: matrix
       "timeout_ms": 120000,
       "timed_out": false,
       "convergence": {
-        "converged_nodes": 0,
-        "total_nodes": 0,
+        "converged_nodes": 1,
+        "total_nodes": 1,
         "progress_pct": 100,
         "eta_seconds": 0,
         "phase": "Converged"
@@ -333,10 +341,18 @@ expression: matrix
       "zone_id": "zone-golden-release",
       "active_quarantines": 0,
       "active_revocations": 0,
-      "healthy_nodes": 0,
-      "total_nodes": 0,
+      "healthy_nodes": 1,
+      "total_nodes": 1,
       "activated": false,
-      "pending_convergences": []
+      "pending_convergences": [
+        {
+          "converged_nodes": 1,
+          "total_nodes": 1,
+          "progress_pct": 100,
+          "eta_seconds": 0,
+          "phase": "Converged"
+        }
+      ]
     },
     "state_dir": "[fleet-state]",
     "convergence_timeout_seconds": 120,
@@ -352,8 +368,8 @@ expression: matrix
             "kind": "quarantine",
             "zone_id": "zone-golden-release",
             "incident_id": "inc-golden-release",
-            "target_id": "sha256:inc-golden-release",
-            "target_kind": "artifact",
+            "target_id": "npm:@acme/auth-guard",
+            "target_kind": "extension",
             "reason": "e2e contract quarantine",
             "quarantine_version": 5
           }
@@ -369,7 +385,19 @@ expression: matrix
           }
         }
       ],
-      "nodes": []
+      "nodes": [
+        {
+          "zone_id": "zone-golden-release",
+          "node_id": "release-agent",
+          "last_seen": "[last_seen]",
+          "quarantine_version": 5,
+          "health": "healthy",
+          "applied_actions": {
+            "action_count": 2,
+            "actions_sha256": "[actions-sha256]"
+          }
+        }
+      ]
     }
   },
   "reconcile_timeout": {

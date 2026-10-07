@@ -283,6 +283,7 @@ fn asupersync_fleet_transport_read_snapshots_record_events_independently() {
                 .with_timezone(&Utc),
             quarantine_version: 3,
             health: NodeHealth::Healthy,
+            applied_actions: None,
         })
         .expect("upsert node");
 
@@ -492,6 +493,7 @@ fn asupersync_fleet_transport_retains_restricted_request_cancellation() {
             last_seen: action.emitted_at,
             quarantine_version: 1,
             health: NodeHealth::Healthy,
+            applied_actions: None,
         };
         transport.initialize().expect("initialize");
         transport.publish_action(&action).expect("publish before cancellation");

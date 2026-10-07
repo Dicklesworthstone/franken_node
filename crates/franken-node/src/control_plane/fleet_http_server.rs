@@ -746,6 +746,7 @@ mod tests {
                 .with_timezone(&Utc),
             quarantine_version: 3,
             health: NodeHealth::Healthy,
+            applied_actions: None,
         }
     }
 

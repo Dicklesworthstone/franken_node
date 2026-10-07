@@ -265,6 +265,70 @@ pub struct FleetActionRecord {
     pub action: FleetAction,
 }
 
+/// A node's acknowledgement that it durably reconciled the entire relevant
+/// action snapshot. This is an application checkpoint, not a signature or a
+/// node-specific attestation: the HTTP transport authenticates a shared bearer.
+/// A heartbeat or quarantine counter alone is never an application checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetApplicationCheckpoint {
+    pub action_count: u64,
+    pub actions_sha256: String,
+}
+
+/// Bind the full immutable records affecting `zone_id`, independent of their
+/// delivery order or the issuing machines' clocks. Wildcard actions apply to
+/// every zone. A change to any action (including its timestamp) invalidates the
+/// checkpoint. The fixed-size result keeps heartbeats bounded as history grows.
+pub fn fleet_application_checkpoint(
+    actions: &[FleetActionRecord],
+    zone_id: &str,
+) -> Result<FleetApplicationCheckpoint, FleetTransportError> {
+    validate_zone_id(zone_id)?;
+    if actions.len() > MAX_ACTION_LOG_ENTRIES {
+        return Err(FleetTransportError::serialization(format!(
+            "fleet action snapshot exceeds {MAX_ACTION_LOG_ENTRIES} entries"
+        )));
+    }
+    let mut relevant = Vec::new();
+    let mut ids = BTreeSet::new();
+    for record in actions {
+        validate_action_record(record)?;
+        if !ids.insert(record.action_id.as_str()) {
+            return Err(FleetTransportError::serialization(format!(
+                "fleet action snapshot repeats action_id `{}`",
+                record.action_id
+            )));
+        }
+        let action_zone = match &record.action {
+            FleetAction::Quarantine { zone_id, .. }
+            | FleetAction::Release { zone_id, .. }
+            | FleetAction::PolicyUpdate { zone_id, .. } => zone_id,
+            #[cfg(feature = "control-plane")]
+            FleetAction::Revoke { scope, .. } => &scope.zone_id,
+        };
+        if action_zone == "all" || action_zone == zone_id {
+            relevant.push(record);
+        }
+    }
+    relevant.sort_unstable_by(|left, right| left.action_id.cmp(&right.action_id));
+    let mut hasher = Sha256::new();
+    hasher.update(b"franken-node/fleet-applied-actions/v1\0");
+    hasher.update((zone_id.len() as u64).to_le_bytes());
+    hasher.update(zone_id.as_bytes());
+    hasher.update((relevant.len() as u64).to_le_bytes());
+    for record in &relevant {
+        let value = serde_json::to_value(record)
+            .map_err(|err| FleetTransportError::serialization(err.to_string()))?;
+        let payload = canonical_bytes(&value);
+        hasher.update((payload.len() as u64).to_le_bytes());
+        hasher.update(payload);
+    }
+    Ok(FleetApplicationCheckpoint {
+        action_count: relevant.len() as u64,
+        actions_sha256: hex::encode(hasher.finalize()),
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeStatus {
     pub zone_id: String,
@@ -272,6 +336,9 @@ pub struct NodeStatus {
     pub last_seen: DateTime<Utc>,
     pub quarantine_version: u64,
     pub health: NodeHealth,
+    /// Missing on historical heartbeats; absence never proves convergence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_actions: Option<FleetApplicationCheckpoint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -539,6 +606,7 @@ impl FleetTransportLayout {
 ///     last_seen: Utc::now(),
 ///     quarantine_version: 1,
 ///     health: NodeHealth::Quarantined,
+///     applied_actions: None,
 /// };
 /// transport.upsert_node_status(&status)?;
 ///
@@ -671,6 +739,7 @@ pub trait FleetTransport {
     ///     last_seen: Utc::now(),
     ///     quarantine_version: 0,  // Not quarantined
     ///     health: NodeHealth::Healthy,
+    ///     applied_actions: None,
     /// };
     /// transport.upsert_node_status(&status)?;
     /// # Ok(())
@@ -971,8 +1040,13 @@ impl FleetTransport for AsupersyncFleetTransport {
                 self.record_event("publish_action")?;
                 return Ok(());
             }
+            if state.actions.len() >= MAX_ACTION_LOG_ENTRIES {
+                return Err(FleetTransportError::serialization(format!(
+                    "fleet action log already contains the maximum {MAX_ACTION_LOG_ENTRIES} entries; refusing to discard retained containment actions"
+                )));
+            }
             let mut actions = state.actions.as_ref().clone();
-            push_bounded(&mut actions, action.clone(), MAX_ACTION_LOG_ENTRIES);
+            actions.push(action.clone());
             state.actions = Arc::new(actions);
         }
         self.record_event("publish_action")?;
@@ -992,8 +1066,7 @@ impl FleetTransport for AsupersyncFleetTransport {
 
     fn upsert_node_status(&mut self, status: &NodeStatus) -> Result<(), FleetTransportError> {
         self.checkpoint("upsert_node_status")?;
-        validate_zone_id(&status.zone_id)?;
-        validate_node_id(&status.node_id)?;
+        validate_node_status(status)?;
 
         {
             let mut state = self.network.write_state()?;
@@ -1245,15 +1318,66 @@ impl FileFleetTransport {
                 lock_file_with_backoff(&file, self.layout.actions_path(), false)?;
                 let rewrite_result = (|| {
                     let retention_window = chrono::TimeDelta::days(retention_days);
-                    let retained_actions = parse_jsonl_records::<FleetActionRecord>(
+                    let mut actions = parse_jsonl_records::<FleetActionRecord>(
                         &file,
                         self.layout.actions_path(),
-                    )?
-                    .into_iter()
-                    .filter(|record| {
-                        now.signed_duration_since(record.emitted_at) <= retention_window
-                    })
-                    .collect::<Vec<_>>();
+                    )?;
+                    for action in &actions {
+                        validate_action_record(action)?;
+                    }
+                    actions.sort_by(|left, right| {
+                        left.emitted_at
+                            .cmp(&right.emitted_at)
+                            .then_with(|| left.action_id.cmp(&right.action_id))
+                    });
+                    // Quarantines do not expire merely because their incident
+                    // is old. Retain its whole history until it is released and
+                    // every incident record has aged past retention, so pruning
+                    // cannot forget containment or resurrect a retired action.
+                    let mut incidents =
+                        std::collections::BTreeMap::<(String, String), (bool, bool)>::new();
+                    for record in &actions {
+                        let (zone, incident, active) = match &record.action {
+                            FleetAction::Quarantine {
+                                zone_id,
+                                incident_id,
+                                ..
+                            } => (zone_id, incident_id, true),
+                            FleetAction::Release {
+                                zone_id,
+                                incident_id,
+                                ..
+                            } => (zone_id, incident_id, false),
+                            _ => continue,
+                        };
+                        let state = incidents
+                            .entry((zone.clone(), incident.clone()))
+                            .or_default();
+                        state.0 |= now.signed_duration_since(record.emitted_at) <= retention_window;
+                        state.1 = active;
+                    }
+                    let retained_actions = actions
+                        .into_iter()
+                        .filter(|record| {
+                            match &record.action {
+                                FleetAction::Quarantine {
+                                    zone_id,
+                                    incident_id,
+                                    ..
+                                }
+                                | FleetAction::Release {
+                                    zone_id,
+                                    incident_id,
+                                    ..
+                                } => incidents
+                                    .get(&(zone_id.clone(), incident_id.clone()))
+                                    .is_some_and(|(recent, active)| *recent || *active),
+                                // Revocations and policy intent have no implicit
+                                // expiry or executable reversal in this protocol.
+                                _ => true,
+                            }
+                        })
+                        .collect::<Vec<_>>();
 
                     let temp_path = self
                         .layout
@@ -1502,8 +1626,7 @@ impl FileFleetTransport {
                     path.display()
                 ))
             })?;
-            validate_zone_id(&status.zone_id)?;
-            validate_node_id(&status.node_id)?;
+            validate_node_status(&status)?;
             if nodes.len() >= MAX_NODES_CAP {
                 return Err(FleetTransportError::serialization(format!(
                     "fleet node status count exceeds {MAX_NODES_CAP} entries"
@@ -1661,8 +1784,7 @@ impl FleetTransport for FileFleetTransport {
 
     fn upsert_node_status(&mut self, status: &NodeStatus) -> Result<(), FleetTransportError> {
         self.ensure_initialized()?;
-        validate_zone_id(&status.zone_id)?;
-        validate_node_id(&status.node_id)?;
+        validate_node_status(status)?;
         self.with_shared_state_lock(false, || self.write_node_status_unlocked(status))
     }
 
@@ -1834,6 +1956,28 @@ pub fn validate_action_record(action: &FleetActionRecord) -> Result<(), FleetTra
 pub fn validate_node_status(status: &NodeStatus) -> Result<(), FleetTransportError> {
     validate_zone_id(&status.zone_id)?;
     validate_node_id(&status.node_id)?;
+    if let Some(checkpoint) = &status.applied_actions {
+        if checkpoint.action_count > MAX_ACTION_LOG_ENTRIES as u64 {
+            return Err(FleetTransportError::serialization(
+                "fleet application checkpoint action count exceeds the bounded history",
+            ));
+        }
+        if checkpoint.actions_sha256.len() != 64
+            || !checkpoint
+                .actions_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(FleetTransportError::serialization(
+                "fleet application checkpoint must contain a lowercase SHA-256 digest",
+            ));
+        }
+        if status.health != NodeHealth::Healthy {
+            return Err(FleetTransportError::serialization(
+                "only a healthy node can acknowledge an applied fleet snapshot",
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -2146,6 +2290,7 @@ mod tests {
                 last_seen: status.last_seen,
                 quarantine_version: status.quarantine_version,
                 health: status.health,
+                applied_actions: status.applied_actions.clone(),
             };
 
             if let Some(existing) = self
@@ -2232,6 +2377,7 @@ mod tests {
                 .with_timezone(&Utc),
             quarantine_version,
             health,
+            applied_actions: None,
         }
     }
 
@@ -2712,6 +2858,7 @@ mod tests {
                 .with_timezone(&Utc),
             quarantine_version: 1,
             health: NodeHealth::Healthy,
+            applied_actions: None,
         };
         fs::write(
             transport.layout().nodes_dir().join("node-bad.json"),
@@ -2797,6 +2944,7 @@ mod tests {
                     .with_timezone(&Utc),
                 quarantine_version: 7,
                 health: NodeHealth::Healthy,
+                applied_actions: None,
             }],
         };
 
@@ -2873,6 +3021,7 @@ mod tests {
                     .with_timezone(&Utc),
                 quarantine_version: 2,
                 health: NodeHealth::Healthy,
+                applied_actions: None,
             })
             .expect("upsert node");
         transport
@@ -2884,6 +3033,7 @@ mod tests {
                     .with_timezone(&Utc),
                 quarantine_version: 3,
                 health: NodeHealth::Degraded,
+                applied_actions: None,
             })
             .expect("upsert node");
 
@@ -3477,6 +3627,69 @@ mod tests {
     }
 
     #[test]
+    fn file_transport_compaction_never_expires_unresolved_containment() {
+        let dir = tempdir().expect("tempdir");
+        let mut transport = FileFleetTransport::new(dir.path());
+        transport.initialize().expect("initialize");
+        let now = DateTime::parse_from_rfc3339("2026-04-06T00:00:00Z")
+            .expect("timestamp")
+            .with_timezone(&Utc);
+        let old = now - chrono::TimeDelta::days(60);
+        for incident in ["active", "old-released", "recently-released"] {
+            transport
+                .publish_action(&FleetActionRecord {
+                    action_id: format!("quarantine-{incident}"),
+                    emitted_at: old,
+                    action: FleetAction::Quarantine {
+                        zone_id: "prod".to_string(),
+                        incident_id: incident.to_string(),
+                        target_id: "extension".to_string(),
+                        target_kind: FleetTargetKind::Extension,
+                        reason: "containment has no implicit expiry".to_string(),
+                        quarantine_version: 1,
+                    },
+                })
+                .expect("quarantine");
+        }
+        for (incident, timestamp) in [
+            ("old-released", old + chrono::TimeDelta::seconds(1)),
+            ("recently-released", now),
+        ] {
+            transport
+                .publish_action(&FleetActionRecord {
+                    action_id: format!("release-{incident}"),
+                    emitted_at: timestamp,
+                    action: FleetAction::Release {
+                        zone_id: "prod".to_string(),
+                        incident_id: incident.to_string(),
+                        reason: None,
+                    },
+                })
+                .expect("release");
+        }
+        transport
+            .compact_action_log_if_needed(1, ACTION_LOG_RETENTION_DAYS, now)
+            .expect("compact");
+        let ids: std::collections::BTreeSet<String> = transport
+            .list_actions()
+            .expect("actions")
+            .into_iter()
+            .map(|action| action.action_id)
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "quarantine-active",
+                "quarantine-recently-released",
+                "release-recently-released"
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect()
+        );
+    }
+
+    #[test]
     fn file_transport_concurrent_compactions_preserve_consistent_final_state() {
         const WORKERS: usize = 8;
         const RETAINED_ACTIONS: usize = 12;
@@ -3712,6 +3925,7 @@ mod tests {
                             last_seen: clock::wall_now(),
                             quarantine_version: 1,
                             health: NodeHealth::Healthy,
+                            applied_actions: None,
                         });
 
                         // Should reject malicious identifiers gracefully
@@ -3762,6 +3976,7 @@ mod tests {
                     last_seen: clock::wall_now(),
                     quarantine_version: extreme_version,
                     health: NodeHealth::Healthy,
+                    applied_actions: None,
                 });
 
                 // Should handle extreme version numbers gracefully
@@ -3891,6 +4106,7 @@ mod tests {
                                 last_seen: clock::wall_now(),
                                 quarantine_version: op_id as u64,
                                 health: NodeHealth::Healthy,
+                                applied_actions: None,
                             });
                         } else {
                             let _ = transport.publish_action(&FleetActionRecord {
@@ -3969,6 +4185,7 @@ mod tests {
                     last_seen: clock::wall_now(),
                     quarantine_version: 1,
                     health: NodeHealth::Healthy,
+                    applied_actions: None,
                 });
 
                 // Should reject path traversal attempts
@@ -4132,6 +4349,7 @@ mod tests {
                     last_seen: clock::wall_now(),
                     quarantine_version: 1,
                     health: NodeHealth::Healthy,
+                    applied_actions: None,
                 });
 
                 // Node ID validation should reject malicious strings
@@ -4178,6 +4396,7 @@ mod tests {
                         - chrono::TimeDelta::from_std(staleness_threshold).unwrap(),
                     quarantine_version: 1,
                     health: NodeHealth::Healthy,
+                    applied_actions: None,
                 })
                 .expect("upsert boundary node");
 
@@ -4191,6 +4410,7 @@ mod tests {
                         + chrono::TimeDelta::seconds(1),
                     quarantine_version: 1,
                     health: NodeHealth::Healthy,
+                    applied_actions: None,
                 })
                 .expect("upsert fresh node");
 
@@ -4204,6 +4424,7 @@ mod tests {
                         - chrono::TimeDelta::seconds(1),
                     quarantine_version: 1,
                     health: NodeHealth::Healthy,
+                    applied_actions: None,
                 })
                 .expect("upsert stale node");
 

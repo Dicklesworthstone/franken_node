@@ -2211,6 +2211,7 @@ fn trust_quarantine_propagates_through_fleet_transport_pipeline() {
                 last_seen: chrono::Utc::now(),
                 quarantine_version: 0,
                 health: NodeHealth::Healthy,
+                applied_actions: None,
             })
             .expect("seed node status");
     }
@@ -2321,8 +2322,33 @@ fn trust_quarantine_propagates_through_fleet_transport_pipeline() {
                 last_seen: converged_last_seen,
                 quarantine_version,
                 health: NodeHealth::Healthy,
+                applied_actions: None,
             })
             .expect("advance node convergence");
+    }
+
+    let heartbeat_only = parse_json_stdout(
+        &run_cli_in_workspace_with_env(workspace.path(), &["fleet", "status", "--json"], &env),
+        "fleet status after fresh heartbeat without application receipt",
+    );
+    assert_eq!(
+        heartbeat_only["status"]["pending_convergences"][0]["progress_pct"], 0,
+        "a fresh heartbeat and quarantine version must not invent application evidence: {heartbeat_only:#}"
+    );
+    let checkpoint =
+        frankenengine_node::control_plane::fleet_transport::fleet_application_checkpoint(
+            &transport.list_actions().expect("retained actions"),
+            "zone-shared",
+        )
+        .expect("checkpoint for exact applied action set");
+    for mut node in transport
+        .list_node_statuses()
+        .expect("retained node statuses")
+    {
+        node.applied_actions = Some(checkpoint.clone());
+        transport
+            .upsert_node_status(&node)
+            .expect("publish application receipt");
     }
 
     let converged_payload = parse_json_stdout(
