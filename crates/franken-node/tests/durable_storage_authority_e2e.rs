@@ -153,6 +153,147 @@ fn persist_then_load_roundtrips_through_the_durable_store_without_json_files() {
     assert_eq!(card_count(&mut restored, "trace-roundtrip"), 1);
 }
 
+/// This executable only observes whether dispatch launched a worker. It never
+/// returns an engine response or substitutes for a successful guest execution.
+#[cfg(all(feature = "engine", unix))]
+fn dispatch_launch_probe(root: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let worker = root.join("dispatch-worker");
+    fs::write(&worker, "#!/bin/sh\n: > \"$0.launched\"\nexit 91\n")
+        .expect("write worker launch probe");
+    fs::set_permissions(&worker, fs::Permissions::from_mode(0o700))
+        .expect("make worker launch probe executable");
+    worker
+}
+
+/// bd-zqz0q / bd-reality-20260923-26n9r.1: losing the entire authority between
+/// preflight and dispatch must refuse just as losing an individual trusted
+/// card does. In particular, balanced and legacy-risky must not silently skip
+/// the execution-time recheck when both registry surfaces have disappeared.
+#[cfg(all(feature = "engine", unix))]
+#[test]
+fn dispatch_refuses_registry_loss_after_preflight_before_worker_launch() {
+    use frankenengine_node::config::{Config, PreferredRuntime, Profile};
+    use frankenengine_node::ops::engine_dispatcher::EngineDispatcher;
+    use frankenengine_node::supply_chain::trust_card_registry_store::{
+        durable_store_path, record_revocation_frontier, registry_snapshot_path,
+    };
+
+    const NOW_SECS: u64 = 2_000;
+    for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let app = dir.path().join("app.js");
+        fs::write(&app, "console.log('must not execute');\n").expect("write application");
+        let worker = dispatch_launch_probe(dir.path());
+        let mut config = Config::for_profile(profile);
+        config.synthesize_init_security_defaults();
+        let registry_path = registry_snapshot_path(dir.path());
+        let mut registry =
+            TrustCardRegistry::from_config(&config.trust).expect("configured trust registry");
+        registry
+            .create(fixture_input(), NOW_SECS, "trace-trust-loss-preflight")
+            .expect("create trusted card");
+        registry
+            .persist_authoritative_state(&registry_path)
+            .expect("persist authoritative trust state");
+        record_revocation_frontier(
+            &registry_path,
+            &config.trust,
+            NOW_SECS,
+            "test: trust sync before dispatch",
+        )
+        .expect("record authenticated frontier");
+
+        // Read and authenticate the real durable state before simulating loss.
+        // The dispatcher receives the same trusted ID that preflight observed.
+        let mut preflight_registry = TrustCardRegistry::load_authoritative_state_from_config(
+            &registry_path,
+            &config.trust,
+            NOW_SECS,
+            SnapshotSourceContext::TrustedFile,
+        )
+        .expect("preflight can read authoritative trust state");
+        let trusted_card = preflight_registry
+            .read(
+                "npm:@acme/auth-guard",
+                NOW_SECS,
+                "trace-trust-loss-preflight",
+            )
+            .expect("preflight authenticates trust card")
+            .expect("trusted card exists");
+        assert_eq!(trusted_card.revocation_status, RevocationStatus::Active);
+        let trusted_ids = vec![trusted_card.extension.extension_id];
+        drop(preflight_registry);
+        drop(registry);
+
+        let state_dir = registry_path.parent().expect("state directory");
+        let preserved_state = dir.path().join("state-before-trust-loss");
+        fs::rename(state_dir, &preserved_state).expect("move authority away after preflight");
+        assert!(!registry_path.exists());
+        assert!(!durable_store_path(&registry_path).exists());
+
+        let error = EngineDispatcher::new(None, PreferredRuntime::FrankenEngine)
+            .with_native_session_worker_path(worker)
+            .dispatch_run(&app, &config, &profile.to_string(), &trusted_ids, NOW_SECS)
+            .expect_err("missing authority must block every profile")
+            .to_string();
+        assert!(
+            error.contains("authoritative trust registry is missing after preflight"),
+            "{profile}: expected the missing-authority refusal, got {error}"
+        );
+        assert!(
+            error.contains("trust sync --force"),
+            "{profile}: refusal must explain recovery: {error}"
+        );
+        assert!(
+            !dir.path().join("dispatch-worker.launched").exists(),
+            "{profile}: trust loss must refuse before launching any worker"
+        );
+        assert!(
+            !state_dir.exists(),
+            "{profile}: refusing trust loss must not recreate an empty authority"
+        );
+        assert!(
+            preserved_state.join("trust-card-registry.v1.db").is_file(),
+            "the original durable authority remains intact outside the active path"
+        );
+    }
+}
+
+/// An empty preflight dependency set still permits a standalone program to
+/// reach worker launch. Besides guarding that contract, this proves the launch
+/// observer above can detect an actual child process through this dispatcher.
+#[cfg(all(feature = "engine", unix))]
+#[test]
+fn dispatch_without_trusted_dependencies_reaches_worker_launch() {
+    use frankenengine_node::config::{Config, PreferredRuntime, Profile};
+    use frankenengine_node::ops::engine_dispatcher::EngineDispatcher;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let app = dir.path().join("app.js");
+    fs::write(&app, "console.log('standalone');\n").expect("write application");
+    let worker = dispatch_launch_probe(dir.path());
+    let mut config = Config::for_profile(Profile::Balanced);
+    config.synthesize_init_security_defaults();
+
+    // The observer exits without executing JavaScript or speaking the private
+    // worker protocol, so failure is expected after its launch.
+    let error = EngineDispatcher::new(None, PreferredRuntime::FrankenEngine)
+        .with_native_session_worker_path(worker)
+        .dispatch_run(&app, &config, "balanced", &[], 2_000)
+        .expect_err("launch observer does not produce an engine response")
+        .to_string();
+    assert!(
+        !error.contains("authoritative trust registry is missing after preflight"),
+        "a standalone run does not inherit a dependency trust requirement: {error}"
+    );
+    assert!(
+        dir.path().join("dispatch-worker.launched").is_file(),
+        "a dependency-free run must reach worker launch: {error}"
+    );
+}
+
 #[test]
 fn legacy_json_pair_imports_once_and_seeds_the_durable_store() {
     let dir = tempfile::tempdir().expect("tempdir");

@@ -4615,6 +4615,24 @@ impl EngineDispatcher {
         let has_authoritative_state =
             durable_authoritative.is_file() || authoritative_registry.is_file();
 
+        // A preflight that trusted dependencies cannot become a dependency-free
+        // run when its registry disappears. Missing authority is a refusal in
+        // every profile, including legacy-risky; profile freshness differences
+        // do not authorize using a trust decision whose source is gone.
+        if !trusted_extension_ids.is_empty() && !has_authoritative_state {
+            return Err(ActionableError::new(
+                format!(
+                    "Execution blocked: authoritative trust registry is missing after preflight; \
+                     neither {} nor {} exists. Previously trusted extensions require \
+                     execution-time trust revalidation before they can run.",
+                    durable_authoritative.display(),
+                    authoritative_registry.display(),
+                ),
+                "Restore the authoritative trust registry and run `franken-node trust sync --force` before retrying",
+            )
+            .into());
+        }
+
         // Revocation freshness governs dependency trust decisions, exactly as
         // the preflight scopes it: re-check it for the dependencies that the
         // preflight trusted. Like the preflight, only the Dangerous tier
@@ -4634,7 +4652,7 @@ impl EngineDispatcher {
             return Err(ActionableError::new(detail, "franken-node trust sync --force").into());
         }
 
-        if has_authoritative_state && !trusted_extension_ids.is_empty() {
+        if !trusted_extension_ids.is_empty() {
             let mut registry = TrustCardRegistry::load_authoritative_state_from_config(
                 &authoritative_registry,
                 &config.trust,
