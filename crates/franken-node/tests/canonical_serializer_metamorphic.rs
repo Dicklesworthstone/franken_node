@@ -198,6 +198,7 @@ impl ArbitraryTrustCardData {
             audit_history: Vec::new(),
             derivation_evidence: None,
             camouflage_hints: Vec::new(),
+            quarantine_sources: Default::default(),
             card_hash: self.card_hash.clone(),
             registry_signature: self.registry_signature.clone(),
         }

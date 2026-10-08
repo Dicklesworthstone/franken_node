@@ -46,6 +46,9 @@ const MAX_CARD_VERSIONS: usize = 512;
 const MAX_AUDIT_HISTORY: usize = 256;
 const MAX_TRUST_CARD_CAMOUFLAGE_HINTS: usize = 64;
 const MAX_TRUST_CARD_EVIDENCE_REFS: usize = 4096;
+/// Containment sources are never evicted to make room for a new decision.
+pub const MAX_QUARANTINE_SOURCES: usize = 1024;
+const MAX_QUARANTINE_SOURCE_ID_BYTES: usize = 256;
 /// Maximum number of camouflage hint records persisted on a single TrustCard.
 ///
 /// Sub-task 4 of bd-35m7.1 wires the trajectory-gaming detector into the
@@ -852,6 +855,43 @@ pub struct AuditRecord {
     pub trace_id: String,
 }
 
+/// Independent authority retaining a quarantine on an extension.
+/// Releasing one source cannot release another source's containment decision.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum QuarantineSource {
+    Local,
+    Fleet {
+        zone_id: String,
+        incident_id: String,
+    },
+}
+
+impl QuarantineSource {
+    fn validate(&self) -> Result<(), TrustCardError> {
+        if let Self::Fleet {
+            zone_id,
+            incident_id,
+        } = self
+        {
+            for (name, value) in [("zone_id", zone_id), ("incident_id", incident_id)] {
+                if value.is_empty()
+                    || value.trim() != value
+                    || value.len() > MAX_QUARANTINE_SOURCE_ID_BYTES
+                    || value.chars().any(char::is_control)
+                {
+                    return Err(TrustCardError::InvalidInput {
+                        reason: format!(
+                            "quarantine source {name} must be nonempty, unpadded, control-free, and at most {MAX_QUARANTINE_SOURCE_ID_BYTES} bytes"
+                        ),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrustCard {
     pub schema_version: String,
@@ -867,6 +907,11 @@ pub struct TrustCard {
     pub reputation_score_basis_points: u16,
     pub reputation_trend: ReputationTrend,
     pub active_quarantine: bool,
+    /// Signed containment ownership. A historical active card without sources
+    /// is conservatively treated as locally quarantined; a fleet release has
+    /// no authority to clear it.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub quarantine_sources: BTreeSet<QuarantineSource>,
     pub dependency_trust_summary: Vec<DependencyTrustStatus>,
     pub last_verified_timestamp: String,
     pub user_facing_risk_assessment: RiskAssessment,
@@ -907,6 +952,7 @@ impl std::fmt::Debug for TrustCard {
             )
             .field("reputation_trend", &self.reputation_trend)
             .field("active_quarantine", &self.active_quarantine)
+            .field("quarantine_sources", &self.quarantine_sources)
             .field("dependency_trust_summary", &self.dependency_trust_summary)
             .field("last_verified_timestamp", &self.last_verified_timestamp)
             .field(
@@ -919,6 +965,34 @@ impl std::fmt::Debug for TrustCard {
             .field("card_hash", &"[REDACTED]")
             .field("registry_signature", &"[REDACTED]")
             .finish()
+    }
+}
+
+impl TrustCard {
+    #[must_use]
+    pub fn effective_quarantine_sources(&self) -> BTreeSet<QuarantineSource> {
+        if self.active_quarantine && self.quarantine_sources.is_empty() {
+            BTreeSet::from([QuarantineSource::Local])
+        } else {
+            self.quarantine_sources.clone()
+        }
+    }
+
+    fn validate_quarantine_sources(&self) -> Result<(), TrustCardError> {
+        if self.quarantine_sources.len() > MAX_QUARANTINE_SOURCES {
+            return Err(TrustCardError::InvalidInput {
+                reason: format!("quarantine source count exceeds {MAX_QUARANTINE_SOURCES}"),
+            });
+        }
+        if !self.active_quarantine && !self.quarantine_sources.is_empty() {
+            return Err(TrustCardError::InvalidInput {
+                reason: "quarantine sources require active_quarantine=true".to_string(),
+            });
+        }
+        for source in &self.quarantine_sources {
+            source.validate()?;
+        }
+        Ok(())
     }
 }
 
@@ -1578,7 +1652,22 @@ impl TrustCardRegistry {
         };
 
         let extension_id = input.extension.extension_id.clone();
-        let (previous_hash, next_version) = match self.latest_verified_card(&extension_id)? {
+        let previous = self.latest_verified_card(&extension_id)?;
+        let mut quarantine_sources = previous
+            .map(TrustCard::effective_quarantine_sources)
+            .unwrap_or_default();
+        if input.active_quarantine {
+            quarantine_sources.insert(QuarantineSource::Local);
+        }
+        // Replacing an artifact or re-scanning its metadata is not authority
+        // to release an operator decision or reverse permanent revocation.
+        let revocation_status = match previous {
+            Some(card) if matches!(card.revocation_status, RevocationStatus::Revoked { .. }) => {
+                card.revocation_status.clone()
+            }
+            _ => input.revocation_status,
+        };
+        let (previous_hash, next_version) = match previous {
             Some(previous) => (
                 Some(previous.card_hash.clone()),
                 next_trust_card_version(previous.trust_card_version, &extension_id)?,
@@ -1595,11 +1684,12 @@ impl TrustCardRegistry {
             certification_level: input.certification_level,
             capability_declarations: sorted_capabilities(input.capability_declarations),
             behavioral_profile: input.behavioral_profile,
-            revocation_status: input.revocation_status,
+            revocation_status,
             provenance_summary: input.provenance_summary,
             reputation_score_basis_points: input.reputation_score_basis_points,
             reputation_trend: input.reputation_trend,
-            active_quarantine: input.active_quarantine,
+            active_quarantine: !quarantine_sources.is_empty(),
+            quarantine_sources,
             dependency_trust_summary: sorted_dependencies(input.dependency_trust_summary),
             last_verified_timestamp: input.last_verified_timestamp,
             user_facing_risk_assessment: input.user_facing_risk_assessment,
@@ -1670,6 +1760,53 @@ impl TrustCardRegistry {
         now_secs: u64,
         trace_id: &str,
     ) -> Result<TrustCard, TrustCardError> {
+        self.update_with_quarantine_source(extension_id, mutation, None, now_secs, trace_id)
+    }
+
+    /// Add or release one signed containment source, preserving all others.
+    /// Repeating the same decision is a no-op, including after a restart.
+    pub fn set_quarantine_source(
+        &mut self,
+        extension_id: &str,
+        source: QuarantineSource,
+        active: bool,
+        now_secs: u64,
+        trace_id: &str,
+    ) -> Result<TrustCard, TrustCardError> {
+        source.validate()?;
+        validate_extension_id(extension_id)?;
+        let latest = self
+            .latest_verified_card(extension_id)?
+            .ok_or_else(|| TrustCardError::NotFound(extension_id.to_string()))?;
+        if latest.effective_quarantine_sources().contains(&source) == active {
+            return Ok(latest.clone());
+        }
+        self.update_with_quarantine_source(
+            extension_id,
+            TrustCardMutation {
+                certification_level: None,
+                revocation_status: None,
+                active_quarantine: None,
+                reputation_score_basis_points: None,
+                reputation_trend: None,
+                user_facing_risk_assessment: None,
+                last_verified_timestamp: Some(timestamp_from_secs(now_secs)),
+                evidence_refs: None,
+            },
+            Some((source, active)),
+            now_secs,
+            trace_id,
+        )
+    }
+
+    fn update_with_quarantine_source(
+        &mut self,
+        extension_id: &str,
+        mutation: TrustCardMutation,
+        source_change: Option<(QuarantineSource, bool)>,
+        now_secs: u64,
+        trace_id: &str,
+    ) -> Result<TrustCard, TrustCardError> {
         validate_extension_id(extension_id)?;
         let latest = self
             .latest_verified_card(extension_id)?
@@ -1725,9 +1862,21 @@ impl TrustCardRegistry {
             }
             next.revocation_status = status;
         }
-        if let Some(active_quarantine) = mutation.active_quarantine {
-            next.active_quarantine = active_quarantine;
+        next.quarantine_sources = latest.effective_quarantine_sources();
+        let quarantine_change = source_change.or_else(|| {
+            mutation
+                .active_quarantine
+                .map(|active| (QuarantineSource::Local, active))
+        });
+        if let Some((source, active)) = &quarantine_change {
+            if *active {
+                next.quarantine_sources.insert(source.clone());
+            } else {
+                next.quarantine_sources.remove(source);
+            }
         }
+        next.active_quarantine = !next.quarantine_sources.is_empty();
+        next.validate_quarantine_sources()?;
         if let Some(score) = mutation.reputation_score_basis_points {
             next.reputation_score_basis_points = score;
         }
@@ -1745,7 +1894,10 @@ impl TrustCardRegistry {
             AuditRecord {
                 timestamp: timestamp_from_secs(now_secs),
                 event_code: TRUST_CARD_UPDATED.to_string(),
-                detail: "trust card updated".to_string(),
+                detail: match &quarantine_change {
+                    Some((source, active)) => format!("quarantine source {source:?} active={active}"),
+                    None => "trust card updated".to_string(),
+                },
                 trace_id: trace_id.to_string(),
             },
             MAX_AUDIT_HISTORY,
@@ -2620,6 +2772,13 @@ fn comparison_from_cards(
             right: right.active_quarantine.to_string(),
         });
     }
+    if left.effective_quarantine_sources() != right.effective_quarantine_sources() {
+        changes.push(TrustCardDiffEntry {
+            field: "quarantine_sources".to_string(),
+            left: format!("{:?}", left.effective_quarantine_sources()),
+            right: format!("{:?}", right.effective_quarantine_sources()),
+        });
+    }
     if !left
         .capability_declarations
         .eq(&right.capability_declarations)
@@ -2765,6 +2924,7 @@ pub fn render_comparison_human(comparison: &TrustCardComparison) -> String {
 /// Returns `TrustCardError` if canonical hashing fails, the HMAC key is invalid,
 /// or either integrity check does not match.
 pub fn verify_card_signature(card: &TrustCard, registry_key: &[u8]) -> Result<(), TrustCardError> {
+    card.validate_quarantine_sources()?;
     let expected_hash = compute_card_hash(card)?;
     if !constant_time::ct_eq(&card.card_hash, &expected_hash) {
         return Err(TrustCardError::CardHashMismatch(
@@ -3089,6 +3249,7 @@ fn canonical_card_without_hash_and_signature(card: &TrustCard) -> Result<Vec<u8>
 /// Returns [`TrustCardError`] if the canonical hash cannot be computed or the
 /// registry key is invalid.
 pub fn sign_card_in_place(card: &mut TrustCard, registry_key: &[u8]) -> Result<(), TrustCardError> {
+    card.validate_quarantine_sources()?;
     card.card_hash = compute_card_hash(card)?;
     let mut mac =
         HmacSha256::new_from_slice(registry_key).map_err(|_| TrustCardError::InvalidRegistryKey)?;
@@ -6775,6 +6936,7 @@ mod tests {
             ],
             derivation_evidence: Some(derivation_evidence),
             camouflage_hints: Vec::new(),
+            quarantine_sources: BTreeSet::new(),
             card_hash: String::new(),
             registry_signature: String::new(),
         };

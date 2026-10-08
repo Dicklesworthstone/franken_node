@@ -79,6 +79,7 @@ fn base_trust_card() -> TrustCard {
         }],
         derivation_evidence: None,
         camouflage_hints: Vec::new(),
+        quarantine_sources: Default::default(),
         card_hash: repeated_hex("3c", 32),
         registry_signature: repeated_hex("4d", 64),
     }

@@ -1,14 +1,16 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use frankenengine_node::security::trajectory_gaming::{CamouflageHint, CamouflageKind};
 use frankenengine_node::supply_chain::certification::{EvidenceType, VerifiedEvidenceRef};
 use frankenengine_node::supply_chain::trust_card::{
     BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
-    DependencyTrustStatus, ExtensionIdentity, ProvenanceSummary, PublisherIdentity,
-    ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, SnapshotSourceContext,
-    TRUST_CARD_CAMOUFLAGE_SUSPECTED, TrustCard, TrustCardInput, TrustCardMutation,
-    TrustCardRegistry, TrustCardRegistrySnapshot, compute_card_hash,
+    DependencyTrustStatus, ExtensionIdentity, MAX_QUARANTINE_SOURCES, ProvenanceSummary,
+    PublisherIdentity, QuarantineSource, ReputationTrend, RevocationStatus, RiskAssessment,
+    RiskLevel, SnapshotSourceContext, TRUST_CARD_CAMOUFLAGE_SUSPECTED, TrustCard, TrustCardError,
+    TrustCardInput, TrustCardMutation, TrustCardRegistry, TrustCardRegistrySnapshot,
+    compute_card_hash, sign_card_in_place, verify_card_signature,
 };
+use frankenengine_node::supply_chain::trust_card_registry_store::TrustCardRegistryStore;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
@@ -67,6 +69,276 @@ fn real_trust_card_input() -> TrustCardInput {
             verification_receipt_hash:
                 "4ef6f8d5e8e0f0b778e7ca4a68697c139e91fbf18d8d1f8af5fcb5e628dd5c6a".to_string(),
         }],
+    }
+}
+
+fn fleet_source(zone_id: &str, incident_id: &str) -> QuarantineSource {
+    QuarantineSource::Fleet {
+        zone_id: zone_id.to_string(),
+        incident_id: incident_id.to_string(),
+    }
+}
+
+#[test]
+fn quarantine_owners_survive_restart_and_independent_releases() {
+    let dir = tempfile::tempdir().expect("state directory");
+    let path = dir.path().join("registry.json");
+    let input = real_trust_card_input();
+    let id = input.extension.extension_id.clone();
+    let mut registry = TrustCardRegistry::default();
+    registry.create(input, 1_800_000_000, "create").unwrap();
+    let east = fleet_source("east", "shared-incident");
+    let all = fleet_source("all", "shared-incident");
+    for source in [east.clone(), all.clone(), QuarantineSource::Local] {
+        registry
+            .set_quarantine_source(&id, source, true, 1_800_000_001, "contain")
+            .unwrap();
+    }
+    registry.persist_authoritative_state(&path).unwrap();
+    drop(registry);
+    let mut loaded = TrustCardRegistry::load_authoritative_state(
+        &path,
+        60,
+        1_800_000_002,
+        SnapshotSourceContext::TrustedFile,
+    )
+    .unwrap();
+    let after_east = loaded
+        .set_quarantine_source(&id, east.clone(), false, 1_800_000_003, "release-east")
+        .unwrap();
+    assert!(after_east.active_quarantine);
+    assert_eq!(
+        after_east.quarantine_sources,
+        BTreeSet::from([all.clone(), QuarantineSource::Local])
+    );
+    let retry = loaded
+        .set_quarantine_source(&id, east, false, 1_800_000_004, "retry-release")
+        .unwrap();
+    assert_eq!(
+        retry.card_hash, after_east.card_hash,
+        "idempotent retry must not create a new version"
+    );
+    let after_all = loaded
+        .set_quarantine_source(&id, all, false, 1_800_000_005, "release-global")
+        .unwrap();
+    assert!(
+        after_all.active_quarantine,
+        "fleet cannot release the local decision"
+    );
+    assert_eq!(
+        after_all.quarantine_sources,
+        BTreeSet::from([QuarantineSource::Local])
+    );
+    let released = loaded
+        .set_quarantine_source(
+            &id,
+            QuarantineSource::Local,
+            false,
+            1_800_000_006,
+            "release-local",
+        )
+        .unwrap();
+    assert!(!released.active_quarantine);
+    assert!(released.quarantine_sources.is_empty());
+    loaded.persist_authoritative_state(&path).unwrap();
+    let mut restarted = TrustCardRegistry::load_authoritative_state(
+        &path,
+        60,
+        1_800_000_007,
+        SnapshotSourceContext::TrustedFile,
+    )
+    .unwrap();
+    assert_eq!(
+        restarted
+            .read(&id, 1_800_000_008, "read")
+            .unwrap()
+            .unwrap()
+            .card_hash,
+        released.card_hash
+    );
+}
+
+#[test]
+fn generic_local_release_cannot_remove_fleet_quarantine() {
+    let input = real_trust_card_input();
+    let id = input.extension.extension_id.clone();
+    let mut registry = TrustCardRegistry::default();
+    registry.create(input, 100, "create").unwrap();
+    let source = fleet_source("east", "supply-chain-incident");
+    registry
+        .set_quarantine_source(&id, source.clone(), true, 101, "fleet")
+        .unwrap();
+    let mutation = |active| TrustCardMutation {
+        certification_level: None,
+        revocation_status: None,
+        active_quarantine: Some(active),
+        reputation_score_basis_points: None,
+        reputation_trend: None,
+        user_facing_risk_assessment: None,
+        last_verified_timestamp: None,
+        evidence_refs: None,
+    };
+    registry
+        .update(&id, mutation(true), 102, "local-quarantine")
+        .unwrap();
+    let card = registry
+        .update(&id, mutation(false), 103, "local-release")
+        .unwrap();
+    assert!(card.active_quarantine);
+    assert_eq!(card.quarantine_sources, BTreeSet::from([source]));
+}
+
+#[test]
+fn historical_unowned_quarantine_is_local_and_cannot_be_claimed_by_fleet() {
+    let mut input = real_trust_card_input();
+    input.active_quarantine = true;
+    let id = input.extension.extension_id.clone();
+    let mut registry = TrustCardRegistry::default();
+    let mut historical = registry.create(input, 100, "historical").unwrap();
+    historical.quarantine_sources.clear();
+    sign_card_in_place(&mut historical, DEFAULT_REGISTRY_KEY).unwrap();
+    let raw = serde_json::to_string(&historical).unwrap();
+    assert!(
+        !raw.contains("quarantine_sources"),
+        "historical encoding remains verifiable"
+    );
+    let snapshot = TrustCardRegistrySnapshot::signed(
+        60,
+        BTreeMap::from([(id.clone(), vec![historical])]),
+        DEFAULT_REGISTRY_KEY,
+    )
+    .unwrap();
+    let mut loaded = TrustCardRegistry::from_snapshot(snapshot, DEFAULT_REGISTRY_KEY, 101).unwrap();
+    let source = fleet_source("east", "later-incident");
+    let claimed = loaded
+        .set_quarantine_source(&id, source.clone(), true, 102, "fleet-quarantine")
+        .unwrap();
+    assert!(
+        claimed
+            .quarantine_sources
+            .contains(&QuarantineSource::Local)
+    );
+    let released = loaded
+        .set_quarantine_source(&id, source, false, 103, "fleet-release")
+        .unwrap();
+    assert!(released.active_quarantine);
+    assert_eq!(
+        released.quarantine_sources,
+        BTreeSet::from([QuarantineSource::Local])
+    );
+}
+
+#[test]
+fn replacement_artifact_preserves_containment_and_permanent_revocation() {
+    let input = real_trust_card_input();
+    let id = input.extension.extension_id.clone();
+    let mut registry = TrustCardRegistry::default();
+    registry.create(input.clone(), 100, "create").unwrap();
+    let source = fleet_source("east", "compromised-publisher");
+    registry
+        .set_quarantine_source(&id, source.clone(), true, 101, "fleet")
+        .unwrap();
+    registry
+        .update(
+            &id,
+            TrustCardMutation {
+                certification_level: None,
+                revocation_status: Some(RevocationStatus::Revoked {
+                    reason: "confirmed compromise".to_string(),
+                    revoked_at: "2026-10-08T00:00:00Z".to_string(),
+                }),
+                active_quarantine: Some(true),
+                reputation_score_basis_points: None,
+                reputation_trend: None,
+                user_facing_risk_assessment: None,
+                last_verified_timestamp: None,
+                evidence_refs: None,
+            },
+            102,
+            "revoke",
+        )
+        .unwrap();
+    let mut replacement = input;
+    replacement.extension.version = "2.4.0".to_string();
+    let card = registry
+        .create(replacement, 103, "replace-artifact")
+        .unwrap();
+    assert!(matches!(
+        card.revocation_status,
+        RevocationStatus::Revoked { .. }
+    ));
+    assert!(card.active_quarantine);
+    assert_eq!(
+        card.quarantine_sources,
+        BTreeSet::from([source.clone(), QuarantineSource::Local])
+    );
+    registry
+        .set_quarantine_source(&id, source, false, 104, "fleet-release")
+        .unwrap();
+    let card = registry
+        .set_quarantine_source(&id, QuarantineSource::Local, false, 105, "local-release")
+        .unwrap();
+    assert!(
+        matches!(card.revocation_status, RevocationStatus::Revoked { .. }),
+        "releasing containment never restores revoked trust"
+    );
+}
+
+#[test]
+fn quarantine_ownership_is_signed_and_inconsistent_states_are_rejected() {
+    let input = real_trust_card_input();
+    let id = input.extension.extension_id.clone();
+    let mut registry = TrustCardRegistry::default();
+    registry.create(input, 100, "create").unwrap();
+    let card = registry
+        .set_quarantine_source(
+            &id,
+            fleet_source("east", "incident"),
+            true,
+            101,
+            "quarantine",
+        )
+        .unwrap();
+    let mut tampered = card.clone();
+    tampered.quarantine_sources = BTreeSet::from([fleet_source("west", "incident")]);
+    assert!(verify_card_signature(&tampered, DEFAULT_REGISTRY_KEY).is_err());
+    let mut inconsistent = card;
+    inconsistent.active_quarantine = false;
+    assert!(sign_card_in_place(&mut inconsistent, DEFAULT_REGISTRY_KEY).is_err());
+}
+
+#[test]
+fn quarantine_source_capacity_and_invalid_identity_fail_without_losing_decisions() {
+    let input = real_trust_card_input();
+    let id = input.extension.extension_id.clone();
+    let mut seed = TrustCardRegistry::default();
+    let mut card = seed.create(input, 100, "create").unwrap();
+    card.active_quarantine = true;
+    card.quarantine_sources = (0..MAX_QUARANTINE_SOURCES)
+        .map(|index| fleet_source("east", &format!("incident-{index}")))
+        .collect();
+    sign_card_in_place(&mut card, DEFAULT_REGISTRY_KEY).unwrap();
+    let snapshot = TrustCardRegistrySnapshot::signed(
+        60,
+        BTreeMap::from([(id.clone(), vec![card.clone()])]),
+        DEFAULT_REGISTRY_KEY,
+    )
+    .unwrap();
+    let mut registry =
+        TrustCardRegistry::from_snapshot(snapshot, DEFAULT_REGISTRY_KEY, 101).unwrap();
+    for source in [
+        fleet_source("east", "overflow"),
+        fleet_source(" east", "bad"),
+        fleet_source("east", "bad\nidentity"),
+    ] {
+        assert!(
+            registry
+                .set_quarantine_source(&id, source, true, 102, "invalid")
+                .is_err()
+        );
+        let unchanged = registry.read(&id, 103, "read").unwrap().unwrap();
+        assert_eq!(unchanged.card_hash, card.card_hash);
+        assert_eq!(unchanged.quarantine_sources.len(), MAX_QUARANTINE_SOURCES);
     }
 }
 
@@ -232,12 +504,42 @@ fn authoritative_registry_rejects_tampered_snapshot() {
         .persist_authoritative_state(&snapshot_path)
         .expect("persist authoritative state");
 
-    let mut raw = std::fs::read_to_string(&snapshot_path).expect("read snapshot");
-    raw = raw.replace(
-        "https://github.com/operator/auth-guard",
-        "fixture://tampered",
+    let store = TrustCardRegistryStore::open(&snapshot_path).expect("open durable authority");
+    let (raw, high_water) = store
+        .load_state()
+        .expect("read durable snapshot")
+        .expect("authoritative snapshot exists");
+    let mut snapshot: TrustCardRegistrySnapshot =
+        serde_json::from_str(&raw).expect("parse valid signed snapshot");
+    let card = snapshot
+        .cards_by_extension
+        .get_mut("npm:@operator/auth-guard")
+        .expect("extension history")
+        .last_mut()
+        .expect("latest signed card");
+    card.provenance_summary.source_uri = "https://example.invalid/tampered".to_string();
+    let tampered = serde_json::to_string(&snapshot).expect("encode structurally valid tampering");
+    // Edit the actual authoritative row without recomputing any card or
+    // snapshot signature. The database remains readable and its signed
+    // high-water marker stays intact, so only integrity validation can refuse.
+    store
+        .with_immediate_transaction(|_connection, tx| {
+            tx.execute_with_params(
+                "UPDATE registry_state SET canonical_json = ?1 WHERE slot = 'snapshot';",
+                &[fsqlite::SqliteValue::Text(tampered.as_str().into())],
+            )
+            .map_err(|error| TrustCardError::SnapshotWrite {
+                path: store.db_path().to_path_buf(),
+                detail: error.to_string(),
+            })?;
+            Ok(())
+        })
+        .expect("commit tampered authoritative snapshot");
+    assert_eq!(
+        store.load_state().expect("database remains readable"),
+        Some((tampered, high_water))
     );
-    std::fs::write(&snapshot_path, raw).expect("tamper snapshot");
+    drop(store);
 
     let err = TrustCardRegistry::load_authoritative_state(
         &snapshot_path,
@@ -247,9 +549,12 @@ fn authoritative_registry_rejects_tampered_snapshot() {
     )
     .expect_err("tampered authoritative state must fail closed");
     assert!(
-        err.to_string().contains("signature")
-            || err.to_string().contains("hash")
-            || err.to_string().contains("snapshot")
+        matches!(
+            &err,
+            TrustCardError::CardHashMismatch(extension_id)
+                if extension_id == "npm:@operator/auth-guard"
+        ),
+        "expected signed card integrity refusal, got {err}"
     );
 }
 

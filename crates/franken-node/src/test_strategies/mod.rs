@@ -590,6 +590,7 @@ pub fn trust_cards() -> BoxedStrategy<TrustCard> {
                 reputation_score_basis_points,
                 reputation_trend,
                 active_quarantine,
+                quarantine_sources: Default::default(),
                 dependency_trust_summary,
                 last_verified_timestamp,
                 user_facing_risk_assessment,

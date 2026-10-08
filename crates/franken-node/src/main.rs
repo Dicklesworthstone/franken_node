@@ -185,9 +185,9 @@ use frankenengine_node::{
         trust_card::{
             BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
             DependencyTrustStatus, ExtensionIdentity, ProvenanceSummary, PublisherIdentity,
-            ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, SnapshotSourceContext,
-            TrustCard, TrustCardError, TrustCardInput, TrustCardListFilter, TrustCardMutation,
-            TrustCardRegistry, TrustCardSyncReport, render_comparison_human,
+            QuarantineSource, ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel,
+            SnapshotSourceContext, TrustCard, TrustCardError, TrustCardInput, TrustCardListFilter,
+            TrustCardMutation, TrustCardRegistry, TrustCardSyncReport, render_comparison_human,
             render_trust_card_human, to_canonical_json as trust_card_to_json,
         },
     },
@@ -26952,24 +26952,16 @@ fn apply_fleet_quarantine_action(
             .read(&extension_id, now_secs, "trace-cli-fleet-agent-quarantine-current")
             .map_err(|err| anyhow::anyhow!(err.to_string()))?
             .ok_or_else(|| anyhow::anyhow!("fleet quarantine target `{extension_id}` disappeared"))?;
-        if card.active_quarantine {
+        if card.effective_quarantine_sources().contains(&source) {
             updated_extensions.push(extension_id);
             continue;
         }
         state
             .registry
-            .update(
+            .set_quarantine_source(
                 &extension_id,
-                TrustCardMutation {
-                    certification_level: None,
-                    revocation_status: None,
-                    active_quarantine: Some(true),
-                    reputation_score_basis_points: None,
-                    reputation_trend: None,
-                    user_facing_risk_assessment: None,
-                    last_verified_timestamp: Some(now_rfc3339.clone()),
-                    evidence_refs: None,
-                },
+                source.clone(),
+                true,
                 now_secs,
                 "trace-cli-fleet-agent-quarantine",
             )
@@ -27018,7 +27010,6 @@ fn apply_fleet_revoke_action(
         PersistedRevocationSeverity::Mandatory => "mandatory",
         PersistedRevocationSeverity::Emergency => "emergency",
     };
-    let now_rfc3339 = rfc3339_timestamp_from_secs(now_secs);
     state
         .registry
         .update(
@@ -27052,6 +27043,8 @@ fn apply_fleet_revoke_action(
 /// A release only retires its own (zone, incident), including the explicit `all`
 /// scope. Independent and later quarantines remain live on agent restart.
 fn active_fleet_quarantines<'a>(
+    zone_id: &str,
+    incident_id: &str,
     actions: &'a [PersistedFleetActionRecord],
     agent_zone: &str,
 ) -> BTreeMap<(&'a str, &'a str), Vec<&'a PersistedFleetActionRecord>> {
@@ -27071,6 +27064,10 @@ fn active_fleet_quarantines<'a>(
             PersistedFleetAction::Release {
                 zone_id,
                 incident_id,
+    let source = QuarantineSource::Fleet {
+        zone_id: zone_id.to_string(),
+        incident_id: incident_id.to_string(),
+    };
                 ..
             } if fleet_action_applies_to_zone(zone_id, agent_zone) => {
                 active.remove(&(zone_id.as_str(), incident_id.as_str()));
@@ -27086,90 +27083,43 @@ fn apply_fleet_release_action(
     agent_zone: &str,
     release_zone: &str,
     incident_id: &str,
-    action_history: &[PersistedFleetActionRecord],
     current_actions: &[PersistedFleetActionRecord],
     now_secs: u64,
 ) -> Result<Vec<String>> {
+    // A later action may have reactivated the same scoped incident. It remains
+    // part of the desired snapshot even while replaying an older release.
+    if active_fleet_quarantines(current_actions, agent_zone)
+        .contains_key(&(release_zone, incident_id))
+    {
+        return Ok(Vec::new());
+    }
+
     let mut state = fleet_agent_registry_state(project_root, now_secs)?;
-    let mut before_release = active_fleet_quarantines(
-        &action_history[..action_history.len().saturating_sub(1)],
-        agent_zone,
-    );
-
-    let Some(records_to_release) = before_release.remove(&(release_zone, incident_id)) else {
-        return Ok(Vec::new());
+    let source = QuarantineSource::Fleet {
+        zone_id: release_zone.to_string(),
+        incident_id: incident_id.to_string(),
     };
-
-    let mut targets_to_release = std::collections::BTreeSet::new();
-    for record in records_to_release {
-        let PersistedFleetAction::Quarantine { target_id, .. } = &record.action else {
-            continue;
-        };
-        for extension_id in resolve_fleet_agent_action_targets(
-            &mut state.registry,
-            target_id,
-            now_secs,
+    // Ownership is persisted on the signed cards. It remains releasable after
+    // restart, target metadata changes, or compaction of the original action.
+    let cards = state
+        .registry
+        .list(
+            &TrustCardListFilter::empty(),
             "trace-cli-fleet-agent-release-lookup",
-        )? {
-            targets_to_release.insert(extension_id);
-        }
-    }
-    if targets_to_release.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut still_quarantined_targets = std::collections::BTreeSet::new();
-    for records in active_fleet_quarantines(current_actions, agent_zone).values() {
-        for record in records {
-            let PersistedFleetAction::Quarantine { target_id, .. } = &record.action else {
-                continue;
-            };
-            for extension_id in resolve_fleet_agent_action_targets(
-                &mut state.registry,
-                target_id,
-                now_secs,
-                "trace-cli-fleet-agent-release-overlap-lookup",
-            )? {
-                still_quarantined_targets.insert(extension_id);
-            }
-        }
-    }
-
-    let releasable_targets = targets_to_release
-        .into_iter()
-        .filter(|extension_id| !still_quarantined_targets.contains(extension_id))
-        .collect::<Vec<_>>();
-    if releasable_targets.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let now_rfc3339 = rfc3339_timestamp_from_secs(now_secs);
+            now_secs,
+        )
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     let mut released = Vec::new();
-    for extension_id in releasable_targets {
-        let card = state.registry
-            .read(&extension_id, now_secs, "trace-cli-fleet-agent-release-current")
-            .map_err(|err| anyhow::anyhow!(err.to_string()))?
-            .ok_or_else(|| anyhow::anyhow!("fleet release target `{extension_id}` disappeared"))?;
-        // A quarantine release never weakens a mandatory revocation.
-        if !card.active_quarantine
-            || matches!(card.revocation_status, RevocationStatus::Revoked { .. })
-        {
+    for card in cards {
+        if !card.effective_quarantine_sources().contains(&source) {
             continue;
         }
         state
             .registry
-            .update(
+            .set_quarantine_source(
                 &extension_id,
-                TrustCardMutation {
-                    certification_level: None,
-                    revocation_status: None,
-                    active_quarantine: Some(false),
-                    reputation_score_basis_points: None,
-                    reputation_trend: None,
-                    user_facing_risk_assessment: None,
-                    last_verified_timestamp: Some(now_rfc3339.clone()),
-                    evidence_refs: None,
-                },
+                source.clone(),
+                false,
                 now_secs,
                 "trace-cli-fleet-agent-release",
             )
@@ -27281,6 +27231,7 @@ fn run_fleet_serve(args: &cli::FleetServeArgs) -> Result<()> {
             bind: bind.to_string(),
             max_requests: args.max_requests,
         },
+        let extension_id = card.extension.extension_id;
         control,
         sink,
     )
@@ -27441,10 +27392,9 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
         // was observed; other independent containment actions still proceed.
         let relevant_actions: Vec<_> = actions
             .iter()
-            .enumerate()
             .filter(|action| {
                 fleet_action_applies_to_zone(
-                    persisted_fleet_action_zone(&action.1.action),
+                    persisted_fleet_action_zone(&action.action),
                     &resolved.zone_id,
                 )
             })
@@ -27453,7 +27403,7 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
         let mut actions_processed = 0_u64;
 
         // Apply each action and track quarantine version
-        for (action_index, action) in relevant_actions {
+        for action in relevant_actions {
             let newly_observed = !seen_action_ids.contains(&action.action_id);
             if newly_observed {
                 actions_processed = actions_processed.saturating_add(1);
@@ -27476,7 +27426,9 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
                     quarantine_version: qv,
                     reason,
                     ..
-                } => match apply_fleet_quarantine_action(Path::new("."), target_id, now_secs) {
+                } => match apply_fleet_quarantine_action(
+                    Path::new("."), zone_id, incident_id, target_id, now_secs,
+                ) {
                     Ok(updated_extensions) => {
                         quarantine_version = quarantine_version.max(*qv);
                         tracing::info!(
@@ -27511,7 +27463,6 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
                     &resolved.zone_id,
                     zone_id,
                     incident_id,
-                    &actions[..=action_index],
                     &actions,
                     now_secs,
                 ) {
@@ -27613,6 +27564,7 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
             last_seen: poll_timestamp,
             quarantine_version,
             health: node_health,
+                    zone_id,
             // Each effect persisted before this atomic heartbeat write. A
             // crash before publication causes idempotent reconciliation on
             // restart. Failure replaces any earlier checkpoint with None.

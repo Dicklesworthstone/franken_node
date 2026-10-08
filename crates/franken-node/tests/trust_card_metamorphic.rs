@@ -266,6 +266,7 @@ fn generated_trust_card(mut seed: u64) -> TrustCard {
         }],
         derivation_evidence: None,
         camouflage_hints: Vec::new(),
+        quarantine_sources: Default::default(),
         card_hash: generated_hash(&mut seed),
         registry_signature: generated_signature(&mut seed),
     }

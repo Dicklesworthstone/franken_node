@@ -50,6 +50,7 @@ fn test_trust_card_canonical_json_snapshot() {
         reputation_score_basis_points: 8500, // 85%
         reputation_trend: ReputationTrend::Stable,
         active_quarantine: false,
+        quarantine_sources: Default::default(),
         dependency_trust_summary: vec![],
         last_verified_timestamp: "2026-05-08T12:00:00Z".to_string(),
         user_facing_risk_assessment: RiskAssessment {

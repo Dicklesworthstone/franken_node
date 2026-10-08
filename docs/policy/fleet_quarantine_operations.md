@@ -48,7 +48,12 @@ Permanently revokes trust credentials for a zone/tenant. Three severity levels:
 ### Release
 
 The CLI retires the selected quarantine incident. A release does not clear a
-mandatory revocation or another active fleet incident affecting the same target.
+mandatory revocation, a local operator's quarantine, or another active fleet
+incident affecting the same target. Trust cards persist a signed
+`quarantine_sources` set containing local ownership and each fleet incident's
+`(zone_id, incident_id)`. The aggregate `active_quarantine` flag stays true while
+any source remains. Ordinary trust-card quarantine mutations affect only local
+ownership; they cannot clear a fleet source.
 Incident IDs are scoped by zone: use `fleet release --incident <id> --zone <zone>`
 when an ID exists in several zones. `--zone all` selects a fleet-wide incident;
 an omitted zone is accepted only when the incident is unambiguous.
@@ -114,10 +119,14 @@ currently authenticates a shared bearer token.
 
 Compaction retains unresolved quarantine history and unexpired incident history;
 revocations have no age-based expiry. A full in-memory action log refuses new
-publication rather than discarding older containment decisions. Source ownership
-for an independent local quarantine is not represented by the trust card's single
-quarantine boolean; the snapshot checkpoint covers the fleet incident state and
-does not establish separate local quarantine provenance.
+publication rather than discarding older containment decisions. Signed ownership
+on each trust card lets release find its affected cards after restart, target
+metadata changes, or removal of the original action from retained history.
+Historical active cards without ownership metadata are treated as locally
+quarantined, so a fleet release cannot silently clear an unattributed decision.
+Creating a replacement card retains existing quarantine sources and permanent
+revocation. A card accepts at most 1,024 independent quarantine sources; reaching
+that limit rejects the new mutation without evicting an existing decision.
 
 ## Decision Receipts
 

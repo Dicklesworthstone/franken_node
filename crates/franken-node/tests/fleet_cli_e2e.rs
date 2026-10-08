@@ -14,8 +14,8 @@ use frankenengine_node::control_plane::fleet_transport::{
     fleet_convergence_receipt_verdict,
 };
 use frankenengine_node::supply_chain::trust_card::{
-    ReputationTrend, RiskAssessment, RiskLevel, SnapshotSourceContext, TrustCardInput,
-    TrustCardMutation, TrustCardRegistry,
+    QuarantineSource, ReputationTrend, RiskAssessment, RiskLevel, SnapshotSourceContext,
+    TrustCardInput, TrustCardMutation, TrustCardRegistry,
 };
 use insta::{assert_json_snapshot, assert_snapshot};
 use sha2::{Digest, Sha256};
@@ -1807,21 +1807,13 @@ fn fleet_agent_release_actions_clear_local_quarantine_state() {
     )
     .expect("load");
     registry
-        .update(
+        .set_quarantine_source(
             "npm:@acme/auth-guard",
-            TrustCardMutation {
-                certification_level: None,
-                revocation_status: None,
-                active_quarantine: Some(true),
-                reputation_score_basis_points: None,
-                reputation_trend: Some(ReputationTrend::Declining),
-                user_facing_risk_assessment: Some(RiskAssessment {
-                    level: RiskLevel::High,
-                    summary: "quarantined before fleet release".to_string(),
-                }),
-                last_verified_timestamp: Some("2026-04-10T00:00:00Z".to_string()),
-                evidence_refs: None,
+            QuarantineSource::Fleet {
+                zone_id: "zone-release".to_string(),
+                incident_id: "inc-release-1".to_string(),
             },
+            true,
             2_001,
             "trace-test-fleet-pre-release",
         )
@@ -1918,21 +1910,13 @@ fn fleet_agent_release_actions_clear_global_quarantine_state() {
     )
     .expect("load");
     registry
-        .update(
+        .set_quarantine_source(
             "npm:@acme/auth-guard",
-            TrustCardMutation {
-                certification_level: None,
-                revocation_status: None,
-                active_quarantine: Some(true),
-                reputation_score_basis_points: None,
-                reputation_trend: Some(ReputationTrend::Declining),
-                user_facing_risk_assessment: Some(RiskAssessment {
-                    level: RiskLevel::High,
-                    summary: "quarantined before global fleet release".to_string(),
-                }),
-                last_verified_timestamp: Some("2026-04-10T00:00:00Z".to_string()),
-                evidence_refs: None,
+            QuarantineSource::Fleet {
+                zone_id: "all".to_string(),
+                incident_id: "inc-global-release-1".to_string(),
             },
+            true,
             2_001,
             "trace-test-fleet-pre-global-release",
         )
@@ -3071,14 +3055,258 @@ fn fleet_release_preserves_same_id_containment_in_independent_global_and_local_s
             "release {released_zone} must preserve {remaining_zone}"
         );
         assert_eq!(
-            card.trust_card_version, 2,
-            "replay must not transiently clear or rewrite containment"
+            card.trust_card_version, 4,
+            "the signed history records two independent owners and one source release"
+        );
+        assert_eq!(
+            card.quarantine_sources,
+            std::collections::BTreeSet::from([QuarantineSource::Fleet {
+                zone_id: remaining_zone.to_string(),
+                incident_id: "shared-scope-id".to_string(),
+            }])
+        );
+        let replay = run_cli_in_dir_with_fleet_state(
+            project.path(),
+            &[
+                "fleet",
+                "agent",
+                "--node-id",
+                "release-agent",
+                "--zone",
+                "east",
+                "--once",
+                "--json",
+            ],
+            &fleet_state_dir,
+        );
+        assert!(replay.status.success());
+        let mut replayed = TrustCardRegistry::load_authoritative_state(
+            &project
+                .path()
+                .join(".franken-node/state/trust-card-registry.v1.json"),
+            60,
+            3_101,
+            SnapshotSourceContext::TrustedFile,
+        )
+        .expect("reload replayed registry");
+        assert_eq!(
+            replayed
+                .read("npm:@acme/auth-guard", 3_102, "verify-replay")
+                .unwrap()
+                .unwrap()
+                .card_hash,
+            card.card_hash,
+            "replay must not rewrite an unchanged ownership decision"
         );
     }
 }
 
 #[test]
 fn fleet_agent_uses_config_defaults_for_node_id_and_poll_interval() {
+#[test]
+fn fleet_release_preserves_local_quarantine_created_before_or_after_fleet_application() {
+    for local_first in [true, false] {
+        let project = tempdir().expect("project");
+        let fleet_state = project.path().join("fleet-state");
+        let mut transport = seed_transport(&fleet_state);
+        write_fail_closed_cli_config_for_fixture_trust_cards(project.path());
+        write_fixture_registry_to(project.path());
+        let registry_path = project
+            .path()
+            .join(".franken-node/state/trust-card-registry.v1.json");
+        let add_local = || {
+            let mut registry = TrustCardRegistry::load_authoritative_state(
+                &registry_path,
+                60,
+                2_000,
+                SnapshotSourceContext::TrustedFile,
+            )
+            .expect("load local registry");
+            registry
+                .update(
+                    "npm:@acme/auth-guard",
+                    TrustCardMutation {
+                        certification_level: None,
+                        revocation_status: None,
+                        active_quarantine: Some(true),
+                        reputation_score_basis_points: None,
+                        reputation_trend: None,
+                        user_facing_risk_assessment: None,
+                        last_verified_timestamp: None,
+                        evidence_refs: None,
+                    },
+                    2_001,
+                    "local-operator",
+                )
+                .expect("local containment");
+            registry
+                .persist_authoritative_state(&registry_path)
+                .expect("persist local decision");
+        };
+        if local_first {
+            add_local();
+        }
+        let emitted_at = Utc::now();
+        transport
+            .publish_action(&FleetActionRecord {
+                action_id: "fleet-owner-quarantine".to_string(),
+                emitted_at,
+                action: FleetAction::Quarantine {
+                    zone_id: "east".to_string(),
+                    incident_id: "supply-chain-incident".to_string(),
+                    target_id: "npm:@acme/auth-guard".to_string(),
+                    target_kind: FleetTargetKind::Extension,
+                    reason: "confirmed containment".to_string(),
+                    quarantine_version: 1,
+                },
+            })
+            .expect("publish quarantine");
+        let agent_args = [
+            "fleet",
+            "agent",
+            "--node-id",
+            "owner-node",
+            "--zone",
+            "east",
+            "--once",
+            "--json",
+        ];
+        let first = run_cli_in_dir_with_fleet_state(project.path(), &agent_args, &fleet_state);
+        assert!(
+            first.status.success(),
+            "{}",
+            String::from_utf8_lossy(&first.stderr)
+        );
+        if !local_first {
+            add_local();
+        }
+        transport
+            .publish_action(&FleetActionRecord {
+                action_id: "fleet-owner-release".to_string(),
+                emitted_at: emitted_at + TimeDelta::seconds(1),
+                action: FleetAction::Release {
+                    zone_id: "east".to_string(),
+                    incident_id: "supply-chain-incident".to_string(),
+                    reason: Some("fleet investigation completed".to_string()),
+                },
+            })
+            .expect("publish release");
+        // Separate process: the release must use persisted signed ownership.
+        let second = run_cli_in_dir_with_fleet_state(project.path(), &agent_args, &fleet_state);
+        assert!(
+            second.status.success(),
+            "{}",
+            String::from_utf8_lossy(&second.stderr)
+        );
+        let mut registry = TrustCardRegistry::load_authoritative_state(
+            &registry_path,
+            60,
+            2_010,
+            SnapshotSourceContext::TrustedFile,
+        )
+        .expect("reload final state");
+        let card = registry
+            .read("npm:@acme/auth-guard", 2_011, "verify")
+            .unwrap()
+            .unwrap();
+        assert!(
+            card.active_quarantine,
+            "local decision lost (local_first={local_first})"
+        );
+        assert_eq!(
+            card.quarantine_sources,
+            std::collections::BTreeSet::from([QuarantineSource::Local])
+        );
+        let nodes = transport.list_node_statuses().expect("list nodes");
+        let node = nodes
+            .iter()
+            .find(|node| node.node_id == "owner-node")
+            .expect("heartbeat");
+        assert_eq!(node.health, NodeHealth::Healthy);
+        assert!(
+            node.applied_actions.is_some(),
+            "independent local quarantine does not prevent fleet application acknowledgement"
+        );
+    }
+}
+
+#[test]
+fn fleet_release_uses_signed_ownership_when_original_target_action_is_no_longer_retained() {
+    let project = tempdir().expect("project");
+    let fleet_state = project.path().join("fleet-state");
+    let mut transport = seed_transport(&fleet_state);
+    write_fail_closed_cli_config_for_fixture_trust_cards(project.path());
+    write_fixture_registry_to(project.path());
+    let registry_path = project
+        .path()
+        .join(".franken-node/state/trust-card-registry.v1.json");
+    let mut registry = TrustCardRegistry::load_authoritative_state(
+        &registry_path,
+        60,
+        2_000,
+        SnapshotSourceContext::TrustedFile,
+    )
+    .unwrap();
+    registry
+        .set_quarantine_source(
+            "npm:@acme/auth-guard",
+            QuarantineSource::Fleet {
+                zone_id: "east".to_string(),
+                incident_id: "compacted-incident".to_string(),
+            },
+            true,
+            2_001,
+            "prior-application",
+        )
+        .unwrap();
+    registry
+        .persist_authoritative_state(&registry_path)
+        .unwrap();
+    transport
+        .publish_action(&FleetActionRecord {
+            action_id: "release-without-original-target".to_string(),
+            emitted_at: Utc::now(),
+            action: FleetAction::Release {
+                zone_id: "east".to_string(),
+                incident_id: "compacted-incident".to_string(),
+                reason: Some("completed remediation".to_string()),
+            },
+        })
+        .unwrap();
+    let output = run_cli_in_dir_with_fleet_state(
+        project.path(),
+        &[
+            "fleet",
+            "agent",
+            "--node-id",
+            "recovered-node",
+            "--zone",
+            "east",
+            "--once",
+            "--json",
+        ],
+        &fleet_state,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut registry = TrustCardRegistry::load_authoritative_state(
+        &registry_path,
+        60,
+        2_002,
+        SnapshotSourceContext::TrustedFile,
+    )
+    .unwrap();
+    let card = registry
+        .read("npm:@acme/auth-guard", 2_003, "verify")
+        .unwrap()
+        .unwrap();
+    assert!(!card.active_quarantine);
+    assert!(card.quarantine_sources.is_empty());
+}
+
     let project = tempdir().expect("tempdir");
     let fleet_state_dir = project.path().join("fleet-state");
     seed_transport(&fleet_state_dir);

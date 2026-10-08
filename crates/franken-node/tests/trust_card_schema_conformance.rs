@@ -268,6 +268,7 @@ fn create_minimal_trust_card() -> TrustCard {
         audit_history: vec![],
         derivation_evidence: None,
         camouflage_hints: Vec::new(),
+        quarantine_sources: Default::default(),
         card_hash: String::new(),
         registry_signature: String::new(),
     })
