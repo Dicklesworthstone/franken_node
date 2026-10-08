@@ -851,6 +851,41 @@ pub fn load_active_fleet_policy(
     }
 }
 
+/// A narrower guest filesystem root must not hide an enclosing project's
+/// enrollment. Keep its authority narrow and refuse the run rather than
+/// silently widening that authority or dropping the enclosing policy.
+///
+/// Inspect canonical ancestors independently of the invocation directory and
+/// package markers. The normal policy reader also refuses corrupt enrollment,
+/// missing documents with a retained lock, and linked state paths.
+pub fn validate_fleet_policy_project_root(project: &Path) -> Result<(), FleetTransportError> {
+    let canonical = project.canonicalize().map_err(|error| {
+        FleetTransportError::io(format!(
+            "failed resolving fleet policy project root {}: {error}",
+            project.display()
+        ))
+    })?;
+    for ancestor in canonical.ancestors().skip(1) {
+        let active = load_active_fleet_policy(ancestor).map_err(|error| {
+            FleetTransportError::stale_state(format!(
+                "cannot exclude fleet policy enrollment at ancestor {} of selected project {}: {error}; \
+                 restore that enrollment and select its project directory explicitly",
+                ancestor.display(),
+                canonical.display()
+            ))
+        })?;
+        if active.is_some() {
+            return Err(FleetTransportError::stale_state(format!(
+                "selected project {} is inside fleet-managed project {}; \
+                 select the enrolled project directory explicitly to preserve its policy",
+                canonical.display(),
+                ancestor.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Apply policy to a copy and commit that copy only on success. The selected
 /// profile stays unchanged: callers below a fleet floor receive an explicit
 /// admission refusal rather than a mixture of profile defaults.
@@ -859,6 +894,21 @@ pub fn enforce_active_fleet_policy(
     config: &mut Config,
     profile: Profile,
 ) -> Result<Option<ActiveFleetPolicy>, FleetTransportError> {
+    // Capture relative aliases once so ancestry admission and the activation
+    // read cannot resolve different projects. Absolute inputs retain the
+    // descriptor reader's existing refusal of symlinked path components.
+    let canonical_relative = if project.is_absolute() {
+        None
+    } else {
+        Some(project.canonicalize().map_err(|error| {
+            FleetTransportError::io(format!(
+                "failed resolving fleet policy admission project {}: {error}",
+                project.display()
+            ))
+        })?)
+    };
+    let project = canonical_relative.as_deref().unwrap_or(project);
+    validate_fleet_policy_project_root(project)?;
     let active = load_active_fleet_policy(project)?;
     if let Some(active) = &active {
         if config.profile != profile {

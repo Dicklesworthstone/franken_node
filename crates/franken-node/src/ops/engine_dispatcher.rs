@@ -1,4 +1,6 @@
-use crate::control_plane::fleet_transport::{ActiveFleetPolicy, enforce_active_fleet_policy};
+use crate::control_plane::fleet_transport::{
+    ActiveFleetPolicy, enforce_active_fleet_policy, validate_fleet_policy_project_root,
+};
 use crate::ops::telemetry_bridge::{
     ShutdownReason, TelemetryBridge, TelemetryRuntimeHandle, TelemetryRuntimeReport,
 };
@@ -2852,6 +2854,8 @@ fn resolve_run_entrypoint_format(
 /// relative file uses its nearest project marker at or below the invocation
 /// directory, or its own parent when none exists. Absolute files select only
 /// their parent. Every entrypoint must remain inside the selected root.
+/// A selected root below an enrolled fleet project is refused; selecting a
+/// narrower guest authority cannot discard the enclosing project's policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunProjectPaths {
@@ -2945,6 +2949,7 @@ impl RunProjectPaths {
                 project_root.display()
             );
         }
+        validate_fleet_policy_project_root(&project_root)?;
         let entrypoint_format =
             resolve_run_entrypoint_format(&entrypoint, &project_root, &mut package_manifests)
                 .map_err(anyhow::Error::msg)?;

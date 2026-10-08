@@ -179,6 +179,14 @@ discard that project's earlier restrictions. Policy publication reports
 agent has applied it. Local `fleet policy status` reads the durable activation,
 and reconciliation requires the existing exact-snapshot application checkpoint.
 
+Run from the enrolled project authority. Selecting a nested directory, a nearer
+package marker, or an absolute file through the library API cannot hide an
+enclosing project's enrollment. Such narrower authorities are refused with a
+hint to select the enrolled project directory; the runtime does not silently
+expand guest filesystem access. The check follows canonical ancestors even when
+the invocation directory is inside the project or the target uses a directory
+symlink. Incomplete or corrupt ancestor enrollment also blocks admission.
+
 The effective rules are:
 
 | Policy field | Runtime behavior |
@@ -223,9 +231,7 @@ trust preflight, the dispatcher binds that activation to the native worker
 request, and the worker checks it again before constructing runtime controls.
 An enrolled worker cannot start after the expected policy disappears or rolls
 back. An already executing guest retains its admitted policy; this command does
-not claim to hot-reload budgets or stop existing guests. Use existing incident
-containment operations when an immediate response for running workloads is
-required.
+not claim to hot-reload budgets or stop existing guests.
 
 ## Decision Receipts
 

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use frankenengine_node::config::{Config, Profile};
+use frankenengine_node::config::{CliOverrides, Config, Profile};
 use frankenengine_node::control_plane::fleet_transport::{
     FleetAction, FleetTargetKind, FleetTransport, NodeHealth, NodeStatus,
 };
@@ -1130,8 +1130,13 @@ fn run_preflight_refuses_high_risk_dependency_under_strict_only() {
 #[test]
 fn execution_trust_admission_rechecks_previously_untracked_revocations() {
     let workspace = config_only_workspace();
-    let mut config = Config::load(&workspace.path().join("franken_node.toml"))
-        .expect("load signed-registry configuration");
+    let mut config = Config::resolve_with_env(
+        Some(&workspace.path().join("franken_node.toml")),
+        CliOverrides::default(),
+        &|_| None,
+    )
+    .expect("resolve signed-registry configuration")
+    .config;
     let now = chrono::Utc::now().timestamp().max(0) as u64;
     let registry_path =
         frankenengine_node::supply_chain::trust_card_registry_store::registry_snapshot_path(
@@ -1159,10 +1164,28 @@ fn execution_trust_admission_rechecks_previously_untracked_revocations() {
         )
         .expect("read fixture card")
         .expect("revoked fixture card");
-    let input = serde_json::from_value::<
-        frankenengine_node::supply_chain::trust_card::TrustCardInput,
-    >(serde_json::to_value(revoked).expect("serialize fixture creation fields"))
-    .expect("typed creation fields retain revocation and signed evidence references");
+    let evidence_refs = revoked
+        .derivation_evidence
+        .as_ref()
+        .expect("fixture retains signed evidence references")
+        .evidence_refs
+        .clone();
+    let input = frankenengine_node::supply_chain::trust_card::TrustCardInput {
+        extension: revoked.extension,
+        publisher: revoked.publisher,
+        certification_level: revoked.certification_level,
+        capability_declarations: revoked.capability_declarations,
+        behavioral_profile: revoked.behavioral_profile,
+        revocation_status: revoked.revocation_status,
+        provenance_summary: revoked.provenance_summary,
+        reputation_score_basis_points: revoked.reputation_score_basis_points,
+        reputation_trend: revoked.reputation_trend,
+        active_quarantine: revoked.active_quarantine,
+        dependency_trust_summary: revoked.dependency_trust_summary,
+        last_verified_timestamp: revoked.last_verified_timestamp,
+        user_facing_risk_assessment: revoked.user_facing_risk_assessment,
+        evidence_refs,
+    };
     registry
         .create(input, now + 3, "test-new-revocation")
         .expect("record new revoked identity");
@@ -1185,8 +1208,13 @@ fn execution_trust_admission_rechecks_a_legacy_skipped_registry_when_it_appears(
     use frankenengine_node::supply_chain::trust_card_registry_store::registry_snapshot_path;
 
     let workspace = config_only_workspace();
-    let mut config = Config::load(&workspace.path().join("franken_node.toml"))
-        .expect("load signed-registry configuration");
+    let mut config = Config::resolve_with_env(
+        Some(&workspace.path().join("franken_node.toml")),
+        CliOverrides::default(),
+        &|_| None,
+    )
+    .expect("resolve signed-registry configuration")
+    .config;
     config.profile = Profile::LegacyRisky;
     let now = chrono::Utc::now().timestamp().max(0) as u64;
     let requirements =
@@ -1228,8 +1256,13 @@ fn execution_trust_admission_rechecks_risk_escalation_with_current_profile() {
 
     let now = chrono::Utc::now().timestamp().max(0) as u64;
     let workspace = seeded_fixture_trust_workspace_with_timestamp(now);
-    let mut config = Config::load(&workspace.path().join("franken_node.toml"))
-        .expect("load signed-registry configuration");
+    let mut config = Config::resolve_with_env(
+        Some(&workspace.path().join("franken_node.toml")),
+        CliOverrides::default(),
+        &|_| None,
+    )
+    .expect("resolve signed-registry configuration")
+    .config;
     config.profile = Profile::Strict;
     let registry_path = registry_snapshot_path(workspace.path());
     record_revocation_frontier(
@@ -1306,8 +1339,13 @@ fn execution_trust_admission_honors_quarantine_profile_without_ignoring_revocati
 
     let now = chrono::Utc::now().timestamp().max(0) as u64;
     let workspace = seeded_fixture_trust_workspace_with_timestamp(now);
-    let mut config = Config::load(&workspace.path().join("franken_node.toml"))
-        .expect("load signed-registry configuration");
+    let mut config = Config::resolve_with_env(
+        Some(&workspace.path().join("franken_node.toml")),
+        CliOverrides::default(),
+        &|_| None,
+    )
+    .expect("resolve signed-registry configuration")
+    .config;
     let registry_path = registry_snapshot_path(workspace.path());
     let requirements = RunTrustRequirements::new(&[], &["npm:@acme/auth-guard".to_string()], true)
         .expect("retain previously trusted card");
@@ -1388,8 +1426,13 @@ fn execution_trust_admission_refuses_registry_and_required_card_loss() {
 
     let now = chrono::Utc::now().timestamp().max(0) as u64;
     let workspace = seeded_fixture_trust_workspace_with_timestamp(now);
-    let mut config = Config::load(&workspace.path().join("franken_node.toml"))
-        .expect("load signed-registry configuration");
+    let mut config = Config::resolve_with_env(
+        Some(&workspace.path().join("franken_node.toml")),
+        CliOverrides::default(),
+        &|_| None,
+    )
+    .expect("resolve signed-registry configuration")
+    .config;
     let requirements = RunTrustRequirements::new(&[], &["npm:@acme/auth-guard".to_string()], true)
         .expect("retain previously trusted card");
     validate_execution_trust(workspace.path(), &config, &requirements, now + 3)
@@ -1427,8 +1470,13 @@ fn execution_trust_admission_uses_execution_clock_for_frontier_expiry() {
 
     let now = chrono::Utc::now().timestamp().max(0) as u64;
     let workspace = seeded_fixture_trust_workspace_with_timestamp(now);
-    let mut config = Config::load(&workspace.path().join("franken_node.toml"))
-        .expect("load signed-registry configuration");
+    let mut config = Config::resolve_with_env(
+        Some(&workspace.path().join("franken_node.toml")),
+        CliOverrides::default(),
+        &|_| None,
+    )
+    .expect("resolve signed-registry configuration")
+    .config;
     config.profile = Profile::Strict;
     record_revocation_frontier(
         &registry_snapshot_path(workspace.path()),
@@ -1439,9 +1487,9 @@ fn execution_trust_admission_uses_execution_clock_for_frontier_expiry() {
     .expect("record fresh frontier");
     let requirements = RunTrustRequirements::new(&[], &["npm:@acme/auth-guard".to_string()], true)
         .expect("retain previously trusted card");
-    validate_execution_trust(workspace.path(), &config, &requirements, now + 300)
-        .expect("strict permits its exact freshness boundary");
-    let error = validate_execution_trust(workspace.path(), &config, &requirements, now + 301)
+    validate_execution_trust(workspace.path(), &config, &requirements, now + 299)
+        .expect("strict admits before its freshness boundary");
+    let error = validate_execution_trust(workspace.path(), &config, &requirements, now + 300)
         .expect_err("worker cannot reuse the earlier preflight clock")
         .to_string();
     assert!(error.contains("RF_STALE_FRONTIER"), "{error}");

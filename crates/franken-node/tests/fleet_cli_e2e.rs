@@ -597,6 +597,272 @@ fn fleet_policy_cli_publishes_activates_and_blocks_weaker_run_profiles() {
 }
 
 #[test]
+#[cfg(unix)]
+fn fleet_policy_project_authority_preserves_boundaries_and_rechecks_late_enrollment() {
+    use frankenengine_node::config::{Config, Profile};
+    use frankenengine_node::ops::engine_dispatcher::{
+        RunProjectPaths, enforce_execution_fleet_policy,
+    };
+    use std::path::Path;
+
+    let project = tempdir().expect("project");
+    let root = project.path().canonicalize().expect("canonical project");
+    let source = root.join("src");
+    std::fs::create_dir(&source).expect("nested source directory");
+    std::fs::write(root.join("package.json"), r#"{"main":"src/index.js"}"#)
+        .expect("project marker");
+    std::fs::write(source.join("index.js"), "console.log('nested');").expect("entrypoint");
+    let outside = tempdir().expect("independent invocation directory");
+    std::os::unix::fs::symlink(&source, outside.path().join("linked"))
+        .expect("explicit directory alias");
+
+    let absolute = RunProjectPaths::resolve(&source.join("index.js"), &root)
+        .expect("unenrolled absolute file keeps narrow authority");
+    assert_eq!(absolute.project_root(), source);
+    let relative = RunProjectPaths::resolve(Path::new("src/index.js"), &root)
+        .expect("relative file selects containing project marker");
+    assert_eq!(relative.project_root(), root);
+    let directory = RunProjectPaths::resolve(Path::new("src"), &root)
+        .expect("explicit directory keeps narrow authority");
+    assert_eq!(directory.project_root(), source);
+    let linked = RunProjectPaths::resolve(Path::new("linked"), outside.path())
+        .expect("explicit directory alias selects its canonical narrow authority");
+    assert_eq!(linked.project_root(), source);
+
+    let actions = [executable_policy_action(
+        "late-ancestor-policy",
+        "east",
+        1,
+        1000,
+    )];
+    activate_fleet_policy_snapshot(&root, &actions, "east")
+        .expect("enroll after selecting the original execution authority");
+
+    let mut config = Config::default();
+    config.profile = Profile::Balanced;
+    let original = serde_json::to_value(&config).expect("original config");
+    let error = enforce_execution_fleet_policy(absolute.project_root(), &mut config, None)
+        .expect_err("worker admission must notice newly enrolled parent authority")
+        .to_string();
+    assert!(error.contains("inside fleet-managed project"), "{error}");
+    assert_eq!(serde_json::to_value(&config).expect("config"), original);
+    for (target, invocation) in [
+        (source.join("index.js"), root.clone()),
+        (PathBuf::from("src"), root.clone()),
+        (PathBuf::from("index.js"), source.clone()),
+        (PathBuf::from("linked"), outside.path().to_path_buf()),
+    ] {
+        let error = RunProjectPaths::resolve(&target, &invocation)
+            .expect_err("narrower authority cannot hide canonical ancestor enrollment")
+            .to_string();
+        assert!(error.contains("inside fleet-managed project"), "{error}");
+        assert!(
+            error.contains("select the enrolled project directory"),
+            "{error}"
+        );
+    }
+    let relative_after = RunProjectPaths::resolve(Path::new("src/index.js"), &root)
+        .expect("relative path still selects the enrolled authority");
+    assert_eq!(relative_after, relative);
+    let admitted = enforce_execution_fleet_policy(relative_after.project_root(), &mut config, None)
+        .expect("selected enrolled project admits with effective policy");
+    assert!(admitted.is_some());
+    assert_eq!(config.runtime.max_instructions, Some(1000));
+
+    activate_fleet_policy_snapshot(
+        &source,
+        &[executable_policy_action(
+            "nested-own-policy",
+            "east",
+            1,
+            500,
+        )],
+        "east",
+    )
+    .expect("independently persisted nested policy");
+    let error = enforce_execution_fleet_policy(&source, &mut config, None)
+        .expect_err("a nested root's own valid enrollment cannot hide the enclosing one")
+        .to_string();
+    assert!(error.contains("inside fleet-managed project"), "{error}");
+
+    std::fs::write(
+        outside.path().join("index.js"),
+        "console.log('independent');",
+    )
+    .expect("unrelated entrypoint");
+    let independent = RunProjectPaths::resolve(Path::new("index.js"), outside.path())
+        .expect("unrelated project remains unmanaged");
+    assert_eq!(
+        independent.project_root(),
+        outside.path().canonicalize().unwrap()
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn fleet_policy_cli_refuses_nested_directory_and_package_marker_authority() {
+    let project = tempdir().expect("project");
+    let source = project.path().join("src");
+    std::fs::create_dir(&source).expect("nested source directory");
+    write_fail_closed_cli_config_for_fixture_trust_cards(project.path());
+    std::fs::write(
+        project.path().join("package.json"),
+        r#"{"name":"managed-project","main":"src/index.js"}"#,
+    )
+    .expect("project manifest");
+    std::fs::write(
+        source.join("index.js"),
+        "console.log('FLEET_POLICY_BYPASSED');",
+    )
+    .expect("guest");
+    std::fs::write(
+        project.path().join("policy.json"),
+        r#"{"minimum_profile":"strict"}"#,
+    )
+    .expect("policy");
+    let state = project.path().join("coordinator");
+    for args in [
+        vec![
+            "fleet",
+            "policy",
+            "publish",
+            "--zone",
+            "east",
+            "--revision",
+            "1",
+            "--file",
+            "policy.json",
+            "--json",
+        ],
+        vec![
+            "fleet",
+            "agent",
+            "--node-id",
+            "nested-managed",
+            "--zone",
+            "east",
+            "--once",
+            "--json",
+        ],
+    ] {
+        let output = run_cli_in_dir_with_fleet_state(project.path(), &args, &state);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    for target in [".", "src/index.js"] {
+        let output = run_cli_in_dir_with_fleet_state(
+            project.path(),
+            &["run", target, "--policy", "balanced", "--json"],
+            &state,
+        );
+        assert!(!output.status.success());
+        let report = json_stdout(&output, "enrolled root profile refusal");
+        assert!(
+            report["error"]
+                .as_str()
+                .unwrap()
+                .contains("activated fleet policy requires profile `strict`")
+        );
+    }
+    let nested_directory = run_cli_in_dir_with_fleet_state(
+        project.path(),
+        &["run", "src", "--policy", "balanced", "--json"],
+        &state,
+    );
+    assert!(!nested_directory.status.success());
+    let report = json_stdout(&nested_directory, "nested directory authority refusal");
+    assert!(
+        report["error"]
+            .as_str()
+            .unwrap()
+            .contains("inside fleet-managed project")
+    );
+
+    std::fs::write(
+        source.join("package.json"),
+        r#"{"name":"nested-package","main":"index.js"}"#,
+    )
+    .expect("nearer package marker");
+    write_fail_closed_cli_config_for_fixture_trust_cards(&source);
+    for (invocation, target) in [
+        (project.path(), "src/index.js"),
+        (source.as_path(), "index.js"),
+    ] {
+        let output = run_cli_in_dir_with_fleet_state(
+            invocation,
+            &["run", target, "--policy", "balanced", "--json"],
+            &state,
+        );
+        assert!(!output.status.success());
+        let report = json_stdout(&output, "nested marker authority refusal");
+        assert_eq!(report["schema_version"], "franken-node/run-error-cli/v1");
+        let error = report["error"]
+            .as_str()
+            .expect("actionable authority error");
+        assert!(error.contains("inside fleet-managed project"), "{error}");
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("Native engine required"));
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn fleet_policy_ancestor_orphaned_documents_and_dangling_state_links_fail_closed() {
+    use frankenengine_node::config::{Config, Profile};
+    use frankenengine_node::ops::engine_dispatcher::RunProjectPaths;
+    use std::path::Path;
+
+    for artifact in [
+        "fleet-policy.lock",
+        "fleet-policy-required.json",
+        "fleet-policy.json",
+    ] {
+        let project = tempdir().expect("project");
+        let source = project.path().join("src");
+        let state = project.path().join(".franken-node/state");
+        std::fs::create_dir(&source).expect("nested source");
+        std::fs::create_dir_all(&state).expect("enrollment directory");
+        std::fs::write(source.join("index.js"), "console.log('guarded');").expect("entrypoint");
+        std::fs::write(state.join(artifact), "{}").expect("orphaned enrollment artifact");
+        let error = RunProjectPaths::resolve(Path::new("src"), project.path())
+            .expect_err("incomplete ancestor enrollment cannot disappear from admission")
+            .to_string();
+        assert!(
+            error.contains("cannot exclude fleet policy enrollment at ancestor"),
+            "{artifact}: {error}"
+        );
+        assert!(
+            enforce_active_fleet_policy(&source, &mut Config::default(), Profile::Balanced)
+                .is_err()
+        );
+    }
+    for component in [".franken-node", ".franken-node/state"] {
+        let project = tempdir().expect("project");
+        let source = project.path().join("src");
+        std::fs::create_dir(&source).expect("nested source");
+        std::fs::write(source.join("index.js"), "console.log('guarded');").expect("entrypoint");
+        if component.ends_with("/state") {
+            std::fs::create_dir(project.path().join(".franken-node")).expect("metadata directory");
+        }
+        std::os::unix::fs::symlink(
+            project.path().join("missing-state"),
+            project.path().join(component),
+        )
+        .expect("dangling metadata directory alias");
+        let error = RunProjectPaths::resolve(Path::new("src"), project.path())
+            .expect_err("dangling metadata directories cannot prove absent enrollment")
+            .to_string();
+        assert!(
+            error.contains("cannot exclude fleet policy enrollment at ancestor"),
+            "{component}: {error}"
+        );
+    }
+}
+
+#[test]
 fn fleet_policy_cli_rejects_bad_input_without_publishing_an_action() {
     let project = tempdir().expect("project");
     let state = project.path().join("coordinator");
