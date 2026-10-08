@@ -1,3 +1,4 @@
+use crate::control_plane::fleet_transport::{ActiveFleetPolicy, enforce_active_fleet_policy};
 use crate::ops::telemetry_bridge::{
     ShutdownReason, TelemetryBridge, TelemetryRuntimeHandle, TelemetryRuntimeReport,
 };
@@ -98,13 +99,13 @@ const NATIVE_ENGINE_WORKER_NAME: &str = "franken-node-native-engine";
 /// before Clap so the worker can never recursively enter the public `run`
 /// command.
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_WORKER_ARG: &str = "__franken-native-session-worker-v6";
+const NATIVE_SESSION_WORKER_ARG: &str = "__franken-native-session-worker-v7";
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_SCHEMA: &str = "franken-node/native-session/v6";
+const NATIVE_SESSION_SCHEMA: &str = "franken-node/native-session/v7";
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_FRAME_MAGIC: &[u8; 12] = b"FNNS-IPC-V6\0";
+const NATIVE_SESSION_FRAME_MAGIC: &[u8; 12] = b"FNNS-IPC-V7\0";
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_PROTOCOL_VERSION: u32 = 6;
+const NATIVE_SESSION_PROTOCOL_VERSION: u32 = 7;
 #[cfg(feature = "engine")]
 const NATIVE_SESSION_FRAME_HEADER_BYTES: usize = 12 + 4 + 8 + 32;
 #[cfg(feature = "engine")]
@@ -254,6 +255,8 @@ struct NativeSessionRequest {
     app_path: PathBuf,
     working_dir: PathBuf,
     project_paths: RunProjectPaths,
+    trust_requirements: RunTrustRequirements,
+    fleet_policy: Option<ActiveFleetPolicy>,
     policy_mode: String,
     config: Config,
     telemetry_socket_path: PathBuf,
@@ -2428,6 +2431,8 @@ struct NativeEngineRunContext {
     evidence_authority: RuntimeEvidenceAuthority,
     effect_wal: Option<NativeEffectWalEmitter>,
     project_paths: RunProjectPaths,
+    trust_requirements: RunTrustRequirements,
+    fleet_policy: Option<ActiveFleetPolicy>,
     /// The program's own arguments, for `process.argv` (bd-my9hk).
     app_args: Vec<String>,
     capture_replay: bool,
@@ -2976,6 +2981,251 @@ impl RunProjectPaths {
     }
 }
 
+/// The dependency identities considered by preflight and the cards on which
+/// that decision depended. These are different sets: an untracked dependency
+/// may acquire a revocation before execution and must still be rechecked.
+///
+/// This records the declared dependency graph, not the modules the engine will
+/// actually import. The native worker receives the complete record through its
+/// authenticated control frame and validates it again before guest execution.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunTrustRequirements {
+    dependency_ids: Vec<String>,
+    required_card_ids: Vec<String>,
+    registry_required: bool,
+}
+
+impl RunTrustRequirements {
+    /// Retain every preflight identity, including the required cards supplied
+    /// by direct library callers, without truncating either set.
+    pub fn new(
+        dependency_ids: &[String],
+        required_card_ids: &[String],
+        registry_required: bool,
+    ) -> Result<Self> {
+        Self::validate_bounds(dependency_ids, required_card_ids)?;
+        let requirements = Self {
+            dependency_ids: dependency_ids
+                .iter()
+                .chain(required_card_ids)
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            registry_required: registry_required || !required_card_ids.is_empty(),
+            required_card_ids: required_card_ids
+                .iter()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+        };
+        requirements.validate()?;
+        Ok(requirements)
+    }
+
+    fn validate_bounds(dependency_ids: &[String], required_card_ids: &[String]) -> Result<()> {
+        const MAX_IDENTITIES: usize = 81_920;
+        const MAX_TOTAL_ID_BYTES: usize = 2 * 1024 * 1024;
+        if dependency_ids.len() > MAX_IDENTITIES || required_card_ids.len() > MAX_IDENTITIES {
+            anyhow::bail!("execution trust requirements exceed the dependency identity limit");
+        }
+        let mut bytes = 0_usize;
+        for id in dependency_ids.iter().chain(required_card_ids) {
+            if id.is_empty()
+                || id.len() > 256
+                || id.trim() != id
+                || id.chars().any(char::is_control)
+            {
+                anyhow::bail!("execution trust requirements contain an invalid extension identity");
+            }
+            bytes = bytes.saturating_add(id.len());
+            if bytes > MAX_TOTAL_ID_BYTES {
+                anyhow::bail!("execution trust requirements exceed the identity byte limit");
+            }
+        }
+        Ok(())
+    }
+
+    /// Deserialization must not let a missing, reordered, or truncated set
+    /// weaken the parent admission. The outer frame supplies authenticity;
+    /// these invariants prevent representation drift inside that boundary.
+    fn validate(&self) -> Result<()> {
+        Self::validate_bounds(&self.dependency_ids, &self.required_card_ids)?;
+        for ids in [&self.dependency_ids, &self.required_card_ids] {
+            if ids.windows(2).any(|pair| pair[0] >= pair[1]) {
+                anyhow::bail!("execution trust requirements are not sorted and unique");
+            }
+        }
+        if self
+            .required_card_ids
+            .iter()
+            .any(|id| self.dependency_ids.binary_search(id).is_err())
+        {
+            anyhow::bail!("execution trust requirements omitted a previously trusted identity");
+        }
+        if !self.registry_required && !self.required_card_ids.is_empty() {
+            anyhow::bail!(
+                "execution trust requirements made a previously required registry optional"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Re-read the authoritative registry at an execution admission boundary.
+/// Both the dispatcher and authenticated native worker use this same policy.
+/// Previously trusted cards must remain present; newly tracked dependencies
+/// must obey their current revocation, quarantine, and risk state as well.
+/// Warnings retain the existing balanced/legacy profile behavior.
+pub fn validate_execution_trust(
+    project_root: &Path,
+    config: &Config,
+    requirements: &RunTrustRequirements,
+    now_secs: u64,
+) -> Result<Vec<String>> {
+    use crate::supply_chain::trust_card::{RevocationStatus, RiskLevel};
+    use crate::supply_chain::trust_card_registry_store::{
+        durable_store_path, registry_snapshot_path,
+    };
+
+    requirements.validate()?;
+    if requirements.dependency_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let authoritative_registry = registry_snapshot_path(project_root);
+    let durable_authoritative = durable_store_path(&authoritative_registry);
+    if !durable_authoritative.is_file() && !authoritative_registry.is_file() {
+        if !requirements.registry_required && config.profile == Profile::LegacyRisky {
+            return Ok(vec![
+                "authoritative trust registry remains unavailable at execution admission; legacy-risky policy retains the skipped preflight".to_string(),
+            ]);
+        }
+        return Err(ActionableError::new(
+            format!(
+                "Execution blocked: authoritative trust registry is missing after preflight; \
+                 neither {} nor {} exists. Dependency execution requires current trust state.",
+                durable_authoritative.display(),
+                authoritative_registry.display(),
+            ),
+            "Restore the authoritative trust registry and run `franken-node trust sync --force` before retrying",
+        )
+        .into());
+    }
+    let mut registry = match TrustCardRegistry::load_authoritative_state_from_config(
+        &authoritative_registry,
+        &config.trust,
+        now_secs,
+        SnapshotSourceContext::TrustedFile,
+    ) {
+        Ok(registry) => registry,
+        Err(error) if !requirements.registry_required && config.profile == Profile::LegacyRisky => {
+            return Ok(vec![format!(
+                "authoritative trust registry remains unreadable at execution admission; legacy-risky policy retains the skipped preflight: {error}"
+            )]);
+        }
+        Err(error) => {
+            return Err(error).context("Trust registry validation failed at execution time");
+        }
+    };
+    let mut warnings = Vec::new();
+    let mut admitted_tracked_card = false;
+    for extension_id in &requirements.dependency_ids {
+        let Some(card) = registry
+            .read(extension_id, now_secs, "trace-execution-trust-validation")
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?
+        else {
+            if requirements
+                .required_card_ids
+                .binary_search(extension_id)
+                .is_ok()
+            {
+                anyhow::bail!(
+                    "Execution blocked: extension '{}' is no longer tracked in trust registry since preflight check. This prevents TOCTOU attacks.",
+                    extension_id,
+                );
+            }
+            warnings.push(format!(
+                "dependency `{extension_id}` remains untracked at execution admission"
+            ));
+            continue;
+        };
+        if let RevocationStatus::Revoked { reason, .. } = &card.revocation_status {
+            anyhow::bail!(
+                "Execution blocked: extension '{}' was revoked since preflight check: {}. This prevents TOCTOU attacks.",
+                extension_id,
+                reason,
+            );
+        }
+        if card.active_quarantine {
+            if config.profile != Profile::LegacyRisky {
+                anyhow::bail!(
+                    "Execution blocked: extension '{}' was quarantined since preflight check. This prevents TOCTOU attacks.",
+                    extension_id,
+                );
+            }
+            warnings.push(format!(
+                "dependency `{extension_id}` is quarantined at execution admission; legacy-risky policy allows execution"
+            ));
+            continue;
+        }
+        if matches!(
+            card.user_facing_risk_assessment.level,
+            RiskLevel::High | RiskLevel::Critical
+        ) {
+            let detail = format!(
+                "dependency `{extension_id}` is {} risk at execution admission: {}",
+                format!("{:?}", card.user_facing_risk_assessment.level).to_ascii_lowercase(),
+                card.user_facing_risk_assessment.summary,
+            );
+            match config.profile {
+                Profile::Strict => anyhow::bail!("Execution blocked: {detail}"),
+                Profile::Balanced => warnings.push(detail),
+                Profile::LegacyRisky => {}
+            }
+        }
+        admitted_tracked_card = true;
+    }
+    if admitted_tracked_card
+        && let Some(detail) = registry_revocation_freshness_denial(
+            &authoritative_registry,
+            &config.trust,
+            SafetyTier::for_policy_mode(&config.profile.to_string()),
+            now_secs,
+            "execution-admission",
+            "trace-execution-revocation-freshness",
+        )
+    {
+        if config.profile == Profile::Strict {
+            return Err(ActionableError::new(detail, "franken-node trust sync --force").into());
+        }
+        warnings.push(detail);
+    }
+    Ok(warnings)
+}
+
+/// Apply current fleet restrictions while preserving every policy revision
+/// already observed by preflight or the supervising process. A lost policy
+/// document cannot turn an authenticated enrolled run into an unmanaged run.
+pub fn enforce_execution_fleet_policy(
+    project_root: &Path,
+    config: &mut Config,
+    expected: Option<&ActiveFleetPolicy>,
+) -> Result<Option<ActiveFleetPolicy>> {
+    let profile = config.profile;
+    let mut effective = config.clone();
+    let active = enforce_active_fleet_policy(project_root, &mut effective, profile)?;
+    if let Some(expected) = expected {
+        let current = active
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("fleet policy disappeared after execution admission"))?;
+        current.ensure_successor_of(expected)?;
+    }
+    *config = effective;
+    Ok(active)
+}
+
 pub struct EngineDispatcher {
     engine_bin_path: String,
     configured_path: Option<PathBuf>,
@@ -2986,6 +3236,13 @@ pub struct EngineDispatcher {
     native_session_worker_path: Option<PathBuf>,
     /// The authority already selected by the product's dependency preflight.
     project_paths: Option<RunProjectPaths>,
+    /// Every dependency inspected by preflight, including untracked identities.
+    preflight_dependency_ids: Vec<String>,
+    /// Whether preflight relied on an available authoritative registry. Only
+    /// legacy-risky's explicitly skipped preflight may start without one.
+    preflight_registry_required: bool,
+    /// Enrolled policy already used by the product's preflight.
+    preflight_fleet_policy: Option<ActiveFleetPolicy>,
     /// The program's own arguments (`run app.js -- a b`), which become
     /// `process.argv[2..]` (bd-my9hk).
     app_args: Vec<String>,
@@ -4945,6 +5202,9 @@ impl Default for EngineDispatcher {
             requested_runtime: PreferredRuntime::Auto,
             native_session_worker_path: None,
             project_paths: None,
+            preflight_dependency_ids: Vec::new(),
+            preflight_registry_required: true,
+            preflight_fleet_policy: None,
             app_args: Vec::new(),
             capture_replay: false,
         }
@@ -5119,6 +5379,31 @@ impl EngineDispatcher {
         self
     }
 
+    /// Bind every inspected dependency identity to worker-side revalidation.
+    /// Required-present cards are supplied separately to [`Self::dispatch_run`].
+    #[must_use]
+    pub fn with_preflight_dependency_ids(mut self, dependency_ids: Vec<String>) -> Self {
+        self.preflight_dependency_ids = dependency_ids;
+        self
+    }
+
+    /// Preserve whether preflight consulted an authoritative registry. A false
+    /// value only retains legacy-risky's existing missing/corrupt-state policy;
+    /// newly available valid cards are always examined before execution.
+    #[must_use]
+    pub fn with_preflight_registry_requirement(mut self, required: bool) -> Self {
+        self.preflight_registry_required = required;
+        self
+    }
+
+    /// Pin the fleet policy that governed preflight. Later boundaries may
+    /// tighten it, but may not forget it or admit a weaker replacement.
+    #[must_use]
+    pub fn with_preflight_fleet_policy(mut self, policy: Option<ActiveFleetPolicy>) -> Self {
+        self.preflight_fleet_policy = policy;
+        self
+    }
+
     /// Set the program's own arguments (`run app.js -- a b`): they follow the
     /// runtime and script paths in `process.argv` (bd-my9hk).
     #[must_use]
@@ -5164,6 +5449,12 @@ impl EngineDispatcher {
                 "Use a valid policy mode: --policy strict, --policy balanced, or --policy legacy-risky"
             ).into());
         }
+        if policy_mode != config.profile.to_string() {
+            anyhow::bail!(
+                "run policy mode {policy_mode} does not match resolved profile {}",
+                config.profile,
+            );
+        }
 
         // Library callers can construct Config directly, so enforce the same
         // execution and parser budgets as the TOML/environment resolver before
@@ -5196,6 +5487,15 @@ impl EngineDispatcher {
             }
             None => RunProjectPaths::resolve(app_path, &working_dir)?,
         };
+        let mut execution_config = config.clone();
+        let active_fleet_policy = enforce_execution_fleet_policy(
+            project_paths.project_root(),
+            &mut execution_config,
+            self.preflight_fleet_policy.as_ref(),
+        )?;
+        #[cfg(not(feature = "engine"))]
+        let _ = &active_fleet_policy;
+        let config = &execution_config;
 
         // The compatibility runner may supply a public key through its
         // kernel-authenticated exact-parent channel. These environment values
@@ -5241,109 +5541,18 @@ impl EngineDispatcher {
             )
         })?;
 
-        // SECURITY: Re-validate trust state to close TOCTOU gap between preflight and execution (bd-zqz0q)
-        //
-        // bd-reality-20260923-26n9r.1: this recheck previously resolved
-        // `<app>/../../.state/trust_card_registry.json` — a location no command
-        // writes (and whose `parent().parent()` escapes the project) — so both
-        // the freshness recheck and the revoked-since-preflight re-read were
-        // silently skipped on every real workspace. Resolve the same
-        // authoritative registry as the run preflight instead.
-        let project_root = project_paths.project_root();
-        let authoritative_registry =
-            frankenengine_node::supply_chain::trust_card_registry_store::registry_snapshot_path(
-                project_root,
-            );
-        let durable_authoritative =
-            frankenengine_node::supply_chain::trust_card_registry_store::durable_store_path(
-                &authoritative_registry,
-            );
-        let has_authoritative_state =
-            durable_authoritative.is_file() || authoritative_registry.is_file();
-
-        // A preflight that trusted dependencies cannot become a dependency-free
-        // run when its registry disappears. Missing authority is a refusal in
-        // every profile, including legacy-risky; profile freshness differences
-        // do not authorize using a trust decision whose source is gone.
-        if !trusted_extension_ids.is_empty() && !has_authoritative_state {
-            return Err(ActionableError::new(
-                format!(
-                    "Execution blocked: authoritative trust registry is missing after preflight; \
-                     neither {} nor {} exists. Previously trusted extensions require \
-                     execution-time trust revalidation before they can run.",
-                    durable_authoritative.display(),
-                    authoritative_registry.display(),
-                ),
-                "Restore the authoritative trust registry and run `franken-node trust sync --force` before retrying",
-            )
-            .into());
-        }
-
-        // Revocation freshness governs dependency trust decisions, exactly as
-        // the preflight scopes it: re-check it for the dependencies that the
-        // preflight trusted. Like the preflight, only the Dangerous tier
-        // (strict) refuses; balanced was already warned at preflight.
-        let freshness_tier = SafetyTier::for_policy_mode(policy_mode);
-        if !trusted_extension_ids.is_empty()
-            && freshness_tier == SafetyTier::Dangerous
-            && let Some(detail) = registry_revocation_freshness_denial(
-                &authoritative_registry,
-                &config.trust,
-                freshness_tier,
-                now_secs,
-                "dispatch-run",
-                "trace-execution-revocation-freshness",
-            )
-        {
-            return Err(ActionableError::new(detail, "franken-node trust sync --force").into());
-        }
-
-        if !trusted_extension_ids.is_empty() {
-            let mut registry = TrustCardRegistry::load_authoritative_state_from_config(
-                &authoritative_registry,
-                &config.trust,
-                now_secs,
-                SnapshotSourceContext::TrustedFile,
-            ).map_err(|err| anyhow::anyhow!(
-                "Trust registry validation failed at execution time: {}. This prevents TOCTOU attacks where trust state changes between preflight and execution.",
-                err
-            ))?;
-
-            for extension_id in trusted_extension_ids {
-                match registry
-                    .read(extension_id, now_secs, "trace-execution-trust-validation")
-                    .map_err(|err| anyhow::anyhow!(err.to_string()))?
-                {
-                    Some(card) => {
-                        // Fail if extension was revoked since preflight
-                        if let crate::supply_chain::trust_card::RevocationStatus::Revoked {
-                            reason,
-                            ..
-                        } = &card.revocation_status
-                        {
-                            return Err(anyhow::anyhow!(
-                                "Execution blocked: extension '{}' was revoked since preflight check: {}. This prevents TOCTOU attacks.",
-                                extension_id,
-                                reason
-                            ));
-                        }
-
-                        // Fail if extension was quarantined since preflight
-                        if card.active_quarantine {
-                            return Err(anyhow::anyhow!(
-                                "Execution blocked: extension '{}' was quarantined since preflight check. This prevents TOCTOU attacks.",
-                                extension_id
-                            ));
-                        }
-                    }
-                    None => {
-                        return Err(anyhow::anyhow!(
-                            "Execution blocked: extension '{}' is no longer tracked in trust registry since preflight check. This prevents TOCTOU attacks.",
-                            extension_id
-                        ));
-                    }
-                }
-            }
+        let trust_requirements = RunTrustRequirements::new(
+            &self.preflight_dependency_ids,
+            trusted_extension_ids,
+            self.preflight_registry_required,
+        )?;
+        for warning in validate_execution_trust(
+            project_paths.project_root(),
+            config,
+            &trust_requirements,
+            now_secs,
+        )? {
+            tracing::warn!(%warning, "Dependency trust warning at dispatch admission");
         }
 
         // Precedence: explicit runtime selection > CLI --engine-bin > FRANKEN_ENGINE_BIN env > config [engine].binary_path > candidates.
@@ -5662,6 +5871,8 @@ impl EngineDispatcher {
             Self::run_engine_native_with_error_handling(
                 app_path,
                 &project_paths,
+                &trust_requirements,
+                active_fleet_policy.as_ref(),
                 config,
                 policy_mode,
                 Path::new(&socket_path),
@@ -5926,6 +6137,10 @@ impl EngineDispatcher {
         ) {
             anyhow::bail!("native-session request policy mode was invalid");
         }
+        if request.policy_mode != request.config.profile.to_string() {
+            anyhow::bail!("native-session request policy mode does not match its resolved profile");
+        }
+        request.trust_requirements.validate()?;
         request.config.runtime.validate_execution_budget()?;
         request.config.runtime.validate_parse_budget()?;
         if !crate::security::constant_time::ct_eq(
@@ -6065,6 +6280,8 @@ impl EngineDispatcher {
         let cleanup_for_worker = Arc::clone(&cleanup_probe);
         let app_path = request.app_path;
         let project_paths = request.project_paths;
+        let trust_requirements = request.trust_requirements;
+        let fleet_policy = request.fleet_policy;
         let config = request.config;
         let policy_mode = request.policy_mode;
         let app_args = request.app_args;
@@ -6084,6 +6301,8 @@ impl EngineDispatcher {
                     evidence_authority,
                     effect_wal: Some(effect_wal),
                     project_paths,
+                    trust_requirements,
+                    fleet_policy,
                     app_args,
                     capture_replay,
                 },
@@ -6237,6 +6456,8 @@ impl EngineDispatcher {
     fn run_engine_native_with_error_handling(
         app_path: &Path,
         project_paths: &RunProjectPaths,
+        trust_requirements: &RunTrustRequirements,
+        fleet_policy: Option<&ActiveFleetPolicy>,
         config: &Config,
         policy_mode: &str,
         telemetry_socket_path: &Path,
@@ -6258,6 +6479,8 @@ impl EngineDispatcher {
         Self::run_engine_native_with_timeout(
             app_path,
             project_paths,
+            trust_requirements,
+            fleet_policy,
             config,
             policy_mode,
             telemetry_socket_path,
@@ -6292,6 +6515,8 @@ impl EngineDispatcher {
     fn run_engine_native_with_timeout(
         app_path: &Path,
         project_paths: &RunProjectPaths,
+        trust_requirements: &RunTrustRequirements,
+        fleet_policy: Option<&ActiveFleetPolicy>,
         config: &Config,
         policy_mode: &str,
         telemetry_socket_path: &Path,
@@ -6758,6 +6983,8 @@ impl EngineDispatcher {
             app_path: app_path_buf.clone(),
             working_dir: working_dir.clone(),
             project_paths: project_paths.clone(),
+            trust_requirements: trust_requirements.clone(),
+            fleet_policy: fleet_policy.cloned(),
             policy_mode: policy_mode.to_string(),
             config: config.clone(),
             telemetry_socket_path: telemetry_socket_path.to_path_buf(),
@@ -7946,8 +8173,6 @@ impl EngineDispatcher {
         // deterministic lane, so that budget must admit ordinary programs.
         let mut execution = match config.profile {
             Profile::Strict => ExecutionConfig {
-                deterministic_budget: 200_000_000,
-                throughput_budget: 200_000_000,
                 deterministic_max_registers: 128, // Reduced register count
                 throughput_max_registers: 256,    // Conservative register limit
                 max_call_depth: 32,               // Shallow call stack for safety
@@ -7956,14 +8181,8 @@ impl EngineDispatcher {
                 // lane's finite containment defaults, matching Balanced.
                 ..ExecutionConfig::default()
             },
-            Profile::Balanced => ExecutionConfig {
-                deterministic_budget: 1_000_000_000,
-                throughput_budget: 1_000_000_000,
-                ..ExecutionConfig::default()
-            },
+            Profile::Balanced => ExecutionConfig::default(),
             Profile::LegacyRisky => ExecutionConfig {
-                deterministic_budget: 5_000_000_000,
-                throughput_budget: 5_000_000_000,
                 deterministic_max_registers: 8192, // Generous register allocation
                 throughput_max_registers: 16384,   // High register limit
                 max_call_depth: 128,               // Deep call stacks allowed
@@ -7971,12 +8190,11 @@ impl EngineDispatcher {
                 ..ExecutionConfig::default()
             },
         };
-        // An operator-set `runtime.max_instructions` replaces the profile's
-        // budget on both lanes (bd-reality-20260923-26n9r.5 deliverable 1).
-        if let Some(max_instructions) = config.runtime.max_instructions {
-            execution.deterministic_budget = max_instructions;
-            execution.throughput_budget = max_instructions;
-        }
+        // Runtime execution and fleet-policy intersection share one definition
+        // of the effective local ceiling, including operator overrides.
+        let max_instructions = config.runtime.effective_instruction_budget(config.profile);
+        execution.deterministic_budget = max_instructions;
+        execution.throughput_budget = max_instructions;
         if let Some(max_registers) = config.runtime.max_registers {
             execution.deterministic_max_registers = max_registers;
             execution.throughput_max_registers = max_registers;
@@ -8239,6 +8457,8 @@ impl EngineDispatcher {
                 evidence_authority,
                 effect_wal: None,
                 project_paths,
+                trust_requirements: RunTrustRequirements::default(),
+                fleet_policy: None,
                 app_args: Vec::new(),
                 capture_replay: false,
             },
@@ -8265,10 +8485,25 @@ impl EngineDispatcher {
             evidence_authority,
             effect_wal,
             project_paths,
+            trust_requirements,
+            fleet_policy,
             app_args,
             capture_replay,
         } = run_context;
         let mut telemetry_guard = Some(telemetry_guard);
+        let mut execution_config = config.clone();
+        enforce_execution_fleet_policy(
+            project_paths.project_root(),
+            &mut execution_config,
+            fleet_policy.as_ref(),
+        )
+        .map_err(|error| {
+            native_engine_spawn_error_with_telemetry_cleanup(
+                format!("Native execution fleet policy admission failed: {error:#}"),
+                &mut telemetry_guard,
+            )
+        })?;
+        let config = &execution_config;
 
         let _span = tracing::info_span!(
             "engine_execution",
@@ -8325,6 +8560,23 @@ impl EngineDispatcher {
                     &mut telemetry_guard,
                 )
             })?;
+        // Worker startup, key provisioning, and telemetry setup can outlive
+        // the parent's preflight decision. Read current signed trust state
+        // here, on the worker's clock, before loading or executing guest code.
+        for warning in validate_execution_trust(
+            project_paths.project_root(),
+            config,
+            &trust_requirements,
+            Utc::now().timestamp().max(0) as u64,
+        )
+        .map_err(|error| {
+            native_engine_spawn_error_with_telemetry_cleanup(
+                format!("Native execution trust admission failed: {error:#}"),
+                &mut telemetry_guard,
+            )
+        })? {
+            tracing::warn!(%warning, "Dependency trust warning at native worker admission");
+        }
         let execution_app_path = project_paths.entrypoint();
         let module_root = project_paths
             .project_root()
@@ -16094,6 +16346,13 @@ mod tests {
                 entrypoint_format: RunEntrypointFormat::CommonJs,
                 package_manifests: Vec::new(),
             },
+            trust_requirements: RunTrustRequirements::new(
+                &["npm:untracked".to_string(), "npm:trusted".to_string()],
+                &["npm:trusted".to_string()],
+                true,
+            )
+            .expect("bounded trust requirements"),
+            fleet_policy: None,
             policy_mode: "balanced".to_string(),
             config: Config::for_profile(Profile::Balanced),
             telemetry_socket_path: PathBuf::from("/tmp/native-session-frame.sock"),
@@ -16111,6 +16370,8 @@ mod tests {
         assert_eq!(decoded.nonce, request.nonce);
         assert_eq!(decoded.config, request.config);
         assert_eq!(decoded.project_paths, request.project_paths);
+        assert_eq!(decoded.trust_requirements, request.trust_requirements);
+        assert_eq!(decoded.fleet_policy, request.fleet_policy);
         assert_eq!(decoded.app_args, request.app_args);
         assert!(decoded.capture_replay);
         assert_eq!(
@@ -16539,6 +16800,8 @@ mod tests {
         let result = EngineDispatcher::run_engine_native_with_timeout(
             &app_path,
             &project_paths,
+            &RunTrustRequirements::default(),
+            None,
             &config,
             "balanced",
             &telemetry_path,
@@ -16598,6 +16861,8 @@ mod tests {
         let result = EngineDispatcher::run_engine_native_with_timeout(
             &app_path,
             &project_paths,
+            &RunTrustRequirements::default(),
+            None,
             &config,
             "balanced",
             &socket_path,

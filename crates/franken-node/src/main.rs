@@ -777,6 +777,10 @@ struct RunPreFlightReport {
     project_root: String,
     policy_mode: String,
     registry_path: Option<String>,
+    /// Captured graph identities retained even when legacy-risky skips an
+    /// unavailable registry. The public verdict already describes that skip.
+    #[serde(skip)]
+    dependency_ids: Vec<String>,
     verdict: PreFlightVerdict,
     receipt: Receipt,
 }
@@ -12404,13 +12408,16 @@ fn emit_trust_release_error_json(message: &str) -> Result<()> {
 }
 
 fn handle_trust_release_command(args: &cli::TrustReleaseArgs) -> Result<()> {
-    if args.app.as_os_str().is_empty() {
-        let message = "trust release requires --app";
+    if args.app.as_os_str().is_empty() && args.artifact.is_none() {
+        let message = "trust release requires --app or --artifact";
         if args.json {
             emit_trust_release_error_json(message)?;
             fail_closed_after_json();
         }
         anyhow::bail!("{message}");
+    }
+    if !args.app.as_os_str().is_empty() && args.artifact.is_some() {
+        anyhow::bail!("trust release accepts exactly one of --app or --artifact");
     }
     if args.operator_id.trim().is_empty() || args.reason.trim().is_empty() {
         let message = "trust release requires non-empty --operator-id and --reason";
@@ -12419,6 +12426,9 @@ fn handle_trust_release_command(args: &cli::TrustReleaseArgs) -> Result<()> {
             fail_closed_after_json();
         }
         anyhow::bail!("{message}");
+    }
+    if let Some(artifact) = &args.artifact {
+        return handle_trust_artifact_release(artifact, args);
     }
     let project_paths = RunProjectPaths::resolve(&args.app, &std::env::current_dir()?)?;
     let project_root = project_paths.project_root();
@@ -12502,6 +12512,81 @@ fn handle_trust_release_command(args: &cli::TrustReleaseArgs) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn handle_trust_artifact_release(artifact: &str, args: &cli::TrustReleaseArgs) -> Result<()> {
+    if artifact.trim().is_empty() {
+        anyhow::bail!("trust release --artifact must not be empty");
+    }
+    let now_secs = now_unix_secs();
+    let mut state = trust_card_cli_registry(now_secs)?;
+    let targets = resolve_fleet_agent_action_targets(
+        &mut state.registry,
+        artifact,
+        now_secs,
+        "trace-cli-trust-release-lookup",
+    )?;
+    if targets.is_empty() {
+        anyhow::bail!("no trust cards match release artifact `{artifact}`");
+    }
+    let operation_id = format!("trust-artifact-release-{}", uuid::Uuid::now_v7());
+    let mut released_local_quarantines = 0_usize;
+    let mut cards = Vec::with_capacity(targets.len());
+    for extension_id in targets {
+        let before = state
+            .registry
+            .read(&extension_id, now_secs, &operation_id)?
+            .ok_or_else(|| anyhow::anyhow!("trust release target `{extension_id}` disappeared"))?;
+        let card = state.registry.release_local_quarantine(
+            &extension_id,
+            &args.operator_id,
+            &args.reason,
+            now_secs,
+            &operation_id,
+        )?;
+        released_local_quarantines += usize::from(card.card_hash != before.card_hash);
+        cards.push(card);
+    }
+    if released_local_quarantines > 0 {
+        persist_trust_card_cli_registry(&state)?;
+    }
+    let remaining_quarantines = cards.iter().filter(|card| card.active_quarantine).count();
+    let revoked_cards = cards
+        .iter()
+        .filter(|card| matches!(card.revocation_status, RevocationStatus::Revoked { .. }))
+        .count();
+    record_trust_decision_evidence(
+        &project_ledger_dir(Path::new(".")),
+        &operation_id,
+        observability::evidence_ledger::DecisionKind::Release,
+        serde_json::json!({
+            "action": "release_local_quarantine",
+            "artifact": artifact,
+            "operator_id": args.operator_id,
+            "reason": args.reason,
+            "released_local_quarantines": released_local_quarantines,
+            "remaining_quarantines": remaining_quarantines,
+            "revoked_cards": revoked_cards,
+            "card_hashes": cards.iter().map(|card| &card.card_hash).collect::<Vec<_>>(),
+        }),
+    );
+    let report = serde_json::json!({
+        "schema_version": "franken-node/trust-artifact-release-cli/v1",
+        "command": "trust.release",
+        "artifact": artifact,
+        "operation_id": operation_id,
+        "operator_id": args.operator_id,
+        "reason": args.reason,
+        "released_local_quarantines": released_local_quarantines,
+        "remaining_quarantines": remaining_quarantines,
+        "revoked_cards": revoked_cards,
+        "cards": cards,
+    });
+    emit_json_or_human(&report, args.json, || {
+        format!(
+            "local quarantine release: artifact={artifact} released={released_local_quarantines} still_quarantined={remaining_quarantines} revoked={revoked_cards}"
+        )
+    })
 }
 
 /// Name the engine containment verdict behind a native exit code in 91..=95
@@ -20898,6 +20983,12 @@ fn evaluate_run_trust_preflight(
 ) -> Result<RunPreFlightReport> {
     let project_root = project_paths.project_root();
     let dependencies = collect_run_package_dependencies(project_root)?;
+    let dependency_ids = dependencies
+        .as_ref()
+        .into_iter()
+        .flatten()
+        .map(|dependency| dependency.extension_id.clone())
+        .collect::<Vec<_>>();
     let mut registry_path = None::<PathBuf>;
 
     let verdict = match dependencies {
@@ -21196,6 +21287,7 @@ fn evaluate_run_trust_preflight(
         project_root: project_root.display().to_string(),
         policy_mode: policy_mode.to_string(),
         registry_path: registry_path.map(|path| path.display().to_string()),
+        dependency_ids,
         verdict,
         receipt,
     })
@@ -26771,6 +26863,120 @@ fn render_fleet_action_human(action: &FleetActionResult, kind: FleetTransportKin
 
 // ── Fleet Agent Mode ─────────────────────────────────────────────────────────
 
+fn run_fleet_policy_publish(args: &cli::FleetPolicyPublishArgs) -> Result<()> {
+    use control_plane::fleet_transport::{FleetPolicyArtifact, FleetRuntimePolicy};
+    control_plane::fleet_transport::validate_zone_id(&args.zone)?;
+    let revision = args
+        .revision
+        .ok_or_else(|| anyhow::anyhow!("`fleet policy publish` requires --revision"))?;
+    let path = args
+        .file
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("`fleet policy publish` requires --file"))?;
+    let selected = std::fs::canonicalize(path)
+        .with_context(|| format!("failed selecting fleet policy input {}", path.display()))?;
+    let parent = selected
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("fleet policy input has no parent"))?;
+    let name = selected
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("fleet policy input has no file name"))?;
+    let raw = supply_chain::module_resolution_graph::read_project_metadata(
+        parent,
+        Path::new(name),
+        16 * 1024,
+    )?;
+    let policy: FleetRuntimePolicy = serde_json::from_str(&raw)
+        .with_context(|| format!("invalid executable fleet policy {}", path.display()))?;
+    let artifact = FleetPolicyArtifact::new(revision, policy)?;
+    let (_, _, mut transport) = open_fleet_transport(Path::new("."))?;
+    let kind = transport.kind();
+    let actions = transport.list_actions()?;
+    let retained = actions.iter().find(|record| {
+        matches!(&record.action,
+            PersistedFleetAction::PolicyUpdate { zone_id, artifact: Some(existing), .. }
+                if zone_id == &args.zone && existing == &artifact
+        )
+    });
+    let already_published = retained.is_some();
+    let action = if let Some(retained) = retained {
+        retained.clone()
+    } else {
+        let fields = serde_json::to_value(&artifact.policy)?
+            .as_object()
+            .map(|value| {
+                value
+                    .iter()
+                    .filter(|(_, value)| value.as_bool() != Some(false))
+                    .map(|(name, _)| name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        PersistedFleetActionRecord {
+            action_id: format!("fleet-policy-{}", uuid::Uuid::now_v7()),
+            emitted_at: Utc::now(),
+            action: PersistedFleetAction::PolicyUpdate {
+                zone_id: args.zone.clone(),
+                policy_version: format!("revision-{revision}"),
+                changed_fields: fields,
+                artifact: Some(artifact),
+            },
+        }
+    };
+    // The durable transport repeats revision/conflict validation inside its
+    // publication transaction, including calls arriving through HTTP.
+    transport.publish_action(&action)?;
+    let report = serde_json::json!({
+        "schema_version": "franken-node/fleet-policy-publish-cli/v1",
+        "transport": kind.label(),
+        "live_control_plane": kind.live(),
+        "published": true,
+        "already_published": already_published,
+        "activated": false,
+        "enforcement_scope": "new_run_admission",
+        "action": action,
+    });
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "fleet policy published: zone={} revision={} action_id={} transport={}; agents must durably activate it before convergence",
+            args.zone,
+            revision,
+            action.action_id,
+            kind.label()
+        );
+    }
+    Ok(())
+}
+
+fn run_fleet_policy_status(args: &cli::FleetPolicyStatusArgs) -> Result<()> {
+    let active = control_plane::fleet_transport::load_active_fleet_policy(Path::new("."))?;
+    let report = serde_json::json!({
+        "schema_version": "franken-node/fleet-policy-status-cli/v1",
+        "activated": active.is_some(),
+        "enforcement_scope": "new_run_admission",
+        "policy": active,
+    });
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else if let Some(active) = active {
+        println!(
+            "fleet policy active for project zone={} (new run admission)",
+            active.zone_id
+        );
+        for (zone, artifact) in active.policies {
+            println!(
+                "  scope={} revision={} sha256={}",
+                zone, artifact.revision, artifact.content_sha256
+            );
+        }
+    } else {
+        println!("no fleet runtime policy is activated for this project");
+    }
+    Ok(())
+}
+
 /// Result of a single fleet agent poll cycle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FleetAgentPollResult {
@@ -26927,6 +27133,8 @@ fn fleet_agent_registry_state(
 
 fn apply_fleet_quarantine_action(
     project_root: &Path,
+    zone_id: &str,
+    incident_id: &str,
     target_id: &str,
     now_secs: u64,
 ) -> Result<Vec<String>> {
@@ -26943,9 +27151,12 @@ fn apply_fleet_quarantine_action(
         );
     }
 
-    let now_rfc3339 = rfc3339_timestamp_from_secs(now_secs);
     let mut updated_extensions = Vec::with_capacity(target_extension_ids.len());
     let mut changed = false;
+    let source = QuarantineSource::Fleet {
+        zone_id: zone_id.to_string(),
+        incident_id: incident_id.to_string(),
+    };
     for extension_id in target_extension_ids {
         let card = state
             .registry
@@ -27010,6 +27221,7 @@ fn apply_fleet_revoke_action(
         PersistedRevocationSeverity::Mandatory => "mandatory",
         PersistedRevocationSeverity::Emergency => "emergency",
     };
+    let now_rfc3339 = rfc3339_timestamp_from_secs(now_secs);
     state
         .registry
         .update(
@@ -27043,8 +27255,6 @@ fn apply_fleet_revoke_action(
 /// A release only retires its own (zone, incident), including the explicit `all`
 /// scope. Independent and later quarantines remain live on agent restart.
 fn active_fleet_quarantines<'a>(
-    zone_id: &str,
-    incident_id: &str,
     actions: &'a [PersistedFleetActionRecord],
     agent_zone: &str,
 ) -> BTreeMap<(&'a str, &'a str), Vec<&'a PersistedFleetActionRecord>> {
@@ -27064,10 +27274,6 @@ fn active_fleet_quarantines<'a>(
             PersistedFleetAction::Release {
                 zone_id,
                 incident_id,
-    let source = QuarantineSource::Fleet {
-        zone_id: zone_id.to_string(),
-        incident_id: incident_id.to_string(),
-    };
                 ..
             } if fleet_action_applies_to_zone(zone_id, agent_zone) => {
                 active.remove(&(zone_id.as_str(), incident_id.as_str()));
@@ -27114,6 +27320,7 @@ fn apply_fleet_release_action(
         if !card.effective_quarantine_sources().contains(&source) {
             continue;
         }
+        let extension_id = card.extension.extension_id;
         state
             .registry
             .set_quarantine_source(
@@ -27231,7 +27438,6 @@ fn run_fleet_serve(args: &cli::FleetServeArgs) -> Result<()> {
             bind: bind.to_string(),
             max_requests: args.max_requests,
         },
-        let extension_id = card.extension.extension_id;
         control,
         sink,
     )
@@ -27402,6 +27608,23 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
 
         let mut actions_processed = 0_u64;
 
+        // Select and persist the complete desired policy once, by revision.
+        // Replaying old actions in producer-clock order must never temporarily
+        // install a weaker policy or erase an already required scope.
+        let policy_activation = control_plane::fleet_transport::activate_fleet_policy_snapshot(
+            Path::new("."),
+            &actions,
+            &resolved.zone_id,
+        );
+        if let Err(error) = &policy_activation {
+            node_health = NodeHealth::Degraded;
+            tracing::error!(node_id = resolved.node_id.as_str(), error = %error,
+                "fleet agent failed activating executable policy");
+            if !resolved.json {
+                eprintln!("fleet agent: failed activating policy: {error}");
+            }
+        }
+
         // Apply each action and track quarantine version
         for action in relevant_actions {
             let newly_observed = !seen_action_ids.contains(&action.action_id);
@@ -27421,6 +27644,7 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
                     Ok(())
                 }
                 PersistedFleetAction::Quarantine {
+                    zone_id,
                     incident_id,
                     target_id,
                     quarantine_version: qv,
@@ -27488,25 +27712,23 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
                 },
                 PersistedFleetAction::PolicyUpdate {
                     policy_version,
-                    changed_fields,
+                    artifact,
                     ..
                 } => {
-                    tracing::info!(
-                        node_id = resolved.node_id.as_str(),
-                        zone_id = resolved.zone_id.as_str(),
-                        policy_version = policy_version.as_str(),
-                        changed_fields = ?changed_fields,
-                        "fleet agent cannot apply policy update without an executable policy artifact"
-                    );
-                    if !resolved.json {
-                        eprintln!(
-                            "fleet agent: unsupported policy update version={} fields={:?}",
-                            policy_version, changed_fields
-                        );
+                    if artifact.is_none() {
+                        Err(anyhow::anyhow!(
+                            "policy update `{policy_version}` carries field names without executable policy contents; application is not acknowledged"
+                        ))
+                    } else {
+                        policy_activation.as_ref()
+                            .map_err(|error| anyhow::anyhow!(error.to_string()))
+                            .and_then(|active| {
+                                if active.is_none() {
+                                    anyhow::bail!("executable fleet policy was not activated");
+                                }
+                                Ok(())
+                            })
                     }
-                    Err(anyhow::anyhow!(
-                        "policy update `{policy_version}` carries field names without executable policy contents; application is not acknowledged"
-                    ))
                 }
                 #[cfg(feature = "control-plane")]
                 PersistedFleetAction::Revoke {
@@ -27564,7 +27786,6 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
             last_seen: poll_timestamp,
             quarantine_version,
             health: node_health,
-                    zone_id,
             // Each effect persisted before this atomic heartbeat write. A
             // crash before publication causes idempotent reconciliation on
             // restart. Failure replaces any earlier checkpoint with None.
@@ -33856,7 +34077,7 @@ fn main() -> Result<()> {
                     return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
                 }
             };
-            let resolved = match config::Config::resolve(
+            let mut resolved = match config::Config::resolve(
                 config.as_deref(),
                 CliOverrides {
                     profile: profile_override,
@@ -33882,6 +34103,14 @@ fn main() -> Result<()> {
                 .and_then(|working_dir| RunProjectPaths::resolve(&app_path, &working_dir))
             {
                 Ok(project_paths) => project_paths,
+                Err(err) => {
+                    return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
+                }
+            };
+            let active_fleet_policy = match control_plane::fleet_transport::enforce_active_fleet_policy(
+                project_paths.project_root(), &mut resolved.config, resolved.selected_profile,
+            ) {
+                Ok(active) => active,
                 Err(err) => {
                     return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
                 }
@@ -33945,7 +34174,14 @@ fn main() -> Result<()> {
                 None
             };
 
-            // Extract trusted extension IDs from preflight for TOCTOU validation (bd-zqz0q)
+            // Retain every inspected identity for execution-time revalidation.
+            // A previously untracked dependency may acquire a revocation while
+            // the native worker starts, and legacy-allowed quarantines still
+            // need the current revocation check.
+            let preflight_dependency_ids = preflight.dependency_ids.clone();
+            let preflight_registry_required =
+                matches!(preflight.verdict, PreFlightVerdict::Passed { .. });
+            // Cards on which preflight relied must also remain present.
             let trusted_extension_ids = match &preflight.verdict {
                 PreFlightVerdict::Passed { results, .. } => results
                     .iter()
@@ -33968,6 +34204,9 @@ fn main() -> Result<()> {
                 ops::engine_dispatcher::EngineDispatcher::new(engine_bin, requested_runtime)
                     .with_native_session_worker_path(native_session_worker_path)
                     .with_project_paths(project_paths.clone())
+                    .with_preflight_fleet_policy(active_fleet_policy)
+                    .with_preflight_dependency_ids(preflight_dependency_ids)
+                    .with_preflight_registry_requirement(preflight_registry_required)
                     .with_replay_capture(capture_replay)
                     .with_app_args(app_args);
             let (dispatch, execution_error) = match dispatcher.dispatch_run(
@@ -35405,6 +35644,18 @@ fn main() -> Result<()> {
                     return fleet_fail("fleet.reconcile", args.json, err);
                 }
             }
+            FleetCommand::Policy(command) => match command {
+                cli::FleetPolicyCommand::Publish(args) => {
+                    if let Err(error) = run_fleet_policy_publish(&args) {
+                        return fleet_fail("fleet.policy.publish", args.json, error);
+                    }
+                }
+                cli::FleetPolicyCommand::Status(args) => {
+                    if let Err(error) = run_fleet_policy_status(&args) {
+                        return fleet_fail("fleet.policy.status", args.json, error);
+                    }
+                }
+            },
             FleetCommand::Agent(args) => {
                 if let Err(err) = run_fleet_agent(&args) {
                     return fleet_fail("fleet.agent", args.json, err);

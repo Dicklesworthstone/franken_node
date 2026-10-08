@@ -60,6 +60,21 @@ an omitted zone is accepted only when the incident is unambiguous.
 Releasing the `all` incident preserves a separately scoped incident with the
 same ID, and releasing a specific zone preserves the fleet-wide incident.
 
+Local trust-card containment is released separately with an attributed operator
+decision:
+
+```bash
+franken-node trust release --artifact npm:package-name \
+  --operator-id operator-security --reason "local remediation verified" --json
+```
+
+`--artifact` also accepts a `sha256:` prefix of at least eight hexadecimal
+characters and is mutually exclusive with sentinel `--app`. The release stores
+the operator and rationale in the signed card history. Its JSON report identifies
+how many local holds changed, how many cards remain quarantined by other owners,
+and how many remain revoked. Repeating it is idempotent. It does not publish a
+fleet release; use `fleet release` for the separately scoped incident.
+
 - Produces event `FLEET-004 (FLEET_RELEASED)`
 - Sets `IncidentHandle` status to `Released`
 - **Invariant INV-FLEET-ROLLBACK**: Release reconciles the selected incident's quarantine state while retaining independent containment.
@@ -103,11 +118,11 @@ Targets absent from the local trust registry remain pending and are retried when
 they appear. Action delivery does not use issuer timestamps as a cursor, so a
 slow issuer clock cannot hide a newly delivered independent incident. Conflicting
 records for the same scoped incident retain the protocol's deterministic
-`(emitted_at, action_id)` ordering. Unsupported
-`PolicyUpdate` records contain field names without executable policy contents;
-the agent reports degraded health and publishes no checkpoint instead of
-acknowledging a log message as a policy change. Independent containment actions
-still proceed.
+`(emitted_at, action_id)` ordering. Executable `PolicyUpdate` records carry
+validated policy contents and a monotonic revision; policy selection is
+independent of producer clocks. Historical records containing only field names
+remain unsupported: the agent reports degraded health and publishes no
+checkpoint. Independent containment actions still proceed.
 
 Each registry effect is durably persisted before its checkpoint heartbeat. A
 crash between those writes causes idempotent desired-state reconciliation on
@@ -127,6 +142,90 @@ quarantined, so a fleet release cannot silently clear an unattributed decision.
 Creating a replacement card retains existing quarantine sources and permanent
 revocation. A card accepts at most 1,024 independent quarantine sources; reaching
 that limit rejects the new mutation without evicting an existing decision.
+
+## Executable Fleet Runtime Policy
+
+`fleet policy publish` distributes restrictions through the configured durable
+store or live HTTP coordinator. The policy file contains only executable policy
+fields; it cannot select a runtime binary, grant guest write or process
+capabilities, replace signing keys, or name a destination path on agents.
+
+For example, save this as `runtime-policy.json`:
+
+```json
+{
+  "minimum_profile": "strict",
+  "max_instructions": 200000000,
+  "max_parse_source_bytes": 256000,
+  "max_parse_tokens": 32768,
+  "block_private_network": true
+}
+```
+
+Publish and inspect it with:
+
+```bash
+franken-node fleet policy publish --zone production --revision 1 --file runtime-policy.json --json
+franken-node fleet agent --node-id production-1 --zone production --once --json
+franken-node fleet policy status --json
+franken-node fleet reconcile --json
+```
+
+Run the agent from the managed project's root, where its local trust cards and
+runtime policy belong. `--zone all` publishes a fleet-wide floor. A project's
+first activation pins its agent zone; changing the agent's zone cannot silently
+discard that project's earlier restrictions. Policy publication reports
+`activated: false`; the command has published intent and does not claim that an
+agent has applied it. Local `fleet policy status` reads the durable activation,
+and reconciliation requires the existing exact-snapshot application checkpoint.
+
+The effective rules are:
+
+| Policy field | Runtime behavior |
+|---|---|
+| `minimum_profile` | Refuse `run` when the selected profile is weaker. The order is `legacy-risky`, `balanced`, `strict`. An explicit `--policy` or external config cannot bypass the floor. |
+| `max_instructions` | Intersect with the local explicit or profile instruction budget on both native execution lanes. |
+| `max_parse_source_bytes`, `max_parse_tokens` | Intersect with the local effective per-module parser limits. |
+| `block_private_network` | Enforce SSRF blocking, cloud-metadata blocking, and audit emission; remove local network allowlist exceptions. |
+
+Only positive supported budgets are accepted. Unknown fields, invalid profile
+names, empty policies, and a digest that does not match the revision and contents
+are rejected. These checks also apply to direct HTTP and transport publications.
+The SHA-256 content commitment is an integrity binding; it is not an independent
+publisher signature. The HTTP coordinator continues to use its configured shared
+bearer authentication.
+
+Revisions increase within each exact action zone. Higher revisions must preserve
+or tighten every previously published restriction. Same-revision conflicting
+content, rollback, and weakening updates are rejected inside the durable
+publication transaction, including concurrent publishers. An exact historical
+retry remains idempotent. Global and zone-specific rules intersect; neither can
+erase the other's restrictions. There is no policy-relaxation or policy-removal
+command in this restrictive distribution path.
+
+On Unix the agent uses bounded, regular metadata files opened through pinned
+directory descriptors with symlink following disabled. It commits
+`.franken-node/state/fleet-policy-required.json` as a durable write-ahead
+high-water mark before atomically replacing `fleet-policy.json`. Both files are
+read under the same advisory lock and must agree before execution. A crash
+between writes, a missing active document, corruption, or disappearing policy
+history blocks new admission. An intact required document plus the same or a
+stricter coordinator snapshot allows the agent to repair an interrupted
+activation. Existing restrictions remain stored when a coordinator presents
+older or missing history. If both documents disappear while the durable
+enrollment lock remains, admission and automatic recovery both refuse: an agent
+cannot prove the previous high-water mark from replacement coordinator history.
+Restore the retained documents from trusted recovery material. Activation is
+refused on platforms without this descriptor-relative storage implementation.
+
+The enforcement scope is **new run admission**. `run` applies the policy before
+trust preflight, the dispatcher binds that activation to the native worker
+request, and the worker checks it again before constructing runtime controls.
+An enrolled worker cannot start after the expected policy disappears or rolls
+back. An already executing guest retains its admitted policy; this command does
+not claim to hot-reload budgets or stop existing guests. Use existing incident
+containment operations when an immediate response for running workloads is
+required.
 
 ## Decision Receipts
 

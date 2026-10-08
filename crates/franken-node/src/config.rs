@@ -4062,6 +4062,18 @@ pub struct RuntimeParseBudget {
 }
 
 impl RuntimeConfig {
+    /// Effective per-lane instruction ceiling, shared by native execution and
+    /// fleet-policy intersection so a fleet restriction cannot raise a tighter
+    /// implicit profile budget when profile defaults change.
+    #[must_use]
+    pub fn effective_instruction_budget(&self, profile: Profile) -> u64 {
+        self.max_instructions.unwrap_or(match profile {
+            Profile::Strict => 200_000_000,
+            Profile::Balanced => 1_000_000_000,
+            Profile::LegacyRisky => 5_000_000_000,
+        })
+    }
+
     /// Reject invalid explicit native execution budgets before admission.
     ///
     /// Both configuration resolution and native dispatch invoke this check so

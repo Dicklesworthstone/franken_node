@@ -6,7 +6,7 @@
 #[cfg(feature = "asupersync-transport")]
 use std::sync::{Arc, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions, TryLockError},
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -24,7 +24,7 @@ use crate::{
     capacity_defaults::bounded_input::{
         AUDIT_BOUNDED_INPUT_REJECTED, BoundedInputPolicy, ERR_BOUNDED_INPUT_CAP_EXCEEDED,
     },
-    config::timeouts,
+    config::{Config, Profile, SsrfEnforcementMode, timeouts},
     connector::canonical_serializer::canonical_bytes,
 };
 
@@ -230,6 +230,234 @@ pub enum NodeHealth {
     Stale,
 }
 
+/// Executable fleet restrictions. Every field can only restrict the local
+/// runtime configuration; this document cannot grant host capabilities, choose
+/// executables, write arbitrary paths, or replace local signing material.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetRuntimePolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum_profile: Option<Profile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_instructions: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_parse_source_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_parse_tokens: Option<u64>,
+    /// Block private/internal destinations and cloud metadata, including
+    /// destinations that a local allowlist would otherwise exempt.
+    #[serde(default)]
+    pub block_private_network: bool,
+}
+
+fn fleet_profile_rank(profile: Profile) -> u8 {
+    match profile {
+        Profile::LegacyRisky => 0,
+        Profile::Balanced => 1,
+        Profile::Strict => 2,
+    }
+}
+
+impl FleetRuntimePolicy {
+    pub fn validate(&self) -> Result<(), FleetTransportError> {
+        if self
+            .minimum_profile
+            .is_none_or(|profile| profile == Profile::LegacyRisky)
+            && self.max_instructions.is_none()
+            && self.max_parse_source_bytes.is_none()
+            && self.max_parse_tokens.is_none()
+            && !self.block_private_network
+        {
+            return Err(FleetTransportError::serialization(
+                "fleet runtime policy must contain an executable restriction",
+            ));
+        }
+        let mut runtime = crate::config::RuntimeConfig::balanced_defaults();
+        runtime.max_instructions = self.max_instructions;
+        runtime.max_parse_source_bytes = self.max_parse_source_bytes;
+        runtime.max_parse_tokens = self.max_parse_tokens;
+        runtime
+            .validate_execution_budget()
+            .and_then(|()| runtime.validate_parse_budget())
+            .map_err(|error| FleetTransportError::serialization(error.to_string()))
+    }
+
+    fn is_at_least_as_restrictive_as(&self, previous: &Self) -> bool {
+        let ceiling_preserved = |current: Option<u64>, old: Option<u64>| {
+            old.is_none_or(|old| current.is_some_and(|current| current <= old))
+        };
+        self.minimum_profile.map_or(0, fleet_profile_rank)
+            >= previous.minimum_profile.map_or(0, fleet_profile_rank)
+            && ceiling_preserved(self.max_instructions, previous.max_instructions)
+            && ceiling_preserved(self.max_parse_source_bytes, previous.max_parse_source_bytes)
+            && ceiling_preserved(self.max_parse_tokens, previous.max_parse_tokens)
+            && (!previous.block_private_network || self.block_private_network)
+    }
+
+    fn enforce(&self, config: &mut Config, profile: Profile) -> Result<(), FleetTransportError> {
+        self.validate()?;
+        if let Some(minimum) = self.minimum_profile
+            && fleet_profile_rank(profile) < fleet_profile_rank(minimum)
+        {
+            return Err(FleetTransportError::stale_state(format!(
+                "activated fleet policy requires profile `{minimum}` or stricter; selected `{profile}`"
+            )));
+        }
+        if let Some(limit) = self.max_instructions {
+            let local_limit = config.runtime.effective_instruction_budget(profile);
+            config.runtime.max_instructions = Some(local_limit.min(limit));
+        }
+        let parse = config.runtime.effective_parse_budget(profile);
+        if let Some(limit) = self.max_parse_source_bytes {
+            config.runtime.max_parse_source_bytes = Some(parse.max_source_bytes.min(limit));
+        }
+        if let Some(limit) = self.max_parse_tokens {
+            config.runtime.max_parse_tokens = Some(parse.max_token_count.min(limit));
+        }
+        if self.block_private_network {
+            let network = &mut config.security.network_policy;
+            network.ssrf_enforcement = SsrfEnforcementMode::Block;
+            network.ssrf_protection_enabled = true;
+            network.block_cloud_metadata = true;
+            network.audit_blocked_requests = true;
+            network.allowlist.clear();
+        }
+        Ok(())
+    }
+}
+
+/// The revision is monotonic within one action zone. The digest binds the full
+/// typed policy and revision, independently of timestamps or changed-field hints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetPolicyArtifact {
+    pub revision: u64,
+    pub content_sha256: String,
+    pub policy: FleetRuntimePolicy,
+}
+
+impl FleetPolicyArtifact {
+    pub fn new(revision: u64, policy: FleetRuntimePolicy) -> Result<Self, FleetTransportError> {
+        let mut artifact = Self {
+            revision,
+            content_sha256: String::new(),
+            policy,
+        };
+        artifact.content_sha256 = artifact.compute_hash()?;
+        artifact.validate()?;
+        Ok(artifact)
+    }
+
+    fn compute_hash(&self) -> Result<String, FleetTransportError> {
+        let value = serde_json::to_value((&self.revision, &self.policy))
+            .map_err(|error| FleetTransportError::serialization(error.to_string()))?;
+        let mut hasher = Sha256::new();
+        hasher.update(b"franken-node/fleet-runtime-policy/v1\0");
+        hasher.update(canonical_bytes(&value));
+        Ok(hex::encode(hasher.finalize()))
+    }
+
+    pub fn validate(&self) -> Result<(), FleetTransportError> {
+        if self.revision == 0 {
+            return Err(FleetTransportError::serialization(
+                "fleet policy revision must be positive",
+            ));
+        }
+        self.policy.validate()?;
+        if self.content_sha256 != self.compute_hash()? {
+            return Err(FleetTransportError::serialization(
+                "fleet policy content_sha256 does not bind its revision and executable content",
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_successor_of(&self, previous: &Self) -> Result<(), FleetTransportError> {
+        self.validate()?;
+        previous.validate()?;
+        if self.revision < previous.revision {
+            return Err(FleetTransportError::stale_state(format!(
+                "fleet policy rollback from revision {} to {} is refused",
+                previous.revision, self.revision
+            )));
+        }
+        if self.revision == previous.revision && self != previous {
+            return Err(FleetTransportError::action_conflict(format!(
+                "fleet policy revision {} has conflicting content",
+                self.revision
+            )));
+        }
+        if !self.policy.is_at_least_as_restrictive_as(&previous.policy) {
+            return Err(FleetTransportError::stale_state(format!(
+                "fleet policy revision {} weakens an activated restriction from revision {}",
+                self.revision, previous.revision
+            )));
+        }
+        Ok(())
+    }
+}
+
+pub const ACTIVE_FLEET_POLICY_SCHEMA: &str = "franken-node/active-fleet-policy/v1";
+const FLEET_POLICY_STATE_FILE: &str = "fleet-policy.json";
+const FLEET_POLICY_REQUIRED_FILE: &str = "fleet-policy-required.json";
+const FLEET_POLICY_LOCK_FILE: &str = "fleet-policy.lock";
+#[cfg(unix)]
+const MAX_FLEET_POLICY_STATE_BYTES: usize = 16 * 1024;
+
+/// Per-project activation. Fleet-wide and exact-zone restrictions compose by
+/// intersection; one scope never overrides another scope's restrictions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActiveFleetPolicy {
+    pub schema_version: String,
+    pub zone_id: String,
+    pub policies: BTreeMap<String, FleetPolicyArtifact>,
+}
+
+impl ActiveFleetPolicy {
+    pub fn validate(&self) -> Result<(), FleetTransportError> {
+        validate_zone_id(&self.zone_id)?;
+        if self.schema_version != ACTIVE_FLEET_POLICY_SCHEMA
+            || self.policies.is_empty()
+            || self.policies.len() > 2
+        {
+            return Err(FleetTransportError::serialization(
+                "invalid activated fleet policy schema or scope count",
+            ));
+        }
+        for (zone, artifact) in &self.policies {
+            if zone != "all" && zone != &self.zone_id {
+                return Err(FleetTransportError::serialization(
+                    "activated fleet policy contains an unrelated zone",
+                ));
+            }
+            artifact.validate()?;
+        }
+        Ok(())
+    }
+
+    /// Check an authenticated parent-to-worker expectation or durable high-water
+    /// mark. New revisions may tighten it; disappearance and rollback fail closed.
+    pub fn ensure_successor_of(&self, previous: &Self) -> Result<(), FleetTransportError> {
+        self.validate()?;
+        previous.validate()?;
+        if self.zone_id != previous.zone_id {
+            return Err(FleetTransportError::stale_state(
+                "activated fleet policy zone changed for the selected project",
+            ));
+        }
+        for (zone, old) in &previous.policies {
+            let current = self.policies.get(zone).ok_or_else(|| {
+                FleetTransportError::stale_state(format!(
+                    "activated fleet policy scope `{zone}` disappeared"
+                ))
+            })?;
+            current.ensure_successor_of(old)?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FleetAction {
@@ -250,6 +478,10 @@ pub enum FleetAction {
         zone_id: String,
         policy_version: String,
         changed_fields: Vec<String>,
+        /// Historical field-name-only intent remains readable, but cannot be
+        /// acknowledged as applied. New publishers supply executable content.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        artifact: Option<FleetPolicyArtifact>,
     },
     #[cfg(feature = "control-plane")]
     Revoke {
@@ -263,6 +495,446 @@ pub struct FleetActionRecord {
     pub action_id: String,
     pub emitted_at: DateTime<Utc>,
     pub action: FleetAction,
+}
+
+/// Choose one executable revision per applicable action scope. Producer clocks
+/// and delivery order cannot downgrade policy, and conflicting same-revision
+/// publications are refused even when another revision would supersede them.
+pub fn fleet_policy_snapshot(
+    actions: &[FleetActionRecord],
+    zone_id: &str,
+) -> Result<Option<ActiveFleetPolicy>, FleetTransportError> {
+    validate_zone_id(zone_id)?;
+    if actions.len() > MAX_ACTION_LOG_ENTRIES {
+        return Err(FleetTransportError::serialization(
+            "fleet policy action snapshot is too large",
+        ));
+    }
+    let mut revisions = BTreeMap::<&str, BTreeMap<u64, &FleetPolicyArtifact>>::new();
+    for record in actions {
+        validate_action_record(record)?;
+        if let FleetAction::PolicyUpdate {
+            zone_id: scope,
+            artifact: Some(artifact),
+            ..
+        } = &record.action
+            && (scope == "all" || scope == zone_id)
+        {
+            let by_revision = revisions.entry(scope).or_default();
+            if let Some(existing) = by_revision.insert(artifact.revision, artifact)
+                && existing != artifact
+            {
+                return Err(FleetTransportError::action_conflict(format!(
+                    "fleet policy scope `{scope}` revision {} has conflicting content",
+                    artifact.revision
+                )));
+            }
+        }
+    }
+    let mut policies = BTreeMap::new();
+    for (scope, by_revision) in revisions {
+        let mut previous: Option<&FleetPolicyArtifact> = None;
+        for artifact in by_revision.into_values() {
+            if let Some(old) = previous {
+                artifact.ensure_successor_of(old)?;
+            }
+            previous = Some(artifact);
+        }
+        if let Some(artifact) = previous {
+            policies.insert(scope.to_string(), artifact.clone());
+        }
+    }
+    if policies.is_empty() {
+        return Ok(None);
+    }
+    let active = ActiveFleetPolicy {
+        schema_version: ACTIVE_FLEET_POLICY_SCHEMA.to_string(),
+        zone_id: zone_id.to_string(),
+        policies,
+    };
+    active.validate()?;
+    Ok(Some(active))
+}
+
+/// Enforce the per-zone policy revision contract while the transport still
+/// holds its publication transaction/lock. This prevents concurrent publishers
+/// from poisoning retained history with conflicting or weakening revisions.
+pub(super) fn validate_fleet_policy_publication(
+    record: &FleetActionRecord,
+    existing: &[FleetActionRecord],
+) -> Result<(), FleetTransportError> {
+    let FleetAction::PolicyUpdate {
+        zone_id,
+        artifact: Some(candidate),
+        ..
+    } = &record.action
+    else {
+        return Ok(());
+    };
+    if existing.iter().any(|old| old == record) {
+        return Ok(());
+    }
+    for old in existing {
+        if let FleetAction::PolicyUpdate {
+            zone_id: scope,
+            artifact: Some(previous),
+            ..
+        } = &old.action
+            && scope == zone_id
+        {
+            candidate.ensure_successor_of(previous)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+struct FleetPolicyStore {
+    directory: File,
+    lock: File,
+    enrollment_created: bool,
+}
+
+#[cfg(unix)]
+impl FleetPolicyStore {
+    fn open(project: &Path, create: bool) -> Result<Option<Self>, FleetTransportError> {
+        use rustix::fs::{Mode, OFlags, mkdirat, open, openat};
+        use rustix::io::Errno;
+        use std::os::unix::fs::MetadataExt;
+        use std::path::Component;
+
+        let open_store = || -> std::io::Result<Option<Self>> {
+            let root = if project.is_absolute() {
+                project.to_path_buf()
+            } else {
+                project.canonicalize()?
+            };
+            if root
+                .components()
+                .any(|part| matches!(part, Component::ParentDir))
+            {
+                return Err(std::io::Error::other(
+                    "fleet policy project root contains parent traversal",
+                ));
+            }
+            let directories =
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+            let mut directory = File::from(open("/", directories, Mode::empty())?);
+            for part in root.components() {
+                if let Component::Normal(name) = part {
+                    directory = File::from(openat(&directory, name, directories, Mode::empty())?);
+                }
+            }
+            for name in [".franken-node", "state"] {
+                directory = match openat(&directory, name, directories, Mode::empty()) {
+                    Ok(fd) => File::from(fd),
+                    Err(Errno::NOENT) if !create => return Ok(None),
+                    Err(Errno::NOENT) => {
+                        match mkdirat(&directory, name, Mode::from_raw_mode(0o700)) {
+                            Ok(()) => directory.sync_all()?,
+                            Err(Errno::EXIST) => {}
+                            Err(error) => return Err(error.into()),
+                        }
+                        File::from(openat(&directory, name, directories, Mode::empty())?)
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+            }
+            let flags = OFlags::RDWR | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+            let (lock, enrollment_created) = match openat(
+                &directory,
+                FLEET_POLICY_LOCK_FILE,
+                if create {
+                    flags | OFlags::CREATE | OFlags::EXCL
+                } else {
+                    flags
+                },
+                Mode::from_raw_mode(0o600),
+            ) {
+                Ok(fd) => (File::from(fd), create),
+                Err(Errno::EXIST) if create => (
+                    File::from(openat(
+                        &directory,
+                        FLEET_POLICY_LOCK_FILE,
+                        flags,
+                        Mode::empty(),
+                    )?),
+                    false,
+                ),
+                Err(Errno::NOENT) if !create => {
+                    // Loss of the lock must not make an enrolled project appear
+                    // unconfigured. Inspect fixed names using the same authority.
+                    for name in [FLEET_POLICY_REQUIRED_FILE, FLEET_POLICY_STATE_FILE] {
+                        match openat(
+                            &directory,
+                            name,
+                            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                            Mode::empty(),
+                        ) {
+                            Err(Errno::NOENT) => {}
+                            Ok(_) => {
+                                return Err(std::io::Error::other(
+                                    "fleet policy enrollment exists without its lock",
+                                ));
+                            }
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
+                    return Ok(None);
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let metadata = lock.metadata()?;
+            if !metadata.is_file() || metadata.nlink() != 1 {
+                return Err(std::io::Error::other(
+                    "fleet policy lock must be a regular file without hardlink aliases",
+                ));
+            }
+            if enrollment_created {
+                lock.sync_all()?;
+                directory.sync_all()?;
+            }
+            Ok(Some(Self {
+                directory,
+                lock,
+                enrollment_created,
+            }))
+        };
+        let Some(store) = open_store().map_err(|error| {
+            FleetTransportError::io(format!("failed opening project fleet policy: {error}"))
+        })?
+        else {
+            return Ok(None);
+        };
+        lock_file_with_backoff(&store.lock, Path::new(FLEET_POLICY_LOCK_FILE), !create)?;
+        Ok(Some(store))
+    }
+
+    fn read(&self, name: &str) -> Result<Option<ActiveFleetPolicy>, FleetTransportError> {
+        use rustix::fs::{Mode, OFlags, openat};
+        use rustix::io::Errno;
+        use std::os::unix::fs::MetadataExt;
+
+        let read = || -> std::io::Result<Option<Vec<u8>>> {
+            let mut file = match openat(
+                &self.directory,
+                name,
+                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                Mode::empty(),
+            ) {
+                Ok(fd) => File::from(fd),
+                Err(Errno::NOENT) => return Ok(None),
+                Err(error) => return Err(error.into()),
+            };
+            let before = file.metadata()?;
+            if !before.is_file()
+                || before.nlink() != 1
+                || before.len() > MAX_FLEET_POLICY_STATE_BYTES as u64
+            {
+                return Err(std::io::Error::other(
+                    "fleet policy must be a bounded regular file without hardlink aliases",
+                ));
+            }
+            let mut bytes = Vec::new();
+            (&mut file)
+                .take(MAX_FLEET_POLICY_STATE_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)?;
+            let after = file.metadata()?;
+            if bytes.len() > MAX_FLEET_POLICY_STATE_BYTES
+                || bytes.len() as u64 != before.len()
+                || before.len() != after.len()
+                || before.mtime() != after.mtime()
+                || before.mtime_nsec() != after.mtime_nsec()
+                || before.ctime() != after.ctime()
+                || before.ctime_nsec() != after.ctime_nsec()
+            {
+                return Err(std::io::Error::other(
+                    "fleet policy changed during its bounded read",
+                ));
+            }
+            Ok(Some(bytes))
+        };
+        read()
+            .map_err(|error| FleetTransportError::io(format!("failed reading {name}: {error}")))?
+            .map(|bytes| {
+                let policy: ActiveFleetPolicy =
+                    serde_json::from_slice(&bytes).map_err(|error| {
+                        FleetTransportError::serialization(format!("invalid {name}: {error}"))
+                    })?;
+                policy.validate()?;
+                Ok(policy)
+            })
+            .transpose()
+    }
+
+    fn write(&self, name: &str, policy: &ActiveFleetPolicy) -> Result<(), FleetTransportError> {
+        use rustix::fs::{Mode, OFlags, openat, renameat};
+        policy.validate()?;
+        let bytes = serde_json::to_vec(policy)
+            .map_err(|error| FleetTransportError::serialization(error.to_string()))?;
+        if bytes.len() > MAX_FLEET_POLICY_STATE_BYTES {
+            return Err(FleetTransportError::serialization(
+                "fleet policy state exceeds its byte bound",
+            ));
+        }
+        let write = || -> std::io::Result<()> {
+            let temp = format!(".fleet-policy-{}.tmp", Uuid::now_v7());
+            let mut file = File::from(openat(
+                &self.directory,
+                temp.as_str(),
+                OFlags::CREATE | OFlags::EXCL | OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::from_raw_mode(0o600),
+            )?);
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            drop(file);
+            renameat(&self.directory, temp.as_str(), &self.directory, name)?;
+            self.directory.sync_all()
+        };
+        write()
+            .map_err(|error| FleetTransportError::io(format!("failed committing {name}: {error}")))
+    }
+
+    fn active(&self) -> Result<Option<ActiveFleetPolicy>, FleetTransportError> {
+        let required = self.read(FLEET_POLICY_REQUIRED_FILE)?;
+        let active = self.read(FLEET_POLICY_STATE_FILE)?;
+        if required.is_none() || required != active {
+            return Err(FleetTransportError::stale_state(
+                "fleet policy activation is missing or incomplete; run the fleet agent to repair it before executing guests",
+            ));
+        }
+        Ok(active)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for FleetPolicyStore {
+    fn drop(&mut self) {
+        let _ = self.lock.unlock();
+    }
+}
+
+/// Read one consistent activated snapshot. An interrupted policy commit, lost
+/// activation document, malformed content, or mismatched zone cannot silently
+/// turn an enrolled project back into an unmanaged runtime.
+pub fn load_active_fleet_policy(
+    project: &Path,
+) -> Result<Option<ActiveFleetPolicy>, FleetTransportError> {
+    #[cfg(unix)]
+    {
+        FleetPolicyStore::open(project, false)?
+            .map(|store| store.active())
+            .transpose()
+            .map(Option::flatten)
+    }
+    #[cfg(not(unix))]
+    {
+        for name in [
+            FLEET_POLICY_REQUIRED_FILE,
+            FLEET_POLICY_STATE_FILE,
+            FLEET_POLICY_LOCK_FILE,
+        ] {
+            match project
+                .join(".franken-node/state")
+                .join(name)
+                .symlink_metadata()
+            {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                _ => {
+                    return Err(FleetTransportError::io(
+                        "fleet policy activation requires Unix descriptor-relative storage on this build",
+                    ));
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Apply policy to a copy and commit that copy only on success. The selected
+/// profile stays unchanged: callers below a fleet floor receive an explicit
+/// admission refusal rather than a mixture of profile defaults.
+pub fn enforce_active_fleet_policy(
+    project: &Path,
+    config: &mut Config,
+    profile: Profile,
+) -> Result<Option<ActiveFleetPolicy>, FleetTransportError> {
+    let active = load_active_fleet_policy(project)?;
+    if let Some(active) = &active {
+        if config.profile != profile {
+            return Err(FleetTransportError::stale_state(
+                "fleet policy admission profile does not match the executable runtime config",
+            ));
+        }
+        let mut effective = config.clone();
+        for artifact in active.policies.values() {
+            artifact.policy.enforce(&mut effective, profile)?;
+        }
+        effective
+            .runtime
+            .validate_execution_budget()
+            .and_then(|()| effective.runtime.validate_parse_budget())
+            .map_err(|error| FleetTransportError::serialization(error.to_string()))?;
+        *config = effective;
+    }
+    Ok(active)
+}
+
+/// Activate the complete desired policy once per poll, before acknowledging any
+/// policy action. The durable required document is a write-ahead high-water mark:
+/// it is persisted before the active document, and a crash between those writes
+/// blocks new guests until a matching or stricter snapshot is durably repaired.
+/// Activation governs new run admission; it does not claim to hot-reload guests
+/// already executing under an earlier authenticated policy snapshot.
+pub fn activate_fleet_policy_snapshot(
+    project: &Path,
+    actions: &[FleetActionRecord],
+    zone_id: &str,
+) -> Result<Option<ActiveFleetPolicy>, FleetTransportError> {
+    let candidate = fleet_policy_snapshot(actions, zone_id)?;
+    #[cfg(unix)]
+    {
+        let Some(store) = FleetPolicyStore::open(project, candidate.is_some())? else {
+            return Ok(None);
+        };
+        let required = store.read(FLEET_POLICY_REQUIRED_FILE)?;
+        let active = store.read(FLEET_POLICY_STATE_FILE)?;
+        if required.is_none() && active.is_none() && !store.enrollment_created {
+            return Err(FleetTransportError::stale_state(
+                "fleet policy enrollment remains but both policy documents disappeared; prior restrictions cannot be recovered from an unverified replacement snapshot",
+            ));
+        }
+        if required.is_none() && active.is_some() {
+            return Err(FleetTransportError::stale_state(
+                "fleet policy required high-water mark disappeared",
+            ));
+        }
+        let Some(candidate) = candidate else {
+            return Err(FleetTransportError::stale_state(
+                "previously activated fleet policy disappeared from the action snapshot",
+            ));
+        };
+        for previous in required.iter().chain(active.iter()) {
+            candidate.ensure_successor_of(previous)?;
+        }
+        if required.as_ref() != Some(&candidate) {
+            store.write(FLEET_POLICY_REQUIRED_FILE, &candidate)?;
+        }
+        if active.as_ref() != Some(&candidate) {
+            store.write(FLEET_POLICY_STATE_FILE, &candidate)?;
+        }
+        // Re-read through the same lock before a successful application ACK.
+        store.active()
+    }
+    #[cfg(not(unix))]
+    {
+        if candidate.is_some() || load_active_fleet_policy(project)?.is_some() {
+            return Err(FleetTransportError::io(
+                "fleet policy activation requires Unix descriptor-relative storage on this build",
+            ));
+        }
+        Ok(None)
+    }
 }
 
 /// A node's acknowledgement that it durably reconciled the entire relevant
@@ -1045,6 +1717,7 @@ impl FleetTransport for AsupersyncFleetTransport {
                     "fleet action log already contains the maximum {MAX_ACTION_LOG_ENTRIES} entries; refusing to discard retained containment actions"
                 )));
             }
+            validate_fleet_policy_publication(action, state.actions.as_ref())?;
             let mut actions = state.actions.as_ref().clone();
             actions.push(action.clone());
             state.actions = Arc::new(actions);
@@ -1700,6 +2373,7 @@ impl FleetTransport for FileFleetTransport {
                         self.layout.actions_path().display()
                     )));
                 }
+                validate_fleet_policy_publication(action, &existing)?;
                 let payload = serde_json::to_vec(action).map_err(|err| {
                     FleetTransportError::serialization(format!(
                         "failed serializing fleet action {}: {err}",
@@ -1908,10 +2582,14 @@ pub fn validate_action_record(action: &FleetActionRecord) -> Result<(), FleetTra
         FleetAction::PolicyUpdate {
             zone_id,
             policy_version,
+            artifact,
             ..
         } => {
             validate_zone_id(zone_id)?;
             validate_action_text_field("policy_version", policy_version)?;
+            if let Some(artifact) = artifact {
+                artifact.validate()?;
+            }
         }
         #[cfg(feature = "control-plane")]
         FleetAction::Revoke {
@@ -2622,6 +3300,7 @@ mod tests {
                 zone_id: "prod".to_string(),
                 policy_version: "\t".to_string(),
                 changed_fields: vec!["trust.min_score".to_string()],
+                artifact: None,
             },
         };
 
@@ -2910,6 +3589,7 @@ mod tests {
                 zone_id: "prod-us-east".to_string(),
                 policy_version: "strict-2026-04-06".to_string(),
                 changed_fields: vec!["trust.min_score".to_string(), "fleet.timeout".to_string()],
+                artifact: None,
             },
         };
 

@@ -894,7 +894,7 @@ every leaf command available in the current build.
 | `franken-node trust revoke <id>` | Revoke an artifact or publisher in the **local** trust-card registry (not a live fleet). The extension id is handler-required so `--json` failures emit `franken-node/trust-error-cli/v1` instead of a human clap error. Optional `--receipt-signing-key`, `--receipt-out`. `--json` emits the revoked trust card; failures `franken-node/trust-error-cli/v1`. |
 | `franken-node trust quarantine` | Quarantine a suspicious artifact in the local trust-card registry and publish the quarantine to the fleet store: the local file transport, or the live coordinator when `[fleet] control_plane_url` is set (every agent polling it applies the quarantine). `--artifact` is handler-required so `--json` failures emit `franken-node/trust-error-cli/v1` instead of a human clap error. `--json` emits `franken-node/trust-quarantine-cli/v1`. |
 | `franken-node trust graph` | Ecosystem reputation graph from the verified trust-card registry and the project's `package-lock.json`: publisher→extension and lockfile `depends_on` edges, effective trust after named propagation rules (R1 revoked → 0; R2 quarantined ≤ 100; R3 at most 200 above the weakest dependency; R4 publishers with a revoked/quarantined extension capped at 400 and their extensions at publisher + 300), an explanation per lowered score, untracked dependencies reported as coverage gaps, and card-version transitions with the audit records that caused them. `--extension <id>` adds that extension's blast radius (every extension whose trust rests on it). `--json` emits `franken-node/trust-graph-cli/v1`. |
-| `franken-node trust release` | Lift a local sentinel run-subject quarantine record for one `--app` (durable JSON; not a live Runtime Sentinel daemon). `--app`, `--operator-id`, and `--reason` are handler-required so `--json` failures emit `franken-node/trust-release-error/v1` instead of a human clap error. `--json` emits `franken-node/trust-release-cli/v1`. |
+| `franken-node trust release` | Release a local trust-card hold with `--artifact <extension-id or sha256:prefix>`, preserving fleet quarantine owners and permanent revocation, or release a sentinel run-target record with `--app`. Exactly one target, `--operator-id`, and `--reason` are required. Artifact releases bind operator/rationale into signed card history and report remaining containment. `--json` emits `franken-node/trust-artifact-release-cli/v1` for artifacts or `franken-node/trust-release-cli/v1` for apps; failures emit `franken-node/trust-release-error/v1`. |
 | `franken-node trust-card show <id>` | Show a card from the **local** trust-card registry JSON (not a live HTTP API). The extension id is handler-required so `--json` failures emit `franken-node/trust-card-error-cli/v1` instead of a human clap error. Flags: `--json`. |
 | `franken-node trust-card export <id> --json` | Export trust card as canonical JSON. The extension id is handler-required so `--json` failures emit `franken-node/trust-card-error-cli/v1` instead of a human clap error. |
 | `franken-node trust-card list` | List with filters: `--publisher`, `--query`, `--page`, `--per-page`. Flags: `--json`. |
@@ -933,7 +933,7 @@ Every fleet command, and `trust quarantine`, talks to one of two stores:
 | `franken-node fleet serve` | Run the live coordinator: serves this node's durable fleet store over HTTP (fastapi_rust listener on the asupersync runtime). Routes: `GET /v1/fleet/health` (open), `GET/POST /v1/fleet/actions`, `GET/POST /v1/fleet/nodes`, `GET /v1/fleet/state` (bearer token, constant-time compare). Validates every record, caps bodies at 64 KiB, stamps heartbeats with its own clock. Flags: `--bind` (default `127.0.0.1:9440`; port 0 picks a free port, printed first on stdout), `--token-file` (default `.franken-node/keys/fleet-control-plane.token`), `--generate-token` (create a 0600 256-bit token), `--allow-non-loopback` (plaintext listener; only behind TLS termination or an encrypted overlay), `--max-requests`, `--json` (JSONL `FLEET_HTTP_LISTENING` / `FLEET_HTTP_REQUEST` / `FLEET_HTTP_SHUTDOWN` events). |
 | `franken-node fleet status` | Show fleet/quarantine state from the configured store. `activated` is true only when a live coordinator answered. Flags: `--zone`, `--verbose`, `--json`. |
 | `franken-node fleet describe <node>` | Describe one fleet node with zone context and incident state. Flags: `--zone`, `--json`. |
-| `franken-node fleet release` | Lift quarantine/revocation controls with signed receipts. `--incident` is handler-required so `--json` failures emit `franken-node/fleet-error-cli/v1` instead of a human clap error. Flags: `--json`. |
+| `franken-node fleet release` | Retire one fleet quarantine incident with signed receipts and application convergence. Preserves local quarantine, other scoped incidents, and permanent revocation. `--zone` disambiguates a shared incident ID; `--zone all` selects its global scope. `--incident` is handler-required so `--json` failures emit `franken-node/fleet-error-cli/v1`. |
 | `franken-node fleet reconcile` | Reconcile the fleet-action log and wait for convergence. Times out fail-closed (same as `fleet release`). Flags: `--json`. |
 | `franken-node fleet agent` | Pull fleet actions, apply them to this node's trust-card registry, and push a heartbeat each cycle. `--zone` is handler-required so `--json` failures emit `franken-node/fleet-error-cli/v1` instead of a human clap error. Flags: `--node-id`, `--poll-interval-secs`, `--max-cycles`, `--once`, `--json`. |
 
@@ -2841,6 +2841,16 @@ Known revoked or quarantined transitive identities therefore reach the existing
 profile-specific admission checks. These are bounded metadata checks: a lockfile
 does not authenticate installed source bytes or enumerate undeclared dynamic
 imports. Missing optional or peer targets remain visible as declared identities.
+
+The native worker receives every identity considered by preflight over its
+authenticated control channel and rereads current signed trust state before
+loading the entrypoint. A card that becomes revoked, quarantined, or High/Critical
+risk during worker startup is evaluated under the selected profile again; required
+cards and registries cannot silently disappear. Previously untracked identities
+are rechecked too. A legacy-risky run whose registry was unavailable still checks
+any valid registry that appears before execution, and revocations block every
+profile. These checks govern new execution admission; they do not intercept each
+module import or continuously refresh an already executing guest.
 
 Trust cards are keyed by package identity. When reachable installations contain
 multiple versions, or mix a pinned version with an unresolved requirement, a new

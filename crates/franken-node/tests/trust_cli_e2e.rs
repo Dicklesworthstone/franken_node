@@ -14,10 +14,13 @@ use frankenengine_node::control_plane::fleet_transport::{
     FleetAction, FleetTargetKind, FleetTransport, NodeHealth, NodeStatus,
 };
 use frankenengine_node::control_plane::fleet_transport_durable::DurableFleetTransport;
+use frankenengine_node::ops::engine_dispatcher::{
+    RunTrustRequirements, enforce_execution_fleet_policy, validate_execution_trust,
+};
 use frankenengine_node::security::remote_cap::{CapabilityProvider, RemoteOperation, RemoteScope};
 use frankenengine_node::supply_chain::trust_card::{
-    SnapshotSourceContext, TrustCardListFilter, TrustCardMutation, TrustCardRegistry,
-    fixture_registry,
+    QuarantineSource, SnapshotSourceContext, TrustCardListFilter, TrustCardMutation,
+    TrustCardRegistry, fixture_registry,
 };
 use frankenengine_node::supply_chain::trust_card_registry_store::TrustCardRegistryStore;
 use serde_json::Value;
@@ -1121,6 +1124,506 @@ fn run_preflight_refuses_high_risk_dependency_under_strict_only() {
     assert_eq!(payload["preflight"]["verdict"]["status"], "passed");
 }
 
+/// These exercise the same production admission function the native worker
+/// invokes, against the real signed durable registry. They do not depend on
+/// whether the current build links the JavaScript engine.
+#[test]
+fn execution_trust_admission_rechecks_previously_untracked_revocations() {
+    let workspace = config_only_workspace();
+    let mut config = Config::load(&workspace.path().join("franken_node.toml"))
+        .expect("load signed-registry configuration");
+    let now = chrono::Utc::now().timestamp().max(0) as u64;
+    let registry_path =
+        frankenengine_node::supply_chain::trust_card_registry_store::registry_snapshot_path(
+            workspace.path(),
+        );
+    let mut registry = TrustCardRegistry::from_config(&config.trust).expect("empty registry");
+    registry
+        .persist_authoritative_state(&registry_path)
+        .expect("persist initially untracked registry");
+    let requirements =
+        RunTrustRequirements::new(&["npm:@beta/telemetry-bridge".to_string()], &[], true)
+            .expect("retain untracked identity");
+    let warnings = validate_execution_trust(workspace.path(), &config, &requirements, now)
+        .expect("untracked dependencies retain the existing admission policy");
+    assert!(warnings.iter().any(|warning| warning.contains("untracked")));
+
+    // The registry acquires a signed revocation after preflight. The identity
+    // was not in the old trusted-card set and must nevertheless be refused.
+    let mut fixture = fixture_registry(now).expect("new signed registry observations");
+    let revoked = fixture
+        .read(
+            "npm:@beta/telemetry-bridge",
+            now + 3,
+            "test-late-revocation-input",
+        )
+        .expect("read fixture card")
+        .expect("revoked fixture card");
+    let input = serde_json::from_value::<
+        frankenengine_node::supply_chain::trust_card::TrustCardInput,
+    >(serde_json::to_value(revoked).expect("serialize fixture creation fields"))
+    .expect("typed creation fields retain revocation and signed evidence references");
+    registry
+        .create(input, now + 3, "test-new-revocation")
+        .expect("record new revoked identity");
+    registry
+        .persist_authoritative_state(&registry_path)
+        .expect("persist late revocation");
+    for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+        config.profile = profile;
+        let error = validate_execution_trust(workspace.path(), &config, &requirements, now + 3)
+            .expect_err("a new revocation always blocks")
+            .to_string();
+        assert!(error.contains("npm:@beta/telemetry-bridge"), "{error}");
+        assert!(error.contains("revoked since preflight"), "{error}");
+        assert!(error.contains("publisher key compromised"), "{error}");
+    }
+}
+
+#[test]
+fn execution_trust_admission_rechecks_a_legacy_skipped_registry_when_it_appears() {
+    use frankenengine_node::supply_chain::trust_card_registry_store::registry_snapshot_path;
+
+    let workspace = config_only_workspace();
+    let mut config = Config::load(&workspace.path().join("franken_node.toml"))
+        .expect("load signed-registry configuration");
+    config.profile = Profile::LegacyRisky;
+    let now = chrono::Utc::now().timestamp().max(0) as u64;
+    let requirements =
+        RunTrustRequirements::new(&["npm:@beta/telemetry-bridge".to_string()], &[], false)
+            .expect("capture identities despite skipped preflight");
+    let warnings = validate_execution_trust(workspace.path(), &config, &requirements, now)
+        .expect("legacy-risky retains its explicit unavailable-registry behavior");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("unavailable"))
+    );
+    let registry_path = registry_snapshot_path(workspace.path());
+    fs::create_dir_all(registry_path.parent().expect("registry parent")).expect("state directory");
+    fs::write(&registry_path, b"corrupt registry").expect("existing unreadable preflight input");
+    let warnings = validate_execution_trust(workspace.path(), &config, &requirements, now + 1)
+        .expect("legacy-risky retains its explicit corrupt-registry behavior");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("unreadable"))
+    );
+    fixture_registry(now)
+        .expect("replacement signed registry")
+        .persist_authoritative_state(&registry_path)
+        .expect("operator creates valid authoritative state before execution");
+    let error = validate_execution_trust(workspace.path(), &config, &requirements, now + 3)
+        .expect_err("a skipped preflight cannot hide a newly available revocation")
+        .to_string();
+    assert!(error.contains("publisher key compromised"), "{error}");
+}
+
+#[test]
+fn execution_trust_admission_rechecks_risk_escalation_with_current_profile() {
+    use frankenengine_node::supply_chain::trust_card::{RiskAssessment, RiskLevel};
+    use frankenengine_node::supply_chain::trust_card_registry_store::{
+        record_revocation_frontier, registry_snapshot_path,
+    };
+
+    let now = chrono::Utc::now().timestamp().max(0) as u64;
+    let workspace = seeded_fixture_trust_workspace_with_timestamp(now);
+    let mut config = Config::load(&workspace.path().join("franken_node.toml"))
+        .expect("load signed-registry configuration");
+    config.profile = Profile::Strict;
+    let registry_path = registry_snapshot_path(workspace.path());
+    record_revocation_frontier(
+        &registry_path,
+        &config.trust,
+        now,
+        "test: execution admission",
+    )
+    .expect("fresh recorded revocation frontier");
+    let requirements = RunTrustRequirements::new(&[], &["npm:@acme/auth-guard".to_string()], true)
+        .expect("retain previously trusted card");
+    assert!(
+        validate_execution_trust(workspace.path(), &config, &requirements, now + 3)
+            .expect("low-risk card is admitted under strict")
+            .is_empty()
+    );
+    let mut registry = TrustCardRegistry::load_authoritative_state_from_config(
+        &registry_path,
+        &config.trust,
+        now + 3,
+        SnapshotSourceContext::TrustedFile,
+    )
+    .expect("load registry for new risk observation");
+    registry
+        .update(
+            "npm:@acme/auth-guard",
+            TrustCardMutation {
+                user_facing_risk_assessment: Some(RiskAssessment {
+                    level: RiskLevel::High,
+                    summary: "new confirmed supply-chain finding".to_string(),
+                }),
+                certification_level: None,
+                revocation_status: None,
+                active_quarantine: None,
+                reputation_score_basis_points: None,
+                reputation_trend: None,
+                last_verified_timestamp: None,
+                evidence_refs: None,
+            },
+            now + 4,
+            "test-risk-escalation",
+        )
+        .expect("record risk escalation");
+    registry
+        .persist_authoritative_state(&registry_path)
+        .expect("persist risk");
+    let error = validate_execution_trust(workspace.path(), &config, &requirements, now + 5)
+        .expect_err("strict cannot reuse its earlier low-risk decision")
+        .to_string();
+    assert!(
+        error.contains("high risk at execution admission"),
+        "{error}"
+    );
+    assert!(
+        error.contains("new confirmed supply-chain finding"),
+        "{error}"
+    );
+    config.profile = Profile::Balanced;
+    let warnings = validate_execution_trust(workspace.path(), &config, &requirements, now + 5)
+        .expect("balanced admits with a current risk warning");
+    assert!(warnings.iter().any(|warning| warning.contains("high risk")));
+    config.profile = Profile::LegacyRisky;
+    assert!(
+        validate_execution_trust(workspace.path(), &config, &requirements, now + 5)
+            .expect("legacy-risky retains its risk policy")
+            .is_empty()
+    );
+}
+
+#[test]
+fn execution_trust_admission_honors_quarantine_profile_without_ignoring_revocation() {
+    use frankenengine_node::supply_chain::trust_card::RevocationStatus;
+    use frankenengine_node::supply_chain::trust_card_registry_store::registry_snapshot_path;
+
+    let now = chrono::Utc::now().timestamp().max(0) as u64;
+    let workspace = seeded_fixture_trust_workspace_with_timestamp(now);
+    let mut config = Config::load(&workspace.path().join("franken_node.toml"))
+        .expect("load signed-registry configuration");
+    let registry_path = registry_snapshot_path(workspace.path());
+    let requirements = RunTrustRequirements::new(&[], &["npm:@acme/auth-guard".to_string()], true)
+        .expect("retain previously trusted card");
+    let mut registry = TrustCardRegistry::load_authoritative_state_from_config(
+        &registry_path,
+        &config.trust,
+        now + 3,
+        SnapshotSourceContext::TrustedFile,
+    )
+    .expect("load registry for quarantine");
+    registry
+        .update(
+            "npm:@acme/auth-guard",
+            TrustCardMutation {
+                active_quarantine: Some(true),
+                certification_level: None,
+                revocation_status: None,
+                reputation_score_basis_points: None,
+                reputation_trend: None,
+                user_facing_risk_assessment: None,
+                last_verified_timestamp: None,
+                evidence_refs: None,
+            },
+            now + 4,
+            "test-quarantine",
+        )
+        .expect("quarantine extension");
+    registry
+        .persist_authoritative_state(&registry_path)
+        .expect("persist quarantine");
+    for profile in [Profile::Strict, Profile::Balanced] {
+        config.profile = profile;
+        let error = validate_execution_trust(workspace.path(), &config, &requirements, now + 5)
+            .expect_err("strict and balanced refuse quarantines")
+            .to_string();
+        assert!(error.contains("quarantined since preflight"), "{error}");
+    }
+    config.profile = Profile::LegacyRisky;
+    let warnings = validate_execution_trust(workspace.path(), &config, &requirements, now + 5)
+        .expect("legacy-risky quarantine behavior matches preflight");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("quarantined"))
+    );
+    registry
+        .update(
+            "npm:@acme/auth-guard",
+            TrustCardMutation {
+                revocation_status: Some(RevocationStatus::Revoked {
+                    reason: "late mandatory revocation".to_string(),
+                    revoked_at: "2026-10-08T00:00:00Z".to_string(),
+                }),
+                certification_level: None,
+                active_quarantine: None,
+                reputation_score_basis_points: None,
+                reputation_trend: None,
+                user_facing_risk_assessment: None,
+                last_verified_timestamp: None,
+                evidence_refs: None,
+            },
+            now + 6,
+            "test-revocation-after-quarantine",
+        )
+        .expect("revoke quarantined extension");
+    registry
+        .persist_authoritative_state(&registry_path)
+        .expect("persist revocation");
+    let error = validate_execution_trust(workspace.path(), &config, &requirements, now + 7)
+        .expect_err("legacy-risky cannot bypass revocation via a quarantine warning")
+        .to_string();
+    assert!(error.contains("late mandatory revocation"), "{error}");
+}
+
+#[test]
+fn execution_trust_admission_refuses_registry_and_required_card_loss() {
+    use frankenengine_node::supply_chain::trust_card_registry_store::registry_snapshot_path;
+
+    let now = chrono::Utc::now().timestamp().max(0) as u64;
+    let workspace = seeded_fixture_trust_workspace_with_timestamp(now);
+    let mut config = Config::load(&workspace.path().join("franken_node.toml"))
+        .expect("load signed-registry configuration");
+    let requirements = RunTrustRequirements::new(&[], &["npm:@acme/auth-guard".to_string()], true)
+        .expect("retain previously trusted card");
+    validate_execution_trust(workspace.path(), &config, &requirements, now + 3)
+        .expect("initially admitted card");
+    fs::rename(
+        workspace.path().join(".franken-node/state"),
+        workspace.path().join("retained-original-state"),
+    )
+    .expect("move authoritative state away after preflight");
+    for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+        config.profile = profile;
+        let error = validate_execution_trust(workspace.path(), &config, &requirements, now + 4)
+            .expect_err("registry disappearance is never dependency-free execution")
+            .to_string();
+        assert!(
+            error.contains("authoritative trust registry is missing"),
+            "{error}"
+        );
+    }
+    TrustCardRegistry::from_config(&config.trust)
+        .expect("replacement registry")
+        .persist_authoritative_state(&registry_snapshot_path(workspace.path()))
+        .expect("persist empty replacement registry");
+    let error = validate_execution_trust(workspace.path(), &config, &requirements, now + 5)
+        .expect_err("a new empty registry cannot erase previously required cards")
+        .to_string();
+    assert!(error.contains("no longer tracked"), "{error}");
+}
+
+#[test]
+fn execution_trust_admission_uses_execution_clock_for_frontier_expiry() {
+    use frankenengine_node::supply_chain::trust_card_registry_store::{
+        record_revocation_frontier, registry_snapshot_path,
+    };
+
+    let now = chrono::Utc::now().timestamp().max(0) as u64;
+    let workspace = seeded_fixture_trust_workspace_with_timestamp(now);
+    let mut config = Config::load(&workspace.path().join("franken_node.toml"))
+        .expect("load signed-registry configuration");
+    config.profile = Profile::Strict;
+    record_revocation_frontier(
+        &registry_snapshot_path(workspace.path()),
+        &config.trust,
+        now,
+        "test: worker clock",
+    )
+    .expect("record fresh frontier");
+    let requirements = RunTrustRequirements::new(&[], &["npm:@acme/auth-guard".to_string()], true)
+        .expect("retain previously trusted card");
+    validate_execution_trust(workspace.path(), &config, &requirements, now + 300)
+        .expect("strict permits its exact freshness boundary");
+    let error = validate_execution_trust(workspace.path(), &config, &requirements, now + 301)
+        .expect_err("worker cannot reuse the earlier preflight clock")
+        .to_string();
+    assert!(error.contains("RF_STALE_FRONTIER"), "{error}");
+    config.profile = Profile::Balanced;
+    let warnings = validate_execution_trust(workspace.path(), &config, &requirements, now + 3_601)
+        .expect("balanced retains warning-only freshness behavior");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("RF_STALE_FRONTIER"))
+    );
+}
+
+#[test]
+fn execution_trust_requirements_refuse_omitted_or_oversized_authority() {
+    let requirements = RunTrustRequirements::new(
+        &["npm:untracked".to_string(), "npm:untracked".to_string()],
+        &["npm:trusted".to_string()],
+        true,
+    )
+    .expect("canonical bounded requirements");
+    let mut encoded = serde_json::to_value(&requirements).expect("encode requirements");
+    assert_eq!(
+        encoded["dependency_ids"],
+        serde_json::json!(["npm:trusted", "npm:untracked"])
+    );
+    assert_eq!(
+        encoded["required_card_ids"],
+        serde_json::json!(["npm:trusted"])
+    );
+    encoded
+        .as_object_mut()
+        .expect("object")
+        .remove("required_card_ids");
+    assert!(serde_json::from_value::<RunTrustRequirements>(encoded).is_err());
+    let truncated: RunTrustRequirements = serde_json::from_value(serde_json::json!({
+        "dependency_ids": [],
+        "required_card_ids": ["npm:trusted"],
+        "registry_required": true
+    }))
+    .expect("structural JSON is checked at execution admission");
+    let workspace = tempfile::tempdir().expect("admission test workspace");
+    let error = validate_execution_trust(workspace.path(), &Config::default(), &truncated, 1)
+        .expect_err("truncated identities cannot bypass a required card")
+        .to_string();
+    assert!(
+        error.contains("omitted a previously trusted identity"),
+        "{error}"
+    );
+    let optional_required_card: RunTrustRequirements = serde_json::from_value(serde_json::json!({
+        "dependency_ids": ["npm:trusted"],
+        "required_card_ids": ["npm:trusted"],
+        "registry_required": false
+    }))
+    .expect("structural JSON is checked at execution admission");
+    assert!(
+        validate_execution_trust(
+            workspace.path(),
+            &Config::default(),
+            &optional_required_card,
+            1
+        )
+        .expect_err("required cards cannot make their registry optional")
+        .to_string()
+        .contains("previously required registry optional")
+    );
+    assert!(RunTrustRequirements::new(&["x".repeat(257)], &[], true).is_err());
+    let oversized = vec!["x".repeat(256); 8_193];
+    assert!(
+        RunTrustRequirements::new(&oversized, &[], true)
+            .expect_err("bound before deduplication")
+            .to_string()
+            .contains("identity byte limit")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn execution_fleet_admission_keeps_authenticated_policy_after_enrollment_loss() {
+    use frankenengine_node::control_plane::fleet_transport::{
+        FleetActionRecord, FleetPolicyArtifact, FleetRuntimePolicy, activate_fleet_policy_snapshot,
+    };
+
+    let workspace = tempfile::tempdir().expect("project");
+    let action = FleetActionRecord {
+        action_id: "worker-admission-policy-1".to_string(),
+        emitted_at: chrono::Utc::now(),
+        action: FleetAction::PolicyUpdate {
+            zone_id: "zone-admission".to_string(),
+            policy_version: "worker-admission-v1".to_string(),
+            changed_fields: vec!["runtime.max_instructions".to_string()],
+            artifact: Some(
+                FleetPolicyArtifact::new(
+                    1,
+                    FleetRuntimePolicy {
+                        max_instructions: Some(10_000),
+                        ..FleetRuntimePolicy::default()
+                    },
+                )
+                .expect("valid restrictive policy"),
+            ),
+        },
+    };
+    let expected = activate_fleet_policy_snapshot(workspace.path(), &[action], "zone-admission")
+        .expect("durably activate")
+        .expect("activated policy");
+    let mut config = Config::default();
+    let admitted = enforce_execution_fleet_policy(workspace.path(), &mut config, Some(&expected))
+        .expect("parent admission");
+    assert_eq!(admitted, Some(expected.clone()));
+    assert_eq!(config.runtime.max_instructions, Some(10_000));
+    fs::rename(
+        workspace.path().join(".franken-node/state"),
+        workspace.path().join("retained-enrollment"),
+    )
+    .expect("move both active and required documents after authenticated parent admission");
+    let error = enforce_execution_fleet_policy(workspace.path(), &mut config, Some(&expected))
+        .expect_err("worker must not forget the enrolled policy even if every marker disappears")
+        .to_string();
+    assert!(error.contains("fleet policy disappeared"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn execution_fleet_admission_accepts_only_stricter_current_revisions() {
+    use frankenengine_node::control_plane::fleet_transport::{
+        FleetActionRecord, FleetPolicyArtifact, FleetRuntimePolicy, activate_fleet_policy_snapshot,
+    };
+
+    let workspace = tempfile::tempdir().expect("project");
+    let action = |revision, limit| FleetActionRecord {
+        action_id: format!("worker-policy-{revision}"),
+        emitted_at: chrono::Utc::now(),
+        action: FleetAction::PolicyUpdate {
+            zone_id: "all".to_string(),
+            policy_version: format!("worker-v{revision}"),
+            changed_fields: vec!["runtime.max_instructions".to_string()],
+            artifact: Some(
+                FleetPolicyArtifact::new(
+                    revision,
+                    FleetRuntimePolicy {
+                        max_instructions: Some(limit),
+                        ..FleetRuntimePolicy::default()
+                    },
+                )
+                .expect("valid policy"),
+            ),
+        },
+    };
+    let expected =
+        activate_fleet_policy_snapshot(workspace.path(), &[action(1, 10_000)], "zone-admission")
+            .expect("activate original policy")
+            .expect("original policy");
+    let tighter =
+        activate_fleet_policy_snapshot(workspace.path(), &[action(2, 5_000)], "zone-admission")
+            .expect("activate stricter policy during worker startup")
+            .expect("stricter policy");
+    let mut config = Config::default();
+    config.runtime.max_instructions = Some(7_000);
+    assert_eq!(
+        enforce_execution_fleet_policy(workspace.path(), &mut config, Some(&expected))
+            .expect("worker applies current stricter revision"),
+        Some(tighter.clone())
+    );
+    assert_eq!(config.runtime.max_instructions, Some(5_000));
+
+    // Replacing the complete durable enrollment would hide its high-water mark
+    // from a fresh process, but cannot hide it from this authenticated session.
+    fs::rename(
+        workspace.path().join(".franken-node/state"),
+        workspace.path().join("retained-stricter-state"),
+    )
+    .expect("retain newer state while replacing enrollment");
+    activate_fleet_policy_snapshot(workspace.path(), &[action(1, 10_000)], "zone-admission")
+        .expect("create older durable state in the replacement store");
+    let error = enforce_execution_fleet_policy(workspace.path(), &mut config, Some(&tighter))
+        .expect_err("authenticated worker expectation rejects full-store rollback")
+        .to_string();
+    assert!(error.contains("rollback"), "{error}");
+    assert_eq!(config.runtime.max_instructions, Some(5_000));
+}
+
 fn doctor_check_status(workspace: &Path, profile: &str, code: &str) -> String {
     let doctor = run_cli_in_workspace(workspace, &["doctor", "--profile", profile, "--json"]);
     let report = parse_json_stdout(&doctor, "doctor --json");
@@ -1805,6 +2308,213 @@ fn trust_revoke_honors_json() {
         !stdout.contains("revocation: revoked"),
         "json mode must not emit the human card dump:\n{stdout}"
     );
+}
+
+#[test]
+fn trust_artifact_release_preserves_fleet_owner_and_signs_operator_rationale() {
+    let workspace = seeded_fixture_trust_workspace();
+    let registry_path = workspace
+        .path()
+        .join(".franken-node/state/trust-card-registry.v1.json");
+    let mut registry = TrustCardRegistry::load_authoritative_state(
+        &registry_path,
+        60,
+        2_000,
+        SnapshotSourceContext::TrustedFile,
+    )
+    .expect("load registry");
+    let source = QuarantineSource::Fleet {
+        zone_id: "production".to_string(),
+        incident_id: "still-investigating".to_string(),
+    };
+    for owner in [QuarantineSource::Local, source.clone()] {
+        registry
+            .set_quarantine_source("npm:@acme/auth-guard", owner, true, 2_001, "contain")
+            .unwrap();
+    }
+    registry
+        .persist_authoritative_state(&registry_path)
+        .unwrap();
+    let args = [
+        "trust",
+        "release",
+        "--artifact",
+        "npm:@acme/auth-guard",
+        "--operator-id",
+        "operator-security",
+        "--reason",
+        "local investigation completed",
+        "--json",
+    ];
+    let output = run_cli_in_workspace(workspace.path(), &args);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = parse_json_stdout(&output, "artifact release");
+    assert_eq!(
+        report["schema_version"],
+        "franken-node/trust-artifact-release-cli/v1"
+    );
+    assert_eq!(report["released_local_quarantines"], 1);
+    assert_eq!(report["remaining_quarantines"], 1);
+    assert_eq!(report["revoked_cards"], 0);
+    let mut registry = TrustCardRegistry::load_authoritative_state(
+        &registry_path,
+        60,
+        2_010,
+        SnapshotSourceContext::TrustedFile,
+    )
+    .unwrap();
+    let card = registry
+        .read("npm:@acme/auth-guard", 2_011, "verify")
+        .unwrap()
+        .unwrap();
+    assert!(card.active_quarantine);
+    assert_eq!(
+        card.quarantine_sources,
+        std::collections::BTreeSet::from([source])
+    );
+    let audit = card.audit_history.last().expect("signed audit record");
+    assert!(audit.detail.contains("operator-security"));
+    assert!(audit.detail.contains("local investigation completed"));
+    frankenengine_node::supply_chain::trust_card::verify_card_signature(
+        &card,
+        FIXTURE_REGISTRY_KEY,
+    )
+    .unwrap();
+    let retry = run_cli_in_workspace(workspace.path(), &args);
+    assert!(retry.status.success());
+    let retried = parse_json_stdout(&retry, "idempotent artifact release");
+    assert_eq!(retried["released_local_quarantines"], 0);
+    assert_eq!(retried["cards"][0]["card_hash"], card.card_hash);
+}
+
+#[test]
+fn trust_artifact_release_clears_local_hold_without_restoring_revoked_trust() {
+    let workspace = seeded_fixture_trust_workspace();
+    let quarantined = run_cli_in_workspace(
+        workspace.path(),
+        &[
+            "trust",
+            "quarantine",
+            "--artifact",
+            "npm:@acme/auth-guard",
+            "--json",
+        ],
+    );
+    assert!(
+        quarantined.status.success(),
+        "{}",
+        String::from_utf8_lossy(&quarantined.stderr)
+    );
+    for (extension, revoked) in [
+        ("npm:@acme/auth-guard", false),
+        ("npm:@beta/telemetry-bridge", true),
+    ] {
+        let output = run_cli_in_workspace(
+            workspace.path(),
+            &[
+                "trust",
+                "release",
+                "--artifact",
+                extension,
+                "--operator-id",
+                "operator-security",
+                "--reason",
+                "local remediation completed",
+                "--json",
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report = parse_json_stdout(&output, "local artifact release");
+        assert_eq!(report["released_local_quarantines"], 1);
+        assert_eq!(report["remaining_quarantines"], 0);
+        assert_eq!(report["revoked_cards"], usize::from(revoked));
+        assert_eq!(report["cards"][0]["active_quarantine"], false);
+        assert_eq!(
+            report["cards"][0]["revocation_status"]["status"],
+            if revoked { "revoked" } else { "active" }
+        );
+    }
+}
+
+#[test]
+fn trust_artifact_release_refuses_ambiguous_targets_and_invalid_audit_inputs() {
+    let workspace = seeded_fixture_trust_workspace();
+    let cases: Vec<Vec<&str>> = vec![
+        vec![
+            "--app",
+            "app.js",
+            "--artifact",
+            "npm:@acme/auth-guard",
+            "--operator-id",
+            "operator",
+            "--reason",
+            "remediated",
+        ],
+        vec![
+            "--artifact",
+            "",
+            "--operator-id",
+            "operator",
+            "--reason",
+            "remediated",
+        ],
+        vec![
+            "--artifact",
+            "sha256:abcd",
+            "--operator-id",
+            "operator",
+            "--reason",
+            "remediated",
+        ],
+        vec![
+            "--artifact",
+            "npm:@acme/auth-guard",
+            "--operator-id",
+            "operator\nforged",
+            "--reason",
+            "remediated",
+        ],
+        vec![
+            "--artifact",
+            "npm:@acme/auth-guard",
+            "--operator-id",
+            "operator",
+            "--reason",
+            " padded rationale",
+        ],
+        vec![
+            "--artifact",
+            "npm:missing",
+            "--operator-id",
+            "operator",
+            "--reason",
+            "remediated",
+        ],
+    ];
+    for tail in cases {
+        let mut args = vec!["trust", "release", "--json"];
+        args.extend(tail);
+        let output = run_cli_in_workspace(workspace.path(), &args);
+        assert!(
+            !output.status.success(),
+            "invalid release was accepted: {args:?}"
+        );
+        let report = parse_json_stdout(&output, "invalid artifact release");
+        assert_eq!(
+            report["schema_version"],
+            "franken-node/trust-release-error/v1"
+        );
+        assert_eq!(report["ok"], false);
+        assert!(!report["error"].as_str().unwrap().is_empty());
+    }
 }
 
 #[test]

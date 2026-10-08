@@ -9,9 +9,11 @@ use frankenengine_node::control_plane::fleet_transport::{
     AsupersyncFleetNetwork, AsupersyncFleetTransport, wait_until_fleet_converged_or_timeout,
 };
 use frankenengine_node::control_plane::fleet_transport::{
-    FleetAction, FleetActionRecord, FleetTargetKind, FleetTransport, NodeHealth, NodeStatus,
-    canonical_fleet_convergence_receipt_payload, fleet_application_checkpoint,
-    fleet_convergence_receipt_verdict,
+    FleetAction, FleetActionRecord, FleetPolicyArtifact, FleetRuntimePolicy, FleetTargetKind,
+    FleetTransport, NodeHealth, NodeStatus, activate_fleet_policy_snapshot,
+    canonical_fleet_convergence_receipt_payload, enforce_active_fleet_policy,
+    fleet_application_checkpoint, fleet_convergence_receipt_verdict, fleet_policy_snapshot,
+    load_active_fleet_policy,
 };
 use frankenengine_node::supply_chain::trust_card::{
     QuarantineSource, ReputationTrend, RiskAssessment, RiskLevel, SnapshotSourceContext,
@@ -123,6 +125,519 @@ fn seed_durable_transport(
         .initialize()
         .expect("initialize durable fleet transport");
     transport
+}
+
+fn executable_policy_action(
+    id: &str,
+    zone: &str,
+    revision: u64,
+    max_instructions: u64,
+) -> FleetActionRecord {
+    FleetActionRecord {
+        action_id: id.to_string(),
+        emitted_at: Utc::now(),
+        action: FleetAction::PolicyUpdate {
+            zone_id: zone.to_string(),
+            policy_version: format!("revision-{revision}"),
+            changed_fields: vec!["max_instructions".to_string()],
+            artifact: Some(
+                FleetPolicyArtifact::new(
+                    revision,
+                    FleetRuntimePolicy {
+                        max_instructions: Some(max_instructions),
+                        ..FleetRuntimePolicy::default()
+                    },
+                )
+                .expect("valid restrictive policy"),
+            ),
+        },
+    }
+}
+
+#[test]
+fn fleet_policy_artifacts_reject_unknown_fields_zero_limits_and_content_tampering() {
+    for raw in [
+        r#"{"max_instructions": 1, "runtime_binary": "/tmp/untrusted"}"#,
+        r#"{"minimum_profile": "permissive"}"#,
+        r#"{"max_instructions": 1, "quarantine_on_high_risk": true}"#,
+    ] {
+        assert!(serde_json::from_str::<FleetRuntimePolicy>(raw).is_err());
+    }
+    for raw in [
+        "{}",
+        r#"{"minimum_profile":"legacy-risky"}"#,
+        r#"{"max_instructions":0}"#,
+        r#"{"max_parse_source_bytes":0}"#,
+        r#"{"max_parse_tokens":18446744073709551615}"#,
+    ] {
+        let policy: FleetRuntimePolicy = serde_json::from_str(raw).expect("typed input");
+        assert!(
+            FleetPolicyArtifact::new(1, policy).is_err(),
+            "accepted {raw}"
+        );
+    }
+    let mut artifact = FleetPolicyArtifact::new(
+        2,
+        FleetRuntimePolicy {
+            max_instructions: Some(500),
+            ..FleetRuntimePolicy::default()
+        },
+    )
+    .expect("valid artifact");
+    artifact.policy.max_instructions = Some(501);
+    assert!(artifact.validate().is_err());
+    assert!(
+        FleetPolicyArtifact::new(
+            0,
+            FleetRuntimePolicy {
+                max_instructions: Some(1),
+                ..FleetRuntimePolicy::default()
+            }
+        )
+        .is_err()
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn fleet_policy_composes_global_zone_and_stronger_local_runtime_constraints() {
+    use frankenengine_node::config::{Config, NetworkAllowlistEntry, Profile, SsrfEnforcementMode};
+    let project = tempdir().expect("project");
+    let global = executable_policy_action("global-ceiling", "all", 10, 5_000);
+    let mut scoped = executable_policy_action("zone-ceiling", "east", 2, 2_000);
+    if let FleetAction::PolicyUpdate { artifact, .. } = &mut scoped.action {
+        *artifact = Some(
+            FleetPolicyArtifact::new(
+                2,
+                FleetRuntimePolicy {
+                    minimum_profile: Some(Profile::Balanced),
+                    max_instructions: Some(2_000),
+                    max_parse_source_bytes: Some(300_000),
+                    max_parse_tokens: Some(20_000),
+                    block_private_network: true,
+                },
+            )
+            .expect("scoped policy"),
+        );
+    }
+    let unrelated = executable_policy_action("west-policy", "west", 100, 1);
+    let active =
+        activate_fleet_policy_snapshot(project.path(), &[global, scoped, unrelated], "east")
+            .expect("activate")
+            .expect("active policy");
+    assert_eq!(active.policies.len(), 2);
+    assert_eq!(active.policies["all"].revision, 10);
+    assert_eq!(active.policies["east"].revision, 2);
+    let mut config = Config::for_profile(Profile::Balanced);
+    config.runtime.max_instructions = Some(1_000);
+    config.runtime.max_parse_tokens = Some(10_000);
+    config.trust.quarantine_on_high_risk = false;
+    config.security.network_policy.ssrf_enforcement = SsrfEnforcementMode::None;
+    config.security.network_policy.ssrf_protection_enabled = false;
+    config.security.network_policy.block_cloud_metadata = false;
+    config.security.network_policy.allowlist = vec![NetworkAllowlistEntry {
+        host: "169.254.169.254".to_string(),
+        port: None,
+        reason: "old local exception".to_string(),
+    }];
+    let child_process = config.security.child_process_spawn.clone();
+    let keys = config.security.authorized_api_keys.clone();
+    assert_eq!(
+        enforce_active_fleet_policy(project.path(), &mut config, Profile::Balanced)
+            .expect("enforce"),
+        Some(active)
+    );
+    assert_eq!(config.runtime.max_instructions, Some(1_000));
+    assert_eq!(config.runtime.max_parse_source_bytes, Some(300_000));
+    assert_eq!(config.runtime.max_parse_tokens, Some(10_000));
+    assert!(
+        !config.trust.quarantine_on_high_risk,
+        "fleet runtime budgets must not rewrite local post-run quarantine policy"
+    );
+    assert_eq!(
+        config.security.network_policy.ssrf_enforcement,
+        SsrfEnforcementMode::Block
+    );
+    assert!(config.security.network_policy.ssrf_protection_enabled);
+    assert!(config.security.network_policy.block_cloud_metadata);
+    assert!(config.security.network_policy.allowlist.is_empty());
+    assert_eq!(config.security.child_process_spawn, child_process);
+    assert_eq!(config.security.authorized_api_keys, keys);
+    let mut strict = Config::for_profile(Profile::Strict);
+    enforce_active_fleet_policy(project.path(), &mut strict, Profile::Strict)
+        .expect("strict floor");
+    assert_eq!(
+        strict.runtime.max_parse_source_bytes,
+        Some(256_000),
+        "policy must retain the stronger implicit profile parser ceiling"
+    );
+    let mut legacy = Config::for_profile(Profile::LegacyRisky);
+    let original = legacy.clone();
+    assert!(
+        enforce_active_fleet_policy(project.path(), &mut legacy, Profile::LegacyRisky).is_err()
+    );
+    assert_eq!(
+        legacy, original,
+        "failed admission must not leave a partially modified config"
+    );
+    assert!(enforce_active_fleet_policy(project.path(), &mut legacy, Profile::Strict).is_err());
+}
+
+#[test]
+#[cfg(unix)]
+fn fleet_policy_revision_order_survives_restart_clock_skew_and_lost_history() {
+    let project = tempdir().expect("project");
+    let old = executable_policy_action("revision-one", "east", 1, 5_000);
+    let mut current = executable_policy_action("revision-two", "east", 2, 1_000);
+    current.emitted_at = old.emitted_at - TimeDelta::days(100);
+    let active =
+        activate_fleet_policy_snapshot(project.path(), &[old.clone(), current.clone()], "east")
+            .expect("clock-independent activation")
+            .expect("active");
+    assert_eq!(active.policies["east"].revision, 2);
+    assert_eq!(
+        load_active_fleet_policy(project.path()).expect("restart load"),
+        Some(active.clone())
+    );
+    let reversed =
+        activate_fleet_policy_snapshot(project.path(), &[current.clone(), old.clone()], "east")
+            .expect("delivery order independent")
+            .expect("active");
+    assert_eq!(reversed, active);
+    assert!(activate_fleet_policy_snapshot(project.path(), &[old], "east").is_err());
+    assert!(activate_fleet_policy_snapshot(project.path(), &[], "east").is_err());
+    assert!(activate_fleet_policy_snapshot(project.path(), &[current], "west").is_err());
+    assert_eq!(
+        load_active_fleet_policy(project.path()).expect("restrictions retained"),
+        Some(active)
+    );
+}
+
+#[test]
+fn fleet_policy_conflict_rollback_and_weakening_are_rejected_by_durable_publication() {
+    let state = tempdir().expect("state");
+    let mut transport = seed_durable_transport(state.path());
+    let old = executable_policy_action("old", "east", 1, 5_000);
+    let current = executable_policy_action("current", "east", 3, 1_000);
+    transport.publish_action(&old).expect("first policy");
+    transport
+        .publish_action(&current)
+        .expect("stricter revision");
+    transport
+        .publish_action(&old)
+        .expect("exact historical retry remains idempotent");
+    for record in [
+        executable_policy_action("conflicting-revision", "east", 3, 999),
+        executable_policy_action("rollback", "east", 2, 500),
+        executable_policy_action("weakening", "east", 4, 1_001),
+    ] {
+        assert!(
+            transport.publish_action(&record).is_err(),
+            "admitted {}",
+            record.action_id
+        );
+    }
+    let conflicting = executable_policy_action("conflict-in-snapshot", "east", 3, 999);
+    assert!(fleet_policy_snapshot(&[old, current.clone(), conflicting], "east").is_err());
+    assert_eq!(
+        transport
+            .list_actions()
+            .expect("unchanged action log")
+            .len(),
+        2
+    );
+    let mut separate_process = seed_durable_transport(state.path());
+    assert!(
+        separate_process
+            .publish_action(&executable_policy_action(
+                "restarted-rollback",
+                "east",
+                2,
+                500
+            ))
+            .is_err()
+    );
+    assert_eq!(
+        separate_process
+            .list_actions()
+            .expect("durable restrictions")
+            .len(),
+        2
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn fleet_policy_incomplete_activation_blocks_admission_and_repairs_idempotently() {
+    use frankenengine_node::config::{Config, Profile};
+    let project = tempdir().expect("project");
+    let old = executable_policy_action("old-policy", "east", 1, 5_000);
+    let current = executable_policy_action("new-policy", "east", 2, 1_000);
+    activate_fleet_policy_snapshot(project.path(), std::slice::from_ref(&old), "east")
+        .expect("first activation");
+    let old_bytes = std::fs::read(project.path().join(".franken-node/state/fleet-policy.json"))
+        .expect("old bytes");
+    let actions = [old, current];
+    activate_fleet_policy_snapshot(project.path(), &actions, "east").expect("next activation");
+    let path = project.path().join(".franken-node/state/fleet-policy.json");
+    // Model a crash after the required high-water mark was committed but before
+    // the active document replaced its predecessor. Both documents remain real.
+    std::fs::write(&path, old_bytes).expect("incomplete active document");
+    assert!(load_active_fleet_policy(project.path()).is_err());
+    let mut config = Config::for_profile(Profile::Balanced);
+    assert!(enforce_active_fleet_policy(project.path(), &mut config, Profile::Balanced).is_err());
+    let repaired = activate_fleet_policy_snapshot(project.path(), &actions, "east")
+        .expect("idempotent repair")
+        .expect("active");
+    assert_eq!(repaired.policies["east"].revision, 2);
+    std::fs::rename(&path, path.with_extension("retained-for-recovery.json"))
+        .expect("simulate lost active path without deleting recovery material");
+    assert!(load_active_fleet_policy(project.path()).is_err());
+    activate_fleet_policy_snapshot(project.path(), &actions, "east")
+        .expect("repair missing active file");
+    std::fs::write(&path, b"{broken-json").expect("corrupt active payload");
+    assert!(load_active_fleet_policy(project.path()).is_err());
+    assert!(enforce_active_fleet_policy(project.path(), &mut config, Profile::Balanced).is_err());
+}
+
+#[test]
+#[cfg(unix)]
+fn fleet_policy_lost_documents_preserve_enrollment_and_refuse_unverifiable_recovery() {
+    let project = tempdir().expect("project");
+    let policy = executable_policy_action("high-water", "east", 9, 100);
+    activate_fleet_policy_snapshot(project.path(), std::slice::from_ref(&policy), "east")
+        .expect("enroll and activate");
+    for name in ["fleet-policy-required.json", "fleet-policy.json"] {
+        let path = project.path().join(".franken-node/state").join(name);
+        std::fs::rename(&path, path.with_extension("recovery-copy.json"))
+            .expect("retain recovery material while simulating missing documents");
+    }
+    assert!(load_active_fleet_policy(project.path()).is_err());
+    assert!(activate_fleet_policy_snapshot(project.path(), &[], "east").is_err());
+    let rollback = executable_policy_action("unverified-rollback", "east", 1, 10_000);
+    assert!(activate_fleet_policy_snapshot(project.path(), &[rollback], "east").is_err());
+    assert!(
+        activate_fleet_policy_snapshot(project.path(), &[policy], "east").is_err(),
+        "without either durable document the previous policy cannot be proven"
+    );
+    assert!(
+        project
+            .path()
+            .join(".franken-node/state/fleet-policy.lock")
+            .is_file()
+    );
+}
+
+#[test]
+fn fleet_policy_concurrent_publishers_cannot_commit_conflicting_revisions() {
+    use std::sync::{Arc, Barrier};
+    let directory = tempdir().expect("state");
+    seed_durable_transport(directory.path());
+    let barrier = Arc::new(Barrier::new(3));
+    let mut workers = Vec::new();
+    for (id, ceiling) in [("concurrent-a", 1_000), ("concurrent-b", 2_000)] {
+        let path = directory.path().to_path_buf();
+        let barrier = Arc::clone(&barrier);
+        workers.push(std::thread::spawn(move || {
+            let mut transport = seed_durable_transport(&path);
+            let action = executable_policy_action(id, "east", 1, ceiling);
+            barrier.wait();
+            transport.publish_action(&action)
+        }));
+    }
+    barrier.wait();
+    let outcomes: Vec<_> = workers
+        .into_iter()
+        .map(|worker| worker.join().expect("publisher"))
+        .collect();
+    assert_eq!(
+        outcomes.iter().filter(|result| result.is_ok()).count(),
+        1,
+        "{outcomes:?}"
+    );
+    let transport = seed_durable_transport(directory.path());
+    let actions = transport.list_actions().expect("durable winner");
+    assert_eq!(actions.len(), 1);
+    assert!(
+        fleet_policy_snapshot(&actions, "east")
+            .expect("unambiguous policy")
+            .is_some()
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn fleet_policy_activation_rejects_symlinked_authority_and_state_files() {
+    use std::os::unix::fs::symlink;
+    let project = tempdir().expect("project");
+    let outside = tempdir().expect("outside");
+    symlink(outside.path(), project.path().join(".franken-node")).expect("metadata symlink");
+    let actions = [executable_policy_action("containment", "east", 1, 1_000)];
+    assert!(activate_fleet_policy_snapshot(project.path(), &actions, "east").is_err());
+    assert!(!outside.path().join("state").exists());
+    let safe = tempdir().expect("safe project");
+    activate_fleet_policy_snapshot(safe.path(), &actions, "east").expect("safe activation");
+    let active = safe.path().join(".franken-node/state/fleet-policy.json");
+    let saved = outside.path().join("saved-active.json");
+    std::fs::rename(&active, &saved).expect("retain active file externally");
+    symlink(&saved, &active).expect("linked active file");
+    assert!(load_active_fleet_policy(safe.path()).is_err());
+    assert!(activate_fleet_policy_snapshot(safe.path(), &actions, "east").is_err());
+}
+
+#[test]
+#[cfg(unix)]
+fn fleet_policy_cli_publishes_activates_and_blocks_weaker_run_profiles() {
+    let project = tempdir().expect("project");
+    write_fail_closed_cli_config_for_fixture_trust_cards(project.path());
+    std::fs::write(
+        project.path().join("package.json"),
+        r#"{"name":"managed-project","main":"app.js"}"#,
+    )
+    .expect("package");
+    std::fs::write(
+        project.path().join("app.js"),
+        "console.log('FLEET_POLICY_BYPASSED');",
+    )
+    .expect("guest");
+    std::fs::write(
+        project.path().join("policy.json"),
+        r#"{"minimum_profile":"strict","max_instructions":1000,"block_private_network":true}"#,
+    )
+    .expect("policy file");
+    let state = project.path().join("coordinator");
+    let publish_args = [
+        "fleet",
+        "policy",
+        "publish",
+        "--zone",
+        "east",
+        "--revision",
+        "1",
+        "--file",
+        "policy.json",
+        "--json",
+    ];
+    let publication = run_cli_in_dir_with_fleet_state(project.path(), &publish_args, &state);
+    assert!(
+        publication.status.success(),
+        "{}",
+        String::from_utf8_lossy(&publication.stderr)
+    );
+    let published = json_stdout(&publication, "policy publish");
+    assert_eq!(published["published"], true);
+    assert_eq!(published["activated"], false);
+    assert_eq!(published["enforcement_scope"], "new_run_admission");
+    assert!(
+        load_active_fleet_policy(project.path())
+            .expect("not yet activated")
+            .is_none()
+    );
+    let retry = run_cli_in_dir_with_fleet_state(project.path(), &publish_args, &state);
+    assert!(retry.status.success());
+    assert_eq!(
+        json_stdout(&retry, "idempotent publication")["already_published"],
+        true
+    );
+    let poll = run_cli_in_dir_with_fleet_state(
+        project.path(),
+        &[
+            "fleet",
+            "agent",
+            "--node-id",
+            "managed",
+            "--zone",
+            "east",
+            "--once",
+            "--json",
+        ],
+        &state,
+    );
+    assert!(
+        poll.status.success(),
+        "{}",
+        String::from_utf8_lossy(&poll.stderr)
+    );
+    assert_eq!(json_stdout(&poll, "policy agent")["node_health"], "healthy");
+    let transport = seed_durable_transport(&state);
+    let actions = transport.list_actions().expect("published policy");
+    assert_eq!(actions.len(), 1);
+    let nodes = transport
+        .list_node_statuses()
+        .expect("application heartbeat");
+    assert_eq!(
+        nodes[0].applied_actions,
+        Some(fleet_application_checkpoint(&actions, "east").expect("checkpoint"))
+    );
+    let status = run_cli_in_dir_with_fleet_state(
+        project.path(),
+        &["fleet", "policy", "status", "--json"],
+        &state,
+    );
+    assert!(status.status.success());
+    let status = json_stdout(&status, "active policy status");
+    assert_eq!(status["activated"], true);
+    assert_eq!(status["policy"]["policies"]["east"]["revision"], 1);
+    for profile in ["balanced", "legacy-risky"] {
+        let run = run_cli_in_dir_with_fleet_state(
+            project.path(),
+            &["run", "app.js", "--policy", profile, "--json"],
+            &state,
+        );
+        assert!(!run.status.success());
+        let failure = json_stdout(&run, "policy admission refusal");
+        assert_eq!(failure["schema_version"], "franken-node/run-error-cli/v1");
+        let text = String::from_utf8_lossy(&run.stdout);
+        assert!(
+            text.contains("activated fleet policy requires profile `strict`"),
+            "{text}"
+        );
+        assert!(!text.contains("FLEET_POLICY_BYPASSED"));
+    }
+}
+
+#[test]
+fn fleet_policy_cli_rejects_bad_input_without_publishing_an_action() {
+    let project = tempdir().expect("project");
+    let state = project.path().join("coordinator");
+    for (index, input) in [
+        "{}",
+        r#"{"max_instructions":0}"#,
+        r#"{"max_instructions":1,"child_process_spawn":true}"#,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let file = format!("policy-{index}.json");
+        std::fs::write(project.path().join(&file), input).expect("input");
+        let result = run_cli_in_dir_with_fleet_state(
+            project.path(),
+            &[
+                "fleet",
+                "policy",
+                "publish",
+                "--zone",
+                "east",
+                "--revision",
+                "1",
+                "--file",
+                &file,
+                "--json",
+            ],
+            &state,
+        );
+        assert!(!result.status.success(), "accepted {input}");
+        assert_eq!(
+            json_stdout(&result, "invalid policy")["schema_version"],
+            "franken-node/fleet-error-cli/v1"
+        );
+    }
+    assert!(
+        seed_durable_transport(&state)
+            .list_actions()
+            .expect("empty log")
+            .is_empty()
+    );
 }
 
 fn seed_transport(
@@ -2506,6 +3021,7 @@ fn fleet_agent_cannot_acknowledge_logging_only_policy_updates_or_old_heartbeats(
                 zone_id: "all".to_string(),
                 policy_version: "not-an-executable-policy".to_string(),
                 changed_fields: vec!["security.policy".to_string()],
+                artifact: None,
             },
         })
         .expect("publish unsupported policy");
@@ -2600,6 +3116,7 @@ fn fleet_reconcile_requires_application_for_policy_only_and_revoke_only_snapshot
             zone_id: "all".to_string(),
             policy_version: "missing-executable-policy".to_string(),
             changed_fields: vec!["security.policy".to_string()],
+            artifact: None,
         },
         FleetAction::Revoke {
             extension_id: "npm:@acme/not-installed".to_string(),
@@ -3102,8 +3619,6 @@ fn fleet_release_preserves_same_id_containment_in_independent_global_and_local_s
 }
 
 #[test]
-fn fleet_agent_uses_config_defaults_for_node_id_and_poll_interval() {
-#[test]
 fn fleet_release_preserves_local_quarantine_created_before_or_after_fleet_application() {
     for local_first in [true, false] {
         let project = tempdir().expect("project");
@@ -3307,6 +3822,8 @@ fn fleet_release_uses_signed_ownership_when_original_target_action_is_no_longer_
     assert!(card.quarantine_sources.is_empty());
 }
 
+#[test]
+fn fleet_agent_uses_config_defaults_for_node_id_and_poll_interval() {
     let project = tempdir().expect("tempdir");
     let fleet_state_dir = project.path().join("fleet-state");
     seed_transport(&fleet_state_dir);

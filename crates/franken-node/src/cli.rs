@@ -1340,8 +1340,7 @@ impl VerifyRecoveryRunbookArgs {
 // -- trust --
 
 #[derive(Debug, Subcommand)]
-pub enum TrustCommand {
-    /// Show trust profile for one extension.
+pub enum TrustCommand {    /// Show trust profile for one extension.
     Card(TrustCardArgs),
 
     /// List extensions by risk/status filters.
@@ -1356,7 +1355,7 @@ pub enum TrustCommand {
     /// Quarantine an artifact in the local trust-card registry and publish it to the fleet store.
     Quarantine(TrustQuarantineArgs),
 
-    /// Lift a local sentinel run-subject quarantine record for `--app` (not a live Runtime Sentinel daemon).
+    /// Release local containment for an artifact or sentinel run target, retaining fleet decisions and revocation.
     Release(TrustReleaseArgs),
 
     /// Refresh trust-card cache and OSV vulnerability state (cached unless `--force`).
@@ -1387,6 +1386,11 @@ pub struct TrustReleaseArgs {
     #[arg(long, default_value = "", value_parser = parse_handler_required_pathbuf)]
     pub app: PathBuf,
 
+    /// Extension ID or sha256:<prefix> whose local trust-card quarantine is
+    /// released. Mutually exclusive with --app; fleet owners remain active.
+    #[arg(long)]
+    pub artifact: Option<String>,
+
     /// Operator identity recorded on the release.
     /// Required by the handler (not clap) so `--json` failures emit
     /// `franken-node/trust-release-error/v1` instead of a human clap error.
@@ -1400,7 +1404,8 @@ pub struct TrustReleaseArgs {
     pub reason: String,
 
     /// Emit the release report as JSON on stdout
-    /// (`franken-node/trust-release-cli/v1`). Early failures emit
+    /// (`franken-node/trust-release-cli/v1` for --app or
+    /// `franken-node/trust-artifact-release-cli/v1` for --artifact). Early failures emit
     /// `franken-node/trust-release-error/v1` then exit 1.
     #[arg(long)]
     pub json: bool,
@@ -1776,6 +1781,10 @@ pub enum FleetCommand {
     /// Reconcile the fleet-action log; timeout fails closed.
     Reconcile(FleetReconcileArgs),
 
+    /// Publish executable runtime restrictions or inspect local activation.
+    #[command(subcommand)]
+    Policy(FleetPolicyCommand),
+
     /// Poll fleet actions and push heartbeats: the local durable store, or a
     /// live coordinator when `[fleet] control_plane_url` is configured.
     Agent(FleetAgentArgs),
@@ -1783,6 +1792,37 @@ pub enum FleetCommand {
     /// Serve this node's durable fleet store as the live HTTP control plane
     /// that agents and operators on other nodes connect to.
     Serve(FleetServeArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum FleetPolicyCommand {
+    /// Publish a validated restrictive policy to an exact zone or `all`.
+    Publish(FleetPolicyPublishArgs),
+    /// Show this project's durable policy for new run admission.
+    Status(FleetPolicyStatusArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct FleetPolicyPublishArgs {
+    /// JSON file containing the executable FleetRuntimePolicy fields.
+    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    pub file: Option<PathBuf>,
+    /// Positive, increasing revision within this exact policy zone.
+    #[arg(long)]
+    pub revision: Option<u64>,
+    /// Exact zone, or `all` for fleet-wide restrictions.
+    #[arg(long, default_value = "")]
+    pub zone: String,
+    /// Emit JSON; publication is not an application acknowledgement.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct FleetPolicyStatusArgs {
+    /// Emit JSON with applied revisions and complete executable policy.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -3280,6 +3320,33 @@ mod parser_contract_extra_tests {
                 assert!(args.reason.is_empty());
             }
             other => panic!("expected trust release, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trust_release_parses_artifact_and_operator_context() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "franken-node",
+            "trust",
+            "release",
+            "--artifact",
+            "npm:@acme/auth-guard",
+            "--operator-id",
+            "operator-security",
+            "--reason",
+            "local remediation completed",
+            "--json",
+        ])
+        .expect("artifact release parses");
+        match cli.command {
+            Command::Trust(TrustCommand::Release(args)) => {
+                assert!(args.app.as_os_str().is_empty());
+                assert_eq!(args.artifact.as_deref(), Some("npm:@acme/auth-guard"));
+                assert_eq!(args.operator_id, "operator-security");
+                assert_eq!(args.reason, "local remediation completed");
+                assert!(args.json);
+            }
+            other => panic!("expected trust artifact release, got {other:?}"),
         }
     }
 

@@ -1760,7 +1760,7 @@ impl TrustCardRegistry {
         now_secs: u64,
         trace_id: &str,
     ) -> Result<TrustCard, TrustCardError> {
-        self.update_with_quarantine_source(extension_id, mutation, None, now_secs, trace_id)
+        self.update_with_quarantine_source(extension_id, mutation, None, None, now_secs, trace_id)
     }
 
     /// Add or release one signed containment source, preserving all others.
@@ -1794,6 +1794,61 @@ impl TrustCardRegistry {
                 evidence_refs: None,
             },
             Some((source, active)),
+            None,
+            now_secs,
+            trace_id,
+        )
+    }
+
+    /// Release local containment with the operator and remediation rationale
+    /// bound into the signed card history. Fleet owners and revocation remain.
+    pub fn release_local_quarantine(
+        &mut self,
+        extension_id: &str,
+        operator_id: &str,
+        reason: &str,
+        now_secs: u64,
+        trace_id: &str,
+    ) -> Result<TrustCard, TrustCardError> {
+        for (name, value, limit) in [("operator_id", operator_id, 256), ("reason", reason, 512)] {
+            if value.is_empty()
+                || value.trim() != value
+                || value.len() > limit
+                || value.chars().any(char::is_control)
+            {
+                return Err(TrustCardError::InvalidInput {
+                    reason: format!(
+                        "quarantine release {name} must be nonempty, unpadded, control-free, and at most {limit} bytes"
+                    ),
+                });
+            }
+        }
+        validate_extension_id(extension_id)?;
+        let latest = self
+            .latest_verified_card(extension_id)?
+            .ok_or_else(|| TrustCardError::NotFound(extension_id.to_string()))?;
+        if !latest
+            .effective_quarantine_sources()
+            .contains(&QuarantineSource::Local)
+        {
+            return Ok(latest.clone());
+        }
+        self.update_with_quarantine_source(
+            extension_id,
+            TrustCardMutation {
+                certification_level: None,
+                revocation_status: None,
+                active_quarantine: None,
+                reputation_score_basis_points: None,
+                reputation_trend: None,
+                user_facing_risk_assessment: None,
+                last_verified_timestamp: Some(timestamp_from_secs(now_secs)),
+                evidence_refs: None,
+            },
+            Some((QuarantineSource::Local, false)),
+            Some(format!(
+                "local quarantine released by {operator_id}: {reason}"
+            )),
             now_secs,
             trace_id,
         )
@@ -1804,6 +1859,7 @@ impl TrustCardRegistry {
         extension_id: &str,
         mutation: TrustCardMutation,
         source_change: Option<(QuarantineSource, bool)>,
+        audit_detail: Option<String>,
         now_secs: u64,
         trace_id: &str,
     ) -> Result<TrustCard, TrustCardError> {
@@ -1894,10 +1950,10 @@ impl TrustCardRegistry {
             AuditRecord {
                 timestamp: timestamp_from_secs(now_secs),
                 event_code: TRUST_CARD_UPDATED.to_string(),
-                detail: match &quarantine_change {
+                detail: audit_detail.unwrap_or_else(|| match &quarantine_change {
                     Some((source, active)) => format!("quarantine source {source:?} active={active}"),
                     None => "trust card updated".to_string(),
-                },
+                }),
                 trace_id: trace_id.to_string(),
             },
             MAX_AUDIT_HISTORY,

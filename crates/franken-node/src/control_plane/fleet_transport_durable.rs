@@ -30,7 +30,7 @@ use fsqlite::{Connection, SqliteValue};
 use super::fleet_transport::{
     FLEET_ACTION_LOG_FILE, FleetAction, FleetActionRecord, FleetSharedState, FleetTransport,
     FleetTransportError, MAX_ACTION_RECORD_BYTES, NodeStatus, validate_action_record,
-    validate_node_status,
+    validate_fleet_policy_publication, validate_node_status,
 };
 
 const FLEET_DB_FILE: &str = "fleet-state.db";
@@ -317,6 +317,30 @@ impl DurableFleetTransport {
         let mut tx = connection
             .transaction()
             .map_err(|err| FleetTransportError::io(err.to_string()))?;
+        if matches!(
+            &record.action,
+            FleetAction::PolicyUpdate {
+                artifact: Some(_),
+                ..
+            }
+        ) {
+            let rows = tx
+                .query(&format!(
+                    "SELECT action_json FROM fleet_actions ORDER BY seq ASC LIMIT {};",
+                    crate::capacity_defaults::aliases::MAX_ACTION_LOG_ENTRIES.saturating_add(1)
+                ))
+                .map_err(|err| FleetTransportError::io(err.to_string()))?;
+            if rows.len() > crate::capacity_defaults::aliases::MAX_ACTION_LOG_ENTRIES {
+                return Err(FleetTransportError::serialization(
+                    "fleet policy history exceeds the action bound",
+                ));
+            }
+            let existing = rows
+                .iter()
+                .map(|row| parse_action_row(&row.values()[0]))
+                .collect::<Result<Vec<_>, _>>()?;
+            validate_fleet_policy_publication(record, &existing)?;
+        }
         tx.execute_with_params(
             "INSERT INTO fleet_actions(action_id, emitted_at, action_json)
              VALUES (?1, ?2, ?3)
