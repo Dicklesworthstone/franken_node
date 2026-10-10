@@ -6071,20 +6071,12 @@ fn load_safe_mode_controller(
     state_path: &Path,
     missing_as_inactive: bool,
 ) -> Result<runtime::safe_mode::SafeModeController> {
-    // Prevent DoS via oversized state files - 16 MiB should be more than sufficient for state
-    const MAX_STATE_FILE_BYTES: u64 = 16 << 20; // 16 MiB
-
-    match crate::bounded_read(state_path, MAX_STATE_FILE_BYTES) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .with_context(|| format!("failed parsing safe-mode state {}", state_path.display())),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound && missing_as_inactive => {
+    match runtime::safe_mode::read_persisted_safe_mode(state_path)? {
+        Some(controller) => Ok(controller),
+        None if missing_as_inactive => {
             Ok(runtime::safe_mode::SafeModeController::with_default_config())
         }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            anyhow::bail!("safe-mode state is unavailable at {}", state_path.display())
-        }
-        Err(err) => Err(err)
-            .with_context(|| format!("failed reading safe-mode state {}", state_path.display())),
+        None => anyhow::bail!("safe-mode state is unavailable at {}", state_path.display()),
     }
 }
 
@@ -34137,6 +34129,9 @@ fn main() -> Result<()> {
                     return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
                 }
             };
+            if let Err(err) = runtime::safe_mode::enforce_run_safe_mode(project_paths.entrypoint()) {
+                return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
+            }
             let active_fleet_policy = match control_plane::fleet_transport::enforce_active_fleet_policy(
                 project_paths.project_root(), &mut resolved.config, resolved.selected_profile,
             ) {

@@ -5621,6 +5621,7 @@ impl EngineDispatcher {
             }
             None => RunProjectPaths::resolve(app_path, &working_dir)?,
         };
+        crate::runtime::safe_mode::enforce_run_safe_mode(project_paths.entrypoint())?;
         let mut execution_config = config.clone();
         let active_fleet_policy = enforce_execution_fleet_policy(
             project_paths.project_root(),
@@ -8711,6 +8712,14 @@ impl EngineDispatcher {
             .map_err(|error| {
                 native_engine_spawn_error_with_telemetry_cleanup(
                     format!("Run project authority changed before execution: {error:#}"),
+                    &mut telemetry_guard,
+                )
+            })?;
+        // Operator entry may occur while the authenticated worker starts.
+        crate::runtime::safe_mode::enforce_run_safe_mode(project_paths.entrypoint())
+            .map_err(|error| {
+                native_engine_spawn_error_with_telemetry_cleanup(
+                    format!("Native execution safe-mode admission failed: {error:#}"),
                     &mut telemetry_guard,
                 )
             })?;

@@ -32,6 +32,120 @@ use sha2::{Digest, Sha256};
 
 use crate::security::constant_time;
 
+/// Maximum size of the existing unsigned operator controller on disk.
+pub const MAX_SAFE_MODE_STATE_BYTES: u64 = 16 << 20;
+
+/// Read the controller used by the safe-mode CLI and execution admission.
+///
+/// Only an absent directory entry is inactive. A malformed, unreadable,
+/// oversized, or non-regular state is an error. Once a state entry has been
+/// observed, a racing removal must not silently turn that restriction off.
+pub fn read_persisted_safe_mode(
+    state_path: &std::path::Path,
+) -> anyhow::Result<Option<SafeModeController>> {
+    use anyhow::Context;
+    use std::fs::File;
+    use std::io::Read;
+
+    let metadata = match std::fs::symlink_metadata(state_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect safe-mode state {}", state_path.display()));
+        }
+    };
+    anyhow::ensure!(
+        metadata.is_file(),
+        "safe-mode state must be a regular file: {}",
+        state_path.display()
+    );
+    #[cfg(unix)]
+    let file = {
+        use rustix::fs::{Mode, OFlags, open};
+        File::from(
+            open(
+                state_path,
+                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .with_context(|| format!("open safe-mode state {}", state_path.display()))?,
+        )
+    };
+    #[cfg(not(unix))]
+    let file = File::open(state_path)
+        .with_context(|| format!("open safe-mode state {}", state_path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("inspect opened safe-mode state {}", state_path.display()))?;
+    anyhow::ensure!(
+        metadata.is_file(),
+        "opened safe-mode state must be a regular file: {}",
+        state_path.display()
+    );
+    anyhow::ensure!(
+        metadata.len() <= MAX_SAFE_MODE_STATE_BYTES,
+        "Safe-mode state file too large: {} bytes (limit: {} bytes): {}",
+        metadata.len(),
+        MAX_SAFE_MODE_STATE_BYTES,
+        state_path.display()
+    );
+    let mut bytes = Vec::new();
+    file.take(MAX_SAFE_MODE_STATE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read safe-mode state {}", state_path.display()))?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= MAX_SAFE_MODE_STATE_BYTES,
+        "Safe-mode state file too large: {} bytes (limit: {} bytes): {}",
+        bytes.len(),
+        MAX_SAFE_MODE_STATE_BYTES,
+        state_path.display()
+    );
+    let controller = serde_json::from_slice(&bytes)
+        .with_context(|| format!("invalid safe-mode state {}", state_path.display()))?;
+    Ok(Some(controller))
+}
+
+/// Refuse a new application execution in an active operator safe-mode scope.
+///
+/// A scope is the directory containing .franken-node/safe-mode/state.json.
+/// Every ancestor of the canonical entrypoint is consulted, so a nested target,
+/// an absolute path, or an inactive child scope cannot bypass an active parent.
+/// This is the CLI's unsigned local operator control, not an authenticated
+/// defense against a principal that can modify the operator's files. Entering
+/// safe mode does not cancel an execution that has already been admitted.
+pub fn enforce_run_safe_mode(entrypoint: &std::path::Path) -> anyhow::Result<()> {
+    use anyhow::Context;
+
+    let entrypoint = entrypoint
+        .canonicalize()
+        .with_context(|| format!("resolve safe-mode run entrypoint {}", entrypoint.display()))?;
+    anyhow::ensure!(
+        entrypoint.is_file(),
+        "safe-mode run entrypoint must be a file"
+    );
+    let parent = entrypoint
+        .parent()
+        .context("safe-mode run entrypoint has no parent directory")?;
+    for scope in parent.ancestors() {
+        let state_path = scope.join(".franken-node/safe-mode/state.json");
+        if let Some(controller) = read_persisted_safe_mode(&state_path)?
+            && controller.is_active()
+        {
+            return Err(crate::ActionableError::new(
+                format!(
+                    "run blocked by active safe mode at {}; inspect and recover this scope from {}",
+                    state_path.display(),
+                    scope.display()
+                ),
+                "franken-node safe-mode status --json",
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------

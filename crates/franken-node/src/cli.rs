@@ -440,7 +440,7 @@ pub struct RuntimeEpochArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum SafeModeCommand {
-    /// Enter safe mode and persist unsigned JSON operator state (not Ed25519-signed).
+    /// Block new runs in this directory and descendants using unsigned operator state.
     Enter(SafeModeEnterArgs),
 
     /// Inspect persisted unsigned JSON safe-mode state.

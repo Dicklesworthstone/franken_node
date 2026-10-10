@@ -159,7 +159,7 @@ replay part of the runtime contract, so JS/TS velocity comes with:
 | Verifier SDK | Independent verification of receipts, bundles, and the honesty manifest (not Ed25519-signed `bench run` reports) |
 | Operator doctor | Workspace-pressure analyzer, close-condition receipts, evidence-readiness from `--input` snapshots (not a live broker) |
 | Proof pipeline | VEF receipts; `proofs queue status` and `proofs workers restart` inspect snapshots / emit restart-request artifacts (not a live broker) |
-| Safe-mode lifecycle | Operator-driven enter/exit with reason codes, persisted JSON state (not Ed25519-signed), and pre-exit operator attestations |
+| Safe-mode lifecycle | Persisted directory-scoped operator state blocks new application runs, including descendant entrypoints; explicit enter/exit with reason codes and pre-exit operator attestations (unsigned JSON) |
 | No unsafe code | `#![forbid(unsafe_code)]` in both `lib.rs` and `main.rs` |
 
 ---
@@ -973,7 +973,7 @@ franken-node fleet status --json   # transport=http, live_control_plane=true
 | `franken-node runtime lane status` | Emit the *local default* lane policy and an empty telemetry snapshot (not a running node). Flags: `--json` (failures `franken-node/runtime-error-cli/v1`). |
 | `franken-node runtime lane assign <task_class>` | Assign one task class through a fresh default lane scheduler; the assignment is not persisted to a live node. Flags: `--json` (failures `franken-node/runtime-error-cli/v1`). |
 | `franken-node runtime epoch` | Compare two caller-supplied epoch integers. Does not inspect a live `ControlEpoch`. `--local-epoch` is handler-required so `--json` failures emit `franken-node/runtime-error-cli/v1` instead of a human clap error. Flags: `--peer-epoch`, `--json`. |
-| `franken-node safe-mode enter` | Enter safe mode and persist unsigned JSON operator state (not Ed25519-signed). `--reason`, `--operator-id`, and `--trust-state-hash` are handler-required so `--json` failures emit `franken-node/safe-mode-cli/v1` instead of a human clap error. Reasons: `explicit-flag`, `environment-variable`, `config-field`, `trust-corruption`, `crash-loop`, `epoch-mismatch`. Flags: `--json`. |
+| `franken-node safe-mode enter` | Enter safe mode and block new runs within this directory and its descendants using persisted unsigned JSON operator state (not Ed25519-signed). `--reason`, `--operator-id`, and `--trust-state-hash` are handler-required so `--json` failures emit `franken-node/safe-mode-cli/v1` instead of a human clap error. Reasons: `explicit-flag`, `environment-variable`, `config-field`, `trust-corruption`, `crash-loop`, `epoch-mismatch`. Flags: `--json`. |
 | `franken-node safe-mode status` | Inspect persisted unsigned JSON safe-mode state. Flags: `--json` (`franken-node/safe-mode-cli/v1`). |
 | `franken-node safe-mode exit` | Exit safe mode after explicit operator confirmation. `--operator-id` is handler-required so `--json` failures emit `franken-node/safe-mode-cli/v1` instead of a human clap error. Required: `--confirm`. `--trust-state-consistent`, `--no-unresolved-incidents`, and `--evidence-ledger-intact` are **operator attestations**, not independently verified checks. Flags: `--json`. |
 | `franken-node proofs queue status` | Inspect proof queue, proof status, and worker readiness from `--input`/`--receipt` snapshots (`live_queue=false`, `queue_source=validation_readiness_snapshot`). Not a live broker. Flags: `--json`. |
@@ -2226,7 +2226,7 @@ bootstrap layout is:
 | `.franken-node/state/registry/archive/` | Archived artifacts retained after `registry gc` |
 | `.franken-node/state/migrations/` | Migration audit, rewrite, and validate outputs |
 | `.franken-node/state/trust-card-registry.v1.db` | Durable trust-card registry store (WAL frankensqlite; the legacy `.v1.json` pair is a one-time import source only) |
-| `.franken-node/safe-mode/state.json` | Unsigned JSON safe-mode controller persist (not Ed25519-signed); override with `--state-dir` |
+| `.franken-node/safe-mode/state.json` | Unsigned JSON safe-mode controller; an active scope blocks new runs with entrypoints in this directory or its descendants. `--state-dir` can address a standalone controller; only the conventional ancestor paths govern `run`. |
 | `.franken-node/keys/` | Signing key material; excluded from version control by the generated `.gitignore` |
 | `.franken-node/keys/receipt-signing.key` | Default Ed25519 seed (mode 0600) for decision receipts, captured incident sources, run-ledger records, incident bundles, close-condition receipts and evidence-ledger entries, used when neither `--receipt-signing-key`, `FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH` nor `security.decision_receipt_signing_key_path` is set |
 | `.franken-node/keys/receipt-signing.pub` | Matching public key (hex), for `verify transparency-log --public-key` and `incident replay --trusted-public-key` |
@@ -3846,18 +3846,25 @@ silently redirected to `http://127.0.0.1:8080`.
 ### What happens when the runtime enters safe mode?
 
 `franken-node safe-mode enter --reason <reason> --operator-id <id>
---trust-state-hash <hash>` suspends new
-capability issuance, refuses to issue new decisions, and persists
-unsigned JSON operator state under `.franken-node/safe-mode/state.json`
-(not Ed25519-signed). There is no automatic entry yet: `crash-loop`,
-`trust-corruption` and `epoch-mismatch` are reason labels an operator
-passes, and no detector triggers them. The runtime continues to emit
-telemetry and accept inspection commands. Exiting requires
-`franken-node safe-mode exit --confirm --operator-id <id>` plus the
-operator attestations (`--trust-state-consistent`,
+--trust-state-hash <hash>` persists unsigned operator state under
+`.franken-node/safe-mode/state.json` and blocks new application runs whose
+canonical entrypoint is in this directory or any descendant. Admission checks
+run in the CLI, the public dispatcher, and again in the authenticated native
+worker before source execution. An inactive child scope cannot override an
+active ancestor; malformed, oversized, unreadable, and nonregular state also
+refuses admission. The error identifies the controlling scope, where the
+operator should inspect and recover state.
+
+There is no automatic entry yet: `crash-loop`, `trust-corruption`, and
+`epoch-mismatch` remain operator-supplied reason labels. Existing executions
+are not cancelled by a later entry, and inspection commands remain available.
+Exiting requires `franken-node safe-mode exit --confirm --operator-id <id>`
+plus the operator attestations (`--trust-state-consistent`,
 `--no-unresolved-incidents`, `--evidence-ledger-intact`), which are not
-independently verified by the CLI. The persisted entry/exit
-records are auditable JSON, not a signed receipt pair.
+independently verified by the CLI. A custom `--state-dir` is standalone unless
+it addresses one of these conventional ancestor state locations. This local
+operator control is unsigned and does not protect against an actor permitted
+to replace the operator's state files.
 
 ### How do I scale up to many fleet nodes?
 

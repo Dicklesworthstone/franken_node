@@ -782,6 +782,10 @@ name = "runtime_cli_e2e"
 path = "tests/runtime_cli_e2e.rs"
 
 [[test]]
+name = "safe_mode_execution"
+path = "tests/safe_mode_execution.rs"
+
+[[test]]
 name = "workspace_pressure_governance_e2e"
 path = "tests/workspace_pressure_governance_e2e.rs"
 
