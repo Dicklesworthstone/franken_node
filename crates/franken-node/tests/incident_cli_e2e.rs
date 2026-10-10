@@ -2051,10 +2051,18 @@ fn native_replay_workspace_with_arguments(
 
 #[cfg(feature = "engine")]
 fn capture_native_run_bundle(workspace: &Path, receipt_id: &str) -> (String, serde_json::Value) {
-    let captured = run_cli_in_workspace(
-        workspace,
-        &["incident", "capture", "--from-run", receipt_id, "--json"],
-    );
+    capture_native_run_bundle_with(workspace, receipt_id, |args| {
+        run_cli_in_workspace(workspace, args)
+    })
+}
+
+#[cfg(feature = "engine")]
+fn capture_native_run_bundle_with(
+    workspace: &Path,
+    receipt_id: &str,
+    mut invoke: impl FnMut(&[&str]) -> Output,
+) -> (String, serde_json::Value) {
+    let captured = invoke(&["incident", "capture", "--from-run", receipt_id, "--json"]);
     assert!(
         captured.status.success(),
         "authenticated run capture failed: {}",
@@ -2067,17 +2075,14 @@ fn capture_native_run_bundle(workspace: &Path, receipt_id: &str) -> (String, ser
         .as_str()
         .expect("incident id")
         .to_string();
-    let bundled = run_cli_in_workspace(
-        workspace,
-        &[
-            "incident",
-            "bundle",
-            "--id",
-            &incident_id,
-            "--verify",
-            "--json",
-        ],
-    );
+    let bundled = invoke(&[
+        "incident",
+        "bundle",
+        "--id",
+        &incident_id,
+        "--verify",
+        "--json",
+    ]);
     assert!(
         bundled.status.success(),
         "signed bundle export failed: {}",
@@ -2093,19 +2098,385 @@ fn capture_native_run_bundle(workspace: &Path, receipt_id: &str) -> (String, ser
 
 #[cfg(feature = "engine")]
 fn execute_native_replay(workspace: &Path, bundle_name: &str) -> Output {
-    run_cli_in_workspace(
-        workspace,
-        &[
-            "incident",
-            "replay",
-            "--bundle",
-            bundle_name,
-            "--execute",
-            "--trusted-public-key",
-            ".franken-node/keys/receipt-signing.pub",
-            "--json",
-        ],
-    )
+    execute_native_replay_with(bundle_name, |args| run_cli_in_workspace(workspace, args))
+}
+
+#[cfg(feature = "engine")]
+fn execute_native_replay_with(bundle_name: &str, invoke: impl FnOnce(&[&str]) -> Output) -> Output {
+    invoke(&[
+        "incident",
+        "replay",
+        "--bundle",
+        bundle_name,
+        "--execute",
+        "--trusted-public-key",
+        ".franken-node/keys/receipt-signing.pub",
+        "--json",
+    ])
+}
+
+#[cfg(all(feature = "engine", feature = "external-commands", target_os = "linux"))]
+mod signed_process_capture {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use ed25519_dalek::{Signer, SigningKey};
+    use frankenengine_node::config::{
+        ChildProcessExecutablePolicy, ChildProcessExecutionPolicy, ChildProcessResourceLimits,
+        ChildProcessSpawnBackend, ChildProcessSpawnConfig, CliOverrides, Config, Profile,
+    };
+    use frankenengine_node::security::impossible_default::{CapabilityToken, ImpossibleCapability};
+    use sha2::{Digest, Sha256};
+
+    use super::*;
+
+    const BWRAP: &str = "/usr/bin/bwrap";
+
+    // Only the outer test namespace sees this key at the production trust-root
+    // path. The real CLI still authenticates the signature, probes Bubblewrap,
+    // and launches its own independently authenticated PID-2 session worker.
+    // Nothing is installed into the host's /etc, and no test authority channel
+    // or alternate process provider enters the product execution path.
+    fn isolated_command(workspace: &Path, trust_directory: &Path, state_home: &Path) -> Command {
+        let binary = resolve_binary_path()
+            .canonicalize()
+            .expect("canonical product executable exists before namespace setup");
+        let mut command = Command::new(BWRAP);
+        command
+            .args([
+                "--die-with-parent",
+                "--unshare-user",
+                "--uid",
+                "0",
+                "--gid",
+                "0",
+                "--ro-bind",
+                "/",
+                "/",
+                // Keep the product's private control sockets writable without
+                // exposing the host's temporary directory or trust-root path.
+                "--tmpfs",
+                "/tmp",
+                "--tmpfs",
+                "/etc",
+                "--bind",
+            ])
+            .arg(workspace)
+            .arg(workspace)
+            .arg("--bind")
+            .arg(state_home)
+            .arg(state_home)
+            // Cargo/RCH may place this executable beneath /tmp. Keep its
+            // exact authenticated identity visible after masking host /tmp.
+            .arg("--ro-bind")
+            .arg(&binary)
+            .arg(&binary)
+            .arg("--ro-bind")
+            .arg(trust_directory)
+            .arg("/etc/franken-node")
+            .arg("--chdir")
+            .arg(workspace)
+            .arg("--")
+            .env("XDG_STATE_HOME", state_home)
+            .env("FRANKEN_ENGINE_TIMEOUT_SECS", "30");
+        command
+    }
+
+    fn isolated_run(
+        workspace: &Path,
+        trust_directory: &Path,
+        state_home: &Path,
+        policy: &str,
+    ) -> Output {
+        isolated_command(workspace, trust_directory, state_home)
+            .arg(
+                resolve_binary_path()
+                    .canonicalize()
+                    .expect("canonical product executable"),
+            )
+            .args([
+                "run",
+                "app.js",
+                "--policy",
+                policy,
+                "--runtime",
+                "franken-engine",
+                "--capture-replay",
+                "--json",
+            ])
+            .output()
+            .expect("launch real signed process capture in the private trust-root namespace")
+    }
+
+    fn signed_config(workspace: &Path, signing_key: &SigningKey) -> Config {
+        let mut config = Config::resolve(
+            Some(&workspace.join("franken_node.toml")),
+            CliOverrides {
+                profile: Some(Profile::Balanced),
+            },
+        )
+        .expect("resolve the same configuration shape the CLI signs and admits")
+        .config;
+        let executable = Path::new("/usr/bin/touch")
+            .canonicalize()
+            .expect("canonical marker-writing executable");
+        let now_ms = u64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("test clock")
+                .as_millis(),
+        )
+        .expect("test clock fits milliseconds");
+        config.security.child_process_spawn = Some(ChildProcessSpawnConfig {
+            token: CapabilityToken {
+                token_id: "native-incident-process-capture".to_string(),
+                capability: ImpossibleCapability::ChildProcessSpawn,
+                issuer: "isolated-incident-test-operator".to_string(),
+                subject: String::new(),
+                issued_at_ms: now_ms,
+                expires_at_ms: now_ms + 120_000,
+                signature: String::new(),
+                justification: "Exercise signed process capture through the actual worker"
+                    .to_string(),
+            },
+            backend: ChildProcessSpawnBackend::Bubblewrap,
+            binary_path: PathBuf::from(BWRAP),
+            execution_policy: ChildProcessExecutionPolicy {
+                allowed_executables: BTreeMap::from([(
+                    "mark".to_string(),
+                    ChildProcessExecutablePolicy {
+                        sha256: hex::encode(Sha256::digest(
+                            fs::read(&executable).expect("read exact marker executable bytes"),
+                        )),
+                        path: executable,
+                    },
+                )]),
+                jailed_cwd_root: workspace.to_path_buf(),
+                allow_shell: false,
+                shell_executable_alias: None,
+                allowed_env_keys: BTreeSet::new(),
+                fixed_env: BTreeMap::new(),
+                limits: ChildProcessResourceLimits::default(),
+            },
+        });
+        let subject = config
+            .child_process_spawn_policy_subject()
+            .expect("bind the complete resolved process policy");
+        let token = &mut config.security.child_process_spawn.as_mut().unwrap().token;
+        token.subject = subject;
+        token.signature = hex::encode(signing_key.sign(token.content_hash().as_bytes()).to_bytes());
+        config
+    }
+
+    #[test]
+    fn signed_process_capture_crosses_the_worker_and_replays_without_live_authority() {
+        if !Path::new(BWRAP).is_file() {
+            eprintln!("SKIP signed process capture: canonical /usr/bin/bwrap is unavailable");
+            return;
+        }
+        let authority = tempfile::tempdir().expect("private process trust-root fixture");
+        if fs::metadata(authority.path()).unwrap().uid() != 0 {
+            eprintln!(
+                "SKIP signed process capture: the isolated fixed trust-root fixture requires uid 0; product root-ownership checks remain enabled"
+            );
+            return;
+        }
+        let signing_key = SigningKey::from_bytes(&[0x69; 32]);
+        let anchor = authority.path().join("process-spawn-trust-anchor.pub");
+        fs::write(&anchor, hex::encode(signing_key.verifying_key().to_bytes())).unwrap();
+        fs::set_permissions(&anchor, fs::Permissions::from_mode(0o444)).unwrap();
+        let state_home = tempfile::tempdir().expect("private operator evidence state");
+
+        // Test nested namespace support before invoking the feature. A failure
+        // after this prerequisite succeeds is a regression, never a skip.
+        let prerequisite_workspace = tempfile::tempdir().unwrap();
+        let prerequisite = isolated_command(
+            prerequisite_workspace.path(),
+            authority.path(),
+            state_home.path(),
+        )
+        .arg(BWRAP)
+        .args([
+            "--unshare-user",
+            "--disable-userns",
+            "--assert-userns-disabled",
+            "--unshare-pid",
+            "--unshare-cgroup",
+            "--unshare-ipc",
+            "--unshare-uts",
+            "--cap-drop",
+            "ALL",
+            "--ro-bind",
+            "/",
+            "/",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--",
+            "/usr/bin/true",
+        ])
+        .output()
+        .expect("probe the actual nested namespace prerequisite");
+        if !prerequisite.status.success() {
+            eprintln!(
+                "SKIP signed process capture: nested Bubblewrap namespaces are unavailable: {}",
+                String::from_utf8_lossy(&prerequisite.stderr)
+            );
+            return;
+        }
+
+        for throws in [false, true] {
+            let workspace = tempfile::tempdir().expect("process capture project");
+            let root = workspace.path().canonicalize().unwrap();
+            let initialized = run_cli_in_workspace(
+                &root,
+                &["init", "--profile", "balanced", "--out-dir", ".", "--json"],
+            );
+            assert!(initialized.status.success(), "{initialized:?}");
+            fs::write(
+                root.join("app.js"),
+                format!(
+                    "const cp = require('child_process'); cp.execFileSync('mark', ['process-marker']); console.log('captured-process'); {}",
+                    if throws { "throw 'captured-failure';" } else { "" },
+                ),
+            )
+            .unwrap();
+            let config = signed_config(&root, &signing_key);
+            let mut invalid = config.clone();
+            invalid
+                .security
+                .child_process_spawn
+                .as_mut()
+                .unwrap()
+                .token
+                .signature = "00".repeat(64);
+            fs::write(root.join("franken_node.toml"), invalid.to_toml().unwrap()).unwrap();
+            let rejected = isolated_run(&root, authority.path(), state_home.path(), "balanced");
+            assert!(!rejected.status.success(), "invalid signature was admitted");
+            let rejection = format!(
+                "{} {}",
+                String::from_utf8_lossy(&rejected.stdout),
+                String::from_utf8_lossy(&rejected.stderr)
+            );
+            assert!(
+                rejection.contains("ERR_IBD_INVALID_SIGNATURE"),
+                "{rejection}"
+            );
+            assert!(!root.join("process-marker").exists());
+
+            fs::write(root.join("franken_node.toml"), config.to_toml().unwrap()).unwrap();
+            let legacy = isolated_run(&root, authority.path(), state_home.path(), "legacy-risky");
+            assert!(
+                !legacy.status.success(),
+                "uncaptured environment authority was admitted"
+            );
+            let legacy_error = format!(
+                "{} {}",
+                String::from_utf8_lossy(&legacy.stdout),
+                String::from_utf8_lossy(&legacy.stderr)
+            );
+            assert!(
+                legacy_error.contains("environment values are not replay inputs"),
+                "{legacy_error}"
+            );
+            assert!(!root.join("process-marker").exists());
+
+            let captured = isolated_run(&root, authority.path(), state_home.path(), "balanced");
+            assert_eq!(
+                captured.status.code(),
+                Some(if throws { 1 } else { 0 }),
+                "{captured:?}"
+            );
+            let run: serde_json::Value = serde_json::from_slice(&captured.stdout)
+                .expect("actual worker capture returns one JSON document");
+            let capture = &run["dispatch"]["native_replay"];
+            assert!(
+                capture.is_object(),
+                "worker refused or lost process capture: {run}"
+            );
+            assert_eq!(
+                run["receipt"]["native_replay_payload_sha256"],
+                capture["payload_sha256"]
+            );
+            assert_eq!(
+                run["dispatch"]["captured_output"]["stdout"],
+                "captured-process\n"
+            );
+            assert!(
+                root.join("process-marker").is_file(),
+                "the admitted OS process must actually execute"
+            );
+            let payload: serde_json::Value =
+                serde_json::from_str(capture["payload_json"].as_str().unwrap()).unwrap();
+            assert!(
+                payload["process"]["preparation"]
+                    .as_array()
+                    .is_some_and(|entries| !entries.is_empty())
+            );
+            assert!(
+                payload["process"]["journal"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry["effect_family"] == "process_spawn")
+            );
+            let terminal = if throws {
+                "uncaught_exception"
+            } else {
+                "completed"
+            };
+            assert_eq!(payload["expected"]["terminal_state"], terminal);
+            let receipt_id = run["receipt"]["receipt_id"].as_str().unwrap();
+            let (bundle_name, bundle) = capture_native_run_bundle_with(&root, receipt_id, |args| {
+                Command::new(resolve_binary_path())
+                    .current_dir(&root)
+                    .env("XDG_STATE_HOME", state_home.path())
+                    .args(args)
+                    .output()
+                    .expect("capture and bundle using the run's independent operator evidence root")
+            });
+            assert_eq!(bundle["initial_state_snapshot"]["native_replay"], *capture);
+
+            for name in ["app.js", "process-marker"] {
+                fs::rename(root.join(name), root.join(format!("saved-{name}"))).unwrap();
+            }
+            let mut replay_config = config;
+            replay_config.security.child_process_spawn = None;
+            fs::write(
+                root.join("franken_node.toml"),
+                replay_config.to_toml().unwrap(),
+            )
+            .unwrap();
+            // Replay runs outside the fixture namespace: neither the signed
+            // process policy nor its private /etc trust anchor is available.
+            let replayed = execute_native_replay_with(&bundle_name, |args| {
+                Command::new(resolve_binary_path())
+                    .current_dir(&root)
+                    .env("XDG_STATE_HOME", state_home.path())
+                    .args(args)
+                    .output()
+                    .expect("replay outside process authority with the original evidence identity")
+            });
+            assert!(replayed.status.success(), "{replayed:?}");
+            let replayed: serde_json::Value = serde_json::from_slice(&replayed.stdout).unwrap();
+            let execution = &replayed["execution_result"];
+            assert_eq!(execution["matched"], true, "{replayed}");
+            assert_eq!(execution["host_effects_match"], true);
+            assert_eq!(execution["console_match"], true);
+            assert_eq!(execution["replay_terminal_state"], terminal);
+            assert!(
+                !root.join("process-marker").exists(),
+                "replay repeated the process effect"
+            );
+            assert!(
+                !root.join("app.js").exists(),
+                "replay recreated original source"
+            );
+            assert!(root.join("saved-process-marker").is_file());
+        }
+    }
 }
 
 #[cfg(feature = "engine")]

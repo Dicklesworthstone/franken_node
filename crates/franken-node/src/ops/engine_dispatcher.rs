@@ -3386,6 +3386,16 @@ fn recheck_native_run_controls(
 #[cfg(feature = "engine")]
 type NativeRunControlUpdate = (Instant, std::result::Result<(), NativeRunControlTrigger>);
 
+#[cfg(feature = "engine")]
+enum NativeSessionPoll {
+    Running,
+    Completed(std::process::ExitStatus),
+    Interrupted {
+        control_trigger: Option<NativeRunControlTrigger>,
+        worker_already_exited: bool,
+    },
+}
+
 /// One owned observer per native session. Potentially contended store reads
 /// never run in the process supervisor. Cancellation wakes the between-check
 /// wait and skips remaining stores; Drop closes the bounded result channel and
@@ -3469,6 +3479,30 @@ impl NativeRunControlMonitor {
                 NativeRunControlKind::MonitorUnavailable,
                 "live execution control check did not complete within 10 seconds",
             )
+        })
+    }
+
+    fn poll_session(
+        &mut self,
+        child: &mut std::process::Child,
+        started: Instant,
+        timeout: std::time::Duration,
+    ) -> io::Result<NativeSessionPoll> {
+        let status = child.try_wait()?;
+        let timed_out = status.is_none() && started.elapsed() >= timeout;
+        let control_trigger = if timed_out { None } else { self.violation() };
+        // A queued control refusal remains authoritative when try_wait has
+        // already reaped the worker. Accepting its final response first would
+        // discard a revocation observed before this completion decision.
+        if timed_out || control_trigger.is_some() {
+            return Ok(NativeSessionPoll::Interrupted {
+                control_trigger,
+                worker_already_exited: status.is_some(),
+            });
+        }
+        Ok(match status {
+            Some(status) => NativeSessionPoll::Completed(status),
+            None => NativeSessionPoll::Running,
         })
     }
 }
@@ -4358,6 +4392,19 @@ struct DispatchResolutionInputs<'a> {
     /// engine executable, so an embedded engine satisfies `auto` and
     /// `franken-engine` runtime selection without any sidecar binary on disk.
     embedded_engine: Option<&'a Path>,
+}
+
+/// Keep public dispatch and authenticated worker admission on the same replay
+/// policy. Signed process authority has its own authentication and containment
+/// gates; capture records that provider's preparation and ordered journal.
+/// Environment authority still has no replay input contract.
+fn validate_native_replay_capture_mode(profile: Profile, capture_replay: bool) -> Result<()> {
+    if capture_replay && profile == Profile::LegacyRisky {
+        anyhow::bail!(
+            "native replay capture requires strict or balanced policy; environment values are not replay inputs"
+        );
+    }
+    Ok(())
 }
 
 struct DispatchReportInputs<'a> {
@@ -5991,11 +6038,7 @@ impl EngineDispatcher {
         config.runtime.validate_execution_budget()?;
         config.runtime.validate_parse_budget()?;
 
-        if self.capture_replay && config.profile == Profile::LegacyRisky {
-            anyhow::bail!(
-                "native replay capture requires strict or balanced policy; environment values are not replay inputs"
-            );
-        }
+        validate_native_replay_capture_mode(config.profile, self.capture_replay)?;
 
         // An external executable named by --engine-bin, the environment, or
         // project config has no authenticated identity. In builds without the
@@ -7927,23 +7970,32 @@ impl EngineDispatcher {
         };
 
         let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) => {
-                    // Never block the absolute worker deadline on a policy
-                    // store read. The observer publishes bounded messages;
-                    // missing observations are themselves a denial.
-                    let timed_out = started.elapsed() >= timeout;
-                    let control_trigger = if timed_out {
-                        None
+            // This only polls the child and bounded observer channel. Policy
+            // store reads cannot block either the deadline or completion.
+            match control_monitor.poll_session(&mut child, started, timeout) {
+                Ok(NativeSessionPoll::Completed(status)) => break status,
+                Ok(NativeSessionPoll::Running) => {
+                    thread::sleep(NATIVE_SESSION_POLL_INTERVAL);
+                }
+                Ok(NativeSessionPoll::Interrupted {
+                    control_trigger,
+                    worker_already_exited,
+                }) => {
+                    let process_cleanup = if worker_already_exited {
+                        // try_wait already reaped this PID. Never send a
+                        // numeric PID/group signal that could hit a reused
+                        // identity. Process authority uses a pinned namespace
+                        // handle, whose existing empty proof still applies.
+                        match &containment {
+                            #[cfg(target_os = "linux")]
+                            NativeSessionContainment::Bubblewrap(unit) => {
+                                wait_for_containment_unit_empty(unit)
+                            }
+                            NativeSessionContainment::ProcessGroup => Ok(()),
+                        }
                     } else {
-                        control_monitor.violation()
+                        kill_and_reap_native_session(&mut child, &containment)
                     };
-                    if !timed_out && control_trigger.is_none() {
-                        thread::sleep(NATIVE_SESSION_POLL_INTERVAL);
-                        continue;
-                    }
-                    let process_cleanup = kill_and_reap_native_session(&mut child, &containment);
                     let request_writer_cleanup = receive_request_writer(request_writer, true);
                     let response_drain = receive_reader(stdout_reader, "response");
                     let diagnostic_drain = receive_reader(stderr_reader, "diagnostics");
@@ -9132,19 +9184,15 @@ impl EngineDispatcher {
         })?;
         let parser_budget = config.runtime.effective_parse_budget(config.profile);
 
-        // Recheck inside the authenticated worker as well as at public dispatch.
-        // Environment values and child-process effects have no replay input
-        // protocol. Process-shape reads use captured argv and fixed engine
-        // metadata, so their explicit narrow grant is preserved during replay.
-        if capture_replay
-            && (config.profile == Profile::LegacyRisky || process_spawn_admission.is_some())
-        {
-            return Err(native_engine_spawn_error_with_telemetry_cleanup(
-                "Native replay capture requires strict or balanced policy without environment or child-process authority"
-                    .to_string(),
+        // Recheck the same policy inside the authenticated worker. Process
+        // authority was independently reauthenticated against active containment
+        // before arriving here; capture must not reject that supported path.
+        validate_native_replay_capture_mode(config.profile, capture_replay).map_err(|error| {
+            native_engine_spawn_error_with_telemetry_cleanup(
+                error.to_string(),
                 &mut telemetry_guard,
-            ));
-        }
+            )
+        })?;
 
         // The parent selected this authority before dependency preflight and
         // checked that its evidence root is outside it. Retain the same root
@@ -10506,6 +10554,154 @@ impl EngineDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_capture_admission_retains_the_environment_exclusion() {
+        for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+            validate_native_replay_capture_mode(profile, false)
+                .expect("ordinary execution retains its profile policy");
+            let capture = validate_native_replay_capture_mode(profile, true);
+            if profile == Profile::LegacyRisky {
+                assert!(
+                    capture
+                        .expect_err("environment authority has no replay inputs")
+                        .to_string()
+                        .contains("environment values are not replay inputs")
+                );
+            } else {
+                capture.expect("strict and balanced support authenticated process captures");
+            }
+        }
+    }
+
+    #[cfg(feature = "engine")]
+    fn live_control_test_monitor(
+        last_checked: Instant,
+    ) -> (
+        NativeRunControlMonitor,
+        std::sync::mpsc::SyncSender<NativeRunControlUpdate>,
+    ) {
+        let (stop, _stop_receiver) = std::sync::mpsc::channel();
+        let (sender, updates) = std::sync::mpsc::sync_channel(1);
+        (
+            NativeRunControlMonitor {
+                cancelled: Arc::new(AtomicBool::new(false)),
+                stop,
+                updates: Some(updates),
+                worker: None,
+                last_checked,
+            },
+            sender,
+        )
+    }
+
+    #[cfg(all(feature = "engine", unix))]
+    #[test]
+    fn live_control_queued_denial_survives_successful_worker_exit() {
+        for kind in [
+            NativeRunControlKind::SafeMode,
+            NativeRunControlKind::ExecutionTrust,
+            NativeRunControlKind::FleetPolicy,
+            NativeRunControlKind::FleetPolicyChanged,
+        ] {
+            let mut child = Command::new("/bin/sh")
+                .args(["-c", "exit 0"])
+                .spawn()
+                .expect("launch short-lived worker");
+            assert!(child.wait().expect("reap completed worker").success());
+            let (mut monitor, sender) = live_control_test_monitor(Instant::now());
+            let expected = NativeRunControlTrigger::new(kind, "control refused before completion");
+            sender
+                .send((Instant::now(), Err(expected.clone())))
+                .expect("queue the already observed refusal");
+
+            let poll = monitor
+                .poll_session(&mut child, Instant::now(), std::time::Duration::ZERO)
+                .expect("poll reaped child");
+            let NativeSessionPoll::Interrupted {
+                control_trigger,
+                worker_already_exited,
+            } = poll
+            else {
+                panic!("a completed worker must not discard a queued control refusal");
+            };
+            assert_eq!(control_trigger, Some(expected));
+            assert!(
+                worker_already_exited,
+                "cleanup must not signal a reaped PID"
+            );
+        }
+    }
+
+    #[cfg(all(feature = "engine", unix))]
+    #[test]
+    fn live_control_completion_checks_observer_health() {
+        for (stale, disconnected) in [(false, false), (true, false), (false, true)] {
+            let mut child = Command::new("/bin/sh")
+                .args(["-c", "exit 0"])
+                .spawn()
+                .expect("launch short-lived worker");
+            assert!(child.wait().expect("reap completed worker").success());
+            let last_checked = if stale {
+                Instant::now() - NATIVE_RUN_CONTROL_OBSERVATION_DEADLINE
+            } else {
+                Instant::now()
+            };
+            let (mut monitor, sender) = live_control_test_monitor(last_checked);
+            let _retained_sender = if disconnected {
+                drop(sender);
+                None
+            } else {
+                Some(sender)
+            };
+            let poll = monitor
+                .poll_session(&mut child, Instant::now(), std::time::Duration::ZERO)
+                .expect("poll reaped child");
+            if stale || disconnected {
+                let NativeSessionPoll::Interrupted {
+                    control_trigger: Some(trigger),
+                    worker_already_exited: true,
+                } = poll
+                else {
+                    panic!("completion needs a live control observer");
+                };
+                assert_eq!(trigger.kind, NativeRunControlKind::MonitorUnavailable);
+            } else {
+                assert!(matches!(
+                    poll,
+                    NativeSessionPoll::Completed(status) if status.success()
+                ));
+            }
+        }
+    }
+
+    #[cfg(all(feature = "engine", unix))]
+    #[test]
+    fn live_control_poll_preserves_running_worker_and_deadline() {
+        let mut child = Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .expect("launch pending worker");
+        let (mut monitor, _sender) = live_control_test_monitor(Instant::now());
+        let running = monitor.poll_session(
+            &mut child,
+            Instant::now(),
+            std::time::Duration::from_secs(60),
+        );
+        let timed_out = monitor.poll_session(&mut child, Instant::now(), std::time::Duration::ZERO);
+        // Reap before assertions so a failed decision cannot leave the test's
+        // real process running for the rest of its sleep interval.
+        child.kill().expect("terminate pending worker");
+        child.wait().expect("reap pending worker");
+        assert!(matches!(running.unwrap(), NativeSessionPoll::Running));
+        assert!(matches!(
+            timed_out.unwrap(),
+            NativeSessionPoll::Interrupted {
+                control_trigger: None,
+                worker_already_exited: false,
+            }
+        ));
+    }
 
     #[cfg(feature = "engine")]
     #[test]
