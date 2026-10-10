@@ -12756,7 +12756,8 @@ fn emit_failed_run_effect_evidence(
 }
 
 /// Surface the parent-owned WAL prefix for a native session killed at its
-/// deadline. This sibling artifact is deliberately not a HostEffectLedger:
+/// deadline or interrupted by live controls. This sibling artifact is
+/// deliberately not a HostEffectLedger:
 /// replay remains uncertified and every unmatched admission is explicitly
 /// `interrupted_indeterminate`.
 #[cfg(feature = "engine")]
@@ -12801,9 +12802,11 @@ fn emit_interrupted_run_effect_evidence(
             render_run_execution_receipt_summary(&output.receipt, Path::new(&output.receipt_path),)
         );
     }
-    if evidence.terminal_state == "timeout_cleanup_unproven" {
+    if evidence.terminal_state == "timeout_cleanup_unproven"
+        || evidence.terminal_state == "control_cleanup_unproven"
+    {
         println!(
-            "run timed out, but worker termination and quiescence were not proven; replay certification refused (terminal-state={}, provider-returned={}, interrupted={}, journal-complete={})",
+            "run interrupted, but worker termination and quiescence were not proven; replay certification refused (terminal-state={}, provider-returned={}, interrupted={}, journal-complete={})",
             evidence.terminal_state,
             evidence.completed_effect_count,
             evidence.interrupted_effect_count,
@@ -12817,6 +12820,9 @@ fn emit_interrupted_run_effect_evidence(
             evidence.interrupted_effect_count,
             evidence.journal_complete
         );
+    }
+    if let Some(trigger) = &evidence.control_trigger {
+        println!("  live_control={:?}: {}", trigger.kind, trigger.detail);
     }
     for entry in &evidence.entries {
         println!(
@@ -37196,6 +37202,7 @@ mod run_trust_gate_tests {
                 },
             ],
             protocol_error: None,
+            control_trigger: None,
         };
         let mut core = sample_failed_run_receipt_core();
         core.execution_failure = Some("native execution timed out".to_string());

@@ -934,8 +934,10 @@ pub fn enforce_active_fleet_policy(
 /// policy action. The durable required document is a write-ahead high-water mark:
 /// it is persisted before the active document, and a crash between those writes
 /// blocks new guests until a matching or stricter snapshot is durably repaired.
-/// Activation governs new run admission; it does not claim to hot-reload guests
-/// already executing under an earlier authenticated policy snapshot.
+/// Activation governs new run admission. Running native sessions observe this
+/// persisted state and are interrupted if their effective restrictions change;
+/// they must be restarted under the new policy. An action
+/// acknowledgement proves persistence, not that every session is already quiet.
 pub fn activate_fleet_policy_snapshot(
     project: &Path,
     actions: &[FleetActionRecord],

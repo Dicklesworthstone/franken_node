@@ -131,6 +131,14 @@ const NATIVE_SESSION_MAX_GUEST_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
 #[cfg(feature = "engine")]
 const NATIVE_SESSION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(2);
 #[cfg(feature = "engine")]
+const NATIVE_RUN_CONTROL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+/// Bound the time a guest can run without a completed local control check.
+/// Store lock waits happen on one owned monitor, never on the worker's deadline
+/// loop. A stalled monitor fails closed even before those reads return.
+#[cfg(feature = "engine")]
+const NATIVE_RUN_CONTROL_OBSERVATION_DEADLINE: std::time::Duration =
+    std::time::Duration::from_secs(10);
+#[cfg(feature = "engine")]
 const NATIVE_EFFECT_WAL_SCHEMA: &str = "franken-node/native-effect-wal/v1";
 #[cfg(feature = "engine")]
 const NATIVE_EFFECT_INTERRUPTION_EVIDENCE_SCHEMA: &str =
@@ -1538,7 +1546,8 @@ fn native_effect_interruption_evidence(
     }
     if reconciled.response.is_some() && reconciled.protocol_error.is_none() {
         reconciled.protocol_error = Some(
-            "native-session final response was observed before timeout termination".to_string(),
+            "native-session final response was observed before interruption termination"
+                .to_string(),
         );
     }
     let completed_effect_count = reconciled
@@ -1562,15 +1571,33 @@ fn native_effect_interruption_evidence(
         interrupted_effect_count,
         entries: reconciled.entries,
         protocol_error: reconciled.protocol_error,
+        control_trigger: None,
     }
 }
 
-#[cfg(feature = "engine")]
+#[cfg(all(feature = "engine", test))]
 fn native_timeout_effect_evidence(
     response_output: std::result::Result<(&[u8], bool), &str>,
     cleanup_failure: Option<&str>,
     expected_nonce: &str,
     allow_test_harness_noise: bool,
+) -> NativeEffectInterruptionEvidence {
+    native_interruption_effect_evidence(
+        response_output,
+        cleanup_failure,
+        expected_nonce,
+        allow_test_harness_noise,
+        None,
+    )
+}
+
+#[cfg(feature = "engine")]
+fn native_interruption_effect_evidence(
+    response_output: std::result::Result<(&[u8], bool), &str>,
+    cleanup_failure: Option<&str>,
+    expected_nonce: &str,
+    allow_test_harness_noise: bool,
+    control_trigger: Option<NativeRunControlTrigger>,
 ) -> NativeEffectInterruptionEvidence {
     let (output, output_cap_exceeded, response_failure) = match response_output {
         Ok((output, output_cap_exceeded)) => (output, output_cap_exceeded, None),
@@ -1582,18 +1609,30 @@ fn native_timeout_effect_evidence(
         expected_nonce,
         allow_test_harness_noise,
     );
+    let interruption = if control_trigger.is_some() {
+        evidence.terminal_state = "control_indeterminate".to_string();
+        "live control"
+    } else {
+        "timeout"
+    };
+    evidence.control_trigger = control_trigger;
     let parent_failure = cleanup_failure.or(response_failure);
     if let Some(error) = parent_failure {
         let previous = evidence.protocol_error.take();
         evidence.protocol_error = Some(previous.map_or_else(
-            || format!("native-session timeout cleanup could not prove quiescence: {error}"),
+            || format!("native-session {interruption} cleanup could not prove quiescence: {error}"),
             |protocol_error| {
                 format!(
-                    "{protocol_error}; native-session timeout cleanup could not prove quiescence: {error}"
+                    "{protocol_error}; native-session {interruption} cleanup could not prove quiescence: {error}"
                 )
             },
         ));
-        evidence.terminal_state = "timeout_cleanup_unproven".to_string();
+        evidence.terminal_state = if evidence.control_trigger.is_some() {
+            "control_cleanup_unproven"
+        } else {
+            "timeout_cleanup_unproven"
+        }
+        .to_string();
         evidence.journal_complete = false;
     }
     evidence
@@ -3246,6 +3285,208 @@ pub fn enforce_execution_fleet_policy(
     Ok(active)
 }
 
+/// Parent-observed reason for terminating an admitted native session. These
+/// observations are local controls, not an authenticated guest panic or proof
+/// that effects already committed by a provider have been rolled back.
+#[cfg(feature = "engine")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeRunControlTrigger {
+    pub kind: NativeRunControlKind,
+    pub detail: String,
+}
+
+#[cfg(feature = "engine")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeRunControlKind {
+    SafeMode,
+    ExecutionTrust,
+    FleetPolicy,
+    FleetPolicyChanged,
+    MonitorUnavailable,
+}
+
+#[cfg(feature = "engine")]
+impl NativeRunControlTrigger {
+    fn new(kind: NativeRunControlKind, detail: impl std::fmt::Display) -> Self {
+        Self {
+            kind,
+            detail: detail.to_string(),
+        }
+    }
+}
+
+/// Compare what the worker actually received, not optional configuration
+/// spelling. A fleet revision that makes a default budget explicit is not a
+/// change to the worker's execution policy.
+#[cfg(feature = "engine")]
+fn native_run_policy_changed(admitted: &Config, current: &Config) -> bool {
+    admitted.profile != current.profile
+        || admitted
+            .runtime
+            .effective_instruction_budget(admitted.profile)
+            != current
+                .runtime
+                .effective_instruction_budget(current.profile)
+        || admitted.runtime.effective_parse_budget(admitted.profile)
+            != current.runtime.effective_parse_budget(current.profile)
+        || admitted.security.network_policy != current.security.network_policy
+}
+
+#[cfg(feature = "engine")]
+fn recheck_native_run_controls(
+    project_paths: &RunProjectPaths,
+    config: &Config,
+    requirements: &RunTrustRequirements,
+    fleet_high_water: &mut Option<ActiveFleetPolicy>,
+    cancelled: &AtomicBool,
+) -> std::result::Result<(), NativeRunControlTrigger> {
+    crate::runtime::safe_mode::enforce_admitted_run_safe_mode(project_paths.entrypoint())
+        .map_err(|error| NativeRunControlTrigger::new(NativeRunControlKind::SafeMode, error))?;
+    if cancelled.load(Ordering::Acquire) {
+        return Ok(());
+    }
+
+    let mut effective = config.clone();
+    let current_fleet = enforce_execution_fleet_policy(
+        project_paths.project_root(),
+        &mut effective,
+        fleet_high_water.as_ref(),
+    )
+    .map_err(|error| NativeRunControlTrigger::new(NativeRunControlKind::FleetPolicy, error))?;
+    if native_run_policy_changed(config, &effective) {
+        return Err(NativeRunControlTrigger::new(
+            NativeRunControlKind::FleetPolicyChanged,
+            "active fleet policy changed the running worker's effective restrictions; restart execution under the current policy",
+        ));
+    }
+    // Retain equivalent newer revisions too. A subsequent rollback must not
+    // become acceptable just because this worker did not need new limits.
+    *fleet_high_water = current_fleet;
+    if cancelled.load(Ordering::Acquire) {
+        return Ok(());
+    }
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| {
+            NativeRunControlTrigger::new(NativeRunControlKind::MonitorUnavailable, error)
+        })?
+        .as_secs();
+    // Preserve the admission profile's warning/deny distinctions, including
+    // legacy quarantine behavior. These identities are the preflight set, not
+    // a claim of per-package attribution for all dynamically loaded code.
+    validate_execution_trust(project_paths.project_root(), config, requirements, now_secs)
+        .map_err(|error| {
+            NativeRunControlTrigger::new(NativeRunControlKind::ExecutionTrust, error)
+        })?;
+    Ok(())
+}
+
+#[cfg(feature = "engine")]
+type NativeRunControlUpdate = (Instant, std::result::Result<(), NativeRunControlTrigger>);
+
+/// One owned observer per native session. Potentially contended store reads
+/// never run in the process supervisor. Cancellation wakes the between-check
+/// wait and skips remaining stores; Drop closes the bounded result channel and
+/// joins the observer on every exit path, including worker startup failures.
+/// If a store is already being read, joining may outlast guest termination;
+/// the guest's deadline and kill/reap path do not wait for that read.
+#[cfg(feature = "engine")]
+struct NativeRunControlMonitor {
+    cancelled: Arc<AtomicBool>,
+    stop: std::sync::mpsc::Sender<()>,
+    updates: Option<std::sync::mpsc::Receiver<NativeRunControlUpdate>>,
+    worker: Option<thread::JoinHandle<()>>,
+    last_checked: Instant,
+}
+
+#[cfg(feature = "engine")]
+impl NativeRunControlMonitor {
+    fn spawn(
+        project_paths: RunProjectPaths,
+        config: Config,
+        requirements: RunTrustRequirements,
+        mut fleet_high_water: Option<ActiveFleetPolicy>,
+    ) -> io::Result<Self> {
+        let (stop, stop_receiver) = std::sync::mpsc::channel();
+        let (update_sender, updates) = std::sync::mpsc::sync_channel(1);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
+        let last_checked = Instant::now();
+        let worker = thread::Builder::new()
+            .name("franken-node-live-control".to_string())
+            .spawn(move || {
+                while !worker_cancelled.load(Ordering::Acquire) {
+                    let result = recheck_native_run_controls(
+                        &project_paths,
+                        &config,
+                        &requirements,
+                        &mut fleet_high_water,
+                        &worker_cancelled,
+                    );
+                    let denied = result.is_err();
+                    if worker_cancelled.load(Ordering::Acquire)
+                        || update_sender.send((Instant::now(), result)).is_err()
+                        || denied
+                    {
+                        return;
+                    }
+                    if !matches!(
+                        stop_receiver.recv_timeout(NATIVE_RUN_CONTROL_POLL_INTERVAL),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                    ) {
+                        return;
+                    }
+                }
+            })?;
+        Ok(Self {
+            cancelled,
+            stop,
+            updates: Some(updates),
+            worker: Some(worker),
+            last_checked,
+        })
+    }
+
+    fn violation(&mut self) -> Option<NativeRunControlTrigger> {
+        let updates = self.updates.as_ref()?;
+        loop {
+            match updates.try_recv() {
+                Ok((checked_at, Ok(()))) => self.last_checked = checked_at,
+                Ok((_, Err(trigger))) => return Some(trigger),
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    return Some(NativeRunControlTrigger::new(
+                        NativeRunControlKind::MonitorUnavailable,
+                        "live execution control monitor stopped without a decision",
+                    ));
+                }
+            }
+        }
+        (self.last_checked.elapsed() >= NATIVE_RUN_CONTROL_OBSERVATION_DEADLINE).then(|| {
+            NativeRunControlTrigger::new(
+                NativeRunControlKind::MonitorUnavailable,
+                "live execution control check did not complete within 10 seconds",
+            )
+        })
+    }
+}
+
+#[cfg(feature = "engine")]
+impl Drop for NativeRunControlMonitor {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+        let _ = self.stop.send(());
+        // A full result slot must not keep the observer blocked on send while
+        // its owner joins it. Close the receiver before waiting for the thread.
+        drop(self.updates.take());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 pub struct EngineDispatcher {
     engine_bin_path: String,
     configured_path: Option<PathBuf>,
@@ -3749,11 +3990,14 @@ pub struct NativeEffectInterruptionEvidence {
     pub entries: Vec<NativeEffectWalEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_trigger: Option<NativeRunControlTrigger>,
 }
 
-/// A timed-out native run with parent-owned interrupted-effect evidence.
+/// A native run stopped by its deadline or live control with parent-owned
+/// interrupted-effect evidence.
 ///
-/// The display text remains the same actionable timeout error. Downcasting
+/// The display text retains the actionable interruption reason. Downcasting
 /// preserves the sibling WAL artifact without ever presenting it as a
 /// finalized host-effect ledger. The dispatch report retains the authenticated
 /// session identity for durable observation of the unsuccessful attempt.
@@ -3967,11 +4211,7 @@ impl std::error::Error for NativeRunPanic {
 /// In particular, error text and generic nonzero worker exits are not evidence
 /// that the native engine reported a panic.
 #[cfg(feature = "engine")]
-fn record_native_panic_for_run(
-    error: &mut anyhow::Error,
-    project_root: &Path,
-    entrypoint: &Path,
-) {
+fn record_native_panic_for_run(error: &mut anyhow::Error, project_root: &Path, entrypoint: &Path) {
     let Some(panic) = error.downcast_mut::<NativeRunPanic>() else {
         return;
     };
@@ -7472,6 +7712,23 @@ impl EngineDispatcher {
         command.stdin(Stdio::piped());
         isolate_process_group(&mut command);
 
+        // Establish ownership before spawning a guest: failure to start the
+        // required control observer cannot leave an unsupervised child behind.
+        let mut control_monitor = NativeRunControlMonitor::spawn(
+            project_paths.clone(),
+            config.clone(),
+            trust_requirements.clone(),
+            fleet_policy.cloned(),
+        )
+        .map_err(|error| {
+            EngineDispatchError::EngineExecutionError {
+                app_path: app_path_buf.clone(),
+                error_message: format!("failed starting live execution control monitor: {error}"),
+                phase: "worker startup".to_string(),
+            }
+            .to_actionable()
+        })?;
+
         let mut child = command.spawn().map_err(|error| {
             EngineDispatchError::EngineExecutionError {
                 app_path: app_path_buf.clone(),
@@ -7675,7 +7932,20 @@ impl EngineDispatcher {
         let status = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break status,
-                Ok(None) if started.elapsed() >= timeout => {
+                Ok(None) => {
+                    // Never block the absolute worker deadline on a policy
+                    // store read. The observer publishes bounded messages;
+                    // missing observations are themselves a denial.
+                    let timed_out = started.elapsed() >= timeout;
+                    let control_trigger = if timed_out {
+                        None
+                    } else {
+                        control_monitor.violation()
+                    };
+                    if !timed_out && control_trigger.is_none() {
+                        thread::sleep(NATIVE_SESSION_POLL_INTERVAL);
+                        continue;
+                    }
                     let process_cleanup = kill_and_reap_native_session(&mut child, &containment);
                     let request_writer_cleanup = receive_request_writer(request_writer, true);
                     let response_drain = receive_reader(stdout_reader, "response");
@@ -7686,7 +7956,7 @@ impl EngineDispatcher {
                         Some(response_drain.clone()),
                         Some(diagnostic_drain),
                     );
-                    let effect_evidence = native_timeout_effect_evidence(
+                    let effect_evidence = native_interruption_effect_evidence(
                         response_drain
                             .as_ref()
                             .map(|response| (response.bytes.as_slice(), response.cap_exceeded))
@@ -7694,8 +7964,20 @@ impl EngineDispatcher {
                         cleanup_failure.as_deref(),
                         &nonce,
                         cfg!(test),
+                        control_trigger.clone(),
                     );
-                    let actionable = if let Some(error) = cleanup_failure {
+                    let actionable = if let Some(trigger) = control_trigger {
+                        let cleanup_detail = cleanup_failure.map_or_else(String::new, |error| {
+                            format!("; worker cleanup could not prove quiescence: {error}")
+                        });
+                        ActionableError::new(
+                            format!(
+                                "Native execution interrupted by live control ({:?}): {}{cleanup_detail}",
+                                trigger.kind, trigger.detail,
+                            ),
+                            "Inspect safe-mode status, trust state, and active fleet policy before retrying `franken-node run`",
+                        )
+                    } else if let Some(error) = cleanup_failure {
                         EngineDispatchError::EngineExecutionError {
                             app_path: app_path_buf,
                             error_message: format!(
@@ -7720,7 +8002,6 @@ impl EngineDispatcher {
                         dispatch_report: None,
                     }));
                 }
-                Ok(None) => thread::sleep(NATIVE_SESSION_POLL_INTERVAL),
                 Err(error) => {
                     let cleanup_failure = native_session_cleanup_failure(
                         kill_and_reap_native_session(&mut child, &containment),
@@ -8886,13 +9167,14 @@ impl EngineDispatcher {
                 )
             })?;
         // Operator entry may occur while the authenticated worker starts.
-        crate::runtime::safe_mode::enforce_run_safe_mode(project_paths.entrypoint())
-            .map_err(|error| {
+        crate::runtime::safe_mode::enforce_run_safe_mode(project_paths.entrypoint()).map_err(
+            |error| {
                 native_engine_spawn_error_with_telemetry_cleanup(
                     format!("Native execution safe-mode admission failed: {error:#}"),
                     &mut telemetry_guard,
                 )
-            })?;
+            },
+        )?;
         // Worker startup, key provisioning, and telemetry setup can outlive
         // the parent's preflight decision. Read current signed trust state
         // here, on the worker's clock, before loading or executing guest code.
@@ -10199,6 +10481,93 @@ impl EngineDispatcher {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "engine")]
+    #[test]
+    fn live_control_compares_effective_policy_and_each_worker_restriction() {
+        for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+            let config = Config::for_profile(profile);
+            let mut equivalent = config.clone();
+            let instructions = config.runtime.effective_instruction_budget(profile);
+            let parse = config.runtime.effective_parse_budget(profile);
+            equivalent.runtime.max_instructions = Some(instructions);
+            equivalent.runtime.max_parse_source_bytes = Some(parse.max_source_bytes);
+            equivalent.runtime.max_parse_tokens = Some(parse.max_token_count);
+            assert!(!native_run_policy_changed(&config, &equivalent));
+
+            let mut tighter = equivalent.clone();
+            tighter.runtime.max_instructions = Some(instructions - 1);
+            assert!(native_run_policy_changed(&config, &tighter));
+            tighter = equivalent.clone();
+            tighter.runtime.max_parse_source_bytes = Some(parse.max_source_bytes - 1);
+            assert!(native_run_policy_changed(&config, &tighter));
+            tighter = equivalent.clone();
+            tighter.runtime.max_parse_tokens = Some(parse.max_token_count - 1);
+            assert!(native_run_policy_changed(&config, &tighter));
+            tighter = equivalent;
+            tighter.security.network_policy.block_cloud_metadata =
+                !config.security.network_policy.block_cloud_metadata;
+            assert!(native_run_policy_changed(&config, &tighter));
+        }
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn live_control_monitor_fails_closed_on_stale_observations_and_disconnect() {
+        let (stop, _stop_receiver) = std::sync::mpsc::channel();
+        let (sender, updates) = std::sync::mpsc::sync_channel(1);
+        let mut monitor = NativeRunControlMonitor {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            stop,
+            updates: Some(updates),
+            worker: None,
+            last_checked: Instant::now() - NATIVE_RUN_CONTROL_OBSERVATION_DEADLINE,
+        };
+        let stale = monitor.violation().expect("stalled observer must deny");
+        assert_eq!(stale.kind, NativeRunControlKind::MonitorUnavailable);
+        sender.send((Instant::now(), Ok(()))).unwrap();
+        assert!(monitor.violation().is_none());
+        drop(sender);
+        let disconnected = monitor.violation().expect("dead observer must deny");
+        assert_eq!(disconnected.kind, NativeRunControlKind::MonitorUnavailable);
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn live_control_evidence_preserves_reason_and_never_certifies_cleanup_failure() {
+        let trigger = NativeRunControlTrigger::new(
+            NativeRunControlKind::SafeMode,
+            "operator activated safe mode",
+        );
+        for cleanup_failure in [None, Some("worker was not reaped")] {
+            let evidence = native_interruption_effect_evidence(
+                Ok((&[], false)),
+                cleanup_failure,
+                "00000000-0000-4000-8000-000000000001",
+                false,
+                Some(trigger.clone()),
+            );
+            assert_eq!(evidence.control_trigger, Some(trigger.clone()));
+            assert!(!evidence.replay_certified);
+            assert_eq!(
+                evidence.terminal_state,
+                if cleanup_failure.is_some() {
+                    "control_cleanup_unproven"
+                } else {
+                    "control_indeterminate"
+                }
+            );
+            if cleanup_failure.is_some() {
+                assert!(!evidence.journal_complete);
+                assert!(
+                    evidence
+                        .protocol_error
+                        .unwrap()
+                        .contains("live control cleanup")
+                );
+            }
+        }
+    }
+
     fn native_invocation_settings_for_test() -> NativeInvocationSettings {
         let deterministic = EngineLaneExecutionLimits {
             max_instructions: 600,
@@ -10850,8 +11219,7 @@ mod tests {
         assert_eq!(panic.evidence_capture_path(), capture_path.as_path());
         assert!(panic.crash_loop_observation().is_none());
         assert!(panic.crash_loop_persistence_error().is_none());
-        let trusted_root =
-            ed25519_dalek::SigningKey::from_bytes(&[0x63; 32]).verifying_key();
+        let trusted_root = ed25519_dalek::SigningKey::from_bytes(&[0x63; 32]).verifying_key();
         panic
             .evidence_capture()
             .verify_with_product_root(&trusted_root)

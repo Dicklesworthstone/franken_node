@@ -919,6 +919,462 @@ fn native_timeout_reaps_a_worker_stuck_in_admitted_http_io() {
     );
 }
 
+#[cfg(target_os = "linux")]
+mod live_native_containment {
+    use super::*;
+    use frankenengine_node::control_plane::fleet_transport::{
+        FleetAction, FleetActionRecord, FleetPolicyArtifact, FleetRuntimePolicy,
+        activate_fleet_policy_snapshot,
+    };
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::os::unix::process::CommandExt;
+    use std::path::Path;
+    use std::sync::mpsc;
+
+    #[derive(Clone, Copy)]
+    enum ControlChange {
+        SafeMode,
+        RevokeDependency,
+        TightenFleet,
+        EquivalentFleetRevision,
+    }
+
+    fn process_start_time(pid: u32) -> Option<String> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        stat.rsplit_once(") ")?
+            .1
+            .split_whitespace()
+            .nth(19)
+            .map(str::to_string)
+    }
+
+    /// Clean up the real product and its independently grouped worker even
+    /// when a control assertion fails. The successful path proves the worker
+    /// has already gone before this guard is dropped.
+    struct ProductChild(std::process::Child, Option<(u32, String)>);
+
+    impl Drop for ProductChild {
+        fn drop(&mut self) {
+            let kill = ["/bin/kill", "/usr/bin/kill"]
+                .into_iter()
+                .find(|path| Path::new(path).is_file());
+            if let Some(kill) = kill
+                && let Some((pid, start)) = &self.1
+                && process_start_time(*pid).as_deref() == Some(start.as_str())
+            {
+                // Retain identity across parent exit, so a regression that
+                // orphans its worker cannot escape the test's cleanup.
+                let _ = Command::new(kill)
+                    .args(["-KILL", "--", &pid.to_string()])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
+            if self.0.try_wait().ok().flatten().is_some() {
+                return;
+            }
+            if let Some(kill) = kill {
+                if let Ok(children) = std::fs::read_to_string(format!(
+                    "/proc/{}/task/{}/children",
+                    self.0.id(),
+                    self.0.id()
+                )) {
+                    for pid in children.split_whitespace() {
+                        let _ = Command::new(kill)
+                            .args(["-KILL", "--", pid])
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .status();
+                    }
+                }
+                let _ = Command::new(kill)
+                    .args(["-KILL", "--", &format!("-{}", self.0.id())])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn cli(project: &Path, arguments: &[&str]) {
+        let output = Command::new(franken_node_bin())
+            .args(arguments)
+            .env_remove("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE")
+            .current_dir(project)
+            .output()
+            .expect("run operator command");
+        assert!(
+            output.status.success(),
+            "operator command {arguments:?} failed: stdout={}; stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    fn activate_policy(project: &Path, revision: u64, block_private_network: bool) {
+        let action = FleetActionRecord {
+            action_id: format!("live-control-policy-{revision}"),
+            emitted_at: chrono::Utc::now(),
+            action: FleetAction::PolicyUpdate {
+                zone_id: "live-control".to_string(),
+                policy_version: format!("revision-{revision}"),
+                changed_fields: vec![
+                    "max_instructions".to_string(),
+                    "block_private_network".to_string(),
+                ],
+                artifact: Some(
+                    FleetPolicyArtifact::new(
+                        revision,
+                        FleetRuntimePolicy {
+                            max_instructions: Some(1_000_000),
+                            block_private_network,
+                            ..FleetRuntimePolicy::default()
+                        },
+                    )
+                    .expect("restrictive fleet artifact"),
+                ),
+            },
+        };
+        activate_fleet_policy_snapshot(project, &[action], "live-control")
+            .expect("durably activate fleet policy")
+            .expect("activated snapshot");
+    }
+
+    fn assert_native_session_observes_control(change: ControlChange) {
+        const ADMISSION_DEADLINE: Duration = Duration::from_secs(30);
+        const CONTROL_DEADLINE: Duration = Duration::from_secs(15);
+        let project = tempfile::tempdir().expect("live containment project");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind real HTTP sink");
+        listener.set_nonblocking(true).expect("bounded accept");
+        let address = listener.local_addr().expect("HTTP sink address");
+        std::fs::write(
+            project.path().join("app.js"),
+            format!(
+                "require('fs').writeFileSync('entered.marker', 'entered');\n\
+                 require('http').get('http://{address}/', (res) => {{\n\
+                   require('fs').writeFileSync('after.marker', res.body);\n\
+                 }});\n"
+            ),
+        )
+        .expect("real guest with an admitted HTTP effect");
+        cli(
+            project.path(),
+            &["init", "--profile", "legacy-risky", "--out-dir", "."],
+        );
+        let config_path = project.path().join("franken_node.toml");
+        let mut config: frankenengine_node::config::Config = toml::from_str(
+            &std::fs::read_to_string(&config_path).expect("initialized runtime config"),
+        )
+        .expect("typed runtime config");
+        config.security.network_policy.allowlist.push(
+            frankenengine_node::config::NetworkAllowlistEntry {
+                host: "127.0.0.1".to_string(),
+                port: Some(address.port()),
+                reason: "real live-containment regression HTTP sink".to_string(),
+            },
+        );
+        std::fs::write(&config_path, config.to_toml().expect("serialize config"))
+            .expect("persist explicit loopback grant");
+        if matches!(change, ControlChange::RevokeDependency) {
+            // This is an admitted manifest dependency, not a claim that the
+            // fixture's application-level HTTP effect originated in lodash.
+            std::fs::write(
+                project.path().join("package.json"),
+                r#"{"name":"live-control-app","version":"1.0.0","dependencies":{"lodash":"4.17.21"}}"#,
+            )
+            .expect("write admitted dependency inventory");
+            cli(project.path(), &["trust", "scan", ".", "--json"]);
+        }
+        if matches!(change, ControlChange::EquivalentFleetRevision) {
+            activate_policy(project.path(), 1, false);
+        }
+
+        let (admitted_tx, admitted_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let server = std::thread::spawn(move || -> std::io::Result<()> {
+            let accepting = Instant::now();
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && accepting.elapsed() < ADMISSION_DEADLINE =>
+                    {
+                        if matches!(release_rx.try_recv(), Err(mpsc::TryRecvError::Disconnected)) {
+                            return Ok(());
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => return Err(error),
+                }
+            };
+            stream.set_nonblocking(false)?;
+            stream.set_read_timeout(Some(ADMISSION_DEADLINE))?;
+            stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request)?;
+            if admitted_tx.send(request).is_err() {
+                return Ok(());
+            }
+            if release_rx.recv_timeout(Duration::from_secs(45)).is_err() {
+                return Ok(());
+            }
+            stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\ntoo-late",
+            )?;
+            stream.flush()
+        });
+        let mut child = ProductChild(
+            Command::new(franken_node_bin())
+                .args([
+                    "run",
+                    "app.js",
+                    "--policy",
+                    "legacy-risky",
+                    "--runtime",
+                    "franken-engine",
+                    "--engine-bin",
+                    franken_node_bin(),
+                    "--json",
+                ])
+                .env("FRANKEN_ENGINE_TIMEOUT_SECS", "60")
+                .env_remove("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE")
+                .current_dir(project.path())
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .process_group(0)
+                .spawn()
+                .expect("spawn real native run"),
+            None,
+        );
+        let request = admitted_rx
+            .recv_timeout(ADMISSION_DEADLINE)
+            .expect("the real HTTP provider reaches the loopback sink");
+        assert!(request.starts_with(b"GET / HTTP/1.1\r\n"));
+        assert!(project.path().join("entered.marker").is_file());
+        let children = std::fs::read_to_string(format!(
+            "/proc/{}/task/{}/children",
+            child.0.id(),
+            child.0.id()
+        ))
+        .expect("native-session child inventory");
+        let (worker_pid, worker_start) = children
+            .split_whitespace()
+            .find_map(|pid| {
+                let pid = pid.parse::<u32>().ok()?;
+                process_start_time(pid).map(|start| (pid, start))
+            })
+            .expect("admitted request belongs to a live native worker");
+        child.1 = Some((worker_pid, worker_start.clone()));
+
+        let expected_trigger = match change {
+            ControlChange::SafeMode => {
+                cli(
+                    project.path(),
+                    &[
+                        "safe-mode",
+                        "enter",
+                        "--reason",
+                        "explicit-flag",
+                        "--operator-id",
+                        "live-containment-test",
+                        "--trust-state-hash",
+                        "operator:live-control",
+                        "--json",
+                    ],
+                );
+                "safe_mode"
+            }
+            ControlChange::RevokeDependency => {
+                cli(project.path(), &["trust", "revoke", "npm:lodash", "--json"]);
+                "execution_trust"
+            }
+            ControlChange::TightenFleet => {
+                activate_policy(project.path(), 1, true);
+                "fleet_policy_changed"
+            }
+            ControlChange::EquivalentFleetRevision => {
+                activate_policy(project.path(), 2, false);
+                // Several monitor intervals pass while real I/O remains
+                // blocked. A revision change without changed effective
+                // restrictions must leave the guest alive to consume its reply.
+                std::thread::sleep(Duration::from_secs(1));
+                release_tx.send(()).expect("release allowed HTTP response");
+                ""
+            }
+        };
+        let control_started = Instant::now();
+        let status = loop {
+            match child.0.try_wait().expect("poll supervised product") {
+                Some(status) => break status,
+                None => {
+                    assert!(
+                        control_started.elapsed() < CONTROL_DEADLINE,
+                        "live control did not finish before its independent test deadline"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        };
+        let mut stdout = String::new();
+        child
+            .0
+            .stdout
+            .take()
+            .expect("run stdout")
+            .read_to_string(&mut stdout)
+            .expect("read real run report");
+        let mut stderr = String::new();
+        child
+            .0
+            .stderr
+            .take()
+            .expect("run stderr")
+            .read_to_string(&mut stderr)
+            .expect("read real run diagnostics");
+        let worker_gone = process_start_time(worker_pid).as_deref() != Some(worker_start.as_str());
+        let callback_before_release = project.path().join("after.marker").exists();
+        if !matches!(change, ControlChange::EquivalentFleetRevision) {
+            release_tx
+                .send(())
+                .expect("release response after product stopped");
+        }
+        let response_result = server.join().expect("join real HTTP sink");
+
+        assert!(
+            worker_gone,
+            "native worker must be gone before CLI completion"
+        );
+        if matches!(change, ControlChange::EquivalentFleetRevision) {
+            response_result.expect("uninterrupted worker receives response");
+            assert!(
+                status.success(),
+                "equivalent policy stopped guest: {stdout}; {stderr}"
+            );
+            assert_eq!(
+                std::fs::read(project.path().join("after.marker")).unwrap(),
+                b"too-late"
+            );
+        } else {
+            // The peer may have accepted bytes into a kernel buffer after
+            // termination; neither that nor a broken pipe proves a callback.
+            let _ = response_result;
+            assert!(!status.success(), "live control must stop the active guest");
+            assert!(
+                !callback_before_release,
+                "callback ran before its withheld response"
+            );
+            assert!(
+                !project.path().join("after.marker").exists(),
+                "late response revived guest"
+            );
+            let evidence: Value = serde_json::from_str(&stdout).unwrap_or_else(|error| {
+                panic!("invalid interruption JSON: {error}; {stdout}; {stderr}")
+            });
+            assert_eq!(
+                evidence["schema_version"],
+                "franken-node/native-effect-interruption-evidence/v1"
+            );
+            assert_eq!(evidence["terminal_state"], "control_indeterminate");
+            assert_eq!(evidence["control_trigger"]["kind"], expected_trigger);
+            let detail = evidence["control_trigger"]["detail"]
+                .as_str()
+                .expect("original live-control cause");
+            match change {
+                ControlChange::SafeMode => {
+                    assert!(
+                        detail.contains("run blocked by active safe mode"),
+                        "{detail}"
+                    );
+                }
+                ControlChange::RevokeDependency => {
+                    assert!(
+                        detail.contains("npm:lodash") && detail.contains("revoked"),
+                        "{detail}"
+                    );
+                }
+                ControlChange::TightenFleet => {
+                    assert!(detail.contains("effective restrictions"), "{detail}");
+                }
+                ControlChange::EquivalentFleetRevision => unreachable!(),
+            }
+            assert!(
+                evidence["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("interrupted by live control"))
+            );
+            assert_eq!(evidence["replay_certified"], false);
+            assert_eq!(evidence["journal_complete"], true);
+            assert_eq!(evidence["interrupted_effect_count"], 1);
+            assert!(evidence["completed_effect_count"].as_u64().unwrap_or(0) >= 1);
+            assert!(
+                evidence["entries"].as_array().unwrap().iter().any(|entry| {
+                    entry["effect_kind"] == "network_request"
+                        && entry["state"] == "interrupted_indeterminate"
+                        && entry.get("policy_outcome").is_none()
+                        && entry.get("allowed").is_none()
+                        && entry.get("denied").is_none()
+                }),
+                "admitted external effect must remain indeterminate: {evidence}"
+            );
+            assert!(evidence["dispatch"]["host_effect_ledger"].is_null());
+            assert!(evidence["receipt"]["incident_capture"].is_null());
+            assert_eq!(
+                evidence["receipt"]["interruption_evidence"]["control_trigger"],
+                evidence["control_trigger"]
+            );
+            let receipt_path = project.path().join(
+                evidence["receipt_path"]
+                    .as_str()
+                    .expect("durable receipt path"),
+            );
+            let persisted: Value = serde_json::from_slice(
+                &std::fs::read(receipt_path).expect("read durable interruption receipt"),
+            )
+            .expect("persisted receipt JSON");
+            assert_eq!(persisted, evidence["receipt"]);
+        }
+        let safe_mode = frankenengine_node::runtime::safe_mode::read_persisted_safe_mode(
+            &project.path().join(".franken-node/safe-mode/state.json"),
+        )
+        .expect("safe-mode state remains valid");
+        if let Some(controller) = safe_mode {
+            let state = serde_json::to_value(controller).expect("serialize crash history");
+            assert!(
+                state["native_crashes"].as_array().is_none_or(Vec::is_empty),
+                "live control must not masquerade as a native panic: {state}"
+            );
+        }
+    }
+
+    #[test]
+    fn safe_mode_entry_terminates_an_already_running_native_session() {
+        assert_native_session_observes_control(ControlChange::SafeMode);
+    }
+
+    #[test]
+    fn dependency_revocation_terminates_an_already_running_native_session() {
+        assert_native_session_observes_control(ControlChange::RevokeDependency);
+    }
+
+    #[test]
+    fn stricter_fleet_policy_terminates_an_already_running_native_session() {
+        assert_native_session_observes_control(ControlChange::TightenFleet);
+    }
+
+    #[test]
+    fn equivalent_fleet_revision_preserves_an_already_running_native_session() {
+        assert_native_session_observes_control(ControlChange::EquivalentFleetRevision);
+    }
+}
+
 const DEBUG_DUMP_MARKERS: &[&str] = &["Native execution completed", "OrchestratorResult"];
 
 /// A pure in-budget program that performs no host I/O, so the trust-native

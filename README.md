@@ -2226,7 +2226,7 @@ bootstrap layout is:
 | `.franken-node/state/registry/archive/` | Archived artifacts retained after `registry gc` |
 | `.franken-node/state/migrations/` | Migration audit, rewrite, and validate outputs |
 | `.franken-node/state/trust-card-registry.v1.db` | Durable trust-card registry store (WAL frankensqlite; the legacy `.v1.json` pair is a one-time import source only) |
-| `.franken-node/safe-mode/state.json` | Unsigned JSON safe-mode controller; an active scope blocks new runs with entrypoints in this directory or its descendants. `--state-dir` can address a standalone controller; only the conventional ancestor paths govern `run`. |
+| `.franken-node/safe-mode/state.json` | Unsigned JSON safe-mode controller; an active scope blocks new runs and interrupts running native sessions with admitted entrypoints in this directory or its descendants. `--state-dir` can address a standalone controller; only the conventional ancestor paths govern `run`. |
 | `.franken-node/keys/` | Signing key material; excluded from version control by the generated `.gitignore` |
 | `.franken-node/keys/receipt-signing.key` | Default Ed25519 seed (mode 0600) for decision receipts, captured incident sources, run-ledger records, incident bundles, close-condition receipts and evidence-ledger entries, used when neither `--receipt-signing-key`, `FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH` nor `security.decision_receipt_signing_key_path` is set |
 | `.franken-node/keys/receipt-signing.pub` | Matching public key (hex), for `verify transparency-log --public-key` and `incident replay --trusted-public-key` |
@@ -2868,8 +2868,10 @@ risk during worker startup is evaluated under the selected profile again; requir
 cards and registries cannot silently disappear. Previously untracked identities
 are rechecked too. A legacy-risky run whose registry was unavailable still checks
 any valid registry that appears before execution, and revocations block every
-profile. These checks govern new execution admission; they do not intercept each
-module import or continuously refresh an already executing guest.
+profile. The native supervisor continues rechecking this admitted dependency set
+while the guest runs and interrupts it when the same profile rules deny current
+trust state. This does not intercept each module import or attribute undeclared
+dynamic code to a package identity.
 
 Trust cards are keyed by package identity. When reachable installations contain
 multiple versions, or mix a pinned version with an unresolved requirement, a new
@@ -3855,6 +3857,27 @@ active ancestor; malformed, oversized, unreadable, and nonregular state also
 refuses admission. The error identifies the controlling scope, where the
 operator should inspect and recover state.
 
+Already running native sessions retain their admitted entrypoint scopes and
+recheck local safe mode, dependency trust, and fleet policy every 250 ms between
+completed checks. A disallowed state interrupts the worker and its containment
+unit. A fleet update that changes effective instruction, parser, or network
+restrictions requires restarting the guest under that policy; equivalent newer
+revisions continue while advancing the observed revision floor. Applications
+are not automatically restarted. Renaming an already loaded entrypoint does
+not change its retained safe-mode scope.
+
+Control reads run on one owned observer per session, independently of the
+worker's absolute deadline. If a check cannot complete for 10 seconds, execution
+fails closed. The worker is terminated before the supervisor joins an observer
+still finishing a store read, so returning the result can take longer than
+stopping the guest. `run --json` reports `control_trigger` and
+`control_indeterminate` (or `control_cleanup_unproven` if cleanup fails), with
+the actual interrupted-effect WAL and a persisted unsuccessful-run receipt.
+In-flight provider outcomes remain unknown; containment does not undo effects
+already committed. Remote fleet propagation still depends on agent polling,
+and a fleet action acknowledgement proves persistence rather than session
+quiescence. Live-control interruptions do not increment the panic counter.
+
 The native supervisor automatically enters safe mode after three validated
 native engine panic responses for the same entrypoint within 60 seconds. It
 records the immutable session nonce and original observation time in the
@@ -3877,8 +3900,7 @@ attached to the original panic error; it is never reported as a successful
 counter update. Panic errors also expose this result through `run --json`.
 
 `trust-corruption` and `epoch-mismatch` still require an operator-supplied
-reason. Existing executions are not cancelled by a later entry, and
-inspection commands remain available. A different in-flight panic first
+reason, and inspection commands remain available. A different in-flight panic first
 recorded after recovery can start the fresh window.
 Exiting requires `franken-node safe-mode exit --confirm --operator-id <id>`
 plus the operator attestations (`--trust-state-consistent`,
