@@ -2144,6 +2144,117 @@ fn replay_capture_refuses_process_shape_opt_in_before_executing_guest_code() {
     }
 }
 
+#[test]
+fn failed_process_shape_run_keeps_actual_settings_and_signed_receipt_binding() {
+    const APP: &str = "console.log(process.argv[2]);\n\
+        const http = require('http');\n\
+        http.get('http://169.254.169.254/latest/meta-data/', (res) => {});\n";
+    let (dir, outcome) = run_app_with_policy_and_env(
+        APP,
+        "balanced",
+        &["--json", "--", "argument-before-denial"],
+        &[
+            ("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE", "true"),
+            ("FRANKEN_NODE_RUNTIME_MAX_INSTRUCTIONS", "123456"),
+            ("FRANKEN_NODE_RUNTIME_MAX_CONSOLE_ENTRIES", "17"),
+            ("FRANKEN_NODE_RUNTIME_MAX_PARSE_SOURCE_BYTES", "900007"),
+            ("FRANKEN_NODE_RUNTIME_MAX_PARSE_TOKENS", "100003"),
+        ],
+    );
+    let evidence: Value = serde_json::from_str(&outcome.stdout).unwrap_or_else(|error| {
+        panic!(
+            "failed invocation must emit JSON: {error}; stderr={}",
+            outcome.stderr
+        )
+    });
+    let (_path, receipt) = persisted_failed_run_receipt(dir.path(), &outcome, &evidence);
+    assert_eq!(
+        evidence["captured_output"]["stdout"],
+        "argument-before-denial\n"
+    );
+    assert_eq!(evidence["host_effect_ledger"]["denied_count"], 1);
+    assert!(evidence["dispatch"]["engine_decision"].is_null());
+    let settings = &evidence["dispatch"]["invocation_settings"];
+    assert_eq!(settings["process_shape_read_allowed"], true);
+    assert_eq!(settings["parser_budget"]["max_source_bytes"], 900_007);
+    assert_eq!(settings["parser_budget"]["max_token_count"], 100_003);
+    assert!(settings["execution_limits"]["selected_lane"].is_null());
+    for lane in ["deterministic", "throughput"] {
+        assert_eq!(
+            settings["execution_limits"][lane]["max_instructions"],
+            123_456
+        );
+        assert_eq!(
+            settings["execution_limits"][lane]["max_console_entries"],
+            17
+        );
+    }
+    for field in [
+        "parser_budget",
+        "execution_limits",
+        "process_shape_read_allowed",
+    ] {
+        assert_eq!(receipt[field], settings[field], "receipt must bind {field}");
+    }
+    let record = authenticated_failed_run_record(dir.path(), &evidence, &receipt)
+        .expect("the refused metadata request has an authenticated failed run record");
+    let record_bytes = serde_json::to_vec(&record).expect("serialize signed run record");
+    let key = receipt_verifying_key(dir.path());
+    for field in [
+        "process_shape_read_allowed",
+        "parser_budget",
+        "execution_limits",
+    ] {
+        let mut tampered = receipt.clone();
+        match field {
+            "process_shape_read_allowed" => tampered[field] = serde_json::json!(false),
+            "parser_budget" => tampered[field]["max_token_count"] = serde_json::json!(100_004),
+            _ => {
+                tampered[field]["deterministic"]["max_instructions"] = serde_json::json!(123_457);
+            }
+        }
+        assert!(
+            frankenengine_node::tools::replay_bundle::parse_verified_run_ledger_record(
+                &record_bytes,
+                &tampered,
+                &key,
+            )
+            .is_err(),
+            "the signed failed run must reject a substituted {field}"
+        );
+    }
+}
+
+#[test]
+fn parser_failure_records_invocation_settings_without_claiming_guest_execution() {
+    let (dir, outcome) = run_app_with_policy_and_env(
+        "console.log('parser-refusal-must-not-print');\n",
+        "balanced",
+        &["--json"],
+        &[
+            ("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE", "true"),
+            ("FRANKEN_NODE_RUNTIME_MAX_PARSE_TOKENS", "1"),
+        ],
+    );
+    let evidence: Value = serde_json::from_str(&outcome.stdout).unwrap_or_else(|error| {
+        panic!(
+            "parser failure must emit JSON: {error}; stderr={}",
+            outcome.stderr
+        )
+    });
+    let (_path, receipt) = persisted_failed_run_receipt(dir.path(), &outcome, &evidence);
+    assert_eq!(evidence["captured_output"]["stdout"], "");
+    assert!(evidence["dispatch"]["engine_decision"].is_null());
+    assert_eq!(
+        evidence["dispatch"]["invocation_settings"]["parser_budget"]["max_token_count"],
+        1
+    );
+    assert_eq!(receipt["parser_budget"]["max_token_count"], 1);
+    assert_eq!(receipt["process_shape_read_allowed"], true);
+    assert!(receipt["execution_limits"]["selected_lane"].is_null());
+    authenticated_failed_run_record(dir.path(), &evidence, &receipt);
+}
+
 /// A program's whole console output reaches the operator. 1,500 lines used to
 /// arrive as lines 500..1499 with exit 0: the engine kept a silent 1,000-entry
 /// ring and dropped the oldest lines (fixed in franken_engine fb07b73f2).

@@ -414,6 +414,10 @@ enum NativeSessionResponse {
         schema_version: String,
         nonce: String,
         message: String,
+        /// The settings supplied to an actual orchestrator invocation. This
+        /// does not assert that parsing, lowering or guest execution completed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        invocation_settings: Option<NativeInvocationSettings>,
         /// The actual telemetry report recovered while shutting down this
         /// failed attempt. Absent when the worker could not produce one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2067,6 +2071,7 @@ fn native_engine_spawn_error_with_telemetry_cleanup(
             message: format!(
                 "{message}. additionally failed to stop telemetry bridge: native telemetry guard was already consumed"
             ),
+            invocation_settings: None,
             telemetry_report: None,
             host_effect_ledger: None,
             native_replay: None,
@@ -2080,6 +2085,7 @@ fn native_engine_spawn_error_with_telemetry_cleanup(
                 "{message}. telemetry bridge stopped after native execution failure in {}ms",
                 report.drain_duration_ms
             ),
+            invocation_settings: None,
             telemetry_report: Some(Box::new(report)),
             host_effect_ledger: None,
             native_replay: None,
@@ -2090,6 +2096,7 @@ fn native_engine_spawn_error_with_telemetry_cleanup(
                 "{message}. telemetry bridge drain timed out after native execution failure in {}ms",
                 report.drain_duration_ms
             ),
+            invocation_settings: None,
             telemetry_report: Some(Box::new(report)),
             host_effect_ledger: None,
             native_replay: None,
@@ -2099,6 +2106,7 @@ fn native_engine_spawn_error_with_telemetry_cleanup(
             message: format!(
                 "{message}. additionally failed to stop telemetry bridge: {cleanup_error}"
             ),
+            invocation_settings: None,
             telemetry_report: None,
             host_effect_ledger: None,
             native_replay: None,
@@ -3323,6 +3331,11 @@ pub struct RunDispatchReport {
     /// before producing a decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_decision: Option<EngineContainmentDecision>,
+    /// Configuration supplied to the native orchestrator, including a failed
+    /// invocation. Absent for startup errors, interrupted workers, and older
+    /// reports that did not capture it. This is not an execution outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_settings: Option<NativeInvocationSettings>,
     /// Opt-in native execution inputs, carried into the signed run record and
     /// incident bundle. These contain source and raw host-I/O result bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3370,6 +3383,29 @@ pub struct EngineContainmentDecision {
     /// actually handed to the engine. Absent in older serialized decisions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_limits: Option<EngineExecutionLimitsReport>,
+}
+
+/// Settings supplied to one native orchestrator invocation. The invocation can
+/// fail during parsing or lowering before any guest instruction executes.
+/// Lane selection and completed security decisions belong to the execution
+/// outcome; the limits here therefore keep `selected_lane` absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeInvocationSettings {
+    pub parser_budget: RuntimeParseBudget,
+    pub execution_limits: EngineExecutionLimitsReport,
+    pub process_shape_read_allowed: bool,
+}
+
+impl NativeInvocationSettings {
+    fn from_completed_decision(decision: &EngineContainmentDecision) -> Option<Self> {
+        let mut execution_limits = decision.execution_limits?;
+        execution_limits.selected_lane = None;
+        Some(Self {
+            parser_budget: decision.parser_budget,
+            execution_limits,
+            process_shape_read_allowed: decision.process_shape_read_allowed?,
+        })
+    }
 }
 
 /// Effective native limits after applying product overrides and engine lane
@@ -3779,6 +3815,7 @@ impl NativeRunInterruption {
                 .take(),
             engine_decision: None,
             native_replay: None,
+            invocation_settings: None,
         });
         self.dispatch_report = Some(Box::new(report));
     }
@@ -3807,6 +3844,8 @@ impl std::error::Error for NativeRunInterruption {}
 #[derive(Debug)]
 pub struct NativeRunFailure {
     actionable: ActionableError,
+    #[cfg_attr(not(feature = "engine"), allow(dead_code))]
+    invocation_settings: Option<NativeInvocationSettings>,
     host_effect_ledger: Option<Box<HostEffectLedger>>,
     #[cfg(feature = "engine")]
     native_replay: Option<Box<crate::ops::native_replay::NativeReplayCapture>>,
@@ -3884,6 +3923,7 @@ impl NativeRunFailure {
                 .take(),
             engine_decision: None,
             native_replay: self.native_replay.take().map(|capture| *capture),
+            invocation_settings: self.invocation_settings.take(),
         });
         self.dispatch_report = Some(Box::new(report));
     }
@@ -3941,6 +3981,7 @@ struct DispatchReportInputs<'a> {
     #[cfg(feature = "engine")]
     runtime_evidence_identity_capture_path: Option<PathBuf>,
     engine_decision: Option<EngineContainmentDecision>,
+    invocation_settings: Option<NativeInvocationSettings>,
     native_replay: Option<crate::ops::native_replay::NativeReplayCapture>,
 }
 
@@ -3975,6 +4016,9 @@ enum RuntimeExecutionMode {
 enum EngineProcessError {
     Spawn {
         message: String,
+        // Keep the general error value small, like its retained evidence.
+        #[cfg_attr(not(feature = "engine"), allow(dead_code))]
+        invocation_settings: Option<Box<NativeInvocationSettings>>,
         #[cfg_attr(not(test), allow(dead_code))]
         telemetry_report: Option<Box<TelemetryRuntimeReport>>,
         /// bd-muy9u: the signed, globally ordered ledger of host effects the
@@ -4001,6 +4045,19 @@ enum EngineProcessError {
 
 #[cfg(feature = "engine")]
 impl EngineProcessError {
+    /// Mark the actual configuration of an invocation that returned a typed
+    /// execution error. Startup and telemetry-only failures have no snapshot.
+    fn with_invocation_settings(mut self, settings: NativeInvocationSettings) -> Self {
+        if let Self::Spawn {
+            invocation_settings,
+            ..
+        } = &mut self
+        {
+            *invocation_settings = Some(Box::new(settings));
+        }
+        self
+    }
+
     /// Attach recovered host-effect evidence to a failure without changing the
     /// failure itself. The operator-visible message is untouched: this only
     /// stops already-performed or denied effects from disappearing.
@@ -5831,6 +5888,7 @@ impl EngineDispatcher {
                 #[cfg(feature = "engine")]
                 runtime_evidence_identity_capture_path: None,
                 engine_decision: None,
+                invocation_settings: None,
                 native_replay: None,
             }));
         }
@@ -6025,6 +6083,7 @@ impl EngineDispatcher {
             runtime_evidence_identity_capture_path: Some(runtime_evidence_identity_capture_path),
             engine_decision,
             native_replay,
+            invocation_settings: None,
         }))
     }
 
@@ -6032,6 +6091,12 @@ impl EngineDispatcher {
         let finished_at = Utc::now();
         let exit_code = inputs.output.status.code();
         let terminated_by_signal = exit_code.is_none();
+        let invocation_settings = inputs.invocation_settings.or_else(|| {
+            inputs
+                .engine_decision
+                .as_ref()
+                .and_then(NativeInvocationSettings::from_completed_decision)
+        });
 
         // bd-bg2hy: feed the Bayesian Runtime Sentinel from the signed host-
         // effect ledger. The feed is a pure function of the ledger entries
@@ -6097,6 +6162,7 @@ impl EngineDispatcher {
                 .map(|path| path.display().to_string()),
             sentinel,
             engine_decision: inputs.engine_decision,
+            invocation_settings,
             native_replay: inputs.native_replay,
         }
     }
@@ -6400,6 +6466,7 @@ impl EngineDispatcher {
                             "failed"
                         }
                     ),
+                    invocation_settings: None,
                     telemetry_report: None,
                     // The worker never started, so no effect could have run.
                     host_effect_ledger: None,
@@ -6435,6 +6502,10 @@ impl EngineDispatcher {
                                     nonce,
                                     message: "native engine returned a signal-only status"
                                         .to_string(),
+                                    invocation_settings:
+                                        NativeInvocationSettings::from_completed_decision(
+                                            &engine_decision,
+                                        ),
                                     telemetry_report: Some(Box::new(telemetry_report)),
                                     // bd-muy9u: execution reached completion and
                                     // produced a ledger; only the exit status was
@@ -6465,6 +6536,7 @@ impl EngineDispatcher {
                         }
                         Err(EngineProcessError::Spawn {
                             message,
+                            invocation_settings,
                             telemetry_report,
                             host_effect_ledger,
                             native_replay,
@@ -6473,6 +6545,7 @@ impl EngineDispatcher {
                             schema_version: NATIVE_SESSION_SCHEMA.to_string(),
                             nonce,
                             message,
+                            invocation_settings: invocation_settings.map(|settings| *settings),
                             telemetry_report,
                             host_effect_ledger: host_effect_ledger.map(|ledger| *ledger),
                             native_replay: native_replay.map(|capture| *capture),
@@ -6509,6 +6582,7 @@ impl EngineDispatcher {
                     message: format!(
                         "native engine worker stopped without a typed outcome: {error}; worker joined: {worker_joined}"
                     ),
+                    invocation_settings: None,
                     telemetry_report: None,
                     // No typed outcome crossed the channel, so the attempt's
                     // effect boundary is unknown. Emitting an empty ledger here
@@ -7767,6 +7841,7 @@ impl EngineDispatcher {
                 schema_version,
                 nonce: response_nonce,
                 message,
+                invocation_settings,
                 telemetry_report,
                 host_effect_ledger,
                 native_replay,
@@ -7847,6 +7922,7 @@ impl EngineDispatcher {
                 let actionable = dispatch_error.to_actionable();
                 Err(anyhow::Error::new(NativeRunFailure {
                     actionable,
+                    invocation_settings,
                     host_effect_ledger: host_effect_ledger.map(Box::new),
                     native_replay,
                     guest_output,
@@ -8887,6 +8963,15 @@ impl EngineDispatcher {
         );
 
         // Execute through native API
+        // These are the same values passed into the orchestrator above. Only
+        // errors at or after this invocation may carry them: prepared settings
+        // alone do not prove that the native invocation was attempted.
+        let invocation_settings = NativeInvocationSettings {
+            parser_budget,
+            execution_limits,
+            process_shape_read_allowed: ambient_authority_grant
+                == AmbientAuthorityGrant::TrustedProcessShape,
+        };
         let exec_start = Instant::now();
         let execution_result = {
             let _exec_span = tracing::info_span!(
@@ -8928,6 +9013,7 @@ impl EngineDispatcher {
                                     ),
                                     &mut telemetry_guard,
                                 )
+                                .with_invocation_settings(invocation_settings)
                             })?,
                         ),
                         None => None,
@@ -8978,6 +9064,7 @@ impl EngineDispatcher {
                         native_execution_failure_message(&error, parser_budget),
                         &mut telemetry_guard,
                     )
+                    .with_invocation_settings(invocation_settings)
                     .with_host_effect_ledger(host_effect_ledger)
                     .with_native_replay(native_replay)
                     .with_guest_output(stdout, stderr));
@@ -8989,7 +9076,8 @@ impl EngineDispatcher {
                 "Native execution returned evidence under an unexpected verification identity"
                     .to_string(),
                 &mut telemetry_guard,
-            ));
+            )
+            .with_invocation_settings(invocation_settings));
         }
 
         let exec_duration = exec_start.elapsed();
@@ -9030,6 +9118,7 @@ impl EngineDispatcher {
                 format!("Failed signing native host-effect ledger: {error}"),
                 &mut telemetry_guard,
             )
+            .with_invocation_settings(invocation_settings)
         })?;
         tracing::info!(
             execution_mode = "native",
@@ -9064,6 +9153,7 @@ impl EngineDispatcher {
                             format!("Native replay capture failed: {error}"),
                             &mut telemetry_guard,
                         )
+                        .with_invocation_settings(invocation_settings)
                         .with_host_effect_ledger(Some(host_effect_ledger))
                         .with_guest_output(stdout, stderr));
                     }
@@ -9816,6 +9906,7 @@ impl EngineDispatcher {
                             report.drain_duration_ms
                         ),
                         telemetry_report: Some(Box::new(report)),
+                        invocation_settings: None,
                         host_effect_ledger: None,
                         native_replay: None,
                         guest_output: (Vec::new(), Vec::new()),
@@ -9826,6 +9917,7 @@ impl EngineDispatcher {
                             report.drain_duration_ms
                         ),
                         telemetry_report: Some(Box::new(report)),
+                        invocation_settings: None,
                         host_effect_ledger: None,
                         native_replay: None,
                         guest_output: (Vec::new(), Vec::new()),
@@ -9835,6 +9927,7 @@ impl EngineDispatcher {
                             "Failed to spawn franken_engine process: {spawn_err}. additionally failed to stop telemetry bridge: {cleanup_err}"
                         ),
                         telemetry_report: None,
+                        invocation_settings: None,
                         host_effect_ledger: None,
                         native_replay: None,
                         guest_output: (Vec::new(), Vec::new()),
@@ -9926,6 +10019,197 @@ impl EngineDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn native_invocation_settings_for_test() -> NativeInvocationSettings {
+        let deterministic = EngineLaneExecutionLimits {
+            max_instructions: 600,
+            max_registers: Some(96),
+            max_call_depth: Some(16),
+            max_heap_objects: 32,
+            max_total_memory_bytes: 65_536,
+            max_console_entries: 16,
+            max_console_bytes: 2_048,
+        };
+        NativeInvocationSettings {
+            parser_budget: RuntimeParseBudget {
+                max_source_bytes: 8_192,
+                max_token_count: 4_096,
+                max_recursion_depth: 128,
+            },
+            execution_limits: EngineExecutionLimitsReport {
+                deterministic,
+                throughput: EngineLaneExecutionLimits {
+                    max_instructions: 1_200,
+                    max_registers: Some(128),
+                    ..deterministic
+                },
+                selected_lane: None,
+            },
+            process_shape_read_allowed: true,
+        }
+    }
+
+    fn native_completed_decision_for_settings_test() -> EngineContainmentDecision {
+        let settings = native_invocation_settings_for_test();
+        EngineContainmentDecision {
+            containment_action: "allow".to_string(),
+            selector_action: "allow".to_string(),
+            risk_state: "benign".to_string(),
+            posterior_benign_millionths: 1_000_000,
+            posterior_anomalous_millionths: 0,
+            posterior_malicious_millionths: 0,
+            posterior_unknown_millionths: 0,
+            expected_loss_millionths: 0,
+            stopping_trigger: None,
+            stopping_observations: None,
+            cusum_statistic_millionths: None,
+            guardplane_last_action: None,
+            decision_rationale: None,
+            instructions_executed: 17,
+            parser_budget: settings.parser_budget,
+            process_shape_read_allowed: Some(settings.process_shape_read_allowed),
+            execution_limits: Some(EngineExecutionLimitsReport {
+                selected_lane: Some(EngineExecutionLane::Throughput),
+                ..settings.execution_limits
+            }),
+        }
+    }
+
+    #[test]
+    fn native_invocation_settings_keep_preselection_limits_without_changing_completed_lane() {
+        let decision = native_completed_decision_for_settings_test();
+        let before = decision.clone();
+        let settings = NativeInvocationSettings::from_completed_decision(&decision)
+            .expect("completed execution captured all invocation settings");
+
+        assert_eq!(settings, native_invocation_settings_for_test());
+        assert_eq!(settings.execution_limits.selected_lane, None);
+        assert_eq!(decision, before);
+        assert_eq!(
+            decision
+                .execution_limits
+                .expect("completed limits")
+                .selected_lane,
+            Some(EngineExecutionLane::Throughput)
+        );
+        let serialized = serde_json::to_value(settings).expect("serialize invocation settings");
+        assert!(
+            serialized["execution_limits"]
+                .get("selected_lane")
+                .is_none()
+        );
+        assert_eq!(
+            serde_json::from_value::<NativeInvocationSettings>(serialized)
+                .expect("read exact invocation settings"),
+            settings
+        );
+    }
+
+    #[test]
+    fn native_invocation_settings_do_not_fill_in_missing_historical_decision_fields() {
+        let complete = serde_json::to_value(native_completed_decision_for_settings_test())
+            .expect("serialize completed decision");
+        for omitted in [
+            vec!["execution_limits"],
+            vec!["process_shape_read_allowed"],
+            vec!["execution_limits", "process_shape_read_allowed"],
+        ] {
+            let mut historical = complete.clone();
+            let fields = historical.as_object_mut().expect("decision object");
+            for field in omitted {
+                fields.remove(field);
+            }
+            let decision: EngineContainmentDecision =
+                serde_json::from_value(historical).expect("historical decision remains readable");
+            assert!(NativeInvocationSettings::from_completed_decision(&decision).is_none());
+        }
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn native_invocation_settings_survive_failed_worker_frames_and_remain_absent_in_old_frames() {
+        let historical = serde_json::json!({
+            "outcome": "execution_failed",
+            "schema_version": NATIVE_SESSION_SCHEMA,
+            "nonce": "00000000-0000-4000-8000-000000000129",
+            "message": "source unavailable before invocation"
+        });
+        let decoded: NativeSessionResponse = serde_json::from_value(historical.clone())
+            .expect("historical failed response remains readable");
+        assert!(matches!(
+            decoded,
+            NativeSessionResponse::ExecutionFailed {
+                invocation_settings: None,
+                ..
+            }
+        ));
+        assert!(
+            serde_json::to_value(decoded)
+                .expect("serialize historical failed response")
+                .get("invocation_settings")
+                .is_none()
+        );
+
+        let settings = native_invocation_settings_for_test();
+        let mut current = historical;
+        current["message"] = serde_json::json!("typed parser failure during invocation");
+        current["invocation_settings"] =
+            serde_json::to_value(settings).expect("serialize invocation settings");
+        let response: NativeSessionResponse =
+            serde_json::from_value(current).expect("decode failed invocation settings");
+        let encoded = encode_native_session_frame(&response, NATIVE_SESSION_MAX_RESPONSE_BYTES)
+            .expect("encode bounded failure response");
+        let decoded: NativeSessionResponse =
+            decode_native_session_frame(&encoded, NATIVE_SESSION_MAX_RESPONSE_BYTES, false)
+                .expect("decode bounded failure response");
+        match decoded {
+            NativeSessionResponse::ExecutionFailed {
+                invocation_settings,
+                host_effect_ledger,
+                ..
+            } => {
+                assert_eq!(invocation_settings, Some(settings));
+                assert!(host_effect_ledger.is_none());
+            }
+            response => panic!("expected typed failure, got {response:?}"),
+        }
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn native_invocation_settings_attach_only_to_typed_execution_errors() {
+        let startup_error = native_engine_spawn_error_with_telemetry_cleanup(
+            "source unavailable before invocation".to_string(),
+            &mut None,
+        );
+        assert!(matches!(
+            &startup_error,
+            EngineProcessError::Spawn {
+                invocation_settings: None,
+                ..
+            }
+        ));
+        let settings = native_invocation_settings_for_test();
+        let execution_error = native_engine_spawn_error_with_telemetry_cleanup(
+            "typed parser failure during invocation".to_string(),
+            &mut None,
+        )
+        .with_invocation_settings(settings);
+        assert!(matches!(
+            execution_error,
+            EngineProcessError::Spawn {
+                invocation_settings: Some(retained),
+                ..
+            } if *retained == settings
+        ));
+
+        let telemetry_error = EngineProcessError::TelemetryDrain("drain failed".to_string())
+            .with_invocation_settings(settings);
+        assert!(matches!(
+            telemetry_error,
+            EngineProcessError::TelemetryDrain(message) if message == "drain failed"
+        ));
+    }
 
     #[cfg(feature = "engine")]
     #[test]
@@ -10530,8 +10814,10 @@ mod tests {
         };
         let actionable = ActionableError::new("guest execution failed", "inspect the run evidence");
         let expected_error = actionable.to_string();
+        let invocation_settings = native_invocation_settings_for_test();
         let mut failure = NativeRunFailure {
             actionable,
+            invocation_settings: Some(invocation_settings),
             host_effect_ledger: Some(Box::new(ledger)),
             native_replay: Some(Box::new(replay_capture.clone())),
             guest_output: CapturedProcessOutput {
@@ -10562,6 +10848,15 @@ mod tests {
         assert_eq!(report.started_at_utc, started_at.to_rfc3339());
         assert_eq!(report.duration_ms, 42);
         assert!(report.engine_decision.is_none());
+        assert_eq!(report.invocation_settings, Some(invocation_settings));
+        assert_eq!(
+            report
+                .invocation_settings
+                .expect("failed invocation settings")
+                .execution_limits
+                .selected_lane,
+            None
+        );
         assert_eq!(report.native_replay.as_ref(), Some(&replay_capture));
         assert_eq!(
             report.runtime_evidence_identity_capture,
@@ -10609,43 +10904,49 @@ mod tests {
         )
         .capture
         .clone();
-        let mut failure = NativeRunFailure {
-            actionable: ActionableError::new("parse failed before execution", "fix the source"),
-            host_effect_ledger: None,
-            native_replay: None,
-            guest_output: CapturedProcessOutput::default(),
-            telemetry_report: None,
-            runtime_evidence_identity_capture: Some(capture),
-            runtime_evidence_identity_capture_path: Some(PathBuf::from(
-                "/var/lib/franken-node-state/unexecuted-capture.json",
-            )),
-            dispatch_report: None,
-        };
-        failure.attach_dispatch_report(
-            Path::new("/usr/bin/franken-node"),
-            Path::new("/srv/project/invalid.js"),
-            Path::new("/srv/project"),
-            Utc::now(),
-            Duration::from_millis(1),
-        );
+        for (message, invocation_settings) in [
+            ("source unavailable before invocation", None),
+            (
+                "typed parser failure during invocation",
+                Some(native_invocation_settings_for_test()),
+            ),
+        ] {
+            let mut failure = NativeRunFailure {
+                actionable: ActionableError::new(message, "check the entrypoint"),
+                invocation_settings,
+                host_effect_ledger: None,
+                native_replay: None,
+                guest_output: CapturedProcessOutput::default(),
+                telemetry_report: None,
+                runtime_evidence_identity_capture: Some(capture.clone()),
+                runtime_evidence_identity_capture_path: Some(PathBuf::from(
+                    "/var/lib/franken-node-state/unexecuted-capture.json",
+                )),
+                dispatch_report: None,
+            };
+            failure.attach_dispatch_report(
+                Path::new("/usr/bin/franken-node"),
+                Path::new("/srv/project/invalid.js"),
+                Path::new("/srv/project"),
+                Utc::now(),
+                Duration::from_millis(1),
+            );
 
-        let report = failure
-            .dispatch_report()
-            .expect("quiet failure remains reportable");
-        assert_eq!(report.exit_code, Some(1));
-        assert!(report.host_effect_ledger.is_none());
-        assert!(report.telemetry.is_none());
-        assert!(report.sentinel.is_none());
-        assert!(report.engine_decision.is_none());
-        assert!(report.native_replay.is_none());
-        assert!(failure.host_effect_ledger().is_none());
-        assert!(failure.guest_output().stdout.is_empty());
-        assert!(failure.guest_output().stderr.is_empty());
-        assert!(
-            failure
-                .to_string()
-                .contains("parse failed before execution")
-        );
+            let report = failure
+                .dispatch_report()
+                .expect("quiet failure remains reportable");
+            assert_eq!(report.exit_code, Some(1));
+            assert!(report.host_effect_ledger.is_none());
+            assert!(report.telemetry.is_none());
+            assert!(report.sentinel.is_none());
+            assert!(report.engine_decision.is_none());
+            assert_eq!(report.invocation_settings, invocation_settings);
+            assert!(report.native_replay.is_none());
+            assert!(failure.host_effect_ledger().is_none());
+            assert!(failure.guest_output().stdout.is_empty());
+            assert!(failure.guest_output().stderr.is_empty());
+            assert!(failure.to_string().contains(message));
+        }
     }
 
     #[cfg(feature = "engine")]
@@ -10746,6 +11047,7 @@ mod tests {
             assert!(report.telemetry.is_none());
             assert!(report.sentinel.is_none());
             assert!(report.engine_decision.is_none());
+            assert!(report.invocation_settings.is_none());
             assert!(report.captured_output.stdout.is_empty());
             assert!(report.captured_output.stderr.is_empty());
             let retained = interruption.effect_evidence();
@@ -10800,6 +11102,7 @@ mod tests {
             runtime_evidence_identity_capture: Some(capture.clone()),
             runtime_evidence_identity_capture_path: Some(capture_path.clone()),
             engine_decision: None,
+            invocation_settings: None,
             native_replay: None,
         });
 
@@ -12938,6 +13241,7 @@ mod tests {
             #[cfg(feature = "engine")]
             runtime_evidence_identity_capture_path: None,
             engine_decision: None,
+            invocation_settings: None,
             native_replay: None,
         });
 
@@ -12952,6 +13256,58 @@ mod tests {
         assert!(!report.terminated_by_signal);
         assert_eq!(report.captured_output.stdout, "ok\n");
         assert!(report.captured_output.stderr.is_empty());
+        assert!(report.invocation_settings.is_none());
+
+        let historical = serde_json::to_value(&report).expect("serialize historical report shape");
+        assert!(historical.get("invocation_settings").is_none());
+        let restored: RunDispatchReport =
+            serde_json::from_value(historical).expect("read report without invocation settings");
+        assert!(restored.invocation_settings.is_none());
+    }
+
+    #[test]
+    fn build_dispatch_report_derives_invocation_settings_without_replacing_the_completed_decision()
+    {
+        let decision = native_completed_decision_for_settings_test();
+        let report = EngineDispatcher::build_dispatch_report(DispatchReportInputs {
+            runtime: "franken_engine",
+            runtime_path: Path::new("/usr/bin/franken-node"),
+            target: Path::new("/srv/project/app.js"),
+            working_dir: Path::new("/srv/project"),
+            used_fallback_runtime: false,
+            started_at: Utc::now(),
+            duration: Duration::from_millis(1),
+            output: captured_output(0, b"", b""),
+            telemetry: None,
+            host_effect_ledger: None,
+            #[cfg(feature = "engine")]
+            runtime_evidence_identity_capture: None,
+            #[cfg(feature = "engine")]
+            runtime_evidence_identity_capture_path: None,
+            engine_decision: Some(decision.clone()),
+            invocation_settings: None,
+            native_replay: None,
+        });
+
+        assert_eq!(report.engine_decision, Some(decision));
+        assert_eq!(
+            report.invocation_settings,
+            Some(native_invocation_settings_for_test())
+        );
+        let serialized = serde_json::to_value(&report).expect("serialize successful run settings");
+        assert_eq!(
+            serialized["engine_decision"]["execution_limits"]["selected_lane"],
+            "throughput"
+        );
+        assert!(
+            serialized["invocation_settings"]["execution_limits"]
+                .get("selected_lane")
+                .is_none()
+        );
+        let restored: RunDispatchReport =
+            serde_json::from_value(serialized).expect("read successful run settings");
+        assert_eq!(restored.engine_decision, report.engine_decision);
+        assert_eq!(restored.invocation_settings, report.invocation_settings);
     }
 
     #[test]
@@ -12976,6 +13332,7 @@ mod tests {
             #[cfg(feature = "engine")]
             runtime_evidence_identity_capture_path: None,
             engine_decision: None,
+            invocation_settings: None,
             native_replay: None,
         });
 
@@ -13007,6 +13364,7 @@ mod tests {
             #[cfg(feature = "engine")]
             runtime_evidence_identity_capture_path: None,
             engine_decision: None,
+            invocation_settings: None,
             native_replay: None,
         });
 
@@ -13565,6 +13923,7 @@ mod tests {
                         #[cfg(feature = "engine")]
                         runtime_evidence_identity_capture_path: None,
                         engine_decision: None,
+                        invocation_settings: None,
                         native_replay: None,
                     };
 
@@ -13871,6 +14230,7 @@ mod tests {
                     #[cfg(feature = "engine")]
                     runtime_evidence_identity_capture_path: None,
                     engine_decision: None,
+                    invocation_settings: None,
                     native_replay: None,
                 };
 
@@ -13904,6 +14264,7 @@ mod tests {
                         .map(|path| path.display().to_string()),
                     sentinel: None,
                     engine_decision: None,
+                    invocation_settings: None,
                     native_replay: None,
                 };
 
@@ -14517,6 +14878,7 @@ mod tests {
                     runtime_evidence_identity_capture_path: None,
                     sentinel: None,
                     engine_decision: None,
+                    invocation_settings: None,
                     native_replay: None,
                 };
 
@@ -15801,6 +16163,7 @@ mod tests {
             #[cfg(feature = "engine")]
             runtime_evidence_identity_capture_path: None,
             engine_decision: None,
+            invocation_settings: None,
             native_replay: None,
         });
         let json = serde_json::to_string(&report).expect("serialize run report");

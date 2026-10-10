@@ -3347,12 +3347,19 @@ add filesystem, network, or spawn capabilities. The current engine provides
 still be unpopulated. Required/imported modules use their independent engine
 lowering policy and do not inherit this entrypoint grant.
 
-Completed native decisions and persisted run receipts record
-`process_shape_read_allowed` as `true` or `false`. Its absence in historical
-or failed-run evidence means the grant was not reported. Native replay capture
-refuses an enabled grant before guest execution because ambient process state
-is not a complete replay input; use strict/balanced with
-`runtime.allow_process_shape=false` to capture replay.
+Native dispatch reports expose `invocation_settings`: the parser budgets,
+execution ceilings for both lanes, and `process_shape_read_allowed` grant
+actually supplied to the engine. These settings survive typed invocation
+failures, including parsing/lowering failures and uncaught guest exceptions,
+and are bound into the persisted receipt and any signed run record. Failed
+attempts leave the selected lane and completed containment decision absent.
+The snapshot proves which settings were supplied, not that guest instructions
+ran. Startup failures, interrupted workers, panics, and telemetry failures may
+still have no reported settings; historical absence also remains unknown.
+
+Native replay capture refuses an enabled process-shape grant before guest
+execution because ambient process state is not a complete replay input; use
+strict/balanced with `runtime.allow_process_shape=false` to capture replay.
 
 ---
 

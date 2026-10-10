@@ -872,14 +872,15 @@ struct RunExecutionReceiptCore {
     interruption_evidence: Option<ops::engine_dispatcher::NativeEffectInterruptionEvidence>,
     runtime_used: String,
     runtime_version: Option<String>,
-    /// Effective entrypoint/import parser limits for a completed native run.
+    /// Effective entrypoint/import parser limits reported for native invocation.
     #[serde(skip_serializing_if = "Option::is_none")]
     parser_budget: Option<config::RuntimeParseBudget>,
-    /// Exact ProcessShapeRead grant reported by the completed native run.
-    /// Missing historical/failed decisions do not imply a denied grant.
+    /// Exact ProcessShapeRead grant reported for native invocation.
+    /// Missing historical or unreported settings do not imply a denied grant.
     #[serde(skip_serializing_if = "Option::is_none")]
     process_shape_read_allowed: Option<bool>,
-    /// Effective execution limits and selected lane for a completed native run.
+    /// Effective native limits. A selected lane is present only when reported
+    /// by a completed engine decision.
     #[serde(skip_serializing_if = "Option::is_none")]
     execution_limits: Option<ops::engine_dispatcher::EngineExecutionLimitsReport>,
     /// Hash of the exact opt-in native replay payload retained in the signed
@@ -8638,7 +8639,9 @@ fn build_run_execution_receipt(
             .map_err(|error| anyhow::anyhow!("native replay capture is invalid: {error}"))?;
     }
     let mut core = RunExecutionReceiptCore {
-        receipt_id: Uuid::now_v7().to_string(),
+        // Seed identity from the recorded inputs, without a fresh random UUID
+        // changing otherwise identical receipts before the content hash.
+        receipt_id: String::new(),
         schema_version: RUN_EXECUTION_RECEIPT_SCHEMA_VERSION.to_string(),
         app_path: app_path.display().to_string(),
         policy_mode: policy_mode.to_string(),
@@ -8657,15 +8660,30 @@ fn build_run_execution_receipt(
         parser_budget: dispatch
             .engine_decision
             .as_ref()
-            .map(|decision| decision.parser_budget),
+            .map(|decision| decision.parser_budget)
+            .or_else(|| {
+                dispatch
+                    .invocation_settings
+                    .map(|settings| settings.parser_budget)
+            }),
         process_shape_read_allowed: dispatch
             .engine_decision
             .as_ref()
-            .and_then(|decision| decision.process_shape_read_allowed),
+            .and_then(|decision| decision.process_shape_read_allowed)
+            .or_else(|| {
+                dispatch
+                    .invocation_settings
+                    .map(|settings| settings.process_shape_read_allowed)
+            }),
         execution_limits: dispatch
             .engine_decision
             .as_ref()
-            .and_then(|decision| decision.execution_limits),
+            .and_then(|decision| decision.execution_limits)
+            .or_else(|| {
+                dispatch
+                    .invocation_settings
+                    .map(|settings| settings.execution_limits)
+            }),
         native_replay_payload_sha256: dispatch
             .native_replay
             .as_ref()
@@ -36541,6 +36559,7 @@ mod run_trust_gate_tests {
             runtime_evidence_identity_capture_path: None,
             sentinel: None,
             engine_decision: None,
+            invocation_settings: None,
         }
     }
 
@@ -36877,6 +36896,83 @@ mod run_trust_gate_tests {
             auto_quarantined_extensions: Vec::new(),
             sentinel_enforcement: None,
             incident_capture: None,
+        }
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn failed_run_receipt_preserves_reported_invocation_settings_without_a_decision() {
+        use ops::engine_dispatcher::{
+            EngineDispatcher, EngineExecutionLimitsReport, NativeInvocationSettings,
+        };
+
+        let tmp = TempDir::new().expect("tempdir");
+        write_demo_project(tmp.path(), &[("@acme/auth-guard", "^1.4.2")]);
+        write_fixture_registry_to(tmp.path());
+        let preflight = evaluate_preflight(tmp.path(), Profile::Balanced);
+        let mut config = Config::for_profile(Profile::Balanced);
+        config.runtime.max_instructions = Some(123_456);
+        let runtime = EngineDispatcher::map_config_to_runtime_config_for_tests(&config);
+        let expected = NativeInvocationSettings {
+            parser_budget: config::RuntimeParseBudget {
+                max_source_bytes: 900_007,
+                max_token_count: 100_003,
+                ..config.runtime.effective_parse_budget(config.profile)
+            },
+            execution_limits: EngineExecutionLimitsReport::from_execution_config(
+                &runtime.execution,
+            ),
+            process_shape_read_allowed: true,
+        };
+        let failure = anyhow::anyhow!("guest failed after invocation");
+
+        for settings in [None, Some(expected)] {
+            let mut dispatch = sample_dispatch_report(
+                tmp.path(),
+                "2026-04-09T15:00:00Z",
+                "2026-04-09T15:00:05Z",
+                None,
+            );
+            dispatch.exit_code = Some(1);
+            dispatch.invocation_settings = settings;
+            assert!(dispatch.engine_decision.is_none());
+            let receipt = build_run_execution_receipt(
+                tmp.path(),
+                "balanced",
+                Profile::Balanced,
+                &preflight,
+                &dispatch,
+                Vec::new(),
+                Vec::new(),
+                None,
+                None,
+                None,
+                Some(&failure),
+            )
+            .expect("failed receipt");
+            assert_eq!(receipt.core.exit_code, Some(1));
+            assert_eq!(
+                receipt.core.execution_failure.as_deref(),
+                Some("guest failed after invocation")
+            );
+            assert_eq!(
+                receipt.core.parser_budget,
+                settings.map(|value| value.parser_budget)
+            );
+            assert_eq!(
+                receipt.core.execution_limits,
+                settings.map(|value| value.execution_limits)
+            );
+            assert_eq!(
+                receipt.core.process_shape_read_allowed,
+                settings.map(|value| value.process_shape_read_allowed)
+            );
+            assert!(
+                receipt
+                    .core
+                    .execution_limits
+                    .is_none_or(|limits| limits.selected_lane.is_none())
+            );
         }
     }
 
