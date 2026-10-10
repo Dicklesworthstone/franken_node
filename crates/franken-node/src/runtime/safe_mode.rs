@@ -106,6 +106,249 @@ pub fn read_persisted_safe_mode(
     Ok(Some(controller))
 }
 
+/// Serialize controller mutations across CLI processes and native supervisors.
+///
+/// The sibling lock survives replacement of the state file. Readers observe a
+/// complete old or new controller; a callback error leaves the old state intact.
+/// To retain an audit entry for a denied operation, return that denial as a value
+/// inside Ok, then handle it after this transaction has committed.
+pub fn update_persisted_safe_mode<T>(
+    state_path: &std::path::Path,
+    missing_as_inactive: bool,
+    update: impl FnOnce(&mut SafeModeController) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    use anyhow::Context;
+    use std::fs::File;
+    use std::io::Write;
+    use std::path::Path;
+
+    anyhow::ensure!(
+        state_path.file_name().is_some(),
+        "safe-mode state path must name a file"
+    );
+    let parent = state_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    // Remember newly created directories so their entries can also be synced.
+    let mut new_directories = Vec::new();
+    let mut directory = parent;
+    while !directory.try_exists()? {
+        new_directories.push(directory.to_path_buf());
+        directory = directory
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+    }
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("create safe-mode state directory {}", parent.display()))?;
+    let lock_path = state_path.with_extension("lock");
+    #[cfg(unix)]
+    let lock = {
+        use rustix::fs::{Mode, OFlags, open};
+        File::from(
+            open(
+                &lock_path,
+                OFlags::RDWR
+                    | OFlags::CREATE
+                    | OFlags::NOFOLLOW
+                    | OFlags::NONBLOCK
+                    | OFlags::CLOEXEC,
+                Mode::RUSR | Mode::WUSR,
+            )
+            .with_context(|| format!("open safe-mode lock {}", lock_path.display()))?,
+        )
+    };
+    #[cfg(not(unix))]
+    let lock = {
+        if let Ok(metadata) = std::fs::symlink_metadata(&lock_path) {
+            anyhow::ensure!(metadata.is_file(), "safe-mode lock must be a regular file");
+        }
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| format!("open safe-mode lock {}", lock_path.display()))?
+    };
+    anyhow::ensure!(
+        lock.metadata()?.is_file(),
+        "safe-mode lock must be a regular file: {}",
+        lock_path.display()
+    );
+    fs2::FileExt::lock_exclusive(&lock)
+        .with_context(|| format!("lock safe-mode state {}", state_path.display()))?;
+    let mut controller = match read_persisted_safe_mode(state_path)? {
+        Some(controller) => controller,
+        None if missing_as_inactive => SafeModeController::with_default_config(),
+        None => anyhow::bail!("safe-mode state is unavailable at {}", state_path.display()),
+    };
+    let result = update(&mut controller)?;
+    let bytes = serde_json::to_vec_pretty(&controller).context("serialize safe-mode state")?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= MAX_SAFE_MODE_STATE_BYTES,
+        "Safe-mode state file too large: {} bytes (limit: {} bytes): {}",
+        bytes.len(),
+        MAX_SAFE_MODE_STATE_BYTES,
+        state_path.display()
+    );
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(parent).context("create temporary safe-mode state")?;
+    temporary
+        .write_all(&bytes)
+        .context("write temporary safe-mode state")?;
+    temporary
+        .as_file()
+        .sync_all()
+        .context("sync temporary safe-mode state")?;
+    temporary
+        .persist(state_path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("atomically replace safe-mode state {}", state_path.display()))?;
+    #[cfg(unix)]
+    {
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .context("sync safe-mode state directory")?;
+        for directory in &new_directories {
+            let entry_parent = directory
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            File::open(entry_parent)
+                .and_then(|parent| parent.sync_all())
+                .context("sync newly created safe-mode directory entry")?;
+        }
+    }
+    // Dropping the stable lock file releases the lock on every return path.
+    drop(lock);
+    Ok(result)
+}
+
+const MAX_NATIVE_CRASH_RECORDS: usize = 4096;
+const MAX_NATIVE_CRASH_THRESHOLD: u32 = 1024;
+const MAX_NATIVE_CRASH_WINDOW_SECS: u64 = 86_400;
+
+/// A parent-observed native panic, retained in the unsigned operator state.
+/// The capture path names the separately signed session-key binding; this
+/// record does not itself authenticate the panic outcome or the program bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct NativeCrashRecord {
+    session_nonce: String,
+    entrypoint: String,
+    observed_at_epoch_secs: u64,
+    cleanup_successful: bool,
+    evidence_capture_path: String,
+    #[serde(default)]
+    retired: bool,
+}
+
+impl NativeCrashRecord {
+    fn same_observation(&self, other: &Self) -> bool {
+        self.session_nonce == other.session_nonce
+            && self.entrypoint == other.entrypoint
+            && self.observed_at_epoch_secs == other.observed_at_epoch_secs
+            && self.cleanup_successful == other.cleanup_successful
+            && self.evidence_capture_path == other.evidence_capture_path
+    }
+
+    fn in_window(&self, now: u64, window_secs: u64) -> bool {
+        self.observed_at_epoch_secs <= now
+            && now - self.observed_at_epoch_secs <= window_secs
+    }
+}
+
+/// Durable result attached to the original native panic error.
+#[derive(Debug, Clone, Serialize)]
+pub struct CrashLoopObservation {
+    pub session_nonce: String,
+    pub entrypoint: String,
+    pub observed_at_epoch_secs: u64,
+    pub crashes_in_window: u32,
+    pub threshold: u32,
+    pub window_secs: u64,
+    /// True when this nonce is still retained, including after recovery.
+    pub duplicate: bool,
+    /// Whether this observation contributes to the current crash window.
+    /// An expired or explicitly retired observation never contributes again.
+    pub counted: bool,
+    pub safe_mode_active: bool,
+    pub safe_mode_activated: bool,
+    pub state_path: String,
+    /// Counter ambiguity activates safe mode without claiming a crash threshold
+    /// was reached. The operator must resolve this cause before recovery.
+    pub tracking_failure: Option<String>,
+}
+
+/// Record one immutable observation from the native supervisor.
+///
+/// The dispatcher calls this only for its validated typed panic outcome.
+/// This API accepts caller-supplied metadata; it is not a panic authenticator.
+/// Project and entrypoint paths must be the absolute normalized paths retained
+/// before execution. Do not reopen the entrypoint after a crash: the guest may
+/// have renamed or removed it. A duplicate retains its original observation
+/// time, so replaying an expired attempt cannot revive its contribution.
+pub fn record_native_crash(
+    project_root: &std::path::Path,
+    entrypoint: &std::path::Path,
+    session_nonce: &str,
+    observed_at_epoch_secs: u64,
+    cleanup_successful: bool,
+    evidence_capture_path: &std::path::Path,
+) -> anyhow::Result<CrashLoopObservation> {
+    use anyhow::Context;
+    use std::path::Component;
+
+    anyhow::ensure!(
+        project_root.is_absolute() && entrypoint.is_absolute(),
+        "native crash paths must be absolute"
+    );
+    anyhow::ensure!(
+        !project_root
+            .components()
+            .chain(entrypoint.components())
+            .any(|component| matches!(component, Component::ParentDir | Component::CurDir)),
+        "native crash paths must be normalized"
+    );
+    let relative = entrypoint
+        .strip_prefix(project_root)
+        .context("native crash entrypoint is outside its project scope")?;
+    anyhow::ensure!(
+        !relative.as_os_str().is_empty(),
+        "native crash entrypoint must name a file within its project scope"
+    );
+    let nonce = uuid::Uuid::parse_str(session_nonce).context("invalid native crash session nonce")?;
+    anyhow::ensure!(
+        nonce.to_string() == session_nonce,
+        "native crash session nonce must use canonical UUID spelling"
+    );
+    let record = NativeCrashRecord {
+        session_nonce: session_nonce.to_string(),
+        entrypoint: entrypoint
+            .to_str()
+            .context("native crash entrypoint is not UTF-8")?
+            .to_string(),
+        observed_at_epoch_secs,
+        cleanup_successful,
+        evidence_capture_path: evidence_capture_path
+            .to_str()
+            .context("native crash evidence capture path is not UTF-8")?
+            .to_string(),
+        retired: false,
+    };
+    let state_path = project_root.join(".franken-node/safe-mode/state.json");
+    update_persisted_safe_mode(&state_path, true, |controller| {
+        // Sample inside the lock: observations may arrive out of order, while
+        // transaction times are serialized and can detect wall-clock rollback.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .context("system clock predates the Unix epoch")?
+            .as_secs();
+        controller.observe_native_crash(record, now, &state_path)
+    })
+}
+
 /// Refuse a new application execution in an active operator safe-mode scope.
 ///
 /// A scope is the directory containing .franken-node/safe-mode/state.json.
@@ -211,6 +454,8 @@ pub enum SafeModeEntryReason {
         /// Window duration in seconds.
         window_secs: u64,
     },
+    /// Crash accounting cannot safely continue until the operator intervenes.
+    CrashTrackingFailure { detail: String },
     /// Control epoch mismatch with federation peers.
     EpochMismatch { local_epoch: u64, peer_epoch: u64 },
 }
@@ -227,6 +472,9 @@ impl fmt::Display for SafeModeEntryReason {
                 window_secs,
             } => {
                 write!(f, "crash_loop({crash_count} in {window_secs}s)")
+            }
+            Self::CrashTrackingFailure { detail } => {
+                write!(f, "crash_tracking_failure({detail})")
             }
             Self::EpochMismatch {
                 local_epoch,
@@ -598,6 +846,8 @@ pub enum AnomalyClassification {
     StaleFrontier { last_epoch: u64, current_epoch: u64 },
     /// Crash loop pattern detected.
     CrashLoopDetected { crash_count: u32, window_secs: u64 },
+    /// Crash accounting is ambiguous or has exhausted its bounded storage.
+    CrashTrackingFailure { detail: String },
     /// Control epoch mismatch with federation peers.
     EpochMismatch { local_epoch: u64, peer_epoch: u64 },
 }
@@ -657,6 +907,11 @@ fn entry_reason_anomalies(reason: &SafeModeEntryReason) -> Vec<AnomalyClassifica
                 window_secs: *window_secs,
             }]
         }
+        SafeModeEntryReason::CrashTrackingFailure { detail } => {
+            vec![AnomalyClassification::CrashTrackingFailure {
+                detail: detail.clone(),
+            }]
+        }
         SafeModeEntryReason::EpochMismatch {
             local_epoch,
             peer_epoch,
@@ -672,7 +927,8 @@ fn entry_reason_anomalies(reason: &SafeModeEntryReason) -> Vec<AnomalyClassifica
 
 fn entry_reason_fallback_disposition(reason: &SafeModeEntryReason) -> Option<DegradedDisposition> {
     match reason {
-        SafeModeEntryReason::TrustCorruption => Some(DegradedDisposition::FailClosed),
+        SafeModeEntryReason::TrustCorruption
+        | SafeModeEntryReason::CrashTrackingFailure { .. } => Some(DegradedDisposition::FailClosed),
         SafeModeEntryReason::CrashLoop { .. } | SafeModeEntryReason::EpochMismatch { .. } => {
             Some(DegradedDisposition::WidenUncertainty)
         }
@@ -692,6 +948,7 @@ fn derive_receipt_disposition(
             a,
             AnomalyClassification::TrustHashMismatch { .. }
                 | AnomalyClassification::EvidenceIntegrityFailure { .. }
+                | AnomalyClassification::CrashTrackingFailure { .. }
         )
     }) {
         DegradedDisposition::FailClosed
@@ -945,6 +1202,10 @@ pub struct SafeModeController {
     audit_log: Vec<SafeModeAuditEntry>,
     entry_receipt: Option<SafeModeEntryReceipt>,
     unresolved_incidents: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    native_crashes: Vec<NativeCrashRecord>,
+    #[serde(default)]
+    last_native_crash_update_epoch_secs: u64,
 }
 
 impl SafeModeController {
@@ -970,6 +1231,8 @@ impl SafeModeController {
             audit_log: Vec::new(),
             entry_receipt: None,
             unresolved_incidents: 0,
+            native_crashes: Vec::new(),
+            last_native_crash_update_epoch_secs: 0,
         }
     }
 
@@ -1177,6 +1440,11 @@ impl SafeModeController {
 
         self.active = false;
         self.restricted_capabilities.clear();
+        // Recovery starts a fresh crash window without forgetting recent
+        // attempt identities. A retry of an old panic cannot undo recovery.
+        for crash in &mut self.native_crashes {
+            crash.retired = true;
+        }
         let exit_reason = self.entry_reason.take();
 
         self.emit_audit(SafeModeAuditEntry {
@@ -1575,6 +1843,105 @@ impl SafeModeController {
         }
     }
 
+    fn observe_native_crash(
+        &mut self,
+        record: NativeCrashRecord,
+        now: u64,
+        state_path: &std::path::Path,
+    ) -> anyhow::Result<CrashLoopObservation> {
+        use anyhow::Context;
+
+        let was_active = self.active;
+        let threshold = self.config.crash_loop_threshold;
+        let window_secs = self.config.crash_loop_window_secs;
+        let previous = self
+            .native_crashes
+            .iter()
+            .find(|previous| previous.session_nonce == record.session_nonce);
+        let duplicate = previous.is_some();
+        let conflicting = previous.is_some_and(|previous| !previous.same_observation(&record));
+        let previously_retired = previous.is_some_and(|previous| previous.retired);
+        let mut tracking_failure = if !(1..=MAX_NATIVE_CRASH_THRESHOLD).contains(&threshold)
+            || !(1..=MAX_NATIVE_CRASH_WINDOW_SECS).contains(&window_secs)
+        {
+            Some(format!(
+                "crash-loop configuration requires threshold 1..={MAX_NATIVE_CRASH_THRESHOLD} and window 1..={MAX_NATIVE_CRASH_WINDOW_SECS} seconds"
+            ))
+        } else if conflicting {
+            Some("a retained native session nonce has conflicting observation metadata".to_string())
+        } else if now < self.last_native_crash_update_epoch_secs
+            || record.observed_at_epoch_secs > now
+        {
+            Some("system clock moved behind a persisted or incoming native crash observation".to_string())
+        } else if self.native_crashes.len() > MAX_NATIVE_CRASH_RECORDS {
+            Some("persisted native crash history exceeds its record limit".to_string())
+        } else {
+            None
+        };
+        let mut counted = false;
+        if tracking_failure.is_none() {
+            self.native_crashes
+                .retain(|crash| crash.in_window(now, window_secs));
+            if record.in_window(now, window_secs) {
+                if duplicate {
+                    counted = !previously_retired;
+                } else if self.native_crashes.len() >= MAX_NATIVE_CRASH_RECORDS {
+                    tracking_failure = Some(format!(
+                        "native crash history reached its {MAX_NATIVE_CRASH_RECORDS}-record limit; recent session identities cannot be evicted safely"
+                    ));
+                } else {
+                    self.native_crashes.push(record.clone());
+                    counted = true;
+                }
+            }
+        }
+        self.last_native_crash_update_epoch_secs =
+            self.last_native_crash_update_epoch_secs.max(now);
+        let crashes_in_window = u32::try_from(
+            self.native_crashes
+                .iter()
+                .filter(|crash| {
+                    !crash.retired
+                        && crash.entrypoint == record.entrypoint
+                        && crash.in_window(now, window_secs)
+                })
+                .count(),
+        )
+        .context("native crash count exceeds u32")?;
+        if !self.active {
+            let reason = if let Some(detail) = &tracking_failure {
+                Some(SafeModeEntryReason::CrashTrackingFailure {
+                    detail: detail.clone(),
+                })
+            } else {
+                self.check_crash_loop_trigger(crashes_in_window, window_secs)
+            };
+            if let Some(reason) = reason {
+                let seconds = i64::try_from(now).context("native crash timestamp exceeds i64")?;
+                let timestamp = chrono::DateTime::from_timestamp(seconds, 0)
+                    .context("native crash timestamp is outside the supported calendar")?
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                // Automatic containment does not claim trust re-verification.
+                // The existing degraded entry receipt explicitly has no hash.
+                self.enter_degraded_state(reason, &timestamp);
+            }
+        }
+        Ok(CrashLoopObservation {
+            session_nonce: record.session_nonce,
+            entrypoint: record.entrypoint,
+            observed_at_epoch_secs: record.observed_at_epoch_secs,
+            crashes_in_window,
+            threshold,
+            window_secs,
+            duplicate,
+            counted,
+            safe_mode_active: self.active,
+            safe_mode_activated: !was_active && self.active,
+            state_path: state_path.display().to_string(),
+            tracking_failure,
+        })
+    }
+
     /// Check epoch mismatch trigger.
     ///
     /// # Examples
@@ -1828,6 +2195,187 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn crash_record(id: u128, entrypoint: &str, observed: u64) -> NativeCrashRecord {
+        NativeCrashRecord {
+            session_nonce: uuid::Uuid::from_u128(id).to_string(),
+            entrypoint: entrypoint.to_string(),
+            observed_at_epoch_secs: observed,
+            cleanup_successful: true,
+            evidence_capture_path: format!("/operator/captures/{id}.json"),
+            retired: false,
+        }
+    }
+
+    fn observe(
+        controller: &mut SafeModeController,
+        record: NativeCrashRecord,
+        now: u64,
+    ) -> CrashLoopObservation {
+        controller
+            .observe_native_crash(
+                record,
+                now,
+                std::path::Path::new("/project/.franken-node/safe-mode/state.json"),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn native_crash_threshold_counts_one_entrypoint_and_includes_window_boundary() {
+        let mut controller = SafeModeController::with_default_config();
+        assert_eq!(
+            observe(&mut controller, crash_record(1, "/project/a.js", 100), 100)
+                .crashes_in_window,
+            1
+        );
+        assert_eq!(
+            observe(&mut controller, crash_record(2, "/project/b.js", 125), 125)
+                .crashes_in_window,
+            1
+        );
+        assert!(!controller.is_active());
+        assert_eq!(
+            observe(&mut controller, crash_record(3, "/project/a.js", 130), 130)
+                .crashes_in_window,
+            2
+        );
+        let threshold = observe(&mut controller, crash_record(4, "/project/a.js", 160), 160);
+        assert_eq!(threshold.crashes_in_window, 3);
+        assert!(threshold.safe_mode_activated);
+        assert_eq!(
+            controller.entry_reason(),
+            Some(&SafeModeEntryReason::CrashLoop {
+                crash_count: 3,
+                window_secs: 60,
+            })
+        );
+        assert_eq!(controller.entry_receipt().unwrap().trust_state_hash, "degraded-no-hash");
+    }
+
+    #[test]
+    fn native_crash_reordered_delivery_and_expired_retries_do_not_recount() {
+        let mut controller = SafeModeController::new(SafeModeConfig {
+            crash_loop_threshold: 4,
+            ..SafeModeConfig::default()
+        });
+        let first = crash_record(1, "/project/app.js", 200);
+        observe(&mut controller, first.clone(), 210);
+        let late = observe(&mut controller, crash_record(2, "/project/app.js", 195), 211);
+        assert_eq!(late.crashes_in_window, 2);
+        assert!(late.tracking_failure.is_none());
+        let retry = observe(&mut controller, first.clone(), 212);
+        assert_eq!(retry.crashes_in_window, 2);
+        assert!(retry.duplicate);
+        let fresh = observe(&mut controller, crash_record(3, "/project/app.js", 273), 273);
+        assert_eq!(fresh.crashes_in_window, 1);
+        let expired_retry = observe(&mut controller, first, 274);
+        assert!(!expired_retry.counted);
+        assert_eq!(expired_retry.crashes_in_window, 1);
+        assert!(!expired_retry.safe_mode_active);
+        assert_eq!(controller.native_crashes.len(), 1);
+    }
+
+    #[test]
+    fn native_crash_recovery_retires_contributions_but_keeps_recent_nonce_identity() {
+        let mut controller = SafeModeController::with_default_config();
+        for id in 1..=3 {
+            observe(&mut controller, crash_record(id, "/project/app.js", 1_000), 1_000);
+        }
+        let verification = ExitVerification {
+            trust_state_consistent: true,
+            no_unresolved_incidents: true,
+            evidence_ledger_intact: true,
+            operator_confirmed: true,
+        };
+        controller
+            .exit_safe_mode(&verification, "operator", "1970-01-01T00:16:50Z")
+            .unwrap();
+        let retry = observe(&mut controller, crash_record(3, "/project/app.js", 1_000), 1_011);
+        assert!(retry.duplicate);
+        assert!(!retry.counted);
+        assert_eq!(retry.crashes_in_window, 0);
+        assert!(!retry.safe_mode_active);
+        let fresh = observe(&mut controller, crash_record(4, "/project/app.js", 1_012), 1_012);
+        assert_eq!(fresh.crashes_in_window, 1);
+        assert!(!fresh.safe_mode_active);
+        assert_eq!(controller.native_crashes.len(), 4);
+    }
+
+    fn assert_tracking_failure(controller: &SafeModeController, result: &CrashLoopObservation) {
+        assert!(result.safe_mode_activated);
+        assert!(result.tracking_failure.is_some());
+        assert!(matches!(
+            controller.entry_reason(),
+            Some(SafeModeEntryReason::CrashTrackingFailure { .. })
+        ));
+        assert_eq!(
+            controller.entry_receipt().unwrap().disposition,
+            DegradedDisposition::FailClosed
+        );
+    }
+
+    #[test]
+    fn native_crash_clock_rollback_and_conflicting_identity_enter_safe_mode() {
+        let mut clock = SafeModeController::with_default_config();
+        observe(&mut clock, crash_record(1, "/project/app.js", 1_000), 1_000);
+        let rollback = observe(&mut clock, crash_record(2, "/project/app.js", 999), 999);
+        assert_tracking_failure(&clock, &rollback);
+        assert_eq!(clock.native_crashes.len(), 1);
+
+        let mut conflict = SafeModeController::with_default_config();
+        let first = crash_record(1, "/project/app.js", 1_000);
+        observe(&mut conflict, first.clone(), 1_000);
+        let mut altered = first;
+        altered.cleanup_successful = false;
+        let conflicting = observe(&mut conflict, altered, 1_001);
+        assert_tracking_failure(&conflict, &conflicting);
+        assert_eq!(conflict.native_crashes.len(), 1);
+        assert!(conflict.native_crashes[0].cleanup_successful);
+    }
+
+    #[test]
+    fn native_crash_invalid_configuration_and_full_history_fail_closed_without_eviction() {
+        let mut invalid = SafeModeController::new(SafeModeConfig {
+            crash_loop_threshold: 0,
+            ..SafeModeConfig::default()
+        });
+        let result = observe(&mut invalid, crash_record(1, "/project/app.js", 1_000), 1_000);
+        assert_tracking_failure(&invalid, &result);
+
+        let mut full = SafeModeController::with_default_config();
+        full.native_crashes = (1..=MAX_NATIVE_CRASH_RECORDS)
+            .map(|id| {
+                let mut record = crash_record(id as u128, "/project/app.js", 1_000);
+                record.retired = true;
+                record
+            })
+            .collect();
+        let first_nonce = full.native_crashes[0].session_nonce.clone();
+        let result = observe(
+            &mut full,
+            crash_record(MAX_NATIVE_CRASH_RECORDS as u128 + 1, "/project/app.js", 1_000),
+            1_000,
+        );
+        assert_tracking_failure(&full, &result);
+        assert_eq!(result.crashes_in_window, 0);
+        assert_eq!(full.native_crashes.len(), MAX_NATIVE_CRASH_RECORDS);
+        assert_eq!(full.native_crashes[0].session_nonce, first_nonce);
+    }
+
+    #[test]
+    fn native_crash_fields_are_backward_compatible_with_existing_controllers() {
+        let mut value = serde_json::to_value(SafeModeController::with_default_config()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("native_crashes");
+        object.remove("last_native_crash_update_epoch_secs");
+        let mut restored: SafeModeController = serde_json::from_value(value).unwrap();
+        let result = observe(&mut restored, crash_record(1, "/project/app.js", 1_000), 1_000);
+        assert_eq!(result.crashes_in_window, 1);
+        assert_eq!(result.threshold, 3);
+        assert_eq!(result.window_secs, 60);
+        assert!(result.tracking_failure.is_none());
+    }
 
     // -- OperationFlags tests -----------------------------------------------
 

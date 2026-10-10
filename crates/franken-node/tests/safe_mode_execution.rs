@@ -3,8 +3,9 @@
 //! processes; native success after recovery is exercised with the engine feature.
 
 use frankenengine_node::runtime::safe_mode::{
-    ExitVerification, MAX_SAFE_MODE_STATE_BYTES, OperationFlags, SafeModeController,
-    SafeModeEntryReason, enforce_run_safe_mode, read_persisted_safe_mode,
+    ExitVerification, MAX_SAFE_MODE_STATE_BYTES, OperationFlags, SafeModeAction, SafeModeController,
+    SafeModeEntryReason, enforce_run_safe_mode, read_persisted_safe_mode, record_native_crash,
+    update_persisted_safe_mode,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -246,4 +247,240 @@ fn cli_explicit_exit_restores_native_execution() {
     );
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert!(String::from_utf8_lossy(&output.stdout).contains("SAFE_MODE_GUEST_RAN"));
+}
+
+
+fn current_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+fn persist_crash_observation(
+    scope: &Path,
+    app: &Path,
+    nonce: &str,
+    observed: u64,
+) -> frankenengine_node::runtime::safe_mode::CrashLoopObservation {
+    // This exercises the actual store API with observation metadata. The
+    // engine's separate typed-error tests cover classification/authentication.
+    record_native_crash(
+        scope,
+        app,
+        nonce,
+        observed,
+        true,
+        &scope.join("retained-captures").join(format!("{nonce}.json")),
+    )
+    .unwrap()
+}
+
+#[test]
+fn persisted_crash_threshold_activates_real_execution_admission() {
+    let directory = tempfile::tempdir().unwrap();
+    let scope = directory.path().canonicalize().unwrap();
+    let app = entry(&scope);
+    let observed = current_epoch_secs();
+    for expected in 1..=3 {
+        let result = persist_crash_observation(
+            &scope,
+            &app,
+            &uuid::Uuid::now_v7().to_string(),
+            observed,
+        );
+        assert_eq!(result.crashes_in_window, expected);
+        assert_eq!(result.safe_mode_active, expected == 3);
+        let reloaded = read_persisted_safe_mode(&state_path(&scope)).unwrap().unwrap();
+        assert_eq!(reloaded.is_active(), expected == 3);
+    }
+    let error = enforce_run_safe_mode(&app).unwrap_err();
+    assert!(error.to_string().contains("run blocked by active safe mode"));
+    let controller = read_persisted_safe_mode(&state_path(&scope)).unwrap().unwrap();
+    assert_eq!(
+        controller.entry_reason(),
+        Some(&SafeModeEntryReason::CrashLoop {
+            crash_count: 3,
+            window_secs: 60,
+        })
+    );
+}
+
+#[test]
+fn concurrent_crash_updates_retain_every_attempt_and_activate_once() {
+    use std::sync::{Arc, Barrier};
+
+    let directory = tempfile::tempdir().unwrap();
+    let scope = directory.path().canonicalize().unwrap();
+    let app = entry(&scope);
+    let observed = current_epoch_secs();
+    let barrier = Arc::new(Barrier::new(12));
+    let workers: Vec<_> = (0..12)
+        .map(|_| {
+            let scope = scope.clone();
+            let app = app.clone();
+            let barrier = Arc::clone(&barrier);
+            let nonce = uuid::Uuid::now_v7().to_string();
+            std::thread::spawn(move || {
+                barrier.wait();
+                persist_crash_observation(&scope, &app, &nonce, observed)
+            })
+        })
+        .collect();
+    let results: Vec<_> = workers.into_iter().map(|worker| worker.join().unwrap()).collect();
+    assert_eq!(
+        results.iter().filter(|result| result.safe_mode_activated).count(),
+        1
+    );
+    assert_eq!(results.iter().map(|result| result.crashes_in_window).max(), Some(12));
+    let controller = read_persisted_safe_mode(&state_path(&scope)).unwrap().unwrap();
+    let persisted = serde_json::to_value(&controller).unwrap();
+    assert_eq!(persisted["native_crashes"].as_array().unwrap().len(), 12);
+    assert_eq!(
+        controller.events().iter().filter(|event| event.code == "SMO-001").count(),
+        1
+    );
+    assert!(controller.is_active());
+}
+
+#[test]
+fn cli_entry_and_recovery_preserve_crash_identity_and_denied_exit_audit() {
+    let directory = initialized_project();
+    let scope = directory.path().canonicalize().unwrap();
+    let app = scope.join("app.js");
+    let nonce = uuid::Uuid::now_v7().to_string();
+    let observed = current_epoch_secs();
+    persist_crash_observation(&scope, &app, &nonce, observed);
+
+    enter_from_cli(&scope);
+    let controller = read_persisted_safe_mode(&state_path(&scope)).unwrap().unwrap();
+    assert_eq!(
+        serde_json::to_value(controller).unwrap()["native_crashes"].as_array().unwrap().len(),
+        1,
+        "manual entry must not replace the existing controller or forget crash identities"
+    );
+
+    let denied = cli(
+        &scope,
+        &["safe-mode", "exit", "--operator-id", "operator", "--confirm", "--json"],
+    );
+    assert!(!denied.status.success());
+    let denied_state = read_persisted_safe_mode(&state_path(&scope)).unwrap().unwrap();
+    assert!(denied_state.is_active());
+    assert!(denied_state.audit_log().iter().any(|entry| {
+        matches!(&entry.action, SafeModeAction::ExitDenied)
+    }));
+
+    let recovered = cli(
+        &scope,
+        &[
+            "safe-mode", "exit", "--operator-id", "operator", "--confirm",
+            "--trust-state-consistent", "--no-unresolved-incidents",
+            "--evidence-ledger-intact", "--json",
+        ],
+    );
+    assert!(recovered.status.success(), "{}", String::from_utf8_lossy(&recovered.stderr));
+    let retry = persist_crash_observation(&scope, &app, &nonce, observed);
+    assert!(retry.duplicate);
+    assert!(!retry.counted);
+    assert_eq!(retry.crashes_in_window, 0);
+    assert!(!retry.safe_mode_active);
+    enforce_run_safe_mode(&app).unwrap();
+    let new_attempt = persist_crash_observation(
+        &scope,
+        &app,
+        &uuid::Uuid::now_v7().to_string(),
+        current_epoch_secs(),
+    );
+    assert_eq!(new_attempt.crashes_in_window, 1);
+    assert!(!new_attempt.safe_mode_active);
+}
+
+#[test]
+fn failed_safe_mode_transaction_leaves_prior_restriction_and_bytes_intact() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = entry(directory.path());
+    persist(directory.path(), &active_controller());
+    let path = state_path(directory.path());
+    let original = fs::read(&path).unwrap();
+    let result: anyhow::Result<()> = update_persisted_safe_mode(&path, false, |controller| {
+        controller.exit_safe_mode(
+            &exit_checks(),
+            "operator",
+            "2026-10-10T00:01:00Z",
+        )?;
+        anyhow::bail!("abort before commit")
+    });
+    assert!(result.unwrap_err().to_string().contains("abort before commit"));
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert!(enforce_run_safe_mode(&app).is_err());
+}
+
+#[test]
+fn crash_accounting_uses_retained_entrypoint_even_if_guest_renamed_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let scope = directory.path().canonicalize().unwrap();
+    let app = entry(&scope);
+    fs::rename(&app, scope.join("renamed-by-guest.js")).unwrap();
+    let result = persist_crash_observation(
+        &scope,
+        &app,
+        &uuid::Uuid::now_v7().to_string(),
+        current_epoch_secs(),
+    );
+    assert_eq!(result.entrypoint, app.to_str().unwrap());
+    assert_eq!(result.crashes_in_window, 1);
+    assert!(Path::new(&result.state_path).is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_safe_mode_lock_is_refused_without_modifying_controller() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().unwrap();
+    entry(directory.path());
+    persist(directory.path(), &active_controller());
+    let path = state_path(directory.path());
+    let original = fs::read(&path).unwrap();
+    let target = directory.path().join("unrelated-file");
+    fs::write(&target, b"preserve me").unwrap();
+    symlink(&target, path.with_extension("lock")).unwrap();
+    let result = update_persisted_safe_mode(&path, false, |controller| {
+        controller.set_unresolved_incidents(99);
+        Ok(())
+    });
+    assert!(result.is_err());
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert_eq!(fs::read(&target).unwrap(), b"preserve me");
+}
+
+#[cfg(feature = "engine")]
+#[test]
+fn repeated_real_guest_exceptions_do_not_enter_native_crash_safe_mode() {
+    let directory = initialized_project();
+    fs::write(
+        directory.path().join("app.js"),
+        "console.log('GUEST_EXCEPTION_REACHED'); throw new Error('ordinary application failure');",
+    )
+    .unwrap();
+    for _ in 0..3 {
+        let output = cli(
+            directory.path(),
+            &["run", "app.js", "--policy", "balanced", "--runtime", "franken-engine", "--json"],
+        );
+        assert!(!output.status.success());
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|error| panic!("{error}: {}", String::from_utf8_lossy(&output.stdout)));
+        assert!(
+            report.to_string().contains("GUEST_EXCEPTION_REACHED"),
+            "the guest must actually have run before throwing: {report}"
+        );
+        assert_ne!(report["outcome"], "native_engine_panic");
+    }
+    let state = read_persisted_safe_mode(
+        &directory.path().join(".franken-node/safe-mode/state.json"),
+    )
+    .unwrap();
+    assert!(state.is_none(), "ordinary guest exceptions must not create crash state");
 }

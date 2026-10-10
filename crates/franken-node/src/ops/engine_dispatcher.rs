@@ -3831,6 +3831,161 @@ impl std::fmt::Display for NativeRunInterruption {
 #[cfg(feature = "engine")]
 impl std::error::Error for NativeRunInterruption {}
 
+/// A panic reported by the authenticated native worker after its response
+/// schema and session nonce were validated by the supervisor.
+///
+/// Production constructs this type only in the validated Panicked response
+/// arm. Guest exceptions, timeouts, and an unexpected worker exit retain their
+/// separate error types. The identity capture authenticates the session key;
+/// it does not sign this parent-observed panic outcome.
+#[cfg(feature = "engine")]
+#[derive(Debug)]
+pub struct NativeRunPanic {
+    actionable: ActionableError,
+    runtime_evidence_identity_capture: RuntimeEvidenceIdentityCapture,
+    runtime_evidence_identity_capture_path: PathBuf,
+    observed_at_epoch_secs: u64,
+    cleanup_successful: bool,
+    crash_loop_observation: Option<crate::runtime::safe_mode::CrashLoopObservation>,
+    crash_loop_persistence_error: Option<String>,
+}
+
+#[cfg(feature = "engine")]
+impl NativeRunPanic {
+    fn from_validated_response(
+        actionable: ActionableError,
+        runtime_evidence_identity_capture: RuntimeEvidenceIdentityCapture,
+        runtime_evidence_identity_capture_path: PathBuf,
+        observed_at_epoch_secs: u64,
+        cleanup_successful: bool,
+    ) -> Self {
+        Self {
+            actionable,
+            runtime_evidence_identity_capture,
+            runtime_evidence_identity_capture_path,
+            observed_at_epoch_secs,
+            cleanup_successful,
+            crash_loop_observation: None,
+            crash_loop_persistence_error: None,
+        }
+    }
+
+    /// The immutable attempt identity provisioned before this worker started.
+    #[must_use]
+    pub fn session_nonce(&self) -> &str {
+        &self.runtime_evidence_identity_capture.session_nonce
+    }
+
+    /// The supervisor's observation time, retained across persistence retries.
+    #[must_use]
+    pub const fn observed_at_epoch_secs(&self) -> u64 {
+        self.observed_at_epoch_secs
+    }
+
+    /// Whether the authenticated worker reported successful panic cleanup.
+    #[must_use]
+    pub const fn cleanup_successful(&self) -> bool {
+        self.cleanup_successful
+    }
+
+    /// The independently persisted binding for this session's evidence key.
+    #[must_use]
+    pub fn evidence_capture(&self) -> &RuntimeEvidenceIdentityCapture {
+        &self.runtime_evidence_identity_capture
+    }
+
+    /// The identity capture retained before the native worker was launched.
+    #[must_use]
+    pub fn evidence_capture_path(&self) -> &Path {
+        &self.runtime_evidence_identity_capture_path
+    }
+
+    /// The durable crash-loop decision, when its state update succeeded.
+    #[must_use]
+    pub fn crash_loop_observation(
+        &self,
+    ) -> Option<&crate::runtime::safe_mode::CrashLoopObservation> {
+        self.crash_loop_observation.as_ref()
+    }
+
+    /// A state update failure, without replacing the original engine panic.
+    #[must_use]
+    pub fn crash_loop_persistence_error(&self) -> Option<&str> {
+        self.crash_loop_persistence_error.as_deref()
+    }
+
+    fn attach_crash_loop_result(
+        &mut self,
+        result: Result<crate::runtime::safe_mode::CrashLoopObservation>,
+    ) {
+        match result {
+            Ok(observation) => {
+                self.crash_loop_observation = Some(observation);
+                self.crash_loop_persistence_error = None;
+            }
+            Err(error) => {
+                self.crash_loop_observation = None;
+                self.crash_loop_persistence_error = Some(format!("{error:#}"));
+            }
+        }
+    }
+}
+
+#[cfg(feature = "engine")]
+impl std::fmt::Display for NativeRunPanic {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.actionable, formatter)?;
+        if let Some(observation) = &self.crash_loop_observation {
+            write!(
+                formatter,
+                "\ncrash_loop: crashes_in_window={}, threshold={}, window_secs={}, safe_mode_active={}, state_path={}",
+                observation.crashes_in_window,
+                observation.threshold,
+                observation.window_secs,
+                observation.safe_mode_active,
+                observation.state_path,
+            )?;
+            if let Some(detail) = &observation.tracking_failure {
+                write!(formatter, "\ncrash-loop tracking failed: {detail}")?;
+            }
+        }
+        if let Some(error) = &self.crash_loop_persistence_error {
+            write!(formatter, "\ncrash-loop state update failed: {error}")?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "engine")]
+impl std::error::Error for NativeRunPanic {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.actionable)
+    }
+}
+
+/// Only a validated typed panic contributes to the durable crash window.
+/// In particular, error text and generic nonzero worker exits are not evidence
+/// that the native engine reported a panic.
+#[cfg(feature = "engine")]
+fn record_native_panic_for_run(
+    error: &mut anyhow::Error,
+    project_root: &Path,
+    entrypoint: &Path,
+) {
+    let Some(panic) = error.downcast_mut::<NativeRunPanic>() else {
+        return;
+    };
+    let observation = crate::runtime::safe_mode::record_native_crash(
+        project_root,
+        entrypoint,
+        panic.session_nonce(),
+        panic.observed_at_epoch_secs(),
+        panic.cleanup_successful(),
+        panic.evidence_capture_path(),
+    );
+    panic.attach_crash_loop_result(observation);
+}
+
 /// An unsuccessful native attempt with the evidence the worker actually
 /// recovered, including attempts that produced no ledger or console output.
 ///
@@ -6019,6 +6174,11 @@ impl EngineDispatcher {
                 self.capture_replay,
             )
             .map_err(|mut error| {
+                record_native_panic_for_run(
+                    &mut error,
+                    project_paths.project_root(),
+                    project_paths.entrypoint(),
+                );
                 if let Some(failure) = error.downcast_mut::<NativeRunFailure>() {
                     failure.attach_dispatch_report(
                         Path::new(&bin_path),
@@ -7970,7 +8130,17 @@ impl EngineDispatcher {
                     panic_message,
                     cleanup_successful,
                 };
-                Err(dispatch_error.to_actionable().into())
+                // Retain only a panic reported through this authenticated
+                // response. A generic worker exit above is not sufficient.
+                let observed_at_epoch_secs = u64::try_from(Utc::now().timestamp()).unwrap_or(0);
+                Err(NativeRunPanic::from_validated_response(
+                    dispatch_error.to_actionable(),
+                    expected_evidence_capture,
+                    evidence_capture_path,
+                    observed_at_epoch_secs,
+                    cleanup_successful,
+                )
+                .into())
             }
         }
     }
@@ -10638,6 +10808,200 @@ mod tests {
         RuntimeEvidenceSessionGrant {
             signing_seed,
             capture,
+        }
+    }
+
+    #[cfg(feature = "engine")]
+    fn native_run_panic_for_test(
+        capture_path: &Path,
+        observed_at_epoch_secs: u64,
+    ) -> NativeRunPanic {
+        let grant = runtime_evidence_grant_for_test(
+            "00000000-0000-4000-8000-000000000001",
+            [0x41; 32],
+            [0x63; 32],
+        );
+        let actionable = EngineDispatchError::EnginePanic {
+            app_path: PathBuf::from("app.js"),
+            panic_message: "native interpreter invariant failed".to_string(),
+            cleanup_successful: false,
+        }
+        .to_actionable();
+        NativeRunPanic::from_validated_response(
+            actionable,
+            grant.capture.clone(),
+            capture_path.to_path_buf(),
+            observed_at_epoch_secs,
+            false,
+        )
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn native_panic_preserves_session_identity_observation_time_and_cleanup() {
+        let capture_path = PathBuf::from("retained-captures/panic-session.json");
+        let panic = native_run_panic_for_test(&capture_path, 1_234);
+        assert_eq!(
+            panic.session_nonce(),
+            "00000000-0000-4000-8000-000000000001"
+        );
+        assert_eq!(panic.observed_at_epoch_secs(), 1_234);
+        assert!(!panic.cleanup_successful());
+        assert_eq!(panic.evidence_capture_path(), capture_path.as_path());
+        assert!(panic.crash_loop_observation().is_none());
+        assert!(panic.crash_loop_persistence_error().is_none());
+        let trusted_root =
+            ed25519_dalek::SigningKey::from_bytes(&[0x63; 32]).verifying_key();
+        panic
+            .evidence_capture()
+            .verify_with_product_root(&trusted_root)
+            .expect("the original independently verifiable session capture is retained");
+        assert_eq!(
+            std::error::Error::source(&panic).unwrap().to_string(),
+            panic.to_string(),
+            "the undecorated panic keeps the original actionable error"
+        );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn native_panic_dispatch_observation_is_durable_and_idempotent() {
+        let directory = tempfile::tempdir().unwrap();
+        let app = directory.path().join("app.js");
+        std::fs::write(&app, "console.log('not executed by this test');").unwrap();
+        let capture_path = directory.path().join("capture.json");
+        let observed_at_epoch_secs = u64::try_from(Utc::now().timestamp()).unwrap();
+        let panic = native_run_panic_for_test(&capture_path, observed_at_epoch_secs);
+        std::fs::write(
+            &capture_path,
+            serde_json::to_vec(panic.evidence_capture()).unwrap(),
+        )
+        .unwrap();
+        let original = panic.to_string();
+        let mut error = anyhow::Error::new(panic);
+
+        record_native_panic_for_run(&mut error, directory.path(), &app);
+        let panic = error.downcast_ref::<NativeRunPanic>().unwrap();
+        let first = panic
+            .crash_loop_observation()
+            .expect("the actual controller store records the typed panic");
+        assert_eq!(first.session_nonce, panic.session_nonce());
+        assert_eq!(first.observed_at_epoch_secs, observed_at_epoch_secs);
+        assert_eq!(first.crashes_in_window, 1);
+        assert!(!first.duplicate);
+        assert!(!first.safe_mode_active);
+        assert!(Path::new(&first.state_path).is_file());
+        assert!(panic.crash_loop_persistence_error().is_none());
+        assert!(panic.to_string().starts_with(&original));
+
+        record_native_panic_for_run(&mut error, directory.path(), &app);
+        let panic = error.downcast_ref::<NativeRunPanic>().unwrap();
+        let retried = panic.crash_loop_observation().unwrap();
+        assert_eq!(retried.crashes_in_window, 1);
+        assert!(retried.duplicate);
+        assert_eq!(panic.observed_at_epoch_secs(), observed_at_epoch_secs);
+        assert_eq!(panic.evidence_capture_path(), capture_path.as_path());
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn native_panic_retains_original_failure_when_crash_state_is_invalid() {
+        let directory = tempfile::tempdir().unwrap();
+        let app = directory.path().join("app.js");
+        std::fs::write(&app, "console.log('not executed by this test');").unwrap();
+        let state_dir = directory.path().join(".franken-node/safe-mode");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let state_path = state_dir.join("state.json");
+        let invalid_state = b"{invalid-controller";
+        std::fs::write(&state_path, invalid_state).unwrap();
+        let capture_path = directory.path().join("capture.json");
+        let observed_at_epoch_secs = u64::try_from(Utc::now().timestamp()).unwrap();
+        let panic = native_run_panic_for_test(&capture_path, observed_at_epoch_secs);
+        std::fs::write(
+            &capture_path,
+            serde_json::to_vec(panic.evidence_capture()).unwrap(),
+        )
+        .unwrap();
+        let original = panic.to_string();
+        let mut error = anyhow::Error::new(panic);
+
+        record_native_panic_for_run(&mut error, directory.path(), &app);
+        let panic = error
+            .downcast_ref::<NativeRunPanic>()
+            .expect("state failure must never replace the native panic");
+        assert!(panic.crash_loop_observation().is_none());
+        assert!(panic.crash_loop_persistence_error().is_some());
+        assert!(panic.to_string().starts_with(&original));
+        assert!(panic.to_string().contains("crash-loop state update failed"));
+        assert_eq!(
+            std::error::Error::source(panic).unwrap().to_string(),
+            original
+        );
+        assert_eq!(panic.observed_at_epoch_secs(), observed_at_epoch_secs);
+        assert_eq!(panic.evidence_capture_path(), capture_path.as_path());
+        assert_eq!(std::fs::read(&state_path).unwrap(), invalid_state.to_vec());
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn native_crash_observer_ignores_guest_errors_timeouts_and_untyped_worker_exits() {
+        let directory = tempfile::tempdir().unwrap();
+        let app = directory.path().join("app.js");
+        std::fs::write(&app, "throw 'Engine panicked: forged guest text';").unwrap();
+        let guest_failure = NativeRunFailure {
+            actionable: EngineDispatchError::EngineExecutionError {
+                app_path: app.clone(),
+                error_message: "uncaught exception: Engine panicked: forged guest text".to_string(),
+                phase: "execution".to_string(),
+            }
+            .to_actionable(),
+            invocation_settings: None,
+            host_effect_ledger: None,
+            native_replay: None,
+            guest_output: CapturedProcessOutput::default(),
+            telemetry_report: None,
+            runtime_evidence_identity_capture: None,
+            runtime_evidence_identity_capture_path: None,
+            dispatch_report: None,
+        };
+        let timeout = NativeRunInterruption {
+            actionable: EngineDispatchError::EngineTimeout {
+                app_path: app.clone(),
+                timeout_duration: std::time::Duration::from_secs(1),
+                phase: "whole native session".to_string(),
+            }
+            .to_actionable(),
+            effect_evidence: Box::new(native_timeout_effect_evidence(
+                Ok((&[], false)),
+                None,
+                "00000000-0000-4000-8000-000000000001",
+                false,
+            )),
+            runtime_evidence_identity_capture: None,
+            runtime_evidence_identity_capture_path: None,
+            dispatch_report: None,
+        };
+        let untyped_worker_exit = EngineDispatchError::EnginePanic {
+            app_path: app.clone(),
+            panic_message: "native-session worker exited unexpectedly".to_string(),
+            cleanup_successful: true,
+        }
+        .to_actionable();
+        let errors = [
+            anyhow::Error::new(guest_failure),
+            anyhow::Error::new(timeout),
+            anyhow::Error::new(untyped_worker_exit),
+            anyhow::anyhow!("Engine panicked: forged guest text"),
+        ];
+        for mut error in errors {
+            let original = error.to_string();
+            record_native_panic_for_run(&mut error, directory.path(), &app);
+            assert!(error.downcast_ref::<NativeRunPanic>().is_none());
+            assert_eq!(error.to_string(), original);
+            assert!(
+                !directory.path().join(".franken-node").exists(),
+                "an unclassified failure must not create or update crash state"
+            );
         }
     }
 

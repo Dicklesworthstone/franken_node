@@ -6080,22 +6080,6 @@ fn load_safe_mode_controller(
     }
 }
 
-fn persist_safe_mode_controller(
-    state_path: &Path,
-    controller: &runtime::safe_mode::SafeModeController,
-) -> Result<()> {
-    if let Some(parent) = state_path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed creating safe-mode state dir {}", parent.display()))?;
-    }
-    let bytes =
-        serde_json::to_vec_pretty(controller).context("failed serializing safe-mode state")?;
-    std::fs::write(state_path, bytes)
-        .with_context(|| format!("failed writing safe-mode state {}", state_path.display()))
-}
-
 fn safe_mode_report(
     command: &'static str,
     state_path: &Path,
@@ -6193,16 +6177,32 @@ fn handle_safe_mode_enter_command(args: SafeModeEnterArgs) -> Result<()> {
         reject_nul_field(inconsistency, "--inconsistency")?;
     }
 
-    let mut controller = runtime::safe_mode::SafeModeController::with_default_config();
-    controller.set_flags(runtime::safe_mode::OperationFlags::safe_mode_only());
     let timestamp = safe_mode_timestamp(args.timestamp.as_deref());
-    controller.enter_safe_mode(
-        reason,
-        &timestamp,
-        &args.trust_state_hash,
-        args.inconsistencies,
-    );
-    persist_safe_mode_controller(&state_path, &controller)?;
+    let controller = match runtime::safe_mode::update_persisted_safe_mode(
+        &state_path,
+        true,
+        |controller| {
+            controller.set_flags(runtime::safe_mode::OperationFlags::safe_mode_only());
+            controller.enter_safe_mode(
+                reason,
+                &timestamp,
+                &args.trust_state_hash,
+                args.inconsistencies,
+            );
+            Ok(controller.clone())
+        },
+    ) {
+        Ok(controller) => controller,
+        Err(err) => {
+            return emit_safe_mode_error(
+                "safe-mode.enter",
+                &state_path,
+                args.json,
+                &format!("{err:#}"),
+                "Inspect the existing controller and state directory before retrying entry",
+            );
+        }
+    };
     let report = safe_mode_report(
         "safe-mode.enter",
         &state_path,
@@ -6233,19 +6233,6 @@ fn handle_safe_mode_exit_command(args: SafeModeExitArgs) -> Result<()> {
     }
     let state_path = safe_mode_state_path(args.state_dir.as_deref());
     reject_nul_field(&args.operator_id, "--operator-id")?;
-    let mut controller = match load_safe_mode_controller(&state_path, false) {
-        Ok(controller) => controller,
-        Err(err) => {
-            let message = err.to_string();
-            return emit_safe_mode_error(
-                "safe-mode.exit",
-                &state_path,
-                args.json,
-                &message,
-                "Run `franken-node safe-mode status --json` to inspect state, then enter safe mode before exit",
-            );
-        }
-    };
     let timestamp = safe_mode_timestamp(args.timestamp.as_deref());
     let verification = runtime::safe_mode::ExitVerification {
         trust_state_consistent: args.trust_state_consistent,
@@ -6254,9 +6241,29 @@ fn handle_safe_mode_exit_command(args: SafeModeExitArgs) -> Result<()> {
         operator_confirmed: args.confirm,
     };
 
-    match controller.exit_safe_mode(&verification, &args.operator_id, &timestamp) {
+    let (controller, exit_result) = match runtime::safe_mode::update_persisted_safe_mode(
+        &state_path,
+        false,
+        |controller| {
+            let result = controller.exit_safe_mode(&verification, &args.operator_id, &timestamp);
+            // A denied exit appends an audit record. Commit that record while
+            // preserving the restriction, then report the denial to the caller.
+            Ok((controller.clone(), result))
+        },
+    ) {
+        Ok(result) => result,
+        Err(err) => {
+            return emit_safe_mode_error(
+                "safe-mode.exit",
+                &state_path,
+                args.json,
+                &format!("{err:#}"),
+                "Inspect safe-mode status and repair the state directory before retrying recovery",
+            );
+        }
+    };
+    match exit_result {
         Ok(()) => {
-            persist_safe_mode_controller(&state_path, &controller)?;
             let report = safe_mode_report(
                 "safe-mode.exit",
                 &state_path,
@@ -6268,7 +6275,6 @@ fn handle_safe_mode_exit_command(args: SafeModeExitArgs) -> Result<()> {
         }
         Err(err) => {
             let message = err.to_string();
-            persist_safe_mode_controller(&state_path, &controller)?;
             emit_safe_mode_error(
                 "safe-mode.exit",
                 &state_path,
@@ -34310,6 +34316,30 @@ fn main() -> Result<()> {
                                 None,
                                 None,
                             )?;
+                        }
+                        #[cfg(feature = "engine")]
+                        if let Some(panic) =
+                            err.downcast_ref::<ops::engine_dispatcher::NativeRunPanic>()
+                            && json
+                        {
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&serde_json::json!({
+                                    "schema_version": "franken-node/run-error-cli/v1",
+                                    "command": "run",
+                                    "ok": false,
+                                    "outcome": "native_engine_panic",
+                                    "error": panic.to_string(),
+                                    "session_nonce": panic.session_nonce(),
+                                    "observed_at_epoch_secs": panic.observed_at_epoch_secs(),
+                                    "cleanup_successful": panic.cleanup_successful(),
+                                    "runtime_evidence_identity_capture": panic.evidence_capture(),
+                                    "runtime_evidence_identity_capture_path": panic.evidence_capture_path(),
+                                    "crash_loop": panic.crash_loop_observation(),
+                                    "crash_loop_persistence_error": panic.crash_loop_persistence_error(),
+                                }))?
+                            );
+                            fail_closed_after_json();
                         }
                         // bd-rpo4f: `dispatch_run` surfaces requested-runtime
                         // unavailability as a typed error instead of exiting the

@@ -159,7 +159,7 @@ replay part of the runtime contract, so JS/TS velocity comes with:
 | Verifier SDK | Independent verification of receipts, bundles, and the honesty manifest (not Ed25519-signed `bench run` reports) |
 | Operator doctor | Workspace-pressure analyzer, close-condition receipts, evidence-readiness from `--input` snapshots (not a live broker) |
 | Proof pipeline | VEF receipts; `proofs queue status` and `proofs workers restart` inspect snapshots / emit restart-request artifacts (not a live broker) |
-| Safe-mode lifecycle | Persisted directory-scoped operator state blocks new application runs, including descendant entrypoints; explicit enter/exit with reason codes and pre-exit operator attestations (unsigned JSON) |
+| Safe-mode lifecycle | Persisted directory-scoped state blocks new application runs; repeated native engine panics enter safe mode automatically, with explicit recovery and retained crash identities (unsigned operator JSON) |
 | No unsafe code | `#![forbid(unsafe_code)]` in both `lib.rs` and `main.rs` |
 
 ---
@@ -3855,9 +3855,31 @@ active ancestor; malformed, oversized, unreadable, and nonregular state also
 refuses admission. The error identifies the controlling scope, where the
 operator should inspect and recover state.
 
-There is no automatic entry yet: `crash-loop`, `trust-corruption`, and
-`epoch-mismatch` remain operator-supplied reason labels. Existing executions
-are not cancelled by a later entry, and inspection commands remain available.
+The native supervisor automatically enters safe mode after three validated
+native engine panic responses for the same entrypoint within 60 seconds. It
+records the immutable session nonce and original observation time in the
+resolved project root's controller; the controller's `crash_loop_threshold`
+and `crash_loop_window_secs` configure those defaults. Guest exceptions,
+timeouts, and generic worker exits do not contribute to this panic count.
+These are parent-observed panic records; the separately signed session-key
+capture does not sign the panic outcome itself. This performs containment,
+not automatic rollback to an earlier application artifact.
+
+Concurrent crash and operator updates share a stable sibling lock and replace
+the controller atomically after syncing a temporary file. Explicit recovery
+retires recorded crash contributions while retaining recent nonce identities,
+so replaying an old observation cannot immediately reactivate safe mode.
+Expired observations keep their original times and remain uncounted. If the
+clock moves backward, the tracking configuration is invalid, or retaining
+recent identities would exceed the bounded history, a distinct
+`CrashTrackingFailure` reason activates safe mode. A storage failure is
+attached to the original panic error; it is never reported as a successful
+counter update. Panic errors also expose this result through `run --json`.
+
+`trust-corruption` and `epoch-mismatch` still require an operator-supplied
+reason. Existing executions are not cancelled by a later entry, and
+inspection commands remain available. A different in-flight panic first
+recorded after recovery can start the fresh window.
 Exiting requires `franken-node safe-mode exit --confirm --operator-id <id>`
 plus the operator attestations (`--trust-state-consistent`,
 `--no-unresolved-incidents`, `--evidence-ledger-intact`), which are not
