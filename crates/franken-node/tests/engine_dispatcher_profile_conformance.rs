@@ -132,18 +132,123 @@ fn run_project_authority_refuses_retargeted_main_after_preflight() {
 #[test]
 #[cfg(feature = "engine")]
 fn process_shape_ambient_grant_is_legacy_risky_only_bd_y30zw() {
-    assert_eq!(
-        EngineDispatcher::map_profile_to_ambient_authority_grant_for_tests(Profile::Strict),
-        AmbientAuthorityGrant::DenyAll
-    );
-    assert_eq!(
-        EngineDispatcher::map_profile_to_ambient_authority_grant_for_tests(Profile::Balanced),
-        AmbientAuthorityGrant::DenyAll
-    );
-    assert_eq!(
-        EngineDispatcher::map_profile_to_ambient_authority_grant_for_tests(Profile::LegacyRisky),
-        AmbientAuthorityGrant::TrustedProcessShape
-    );
+    for (profile, expected) in [
+        (Profile::Strict, AmbientAuthorityGrant::DenyAll),
+        (Profile::Balanced, AmbientAuthorityGrant::DenyAll),
+        (
+            Profile::LegacyRisky,
+            AmbientAuthorityGrant::TrustedProcessShape,
+        ),
+    ] {
+        let config = Config::for_profile(profile);
+        assert_eq!(config.runtime.allow_process_shape, None);
+        assert_eq!(
+            EngineDispatcher::map_config_to_ambient_authority_grant_for_tests(&config),
+            expected,
+            "{profile}: an unset override must preserve the profile default"
+        );
+    }
+}
+
+#[test]
+#[cfg(feature = "engine")]
+fn process_shape_override_changes_only_the_narrow_ambient_grant() {
+    for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+        let original = Config::for_profile(profile);
+        let runtime = EngineDispatcher::map_config_to_runtime_config_for_tests(&original);
+        let orchestrator = EngineDispatcher::map_config_to_orchestrator_config_for_tests(&original);
+        for (enabled, expected) in [
+            (true, AmbientAuthorityGrant::TrustedProcessShape),
+            (false, AmbientAuthorityGrant::DenyAll),
+        ] {
+            let mut configured = original.clone();
+            configured.runtime.allow_process_shape = Some(enabled);
+            assert_eq!(
+                EngineDispatcher::map_config_to_ambient_authority_grant_for_tests(&configured),
+                expected,
+                "{profile}: explicit {enabled} must override the profile default"
+            );
+            assert_eq!(
+                EngineDispatcher::map_config_to_runtime_config_for_tests(&configured),
+                runtime,
+                "{profile}: process metadata cannot change execution budgets or containment"
+            );
+            let mapped = EngineDispatcher::map_config_to_orchestrator_config_for_tests(&configured);
+            assert_eq!(mapped.parser_options, orchestrator.parser_options);
+            assert_eq!(mapped.loss_matrix_preset, orchestrator.loss_matrix_preset);
+            assert_eq!(mapped.epoch, orchestrator.epoch);
+            assert_eq!(mapped.force_lane, orchestrator.force_lane);
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "engine")]
+fn process_shape_replay_refusal_precedes_source_and_worker_resolution() {
+    use frankenengine_node::config::PreferredRuntime;
+
+    for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+        let directory = tempfile::tempdir().expect("empty replay fixture");
+        let mut config = Config::for_profile(profile);
+        config.runtime.allow_process_shape = Some(true);
+        let error = EngineDispatcher::new(None, PreferredRuntime::FrankenEngine)
+            .with_replay_capture(true)
+            .with_native_session_worker_path(directory.path().join("worker-does-not-exist"))
+            .dispatch_run(
+                &directory.path().join("source-does-not-exist.js"),
+                &config,
+                &profile.to_string(),
+                &[],
+                2_000,
+            )
+            .expect_err("unsupported replay authority must refuse before loading any source")
+            .to_string();
+        assert!(
+            error.contains("native replay capture"),
+            "{profile}: {error}"
+        );
+        assert!(
+            error.contains("runtime.allow_process_shape=false"),
+            "{error}"
+        );
+        assert!(
+            error.contains("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE=false"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read_dir(directory.path())
+                .expect("inspect rejected run fixture")
+                .count(),
+            0,
+            "replay refusal must not provision run state, output or worker files"
+        );
+    }
+}
+
+#[test]
+#[cfg(feature = "engine")]
+fn explicit_process_shape_denial_keeps_strict_and_balanced_replay_admissible() {
+    use frankenengine_node::config::PreferredRuntime;
+
+    for profile in [Profile::Strict, Profile::Balanced] {
+        let directory = tempfile::tempdir().expect("empty replay fixture");
+        let mut config = Config::for_profile(profile);
+        config.runtime.allow_process_shape = Some(false);
+        let error = EngineDispatcher::new(None, PreferredRuntime::FrankenEngine)
+            .with_replay_capture(true)
+            .with_native_session_worker_path(directory.path().join("worker-does-not-exist"))
+            .dispatch_run(
+                &directory.path().join("source-does-not-exist.js"),
+                &config,
+                &profile.to_string(),
+                &[],
+                2_000,
+            )
+            .expect_err("ordinary target resolution should follow successful replay admission")
+            .to_string();
+        assert!(error.contains("resolve run target"), "{profile}: {error}");
+        assert!(!error.contains("native replay capture"), "{error}");
+    }
 }
 
 #[test]

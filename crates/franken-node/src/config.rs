@@ -1421,6 +1421,14 @@ impl Config {
                     MAX_MERGE_DECISIONS,
                 );
             }
+            if let Some(value) = section.allow_process_shape {
+                self.runtime.allow_process_shape = Some(value);
+                push_bounded(
+                    decisions,
+                    MergeDecision::new(stage.clone(), "runtime.allow_process_shape", value),
+                    MAX_MERGE_DECISIONS,
+                );
+            }
             if let Some(value) = section.max_instructions {
                 self.runtime.max_instructions = Some(value);
                 push_bounded(
@@ -2067,6 +2075,15 @@ impl Config {
             push_bounded(
                 decisions,
                 MergeDecision::new(MergeStage::Env, "runtime.drain_timeout_ms", parsed),
+                MAX_MERGE_DECISIONS,
+            );
+        }
+        if let Some(raw) = env_lookup("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE") {
+            let parsed = parse_env_bool("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE", &raw)?;
+            self.runtime.allow_process_shape = Some(parsed);
+            push_bounded(
+                decisions,
+                MergeDecision::new(MergeStage::Env, "runtime.allow_process_shape", parsed),
                 MAX_MERGE_DECISIONS,
             );
         }
@@ -3258,6 +3275,7 @@ struct RuntimeOverrides {
     pub bulkhead_retry_after_ms: Option<u64>,
     pub lanes: Option<BTreeMap<String, RuntimeLaneOverrides>>,
     pub drain_timeout_ms: Option<u64>,
+    pub allow_process_shape: Option<bool>,
     pub max_instructions: Option<u64>,
     pub max_registers: Option<u32>,
     pub max_call_depth: Option<usize>,
@@ -4005,6 +4023,15 @@ pub struct RuntimeConfig {
     /// When `None`, consumers use `timeouts::RUNTIME_DRAIN_TIMEOUT_MS`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drain_timeout_ms: Option<u64>,
+    /// Explicit lowering-time permission for allowlisted process metadata
+    /// reads in the native entrypoint (for example `process.argv` and
+    /// `process.platform`). This grants no environment values, filesystem,
+    /// network, or child-process authority. Imported modules still apply the
+    /// engine's independent lowering policy. `None` preserves the profile
+    /// default: denied for strict/balanced, allowed for legacy-risky.
+    /// Native replay capture cannot record this ambient process state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_process_shape: Option<bool>,
     /// Instruction budget for one `run` of guest code in the native engine,
     /// replacing the profile's default (strict 200M, balanced 1B,
     /// legacy-risky 5B). The wall-clock timeout still applies.
@@ -4062,6 +4089,14 @@ pub struct RuntimeParseBudget {
 }
 
 impl RuntimeConfig {
+    /// Resolve the narrow process-metadata grant without changing any other
+    /// profile permission. Explicit false also tightens legacy-risky.
+    #[must_use]
+    pub fn allows_process_shape(&self, profile: Profile) -> bool {
+        self.allow_process_shape
+            .unwrap_or(profile == Profile::LegacyRisky)
+    }
+
     /// Effective per-lane instruction ceiling, shared by native execution and
     /// fleet-policy intersection so a fleet restriction cannot raise a tighter
     /// implicit profile budget when profile defaults change.
@@ -4226,6 +4261,7 @@ impl RuntimeConfig {
                 RuntimeLaneConfig::new(4, 20, 32, 100, LaneOverflowPolicy::ShedOldest),
             ),
             drain_timeout_ms: None,
+            allow_process_shape: None,
             max_instructions: None,
             max_registers: None,
             max_call_depth: None,
@@ -4261,6 +4297,7 @@ impl RuntimeConfig {
                 RuntimeLaneConfig::new(8, 20, 64, 100, LaneOverflowPolicy::ShedOldest),
             ),
             drain_timeout_ms: None,
+            allow_process_shape: None,
             max_instructions: None,
             max_registers: None,
             max_call_depth: None,
@@ -4296,6 +4333,7 @@ impl RuntimeConfig {
                 RuntimeLaneConfig::new(16, 20, 128, 100, LaneOverflowPolicy::ShedOldest),
             ),
             drain_timeout_ms: None,
+            allow_process_shape: None,
             max_instructions: None,
             max_registers: None,
             max_call_depth: None,
@@ -6445,6 +6483,122 @@ registry_signing_key = "x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c="
                 "runtime.remote_max_in_flight",
                 "runtime.bulkhead_retry_after_ms"
             ]
+        );
+    }
+
+    #[test]
+    fn process_shape_permission_preserves_defaults_and_allows_explicit_tightening() {
+        for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+            let mut config = Config::for_profile(profile);
+            assert_eq!(config.runtime.allow_process_shape, None);
+            assert_eq!(
+                config.runtime.allows_process_shape(profile),
+                profile == Profile::LegacyRisky,
+            );
+            let historical = serde_json::to_value(&config.runtime).expect("runtime JSON");
+            assert!(historical.get("allow_process_shape").is_none());
+            let decoded: RuntimeConfig = serde_json::from_value(historical).expect("old runtime");
+            assert_eq!(decoded.allow_process_shape, None);
+
+            for allowed in [false, true] {
+                config.runtime.allow_process_shape = Some(allowed);
+                assert_eq!(config.runtime.allows_process_shape(profile), allowed);
+                let decoded: RuntimeConfig = serde_json::from_str(
+                    &serde_json::to_string(&config.runtime).expect("serialize runtime"),
+                )
+                .expect("deserialize runtime");
+                assert_eq!(decoded.allow_process_shape, Some(allowed));
+                assert_eq!(decoded.allows_process_shape(profile), allowed);
+            }
+        }
+    }
+
+    #[test]
+    fn process_shape_permission_resolves_profile_and_environment_with_provenance() {
+        let (_dir, path) = security_baseline_file();
+        let baseline = std::fs::read_to_string(&path).expect("baseline config");
+        for (base_value, profile_value) in [(true, false), (false, true)] {
+            std::fs::write(
+                &path,
+                format!(
+                    "{baseline}\n[runtime]\nallow_process_shape = {base_value}\n\
+                     [profiles.balanced.runtime]\nallow_process_shape = {profile_value}\n",
+                ),
+            )
+            .expect("write permission config");
+            let from_profile = Config::resolve_with_env(
+                Some(&path),
+                CliOverrides::default(),
+                &map_lookup(BTreeMap::new()),
+            )
+            .expect("profile permission");
+            assert_eq!(
+                from_profile.config.runtime.allow_process_shape,
+                Some(profile_value),
+            );
+            assert!(from_profile.decisions.iter().any(|decision| {
+                decision.field == "runtime.allow_process_shape"
+                    && decision.stage == MergeStage::Profile
+            }));
+
+            let from_env = Config::resolve_with_env(
+                Some(&path),
+                CliOverrides::default(),
+                &map_lookup(BTreeMap::from([(
+                    "FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE".to_string(),
+                    base_value.to_string(),
+                )])),
+            )
+            .expect("environment permission");
+            assert_eq!(
+                from_env.config.runtime.allow_process_shape,
+                Some(base_value)
+            );
+            assert_eq!(
+                from_env
+                    .config
+                    .runtime
+                    .allows_process_shape(Profile::Balanced),
+                base_value,
+            );
+            assert!(from_env.decisions.iter().any(|decision| {
+                decision.field == "runtime.allow_process_shape" && decision.stage == MergeStage::Env
+            }));
+        }
+    }
+
+    #[test]
+    fn process_shape_permission_rejects_malformed_configuration() {
+        let (_dir, path) = security_baseline_file();
+        for raw in ["", "truthy", "2", "false; true"] {
+            let error = Config::resolve_with_env(
+                Some(&path),
+                CliOverrides::default(),
+                &map_lookup(BTreeMap::from([(
+                    "FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE".to_string(),
+                    raw.to_string(),
+                )])),
+            )
+            .expect_err("permission needs a boolean")
+            .to_string();
+            assert!(
+                error.contains("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE"),
+                "{error}"
+            );
+        }
+        let baseline = std::fs::read_to_string(&path).expect("baseline config");
+        std::fs::write(
+            &path,
+            format!("{baseline}\n[runtime]\nallow_process_shape = \"true\"\n"),
+        )
+        .expect("write invalid type");
+        assert!(
+            Config::resolve_with_env(
+                Some(&path),
+                CliOverrides::default(),
+                &map_lookup(BTreeMap::new()),
+            )
+            .is_err()
         );
     }
 

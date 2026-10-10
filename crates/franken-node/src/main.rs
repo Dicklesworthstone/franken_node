@@ -875,6 +875,10 @@ struct RunExecutionReceiptCore {
     /// Effective entrypoint/import parser limits for a completed native run.
     #[serde(skip_serializing_if = "Option::is_none")]
     parser_budget: Option<config::RuntimeParseBudget>,
+    /// Exact ProcessShapeRead grant reported by the completed native run.
+    /// Missing historical/failed decisions do not imply a denied grant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    process_shape_read_allowed: Option<bool>,
     /// Effective execution limits and selected lane for a completed native run.
     #[serde(skip_serializing_if = "Option::is_none")]
     execution_limits: Option<ops::engine_dispatcher::EngineExecutionLimitsReport>,
@@ -8654,6 +8658,10 @@ fn build_run_execution_receipt(
             .engine_decision
             .as_ref()
             .map(|decision| decision.parser_budget),
+        process_shape_read_allowed: dispatch
+            .engine_decision
+            .as_ref()
+            .and_then(|decision| decision.process_shape_read_allowed),
         execution_limits: dispatch
             .engine_decision
             .as_ref()
@@ -36853,6 +36861,7 @@ mod run_trust_gate_tests {
             runtime_used: "franken_engine".to_string(),
             runtime_version: None,
             parser_budget: None,
+            process_shape_read_allowed: None,
             execution_limits: None,
             native_replay_payload_sha256: None,
             preflight_verdict: PreFlightVerdict::Passed {
@@ -36869,6 +36878,22 @@ mod run_trust_gate_tests {
             sentinel_enforcement: None,
             incident_capture: None,
         }
+    }
+
+    #[test]
+    fn process_shape_grant_is_bound_to_run_receipt_hash_and_identity() {
+        let mut core = sample_failed_run_receipt_core();
+        let mut hashes = BTreeSet::new();
+        let mut ids = BTreeSet::new();
+        for grant in [None, Some(false), Some(true)] {
+            core.process_shape_read_allowed = grant;
+            hashes.insert(compute_run_execution_receipt_hash(&core).expect("receipt hash"));
+            ids.insert(deterministic_run_execution_receipt_id(
+                &compute_run_execution_receipt_seed_hash(&core).expect("receipt seed"),
+            ));
+        }
+        assert_eq!(hashes.len(), 3, "unknown, denied, and allowed are distinct");
+        assert_eq!(ids.len(), 3, "grant changes cannot reuse a run identity");
     }
 
     #[test]

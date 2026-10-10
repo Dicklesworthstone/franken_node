@@ -102,6 +102,15 @@ fn run_app_with_policy(
     policy: &str,
     extra_args: &[&str],
 ) -> (tempfile::TempDir, RunOutcome) {
+    run_app_with_policy_and_env(app_src, policy, extra_args, &[])
+}
+
+fn run_app_with_policy_and_env(
+    app_src: &str,
+    policy: &str,
+    extra_args: &[&str],
+    environment: &[(&str, &str)],
+) -> (tempfile::TempDir, RunOutcome) {
     let dir = tempfile::TempDir::new().expect("tempdir");
     std::fs::write(dir.path().join("app.js"), app_src).expect("write fixture app");
 
@@ -111,6 +120,7 @@ fn run_app_with_policy(
     // `security.authorized_api_keys`) so `run` passes config validation.
     let init = Command::new(franken_node_bin())
         .args(["init", "--profile", "balanced", "--out-dir", "."])
+        .env_remove("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE")
         .current_dir(dir.path())
         .output()
         .expect("spawn franken-node init");
@@ -145,6 +155,8 @@ fn run_app_with_policy(
     for arg in extra_args {
         cmd.arg(arg);
     }
+    cmd.env_remove("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE");
+    cmd.envs(environment.iter().copied());
     cmd.current_dir(dir.path());
     let output = cmd.output().expect("spawn franken-node run");
     let outcome = RunOutcome {
@@ -2034,6 +2046,102 @@ fn app_args_reach_process_argv_where_the_profile_allows_it_bd_my9hk() {
         "stderr=\n{}",
         balanced.stderr
     );
+}
+
+#[test]
+fn process_shape_opt_in_runs_entrypoint_arguments_and_binds_the_grant_to_receipts() {
+    const APP: &str = "console.log(process.argv.slice(2).join(\",\"));\n\
+        console.log(typeof process.platform);\n";
+    for policy in ["strict", "balanced"] {
+        let (dir, outcome) = run_app_with_policy_and_env(
+            APP,
+            policy,
+            &["--json", "--", "alpha", "beta"],
+            &[("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE", "true")],
+        );
+        assert_eq!(outcome.exit_code, Some(0), "{policy}: {}", outcome.stderr);
+        let report: Value = serde_json::from_str(&outcome.stdout).expect("run JSON");
+        assert_eq!(
+            report["dispatch"]["captured_output"]["stdout"],
+            "alpha,beta\nstring\n"
+        );
+        assert_eq!(
+            report["dispatch"]["engine_decision"]["process_shape_read_allowed"],
+            true,
+        );
+        assert_eq!(report["receipt"]["process_shape_read_allowed"], true);
+        let receipt_path = report["receipt_path"].as_str().expect("receipt path");
+        let persisted: Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join(receipt_path)).expect("read persisted receipt"),
+        )
+        .expect("persisted receipt JSON");
+        assert_eq!(persisted["process_shape_read_allowed"], true);
+        assert_eq!(persisted["receipt_hash"], report["receipt"]["receipt_hash"]);
+    }
+
+    let (_dir, denied) = run_app_with_policy_and_env(
+        APP,
+        "legacy-risky",
+        &["--console-only", "--", "alpha", "beta"],
+        &[("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE", "false")],
+    );
+    assert_ne!(denied.exit_code, Some(0));
+    assert!(
+        denied.stderr.contains("ambient authority violation"),
+        "{}",
+        denied.stderr
+    );
+
+    let (_dir, ordinary) = run_app("console.log('ordinary');\n", &["--json"]);
+    assert_eq!(ordinary.exit_code, Some(0), "{}", ordinary.stderr);
+    let report: Value = serde_json::from_str(&ordinary.stdout).expect("ordinary run JSON");
+    assert_eq!(report["receipt"]["process_shape_read_allowed"], false);
+}
+
+#[test]
+fn process_shape_opt_in_keeps_environment_aliases_and_computed_access_denied() {
+    for source in [
+        "console.log(process.env.PATH);\n",
+        "const raw = process; console.log(raw.argv);\n",
+        "console.log(process['argv']);\n",
+    ] {
+        let (_dir, outcome) = run_app_with_policy_and_env(
+            source,
+            "balanced",
+            &["--console-only"],
+            &[("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE", "true")],
+        );
+        assert_ne!(
+            outcome.exit_code,
+            Some(0),
+            "source={source}: {}",
+            outcome.stdout
+        );
+        assert!(
+            outcome.stderr.contains("ambient authority violation"),
+            "source={source}: {}",
+            outcome.stderr,
+        );
+    }
+}
+
+#[test]
+fn replay_capture_refuses_process_shape_opt_in_before_executing_guest_code() {
+    for policy in ["strict", "balanced"] {
+        let (_dir, outcome) = run_app_with_policy_and_env(
+            "console.log('guest-must-not-execute');\n",
+            policy,
+            &["--capture-replay", "--console-only"],
+            &[("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE", "true")],
+        );
+        assert_ne!(outcome.exit_code, Some(0), "{policy}: {}", outcome.stdout);
+        assert!(!outcome.stdout.contains("guest-must-not-execute"));
+        assert!(
+            outcome.stderr.contains("runtime.allow_process_shape=false"),
+            "{policy}: {}",
+            outcome.stderr,
+        );
+    }
 }
 
 /// A program's whole console output reaches the operator. 1,500 lines used to

@@ -1152,6 +1152,13 @@ preferred = "auto"
 remote_max_in_flight = 50
 # Retry hint when bulkhead is saturated
 bulkhead_retry_after_ms = 50
+# Optional static process metadata reads in native entrypoint code, including
+# supplied process.argv values and process.platform. Omitted: denied in
+# strict/balanced, allowed in legacy-risky. Explicit false denies every profile.
+# allow_process_shape = true
+# Also FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE; environment overrides TOML.
+# This is incompatible with --capture-replay and does not grant environment
+# values, filesystem access, network access, or child-process spawning.
 # Instruction budget for one `run` in the native engine (optional; default
 # strict 200M, balanced 1B, legacy-risky 5B). Also
 # FRANKEN_NODE_RUNTIME_MAX_INSTRUCTIONS. The wall-clock timeout still applies.
@@ -2256,6 +2263,7 @@ convention. The most common:
 |---|---|---|
 | `FRANKEN_NODE_PROFILE` | `profile` | `strict`, `balanced`, or `legacy-risky` |
 | `FRANKEN_NODE_RUNTIME_PREFERRED` | `runtime.preferred` | `auto`, `node`, `bun`, or `franken-engine` |
+| `FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE` | `runtime.allow_process_shape` | Explicit `true`/`false` for static process metadata reads in the native entrypoint; omitted values retain the profile default; replay capture refuses an enabled grant |
 | `FRANKEN_NODE_RUNTIME_MAX_INSTRUCTIONS` | `runtime.max_instructions` | Instruction budget for one `run` (> 0); replaces the profile default |
 | `FRANKEN_NODE_RUNTIME_MAX_REGISTERS` | `runtime.max_registers` | Registers per call frame on both native lanes (1–65,536); replaces profile defaults |
 | `FRANKEN_NODE_RUNTIME_MAX_CALL_DEPTH` | `runtime.max_call_depth` | Guest call depth on both native lanes (1–10,000); replaces the profile default |
@@ -3312,7 +3320,7 @@ Profile selection changes concrete behavior. The salient differences:
 | `registry.require_provenance` | required | required | may be relaxed |
 | Compatibility mode | tightest | balanced | permissive |
 | Guest file writes (`fs.writeFileSync` and friends; confined to the project root) | denied | denied | allowed |
-| `process.platform`, `process.arch` and other allowlisted `process` shape reads | denied | denied | allowed |
+| Allowlisted process metadata reads in native entrypoint code (`process.argv`, `process.platform`) | denied unless `runtime.allow_process_shape=true` | denied unless `runtime.allow_process_shape=true` | allowed unless `runtime.allow_process_shape=false` |
 | `process.env` reads | denied | denied | denied (no profile grants them yet) |
 | Pure builtins (JSON, Error, Number, `path` string operations) | allowed | allowed | allowed |
 | Compatibility corpus pass rate (560 cases, 2026-09-26, same binary, back to back) | 70.71%: the same as balanced except `http` 3/50, since strict grants no network egress | 78.93% (fs 2/50) | 86.61% |
@@ -3323,6 +3331,28 @@ Profile selection changes concrete behavior. The salient differences:
 The profile string is canonicalized at load time and recorded in every
 decision receipt; replays under a different profile produce a
 counterfactual diff, not a bug.
+
+For entrypoint scripts that need their arguments while retaining balanced
+policy, set `[runtime] allow_process_shape = true` or run:
+
+```bash
+FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE=true franken-node run app.js -- alpha beta
+```
+
+The grant permits the engine's statically allowlisted process metadata,
+including the actual supplied argument strings. Raw or aliased `process`,
+computed property access, and environment values remain refused. It does not
+add filesystem, network, or spawn capabilities. The current engine provides
+`argv`, `platform`, and a synthetic `pid`; other allowlisted field names may
+still be unpopulated. Required/imported modules use their independent engine
+lowering policy and do not inherit this entrypoint grant.
+
+Completed native decisions and persisted run receipts record
+`process_shape_read_allowed` as `true` or `false`. Its absence in historical
+or failed-run evidence means the grant was not reported. Native replay capture
+refuses an enabled grant before guest execution because ambient process state
+is not a complete replay input; use strict/balanced with
+`runtime.allow_process_shape=false` to capture replay.
 
 ---
 

@@ -3362,6 +3362,10 @@ pub struct EngineContainmentDecision {
     /// Parser limits applied to the entrypoint and every imported module.
     /// Captured from the same resolved configuration handed to the engine.
     pub parser_budget: RuntimeParseBudget,
+    /// Whether the native entrypoint received the engine's narrow
+    /// ProcessShapeRead grant. Absent in historical decisions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_shape_read_allowed: Option<bool>,
     /// Resolved native execution limits on both lanes, from the configuration
     /// actually handed to the engine. Absent in older serialized decisions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4834,6 +4838,7 @@ fn engine_containment_decision(
     result: &frankenengine_engine::execution_orchestrator::OrchestratorResult,
     parser_budget: RuntimeParseBudget,
     execution_limits: EngineExecutionLimitsReport,
+    ambient_authority_grant: AmbientAuthorityGrant,
 ) -> EngineContainmentDecision {
     let stopping = result.optimal_stopping_certificate.as_ref();
     let security_entry = result.evidence_entries.iter().find(|entry| {
@@ -4857,6 +4862,9 @@ fn engine_containment_decision(
         decision_rationale: security_entry.map(|entry| entry.chosen_action.rationale.clone()),
         instructions_executed: result.instructions_executed,
         parser_budget,
+        process_shape_read_allowed: Some(
+            ambient_authority_grant == AmbientAuthorityGrant::TrustedProcessShape,
+        ),
         execution_limits: Some(execution_limits.with_selected_lane(result.lane)),
     }
 }
@@ -5533,10 +5541,11 @@ impl EngineDispatcher {
 
         if self.capture_replay
             && (config.profile == Profile::LegacyRisky
+                || config.runtime.allows_process_shape(config.profile)
                 || config.security.child_process_spawn.is_some())
         {
             anyhow::bail!(
-                "native replay capture requires strict or balanced policy without process-spawn authority; ambient process state and child processes are not replay inputs"
+                "native replay capture requires strict or balanced policy without process-shape or process-spawn authority; set runtime.allow_process_shape=false (FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE=false) and remove child-process authority because ambient process state and child processes are not replay inputs"
             );
         }
 
@@ -8603,10 +8612,12 @@ impl EngineDispatcher {
         // Neither ambient process authority nor process effects have a complete
         // replay input protocol yet.
         if capture_replay
-            && (config.profile == Profile::LegacyRisky || process_spawn_admission.is_some())
+            && (config.profile == Profile::LegacyRisky
+                || config.runtime.allows_process_shape(config.profile)
+                || process_spawn_admission.is_some())
         {
             return Err(native_engine_spawn_error_with_telemetry_cleanup(
-                "Native replay capture does not support ambient process or child-process authority"
+                "Native replay capture does not support ambient process or child-process authority; disable runtime.allow_process_shape for capture"
                     .to_string(),
                 &mut telemetry_guard,
             ));
@@ -8702,7 +8713,7 @@ impl EngineDispatcher {
         let execution_limits =
             EngineExecutionLimitsReport::from_execution_config(&runtime_config.execution);
 
-        let ambient_authority_grant = Self::map_profile_to_ambient_authority_grant(config.profile);
+        let ambient_authority_grant = Self::map_config_to_ambient_authority_grant(config);
         let expected_evidence_identity = evidence_authority.verification_identity();
         let host_effect_ledger_authority = evidence_authority.clone();
         let host_effect_ledger_epoch = security_epoch_for_profile(config.profile);
@@ -8723,7 +8734,7 @@ impl EngineDispatcher {
         orchestrator.set_cancellation_token(cancellation.token().clone());
         // `process.argv` as Node reports it: the runtime, the script's absolute
         // path, then the program's own arguments (bd-my9hk). Whether the
-        // program may read it is still the profile's ambient grant (bd-y30zw).
+        // program may read it follows the resolved, explicit ambient grant.
         let mut process_argv = Vec::with_capacity(app_args.len().saturating_add(2));
         process_argv.push(std::env::current_exe().map_or_else(
             |_| "franken-node".to_string(),
@@ -9083,8 +9094,12 @@ impl EngineDispatcher {
             stdout,
             stderr,
         };
-        let engine_decision =
-            engine_containment_decision(&execution_result, parser_budget, execution_limits);
+        let engine_decision = engine_containment_decision(
+            &execution_result,
+            parser_budget,
+            execution_limits,
+            ambient_authority_grant,
+        );
 
         // Stop telemetry and return
         let telemetry_guard = telemetry_guard.take().ok_or_else(|| {
@@ -9870,19 +9885,20 @@ impl EngineDispatcher {
     }
 
     #[cfg(feature = "engine")]
-    fn map_profile_to_ambient_authority_grant(profile: Profile) -> AmbientAuthorityGrant {
-        match profile {
-            Profile::LegacyRisky => AmbientAuthorityGrant::TrustedProcessShape,
-            Profile::Strict | Profile::Balanced => AmbientAuthorityGrant::DenyAll,
+    fn map_config_to_ambient_authority_grant(config: &Config) -> AmbientAuthorityGrant {
+        if config.runtime.allows_process_shape(config.profile) {
+            AmbientAuthorityGrant::TrustedProcessShape
+        } else {
+            AmbientAuthorityGrant::DenyAll
         }
     }
 
-    /// Test helper: expose the resolved profile's lowering-time ambient grant.
+    /// Test helper: expose the resolved configuration's lowering-time grant.
     #[cfg(feature = "engine")]
-    pub fn map_profile_to_ambient_authority_grant_for_tests(
-        profile: Profile,
+    pub fn map_config_to_ambient_authority_grant_for_tests(
+        config: &Config,
     ) -> AmbientAuthorityGrant {
-        Self::map_profile_to_ambient_authority_grant(profile)
+        Self::map_config_to_ambient_authority_grant(config)
     }
 
     /// Test helper: get validated capabilities for profile (enforces trust boundary)
