@@ -2627,18 +2627,21 @@ struct RunPackageManifest {
 }
 
 /// Open through retained directory descriptors. Checking a canonical path and
-/// subsequently opening it would allow a replaced parent or manifest symlink
-/// to redirect a privileged preflight read. NONBLOCK also prevents a FIFO from
-/// hanging the preflight before its file type can be inspected.
+/// subsequently opening it would allow a replaced parent or file symlink to
+/// redirect a privileged read. NONBLOCK also prevents a FIFO from hanging the
+/// worker before its file type can be inspected.
 #[cfg(unix)]
-fn open_run_package_manifest(directory: &Path) -> io::Result<Option<std::fs::File>> {
+fn open_run_project_file(
+    directory: &Path,
+    name: &std::ffi::OsStr,
+) -> io::Result<Option<std::fs::File>> {
     use rustix::fs::{Mode, OFlags, open, openat};
     use std::path::Component;
 
     if !directory.is_absolute() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "package directory must be canonical and absolute",
+            "project file directory must be canonical and absolute",
         ));
     }
     let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
@@ -2653,14 +2656,14 @@ fn open_run_package_manifest(directory: &Path) -> io::Result<Option<std::fs::Fil
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "package directory must not contain traversal components",
+                    "project file directory must not contain traversal components",
                 ));
             }
         }
     }
     match openat(
         &descriptor,
-        "package.json",
+        name,
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     ) {
@@ -2671,17 +2674,20 @@ fn open_run_package_manifest(directory: &Path) -> io::Result<Option<std::fs::Fil
 }
 
 #[cfg(not(unix))]
-fn open_run_package_manifest(directory: &Path) -> io::Result<Option<std::fs::File>> {
+fn open_run_project_file(
+    directory: &Path,
+    name: &std::ffi::OsStr,
+) -> io::Result<Option<std::fs::File>> {
     // The canonical authority is checked again on the authenticated worker.
     // Reject metadata links rather than allowing them to choose another scope.
-    let path = directory.join("package.json");
+    let path = directory.join(name);
     match std::fs::symlink_metadata(&path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
         Ok(metadata) if !metadata.is_file() || metadata.is_symlink() => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "package manifest must be a regular file, not a symlink",
+                "project input must be a regular file, not a symlink",
             ));
         }
         Ok(_) => {}
@@ -2689,7 +2695,7 @@ fn open_run_package_manifest(directory: &Path) -> io::Result<Option<std::fs::Fil
     if directory.canonicalize()? != directory {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "package directory changed after authority resolution",
+            "project file directory changed after authority resolution",
         ));
     }
     std::fs::File::open(path).map(Some)
@@ -2717,13 +2723,14 @@ fn read_run_package_manifest(
         return Ok(Some(manifest.clone()));
     }
     let path = directory.join("package.json");
-    let Some(file) = open_run_package_manifest(directory).map_err(|error| {
-        format!(
-            "Failed to open package manifest {} inside the selected project; \
+    let Some(file) = open_run_project_file(directory, std::ffi::OsStr::new("package.json"))
+        .map_err(|error| {
+            format!(
+                "Failed to open package manifest {} inside the selected project; \
              metadata symlinks and nonregular files are not allowed: {error}",
-            path.display()
-        )
-    })?
+                path.display()
+            )
+        })?
     else {
         return Ok(None);
     };
@@ -4857,16 +4864,46 @@ fn engine_containment_decision(
 /// Enforce the source-byte budget before allocating the complete entrypoint.
 /// Reading one extra byte detects files that grow after open without trusting
 /// metadata or allowing an unbounded read before the parser checks its budget.
+/// On Unix, retained directory descriptors and no-follow opens prevent the
+/// project from redirecting this read through a replaced entrypoint or ancestor
+/// symlink after the worker's authority recheck. Other platforms retain the
+/// existing link/canonical-path prechecks, without that atomic-open guarantee.
 #[cfg(feature = "engine")]
 fn read_native_entry_source(path: &Path, max_source_bytes: u64) -> Result<String, String> {
-    let source_file = std::fs::File::open(path).map_err(|error| {
+    let directory = path.parent().ok_or_else(|| {
         format!(
-            "Failed to open application source at {}: {error}",
+            "Application source at {} has no parent directory",
             path.display()
         )
     })?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| format!("Application source at {} has no filename", path.display()))?;
+    let source_file = open_run_project_file(directory, name)
+        .and_then(|file| {
+            file.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "source file is missing"))
+        })
+        .map_err(|error| {
+            format!(
+                "Failed to open application source at {} inside the selected project; \
+                 source and ancestor symlinks are not allowed after authority resolution: {error}",
+                path.display()
+            )
+        })?;
+    let before = source_file.metadata().map_err(|error| {
+        format!(
+            "Failed to inspect application source at {}: {error}",
+            path.display()
+        )
+    })?;
+    if !before.is_file() {
+        return Err(format!(
+            "Application source at {} must be a regular file",
+            path.display()
+        ));
+    }
     let mut bytes = Vec::new();
-    source_file
+    (&source_file)
         .take(max_source_bytes.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|error| {
@@ -4882,6 +4919,33 @@ fn read_native_entry_source(path: &Path, max_source_bytes: u64) -> Result<String
              within the supported limit of {} bytes",
             path.display(),
             crate::config::MAX_PARSE_SOURCE_BYTES,
+        ));
+    }
+    let after = source_file.metadata().map_err(|error| {
+        format!(
+            "Failed to recheck application source at {}: {error}",
+            path.display()
+        )
+    })?;
+    #[cfg(unix)]
+    let identity_changed = {
+        use std::os::unix::fs::MetadataExt;
+
+        before.dev() != after.dev()
+            || before.ino() != after.ino()
+            || before.ctime() != after.ctime()
+            || before.ctime_nsec() != after.ctime_nsec()
+    };
+    #[cfg(not(unix))]
+    let identity_changed = false;
+    if before.len() != after.len()
+        || before.modified().ok() != after.modified().ok()
+        || before.len() != u64::try_from(bytes.len()).unwrap_or(u64::MAX)
+        || identity_changed
+    {
+        return Err(format!(
+            "Application source at {} changed while it was being read",
+            path.display()
         ));
     }
     String::from_utf8(bytes).map_err(|error| {
@@ -9851,7 +9915,11 @@ mod tests {
     #[test]
     fn native_entry_source_budget_accepts_exact_bytes_and_rejects_overflow() {
         let directory = tempfile::tempdir().expect("source budget directory");
-        let path = directory.path().join("entry.js");
+        let path = directory
+            .path()
+            .canonicalize()
+            .expect("canonical source directory")
+            .join("entry.js");
         let source = "console.log('é');";
         std::fs::write(&path, source).expect("write UTF-8 source");
         let budget = u64::try_from(source.len()).expect("source length");
@@ -9877,7 +9945,11 @@ mod tests {
     #[test]
     fn native_entry_source_budget_preserves_utf8_and_io_errors() {
         let directory = tempfile::tempdir().expect("source error directory");
-        let path = directory.path().join("entry.js");
+        let path = directory
+            .path()
+            .canonicalize()
+            .expect("canonical source directory")
+            .join("entry.js");
         assert!(
             read_native_entry_source(&path, 32)
                 .expect_err("missing source")
@@ -9891,6 +9963,116 @@ mod tests {
         );
         std::fs::write(&path, []).expect("write empty source");
         assert_eq!(read_native_entry_source(&path, 32).expect("empty read"), "");
+    }
+
+    #[cfg(all(feature = "engine", unix))]
+    #[test]
+    fn native_entry_source_refuses_a_symlink_swap_after_authority_resolution() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("source authority directory");
+        let project = directory.path().join("project");
+        std::fs::create_dir(&project).expect("create project");
+        let entry = project.join("entry.js");
+        std::fs::write(&entry, "console.log('selected');").expect("write selected source");
+        let outside = directory.path().join("outside.js");
+        std::fs::write(&outside, "console.log('outside authority');")
+            .expect("write outside source");
+        let selected =
+            RunProjectPaths::resolve(&entry, directory.path()).expect("resolve initial authority");
+
+        std::fs::rename(&entry, project.join("original.js")).expect("retain original source");
+        symlink(&outside, &entry).expect("replace selected entry with a symlink");
+
+        let error = read_native_entry_source(selected.entrypoint(), 1024)
+            .expect_err("changed entry cannot redirect a privileged source read");
+        assert!(
+            error.contains("Failed to open application source"),
+            "{error}"
+        );
+        assert!(error.contains("symlinks are not allowed"), "{error}");
+    }
+
+    #[cfg(all(feature = "engine", unix))]
+    #[test]
+    fn native_entry_source_refuses_an_ancestor_swap_after_authority_resolution() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("source ancestor directory");
+        let project = directory.path().join("project");
+        let source_dir = project.join("src");
+        std::fs::create_dir_all(&source_dir).expect("create source directory");
+        let entry = source_dir.join("entry.js");
+        std::fs::write(&entry, "console.log('selected');").expect("write selected source");
+        let outside = directory.path().join("outside");
+        std::fs::create_dir(&outside).expect("create outside directory");
+        std::fs::write(
+            outside.join("entry.js"),
+            "console.log('outside authority');",
+        )
+        .expect("write outside source");
+        let selected =
+            RunProjectPaths::resolve(&entry, directory.path()).expect("resolve initial authority");
+
+        std::fs::rename(&source_dir, project.join("original-src"))
+            .expect("retain selected directory");
+        symlink(&outside, &source_dir).expect("replace source directory with a symlink");
+
+        let error = read_native_entry_source(selected.entrypoint(), 1024)
+            .expect_err("changed ancestor cannot redirect a privileged source read");
+        assert!(
+            error.contains("Failed to open application source"),
+            "{error}"
+        );
+        assert!(error.contains("symlinks are not allowed"), "{error}");
+    }
+
+    #[cfg(all(feature = "engine", unix))]
+    #[test]
+    fn native_entry_source_refuses_nonregular_files_without_waiting_for_a_writer() {
+        use rustix::fs::{Mode, OFlags, mkfifoat, open};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let directory = tempfile::tempdir().expect("nonregular source directory");
+        let root = std::fs::File::open(directory.path()).expect("open fixture directory");
+        mkfifoat(&root, "entry.js", Mode::RUSR | Mode::WUSR).expect("create source FIFO");
+        let entry = directory
+            .path()
+            .canonicalize()
+            .expect("canonical source directory")
+            .join("entry.js");
+        let reader_entry = entry.clone();
+        let (sender, receiver) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let result = read_native_entry_source(&reader_entry, 1024);
+            sender.send(result).expect("send source read result");
+        });
+        let result = receiver.recv_timeout(Duration::from_secs(2));
+        if result.is_err() {
+            // A regression to blocking File::open must fail this test without
+            // leaving a stuck reader. Briefly open both ends and then close
+            // the writer so a blocked open/read can finish with EOF.
+            let writer = open(&entry, OFlags::RDWR | OFlags::NONBLOCK, Mode::empty())
+                .expect("release regressed FIFO reader");
+            drop(writer);
+        }
+        reader.join().expect("source reader thread");
+        let error = result
+            .expect("nonregular source rejection must not wait for a FIFO writer")
+            .expect_err("FIFO is not executable source");
+        assert!(error.contains("must be a regular file"), "{error}");
+
+        let subdir = entry
+            .parent()
+            .expect("source directory")
+            .join("not-a-file.js");
+        std::fs::create_dir(&subdir).expect("create directory-shaped source");
+        assert!(
+            read_native_entry_source(&subdir, 1024)
+                .expect_err("directory is not executable source")
+                .contains("must be a regular file")
+        );
     }
 
     #[cfg(feature = "engine")]
