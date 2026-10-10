@@ -1157,8 +1157,8 @@ bulkhead_retry_after_ms = 50
 # strict/balanced, allowed in legacy-risky. Explicit false denies every profile.
 # allow_process_shape = true
 # Also FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE; environment overrides TOML.
-# This is incompatible with --capture-replay and does not grant environment
-# values, filesystem access, network access, or child-process spawning.
+# Replay capture retains supplied arguments and this bounded grant. It does
+# not grant environment values, filesystem, network, or child-process access.
 # Instruction budget for one `run` in the native engine (optional; default
 # strict 200M, balanced 1B, legacy-risky 5B). Also
 # FRANKEN_NODE_RUNTIME_MAX_INSTRUCTIONS. The wall-clock timeout still applies.
@@ -2263,7 +2263,7 @@ convention. The most common:
 |---|---|---|
 | `FRANKEN_NODE_PROFILE` | `profile` | `strict`, `balanced`, or `legacy-risky` |
 | `FRANKEN_NODE_RUNTIME_PREFERRED` | `runtime.preferred` | `auto`, `node`, `bun`, or `franken-engine` |
-| `FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE` | `runtime.allow_process_shape` | Explicit `true`/`false` for static process metadata reads in the native entrypoint; omitted values retain the profile default; replay capture refuses an enabled grant |
+| `FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE` | `runtime.allow_process_shape` | Explicit `true`/`false` for static process metadata reads in the native entrypoint; omitted values retain the profile default; replay capture retains the bounded grant and supplied arguments |
 | `FRANKEN_NODE_RUNTIME_MAX_INSTRUCTIONS` | `runtime.max_instructions` | Instruction budget for one `run` (> 0); replaces the profile default |
 | `FRANKEN_NODE_RUNTIME_MAX_REGISTERS` | `runtime.max_registers` | Registers per call frame on both native lanes (1–65,536); replaces profile defaults |
 | `FRANKEN_NODE_RUNTIME_MAX_CALL_DEPTH` | `runtime.max_call_depth` | Guest call depth on both native lanes (1–10,000); replaces the profile default |
@@ -3357,9 +3357,14 @@ The snapshot proves which settings were supplied, not that guest instructions
 ran. Startup failures, interrupted workers, panics, and telemetry failures may
 still have no reported settings; historical absence also remains unknown.
 
-Native replay capture refuses an enabled process-shape grant before guest
-execution because ambient process state is not a complete replay input; use
-strict/balanced with `runtime.allow_process_shape=false` to capture replay.
+Native replay capture supports this bounded process-shape grant in strict and
+balanced profiles. It retains the supplied `process.argv` strings and restores
+them during offline execution, together with the original grant. The engine's
+fixed `platform` and synthetic `pid` do not depend on the replay host. Captured
+arguments may contain secrets, just like captured source and I/O. This does not
+extend capture to environment reads, child processes, runtime module loading,
+or the legacy-risky profile. Statically lowered builtin facades can still use
+their recorded I/O transcript.
 
 ---
 

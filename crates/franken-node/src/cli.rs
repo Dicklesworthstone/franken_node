@@ -327,9 +327,10 @@ pub struct RunArgs {
     #[arg(long)]
     pub compat_preflight: bool,
 
-    /// Retain the entry source and raw host-I/O results for offline native
-    /// re-execution with `incident replay --execute`. Captured data may contain
-    /// application secrets. Supports completed native runs and certified
+    /// Retain the entry source, supplied arguments, process-metadata grant, and
+    /// raw host-I/O results for offline native re-execution with
+    /// `incident replay --execute`. Captured data may contain application
+    /// secrets. Supports completed native runs and certified
     /// uncaught-exception prefixes; the original run's exit status is retained.
     #[arg(long)]
     pub capture_replay: bool,
@@ -1340,7 +1341,8 @@ impl VerifyRecoveryRunbookArgs {
 // -- trust --
 
 #[derive(Debug, Subcommand)]
-pub enum TrustCommand {    /// Show trust profile for one extension.
+pub enum TrustCommand {
+    /// Show trust profile for one extension.
     Card(TrustCardArgs),
 
     /// List extensions by risk/status filters.

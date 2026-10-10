@@ -2108,7 +2108,7 @@ fn process_shape_opt_in_keeps_environment_aliases_and_computed_access_denied() {
         let (_dir, outcome) = run_app_with_policy_and_env(
             source,
             "balanced",
-            &["--console-only"],
+            &["--capture-replay", "--console-only"],
             &[("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE", "true")],
         );
         assert_ne!(
@@ -2126,20 +2126,41 @@ fn process_shape_opt_in_keeps_environment_aliases_and_computed_access_denied() {
 }
 
 #[test]
-fn replay_capture_refuses_process_shape_opt_in_before_executing_guest_code() {
+fn replay_capture_retains_explicit_process_shape_inputs_under_strict_and_balanced() {
     for policy in ["strict", "balanced"] {
         let (_dir, outcome) = run_app_with_policy_and_env(
-            "console.log('guest-must-not-execute');\n",
+            "console.log(process.argv.slice(2).join('|'));\n\
+             console.log(process.platform);\nconsole.log(process.pid);\n",
             policy,
-            &["--capture-replay", "--console-only"],
+            &[
+                "--capture-replay",
+                "--json",
+                "--",
+                "argument with spaces",
+                "βeta",
+            ],
             &[("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE", "true")],
         );
-        assert_ne!(outcome.exit_code, Some(0), "{policy}: {}", outcome.stdout);
-        assert!(!outcome.stdout.contains("guest-must-not-execute"));
-        assert!(
-            outcome.stderr.contains("runtime.allow_process_shape=false"),
-            "{policy}: {}",
-            outcome.stderr,
+        assert_eq!(outcome.exit_code, Some(0), "{policy}: {}", outcome.stderr);
+        let report: Value = serde_json::from_str(&outcome.stdout).expect("captured run JSON");
+        assert_eq!(
+            report["dispatch"]["captured_output"]["stdout"],
+            "argument with spaces|βeta\nlinux\n1\n"
+        );
+        let capture = &report["dispatch"]["native_replay"];
+        let payload: Value = serde_json::from_str(
+            capture["payload_json"]
+                .as_str()
+                .expect("captured execution input"),
+        )
+        .expect("typed replay payload JSON");
+        assert_eq!(payload["ambient_authority"], "trusted_process_shape");
+        assert_eq!(payload["process_argv"][2], "argument with spaces");
+        assert_eq!(payload["process_argv"][3], "βeta");
+        assert_eq!(report["receipt"]["process_shape_read_allowed"], true);
+        assert_eq!(
+            report["receipt"]["native_replay_payload_sha256"],
+            capture["payload_sha256"]
         );
     }
 }

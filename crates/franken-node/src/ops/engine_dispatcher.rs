@@ -5598,11 +5598,10 @@ impl EngineDispatcher {
 
         if self.capture_replay
             && (config.profile == Profile::LegacyRisky
-                || config.runtime.allows_process_shape(config.profile)
                 || config.security.child_process_spawn.is_some())
         {
             anyhow::bail!(
-                "native replay capture requires strict or balanced policy without process-shape or process-spawn authority; set runtime.allow_process_shape=false (FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE=false) and remove child-process authority because ambient process state and child processes are not replay inputs"
+                "native replay capture requires strict or balanced policy without process-spawn authority; environment values and child processes are not replay inputs"
             );
         }
 
@@ -8685,15 +8684,14 @@ impl EngineDispatcher {
         let parser_budget = config.runtime.effective_parse_budget(config.profile);
 
         // Recheck inside the authenticated worker as well as at public dispatch.
-        // Neither ambient process authority nor process effects have a complete
-        // replay input protocol yet.
+        // Environment values and child-process effects have no replay input
+        // protocol. Process-shape reads use captured argv and fixed engine
+        // metadata, so their explicit narrow grant is preserved during replay.
         if capture_replay
-            && (config.profile == Profile::LegacyRisky
-                || config.runtime.allows_process_shape(config.profile)
-                || process_spawn_admission.is_some())
+            && (config.profile == Profile::LegacyRisky || process_spawn_admission.is_some())
         {
             return Err(native_engine_spawn_error_with_telemetry_cleanup(
-                "Native replay capture does not support ambient process or child-process authority; disable runtime.allow_process_shape for capture"
+                "Native replay capture requires strict or balanced policy without environment or child-process authority"
                     .to_string(),
                 &mut telemetry_guard,
             ));
@@ -9040,6 +9038,7 @@ impl EngineDispatcher {
                                 &package,
                                 orchestrator_config,
                                 runtime_config,
+                                ambient_authority_grant,
                                 process_argv,
                                 &orchestrator,
                                 &error,
@@ -9141,6 +9140,7 @@ impl EngineDispatcher {
                     &package,
                     &orchestrator_config,
                     &runtime_config,
+                    ambient_authority_grant,
                     &process_argv,
                     &execution_result,
                 ) {

@@ -4,6 +4,9 @@
 //! authenticate the containing run record or incident bundle before executing
 //! it. Re-execution consumes the captured source and typed host-I/O outcomes;
 //! it never installs a live filesystem, network, entropy, or process provider.
+//! An explicit process-shape grant is replayable: argv comes from the captured
+//! launch arguments, while platform and pid are fixed engine-contained values.
+//! This grant never admits environment values or access to the raw process object.
 //! Runtime module loading is refused because the engine's module loader does
 //! not yet consume the host-I/O transcript. Statically lowered builtin facades
 //! remain usable, including their recorded filesystem and network effects.
@@ -268,10 +271,28 @@ mod engine {
             self.runtime
                 .validate()
                 .map_err(|error| format!("invalid captured runtime settings: {error}"))?;
-            if self.ambient_authority != AmbientAuthorityGrant::DenyAll {
-                return Err(
-                    "native replay requires captured deny-all ambient authority".to_string()
-                );
+            match self.ambient_authority {
+                AmbientAuthorityGrant::DenyAll => {}
+                AmbientAuthorityGrant::TrustedProcessShape => {
+                    // This is an exhaustive match over supported engine grants:
+                    // adding another grant requires a replay policy decision.
+                    // The engine supplies argv from set_process_argv, a fixed
+                    // linux platform and synthetic pid; it never reads ambient
+                    // host metadata for this grant. Bound the one supplied
+                    // input before constructing a replay engine as well as
+                    // bounding its serialized envelope in encode_capture.
+                    let argv_bytes = self.process_argv.iter().try_fold(0_usize, |total, arg| {
+                        total.checked_add(arg.len()).ok_or_else(|| {
+                            "native replay process argument length overflowed".to_string()
+                        })
+                    })?;
+                    if argv_bytes > MAX_NATIVE_REPLAY_PAYLOAD_BYTES {
+                        return Err(
+                            "native replay process arguments exceed the capture byte budget"
+                                .to_string(),
+                        );
+                    }
+                }
             }
             if self.host_io_exception_provenance != HostIoExceptionProvenance::ProviderInternal {
                 return Err(
@@ -557,12 +578,15 @@ mod engine {
     impl NativeReplayCapture {
         /// Capture the source actually passed to the native engine and its
         /// finalized response, before either can be discarded or reread.
-        /// The product caller must have selected DenyAll ambient authority and
-        /// installed its SandboxedHostIo plus transparent policy decorators.
+        /// The product caller supplies the same ambient grant and argv it gave
+        /// the orchestrator, and must have installed its SandboxedHostIo plus
+        /// transparent policy decorators. A process-shape grant supplies only
+        /// captured arguments and the engine's deterministic metadata shape.
         pub fn from_execution(
             package: &ExtensionPackage,
             orchestrator_config: &OrchestratorConfig,
             runtime_config: &RuntimeConfig,
+            ambient_authority: AmbientAuthorityGrant,
             process_argv: &[String],
             result: &OrchestratorResult,
         ) -> Result<Self, String> {
@@ -580,7 +604,7 @@ mod engine {
                 package: package.clone(),
                 orchestrator: CapturedOrchestratorSettings::capture(orchestrator_config)?,
                 runtime: runtime_config.clone(),
-                ambient_authority: AmbientAuthorityGrant::DenyAll,
+                ambient_authority,
                 host_io_exception_provenance: HostIoExceptionProvenance::ProviderInternal,
                 process_argv: process_argv.to_vec(),
                 host_effect_transcript: result.host_effect_transcript.clone(),
@@ -607,6 +631,7 @@ mod engine {
             package: &ExtensionPackage,
             orchestrator_config: &OrchestratorConfig,
             runtime_config: &RuntimeConfig,
+            ambient_authority: AmbientAuthorityGrant,
             process_argv: &[String],
             orchestrator: &ExecutionOrchestrator,
             error: &OrchestratorError,
@@ -616,7 +641,7 @@ mod engine {
                 package: package.clone(),
                 orchestrator: CapturedOrchestratorSettings::capture(orchestrator_config)?,
                 runtime: runtime_config.clone(),
-                ambient_authority: AmbientAuthorityGrant::DenyAll,
+                ambient_authority,
                 host_io_exception_provenance: HostIoExceptionProvenance::ProviderInternal,
                 process_argv: process_argv.to_vec(),
                 host_effect_transcript,
@@ -881,6 +906,15 @@ mod engine {
         }
 
         fn record(root: &Path, source: &str) -> NativeReplayCapture {
+            record_with_inputs(root, source, AmbientAuthorityGrant::DenyAll, &[])
+        }
+
+        fn record_with_inputs(
+            root: &Path,
+            source: &str,
+            ambient_authority: AmbientAuthorityGrant,
+            process_argv: &[String],
+        ) -> NativeReplayCapture {
             let config = OrchestratorConfig {
                 commonjs_entry: true,
                 ..OrchestratorConfig::default()
@@ -913,28 +947,155 @@ mod engine {
                 ExecutionOrchestrator::try_new_with_runtime_config_and_authority(
                     config.clone(),
                     runtime.clone(),
-                    AmbientAuthorityGrant::DenyAll,
+                    ambient_authority,
                     authority,
                 )
                 .expect("native recorder");
+            orchestrator.set_process_argv(process_argv.to_vec());
             orchestrator.set_host_io(
                 Arc::new(SandboxedHostIo::with_root(root).expect("real filesystem provider")),
                 Some(Arc::new(InMemoryHostIoTranscript::recording())),
             );
             match orchestrator.execute(&package) {
-                Ok(result) => {
-                    NativeReplayCapture::from_execution(&package, &config, &runtime, &[], &result)
-                }
+                Ok(result) => NativeReplayCapture::from_execution(
+                    &package,
+                    &config,
+                    &runtime,
+                    ambient_authority,
+                    process_argv,
+                    &result,
+                ),
                 Err(error) => NativeReplayCapture::from_failed_execution(
                     &package,
                     &config,
                     &runtime,
-                    &[],
+                    ambient_authority,
+                    process_argv,
                     &orchestrator,
                     &error,
                 ),
             }
             .expect("capture actual native result")
+        }
+
+        #[test]
+        fn native_reexecution_restores_captured_process_shape_for_completion_and_exception() {
+            on_native_stack(|| {
+                for throws in [false, true] {
+                    let root = tempfile::tempdir().expect("original argument program");
+                    let source = format!(
+                        "const fs = require('fs');\n\
+                         console.log(process.argv.join('|'));\n\
+                         console.log(process.platform);\n\
+                         console.log(process.pid);\n\
+                         fs.writeFileSync('output.txt', process.argv[2]);\n{}",
+                        if throws {
+                            "throw process.argv[2];\n"
+                        } else {
+                            ""
+                        }
+                    );
+                    let argv = vec![
+                        "captured-runtime".to_string(),
+                        root.path().join("app.cjs").display().to_string(),
+                        "captured argument with spaces".to_string(),
+                        "βeta".to_string(),
+                    ];
+                    let capture = record_with_inputs(
+                        root.path(),
+                        &source,
+                        AmbientAuthorityGrant::TrustedProcessShape,
+                        &argv,
+                    );
+                    let payload: NativeReplayPayload =
+                        serde_json::from_str(&capture.payload_json).expect("captured shape inputs");
+                    assert_eq!(
+                        payload.ambient_authority,
+                        AmbientAuthorityGrant::TrustedProcessShape
+                    );
+                    assert_eq!(payload.process_argv, argv);
+                    assert_eq!(
+                        std::fs::read_to_string(root.path().join("output.txt"))
+                            .expect("original write"),
+                        "captured argument with spaces"
+                    );
+                    for name in ["app.cjs", "output.txt"] {
+                        std::fs::rename(
+                            root.path().join(name),
+                            root.path().join(format!("saved-{name}")),
+                        )
+                        .expect("preserve original inputs outside their execution paths");
+                    }
+                    let outcome = reexecute(&capture).expect("replay captured process arguments");
+                    assert!(outcome.matched, "{outcome:?}");
+                    assert!(outcome.console_match);
+                    assert!(outcome.host_effects_match);
+                    assert!(outcome.module_load_disabled);
+                    assert_eq!(
+                        outcome.captured_terminal_state,
+                        if throws {
+                            NativeReplayTerminalState::UncaughtException
+                        } else {
+                            NativeReplayTerminalState::Completed
+                        }
+                    );
+                    assert!(
+                        !root.path().join("output.txt").exists(),
+                        "replaying argv must not reinstall a live filesystem provider"
+                    );
+                }
+            });
+        }
+
+        #[test]
+        fn native_process_shape_replay_detects_changed_arguments_and_denies_other_authority() {
+            on_native_stack(|| {
+                let root = tempfile::tempdir().expect("argument replay boundary");
+                let capture = record_with_inputs(
+                    root.path(),
+                    "console.log(process.argv[2]);\n",
+                    AmbientAuthorityGrant::TrustedProcessShape,
+                    &[
+                        "runtime".to_string(),
+                        "app.cjs".to_string(),
+                        "original".to_string(),
+                    ],
+                );
+                let original: NativeReplayPayload =
+                    serde_json::from_str(&capture.payload_json).expect("original capture");
+                let mut changed = original.clone();
+                changed.process_argv[2] = "changed".to_string();
+                let changed = encode_capture(&changed).expect("encode changed arguments");
+                let outcome =
+                    reexecute(&changed).expect("changed argument program still completes");
+                assert!(!outcome.matched);
+                assert!(!outcome.console_match);
+
+                for source in [
+                    "console.log(process.env.PATH);",
+                    "const raw = process; console.log(raw.argv);",
+                    "console.log(process['argv']);",
+                ] {
+                    let mut changed = original.clone();
+                    changed.package.source = source.to_string();
+                    let changed = encode_capture(&changed).expect("encode authority probe");
+                    let error =
+                        reexecute(&changed).expect_err("shape grant stays narrow in replay");
+                    assert!(
+                        error.contains("ambient authority violation"),
+                        "{source}: {error}"
+                    );
+                }
+                let mut oversized = original;
+                oversized.process_argv = vec!["x".repeat(MAX_NATIVE_REPLAY_PAYLOAD_BYTES + 1)];
+                assert!(
+                    oversized
+                        .validate()
+                        .expect_err("bounded process arguments")
+                        .contains("process arguments exceed")
+                );
+                assert!(encode_capture(&oversized).is_err());
+            });
         }
 
         #[test]

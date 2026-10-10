@@ -184,13 +184,14 @@ fn process_shape_override_changes_only_the_narrow_ambient_grant() {
 
 #[test]
 #[cfg(feature = "engine")]
-fn process_shape_replay_refusal_precedes_source_and_worker_resolution() {
+fn legacy_replay_refusal_precedes_source_and_worker_resolution() {
     use frankenengine_node::config::PreferredRuntime;
 
-    for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+    for allowed in [None, Some(false), Some(true)] {
+        let profile = Profile::LegacyRisky;
         let directory = tempfile::tempdir().expect("empty replay fixture");
         let mut config = Config::for_profile(profile);
-        config.runtime.allow_process_shape = Some(true);
+        config.runtime.allow_process_shape = allowed;
         let error = EngineDispatcher::new(None, PreferredRuntime::FrankenEngine)
             .with_replay_capture(true)
             .with_native_session_worker_path(directory.path().join("worker-does-not-exist"))
@@ -208,11 +209,7 @@ fn process_shape_replay_refusal_precedes_source_and_worker_resolution() {
             "{profile}: {error}"
         );
         assert!(
-            error.contains("runtime.allow_process_shape=false"),
-            "{error}"
-        );
-        assert!(
-            error.contains("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE=false"),
+            error.contains("environment values and child processes are not replay inputs"),
             "{error}"
         );
         assert_eq!(
@@ -227,27 +224,29 @@ fn process_shape_replay_refusal_precedes_source_and_worker_resolution() {
 
 #[test]
 #[cfg(feature = "engine")]
-fn explicit_process_shape_denial_keeps_strict_and_balanced_replay_admissible() {
+fn process_shape_setting_keeps_strict_and_balanced_replay_admissible() {
     use frankenengine_node::config::PreferredRuntime;
 
     for profile in [Profile::Strict, Profile::Balanced] {
-        let directory = tempfile::tempdir().expect("empty replay fixture");
-        let mut config = Config::for_profile(profile);
-        config.runtime.allow_process_shape = Some(false);
-        let error = EngineDispatcher::new(None, PreferredRuntime::FrankenEngine)
-            .with_replay_capture(true)
-            .with_native_session_worker_path(directory.path().join("worker-does-not-exist"))
-            .dispatch_run(
-                &directory.path().join("source-does-not-exist.js"),
-                &config,
-                &profile.to_string(),
-                &[],
-                2_000,
-            )
-            .expect_err("ordinary target resolution should follow successful replay admission")
-            .to_string();
-        assert!(error.contains("resolve run target"), "{profile}: {error}");
-        assert!(!error.contains("native replay capture"), "{error}");
+        for allowed in [None, Some(false), Some(true)] {
+            let directory = tempfile::tempdir().expect("empty replay fixture");
+            let mut config = Config::for_profile(profile);
+            config.runtime.allow_process_shape = allowed;
+            let error = EngineDispatcher::new(None, PreferredRuntime::FrankenEngine)
+                .with_replay_capture(true)
+                .with_native_session_worker_path(directory.path().join("worker-does-not-exist"))
+                .dispatch_run(
+                    &directory.path().join("source-does-not-exist.js"),
+                    &config,
+                    &profile.to_string(),
+                    &[],
+                    2_000,
+                )
+                .expect_err("ordinary target resolution should follow successful replay admission")
+                .to_string();
+            assert!(error.contains("resolve run target"), "{profile}: {error}");
+            assert!(!error.contains("native replay capture"), "{error}");
+        }
     }
 }
 

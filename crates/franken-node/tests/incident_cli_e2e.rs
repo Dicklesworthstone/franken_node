@@ -1992,6 +1992,16 @@ fn native_replay_workspace_with_outcome(
     source: &str,
     expect_success: bool,
 ) -> (tempfile::TempDir, serde_json::Value) {
+    native_replay_workspace_with_arguments(source, expect_success, false, &[])
+}
+
+#[cfg(feature = "engine")]
+fn native_replay_workspace_with_arguments(
+    source: &str,
+    expect_success: bool,
+    allow_process_shape: bool,
+    app_args: &[&str],
+) -> (tempfile::TempDir, serde_json::Value) {
     let workspace = tempfile::tempdir().expect("native replay workspace");
     fs::write(workspace.path().join("app.js"), source).expect("write actual guest program");
     fs::write(workspace.path().join("input.txt"), "ORIGINAL").expect("write live guest input");
@@ -2004,10 +2014,16 @@ fn native_replay_workspace_with_outcome(
         "init failed: {}",
         String::from_utf8_lossy(&initialized.stderr)
     );
-    let recorded = run_cli_in_workspace(
-        workspace.path(),
-        &["run", "app.js", "--capture-replay", "--json"],
-    );
+    let recorded = Command::new(resolve_binary_path())
+        .current_dir(workspace.path())
+        .args(["run", "app.js", "--capture-replay", "--json", "--"])
+        .args(app_args)
+        .env(
+            "FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE",
+            if allow_process_shape { "true" } else { "false" },
+        )
+        .output()
+        .expect("capture the native program's actual launch arguments");
     assert_eq!(
         recorded.status.success(),
         expect_success,
@@ -2154,6 +2170,90 @@ fn write_authenticated_native_candidate(
         &signing_key.verifying_key(),
     )
     .expect("independent SDK accepts structure and signature before guest execution is tested");
+}
+
+#[cfg(feature = "engine")]
+#[test]
+fn native_incident_replay_restores_process_arguments_for_completed_and_failed_runs() {
+    for expect_success in [true, false] {
+        let source = format!(
+            "const {{ writeFileSync }} = require('fs');\n\
+             console.log(process.argv.slice(2).join('|'));\n\
+             console.log(process.argv[1].endsWith('app.js'));\n\
+             console.log(process.platform);\nconsole.log(process.pid);\n\
+             writeFileSync('output.txt', process.argv[2]);\n{}",
+            if expect_success {
+                ""
+            } else {
+                "throw process.argv[3];\n"
+            }
+        );
+        let (workspace, run) = native_replay_workspace_with_arguments(
+            &source,
+            expect_success,
+            true,
+            &["argument with spaces", "βeta"],
+        );
+        assert_eq!(
+            run["dispatch"]["captured_output"]["stdout"],
+            "argument with spaces|βeta\ntrue\nlinux\n1\n"
+        );
+        assert_eq!(run["receipt"]["process_shape_read_allowed"], true);
+        let receipt_id = run["receipt"]["receipt_id"].as_str().expect("receipt id");
+        let (bundle_name, bundle) = capture_native_run_bundle(workspace.path(), receipt_id);
+        assert_eq!(
+            bundle["initial_state_snapshot"]["native_replay"],
+            run["dispatch"]["native_replay"]
+        );
+        let payload: serde_json::Value = serde_json::from_str(
+            bundle["initial_state_snapshot"]["native_replay"]["payload_json"]
+                .as_str()
+                .expect("signed capture payload"),
+        )
+        .expect("captured invocation inputs");
+        assert_eq!(payload["ambient_authority"], "trusted_process_shape");
+        assert_eq!(payload["process_argv"][2], "argument with spaces");
+        assert_eq!(payload["process_argv"][3], "βeta");
+        let terminal_state = if expect_success {
+            "completed"
+        } else {
+            "uncaught_exception"
+        };
+        assert_eq!(payload["expected"]["terminal_state"], terminal_state);
+        for name in ["app.js", "input.txt", "output.txt"] {
+            fs::rename(
+                workspace.path().join(name),
+                workspace.path().join(format!("saved-{name}")),
+            )
+            .expect("preserve original files away from their execution paths");
+        }
+
+        // This command's real process arguments differ from the original
+        // program's, and the configured profile does not enable shape reads.
+        // Replay must restore the authenticated grant and launch arguments.
+        let replay = execute_native_replay(workspace.path(), &bundle_name);
+        assert!(
+            replay.status.success(),
+            "captured process shape should replay: stdout={} stderr={}",
+            String::from_utf8_lossy(&replay.stdout),
+            String::from_utf8_lossy(&replay.stderr)
+        );
+        let replay: serde_json::Value =
+            serde_json::from_slice(&replay.stdout).expect("native shape replay JSON");
+        let execution = &replay["execution_result"];
+        assert_eq!(execution["matched"], true, "{replay}");
+        assert_eq!(execution["console_match"], true);
+        assert_eq!(execution["host_effects_match"], true);
+        assert_eq!(execution["module_load_disabled"], true);
+        assert_eq!(execution["captured_terminal_state"], terminal_state);
+        assert_eq!(execution["replay_terminal_state"], terminal_state);
+        assert!(!workspace.path().join("output.txt").exists());
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("saved-output.txt"))
+                .expect("original effect remains intact"),
+            "argument with spaces"
+        );
+    }
 }
 
 #[cfg(feature = "engine")]
