@@ -2,8 +2,15 @@
 //!
 //! A capture is an integrity envelope, not its own trust anchor. The caller must
 //! authenticate the containing run record or incident bundle before executing
-//! it. Re-execution consumes the captured source and typed host-I/O outcomes;
+//! it. Re-execution consumes the captured source and typed host-effect outcomes;
 //! it never installs a live filesystem, network, entropy, or process provider.
+//! Process-authorized captures preserve the globally ordered effect journal and
+//! the exact request preparation observed at the authenticated provider. Replay
+//! uses an expired process authority and a provider that cannot dispatch effects.
+//! The original process-capture run applies the engine's conservative Unknown
+//! exception floor before lowering, matching the ordered replay journal's floor.
+//! This can deny a flow the ordinary bounded live provider would permit; neither
+//! captured witnesses nor replay provenance are weakened to obtain a match.
 //! An explicit process-shape grant is replayable: argv comes from the captured
 //! launch arguments, while platform and pid are fixed engine-contained values.
 //! This grant never admits environment values or access to the raw process object.
@@ -120,9 +127,13 @@ pub fn reexecute(capture: &NativeReplayCapture) -> Result<NativeReplayOutcome, S
 }
 
 #[cfg(feature = "engine")]
+pub use engine::{CapturingProcessSpawnProvider, ProcessReplayCaptureHostIo};
+
+#[cfg(feature = "engine")]
 mod engine {
     use std::io::Write;
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use frankenengine_engine::ast::ParseGoal;
     use frankenengine_engine::baseline_interpreter::{ConsoleEntry, InterpreterError, LaneChoice};
@@ -131,7 +142,7 @@ mod engine {
     use frankenengine_engine::evidence_ledger::RuntimeEvidenceAuthority;
     use frankenengine_engine::execution_orchestrator::{
         ExecutionOrchestrator, ExtensionPackage, LossMatrixPreset, OrchestratorConfig,
-        OrchestratorError, OrchestratorResult,
+        OrchestratorError, OrchestratorResult, ProcessSpawnAttemptAuthority,
     };
     use frankenengine_engine::ir_contract::{ExecutionOutcome, Ir4Module};
     use frankenengine_engine::lowering_pipeline::AmbientAuthorityGrant;
@@ -139,16 +150,430 @@ mod engine {
     use frankenengine_engine::runtime_config::RuntimeConfig;
     use frankenengine_engine::security_epoch::SecurityEpoch;
     use frankenengine_extension_host::host_effect_journal::{
-        HostEffectJournalAttemptRecord, HostEffectJournalEntry,
+        HostEffectJournalAttemptRecord, HostEffectJournalEntry, InMemoryHostEffectJournal,
     };
     use frankenengine_extension_host::host_io::{
         HostIoCapability, HostIoControl, HostIoError, HostIoExceptionProvenance, HostIoOutcome,
         HostIoProvider, HostIoRecorder, HostIoRequest, InMemoryHostIoTranscript,
     };
+    use frankenengine_extension_host::process_spawn::{
+        ProcessSpawnCapability, ProcessSpawnControl, ProcessSpawnError, ProcessSpawnOutcome,
+        ProcessSpawnProvider, ProcessSpawnRequest,
+    };
 
     use super::*;
 
     const REPLAY_STACK_BYTES: usize = 64 * 1024 * 1024;
+    const MAX_PROCESS_PREPARATION_ENTRIES: usize = 4096;
+    const MAX_PROCESS_PREPARATION_BYTES: usize = MAX_NATIVE_REPLAY_PAYLOAD_BYTES / 2;
+
+    /// Apply the ordered replay journal's conservative exception floor during
+    /// the original capture execution, before the engine constructs its IR.
+    ///
+    /// All actual I/O, admission, and live supervision remain with the wrapped
+    /// product provider. This adds a classification restriction for capture;
+    /// it never changes an effect result or relabels an existing witness.
+    #[derive(Debug)]
+    pub struct ProcessReplayCaptureHostIo {
+        inner: Arc<dyn HostIoProvider>,
+    }
+
+    impl ProcessReplayCaptureHostIo {
+        pub fn new(inner: Arc<dyn HostIoProvider>) -> Self {
+            Self { inner }
+        }
+    }
+
+    impl HostIoProvider for ProcessReplayCaptureHostIo {
+        fn name(&self) -> &str {
+            self.inner.name()
+        }
+
+        fn filesystem_exception_provenance(&self) -> HostIoExceptionProvenance {
+            self.inner
+                .filesystem_exception_provenance()
+                .combine(HostIoExceptionProvenance::Unknown)
+        }
+
+        fn perform(&self, request: &HostIoRequest, granted: &[HostIoCapability]) -> HostIoOutcome {
+            self.inner.perform(request, granted)
+        }
+
+        fn perform_controlled(
+            &self,
+            request: &HostIoRequest,
+            granted: &[HostIoCapability],
+            control: Arc<dyn HostIoControl>,
+        ) -> HostIoOutcome {
+            self.inner.perform_controlled(request, granted, control)
+        }
+    }
+
+    fn capture_exception_provenance(process_capture: bool) -> HostIoExceptionProvenance {
+        if process_capture {
+            HostIoExceptionProvenance::Unknown
+        } else {
+            HostIoExceptionProvenance::ProviderInternal
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+    enum CapturedProcessPreparation {
+        Preflight {
+            request: ProcessSpawnRequest,
+            outcome: Result<(), ProcessSpawnError>,
+        },
+        Prepare {
+            request: ProcessSpawnRequest,
+            outcome: Result<ProcessSpawnRequest, ProcessSpawnError>,
+        },
+    }
+
+    impl CapturedProcessPreparation {
+        fn request(&self) -> &ProcessSpawnRequest {
+            match self {
+                Self::Preflight { request, .. } | Self::Prepare { request, .. } => request,
+            }
+        }
+
+        fn is_preflight(&self) -> bool {
+            matches!(self, Self::Preflight { .. })
+        }
+    }
+
+    #[derive(Serialize)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    enum ProcessPreparationObservation<'a> {
+        Preflight {
+            request: &'a ProcessSpawnRequest,
+            outcome: &'a Result<(), ProcessSpawnError>,
+        },
+        Prepare {
+            request: &'a ProcessSpawnRequest,
+            outcome: &'a Result<ProcessSpawnRequest, ProcessSpawnError>,
+        },
+    }
+
+    #[derive(Debug, Default)]
+    struct ProcessPreparationState {
+        entries: Vec<CapturedProcessPreparation>,
+        encoded_bytes: usize,
+        error: Option<String>,
+    }
+
+    /// Transparent capture around the already authenticated product provider.
+    /// This never grants process authority or changes the live provider's result.
+    /// Preparation is captured rather than reimplementing signed alias, shell,
+    /// and request-limit policy in the replay engine.
+    #[derive(Debug)]
+    pub struct CapturingProcessSpawnProvider {
+        inner: Arc<dyn ProcessSpawnProvider>,
+        state: Mutex<ProcessPreparationState>,
+    }
+
+    impl CapturingProcessSpawnProvider {
+        pub fn new(inner: Arc<dyn ProcessSpawnProvider>) -> Self {
+            Self {
+                inner,
+                state: Mutex::new(ProcessPreparationState::default()),
+            }
+        }
+
+        fn record(&self, observation: ProcessPreparationObservation<'_>) {
+            let Ok(mut state) = self.state.lock() else {
+                return;
+            };
+            if state.error.is_some() {
+                return;
+            }
+            // Serialize borrowed inputs through a bounded writer before cloning
+            // anything guest-controlled into retained preparation evidence.
+            let mut writer = BoundedCaptureWriter(Vec::new());
+            if serde_json::to_writer(&mut writer, &observation).is_err() {
+                state.error =
+                    Some("process preparation exceeds the capture byte budget".to_string());
+                return;
+            }
+            let entry: CapturedProcessPreparation = match serde_json::from_slice(&writer.0) {
+                Ok(entry) => entry,
+                Err(_) => {
+                    state.error =
+                        Some("process preparation could not be captured exactly".to_string());
+                    return;
+                }
+            };
+            if let Some(previous) = state.entries.iter().find(|previous| {
+                previous.is_preflight() == entry.is_preflight()
+                    && previous.request() == entry.request()
+            }) {
+                if previous != &entry {
+                    state.error = Some(
+                        "process preparation changed for an identical request during capture"
+                            .to_string(),
+                    );
+                }
+                return;
+            }
+            if state.entries.len() == MAX_PROCESS_PREPARATION_ENTRIES
+                || writer.0.len()
+                    > MAX_PROCESS_PREPARATION_BYTES.saturating_sub(state.encoded_bytes)
+            {
+                state.error = Some("process preparation exceeds the capture budget".to_string());
+                return;
+            }
+            state.encoded_bytes += writer.0.len();
+            state.entries.push(entry);
+        }
+
+        fn snapshot(&self) -> Result<Vec<CapturedProcessPreparation>, String> {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "process preparation capture was interrupted".to_string())?;
+            if let Some(error) = &state.error {
+                return Err(error.clone());
+            }
+            Ok(state.entries.clone())
+        }
+    }
+
+    impl ProcessSpawnProvider for CapturingProcessSpawnProvider {
+        fn name(&self) -> &str {
+            self.inner.name()
+        }
+
+        fn preflight_request(
+            &self,
+            request: &ProcessSpawnRequest,
+        ) -> Result<(), ProcessSpawnError> {
+            // Keep preflight allocation-free and free of state mutation. A
+            // denial here has no journal/preparation record; replay will refuse
+            // its unknown request rather than invent the missing observation.
+            self.inner.preflight_request(request)
+        }
+
+        fn prepare_request(
+            &self,
+            request: &ProcessSpawnRequest,
+        ) -> Result<ProcessSpawnRequest, ProcessSpawnError> {
+            let outcome = self.inner.prepare_request(request);
+            // The authenticated native provider's preflight is side-effect-free.
+            // Observe its exact answers here, after the engine has admitted and
+            // reserved the original request, without allocating in preflight.
+            let original_preflight = self.inner.preflight_request(request);
+            self.record(ProcessPreparationObservation::Preflight {
+                request,
+                outcome: &original_preflight,
+            });
+            if let Ok(prepared) = &outcome {
+                let prepared_preflight = self.inner.preflight_request(prepared);
+                self.record(ProcessPreparationObservation::Preflight {
+                    request: prepared,
+                    outcome: &prepared_preflight,
+                });
+            }
+            self.record(ProcessPreparationObservation::Prepare {
+                request,
+                outcome: &outcome,
+            });
+            outcome
+        }
+
+        fn perform(
+            &self,
+            request: &ProcessSpawnRequest,
+            granted: &[ProcessSpawnCapability],
+        ) -> ProcessSpawnOutcome {
+            self.inner.perform(request, granted)
+        }
+
+        fn perform_controlled(
+            &self,
+            request: &ProcessSpawnRequest,
+            granted: &[ProcessSpawnCapability],
+            control: Arc<dyn ProcessSpawnControl>,
+        ) -> ProcessSpawnOutcome {
+            self.inner.perform_controlled(request, granted, control)
+        }
+
+        fn cleanup_handle(&self, handle: &str) -> ProcessSpawnOutcome {
+            self.inner.cleanup_handle(handle)
+        }
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct CapturedProcessReplay {
+        preparation: Vec<CapturedProcessPreparation>,
+        journal: Vec<HostEffectJournalEntry>,
+    }
+
+    impl CapturedProcessReplay {
+        fn capture(
+            provider: Option<&CapturingProcessSpawnProvider>,
+            journal: &[HostEffectJournalEntry],
+        ) -> Result<Option<Self>, String> {
+            match provider {
+                Some(provider) => Ok(Some(Self {
+                    preparation: provider.snapshot()?,
+                    journal: journal.to_vec(),
+                })),
+                None if journal
+                    .iter()
+                    .any(|entry| matches!(entry, HostEffectJournalEntry::ProcessSpawn { .. })) =>
+                {
+                    Err(
+                        "native replay process effects require captured request preparation"
+                            .to_string(),
+                    )
+                }
+                None => Ok(None),
+            }
+        }
+
+        fn validate(&self, host_io: &[(HostIoRequest, HostIoOutcome)]) -> Result<(), String> {
+            if self.preparation.len() > MAX_PROCESS_PREPARATION_ENTRIES {
+                return Err("native replay process preparation has too many entries".to_string());
+            }
+            let mut encoded_bytes = 0_usize;
+            for (index, entry) in self.preparation.iter().enumerate() {
+                if self.preparation[..index].iter().any(|previous| {
+                    previous.is_preflight() == entry.is_preflight()
+                        && previous.request() == entry.request()
+                }) {
+                    return Err("native replay process preparation repeats a request".to_string());
+                }
+                let mut writer = BoundedCaptureWriter(Vec::new());
+                serde_json::to_writer(&mut writer, entry).map_err(|_| {
+                    "native replay process preparation exceeds its byte budget".to_string()
+                })?;
+                encoded_bytes = encoded_bytes.saturating_add(writer.0.len());
+                if encoded_bytes > MAX_PROCESS_PREPARATION_BYTES {
+                    return Err(
+                        "native replay process preparation exceeds its byte budget".to_string()
+                    );
+                }
+            }
+            let recorded_host_io: Vec<_> = self
+                .journal
+                .iter()
+                .filter_map(|entry| match entry {
+                    HostEffectJournalEntry::HostIo { request, outcome } => {
+                        Some((request.clone(), outcome.clone()))
+                    }
+                    HostEffectJournalEntry::ProcessSpawn { .. } => None,
+                })
+                .collect();
+            if recorded_host_io != host_io {
+                return Err(
+                    "native replay global journal disagrees with its host-I/O transcript"
+                        .to_string(),
+                );
+            }
+            Ok(())
+        }
+    }
+
+    /// Carries captured preparation only. The ordered engine journal supplies
+    /// every effect outcome; no implementation here can access the host.
+    ///
+    /// Replay alone retains a one-bit verification diagnostic on a missing
+    /// preflight observation. This deliberately departs from the general
+    /// provider preflight purity convention: the engine makes such denials
+    /// catchable before journal access, so otherwise a guest could conceal an
+    /// unrecorded request. The bit never changes any subsequent provider answer
+    /// and is read only after execution. Rejection neither clones nor hashes
+    /// the unknown input, allocates a diagnostic string, or touches the host.
+    #[derive(Debug)]
+    struct CapturedReplayProcessProvider {
+        preparation: Vec<CapturedProcessPreparation>,
+        diverged: AtomicBool,
+    }
+
+    impl CapturedReplayProcessProvider {
+        fn new(preparation: Vec<CapturedProcessPreparation>) -> Self {
+            Self {
+                preparation,
+                diverged: AtomicBool::new(false),
+            }
+        }
+
+        fn refuse(&self) -> ProcessSpawnError {
+            self.diverged.store(true, Ordering::Release);
+            ProcessSpawnError::Denied {
+                // The detailed diagnostic is produced by verify after the
+                // engine stops; an oversized request cannot allocate it here.
+                reason: String::new(),
+            }
+        }
+
+        fn verify(&self) -> Result<(), String> {
+            if self.diverged.load(Ordering::Acquire) {
+                return Err("native replay process preparation diverged, even if the guest caught its error".to_string());
+            }
+            Ok(())
+        }
+    }
+
+    impl ProcessSpawnProvider for CapturedReplayProcessProvider {
+        fn name(&self) -> &str {
+            "native-replay-no-live-process"
+        }
+
+        fn preflight_request(
+            &self,
+            request: &ProcessSpawnRequest,
+        ) -> Result<(), ProcessSpawnError> {
+            self.preparation
+                .iter()
+                .find_map(|entry| match entry {
+                    CapturedProcessPreparation::Preflight {
+                        request: expected,
+                        outcome,
+                    } if expected == request => Some(outcome.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| Err(self.refuse()))
+        }
+
+        fn prepare_request(
+            &self,
+            request: &ProcessSpawnRequest,
+        ) -> Result<ProcessSpawnRequest, ProcessSpawnError> {
+            self.preparation
+                .iter()
+                .find_map(|entry| match entry {
+                    CapturedProcessPreparation::Prepare {
+                        request: expected,
+                        outcome,
+                    } if expected == request => Some(outcome.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| Err(self.refuse()))
+        }
+
+        fn perform(
+            &self,
+            _request: &ProcessSpawnRequest,
+            _granted: &[ProcessSpawnCapability],
+        ) -> ProcessSpawnOutcome {
+            Err(self.refuse())
+        }
+
+        fn perform_controlled(
+            &self,
+            _request: &ProcessSpawnRequest,
+            _granted: &[ProcessSpawnCapability],
+            _control: Arc<dyn ProcessSpawnControl>,
+        ) -> ProcessSpawnOutcome {
+            Err(self.refuse())
+        }
+
+        fn cleanup_handle(&self, _handle: &str) -> ProcessSpawnOutcome {
+            Err(self.refuse())
+        }
+    }
 
     /// Every serializable setting of the actual execution orchestrator.
     /// A shared work pool is not serializable authority and is refused.
@@ -263,6 +688,8 @@ mod engine {
         host_io_exception_provenance: HostIoExceptionProvenance,
         process_argv: Vec<String>,
         host_effect_transcript: Vec<(HostIoRequest, HostIoOutcome)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        process: Option<CapturedProcessReplay>,
         expected: CapturedAttempt,
     }
 
@@ -294,11 +721,6 @@ mod engine {
                     }
                 }
             }
-            if self.host_io_exception_provenance != HostIoExceptionProvenance::ProviderInternal {
-                return Err(
-                    "native replay requires authenticated bounded host-I/O provenance".to_string(),
-                );
-            }
             if self.package.source.trim().is_empty() || self.package.extension_id.trim().is_empty()
             {
                 return Err(
@@ -307,7 +729,7 @@ mod engine {
             }
             for capability in &self.package.capabilities {
                 match RuntimeCapability::from_tag_str(capability) {
-                    Some(RuntimeCapability::ProcessSpawn | RuntimeCapability::EnvRead) => {
+                    Some(RuntimeCapability::EnvRead) => {
                         return Err(format!(
                             "native replay does not support captured {capability} authority"
                         ));
@@ -315,6 +737,23 @@ mod engine {
                     Some(_) => {}
                     None => return Err(format!("unrecognized captured capability {capability}")),
                 }
+            }
+            let has_process_authority = self.package.capabilities.iter().any(|capability| {
+                RuntimeCapability::from_tag_str(capability) == Some(RuntimeCapability::ProcessSpawn)
+            });
+            if has_process_authority != self.process.is_some() {
+                return Err("native replay process authority requires its exact preparation and ordered journal".to_string());
+            }
+            if self.host_io_exception_provenance
+                != capture_exception_provenance(self.process.is_some())
+            {
+                return Err(
+                    "native replay exception provenance differs from its original capture mode"
+                        .to_string(),
+                );
+            }
+            if let Some(process) = &self.process {
+                process.validate(&self.host_effect_transcript)?;
             }
             match &self.expected {
                 CapturedAttempt::Completed(expected) => {
@@ -478,13 +917,19 @@ mod engine {
         })
     }
 
+    struct ObservedGuestException {
+        exception: CapturedGuestException,
+        host_effect_transcript: Vec<(HostIoRequest, HostIoOutcome)>,
+        host_effect_journal: Vec<HostEffectJournalEntry>,
+    }
+
     /// Accept only an actual uncaught guest exception whose recorder and cell
     /// both finalized. An error prefix with an unknown effect boundary cannot
     /// become replay evidence merely because some console output was retained.
     fn observe_guest_exception(
         orchestrator: &ExecutionOrchestrator,
         error: &OrchestratorError,
-    ) -> Result<(CapturedGuestException, Vec<(HostIoRequest, HostIoOutcome)>), String> {
+    ) -> Result<ObservedGuestException, String> {
         let OrchestratorError::Interpreter(InterpreterError::UncaughtException { value }) =
             error.primary_error()
         else {
@@ -556,23 +1001,22 @@ mod engine {
         }
         let host_effect_transcript = entries
             .iter()
-            .map(|entry| match entry {
+            .filter_map(|entry| match entry {
                 HostEffectJournalEntry::HostIo { request, outcome } => {
-                    Ok((request.clone(), outcome.clone()))
+                    Some((request.clone(), outcome.clone()))
                 }
-                HostEffectJournalEntry::ProcessSpawn { .. } => {
-                    Err("native failure replay does not support process journals".to_string())
-                }
+                HostEffectJournalEntry::ProcessSpawn { .. } => None,
             })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok((
-            CapturedGuestException {
+            .collect();
+        Ok(ObservedGuestException {
+            exception: CapturedGuestException {
                 trace_id: trace_id.to_string(),
                 exception_value: value.clone(),
                 console_output: orchestrator.last_failed_console_output(),
             },
             host_effect_transcript,
-        ))
+            host_effect_journal: entries.to_vec(),
+        })
     }
 
     impl NativeReplayCapture {
@@ -580,18 +1024,26 @@ mod engine {
         /// finalized response, before either can be discarded or reread.
         /// The product caller supplies the same ambient grant and argv it gave
         /// the orchestrator, and must have installed its SandboxedHostIo plus
-        /// transparent policy decorators. A process-shape grant supplies only
-        /// captured arguments and the engine's deterministic metadata shape.
+        /// transparent policy decorators. If process_preparation is Some, the
+        /// caller must also have installed ProcessReplayCaptureHostIo during
+        /// the original execution so its lowering uses the ordered journal's
+        /// conservative exception floor.
+        /// A process-shape grant supplies only captured arguments and the
+        /// engine's deterministic metadata shape.
         pub fn from_execution(
             package: &ExtensionPackage,
             orchestrator_config: &OrchestratorConfig,
             runtime_config: &RuntimeConfig,
             ambient_authority: AmbientAuthorityGrant,
             process_argv: &[String],
+            process_preparation: Option<&CapturingProcessSpawnProvider>,
             result: &OrchestratorResult,
         ) -> Result<Self, String> {
-            if !result.host_effect_journal.is_empty() {
-                return Err("native replay capture does not support process journals".to_string());
+            if process_preparation.is_none() && !result.host_effect_journal.is_empty() {
+                return Err(
+                    "native replay global journal requires captured process preparation"
+                        .to_string(),
+                );
             }
             if result.extension_id != package.extension_id
                 || result.epoch != orchestrator_config.epoch
@@ -605,9 +1057,15 @@ mod engine {
                 orchestrator: CapturedOrchestratorSettings::capture(orchestrator_config)?,
                 runtime: runtime_config.clone(),
                 ambient_authority,
-                host_io_exception_provenance: HostIoExceptionProvenance::ProviderInternal,
+                host_io_exception_provenance: capture_exception_provenance(
+                    process_preparation.is_some(),
+                ),
                 process_argv: process_argv.to_vec(),
                 host_effect_transcript: result.host_effect_transcript.clone(),
+                process: CapturedProcessReplay::capture(
+                    process_preparation,
+                    &result.host_effect_journal,
+                )?,
                 expected: CapturedAttempt::Completed(CapturedExecution {
                     trace_id: result.trace_id.clone(),
                     ir4_witness: result.ir4_witness.clone(),
@@ -627,29 +1085,53 @@ mod engine {
         /// Capture an uncaught guest exception and its finalized effect prefix.
         /// No successful IR4 witness or finalized nondeterminism trace is
         /// manufactured for an attempt the engine reported as failed.
+        /// As with from_execution, Some process_preparation requires that the
+        /// original execution installed ProcessReplayCaptureHostIo before
+        /// lowering and used this exact capturing process provider.
+        // Keep product-admitted source/settings/provider inputs separate from
+        // the live orchestrator and error that independently establish the
+        // finalized failure evidence; no caller-built payload substitutes for
+        // those observations. The exemption is confined to this boundary.
+        #[allow(clippy::too_many_arguments)]
         pub fn from_failed_execution(
             package: &ExtensionPackage,
             orchestrator_config: &OrchestratorConfig,
             runtime_config: &RuntimeConfig,
             ambient_authority: AmbientAuthorityGrant,
             process_argv: &[String],
+            process_preparation: Option<&CapturingProcessSpawnProvider>,
             orchestrator: &ExecutionOrchestrator,
             error: &OrchestratorError,
         ) -> Result<Self, String> {
-            let (expected, host_effect_transcript) = observe_guest_exception(orchestrator, error)?;
+            let ObservedGuestException {
+                exception: expected,
+                host_effect_transcript,
+                host_effect_journal: journal,
+            } = observe_guest_exception(orchestrator, error)?;
             let payload = NativeReplayPayload {
                 package: package.clone(),
                 orchestrator: CapturedOrchestratorSettings::capture(orchestrator_config)?,
                 runtime: runtime_config.clone(),
                 ambient_authority,
-                host_io_exception_provenance: HostIoExceptionProvenance::ProviderInternal,
+                host_io_exception_provenance: capture_exception_provenance(
+                    process_preparation.is_some(),
+                ),
                 process_argv: process_argv.to_vec(),
                 host_effect_transcript,
+                process: CapturedProcessReplay::capture(process_preparation, &journal)?,
                 expected: CapturedAttempt::UncaughtException(expected),
             };
             payload.validate()?;
             encode_capture(&payload)
         }
+    }
+
+    fn replay_policy_comparison_note(process_replay: bool) -> String {
+        let mut note = "Replay disables runtime module loading. Its changed declared-capability population can change Bayesian and containment decisions; decisions_match is informational and is excluded from the guest execution verdict.".to_string();
+        if process_replay {
+            note.push_str(" The original process-capture run and ordered replay journal both use the engine's conservative Unknown exception floor. Capture mode can deny flows the ordinary live provider permits. IR, execution, and effect comparisons remain exact; no captured witness or replay outcome is relabeled to obtain a match.");
+        }
+        note
     }
 
     fn compare_execution(
@@ -671,21 +1153,28 @@ mod engine {
             captured_terminal_state: NativeReplayTerminalState::Completed,
             replay_terminal_state: NativeReplayTerminalState::Completed,
             terminal_state_match: true,
-            ir3_hash_match: Some(expected.ir4_witness.executed_ir3_hash
-                == replayed.ir4_witness.executed_ir3_hash),
+            ir3_hash_match: Some(
+                expected.ir4_witness.executed_ir3_hash == replayed.ir4_witness.executed_ir3_hash,
+            ),
             ir4_witness_match: Some(expected.ir4_witness == replayed.ir4_witness),
             execution_value_match: Some(expected.execution_value == replayed.execution_value),
-            instruction_count_match: Some(expected.instructions_executed
-                == replayed.instructions_executed),
+            instruction_count_match: Some(
+                expected.instructions_executed == replayed.instructions_executed,
+            ),
             console_match: expected.console_output == replayed.console_output,
-            host_effects_match: payload.host_effect_transcript == replayed.host_effect_transcript,
-            nondeterminism_trace_match: Some(expected.nondeterminism_trace
-                == replayed.nondeterminism_trace),
+            host_effects_match: payload.host_effect_transcript == replayed.host_effect_transcript
+                && payload
+                    .process
+                    .as_ref()
+                    .is_none_or(|process| process.journal == replayed.host_effect_journal),
+            nondeterminism_trace_match: Some(
+                expected.nondeterminism_trace == replayed.nondeterminism_trace,
+            ),
             lane_match: Some(expected.lane == replayed.lane),
             exit_code_match: Some(expected.exit_code == replayed.exit_code),
             exception_value_match: None,
             decisions_match: Some(expected.decisions == execution_decisions(replayed)?),
-            policy_comparison_note: "Replay disables runtime module loading. Its changed declared-capability population can change Bayesian and containment decisions; decisions_match is informational and is excluded from the guest execution verdict.".to_string(),
+            policy_comparison_note: replay_policy_comparison_note(payload.process.is_some()),
         };
         for (matches, subject) in [
             (outcome.ir3_hash_match == Some(true), "executed IR3"),
@@ -730,11 +1219,13 @@ mod engine {
         exception_value: Option<String>,
         console_output: Vec<ConsoleEntry>,
         host_effect_transcript: Vec<(HostIoRequest, HostIoOutcome)>,
+        host_effect_journal: Vec<HostEffectJournalEntry>,
     }
 
     fn compare_failure_observation(
         expected: &CapturedGuestException,
         expected_effects: &[(HostIoRequest, HostIoOutcome)],
+        expected_journal: Option<&[HostEffectJournalEntry]>,
         replayed: &GuestTerminalObservation,
     ) -> NativeReplayOutcome {
         let mut outcome = NativeReplayOutcome {
@@ -754,7 +1245,8 @@ mod engine {
             execution_value_match: None,
             instruction_count_match: None,
             console_match: expected.console_output == replayed.console_output,
-            host_effects_match: expected_effects == replayed.host_effect_transcript,
+            host_effects_match: expected_effects == replayed.host_effect_transcript
+                && expected_journal.is_none_or(|journal| journal == replayed.host_effect_journal),
             nondeterminism_trace_match: None,
             lane_match: None,
             exit_code_match: None,
@@ -762,6 +1254,9 @@ mod engine {
             decisions_match: None,
             policy_comparison_note: "This verdict verifies an uncaught guest exception, captured console, and finalized host-effect prefix. The failed run has no completed IR4 witness, finalized nondeterminism trace, total instruction count, or completed runtime decision to compare. Runtime module loading remains disabled.".to_string(),
         };
+        if expected_journal.is_some() {
+            outcome.policy_comparison_note.push_str(" Process outcomes are consumed in global journal order without live dispatch; the engine's Unknown filesystem exception provenance remains in force.");
+        }
         for (matches, subject) in [
             (outcome.terminal_state_match, "terminal state"),
             (
@@ -833,7 +1328,31 @@ mod engine {
                         payload.host_effect_transcript.clone(),
                     ))),
                 );
+                let replay_process_provider = payload.process.as_ref().map(|process| {
+                    Arc::new(CapturedReplayProcessProvider::new(
+                        process.preparation.clone(),
+                    ))
+                });
+                if let (Some(process), Some(provider)) =
+                    (&payload.process, &replay_process_provider)
+                {
+                    // An expired authority is intentional: ordered replay must
+                    // consume captured outcomes without authorizing a live call.
+                    // Keep the journal's Unknown provenance floor unchanged.
+                    orchestrator.set_process_spawn(
+                        provider.clone(),
+                        Arc::new(InMemoryHostEffectJournal::replaying(
+                            process.journal.clone(),
+                        )),
+                        ProcessSpawnAttemptAuthority::expiring_at_unix_ms(0),
+                    );
+                }
                 let result = orchestrator.execute(&package);
+                if let Some(provider) = replay_process_provider {
+                    // A caught preparation mismatch cannot turn into a valid
+                    // replay merely because the guest suppressed its exception.
+                    provider.verify()?;
+                }
                 match (&payload.expected, result) {
                     (CapturedAttempt::Completed(_), Ok(replayed)) => {
                         compare_execution(&payload, &replayed)
@@ -842,11 +1361,11 @@ mod engine {
                         Err(format!("native re-execution failed: {error}"))
                     }
                     (CapturedAttempt::UncaughtException(expected), Err(error)) => {
-                        let (observed, host_effect_transcript) = observe_guest_exception(
-                            &orchestrator,
-                            &error,
-                        )
-                        .map_err(|reason| {
+                        let ObservedGuestException {
+                            exception: observed,
+                            host_effect_transcript,
+                            host_effect_journal,
+                        } = observe_guest_exception(&orchestrator, &error).map_err(|reason| {
                             format!(
                                 "native failure re-execution is not certified: {reason}; {error}"
                             )
@@ -857,10 +1376,15 @@ mod engine {
                             exception_value: Some(observed.exception_value),
                             console_output: observed.console_output,
                             host_effect_transcript,
+                            host_effect_journal,
                         };
                         Ok(compare_failure_observation(
                             expected,
                             &payload.host_effect_transcript,
+                            payload
+                                .process
+                                .as_ref()
+                                .map(|process| process.journal.as_slice()),
                             &replayed,
                         ))
                     }
@@ -871,10 +1395,15 @@ mod engine {
                             exception_value: None,
                             console_output: replayed.console_output,
                             host_effect_transcript: replayed.host_effect_transcript,
+                            host_effect_journal: replayed.host_effect_journal,
                         };
                         Ok(compare_failure_observation(
                             expected,
                             &payload.host_effect_transcript,
+                            payload
+                                .process
+                                .as_ref()
+                                .map(|process| process.journal.as_slice()),
                             &replayed,
                         ))
                     }
@@ -893,6 +1422,8 @@ mod engine {
         use std::path::Path;
 
         use frankenengine_extension_host::host_io::{HostIoResponse, SandboxedHostIo};
+        #[cfg(unix)]
+        use frankenengine_extension_host::process_spawn::{NativeProcessSpawn, ProcessSpawnPolicy};
 
         use super::*;
 
@@ -963,6 +1494,7 @@ mod engine {
                     &runtime,
                     ambient_authority,
                     process_argv,
+                    None,
                     &result,
                 ),
                 Err(error) => NativeReplayCapture::from_failed_execution(
@@ -971,11 +1503,396 @@ mod engine {
                     &runtime,
                     ambient_authority,
                     process_argv,
+                    None,
                     &orchestrator,
                     &error,
                 ),
             }
             .expect("capture actual native result")
+        }
+
+        #[cfg(unix)]
+        fn process_provider(root: &Path) -> Arc<CapturingProcessSpawnProvider> {
+            let mut policy =
+                ProcessSpawnPolicy::jailed(root).expect("jailed native process policy");
+            for (alias, candidates) in [
+                ("mark", ["/usr/bin/touch", "/bin/touch"]),
+                ("emit", ["/usr/bin/printf", "/bin/printf"]),
+                ("shell", ["/usr/bin/sh", "/bin/sh"]),
+            ] {
+                let executable = candidates
+                    .iter()
+                    .map(Path::new)
+                    .find(|path| path.is_file())
+                    .expect("standard Unix fixture executable");
+                policy
+                    .authorize_alias(alias, executable)
+                    .expect("authorize exact fixture executable");
+            }
+            policy.allow_shell = true;
+            policy.shell_executable_alias = Some("shell".to_string());
+            Arc::new(CapturingProcessSpawnProvider::new(Arc::new(
+                NativeProcessSpawn::new(policy).expect("native process provider"),
+            )))
+        }
+
+        #[cfg(unix)]
+        fn record_process(root: &Path, source: &str) -> NativeReplayCapture {
+            let config = OrchestratorConfig {
+                commonjs_entry: true,
+                ..OrchestratorConfig::default()
+            };
+            let runtime = RuntimeConfig::default();
+            let path = root.join("process.cjs");
+            std::fs::write(&path, source).expect("write original process source");
+            let package = ExtensionPackage {
+                extension_id: "native-process-replay-regression".to_string(),
+                source: source.to_string(),
+                source_file: Some(path.display().to_string()),
+                module_root: Some(root.display().to_string()),
+                capabilities: [
+                    "module_load",
+                    "process_spawn",
+                    "builtin",
+                    "fs_read",
+                    "fs_write",
+                    "timer",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+                version: "test".to_string(),
+                metadata: BTreeMap::new(),
+            };
+            let authority = RuntimeEvidenceAuthority::generate_runtime_owned(
+                "franken-node.native-process-replay-test",
+                config.epoch,
+                1,
+                None,
+            )
+            .expect("runtime-owned test evidence authority");
+            let mut orchestrator =
+                ExecutionOrchestrator::try_new_with_runtime_config_and_authority(
+                    config.clone(),
+                    runtime.clone(),
+                    AmbientAuthorityGrant::DenyAll,
+                    authority,
+                )
+                .expect("native process recorder");
+            orchestrator.set_host_io(
+                Arc::new(ProcessReplayCaptureHostIo::new(Arc::new(
+                    SandboxedHostIo::with_root(root).expect("live bounded host I/O"),
+                ))),
+                Some(Arc::new(InMemoryHostIoTranscript::recording())),
+            );
+            let provider = process_provider(root);
+            let expires_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("test clock")
+                .as_millis();
+            let expires_at = u64::try_from(expires_at)
+                .expect("test time fits")
+                .saturating_add(60_000);
+            orchestrator.set_process_spawn(
+                provider.clone(),
+                Arc::new(InMemoryHostEffectJournal::recording()),
+                ProcessSpawnAttemptAuthority::expiring_at_unix_ms(expires_at),
+            );
+            match orchestrator.execute(&package) {
+                Ok(result) => NativeReplayCapture::from_execution(
+                    &package,
+                    &config,
+                    &runtime,
+                    AmbientAuthorityGrant::DenyAll,
+                    &[],
+                    Some(provider.as_ref()),
+                    &result,
+                ),
+                Err(error) => NativeReplayCapture::from_failed_execution(
+                    &package,
+                    &config,
+                    &runtime,
+                    AmbientAuthorityGrant::DenyAll,
+                    &[],
+                    Some(provider.as_ref()),
+                    &orchestrator,
+                    &error,
+                ),
+            }
+            .expect("capture real process execution")
+        }
+
+        #[test]
+        #[cfg(unix)]
+        fn process_reexecution_preserves_success_and_exception_without_repeating_live_effects() {
+            on_native_stack(|| {
+                for throws in [false, true] {
+                    let root = tempfile::tempdir().expect("native process replay root");
+                    let marker = root.path().join("process-marker");
+                    let marker_json = serde_json::to_string(&marker.display().to_string()).unwrap();
+                    let source = format!(
+                        "const cp = require('child_process'); const fs = require('fs'); cp.execFileSync('mark', [{marker_json}]); fs.writeFileSync('host-marker.txt', 'captured-host-output'); console.log(cp.execFileSync('emit', ['captured-process-output'], {{ encoding: 'utf8' }})); {}",
+                        if throws {
+                            "throw 'captured-process-failure';"
+                        } else {
+                            ""
+                        },
+                    );
+                    let capture = record_process(root.path(), &source);
+                    assert!(
+                        marker.is_file(),
+                        "the original child really performed its effect"
+                    );
+                    std::fs::rename(&marker, root.path().join("saved-process-marker")).unwrap();
+                    std::fs::rename(
+                        root.path().join("host-marker.txt"),
+                        root.path().join("saved-host-marker.txt"),
+                    )
+                    .unwrap();
+                    std::fs::rename(
+                        root.path().join("process.cjs"),
+                        root.path().join("saved-process.cjs"),
+                    )
+                    .unwrap();
+                    let payload: NativeReplayPayload =
+                        serde_json::from_str(&capture.payload_json).unwrap();
+                    assert_eq!(
+                        payload.host_io_exception_provenance,
+                        HostIoExceptionProvenance::Unknown,
+                        "the original engine execution must use the replay journal's floor"
+                    );
+                    let process = payload.process.as_ref().expect("ordered process capture");
+                    assert!(
+                        process.journal.iter().any(|entry| matches!(
+                            entry,
+                            HostEffectJournalEntry::ProcessSpawn { .. }
+                        ))
+                    );
+                    assert!(process.preparation.iter().any(|entry| matches!(entry,
+                        CapturedProcessPreparation::Prepare { request: original, outcome: Ok(prepared) } if original != prepared
+                    )), "record the actual alias-to-executable preparation");
+                    let outcome =
+                        reexecute(&capture).expect("replay with expired process authority");
+                    assert!(outcome.matched, "{outcome:?}");
+                    assert!(outcome.host_effects_match);
+                    assert!(outcome.console_match);
+                    assert_eq!(
+                        outcome.captured_terminal_state,
+                        if throws {
+                            NativeReplayTerminalState::UncaughtException
+                        } else {
+                            NativeReplayTerminalState::Completed
+                        }
+                    );
+                    assert!(
+                        !marker.exists(),
+                        "replay must never spawn the marker writer"
+                    );
+                    assert!(
+                        !root.path().join("host-marker.txt").exists(),
+                        "ordered process replay must not repeat interleaved filesystem effects"
+                    );
+                    assert!(
+                        !root.path().join("process.cjs").exists(),
+                        "source comes from the capture"
+                    );
+                    assert!(root.path().join("saved-process-marker").exists());
+                }
+            });
+        }
+
+        #[test]
+        #[cfg(unix)]
+        fn process_reexecution_uses_captured_shell_preparation_and_policy_denials() {
+            on_native_stack(|| {
+                let root = tempfile::tempdir().unwrap();
+                let capture = record_process(
+                    root.path(),
+                    "const cp = require('child_process'); console.log(cp.execSync('printf shell-output', { encoding: 'utf8' })); try { cp.execFileSync('unapproved-command', [], { encoding: 'utf8' }); } catch (error) { console.log('expected-policy-denial'); }",
+                );
+                let payload: NativeReplayPayload =
+                    serde_json::from_str(&capture.payload_json).unwrap();
+                let process = payload.process.as_ref().unwrap();
+                assert!(process.preparation.iter().any(|entry| matches!(
+                    entry,
+                    CapturedProcessPreparation::Prepare {
+                        outcome: Err(_),
+                        ..
+                    }
+                )));
+                assert!(process.journal.iter().any(|entry| matches!(
+                    entry,
+                    HostEffectJournalEntry::ProcessSpawn {
+                        outcome: Err(_),
+                        ..
+                    }
+                )));
+                let outcome =
+                    reexecute(&capture).expect("replay exact signed shell selection and denial");
+                assert!(outcome.matched, "{outcome:?}");
+            });
+        }
+
+        #[test]
+        #[cfg(unix)]
+        fn process_reexecution_rejects_unknown_preparation_even_when_guest_catches_error() {
+            on_native_stack(|| {
+                for throws in [false, true] {
+                    let root = tempfile::tempdir().unwrap();
+                    let source = format!(
+                        "const cp = require('child_process'); try {{ cp.execFileSync('emit', ['original'], {{ encoding: 'utf8' }}); }} catch (error) {{ }} console.log('after-attempt'); {}",
+                        if throws {
+                            "throw 'captured-failure';"
+                        } else {
+                            ""
+                        },
+                    );
+                    let capture = record_process(root.path(), &source);
+                    for missing_preflight in [false, true] {
+                        let mut payload: NativeReplayPayload =
+                            serde_json::from_str(&capture.payload_json).unwrap();
+                        let process = payload.process.as_mut().unwrap();
+                        process
+                            .preparation
+                            .retain(|entry| entry.is_preflight() != missing_preflight);
+                        // In the preflight case, neither the guest-visible
+                        // terminal state nor a leftover journal entry can
+                        // reveal the swallowed denial. The replay diagnostic
+                        // must still refuse to certify this incomplete input.
+                        process.journal.clear();
+                        payload.validate().expect("bounded but incomplete capture");
+                        let changed = encode_capture(&payload).unwrap();
+                        let error = reexecute(&changed)
+                            .expect_err("guest catch cannot hide missing preparation");
+                        assert!(error.contains("even if the guest caught"), "{error}");
+                    }
+                }
+            });
+        }
+
+        #[test]
+        #[cfg(unix)]
+        fn process_reexecution_enforces_global_effect_order_and_unused_suffix() {
+            on_native_stack(|| {
+                for throws in [false, true] {
+                    let root = tempfile::tempdir().unwrap();
+                    let source = format!(
+                        "const cp = require('child_process'); const fs = require('fs'); console.log(cp.execFileSync('emit', ['first'], {{ encoding: 'utf8' }})); fs.writeFileSync('between.txt', 'between'); console.log(cp.execFileSync('emit', ['second'], {{ encoding: 'utf8' }})); {}",
+                        if throws {
+                            "throw 'ordered-failure';"
+                        } else {
+                            ""
+                        },
+                    );
+                    let capture = record_process(root.path(), &source);
+                    let mut reordered: NativeReplayPayload =
+                        serde_json::from_str(&capture.payload_json).unwrap();
+                    let journal = &mut reordered.process.as_mut().unwrap().journal;
+                    assert!(matches!(
+                        journal[0],
+                        HostEffectJournalEntry::ProcessSpawn { .. }
+                    ));
+                    assert!(matches!(journal[1], HostEffectJournalEntry::HostIo { .. }));
+                    journal.swap(0, 1);
+                    reordered
+                        .validate()
+                        .expect("internally consistent cross-family reordering");
+                    reexecute(&encode_capture(&reordered).unwrap()).expect_err(
+                        "process/filesystem order is authoritative even in a failed prefix",
+                    );
+                    let mut trailing: NativeReplayPayload =
+                        serde_json::from_str(&capture.payload_json).unwrap();
+                    let journal = &mut trailing.process.as_mut().unwrap().journal;
+                    journal.push(journal[0].clone());
+                    trailing
+                        .validate()
+                        .expect("internally consistent unused process suffix");
+                    reexecute(&encode_capture(&trailing).unwrap()).expect_err(
+                        "unused process outcomes cannot certify success or a failed prefix",
+                    );
+                }
+            });
+        }
+
+        #[test]
+        #[cfg(unix)]
+        fn process_capture_rejects_missing_authority_conflicting_preparation_and_unjournaled_preflight()
+         {
+            on_native_stack(|| {
+                let root = tempfile::tempdir().unwrap();
+                let capture = record_process(
+                    root.path(),
+                    "const cp = require('child_process'); console.log(cp.execFileSync('emit', ['capture'], { encoding: 'utf8' }));",
+                );
+                let mut missing: NativeReplayPayload =
+                    serde_json::from_str(&capture.payload_json).unwrap();
+                missing.process = None;
+                assert!(
+                    missing
+                        .validate()
+                        .unwrap_err()
+                        .contains("exact preparation")
+                );
+                let mut duplicated: NativeReplayPayload =
+                    serde_json::from_str(&capture.payload_json).unwrap();
+                let process = duplicated.process.as_mut().unwrap();
+                process.preparation.push(process.preparation[0].clone());
+                assert!(
+                    duplicated
+                        .validate()
+                        .unwrap_err()
+                        .contains("repeats a request")
+                );
+                let payload: NativeReplayPayload =
+                    serde_json::from_str(&capture.payload_json).unwrap();
+                let mut request = payload.process.as_ref().unwrap().preparation[0]
+                    .request()
+                    .clone();
+                let ProcessSpawnRequest::Run { launch, .. } = &mut request else {
+                    panic!("execFileSync request")
+                };
+                launch.argv = vec!["x".repeat(MAX_PROCESS_PREPARATION_BYTES + 1)];
+                let provider = process_provider(root.path());
+                assert!(provider.preflight_request(&request).is_err());
+                let preparation = provider
+                    .snapshot()
+                    .expect("preflight leaves capture state untouched");
+                assert!(preparation.is_empty());
+                let process = payload.process.as_ref().unwrap();
+                let replay = CapturedReplayProcessProvider::new(process.preparation.clone());
+                assert_eq!(
+                    replay.preflight_request(&request),
+                    Err(ProcessSpawnError::Denied {
+                        reason: String::new()
+                    }),
+                    "unknown inputs are refused without allocating a diagnostic"
+                );
+                let (known_request, known_outcome) = process
+                    .preparation
+                    .iter()
+                    .find_map(|entry| {
+                        if let CapturedProcessPreparation::Prepare { request, outcome } = entry {
+                            Some((request, outcome))
+                        } else {
+                            None
+                        }
+                    })
+                    .expect("captured original request preparation");
+                assert_eq!(replay.preflight_request(known_request), Ok(()));
+                assert_eq!(
+                    replay.prepare_request(known_request),
+                    *known_outcome,
+                    "the diagnostic flag must not change later deterministic provider answers"
+                );
+                assert!(
+                    replay.verify().is_err(),
+                    "an unobserved denial is not replay evidence"
+                );
+                assert!(
+                    provider.state.lock().unwrap().entries.is_empty(),
+                    "oversized preflight must not allocate retained capture entries"
+                );
+            });
         }
 
         #[test]
@@ -1095,6 +2012,51 @@ mod engine {
                         .contains("process arguments exceed")
                 );
                 assert!(encode_capture(&oversized).is_err());
+            });
+        }
+
+        #[test]
+        fn native_reexecution_preserves_existing_v2_canonical_capture_bytes() {
+            on_native_stack(|| {
+                // Freeze the original v2 field order and shape independently
+                // of the newly optional process capture field. Already signed
+                // payloads must retain both their bytes and their digest.
+                #[derive(Serialize)]
+                struct OriginalV2Payload<'a> {
+                    package: &'a ExtensionPackage,
+                    orchestrator: &'a CapturedOrchestratorSettings,
+                    runtime: &'a RuntimeConfig,
+                    ambient_authority: AmbientAuthorityGrant,
+                    host_io_exception_provenance: HostIoExceptionProvenance,
+                    process_argv: &'a [String],
+                    host_effect_transcript: &'a [(HostIoRequest, HostIoOutcome)],
+                    expected: &'a CapturedAttempt,
+                }
+
+                let root = tempfile::tempdir().expect("existing v2 capture");
+                let capture = record(root.path(), "console.log('existing-v2-capture');");
+                let payload: NativeReplayPayload =
+                    serde_json::from_str(&capture.payload_json).expect("v2 inputs");
+                assert!(payload.process.is_none());
+                let original_payload_json = serde_json::to_string(&OriginalV2Payload {
+                    package: &payload.package,
+                    orchestrator: &payload.orchestrator,
+                    runtime: &payload.runtime,
+                    ambient_authority: payload.ambient_authority,
+                    host_io_exception_provenance: payload.host_io_exception_provenance,
+                    process_argv: &payload.process_argv,
+                    host_effect_transcript: &payload.host_effect_transcript,
+                    expected: &payload.expected,
+                })
+                .expect("original v2 serialization");
+                let original = NativeReplayCapture {
+                    schema_version: "franken-node/native-replay-capture/v2".to_string(),
+                    payload_sha256: hex::encode(Sha256::digest(original_payload_json.as_bytes())),
+                    payload_json: original_payload_json,
+                };
+                assert_eq!(capture, original);
+                let outcome = reexecute(&original).expect("accept already signed v2 shape");
+                assert!(outcome.matched, "{outcome:?}");
             });
         }
 

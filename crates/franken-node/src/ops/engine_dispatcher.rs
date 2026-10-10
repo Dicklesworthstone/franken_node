@@ -5991,12 +5991,9 @@ impl EngineDispatcher {
         config.runtime.validate_execution_budget()?;
         config.runtime.validate_parse_budget()?;
 
-        if self.capture_replay
-            && (config.profile == Profile::LegacyRisky
-                || config.security.child_process_spawn.is_some())
-        {
+        if self.capture_replay && config.profile == Profile::LegacyRisky {
             anyhow::bail!(
-                "native replay capture requires strict or balanced policy without process-spawn authority; environment values and child processes are not replay inputs"
+                "native replay capture requires strict or balanced policy; environment values are not replay inputs"
             );
         }
 
@@ -9286,6 +9283,7 @@ impl EngineDispatcher {
         // policy is the exact token-subject policy, not ambient PATH/env state.
         // The shared journal is installed at the same time so interleaved
         // filesystem/network/process crossings retain their real global order.
+        let mut replay_process_provider = None;
         if let Some(admission) = process_spawn_admission.as_ref() {
             let process_spawn_authority =
                 ProcessSpawnAttemptAuthority::expiring_at_unix_ms(admission.expires_at_ms());
@@ -9306,7 +9304,21 @@ impl EngineDispatcher {
                 expires_at_ms: admission.expires_at_ms(),
             };
             let journal = Arc::new(InMemoryHostEffectJournal::recording());
-            orchestrator.set_process_spawn(Arc::new(provider), journal, process_spawn_authority);
+            if capture_replay {
+                let provider = Arc::new(
+                    crate::ops::native_replay::CapturingProcessSpawnProvider::new(Arc::new(
+                        provider,
+                    )),
+                );
+                orchestrator.set_process_spawn(provider.clone(), journal, process_spawn_authority);
+                replay_process_provider = Some(provider);
+            } else {
+                orchestrator.set_process_spawn(
+                    Arc::new(provider),
+                    journal,
+                    process_spawn_authority,
+                );
+            }
             tracing::info!(
                 execution_mode = "native",
                 "Installed signed, containment-bound process-spawn provider"
@@ -9396,7 +9408,19 @@ impl EngineDispatcher {
                     crate::ops::flow_gated_host_io::FlowGatedHostIo::new(gated, run_egress_trace);
                 let cancellation_gated =
                     CancellationGatedHostIo::new(Arc::new(flow_gated), cancellation.clone());
-                orchestrator.set_host_io(Arc::new(cancellation_gated), Some(recorder));
+                let host_io: Arc<dyn HostIoProvider> = Arc::new(cancellation_gated);
+                let host_io = if replay_process_provider.is_some() {
+                    // Ordered replay has the engine's conservative Unknown
+                    // exception provenance. Use that same restriction in the
+                    // original capture before lowering; never relabel original
+                    // witnesses or relax comparison to manufacture a match.
+                    Arc::new(crate::ops::native_replay::ProcessReplayCaptureHostIo::new(
+                        host_io,
+                    )) as Arc<dyn HostIoProvider>
+                } else {
+                    host_io
+                };
+                orchestrator.set_host_io(host_io, Some(recorder));
                 tracing::info!(
                     execution_mode = "native",
                     sandbox_root = %sandbox_root.display(),
@@ -9501,6 +9525,7 @@ impl EngineDispatcher {
                                 runtime_config,
                                 ambient_authority_grant,
                                 process_argv,
+                                replay_process_provider.as_deref(),
                                 &orchestrator,
                                 &error,
                             ) {
@@ -9603,6 +9628,7 @@ impl EngineDispatcher {
                     &runtime_config,
                     ambient_authority_grant,
                     &process_argv,
+                    replay_process_provider.as_deref(),
                     &execution_result,
                 ) {
                     Ok(capture) => Some(capture),

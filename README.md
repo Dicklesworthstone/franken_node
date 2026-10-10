@@ -72,8 +72,8 @@ Under `franken-node`:
   `incident replay` integrity-verify the recorded bundle. Runs recorded with
   `--capture-replay` also support `incident replay --execute` for native guest
   execution or a certified uncaught-exception prefix, using captured host-I/O
-  results. `incident counterfactual --policy strict` scores an alternative
-  policy against the recorded evidence.
+  and admitted process results. `incident counterfactual --policy strict` scores
+  an alternative policy against the recorded evidence.
 
 Every gate above is a runtime default, not an external scanner. Each `run`
 (including a preflight refusal) and each `trust revoke`/`quarantine`/`release`
@@ -547,8 +547,8 @@ emitted evidence.
 #### Re-execute captured native JavaScript
 
 Opt in when recording a run to retain its entry source, execution settings,
-arguments, and raw host-I/O results in the signed run record. The capture is
-limited to 4 MiB and may contain application secrets.
+arguments, and raw host-I/O and admitted process results in the signed run
+record. The capture is limited to 4 MiB and may contain application secrets.
 
 ```bash
 franken-node init --profile balanced --out-dir .
@@ -564,27 +564,46 @@ franken-node incident replay --bundle INCIDENT_ID.fnbundle --execute \
 
 Replay authenticates the bundle before executing its captured source through
 the native engine. It consumes the exact recorded host requests and responses;
-it does not repeat filesystem writes or network requests, and the original
-source and input files may be missing or changed. An unused transcript suffix,
+it does not repeat filesystem writes, network requests, or child processes.
+The original source and input files may be missing or changed. An unused transcript suffix,
 an unexpected request, or a different result fails verification.
 
 | Replay mode | Verified result |
 |---|---|
 | Default, `replay_kind: recorded_trace` | Signature, bundle integrity, and the recorded decision sequence. |
-| `--execute`, `verification_scope: guest_execution` | Fresh guest output, value, IR3/IR4 witness, instruction count, nondeterminism trace, lane, exit code, and host-I/O transcript. |
-| `--execute`, `verification_scope: guest_failure_prefix` | The same uncaught exception, console output, execution trace identity, and finalized host-I/O prefix. Completed-witness, instruction-count, nondeterminism, lane, exit-code, and policy comparisons remain `null`. |
+| `--execute`, `verification_scope: guest_execution` | Fresh guest output, value, IR3/IR4 witness, instruction count, nondeterminism trace, lane, exit code, host-I/O transcript, and the global effect journal when process authority was admitted. |
+| `--execute`, `verification_scope: guest_failure_prefix` | The same uncaught exception, console output, execution trace identity, finalized host-I/O prefix, and any captured global process/I/O journal. Completed-witness, instruction-count, nondeterminism, lane, exit-code, and policy comparisons remain `null`. |
 
 A captured exception leaves the original `run` failed with exit status 1 and
 its original error and output. A later replay exits successfully when it
 reproduces that failure. Runs without host effects receive a completion or
 failure timeline event, without inventing an effect receipt.
 
+Strict and balanced runs with a valid signed child-process admission can now
+capture process replay. The worker retains bounded exact request preparation,
+including policy-owned executable and shell aliases, plus the global ordering
+of filesystem, network, and process outcomes. Replay uses those captured inputs
+with an inert process provider and an expired process authority; it does not
+reopen executables, consult the current process policy, or launch a child.
+An unknown preparation, conflicting capture, reordered effect, or unconsumed
+journal suffix cannot produce a successful replay verdict, including when the
+guest catches the immediate error. A request refused before journal admission
+may lack replayable preparation and consequently fail replay verification.
+
+Process capture uses the engine's conservative `Unknown` exception provenance
+in the original execution as well as replay. This can restrict flows that an
+ordinary run would allow; it keeps the actual original and replay witnesses
+comparable without making replay data more trusted or waiving any comparison.
+The optional process inputs preserve existing capture envelopes without
+changing previously signed payload bytes. Preparation is limited to 4,096
+unique entries and 2 MiB within the overall 4 MiB capture limit.
+
 Runtime module loading is disabled during replay; source capture for loaded
 modules is not available. A certified exception prefix involving runtime module
 loading can be captured, but `--execute` will refuse that module access.
-Process-spawn and ambient environment authority,
-timeouts, interrupted sessions, and uncertified engine failures remain outside
-this replay scope. For completed runs, `decisions_match` is informational:
+Ambient environment authority, timeouts, interrupted sessions, and uncertified
+engine failures remain outside this replay scope. For completed runs,
+`decisions_match` is informational:
 withholding module authority changes the capability population used by Bayesian
 policy evaluation, so the guest verdict does not certify identical policy
 decisions. `--execute` requires a build with the `engine` feature.
@@ -3732,7 +3751,9 @@ one pass.
   Completed guests and certified uncaught-exception prefixes have distinct
   verification scopes; a failed prefix has no completed IR4 witness or final
   instruction-count/nondeterminism comparison. Runtime module source capture,
-  process-spawn/environment replay, and interrupted execution remain unsupported.
+  ambient environment replay, and interrupted execution remain unsupported.
+  Admitted process replay preserves captured preparation and global effect order
+  while refusing live process dispatch.
   Original policy decisions are not certified by the guest replay verdict.
 - **Source builds require the sibling `franken_engine` repository** to be
   checked out next to this one (engine-split contract). The one-line

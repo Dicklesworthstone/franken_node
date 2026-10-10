@@ -209,7 +209,7 @@ fn legacy_replay_refusal_precedes_source_and_worker_resolution() {
             "{profile}: {error}"
         );
         assert!(
-            error.contains("environment values and child processes are not replay inputs"),
+            error.contains("environment values are not replay inputs"),
             "{error}"
         );
         assert_eq!(
