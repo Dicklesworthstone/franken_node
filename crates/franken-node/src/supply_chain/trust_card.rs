@@ -48,6 +48,9 @@ const MAX_TRUST_CARD_CAMOUFLAGE_HINTS: usize = 64;
 const MAX_TRUST_CARD_EVIDENCE_REFS: usize = 4096;
 /// Containment sources are never evicted to make room for a new decision.
 pub const MAX_QUARANTINE_SOURCES: usize = 1024;
+/// Behavioral stream commitments are never evicted or reset to make room.
+/// Retaining them prevents deleted evidence from reopening an old stream.
+pub const MAX_BEHAVIORAL_OBSERVATION_STREAMS: usize = 4096;
 const MAX_QUARANTINE_SOURCE_ID_BYTES: usize = 256;
 /// Maximum number of camouflage hint records persisted on a single TrustCard.
 ///
@@ -969,6 +972,49 @@ impl std::fmt::Debug for TrustCard {
 }
 
 impl TrustCard {
+    /// Preserve risk supported by retained camouflage findings when another
+    /// source refreshes its assessment. A severity of 0.50 implies High and
+    /// 0.90 implies Critical. The registry's explicit camouflage admission
+    /// path also raises High for lower-severity findings: retain that existing
+    /// decision, while display-only low-severity hints on Low/Medium cards do
+    /// not independently raise risk. Historical cards do not separately encode
+    /// risk causes, and hint records are bounded. Conservatively retain the
+    /// existing High/Critical rating whenever valid hints remain, even if its
+    /// original strongest hint aged out or another source also raised risk.
+    /// Lowering that rating requires explicit source-specific remediation.
+    /// A higher proposal wins.
+    #[must_use]
+    pub fn risk_with_camouflage_floor(&self, mut proposed: RiskAssessment) -> RiskAssessment {
+        let severity = self
+            .camouflage_hints
+            .iter()
+            .map(|hint| hint.severity)
+            .filter(|severity| severity.is_finite() && (0.0..=1.0).contains(severity))
+            .max_by(f64::total_cmp);
+        let Some(severity) = severity else {
+            return proposed;
+        };
+        if severity >= TRUST_CARD_CAMOUFLAGE_RISK_BUMP_SEVERITY
+            || self.user_facing_risk_assessment.level >= RiskLevel::High
+        {
+            let kinds = self
+                .camouflage_hints
+                .iter()
+                .filter(|hint| hint.severity.is_finite() && (0.0..=1.0).contains(&hint.severity))
+                .map(|hint| hint.kind.as_str())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join(",");
+            proposed.level = proposed
+                .level
+                .max(camouflage_risk_level(severity))
+                .max(self.user_facing_risk_assessment.level);
+            proposed.summary = camouflage_risk_summary(&proposed.summary, &kinds, severity);
+        }
+        proposed
+    }
+
     #[must_use]
     pub fn effective_quarantine_sources(&self) -> BTreeSet<QuarantineSource> {
         if self.active_quarantine && self.quarantine_sources.is_empty() {
@@ -1103,6 +1149,11 @@ pub struct TrustCardRegistrySnapshot {
     pub previous_snapshot_hash: Option<String>,
     pub cache_ttl_secs: u64,
     pub cards_by_extension: BTreeMap<String, Vec<TrustCard>>,
+    /// Retained stream ID -> last admitted observation ID commitments, covered
+    /// by the snapshot signature and high-water chain independently of bounded
+    /// card/audit history. Omission when empty preserves pre-observation hashes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub behavioral_observation_heads: BTreeMap<String, String>,
     pub snapshot_hash: String,
     pub registry_signature: String,
 }
@@ -1126,6 +1177,10 @@ impl std::fmt::Debug for TrustCardRegistrySnapshot {
             .field(
                 "cards_by_extension",
                 &format!("{} extensions", self.cards_by_extension.len()),
+            )
+            .field(
+                "behavioral_observation_streams",
+                &self.behavioral_observation_heads.len(),
             )
             .field("snapshot_hash", &"[REDACTED]")
             .field("registry_signature", &"[REDACTED]")
@@ -1158,6 +1213,7 @@ impl TrustCardRegistrySnapshot {
             previous_snapshot_hash: None,
             cache_ttl_secs: cache_ttl_secs.max(1),
             cards_by_extension,
+            behavioral_observation_heads: BTreeMap::new(),
             snapshot_hash: String::new(),
             registry_signature: String::new(),
         };
@@ -1201,6 +1257,7 @@ impl Clone for DurableBase {
 #[derive(Debug, Clone)]
 pub struct TrustCardRegistry {
     cards_by_extension: BTreeMap<String, Vec<TrustCard>>,
+    behavioral_observation_heads: BTreeMap<String, String>,
     cache_by_extension: BTreeMap<String, CachedCard>,
     cache_ttl_secs: u64,
     registry_key: Vec<u8>,
@@ -1235,6 +1292,7 @@ impl TrustCardRegistry {
     pub fn new(cache_ttl_secs: u64, registry_key: &[u8]) -> Self {
         Self {
             cards_by_extension: BTreeMap::new(),
+            behavioral_observation_heads: BTreeMap::new(),
             cache_by_extension: BTreeMap::new(),
             cache_ttl_secs: cache_ttl_secs.max(1),
             registry_key: registry_key.to_vec(),
@@ -1277,11 +1335,55 @@ impl TrustCardRegistry {
             previous_snapshot_hash: self.previous_snapshot_hash.clone(),
             cache_ttl_secs: self.cache_ttl_secs,
             cards_by_extension: self.cards_by_extension.clone(),
+            behavioral_observation_heads: self.behavioral_observation_heads.clone(),
             snapshot_hash: String::new(),
             registry_signature: String::new(),
         };
         sign_snapshot_in_place(&mut snapshot, &self.registry_key)?;
         Ok(snapshot)
+    }
+
+    pub(crate) fn behavioral_observation_head(&self, stream_id: &str) -> Option<&str> {
+        self.behavioral_observation_heads
+            .get(stream_id)
+            .map(String::as_str)
+    }
+
+    /// Advance an authenticated stream commitment without discarding any old
+    /// stream. The accompanying card and journal commit atomically through
+    /// `persist_authoritative_state_with_slot`.
+    pub(crate) fn advance_behavioral_observation_head(
+        &mut self,
+        stream_id: &str,
+        expected: Option<&str>,
+        next_observation_id: &str,
+    ) -> Result<(), TrustCardError> {
+        if !valid_behavioral_content_id(stream_id)
+            || !valid_behavioral_content_id(next_observation_id)
+        {
+            return Err(TrustCardError::InvalidInput {
+                reason: "behavioral stream heads require canonical sha256 content identities"
+                    .to_string(),
+            });
+        }
+        if self.behavioral_observation_head(stream_id) != expected {
+            return Err(TrustCardError::InvalidSnapshot(
+                "behavioral stream does not extend the retained signed registry head".to_string(),
+            ));
+        }
+        if expected.is_none()
+            && self.behavioral_observation_heads.len() >= MAX_BEHAVIORAL_OBSERVATION_STREAMS
+        {
+            return Err(TrustCardError::InvalidInput {
+                reason: format!(
+                    "behavioral registry reached its {MAX_BEHAVIORAL_OBSERVATION_STREAMS}-stream retention limit; existing commitments cannot be discarded"
+                ),
+            });
+        }
+        self.advance_snapshot_sequence_for_mutation();
+        self.behavioral_observation_heads
+            .insert(stream_id.to_string(), next_observation_id.to_string());
+        Ok(())
     }
 
     fn advance_snapshot_sequence_for_mutation(&mut self) {
@@ -1335,7 +1437,9 @@ impl TrustCardRegistry {
         }
 
         let mut registry = Self::new(snapshot.cache_ttl_secs, registry_key);
+        validate_behavioral_observation_heads(&snapshot.behavioral_observation_heads)?;
         registry.cards_by_extension = snapshot.cards_by_extension.clone();
+        registry.behavioral_observation_heads = snapshot.behavioral_observation_heads.clone();
 
         for (extension_id, history) in &registry.cards_by_extension {
             validate_snapshot_history(extension_id, history, &registry.registry_key)?;
@@ -1563,9 +1667,33 @@ impl TrustCardRegistry {
     /// Returns `TrustCardError` if snapshot materialization, high-water chain
     /// validation, canonical encoding, or the transaction fails.
     pub fn persist_authoritative_state(&self, path: &Path) -> Result<(), TrustCardError> {
+        self.persist_authoritative_state_with_slot(path, None)
+    }
+
+    /// Commit a verified auxiliary evidence journal with the registry decision
+    /// it produced. The expected value prevents a concurrent ingestion from
+    /// losing another observation, independently of registry high-water checks.
+    pub(crate) fn persist_authoritative_state_with_slot(
+        &self,
+        path: &Path,
+        slot_update: Option<(&str, Option<&str>, &str)>,
+    ) -> Result<(), TrustCardError> {
         let mut snapshot = self.snapshot()?;
         let store = TrustCardRegistryStore::open(path)?;
         store.with_immediate_transaction(|connection, tx| {
+            if let Some((slot, expected, _)) = slot_update {
+                if !slot.starts_with("behavioral-observations:") {
+                    return Err(TrustCardError::InvalidSnapshot(
+                        "unsupported auxiliary trust registry slot".to_string(),
+                    ));
+                }
+                if read_slot(connection, slot)?.as_deref() != expected {
+                    return Err(TrustCardError::InvalidSnapshot(
+                        "concurrent behavioral observation update rejected; reload and retry"
+                            .to_string(),
+                    ));
+                }
+            }
             let current_high_water = match read_slot(connection, SLOT_HIGH_WATER)? {
                 Some(raw) => {
                     let high_water = serde_json::from_str::<TrustCardRegistrySnapshotHighWater>(
@@ -1615,6 +1743,9 @@ impl TrustCardRegistry {
             let high_water_encoded = to_canonical_json(&next_high_water)?;
             upsert_slot(tx, SLOT_SNAPSHOT, &encoded)?;
             upsert_slot(tx, SLOT_HIGH_WATER, &high_water_encoded)?;
+            if let Some((slot, _, value)) = slot_update {
+                upsert_slot(tx, slot, value)?;
+            }
             Ok(())
         })?;
         self.durable_base.set(snapshot.snapshot_hash);
@@ -1940,7 +2071,7 @@ impl TrustCardRegistry {
             next.reputation_trend = trend;
         }
         if let Some(risk) = mutation.user_facing_risk_assessment {
-            next.user_facing_risk_assessment = risk;
+            next.user_facing_risk_assessment = next.risk_with_camouflage_floor(risk);
         }
         if let Some(ts) = mutation.last_verified_timestamp {
             next.last_verified_timestamp = ts;
@@ -1951,7 +2082,9 @@ impl TrustCardRegistry {
                 timestamp: timestamp_from_secs(now_secs),
                 event_code: TRUST_CARD_UPDATED.to_string(),
                 detail: audit_detail.unwrap_or_else(|| match &quarantine_change {
-                    Some((source, active)) => format!("quarantine source {source:?} active={active}"),
+                    Some((source, active)) => {
+                        format!("quarantine source {source:?} active={active}")
+                    }
                     None => "trust card updated".to_string(),
                 }),
                 trace_id: trace_id.to_string(),
@@ -2030,7 +2163,8 @@ impl TrustCardRegistry {
         next.reputation_score_basis_points = input.reputation_score_basis_points;
         next.reputation_trend = input.reputation_trend;
         next.last_verified_timestamp = input.last_verified_timestamp;
-        next.user_facing_risk_assessment = input.user_facing_risk_assessment;
+        next.user_facing_risk_assessment =
+            next.risk_with_camouflage_floor(input.user_facing_risk_assessment);
         next.derivation_evidence = Some(DerivationMetadata {
             derivation_chain_hash: compute_trust_card_derivation_hash(
                 &input.evidence_refs,
@@ -2039,25 +2173,6 @@ impl TrustCardRegistry {
             evidence_refs: input.evidence_refs,
             derived_at_epoch: now_secs,
         });
-        let camouflage_severity = next
-            .camouflage_hints
-            .iter()
-            .map(|hint| hint.severity)
-            .filter(|severity| severity.is_finite())
-            .fold(0.0_f64, f64::max);
-        if camouflage_severity >= TRUST_CARD_CAMOUFLAGE_RISK_BUMP_SEVERITY {
-            let kinds = next
-                .camouflage_hints
-                .iter()
-                .map(|hint| hint.kind.as_str())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>()
-                .join(",");
-            let risk = &mut next.user_facing_risk_assessment;
-            risk.level = risk.level.max(camouflage_risk_level(camouflage_severity));
-            risk.summary = camouflage_risk_summary(&risk.summary, &kinds, camouflage_severity);
-        }
         push_bounded(
             &mut next.audit_history,
             AuditRecord {
@@ -3350,12 +3465,37 @@ fn sign_snapshot_in_place(
     snapshot: &mut TrustCardRegistrySnapshot,
     registry_key: &[u8],
 ) -> Result<(), TrustCardError> {
+    validate_behavioral_observation_heads(&snapshot.behavioral_observation_heads)?;
     snapshot.snapshot_hash = compute_snapshot_hash(snapshot)?;
     let mut mac =
         HmacSha256::new_from_slice(registry_key).map_err(|_| TrustCardError::InvalidRegistryKey)?;
     mac.update(b"trust_card_registry_snapshot_sig_v1:");
     mac.update(snapshot.snapshot_hash.as_bytes());
     snapshot.registry_signature = hex::encode(mac.finalize().into_bytes());
+    Ok(())
+}
+
+fn valid_behavioral_content_id(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+fn validate_behavioral_observation_heads(
+    heads: &BTreeMap<String, String>,
+) -> Result<(), TrustCardError> {
+    if heads.len() > MAX_BEHAVIORAL_OBSERVATION_STREAMS
+        || heads.iter().any(|(stream, observation)| {
+            !valid_behavioral_content_id(stream) || !valid_behavioral_content_id(observation)
+        })
+    {
+        return Err(TrustCardError::InvalidSnapshot(
+            "invalid or excessive retained behavioral stream commitments".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -7429,6 +7569,7 @@ mod tests {
             previous_snapshot_hash: None,
             cache_ttl_secs: 60,
             cards_by_extension: BTreeMap::new(),
+            behavioral_observation_heads: BTreeMap::new(),
             snapshot_hash: "valid_hash".to_string(),
             registry_signature: "invalid_signature".to_string(),
         };
@@ -7591,6 +7732,7 @@ mod tests {
             previous_snapshot_hash: None,
             cache_ttl_secs: 60,
             cards_by_extension: cards_map,
+            behavioral_observation_heads: BTreeMap::new(),
             snapshot_hash: "test_hash".to_string(),
             registry_signature: "test_signature".to_string(),
         };
@@ -7624,6 +7766,7 @@ mod tests {
             previous_snapshot_hash: None,
             cache_ttl_secs: 60,
             cards_by_extension: BTreeMap::new(),
+            behavioral_observation_heads: BTreeMap::new(),
             snapshot_hash: "test_hash".to_string(),
             registry_signature: "test_signature".to_string(),
         };
@@ -7644,6 +7787,7 @@ mod tests {
             previous_snapshot_hash: None,
             cache_ttl_secs: 60,
             cards_by_extension: cards_map,
+            behavioral_observation_heads: BTreeMap::new(),
             snapshot_hash: "test_hash".to_string(),
             registry_signature: "test_signature".to_string(),
         };

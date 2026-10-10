@@ -3709,6 +3709,173 @@ fn trust_sync_rejects_unauthenticated_clean_refresh_that_lowers_risk() {
 }
 
 #[test]
+fn trust_sync_keeps_signed_camouflage_risk_after_vulnerable_then_clean_refresh() {
+    use std::collections::BTreeMap;
+
+    use frankenengine_node::security::trajectory_gaming::{CamouflageHint, CamouflageKind};
+    use frankenengine_node::supply_chain::certification::{EvidenceType, VerifiedEvidenceRef};
+    use frankenengine_node::supply_chain::trust_card::{RiskLevel, verify_card_signature};
+
+    const EXTENSION: &str = "npm:@acme/auth-guard";
+    let now_secs = chrono::Utc::now().timestamp() as u64;
+    let workspace = seeded_fixture_trust_workspace_with_timestamp(now_secs);
+    let registry_path = workspace
+        .path()
+        .join(".franken-node/state/trust-card-registry.v1.json");
+    let mut config = Config::for_profile(Profile::Balanced);
+    config.trust.registry_signing_key = Some(BASE64_STANDARD.encode(FIXTURE_REGISTRY_KEY));
+    let load_registry = || {
+        TrustCardRegistry::load_authoritative_state_from_config(
+            &registry_path,
+            &config.trust,
+            now_secs,
+            SnapshotSourceContext::TrustedFile,
+        )
+        .expect("reload authenticated durable trust registry")
+    };
+    let mut registry = load_registry();
+    // This explicit detector fixture exercises cross-command retention. The
+    // collector ingestion tests separately exercise measured trajectories.
+    let marked = registry
+        .mark_camouflage_suspected(
+            EXTENSION,
+            &[CamouflageHint {
+                kind: CamouflageKind::GradualCreep,
+                severity: 0.95,
+                evidence: BTreeMap::from([("fixture_slope".to_string(), 0.95)]),
+                sample_indices: vec![0, 1, 2, 3],
+            }],
+            vec![VerifiedEvidenceRef {
+                evidence_id: "fixture:trust-sync-camouflage-retention".to_string(),
+                evidence_type: EvidenceType::ReputationSignal,
+                verified_at_epoch: now_secs,
+                verification_receipt_hash: "c".repeat(64),
+            }],
+            now_secs,
+            "trace-trust-cli-camouflage-retention",
+        )
+        .expect("persist detector fixture through the real trust mutation");
+    assert_eq!(
+        marked.user_facing_risk_assessment.level,
+        RiskLevel::Critical
+    );
+    registry
+        .persist_authoritative_state(&registry_path)
+        .expect("commit signed camouflage card");
+
+    let (vulnerable_url, vulnerable_requests, vulnerable_server) = spawn_osv_fixture_server();
+    let vulnerable_token = issue_osv_fixture_remotecap(workspace.path(), &vulnerable_url);
+    let vulnerable = run_cli_in_workspace_with_env(
+        workspace.path(),
+        &["trust", "sync", "--force", "--json"],
+        &[
+            ("FRANKEN_NODE_OSV_QUERY_URL", vulnerable_url.as_str()),
+            ("FRANKEN_NODE_REMOTECAP_KEY", FIXTURE_REMOTECAP_KEY),
+            (
+                "FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN",
+                vulnerable_token.to_str().expect("fixture token path"),
+            ),
+        ],
+    );
+    vulnerable_server
+        .join()
+        .expect("join vulnerable OSV server");
+    assert!(
+        vulnerable.status.success(),
+        "CVE refresh failed: {}",
+        String::from_utf8_lossy(&vulnerable.stderr)
+    );
+    assert_eq!(vulnerable_requests.lock().expect("CVE requests").len(), 2);
+    let vulnerable_report = parse_json_stdout(&vulnerable, "CVE refresh report");
+    assert_eq!(vulnerable_report["vulnerabilities"], 1);
+    let after_vulnerable = load_registry()
+        .read(EXTENSION, now_secs, "trace-read-after-cve")
+        .expect("read signed card after CVE refresh")
+        .expect("camouflage card remains present");
+    verify_card_signature(&after_vulnerable, FIXTURE_REGISTRY_KEY)
+        .expect("CVE refresh card signature");
+    assert_eq!(after_vulnerable.camouflage_hints, marked.camouflage_hints);
+    assert_eq!(
+        after_vulnerable.user_facing_risk_assessment.level,
+        RiskLevel::Critical
+    );
+    assert!(
+        after_vulnerable
+            .user_facing_risk_assessment
+            .summary
+            .contains("OSV-2026-0001")
+    );
+
+    let (clean_url, clean_requests, clean_server) =
+        spawn_osv_static_response_server(2, 200, "OK", r#"{"vulns":[]}"#);
+    let clean_token = issue_osv_fixture_remotecap(workspace.path(), &clean_url);
+    let clean = run_cli_in_workspace_with_env(
+        workspace.path(),
+        &["trust", "sync", "--force", "--json"],
+        &[
+            ("FRANKEN_NODE_OSV_QUERY_URL", clean_url.as_str()),
+            ("FRANKEN_NODE_REMOTECAP_KEY", FIXTURE_REMOTECAP_KEY),
+            (
+                "FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN",
+                clean_token.to_str().expect("fixture token path"),
+            ),
+        ],
+    );
+    clean_server.join().expect("join clean OSV server");
+    assert!(
+        clean.status.success(),
+        "clean refresh failed: {}",
+        String::from_utf8_lossy(&clean.stderr)
+    );
+    assert_eq!(clean_requests.lock().expect("clean requests").len(), 2);
+    let clean_report = parse_json_stdout(&clean, "clean refresh report");
+    assert_eq!(clean_report["refreshed"], 2);
+    assert_eq!(clean_report["vulnerabilities"], 0);
+    // A loopback collector cannot authorize lowering risk. The correct clean
+    // refresh preserves the independent behavioral finding, so no lowering
+    // is proposed or rejected and the signed card still advances.
+    assert_eq!(clean_report["risk_lowering_rejections"], 0);
+    let mut reloaded = load_registry();
+    let after_clean = reloaded
+        .read(EXTENSION, now_secs, "trace-read-after-clean-cve")
+        .expect("read signed card after clean refresh")
+        .expect("camouflage card remains present");
+    verify_card_signature(&after_clean, FIXTURE_REGISTRY_KEY)
+        .expect("clean refresh card signature");
+    assert_eq!(
+        after_clean.trust_card_version,
+        after_vulnerable.trust_card_version + 1
+    );
+    assert_eq!(
+        after_clean.previous_version_hash.as_deref(),
+        Some(after_vulnerable.card_hash.as_str())
+    );
+    assert_eq!(after_clean.camouflage_hints, marked.camouflage_hints);
+    assert_eq!(
+        after_clean.user_facing_risk_assessment.level,
+        RiskLevel::Critical
+    );
+    assert!(
+        !after_clean.active_quarantine,
+        "risk evidence alone does not quarantine"
+    );
+    let companion = reloaded
+        .read(
+            "npm:@beta/telemetry-bridge",
+            now_secs,
+            "trace-read-retained-containment",
+        )
+        .expect("read signed companion card")
+        .expect("companion card remains present");
+    verify_card_signature(&companion, FIXTURE_REGISTRY_KEY).expect("companion card signature");
+    assert!(companion.active_quarantine);
+    assert!(matches!(
+        companion.revocation_status,
+        frankenengine_node::supply_chain::trust_card::RevocationStatus::Revoked { .. }
+    ));
+}
+
+#[test]
 fn trust_sync_without_force_skips_fresh_network_refresh() {
     let now_secs = chrono::Utc::now().timestamp() as u64;
     let workspace = seeded_fixture_trust_workspace_with_timestamp(now_secs);

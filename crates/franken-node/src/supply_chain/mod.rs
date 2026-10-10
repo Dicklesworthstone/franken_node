@@ -1,4 +1,5 @@
 pub mod artifact_signing;
+pub mod behavioral_observation;
 pub mod category_shift;
 pub mod certification;
 pub mod ecosystem_telemetry;

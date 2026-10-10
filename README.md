@@ -890,6 +890,7 @@ every leaf command available in the current build.
 | `franken-node trust card <id>` | Show trust profile for one extension. The extension id is handler-required so `--json` failures emit `franken-node/trust-error-cli/v1` instead of a human clap error. Flags: `--json`. |
 | `franken-node trust list` | List extensions; filter by `--risk`, `--revoked`. `--json` emits the card list as JSON. |
 | `franken-node trust scan [path]` | Populate baseline trust cards from package.json. A plain rescan skips existing cards; with `--deep`/`--audit` it refreshes them from the fetched evidence (same version only; lowering risk needs an OSV answer from the default endpoint) and keeps certification, revocation, quarantine and camouflage marks. Flags: `--deep`, `--audit`, `--json`. |
+| `franken-node trust observe <observation.json> --collector-key <public-key-file>` | Verify collector-attested measurements for an exact package artifact, append a durable observation stream, and apply BPET camouflage findings to its signed trust card. Repeated observations are idempotent. `--json` emits `franken-node/behavioral-ingestion/v1`. See [the measurement and signing contract](docs/TRUST_BEHAVIORAL_OBSERVATIONS.md). |
 | `franken-node trust sync` | Refresh trust-card cache and npm vulnerability state from OSV; `--force` to ignore caches. `--json` emits `franken-node/trust-sync-cli/v1`. |
 | `franken-node trust revoke <id>` | Revoke an artifact or publisher in the **local** trust-card registry (not a live fleet). The extension id is handler-required so `--json` failures emit `franken-node/trust-error-cli/v1` instead of a human clap error. Optional `--receipt-signing-key`, `--receipt-out`. `--json` emits the revoked trust card; failures `franken-node/trust-error-cli/v1`. |
 | `franken-node trust quarantine` | Quarantine a suspicious artifact in the local trust-card registry and publish the quarantine to the fleet store: the local file transport, or the live coordinator when `[fleet] control_plane_url` is set (every agent polling it applies the quarantine). `--artifact` is handler-required so `--json` failures emit `franken-node/trust-error-cli/v1` instead of a human clap error. `--json` emits `franken-node/trust-quarantine-cli/v1`. |
@@ -1389,7 +1390,7 @@ feature.
 | **Remote capability tokens** | `security::remote_cap`, `remote::*` | Scope-bound, single-use-optional Ed25519 tokens with endpoint binding | Yes: `remotecap`, `trust scan --deep/--audit`, `trust sync`, `init` |
 | **DGIS adversarial topology** | `security::dgis`, `dgis::*` | Dependency contagion simulator, fragility model, SPOF detection, immunization planner | Partly: the fragility model scores npm maintainer data in `trust scan --deep`; the contagion simulator, SPOF detection and immunization planner are library only |
 | **BPET evolution risk scorer** | `security::bpet`, `migration::bpet_migration_gate` | Phenotype feature extraction, topology risk delta during rollout | Library only (`bpet_migration_gate`: `feature:admin-tools`) |
-| **ATC adversarial trajectory checker** | `security::trajectory_gaming` + `federation::atc_*` | Camouflage detection severity, ATC participation weighting, reciprocity tracking | Library only (`federation::atc_*`: `feature:advanced-features`) |
+| **ATC adversarial trajectory checker** | `security::trajectory_gaming` + `federation::atc_*` | Camouflage detection severity, ATC participation weighting, reciprocity tracking | Partly: `trust observe` authenticates collector-attributed package measurements and persists BPET camouflage findings on trust cards; federation weighting/reciprocity remains library only (`feature:advanced-features`) |
 | **VEF execution receipts** | `vef::*` | Proof service / generator / scheduler / verifier, linked receipt chain, fail-closed verification | Partly: `debug evidence` verifies `vef::evidence_capsule`; the proof service, scheduler, verifier and receipt chain are library only |
 | **Verifier SDK** | `sdk/verifier` (`frankenengine-verifier-sdk`) | Independent bundle replay, capsule verification, counterfactual reasoning outside the producing runtime | Yes: `ltv attest/verify-as-of` call it; incident bundles the CLI writes verify with its `verify_incident_bundle`; it also builds standalone |
 
@@ -1704,6 +1705,16 @@ below operates on those topology metrics rather than on the contagion
 simulator's `InfectionState` directly.
 
 ### BPET evolution risk scorer
+
+`trust observe` connects signed, collector-attributed package measurements to
+the BPET camouflage detector and durable trust cards. Four comparable samples
+enable trajectory analysis; observed camouflage can raise the package's risk.
+The command checks an independently pinned collector key, exact version and
+artifact bindings, measurement continuity, and observation replay protection.
+See [Signed behavioral observations](docs/TRUST_BEHAVIORAL_OBSERVATIONS.md) for
+the CLI, collector signing API, units, and storage limits. Native application
+effect ledgers still lack per-dependency attribution, so this surface consumes
+isolated-package collector observations.
 
 `security::bpet::evolution_risk_scorer::compute_risk_score` takes a
 `FeatureVector` of four normalized features (each in `[0.0, 1.0]`):

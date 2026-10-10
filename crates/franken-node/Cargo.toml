@@ -283,6 +283,14 @@ name = "incident_cli_e2e"
 path = "tests/incident_cli_e2e.rs"
 
 [[test]]
+name = "behavioral_observation_ingestion"
+path = "tests/behavioral_observation_ingestion.rs"
+
+[[test]]
+name = "trust_observe_cli_e2e"
+path = "tests/trust_observe_cli_e2e.rs"
+
+[[test]]
 name = "run_console_exit_e2e"
 path = "tests/run_console_exit_e2e.rs"
 

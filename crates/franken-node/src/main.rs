@@ -54,6 +54,7 @@ mod api {
     }
 }
 mod cli;
+mod trust_observe_cli;
 #[allow(dead_code)]
 mod observability {
     #[path = "evidence_ledger.rs"]
@@ -25332,7 +25333,7 @@ fn trust_sync_clean_risk_assessment(card: &TrustCard) -> RiskAssessment {
         return card.user_facing_risk_assessment.clone();
     }
 
-    match (&card.revocation_status, card.active_quarantine) {
+    let clean = match (&card.revocation_status, card.active_quarantine) {
         (RevocationStatus::Revoked { reason, .. }, _) => RiskAssessment {
             level: RiskLevel::Critical,
             summary: format!("Revoked: {reason}"),
@@ -25349,7 +25350,10 @@ fn trust_sync_clean_risk_assessment(card: &TrustCard) -> RiskAssessment {
             level: RiskLevel::Low,
             summary: "No known OSV vulnerabilities from latest refresh".to_string(),
         },
-    }
+    };
+    // OSV clears vulnerability evidence only. A clean answer cannot discharge
+    // independently verified behavioral findings retained on this card.
+    card.risk_with_camouflage_floor(clean)
 }
 
 fn trust_sync_clean_reputation_trend(card: &TrustCard) -> ReputationTrend {
@@ -35110,6 +35114,11 @@ fn main() -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&report)?);
                 } else {
                     println!("{}", render_trust_scan_human(&report));
+                }
+            }
+            TrustCommand::Observe(args) => {
+                if let Err(err) = trust_observe_cli::handle(&args) {
+                    return trust_fail("trust.observe", args.json, err);
                 }
             }
             TrustCommand::Revoke(args) => {

@@ -1351,6 +1351,9 @@ pub enum TrustCommand {
     /// Populate baseline trust cards from package.json dependencies.
     Scan(TrustScanArgs),
 
+    /// Verify collector-attested package behavior and update its durable trust card.
+    Observe(TrustObserveArgs),
+
     /// Revoke an artifact or publisher in the local trust-card registry (not a live fleet).
     Revoke(TrustRevokeArgs),
 
@@ -1455,6 +1458,23 @@ pub struct TrustScanArgs {
     pub audit: bool,
 
     /// Emit structured JSON output.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct TrustObserveArgs {
+    /// Signed behavioral observation JSON from an isolated-package collector.
+    /// Required by the handler so --json errors retain the trust error schema.
+    #[arg(default_value = "", value_parser = parse_handler_required_pathbuf)]
+    pub observation: PathBuf,
+
+    /// Independently trusted Ed25519 collector public-key file (raw, hex, or SSH).
+    /// An observation's embedded key identity does not establish trust.
+    #[arg(long, default_value = "", value_parser = parse_handler_required_pathbuf)]
+    pub collector_key: PathBuf,
+
+    /// Emit the authenticated ingestion result as JSON.
     #[arg(long)]
     pub json: bool,
 }
