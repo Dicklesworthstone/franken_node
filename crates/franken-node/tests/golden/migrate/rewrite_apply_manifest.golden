@@ -2,7 +2,7 @@
   "name": "demo",
   "version": "1.0.0",
   "scripts": {
-    "test": "franken-node test.js"
+    "test": "franken-node run --console-only test.js"
   },
   "engines": {
     "node": ">=20 <23"

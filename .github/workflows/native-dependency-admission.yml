@@ -4,6 +4,8 @@ on:
     branches: [main]
     paths:
       - crates/franken-node/src/migration/dependency_admission.rs
+      - crates/franken-node/src/migration/dependency_graph_admission.rs
+      - crates/franken-node/src/migration/npm_version_req.rs
       - crates/franken-node/src/migration/dependency_workspaces.rs
       - crates/franken-node/src/migration/verified_rewrite.rs
       - tools/dependency-admission/**
@@ -11,6 +13,8 @@ on:
   pull_request:
     paths:
       - crates/franken-node/src/migration/dependency_admission.rs
+      - crates/franken-node/src/migration/dependency_graph_admission.rs
+      - crates/franken-node/src/migration/npm_version_req.rs
       - crates/franken-node/src/migration/dependency_workspaces.rs
       - crates/franken-node/src/migration/verified_rewrite.rs
       - tools/dependency-admission/**

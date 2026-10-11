@@ -8,6 +8,6 @@ summary: manifests=1 rewrites_planned=3 rewrites_applied=0 manual_review_items=0
 entries (5):
 - [mig-rewrite-001:RewriteCommonJsRequire] normalized 1 CommonJS builtin specifier(s) without changing module format or load order (path: index.js) (applied=false)
 - [mig-rewrite-002:PinNodeEngine] set engines.node to >=20 <23 to reduce migration runtime drift (path: package.json) (applied=false)
-- [mig-rewrite-003:RewritePackageScript] rewrote package script `start` from `node` runtime to `franken-node`: `NODE_OPTIONS=--trace-warnings node index.js && bun scripts/build.mjs` -> `NODE_OPTIONS=--trace-warnings franken-node index.js && franken-node scripts/build.mjs` (path: package.json) (applied=false)
+- [mig-rewrite-003:RewritePackageScript] rewrote package script `start` from `node` runtime to `franken-node`: `NODE_ENV=production node index.js && bun scripts/build.mjs` -> `NODE_ENV=production franken-node run --console-only index.js && franken-node run --console-only scripts/build.mjs` (path: package.json) (applied=false)
 - [mig-rewrite-004:ModuleGraphDiscovery] script `start` uses `node` entry `index.js`; module graph discovered 1 JS/MJS/CJS file(s): index.js (path: package.json) (applied=false)
 - [mig-rewrite-005:RewriteEsmImport] rewrote 1 ESM import/export specifier(s) for runtime compatibility (path: scripts/build.mjs) (applied=false)

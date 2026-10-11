@@ -611,6 +611,7 @@ struct PackageScriptShellToken {
     kind: PackageScriptShellTokenKind,
     raw: String,
     unquoted: String,
+    expands: bool,
     start: usize,
     end: usize,
 }
@@ -618,9 +619,8 @@ struct PackageScriptShellToken {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PackageScriptCommandMatch {
     runtime: PackageScriptRuntime,
-    runtime_start: usize,
-    runtime_end: usize,
     entry_path: String,
+    replacement: Option<(usize, usize, String)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -832,7 +832,21 @@ pub fn run_rewrite(project_path: &Path, apply: bool) -> anyhow::Result<Migration
                 );
             }
 
-            let script_rewrites = collect_package_script_rewrites(&manifest);
+            let (script_rewrites, script_reviews) = collect_package_script_rewrites(&manifest);
+            for detail in script_reviews {
+                manual_review_items = manual_review_items.saturating_add(1);
+                push_bounded(
+                    &mut entries,
+                    MigrationRewriteEntry {
+                        id: String::new(),
+                        path: Some(relative_path.clone()),
+                        action: MigrationRewriteAction::ManualScriptReview,
+                        detail,
+                        applied: false,
+                    },
+                    MAX_TOTAL_FINDINGS,
+                );
+            }
             let engine_pin_changed = ensure_node_engine_pin(&mut manifest);
             let package_script_rewrite_count =
                 apply_package_script_rewrites(&mut manifest, &script_rewrites);
@@ -1385,7 +1399,7 @@ fn manifest_entry_candidates(manifest: &serde_json::Value) -> Vec<(String, Strin
 fn preferred_script_entry_candidates(
     manifest: &serde_json::Value,
 ) -> Vec<(String, PackageScriptRewrite)> {
-    let rewrites = collect_package_script_rewrites(manifest);
+    let (rewrites, _) = collect_package_script_rewrites(manifest);
     let mut candidates = Vec::new();
     for preferred in ["smoke", "validate", "test", "start"] {
         if let Some(script_rewrite) = rewrites
@@ -3104,79 +3118,99 @@ fn ensure_node_engine_pin(manifest: &mut serde_json::Value) -> bool {
     true
 }
 
-fn collect_package_script_rewrites(manifest: &serde_json::Value) -> Vec<PackageScriptRewrite> {
+fn collect_package_script_rewrites(
+    manifest: &serde_json::Value,
+) -> (Vec<PackageScriptRewrite>, Vec<String>) {
     let mut rewrites = Vec::new();
+    let mut reviews = Vec::new();
     let Some(scripts) = manifest
         .get("scripts")
         .and_then(serde_json::Value::as_object)
     else {
-        return rewrites;
+        return (rewrites, reviews);
     };
-
-    for (script_name, command_value) in scripts {
+    for (index, (script_name, command_value)) in scripts.iter().enumerate() {
+        if index == MAX_TOTAL_FINDINGS {
+            reviews.push(
+                "additional package scripts exceed the migration analysis limit; manual migration required".into(),
+            );
+            break;
+        }
         let Some(command) = command_value.as_str() else {
             continue;
         };
-        if let Some(script_rewrite) = classify_package_script_command(script_name, command) {
-            push_bounded(&mut rewrites, script_rewrite, MAX_TOTAL_FINDINGS);
+        match classify_package_script_command(script_name, command) {
+            Ok(Some(rewrite)) => rewrites.push(rewrite),
+            Ok(None) => {}
+            Err(reason) => reviews.push(format!("script `{script_name}`: {reason}")),
         }
     }
-
     rewrites.sort_by(|left, right| left.script_name.cmp(&right.script_name));
-    rewrites
+    (rewrites, reviews)
 }
 
 fn classify_package_script_command(
     script_name: &str,
     command: &str,
-) -> Option<PackageScriptRewrite> {
-    let tokens = tokenize_package_script_command(command)?;
+) -> Result<Option<PackageScriptRewrite>, String> {
+    let tokens = tokenize_package_script_command(command).ok_or_else(|| {
+        "unsupported shell syntax or token limit; no partial script rewrite applied".to_owned()
+    })?;
     let mut first_match = None;
     let mut replacements = Vec::new();
     let mut segment_start = 0_usize;
-
     while segment_start < tokens.len() {
         let segment_end = tokens[segment_start..]
             .iter()
             .position(|token| token.kind != PackageScriptShellTokenKind::Word)
             .map_or(tokens.len(), |offset| segment_start.saturating_add(offset));
-
         if let Some(command_match) =
-            classify_package_script_segment(&tokens[segment_start..segment_end])
+            classify_package_script_segment(&tokens[segment_start..segment_end])?
         {
             first_match.get_or_insert_with(|| command_match.clone());
-            if matches!(
-                command_match.runtime,
-                PackageScriptRuntime::Node | PackageScriptRuntime::Bun
-            ) {
-                push_bounded(
-                    &mut replacements,
-                    (command_match.runtime_start, command_match.runtime_end),
-                    MAX_FINDINGS_PER_CATEGORY,
-                );
+            if let Some(replacement) = command_match.replacement {
+                if replacements.len() == MAX_FINDINGS_PER_CATEGORY {
+                    return Err(
+                        "runtime command limit exceeded; no partial script rewrite applied".into(),
+                    );
+                }
+                replacements.push(replacement);
             }
         }
-
         segment_start = segment_end.saturating_add(1);
     }
-
-    let first_match = first_match?;
-    let rewritten_command = if replacements.is_empty() {
-        None
-    } else {
-        Some(apply_package_script_runtime_replacements(
-            command,
-            &replacements,
-        ))
+    let Some(first_match) = first_match else {
+        return Ok(None);
     };
-
-    Some(PackageScriptRewrite {
+    if !replacements.is_empty() {
+        // Earlier standalone assignments and exports can affect a later
+        // runtime command. Inspect them only after finding a real rewrite;
+        // text printed by unrelated commands is not runtime configuration.
+        for segment in tokens.split(|token| token.kind != PackageScriptShellTokenKind::Word) {
+            let assignment_end = skip_shell_env_assignments(segment, 0);
+            if assignment_end == segment.len() {
+                reject_package_script_runtime_environment(&segment[..assignment_end])?;
+            }
+            if segment
+                .get(assignment_end)
+                .is_some_and(|token| token.unquoted == "export")
+            {
+                reject_package_script_runtime_environment(&segment[..assignment_end])?;
+                reject_package_script_runtime_environment(
+                    &segment[assignment_end.saturating_add(1)..],
+                )?;
+            }
+        }
+    }
+    let rewritten_command = (!replacements.is_empty())
+        .then(|| apply_package_script_runtime_replacements(command, &replacements));
+    Ok(Some(PackageScriptRewrite {
         script_name: script_name.to_string(),
         runtime: first_match.runtime,
         entry_path: first_match.entry_path,
         original_command: command.to_string(),
         rewritten_command,
-    })
+    }))
 }
 
 fn tokenize_package_script_command(command: &str) -> Option<Vec<PackageScriptShellToken>> {
@@ -3185,25 +3219,29 @@ fn tokenize_package_script_command(command: &str) -> Option<Vec<PackageScriptShe
 
     while index < command.len() {
         let current = command[index..].chars().next()?;
-        if current.is_whitespace() {
+        if matches!(current, ' ' | '\t') {
             index = index.saturating_add(current.len_utf8());
             continue;
+        }
+        // Other whitespace is not a supported shell word separator here.
+        if current.is_whitespace() {
+            return None;
+        }
+        if tokens.len() == MAX_TOTAL_FINDINGS {
+            return None;
         }
 
         if let Some((kind, width)) = package_script_control_token(command, index) {
             let end = index.saturating_add(width);
             let raw = command.get(index..end)?.to_string();
-            push_bounded(
-                &mut tokens,
-                PackageScriptShellToken {
-                    kind,
-                    unquoted: raw.clone(),
-                    raw,
-                    start: index,
-                    end,
-                },
-                MAX_TOTAL_FINDINGS,
-            );
+            tokens.push(PackageScriptShellToken {
+                kind,
+                unquoted: raw.clone(),
+                raw,
+                expands: false,
+                start: index,
+                end,
+            });
             index = end;
             continue;
         }
@@ -3211,6 +3249,7 @@ fn tokenize_package_script_command(command: &str) -> Option<Vec<PackageScriptShe
         let start = index;
         let mut unquoted = String::new();
         let mut quote = None;
+        let mut expands = false;
 
         while index < command.len() {
             let ch = command[index..].chars().next()?;
@@ -3218,6 +3257,22 @@ fn tokenize_package_script_command(command: &str) -> Option<Vec<PackageScriptShe
                 && (ch.is_whitespace() || package_script_control_token(command, index).is_some())
             {
                 break;
+            }
+            if quote.is_none()
+                && (matches!(ch, '<' | '>' | '&' | '(' | ')') || (ch == '#' && index == start))
+            {
+                return None;
+            }
+            if matches!(quote, None | Some('"')) {
+                if ch == '`' || (ch == '$' && command[index..].starts_with("$(")) {
+                    return None;
+                }
+                if ch == '$' {
+                    expands = true;
+                }
+            }
+            if quote.is_none() && matches!(ch, '*' | '?' | '[' | '{' | '}' | '~') {
+                expands = true;
             }
 
             match quote {
@@ -3228,13 +3283,11 @@ fn tokenize_package_script_command(command: &str) -> Option<Vec<PackageScriptShe
                     }
                     '\\' => {
                         index = index.saturating_add(ch.len_utf8());
-                        if index < command.len() {
-                            let escaped = command[index..].chars().next()?;
+                        let escaped = command[index..].chars().next()?;
+                        if escaped != '\n' {
                             unquoted.push(escaped);
-                            index = index.saturating_add(escaped.len_utf8());
-                        } else {
-                            unquoted.push(ch);
                         }
+                        index = index.saturating_add(escaped.len_utf8());
                     }
                     _ => {
                         unquoted.push(ch);
@@ -3247,13 +3300,14 @@ fn tokenize_package_script_command(command: &str) -> Option<Vec<PackageScriptShe
                 }
                 Some('"') if ch == '\\' => {
                     index = index.saturating_add(ch.len_utf8());
-                    if index < command.len() {
-                        let escaped = command[index..].chars().next()?;
-                        unquoted.push(escaped);
-                        index = index.saturating_add(escaped.len_utf8());
-                    } else {
-                        unquoted.push(ch);
+                    let escaped = command[index..].chars().next()?;
+                    if !matches!(escaped, '$' | '`' | '"' | '\\' | '\n') {
+                        unquoted.push('\\');
                     }
+                    if escaped != '\n' {
+                        unquoted.push(escaped);
+                    }
+                    index = index.saturating_add(escaped.len_utf8());
                 }
                 Some(_) => {
                     unquoted.push(ch);
@@ -3267,17 +3321,14 @@ fn tokenize_package_script_command(command: &str) -> Option<Vec<PackageScriptShe
         }
 
         let raw = command.get(start..index)?.to_string();
-        push_bounded(
-            &mut tokens,
-            PackageScriptShellToken {
-                kind: PackageScriptShellTokenKind::Word,
-                raw,
-                unquoted,
-                start,
-                end: index,
-            },
-            MAX_TOTAL_FINDINGS,
-        );
+        tokens.push(PackageScriptShellToken {
+            kind: PackageScriptShellTokenKind::Word,
+            raw,
+            unquoted,
+            expands,
+            start,
+            end: index,
+        });
     }
 
     Some(tokens)
@@ -3305,49 +3356,145 @@ fn package_script_control_token(
 
 fn classify_package_script_segment(
     tokens: &[PackageScriptShellToken],
-) -> Option<PackageScriptCommandMatch> {
+) -> Result<Option<PackageScriptCommandMatch>, String> {
     if tokens.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     let mut command_index = skip_shell_env_assignments(tokens, 0);
-
     if tokens
         .get(command_index)
         .is_some_and(|token| token.unquoted == "env")
     {
         command_index = skip_shell_env_assignments(tokens, command_index.saturating_add(1));
+        if tokens
+            .get(command_index)
+            .is_some_and(|token| token.unquoted.starts_with('-'))
+        {
+            return Err("env wrapper options require manual migration; no partial script rewrite applied".into());
+        }
     }
-
     if tokens
         .get(command_index)
-        .is_some_and(|token| matches!(token.unquoted.as_str(), "cross-env" | "cross-env-shell"))
+        .is_some_and(|token| token.unquoted == "cross-env-shell")
+    {
+        return Err("cross-env-shell requires manual migration; no partial script rewrite applied".into());
+    }
+    if tokens
+        .get(command_index)
+        .is_some_and(|token| token.unquoted == "cross-env")
     {
         command_index = skip_shell_env_assignments(tokens, command_index.saturating_add(1));
     }
 
     let runtime_index =
         package_manager_wrapped_runtime_index(tokens, command_index).unwrap_or(command_index);
-    let runtime = package_script_runtime_from_word(tokens.get(runtime_index)?.unquoted.as_str())?;
-    let entry_index = package_script_entry_index(tokens, runtime_index)?;
-    let entry_path = tokens.get(entry_index)?.unquoted.clone();
-    if !is_package_script_entry_path(&entry_path) {
-        return None;
+    let Some(runtime_token) = tokens.get(runtime_index) else {
+        return Ok(None);
+    };
+    let Some(runtime) = package_script_runtime_from_word(&runtime_token.unquoted) else {
+        if runtime_index != command_index && runtime_token.unquoted.starts_with('-') {
+            return Err("package executor options require manual migration; no partial script rewrite applied".into());
+        }
+        return Ok(None);
+    };
+
+    if runtime == PackageScriptRuntime::FrankenNode {
+        if tokens
+            .get(runtime_index.saturating_add(1))
+            .is_some_and(|token| is_package_script_entry_path(&token.unquoted))
+        {
+            return Err("legacy franken-node package invocation lacks the run subcommand; manual migration required".into());
+        }
+        let Some(entry_index) = package_script_entry_index(tokens, runtime_index) else {
+            return Ok(None);
+        };
+        let Some(entry_token) = tokens.get(entry_index) else {
+            return Ok(None);
+        };
+        if entry_token.expands || !is_package_script_entry_path(&entry_token.unquoted) {
+            return Ok(None);
+        }
+        if !tokens
+            .get(runtime_index.saturating_add(1))
+            .is_some_and(|token| token.unquoted == "run")
+        {
+            return Err("legacy franken-node package invocation lacks the run subcommand; manual migration required".into());
+        }
+        return Ok(Some(PackageScriptCommandMatch {
+            runtime,
+            entry_path: entry_token.unquoted.clone(),
+            replacement: None,
+        }));
     }
 
-    let runtime_token = tokens.get(runtime_index)?;
-    Some(PackageScriptCommandMatch {
+    reject_package_script_runtime_environment(&tokens[..runtime_index])?;
+    let mut entry_index = runtime_index.saturating_add(1);
+    if tokens
+        .get(entry_index)
+        .is_some_and(|token| token.unquoted == "--")
+    {
+        entry_index = entry_index.saturating_add(1);
+    }
+    let Some(entry_token) = tokens.get(entry_index) else {
+        return Err("runtime command has no supported entry point; manual migration required".into());
+    };
+    let entry_path = entry_token.unquoted.as_str();
+    if entry_path.starts_with('-') {
+        return Err("runtime options and option-like entry paths require manual migration; no partial script rewrite applied".into());
+    }
+    if entry_token.expands
+        || !is_package_script_entry_path(entry_path)
+        || Path::new(entry_path).is_absolute()
+        || entry_path.contains('\\')
+        || entry_path.contains('\0')
+        || entry_path.split('/').any(|part| part == "..")
+    {
+        return Err("runtime entry must be a static project-relative JavaScript path; no partial script rewrite applied".into());
+    }
+
+    let mut replacement = format!("franken-node run --console-only {}", entry_token.raw);
+    if entry_index.saturating_add(1) < tokens.len() {
+        // Consume only our separator: an original post-entry '--' is guest data.
+        replacement.push_str(" --");
+    }
+    Ok(Some(PackageScriptCommandMatch {
         runtime,
-        runtime_start: runtime_token.start,
-        runtime_end: runtime_token.end,
-        entry_path,
-    })
+        entry_path: entry_path.to_string(),
+        replacement: Some((runtime_token.start, entry_token.end, replacement)),
+    }))
+}
+
+fn reject_package_script_runtime_environment(
+    tokens: &[PackageScriptShellToken],
+) -> Result<(), String> {
+    for token in tokens {
+        let (name, value) = token
+            .unquoted
+            .split_once('=')
+            .map_or((token.unquoted.as_str(), None), |(name, value)| {
+                (name, Some(value))
+            });
+        let normalized = name.to_ascii_uppercase();
+        let runtime_control = matches!(
+            normalized.as_str(),
+            "NODE_OPTIONS" | "BUN_OPTIONS" | "NODE_PATH" | "LD_PRELOAD" | "DYLD_INSERT_LIBRARIES"
+        );
+        if normalized.starts_with("FRANKEN_NODE_")
+            || (runtime_control && value.is_none_or(|value| !value.is_empty()))
+        {
+            return Err(format!(
+                "runtime control '{name}' cannot be preserved by franken-node run; no partial script rewrite applied"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn skip_shell_env_assignments(tokens: &[PackageScriptShellToken], mut index: usize) -> usize {
     while tokens
         .get(index)
-        .is_some_and(|token| is_shell_env_assignment(&token.unquoted))
+        .is_some_and(|token| is_shell_env_assignment(&token.raw))
     {
         index = index.saturating_add(1);
     }
@@ -3446,6 +3593,12 @@ fn package_script_entry_index(
     runtime_index: usize,
 ) -> Option<usize> {
     let mut index = runtime_index.saturating_add(1);
+    if tokens.get(runtime_index).is_some_and(|token| {
+        package_script_runtime_from_word(&token.unquoted) == Some(PackageScriptRuntime::FrankenNode)
+    }) && tokens.get(index).is_some_and(|token| token.unquoted == "run")
+    {
+        index = index.saturating_add(1);
+    }
     while let Some(token) = tokens.get(index) {
         let word = token.unquoted.as_str();
         if word == "--" {
@@ -3477,20 +3630,23 @@ fn package_script_runtime_option_takes_value(word: &str) -> bool {
             | "--env-file"
             | "--conditions"
             | "--inspect-port"
+            | "--policy"
+            | "--config"
+            | "--runtime"
+            | "--engine-bin"
+            | "--trace-id"
     )
 }
 
 fn apply_package_script_runtime_replacements(
     command: &str,
-    replacements: &[(usize, usize)],
+    replacements: &[(usize, usize, String)],
 ) -> String {
     let mut rewritten = command.to_string();
     let mut sorted = replacements.to_vec();
-    sorted.sort_by_key(|right| std::cmp::Reverse(right.0));
-    for (start, end) in sorted {
-        if start <= end && end <= rewritten.len() {
-            rewritten.replace_range(start..end, "franken-node");
-        }
+    sorted.sort_by_key(|replacement| std::cmp::Reverse(replacement.0));
+    for (start, end, replacement) in sorted {
+        rewritten.replace_range(start..end, &replacement);
     }
     rewritten
 }
@@ -4072,7 +4228,7 @@ mod tests {
               "name":"demo",
               "version":"1.0.0",
               "engines":{"node":">=20 <23"},
-              "scripts":{"test":"franken-node test.js"}
+              "scripts":{"test":"franken-node run --console-only test.js"}
             }"#,
         );
     }
@@ -4478,7 +4634,7 @@ mod tests {
           "name":"demo",
           "version":"1.0.0",
           "engines":{"node":"22.x"},
-          "scripts":{"test":"franken-node test.js"}
+          "scripts":{"test":"franken-node run --console-only test.js"}
         }"#;
 
         write_project_file(project, "package.json", original);
@@ -4488,6 +4644,7 @@ mod tests {
 
         assert_eq!(report.rewrites_planned, 0);
         assert_eq!(report.rewrites_applied, 0);
+        assert_eq!(report.manual_review_items, 0);
         assert!(report.rollback_entries.is_empty());
         assert_eq!(after, original);
     }
@@ -4666,7 +4823,7 @@ mod tests {
                 .and_then(serde_json::Value::as_object)
                 .and_then(|scripts| scripts.get("test"))
                 .and_then(serde_json::Value::as_str),
-            Some("franken-node test.js")
+            Some("franken-node run --console-only test.js")
         );
     }
 
@@ -4688,7 +4845,7 @@ mod tests {
               "scripts":{
                 "start":"node src/index.js --watch",
                 "build":"bun tools/build.mjs",
-                "already":"franken-node src/index.js",
+                "already":"franken-node run --console-only src/index.js",
                 "lint":"eslint ."
               }
             }"#,
@@ -4704,10 +4861,16 @@ mod tests {
         assert_eq!(report.rollback_entries.len(), 1);
         assert_eq!(
             parsed["scripts"]["start"],
-            "franken-node src/index.js --watch"
+            "franken-node run --console-only src/index.js -- --watch"
         );
-        assert_eq!(parsed["scripts"]["build"], "franken-node tools/build.mjs");
-        assert_eq!(parsed["scripts"]["already"], "franken-node src/index.js");
+        assert_eq!(
+            parsed["scripts"]["build"],
+            "franken-node run --console-only tools/build.mjs"
+        );
+        assert_eq!(
+            parsed["scripts"]["already"],
+            "franken-node run --console-only src/index.js"
+        );
         assert_eq!(parsed["scripts"]["lint"], "eslint .");
         assert_eq!(
             report
@@ -4741,8 +4904,8 @@ mod tests {
               "version":"1.0.0",
               "engines":{"node":">=20 <23"},
               "scripts":{
-                "compound":"NODE_OPTIONS=--enable-source-maps node src/index.js && bun tools/build.mjs || npm run fallback",
-                "env":"env NODE_OPTIONS='--trace-warnings' node \"scripts/my task.js\"",
+                "compound":"NODE_ENV=production node src/index.js && bun tools/build.mjs || npm run fallback",
+                "env":"env APP_MODE='test mode' node \"scripts/my task.js\"",
                 "pnpm":"pnpm exec -- node scripts/check.js",
                 "yarn":"yarn node scripts/check.js",
                 "inline":"node -e \"console.log(1)\"",
@@ -4758,21 +4921,22 @@ mod tests {
 
         assert_eq!(report.rewrites_planned, 1);
         assert_eq!(report.rewrites_applied, 1);
+        assert_eq!(report.manual_review_items, 1);
         assert_eq!(
             parsed["scripts"]["compound"],
-            "NODE_OPTIONS=--enable-source-maps franken-node src/index.js && franken-node tools/build.mjs || npm run fallback"
+            "NODE_ENV=production franken-node run --console-only src/index.js && franken-node run --console-only tools/build.mjs || npm run fallback"
         );
         assert_eq!(
             parsed["scripts"]["env"],
-            "env NODE_OPTIONS='--trace-warnings' franken-node \"scripts/my task.js\""
+            "env APP_MODE='test mode' franken-node run --console-only \"scripts/my task.js\""
         );
         assert_eq!(
             parsed["scripts"]["pnpm"],
-            "pnpm exec -- franken-node scripts/check.js"
+            "pnpm exec -- franken-node run --console-only scripts/check.js"
         );
         assert_eq!(
             parsed["scripts"]["yarn"],
-            "yarn franken-node scripts/check.js"
+            "yarn franken-node run --console-only scripts/check.js"
         );
         assert_eq!(parsed["scripts"]["inline"], "node -e \"console.log(1)\"");
         assert_eq!(parsed["scripts"]["delegated"], "npm run build");
@@ -4805,7 +4969,7 @@ mod tests {
               "name":"demo",
               "version":"1.0.0",
               "engines":{"node":">=20 <23"},
-              "scripts":{"start":"franken-node src/index.js"}
+              "scripts":{"start":"franken-node run --console-only src/index.js"}
             }"#,
         );
 

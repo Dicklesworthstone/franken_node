@@ -431,6 +431,303 @@ mod tests {
     }
 
     #[test]
+    fn primary_package_scripts_route_guest_arguments_through_the_public_run_command() {
+        use clap::Parser as _;
+
+        let cases: [(&str, &[&str]); 5] = [
+            ("node app.js", &[]),
+            (
+                "node app.js --policy permissive --config guest.toml --runtime bun --engine-bin guest --json --capture-replay --compat-preflight --trace-id guest",
+                &[
+                    "--policy",
+                    "permissive",
+                    "--config",
+                    "guest.toml",
+                    "--runtime",
+                    "bun",
+                    "--engine-bin",
+                    "guest",
+                    "--json",
+                    "--capture-replay",
+                    "--compat-preflight",
+                    "--trace-id",
+                    "guest",
+                ],
+            ),
+            ("node -- app.js -- --policy guest", &["--", "--policy", "guest"]),
+            ("bun app.js --watch", &["--watch"]),
+            ("node app.js --", &["--"]),
+        ];
+        for (original_command, guest_args) in cases {
+            let root = project();
+            fs::write(root.path().join("app.js"), "console.log('app');\n").unwrap();
+            let manifest = serde_json::json!({
+                "name": "script-routing",
+                "engines": { "node": ">=20" },
+                "scripts": { "start": original_command }
+            })
+            .to_string();
+            fs::write(root.path().join("package.json"), &manifest).unwrap();
+            let plan = planned(root.path());
+            assert_eq!(
+                (
+                    plan.rewrites_planned,
+                    plan.rewrites_applied,
+                    plan.manual_review_items
+                ),
+                (1, 0, 0),
+                "{original_command}: {plan:#?}"
+            );
+            assert_eq!(
+                fs::read_to_string(root.path().join("package.json")).unwrap(),
+                manifest
+            );
+
+            let applied = super::super::run_rewrite(root.path(), true).unwrap();
+            assert_eq!(
+                (
+                    applied.rewrites_planned,
+                    applied.rewrites_applied,
+                    applied.manual_review_items
+                ),
+                (1, 1, 0),
+                "{original_command}: {applied:#?}"
+            );
+            assert_eq!(applied.rollback_entries, plan.rollback_entries);
+            assert_eq!(
+                fs::read_to_string(root.path().join(".migrate-backup/package.json")).unwrap(),
+                manifest
+            );
+            let rewritten: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(root.path().join("package.json")).unwrap(),
+            )
+            .unwrap();
+            let command = rewritten["scripts"]["start"].as_str().unwrap();
+            assert!(
+                command.starts_with("franken-node run --console-only app.js"),
+                "{command}"
+            );
+            // These entries contain no shell quoting: parse the exact argv
+            // that the shell passes to the public CLI.
+            let cli = crate::cli::Cli::try_parse_from(command.split_whitespace()).unwrap();
+            let crate::cli::Command::Run(args) = cli.command else {
+                panic!("package script did not select run: {command}");
+            };
+            assert_eq!(args.app_path, std::path::PathBuf::from("app.js"));
+            assert_eq!(
+                args.app_args,
+                guest_args
+                    .iter()
+                    .map(|arg| (*arg).to_string())
+                    .collect::<Vec<_>>()
+            );
+            assert!(args.console_only);
+            assert!(
+                args.policy.is_none()
+                    && args.config.is_none()
+                    && args.runtime.is_none()
+                    && args.engine_bin.is_none()
+            );
+            assert!(!args.json && !args.capture_replay && !args.compat_preflight);
+            assert_eq!(args.trace_id, "run-execution");
+            args.validate_paths().unwrap();
+            let repeated = super::super::run_rewrite(root.path(), true).unwrap();
+            assert_eq!(
+                (
+                    repeated.rewrites_planned,
+                    repeated.rewrites_applied,
+                    repeated.manual_review_items
+                ),
+                (0, 0, 0),
+                "{repeated:#?}"
+            );
+            assert!(repeated.entries.iter().any(|entry| {
+                entry.action == Action::ModuleGraphDiscovery && entry.detail.contains("app.js")
+            }));
+        }
+    }
+
+    #[test]
+    fn primary_package_scripts_preserve_shell_words_and_command_boundaries() {
+        let mut cases = [
+            (
+                r#"NODE_ENV=production node "scripts/my task.js" "" --json '--' 'a&b'"#,
+                r#"NODE_ENV=production franken-node run --console-only "scripts/my task.js" -- "" --json '--' 'a&b'"#,
+            ),
+            (
+                "node 'scripts/$literal.js'",
+                "franken-node run --console-only 'scripts/$literal.js'",
+            ),
+            (
+                "node a.js && bun b.mjs || echo 'a|b'; node c.cjs | cat",
+                "franken-node run --console-only a.js && franken-node run --console-only b.mjs || echo 'a|b'; franken-node run --console-only c.cjs | cat",
+            ),
+            (r#""no\de" app.js"#, r#""no\de" app.js"#),
+            (r#""FOO"=bar node app.js"#, r#""FOO"=bar node app.js"#),
+            (r#"FOO\=bar node app.js"#, r#"FOO\=bar node app.js"#),
+            (
+                "franken-node run --policy strict app.js",
+                "franken-node run --policy strict app.js",
+            ),
+        ]
+        .into_iter()
+        .map(|(original, expected)| (original.to_owned(), expected.to_owned()))
+        .collect::<Vec<_>>();
+        cases.push((
+            vec!["node app.js"; 16].join(" && "),
+            vec!["franken-node run --console-only app.js"; 16].join(" && "),
+        ));
+
+        for (original, expected) in cases {
+            let root = project();
+            fs::create_dir(root.path().join("scripts")).unwrap();
+            for path in [
+                "app.js",
+                "a.js",
+                "b.mjs",
+                "c.cjs",
+                "scripts/my task.js",
+                "scripts/$literal.js",
+            ] {
+                fs::write(root.path().join(path), "console.log('app');\n").unwrap();
+            }
+            let manifest = serde_json::json!({
+                "name": "script-shell-words",
+                "engines": { "node": ">=20" },
+                "scripts": { "start": original }
+            })
+            .to_string();
+            fs::write(root.path().join("package.json"), &manifest).unwrap();
+
+            let applied = super::super::run_rewrite(root.path(), true).unwrap();
+            let expected_rewrites = if original == expected { 0 } else { 1 };
+            assert_eq!(
+                (
+                    applied.rewrites_planned,
+                    applied.rewrites_applied,
+                    applied.manual_review_items
+                ),
+                (expected_rewrites, expected_rewrites, 0),
+                "{original}: {applied:#?}"
+            );
+            let rewritten: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(root.path().join("package.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                rewritten["scripts"]["start"].as_str().unwrap(),
+                expected,
+                "{original}"
+            );
+            if expected_rewrites == 1 {
+                assert_eq!(
+                    fs::read_to_string(root.path().join(".migrate-backup/package.json")).unwrap(),
+                    manifest
+                );
+            } else {
+                assert!(
+                    !root.path().join(".migrate-backup/package.json").exists(),
+                    "{original}"
+                );
+            }
+            let repeated = super::super::run_rewrite(root.path(), true).unwrap();
+            assert_eq!(
+                (
+                    repeated.rewrites_planned,
+                    repeated.rewrites_applied,
+                    repeated.manual_review_items
+                ),
+                (0, 0, 0),
+                "{original}: {repeated:#?}"
+            );
+            if original.starts_with("franken-node run ") {
+                assert!(repeated.entries.iter().any(|entry| {
+                    entry.action == Action::ModuleGraphDiscovery && entry.detail.contains("app.js")
+                }));
+            }
+        }
+    }
+
+    #[test]
+    fn primary_package_scripts_refuse_unsupported_runtime_semantics_without_partial_apply() {
+        let mut commands: Vec<String> = [
+            "node --require hook.js app.js",
+            "node --import=hook.mjs app.js",
+            "node --inspect app.js",
+            "node -e 'console.log(1)'",
+            "node -- -app.js",
+            "node ../app.js",
+            "node \"$ENTRY.js\"",
+            "node src/*.js",
+            "node app.js && node --inspect app.js",
+            "NODE_OPTIONS=--trace-warnings node app.js",
+            "env NODE_OPTIONS='--require=hook.js' node app.js",
+            "cross-env BUN_OPTIONS=--preload=hook.js bun app.js",
+            "NODE_PATH=modules node app.js",
+            "FRANKEN_NODE_PROFILE=permissive node app.js",
+            "export NODE_OPTIONS=--require=hook.js; node app.js",
+            "FRANKEN_NODE_PROFILE=permissive; node app.js",
+            "node app.js & node app.js",
+            "node app.js\nnode app.js",
+            "node app.js >out.txt 2>&1",
+            "node app.js # node app.js",
+            "node app.js $(node other.js)",
+            "franken-node app.js",
+            "franken-node --inspect app.js",
+            "franken-node -r hook.js app.js",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        commands.push(vec!["node app.js"; 17].join(" && "));
+        commands.push(format!("node app.js {}", vec!["argument"; 1_001].join(" ")));
+
+        for command in commands {
+            let root = project();
+            fs::write(root.path().join("app.js"), "console.log('app');\n").unwrap();
+            let manifest = serde_json::json!({
+                "name": "script-refusal",
+                "engines": { "node": ">=20" },
+                "scripts": {
+                    "start": command,
+                    "lint": "eslint .",
+                    "echo": "echo 'NODE_OPTIONS=--require=hook.js'"
+                }
+            })
+            .to_string();
+            fs::write(root.path().join("package.json"), &manifest).unwrap();
+            let applied = super::super::run_rewrite(root.path(), true).unwrap();
+            assert_eq!(
+                (
+                    applied.rewrites_planned,
+                    applied.rewrites_applied,
+                    applied.manual_review_items
+                ),
+                (0, 0, 1),
+                "{command}: {applied:#?}"
+            );
+            assert!(applied.rollback_entries.is_empty(), "{command}");
+            assert!(
+                applied.entries.iter().any(|entry| {
+                    entry.action == Action::ManualScriptReview
+                        && entry.detail.contains("script `start`")
+                        && !entry.applied
+                }),
+                "{command}: {applied:#?}"
+            );
+            assert_eq!(
+                fs::read_to_string(root.path().join("package.json")).unwrap(),
+                manifest,
+                "{command}"
+            );
+            assert!(
+                !root.path().join(".migrate-backup/package.json").exists(),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
     fn primary_apply_preserves_commonjs_format_load_order_and_exact_preimages() {
         let source = "#!/usr/bin/env node\n'use strict';\nconsole.log('before', this === module.exports);\nmodule.exports = function(on) {\n if (!on) return 'off';\n require('late');\n const {\n  basename\n } = require(\n 'path'\n );\n return basename(__filename);\n};\nconsole.log(module.exports(false));\nconsole.log(module.exports(true));\n";
         let expected = source.replace("'path'", "'node:path'");

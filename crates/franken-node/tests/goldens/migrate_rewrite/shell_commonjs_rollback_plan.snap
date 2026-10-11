@@ -15,8 +15,8 @@ source: crates/franken-node/tests/migrate_rewrite_goldens.rs
     },
     {
       "path": "package.json",
-      "original_content": "{\n  \"name\": \"migrate-rewrite-shell-commonjs-fixture\",\n  \"version\": \"1.0.0\",\n  \"scripts\": {\n    \"start\": \"NODE_OPTIONS=--trace-warnings node index.js && bun scripts/build.mjs\"\n  }\n}\n",
-      "rewritten_content": "{\n  \"name\": \"migrate-rewrite-shell-commonjs-fixture\",\n  \"version\": \"1.0.0\",\n  \"scripts\": {\n    \"start\": \"NODE_OPTIONS=--trace-warnings franken-node index.js && franken-node scripts/build.mjs\"\n  },\n  \"engines\": {\n    \"node\": \">=20 <23\"\n  }\n}\n"
+      "original_content": "{\n  \"name\": \"migrate-rewrite-shell-commonjs-fixture\",\n  \"version\": \"1.0.0\",\n  \"scripts\": {\n    \"start\": \"NODE_ENV=production node index.js && bun scripts/build.mjs\"\n  }\n}\n",
+      "rewritten_content": "{\n  \"name\": \"migrate-rewrite-shell-commonjs-fixture\",\n  \"version\": \"1.0.0\",\n  \"scripts\": {\n    \"start\": \"NODE_ENV=production franken-node run --console-only index.js && franken-node run --console-only scripts/build.mjs\"\n  },\n  \"engines\": {\n    \"node\": \">=20 <23\"\n  }\n}\n"
     },
     {
       "path": "scripts/build.mjs",

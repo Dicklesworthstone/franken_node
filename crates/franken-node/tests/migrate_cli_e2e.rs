@@ -862,7 +862,7 @@ fn migration_demo_pipeline_runs_live_migrate_commands_end_to_end() {
     );
     assert_eq!(
         rewritten_manifest["scripts"]["start"],
-        serde_json::json!("franken-node index.js")
+        serde_json::json!("franken-node run --console-only index.js")
     );
     log_phase(
         test_name,
