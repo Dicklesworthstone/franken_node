@@ -8,6 +8,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -71,6 +72,12 @@ class ValidationTests(unittest.TestCase):
 @unittest.skipUnless(os.name == "posix" and shutil.which("node"), "requires POSIX and Node reference")
 class ExecutionTests(unittest.TestCase):
     def setUp(self):
+        overrides = {key: "" for key in os.environ if key.startswith("FRANKEN_NODE_")}
+        overrides.update({key: "" for key in ("NODE_OPTIONS", "NODE_PATH", "BUN_OPTIONS",
+                                             "LD_PRELOAD", "DYLD_INSERT_LIBRARIES")})
+        environment = patch.dict(os.environ, overrides)
+        environment.start()
+        self.addCleanup(environment.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -179,6 +186,55 @@ else:
         self.assertEqual(report["corpus_case_count"], 2)
         self.assertEqual(report["selected_case_count"], 1)
         self.assertEqual([row["id"] for row in report["results"]], ["second"])
+
+    def test_file_mismatch_fails_even_when_console_matches(self):
+        value = case()
+        value["files"]["main.js"] = (
+            "require('fs').writeFileSync('result.txt', '42'); console.log(42);\n")
+        value["expected"]["files"] = {"result.txt": "42"}
+        report = self.run_cases(value)
+        result = report["results"][0]
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertEqual(result["reference"]["differences"], [])
+        self.assertEqual(result["candidate"]["differences"], ["file:result.txt"])
+
+    def test_setup_failure_is_not_a_comparison_pass(self):
+        self.native.write_text(f"#!{sys.executable}\nraise SystemExit(7)\n")
+        report = self.run_cases(case())
+        result = report["results"][0]
+        self.assertEqual(result["verdict"], "ERROR")
+        self.assertEqual(result["setup"]["exit_code"], 7)
+        self.assertNotIn("candidate", result)
+
+    def test_setup_cannot_replace_fixture_source(self):
+        self.native.write_text(f"#!{sys.executable}\n" +
+                               "from pathlib import Path\nPath('main.js').write_text('changed')\n")
+        result = self.run_cases(case())["results"][0]
+        self.assertEqual(result["verdict"], "ERROR")
+        self.assertIn("changed fixture input", result["detail"])
+
+    def test_digest_pin_rejects_changed_inputs_before_execution(self):
+        with self.assertRaisesRegex(ValueError, "corpus digest does not match"):
+            self.run_cases(case(), expected_corpus_sha256="sha256:" + "0" * 64)
+        self.assertFalse((self.root / "artifacts").exists())
+
+    def test_frozen_corpus_can_be_rerun_with_its_digest(self):
+        first = self.run_cases(case())
+        captured = runner.load_corpus(self.root / "artifacts/corpus.json")
+        second = runner.run_corpus(captured, self.native, self.node, self.root / "rerun",
+                                   expected_corpus_sha256=first["corpus_sha256"])
+        self.assertEqual(second["verdict"], "PASS")
+        self.assertEqual(second["results"][0]["case_sha256"], first["results"][0]["case_sha256"])
+
+    def test_script_flags_stay_after_native_argument_separator(self):
+        value = case()
+        value["args"] = ["--runtime", "node", "--policy", "legacy-risky", "a b"]
+        self.assertEqual(self.run_cases(value)["verdict"], "PASS")
+        receipt = json.loads((self.root / "artifacts/answer/candidate/execution/watchdog.json").read_text())
+        command = receipt["command"]
+        separator = command.index("--")
+        self.assertEqual(command[separator + 1:], value["args"])
+        self.assertEqual(command[command.index("--runtime") + 1], "franken-engine")
 
     def test_cancellation_never_passes_an_empty_run(self):
         cancellation = runner.Cancellation()
