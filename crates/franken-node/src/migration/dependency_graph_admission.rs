@@ -5,8 +5,9 @@
 //! alias hidden behind a private installation. This gate runs before checked
 //! migration executes either runtime. It never opens installed package files.
 //!
-//! Modern optional dependencies override same-named ordinary dependencies;
-//! absent optional dependencies/optional peers need no invented installation.
+//! Modern ordinary dependencies supersede same-named peer dependencies;
+//! optional dependencies supersede both. Absent optional dependencies/optional
+//! peers need no invented installation.
 //! PRESENT optional installations still undergo every identity/risk check.
 //! Transitive development dependencies are not runtime installation edges.
 //! Legacy `requires` lacks per-edge optionality: unresolved edges stay review
@@ -151,7 +152,14 @@ impl Admission<'_> {
                 // Validate overridden entries too, without treating the losing
                 // declaration as the package actually selected by npm.
                 alias(installed_as, Some(request))?;
-                if section_name == "dependencies" && optional.contains_key(installed_as) {
+                // npm loads peer edges first, production edges next, and
+                // optional edges last. Later declarations replace earlier
+                // edges with the same installation name.
+                if (section_name == "dependencies" && optional.contains_key(installed_as))
+                    || (section_name == "peerDependencies"
+                        && (dependencies.contains_key(installed_as)
+                            || optional.contains_key(installed_as)))
+                {
                     continue;
                 }
                 let peer_optional = peer_meta.get(installed_as)
@@ -341,6 +349,44 @@ mod tests {
             "node_modules/alias":{"name":"wrong","version":"2.0.0"}
         })).unwrap();
         assert_eq!(report.findings[0].code, "unresolved_transitive_dependency");
+    }
+
+    #[test]
+    fn runtime_dependencies_supersede_same_named_peer_edges() {
+        for section in ["dependencies", "optionalDependencies"] {
+            let mut consumer = json!({
+                "version": "1.0.0",
+                "peerDependencies": { "adapter": "npm:sharp@1" }
+            });
+            consumer[section] = json!({ "adapter": "npm:ordinary@1" });
+            let report = modern(json!({
+                "node_modules/a": consumer,
+                "node_modules/a/node_modules/adapter": {
+                    "name": "ordinary",
+                    "version": "1.0.0"
+                }
+            }))
+            .unwrap();
+            assert!(!report.requires_review(), "{section}: {report:?}");
+        }
+    }
+
+    #[test]
+    fn overridden_peer_edges_still_validate_request_metadata() {
+        for request in [json!(12), json!("npm:")] {
+            let report = modern(json!({
+                "node_modules/a": {
+                    "version": "1.0.0",
+                    "dependencies": { "adapter": "npm:ordinary@1" },
+                    "peerDependencies": { "adapter": request }
+                },
+                "node_modules/a/node_modules/adapter": {
+                    "name": "ordinary",
+                    "version": "1.0.0"
+                }
+            }));
+            assert!(report.is_err());
+        }
     }
 
     #[test]
