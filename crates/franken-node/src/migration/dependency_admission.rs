@@ -24,6 +24,9 @@ use std::time::Instant;
 #[path = "dependency_workspaces.rs"]
 mod workspaces;
 
+#[path = "dependency_graph_admission.rs"]
+mod graph;
+
 const MAX_MANIFEST_BYTES: usize = 512 * 1024;
 const MAX_LOCK_BYTES: usize = 16 * 1024 * 1024;
 const MAX_METADATA_BYTES: usize = 64 * 1024 * 1024;
@@ -371,9 +374,14 @@ fn package_findings(report: &mut DependencyAdmission, packages: &BTreeMap<String
 fn nearest_package<'a>(packages: &'a BTreeMap<String, LockedPackage>, source: &str, installed_as: &str) -> Option<&'a LockedPackage> {
     let mut directory = source.strip_suffix("/package.json").unwrap_or("");
     loop {
-        let path = if directory.is_empty() { format!("node_modules/{installed_as}") }
-            else { format!("{directory}/node_modules/{installed_as}") };
-        if let Some(package) = packages.get(&path) { return Some(package); }
+        // Node skips an ancestor named node_modules instead of appending a
+        // second node_modules component. Such a fictitious installation must
+        // not shadow the real hoisted package during metadata admission.
+        if directory.rsplit('/').next() != Some("node_modules") {
+            let path = if directory.is_empty() { format!("node_modules/{installed_as}") }
+                else { format!("{directory}/node_modules/{installed_as}") };
+            if let Some(package) = packages.get(&path) { return Some(package); }
+        }
         if directory.is_empty() { return None; }
         directory = directory.rsplit_once('/').map_or("", |(parent, _)| parent);
     }
@@ -436,6 +444,7 @@ pub fn inspect(project: &Path, deadline: Instant) -> Result<DependencyAdmission>
     };
     let workspace_links = workspaces::bind_links(&mut capture, &manifests, lock.as_ref(), &packages, &mut report)?;
     package_findings(&mut report, &packages, source, &workspace_links)?;
+    graph::inspect(lock.as_ref(), &packages, source, &mut report, deadline)?;
     let mut declared = 0;
     for (directory, manifest) in &manifests {
         let source = workspaces::manifest_path(directory);
