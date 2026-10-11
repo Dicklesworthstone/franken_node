@@ -1,0 +1,192 @@
+"""Executable runner tests. The candidate shim is NOT native-runtime evidence."""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import shutil
+import sys
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from scripts import project_compat_runner as runner
+
+
+def case(name: str = "answer", entry: str = "main.js") -> dict:
+    return {"id": name, "category": "commonjs", "entry": entry,
+            "files": {entry: "console.log(require('./answer.js'));\n",
+                      "answer.js": "module.exports = 42;\n"},
+            "expected": {"stdout": "42\n", "stderr": "", "exit_code": 0}}
+
+
+def corpus(*cases: dict) -> dict:
+    return {"schema_version": runner.SCHEMA, "cases": list(cases) or [case()]}
+
+
+class ValidationTests(unittest.TestCase):
+    def test_valid_project_and_stable_fingerprint(self):
+        value = corpus()
+        self.assertEqual(runner.validate_corpus(value), value)
+        reordered = {"cases": value["cases"], "schema_version": runner.SCHEMA}
+        self.assertEqual(runner.digest(runner.encoded(value)), runner.digest(runner.encoded(reordered)))
+
+    def test_unsafe_paths(self):
+        for path in ("../secret", "/absolute.js", "a/../../b", "a//b", "./main.js",
+                     "a\\b", "C:/drive.js", "", "a/./b", ".git/config", ".franken-node/state"):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                runner.relative_path(path)
+
+    def test_invalid_corpora(self):
+        invalid = [corpus(case(), case()), {"schema_version": runner.SCHEMA, "cases": []}]
+        for mutate in (
+            lambda c: c["cases"][0].update(entry="absent.js"),
+            lambda c: c["cases"][0].update(args="--bad"),
+            lambda c: c["cases"][0].update(unknown=True),
+            lambda c: c["cases"][0]["expected"].update(exit_code=True),
+            lambda c: c["cases"][0]["expected"].update(exit_code=-1),
+            lambda c: c["cases"][0]["files"].update({"answer.js/child": "collision"}),
+            lambda c: c["cases"][0]["files"].update({"large.js": "x" * (runner.MAX_PROJECT_BYTES + 1)}),
+        ):
+            value = corpus()
+            mutate(value)
+            invalid.append(value)
+        for value in invalid:
+            with self.subTest(value=str(value)[:100]), self.assertRaises(ValueError):
+                runner.validate_corpus(value)
+
+    def test_duplicate_json_keys_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "corpus.json"
+            path.write_text('{"schema_version":"x","schema_version":"y","cases":[]}')
+            with self.assertRaisesRegex(ValueError, "duplicate JSON key"):
+                runner.load_corpus(path)
+
+    def test_missing_binary_does_not_fallback(self):
+        with self.assertRaisesRegex(ValueError, "executable not found"):
+            runner.executable("/definitely-not-installed/franken-node")
+
+
+@unittest.skipUnless(os.name == "posix" and shutil.which("node"), "requires POSIX and Node reference")
+class ExecutionTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.native = self.root / "candidate-test-double"
+        # An explicitly synthetic command adapter. This does not execute JS and
+        # its PASS results test the harness, not franken-engine compatibility.
+        self.native.write_text(f"#!{sys.executable}\n" + '''
+import pathlib, sys, time
+if sys.argv[1] == 'init':
+    assert sys.argv[2:] == ['--profile', 'balanced', '--out-dir', '.']
+    raise SystemExit(0)
+assert sys.argv[1] == 'run'
+assert sys.argv[3:8] == ['--policy', 'balanced', '--runtime', 'franken-engine', '--console-only']
+entry = pathlib.Path(sys.argv[2]).name
+if entry == 'hang.js':
+    time.sleep(20)
+if entry == 'flood.js':
+    print('x' * 8192)
+elif entry == 'wrong.js':
+    print('wrong')
+elif entry == 'exit.js':
+    sys.stderr.write('expected failure\\n')
+    raise SystemExit(7)
+elif entry == 'isolated.js':
+    print(0 if pathlib.Path('reference-created.txt').exists() else 42)
+else:
+    print(42)
+''')
+        self.native.chmod(0o700)
+        self.node = runner.executable("node")
+
+    def run_cases(self, *cases, **kwargs):
+        return runner.run_corpus(corpus(*cases), self.native, self.node,
+                                 self.root / "artifacts", **kwargs)
+
+    def test_real_node_multifile_reference_and_candidate_command(self):
+        report = self.run_cases(case())
+        self.assertEqual(report["verdict"], "PASS")
+        self.assertEqual(report["passing_cases"], 1)
+        self.assertEqual(report["candidate"], runner.fingerprint(self.native))
+        snapshot = runner.load_corpus(self.root / "artifacts/corpus.json")
+        self.assertEqual(snapshot, corpus())
+        self.assertEqual(report["corpus_sha256"], runner.digest(runner.encoded(snapshot)))
+        receipt = json.loads((self.root / "artifacts/answer/candidate/execution/watchdog.json").read_text())
+        self.assertIn("franken-engine", receipt["command"])
+        self.assertTrue(receipt["output_complete"])
+
+    def test_mismatch_does_not_skip_following_case(self):
+        report = self.run_cases(case("bad", "wrong.js"), case("good"))
+        self.assertEqual(report["verdict"], "FAIL")
+        self.assertEqual([row["verdict"] for row in report["results"]], ["FAIL", "PASS"])
+        self.assertEqual(report["results"][0]["candidate"]["differences"], ["stdout"])
+
+    def test_reference_must_match_golden_not_only_candidate(self):
+        value = case()
+        value["expected"]["stdout"] = "incorrect golden\n"
+        report = self.run_cases(value)
+        self.assertEqual(report["results"][0]["verdict"], "REFERENCE_FAILED")
+        self.assertEqual(report["passing_cases"], 0)
+
+    def test_expected_nonzero_is_observable(self):
+        value = case(entry="exit.js")
+        value["files"]["exit.js"] = "process.stderr.write('expected failure\\n'); process.exit(7);\n"
+        value["expected"] = {"stdout": "", "stderr": "expected failure\n", "exit_code": 7}
+        self.assertEqual(self.run_cases(value)["verdict"], "PASS")
+
+    def test_timeout_is_not_an_expected_exit(self):
+        report = self.run_cases(case(entry="hang.js"), wall_time_ms=1500)
+        result = report["results"][0]
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertEqual(result["candidate"]["outcome"], "wrapper_timeout")
+        self.assertIn("execution_incomplete", result["candidate"]["differences"])
+
+    def test_output_quota_fails_closed(self):
+        report = self.run_cases(case(entry="flood.js"), max_output_bytes=64)
+        result = report["results"][0]
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertEqual(result["candidate"]["outcome"], "output_limit_exceeded")
+        self.assertLessEqual(result["candidate"]["stdout_bytes"], 64)
+
+    def test_reference_mutations_do_not_seed_candidate(self):
+        value = case(entry="isolated.js")
+        value["files"]["isolated.js"] = (
+            "require('fs').writeFileSync('reference-created.txt', 'secret'); console.log(42);\n")
+        self.assertEqual(self.run_cases(value)["verdict"], "PASS")
+        base = self.root / "artifacts/answer"
+        self.assertTrue((base / "reference/project/reference-created.txt").exists())
+        self.assertFalse((base / "candidate/project/reference-created.txt").exists())
+
+    def test_identical_binary_rejected(self):
+        with self.assertRaisesRegex(ValueError, "different runtime binaries"):
+            runner.run_corpus(corpus(), self.node, self.node, self.root / "artifacts")
+
+    def test_unknown_selection_rejected(self):
+        with self.assertRaisesRegex(ValueError, "unknown case ids"):
+            self.run_cases(case(), selected=["typo"])
+        self.assertFalse((self.root / "artifacts").exists())
+
+    def test_existing_artifact_directory_not_reused(self):
+        (self.root / "artifacts").mkdir()
+        with self.assertRaises(FileExistsError):
+            self.run_cases(case())
+
+    def test_selection_keeps_full_corpus_denominator(self):
+        report = self.run_cases(case("first"), case("second"), selected=["second"])
+        self.assertEqual(report["corpus_case_count"], 2)
+        self.assertEqual(report["selected_case_count"], 1)
+        self.assertEqual([row["id"] for row in report["results"]], ["second"])
+
+    def test_cancellation_never_passes_an_empty_run(self):
+        cancellation = runner.Cancellation()
+        cancellation.request(15)
+        report = self.run_cases(case(), cancellation=cancellation)
+        self.assertEqual(report["verdict"], "CANCELLED")
+        self.assertEqual(report["results"], [])
+
+
+if __name__ == "__main__":
+    unittest.main()

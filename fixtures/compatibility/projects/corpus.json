@@ -1,0 +1,18 @@
+{
+  "schema_version": "franken-node/project-compat-corpus/v1",
+  "description": "Hand-authored executable package-resolution scenarios; not third-party npm certification.",
+  "cases": [
+    {
+      "id": "commonjs-relative-chain",
+      "category": "commonjs",
+      "description": "Resolve relative CommonJS imports across a three-file dependency chain.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "console.log(require('./lib/answer.js'));\n",
+        "lib/answer.js": "module.exports = require('./base.js') + 2;\n",
+        "lib/base.js": "module.exports = 40;\n"
+      },
+      "expected": {"stdout": "42\n", "stderr": "", "exit_code": 0}
+    }
+  ]
+}
