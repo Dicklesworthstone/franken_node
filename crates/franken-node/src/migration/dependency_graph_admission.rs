@@ -511,6 +511,7 @@ mod tests {
         let mut report = DependencyAdmission {
             schema_version: String::new(), scope: String::new(), packages_scanned: 0,
             manifests_scanned: 0, inputs: Vec::new(), findings: Vec::new(),
+            installation_checked: false, installed_packages_scanned: 0,
         };
         let packages = BTreeMap::new();
         let mut admission = Admission {
