@@ -1,4 +1,4 @@
-//! Syntax-aware ESM specifier migration for JavaScript, TypeScript and TSX.
+//! Syntax-aware module specifier migration for JavaScript, TypeScript and TSX.
 //! No module-format conversion, type erasure or declaration hoisting: only
 //! recognized specifier literal contents may change. The exact allowlist
 //! excludes prefix-only builtins and arbitrary package subpaths.
@@ -88,6 +88,130 @@ pub(super) fn normalize_import_specifier(specifier: &str) -> String {
         format!("node:{specifier}")
     } else {
         specifier.to_owned()
+    }
+}
+
+/// Preserve CommonJS wrapper semantics and load sites. Syntax establishes safe
+/// literal-edit locations; runtime comparison is still needed to detect loader
+/// changes elsewhere in a project, including builtin require.cache injection.
+pub(super) fn rewrite_commonjs(
+    source: &str,
+    deadline: Instant,
+) -> Result<(String, usize), String> {
+    if source.len() > MAX_SOURCE_BYTES || Instant::now() >= deadline {
+        return Err(
+            "CommonJS source size or planning budget exceeded; manual migration required".into(),
+        );
+    }
+    let tree = source_syntax::parse(source, Syntax::JavaScript, deadline)?;
+    let mut cursor = tree.walk();
+    let mut visited = 0;
+    let mut edits: Vec<(Range<usize>, String)> = Vec::new();
+    loop {
+        visited += 1;
+        if visited > MAX_NODES || Instant::now() >= deadline {
+            return Err("CommonJS traversal budget exhausted; manual migration required".into());
+        }
+        let node = cursor.node();
+        match node.kind() {
+            "import_statement" | "export_statement" | "with_statement" => {
+                return Err("mixed module syntax or dynamic lexical scope requires manual CommonJS migration".into());
+            }
+            "identifier"
+            | "shorthand_property_identifier"
+            | "shorthand_property_identifier_pattern" => {
+                let name = text(source, node);
+                if name.contains('\\') {
+                    return Err("escaped identifier prevents proving the CommonJS loader binding; manual migration required".into());
+                }
+                if name == "require" {
+                    let direct_call = node.parent().is_some_and(|parent| {
+                        parent.kind() == "call_expression"
+                            && parent
+                                .child_by_field_name("function")
+                                .is_some_and(|function| function.id() == node.id())
+                    });
+                    if !direct_call {
+                        return Err("require rebinding, aliasing or property/cache access requires manual migration; no partial source rewrite applied".into());
+                    }
+                }
+            }
+            "call_expression" => {
+                if let Some(function) = node.child_by_field_name("function") {
+                    // Preserve the primary planner's dynamic import barrier
+                    // before considering any CommonJS candidate edit.
+                    if function.kind() == "import" {
+                        return Err("dynamic import() usage requires manual CommonJS migration; no partial source rewrite applied".into());
+                    }
+                    let name = text(source, function);
+                    if (function.kind() == "identifier" && name == "eval")
+                        || name == "createRequire"
+                        || name.ends_with(".createRequire")
+                    {
+                        return Err("dynamic loader construction or eval requires manual CommonJS migration".into());
+                    }
+                    if function.kind() == "identifier" && name == "require" {
+                        let arguments = node
+                            .child_by_field_name("arguments")
+                            .ok_or_else(|| "CommonJS require arguments missing".to_owned())?;
+                        let mut argument_cursor = arguments.walk();
+                        let mut actual = arguments
+                            .named_children(&mut argument_cursor)
+                            .filter(|child| child.kind() != "comment");
+                        let literal = actual.next().ok_or_else(|| {
+                            "empty require call requires manual migration".to_owned()
+                        })?;
+                        if actual.next().is_some()
+                            || !matches!(literal.kind(), "string" | "template_string")
+                        {
+                            return Err("computed or unsupported require call requires manual migration; no partial source rewrite applied".into());
+                        }
+                        let raw = text(source, literal);
+                        if raw.len() < 2
+                            || raw.contains('\\')
+                            || (literal.kind() == "template_string" && raw.contains("${"))
+                        {
+                            return Err("escaped or interpolated require specifier requires manual migration; no partial source rewrite applied".into());
+                        }
+                        let name = &raw[1..raw.len() - 1];
+                        let normalized = normalize_import_specifier(name);
+                        if normalized != name {
+                            if edits.len() == MAX_EDITS {
+                                return Err("CommonJS edit limit exceeded".into());
+                            }
+                            edits.push((
+                                literal.start_byte() + 1..literal.end_byte() - 1,
+                                normalized,
+                            ));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        if cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                edits.sort_by_key(|(range, _)| range.start);
+                let mut output = String::with_capacity(source.len());
+                let mut previous = 0;
+                for (range, replacement) in &edits {
+                    if range.start < previous {
+                        return Err("overlapping CommonJS specifier edits refused".into());
+                    }
+                    output.push_str(&source[previous..range.start]);
+                    output.push_str(replacement);
+                    previous = range.end;
+                }
+                output.push_str(&source[previous..]);
+                return Ok((output, edits.len()));
+            }
+        }
     }
 }
 

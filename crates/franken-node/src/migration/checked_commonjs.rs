@@ -6,6 +6,7 @@
 //! bypasses require.cache, so runtime comparison remains mandatory. Loader
 //! rebinding/cache access is refused before execution, not guessed equivalent.
 
+use super::super::module_specifiers::rewrite_commonjs as rewrite;
 use super::super::{MigrationRewriteEntry, MigrationRollbackEntry};
 use super::{MigrationRewriteAction as Action, MigrationRewriteReport};
 use anyhow::{Context, Result, ensure};
@@ -13,14 +14,10 @@ use rustix::fs::{Mode, OFlags, open};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Read;
-use std::ops::{ControlFlow, Range};
 use std::path::{Component, Path};
 use std::time::{Duration, Instant};
-use tree_sitter::{Node, ParseOptions, Parser};
 
 const MAX_SOURCE_BYTES: usize = 10 * 1024 * 1024;
-const MAX_NODES: usize = 1_000_000;
-const MAX_EDITS: usize = 65_536;
 const MAX_PLAN_ENTRIES: usize = 1_000;
 const PARSE_TIMEOUT: Duration = Duration::from_secs(2);
 const CONVERSION_CONTEXT: &str = "; refused by rewrite:cjs-require-to-esm@1.0.0 precondition:cjs-static-require-no-dynamic-no-cache";
@@ -314,145 +311,6 @@ fn read_staged_source(root: &Path, name: &str, deadline: Instant) -> Result<Stri
     String::from_utf8(bytes).context("captured CommonJS source must be UTF-8")
 }
 
-fn text<'a>(source: &'a str, node: Node<'_>) -> &'a str {
-    &source[node.byte_range()]
-}
-
-fn rewrite(source: &str, deadline: Instant) -> std::result::Result<(String, usize), String> {
-    if source.len() > MAX_SOURCE_BYTES || Instant::now() >= deadline {
-        return Err(
-            "CommonJS source size or planning budget exceeded; manual migration required".into(),
-        );
-    }
-    let mut parser = Parser::new();
-    parser
-        .set_language(&tree_sitter_javascript::LANGUAGE.into())
-        .map_err(|error| format!("CommonJS parser unavailable: {error}"))?;
-    let bytes = source.as_bytes();
-    let mut input = |offset: usize, _| bytes.get(offset..).unwrap_or_default();
-    let mut progress = |_: &tree_sitter::ParseState| {
-        if Instant::now() >= deadline {
-            ControlFlow::Break(())
-        } else {
-            ControlFlow::Continue(())
-        }
-    };
-    let tree = parser
-        .parse_with_options(
-            &mut input,
-            None,
-            Some(ParseOptions::new().progress_callback(&mut progress)),
-        )
-        .ok_or_else(|| "CommonJS parsing budget exhausted; manual migration required".to_owned())?;
-    if tree.root_node().has_error() {
-        return Err("CommonJS parser rejected source; no partial source rewrite applied".into());
-    }
-    let mut cursor = tree.walk();
-    let mut visited = 0;
-    let mut edits: Vec<(Range<usize>, String)> = Vec::new();
-    loop {
-        visited += 1;
-        if visited > MAX_NODES || Instant::now() >= deadline {
-            return Err("CommonJS traversal budget exhausted; manual migration required".into());
-        }
-        let node = cursor.node();
-        match node.kind() {
-            "import_statement" | "export_statement" | "with_statement" => {
-                return Err("mixed module syntax or dynamic lexical scope requires manual CommonJS migration".into());
-            }
-            "identifier"
-            | "shorthand_property_identifier"
-            | "shorthand_property_identifier_pattern" => {
-                let name = text(source, node);
-                if name.contains('\\') {
-                    return Err("escaped identifier prevents proving the CommonJS loader binding; manual migration required".into());
-                }
-                if name == "require" {
-                    let direct_call = node.parent().is_some_and(|parent| {
-                        parent.kind() == "call_expression"
-                            && parent
-                                .child_by_field_name("function")
-                                .is_some_and(|function| function.id() == node.id())
-                    });
-                    if !direct_call {
-                        return Err("require rebinding, aliasing or property/cache access requires manual migration; no partial source rewrite applied".into());
-                    }
-                }
-            }
-            "call_expression" => {
-                if let Some(function) = node.child_by_field_name("function") {
-                    let name = text(source, function);
-                    if (function.kind() == "identifier" && name == "eval")
-                        || name == "createRequire"
-                        || name.ends_with(".createRequire")
-                    {
-                        return Err("dynamic loader construction or eval requires manual CommonJS migration".into());
-                    }
-                    if function.kind() == "identifier" && name == "require" {
-                        let arguments = node
-                            .child_by_field_name("arguments")
-                            .ok_or_else(|| "CommonJS require arguments missing".to_owned())?;
-                        let mut argument_cursor = arguments.walk();
-                        let mut actual = arguments
-                            .named_children(&mut argument_cursor)
-                            .filter(|child| child.kind() != "comment");
-                        let literal = actual.next().ok_or_else(|| {
-                            "empty require call requires manual migration".to_owned()
-                        })?;
-                        if actual.next().is_some()
-                            || !matches!(literal.kind(), "string" | "template_string")
-                        {
-                            return Err("computed or unsupported require call requires manual migration; no partial source rewrite applied".into());
-                        }
-                        let raw = text(source, literal);
-                        if raw.len() < 2
-                            || raw.contains('\\')
-                            || (literal.kind() == "template_string" && raw.contains("${"))
-                        {
-                            return Err("escaped or interpolated require specifier requires manual migration; no partial source rewrite applied".into());
-                        }
-                        let name = &raw[1..raw.len() - 1];
-                        let normalized = super::normalize_import_specifier(name);
-                        if normalized != name {
-                            if edits.len() == MAX_EDITS {
-                                return Err("CommonJS edit limit exceeded".into());
-                            }
-                            edits.push((
-                                literal.start_byte() + 1..literal.end_byte() - 1,
-                                normalized,
-                            ));
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-        if cursor.goto_first_child() {
-            continue;
-        }
-        loop {
-            if cursor.goto_next_sibling() {
-                break;
-            }
-            if !cursor.goto_parent() {
-                edits.sort_by_key(|(range, _)| range.start);
-                let mut output = String::with_capacity(source.len());
-                let mut previous = 0;
-                for (range, replacement) in &edits {
-                    if range.start < previous {
-                        return Err("overlapping CommonJS specifier edits refused".into());
-                    }
-                    output.push_str(&source[previous..range.start]);
-                    output.push_str(replacement);
-                    previous = range.end;
-                }
-                output.push_str(&source[previous..]);
-                return Ok((output, edits.len()));
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::{
@@ -531,6 +389,15 @@ mod tests {
     }
 
     #[test]
+    fn standalone_and_conditional_builtin_loads_keep_their_positions() {
+        transformed(
+            "require('fs');\nif (false) require('path');\n",
+            "require('node:fs');\nif (false) require('node:path');\n",
+            2,
+        );
+    }
+
+    #[test]
     fn loader_rebinding_cache_aliasing_and_dynamic_scope_refuse_every_edit() {
         for suffix in [
             "const require = custom;",
@@ -547,6 +414,7 @@ mod tests {
             "export const value=1;",
             r"const requ\u0069re=custom;",
             "createRequire('/tmp/a.cjs');",
+            "import('node:fs');",
         ] {
             assert!(
                 rewrite(&format!("const path=require('path');{suffix}"), deadline()).is_err(),
@@ -562,6 +430,88 @@ mod tests {
         assert!(rewrite(&" ".repeat(MAX_SOURCE_BYTES + 1), deadline()).is_err());
     }
 
+    #[test]
+    fn primary_apply_preserves_commonjs_format_load_order_and_exact_preimages() {
+        let source = "#!/usr/bin/env node\n'use strict';\nconsole.log('before', this === module.exports);\nmodule.exports = function(on) {\n if (!on) return 'off';\n require('late');\n const {\n  basename\n } = require(\n 'path'\n );\n return basename(__filename);\n};\nconsole.log(module.exports(false));\nconsole.log(module.exports(true));\n";
+        let expected = source.replace("'path'", "'node:path'");
+        for (name, module_package) in [("case.test.js", false), ("case.test.cjs", true)] {
+            let root = project();
+            if module_package {
+                fs::write(
+                    root.path().join("package.json"),
+                    r#"{"name":"checked-cjs","type":"module","engines":{"node":">=20"}}"#,
+                )
+                .unwrap();
+            }
+            let manifest = fs::read_to_string(root.path().join("package.json")).unwrap();
+            fs::create_dir_all(root.path().join("node_modules/late")).unwrap();
+            fs::write(
+                root.path().join("node_modules/late/index.js"),
+                "console.log('loaded');module.exports='late';\n",
+            )
+            .unwrap();
+            fs::write(root.path().join(name), source).unwrap();
+            let execute = || {
+                std::process::Command::new("node")
+                    .arg(name)
+                    .current_dir(root.path())
+                    .output()
+                    .unwrap()
+            };
+            let before = execute();
+            assert!(before.status.success(), "{before:?}");
+            assert_eq!(
+                before.stdout,
+                format!("before true\noff\nloaded\n{name}\n").into_bytes()
+            );
+            let plan = planned(root.path());
+            assert_eq!(
+                (
+                    plan.rewrites_planned,
+                    plan.rewrites_applied,
+                    plan.manual_review_items
+                ),
+                (1, 0, 0)
+            );
+            assert_eq!(plan.rollback_entries[0].rewritten_content, expected);
+            assert_eq!(fs::read_to_string(root.path().join(name)).unwrap(), source);
+            assert!(!root.path().join(".migrate-backup").join(name).exists());
+
+            let applied = super::super::run_rewrite(root.path(), true).unwrap();
+            assert_eq!(
+                (
+                    applied.rewrites_planned,
+                    applied.rewrites_applied,
+                    applied.manual_review_items
+                ),
+                (1, 1, 0)
+            );
+            assert_eq!(applied.rollback_entries, plan.rollback_entries);
+            assert_eq!(fs::read_to_string(root.path().join(name)).unwrap(), expected);
+            assert_eq!(
+                fs::read_to_string(root.path().join(".migrate-backup").join(name)).unwrap(),
+                source
+            );
+            assert_eq!(
+                fs::read_to_string(root.path().join("package.json")).unwrap(),
+                manifest
+            );
+            let after = execute();
+            assert!(after.status.success(), "{after:?}");
+            assert_eq!(after.stdout, before.stdout);
+            assert_eq!(after.stderr, before.stderr);
+            let repeated = super::super::run_rewrite(root.path(), true).unwrap();
+            assert_eq!(
+                (
+                    repeated.rewrites_planned,
+                    repeated.rewrites_applied,
+                    repeated.manual_review_items
+                ),
+                (0, 0, 0)
+            );
+        }
+    }
+
     // Real Node/Node executions of the production checked pipeline establish
     // candidate planning/installation behavior, not native Franken parity.
     #[test]
@@ -574,7 +524,7 @@ mod tests {
             fs::Permissions::from_mode(0o755),
         )
         .unwrap();
-        assert!(planned(root.path()).manual_review_items > 0);
+        assert_eq!(planned(root.path()).manual_review_items, 0);
         let report = pair(root.path());
         assert_eq!(report.status, CheckedRewriteStatus::Applied, "{report:#?}");
         let rewrite = report.rewrite.as_ref().unwrap();
@@ -638,7 +588,7 @@ mod tests {
         let source =
             "module.exports = function() { return 42; };\nconsole.log(module.exports());\n";
         fs::write(root.path().join("case.test.cjs"), source).unwrap();
-        assert!(planned(root.path()).manual_review_items > 0);
+        assert_eq!(planned(root.path()).manual_review_items, 0);
         let report = pair(root.path());
         assert_eq!(
             report.status,
@@ -686,6 +636,7 @@ mod tests {
         for source in [
             "function load(require) {\n const path = require('path');\n return path;\n}\nconsole.log(42);\n",
             "const name='path';\nconst path=require(name);\nconsole.log(path.sep);\n",
+            "const path=require('path');import('node:fs');\n",
         ] {
             let root = project();
             fs::write(root.path().join("case.test.cjs"), source).unwrap();

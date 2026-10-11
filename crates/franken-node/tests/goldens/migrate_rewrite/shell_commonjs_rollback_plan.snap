@@ -11,7 +11,7 @@ source: crates/franken-node/tests/migrate_rewrite_goldens.rs
     {
       "path": "index.js",
       "original_content": "const fs = require(\"fs\");\n\nconsole.log(fs.existsSync(\".\"));\n",
-      "rewritten_content": "import fs from \"node:fs\";\n\nconsole.log(fs.existsSync(\".\"));\n"
+      "rewritten_content": "const fs = require(\"node:fs\");\n\nconsole.log(fs.existsSync(\".\"));\n"
     },
     {
       "path": "package.json",

@@ -1435,17 +1435,17 @@ fn migrate_rewrite_apply_emits_rollback_plan_and_updates_manifest() {
 
     let rewritten_source =
         std::fs::read_to_string(project_path.join("index.js")).expect("read rewritten source");
-    assert!(rewritten_source.contains("import fs from \"node:fs\";"));
-    assert!(!rewritten_source.contains("require("));
+    assert!(rewritten_source.contains("const fs = require(\"node:fs\");"));
+    assert!(!rewritten_source.contains("require(\"fs\")"));
     let source_backup = std::fs::read_to_string(project_path.join(".migrate-backup/index.js"))
         .expect("read source backup");
     assert!(source_backup.contains("const fs = require(\"fs\");"));
 }
 
 #[test]
-fn migrate_rewrite_cjs_fixture_records_migcert_transcript_and_sdk_certifies_offline() {
+fn migrate_rewrite_preserves_commonjs_and_checks_reference_migcert_fixture() {
     let test_name =
-        "migrate_rewrite_cjs_fixture_records_migcert_transcript_and_sdk_certifies_offline";
+        "migrate_rewrite_preserves_commonjs_and_checks_reference_migcert_fixture";
     let temp = TempDir::new().expect("temp dir");
     let project_path = temp.path().join("project");
     write_basic_rewrite_project(&project_path);
@@ -1472,7 +1472,7 @@ fn migrate_rewrite_cjs_fixture_records_migcert_transcript_and_sdk_certifies_offl
     );
     let rewrite = parse_json_stdout(&output, "migrate rewrite --apply --json");
     let rewritten_source = std::fs::read_to_string(&source_path).expect("read rewritten source");
-    assert!(rewritten_source.contains("import fs from \"node:fs\";"));
+    assert!(rewritten_source.contains("const fs = require(\"node:fs\");"));
     assert!(!rewritten_source.contains("require(\"fs\")"));
     assert!(
         rollback_path.is_file(),
@@ -1507,11 +1507,28 @@ fn migrate_rewrite_cjs_fixture_records_migcert_transcript_and_sdk_certifies_offl
         "reference migration certificate signature should verify"
     );
 
-    let capsule =
+    // The reference certificate covers a CJS-to-ESM fixture, not the
+    // specifier normalization performed by this CLI run.
+    let unrelated_capsule =
         e2e_migration_equivalence_capsule("index.js", &original_source, &rewritten_source);
+    let unrelated_result = create_verifier_sdk("verifier://migration-e2e")
+        .verify_migration_artifact(&make_sdk_migration_equivalence_bundle(&unrelated_capsule))
+        .expect("SDK should verify the unrelated-rule bundle structure");
+    assert_eq!(unrelated_result.verdict, VerificationVerdict::Fail);
+    assert!(
+        unrelated_result.checked_assertions.iter().any(|assertion| {
+            assertion.assertion == "migration_precondition_rechecked" && !assertion.passed
+        }),
+        "CJS normalization must not satisfy the CJS-to-ESM proof: {unrelated_result:#?}"
+    );
+    let capsule = e2e_migration_equivalence_capsule(
+        "reference.js",
+        "const fs = require(\"fs\");\nconsole.log(typeof fs.readFileSync);\n",
+        "import fs from \"node:fs\";\nconsole.log(typeof fs.readFileSync);\n",
+    );
     let sdk_result = create_verifier_sdk("verifier://migration-e2e")
         .verify_migration_artifact(&make_sdk_migration_equivalence_bundle(&capsule))
-        .expect("SDK should certify the mock-free migration equivalence bundle");
+        .expect("SDK should validate the reference migration fixture");
     assert_eq!(sdk_result.verdict, VerificationVerdict::Pass);
     assert!(
         sdk_result
@@ -1604,10 +1621,11 @@ fn migrate_rewrite_cjs_fixture_records_migcert_transcript_and_sdk_certifies_offl
 
     let transcript = serde_json::json!({
         "schema_version": "franken-node/migcert-e2e-transcript/v1",
+        "certificate_scope": "reference_cjs_to_esm_fixture",
         "events": [
             {
                 "event_code": event_codes::FN_MIGCERT_GENERATED,
-                "source": "migrate rewrite --apply --json",
+                "source": "generate_reference_behavioral_conformance_certificate",
                 "status": "pass"
             },
             {
@@ -1660,6 +1678,7 @@ fn migrate_rewrite_cjs_fixture_records_migcert_transcript_and_sdk_certifies_offl
     assert_eq!(
         scrubbed_transcript,
         serde_json::json!({
+            "certificate_scope": "reference_cjs_to_esm_fixture",
             "certificate": {
                 "bound_total_cases": 128,
                 "content_hash": "[HASH]",
@@ -1669,7 +1688,7 @@ fn migrate_rewrite_cjs_fixture_records_migcert_transcript_and_sdk_certifies_offl
             "events": [
                 {
                     "event_code": "FN-MIGCERT-001",
-                    "source": "migrate rewrite --apply --json",
+                    "source": "generate_reference_behavioral_conformance_certificate",
                     "status": "pass"
                 },
                 {
@@ -1714,7 +1733,7 @@ fn migrate_rewrite_cjs_fixture_records_migcert_transcript_and_sdk_certifies_offl
     );
     log_phase(
         test_name,
-        "migcert_transcript_certified",
+        "reference_migcert_fixture_verified",
         serde_json::json!({
             "events": transcript["events"].as_array().map_or(0, Vec::len),
             "sdk_verdict": "pass",
@@ -1869,8 +1888,8 @@ fn migrate_rewrite_apply_json_keeps_rollback_artifact_separate() {
 
     let rewritten_source =
         std::fs::read_to_string(project_path.join("index.js")).expect("read rewritten source");
-    assert!(rewritten_source.contains("import fs from \"node:fs\";"));
-    assert!(!rewritten_source.contains("require("));
+    assert!(rewritten_source.contains("const fs = require(\"node:fs\");"));
+    assert!(!rewritten_source.contains("require(\"fs\")"));
 }
 
 #[test]
@@ -1908,16 +1927,12 @@ fn migrate_rewrite_apply_handles_commonjs_destructuring_export_and_nested_requir
 
     let rewritten_source =
         std::fs::read_to_string(project_path.join("index.js")).expect("read rewritten source");
-    assert!(rewritten_source.starts_with("#!/usr/bin/env node\n"));
-    assert!(
-        rewritten_source
-            .contains("import { readFile, writeFile as write } from \"node:fs\"; // fs api")
+    assert_eq!(
+        rewritten_source,
+        original_source
+            .replace("require('fs')", "require('node:fs')")
+            .replace("require(\"os\")", "require(\"node:os\")")
     );
-    assert!(rewritten_source.contains("import os from \"node:os\";"));
-    assert!(rewritten_source.contains("export { readFile, write as writer };"));
-    assert!(rewritten_source.contains("const literal = \"require('path') remains a string\";"));
-    assert!(rewritten_source.contains("// const fake = require('crypto');"));
-    assert!(!rewritten_source.contains("const os = require(\"os\")"));
 
     let source_backup = std::fs::read_to_string(project_path.join(".migrate-backup/index.js"))
         .expect("read source backup");
@@ -1956,7 +1971,7 @@ fn migrate_rewrite_bails_on_computed_require_without_mutating_source() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("rewrites_planned=0"));
     assert!(stdout.contains("manual_review_items=1"));
-    assert!(stdout.contains("dynamic or non-literal require() usage detected"));
+    assert!(stdout.contains("computed or unsupported require call"));
 
     let unchanged_source =
         std::fs::read_to_string(project_path.join("index.js")).expect("read unchanged source");
@@ -1997,9 +2012,7 @@ fn migrate_rewrite_bails_on_require_cache_precondition_without_mutating_source()
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("rewrites_planned=0"));
     assert!(stdout.contains("manual_review_items=1"));
-    assert!(stdout.contains("require.cache access detected"));
-    assert!(stdout.contains("rewrite:cjs-require-to-esm@1.0.0"));
-    assert!(stdout.contains("precondition:cjs-static-require-no-dynamic-no-cache"));
+    assert!(stdout.contains("require rebinding, aliasing or property/cache access"));
 
     let unchanged_source =
         std::fs::read_to_string(project_path.join("index.js")).expect("read unchanged source");

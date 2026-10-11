@@ -22,10 +22,8 @@ use std::thread;
 use std::time::Duration;
 #[cfg(not(target_os = "linux"))]
 use std::time::Instant;
-use tree_sitter::{Language, Node, Parser as JsParser};
 
 mod module_specifiers;
-use module_specifiers::normalize_import_specifier;
 
 #[cfg(all(unix, not(target_os = "linux")))]
 use std::os::unix::process::CommandExt;
@@ -944,9 +942,9 @@ pub fn run_rewrite(project_path: &Path, apply: bool) -> anyhow::Result<Migration
         let module_format = classify_source_module_format(project_path, &path);
         let (rewritten_content, rewrite_count, manual_findings, rewrite_action, rewrite_detail) =
             match module_format {
-                // Typed sources use specifier-only migration, independent of
-                // their package's output format. Never send typed CommonJS
-                // through a JavaScript converter that may hoist ESM syntax.
+                // Typed sources select their own grammar. Untyped CommonJS
+                // keeps require calls, exports and load sites; only builtin
+                // specifier literal bytes change.
                 SourceModuleFormat::CommonJs if !is_typescript_source_file(&path) => {
                     let rewrite = rewrite_commonjs_requires(&raw);
                     (
@@ -955,7 +953,7 @@ pub fn run_rewrite(project_path: &Path, apply: bool) -> anyhow::Result<Migration
                         rewrite.manual_findings,
                         MigrationRewriteAction::RewriteCommonJsRequire,
                         format!(
-                            "rewrote {} CommonJS require/export declaration(s) to ESM syntax",
+                            "normalized {} CommonJS builtin specifier(s) without changing module format or load order",
                             rewrite.rewrite_count
                         ),
                     )
@@ -2893,206 +2891,19 @@ struct EsmImportRewrite {
     manual_findings: Vec<String>,
 }
 
-const COMMONJS_TO_ESM_REWRITE_RULE_ID: &str = "rewrite:cjs-require-to-esm";
-const COMMONJS_TO_ESM_REWRITE_RULE_VERSION: &str = "1.0.0";
-const COMMONJS_TO_ESM_PRECONDITION_ID: &str = "precondition:cjs-static-require-no-dynamic-no-cache";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CommonJsRewritePreconditionProof {
-    rule_id: &'static str,
-    rule_version: &'static str,
-    precondition_id: &'static str,
-    parser_rewrite_count: usize,
-    line_rewrite_count: usize,
-    failures: Vec<String>,
-}
-
-impl CommonJsRewritePreconditionProof {
-    fn passed(&self) -> bool {
-        self.failures.is_empty() && self.parser_rewrite_count == self.line_rewrite_count
-    }
-
-    fn rule_context(&self) -> String {
-        format!(
-            "{}@{} {}",
-            self.rule_id, self.rule_version, self.precondition_id
-        )
-    }
-
-    fn manual_findings(&self) -> Vec<String> {
-        let rule_context = self.rule_context();
-        self.failures
-            .iter()
-            .map(|failure| format!("{failure}; refused by {rule_context}"))
-            .collect()
-    }
-}
-
-#[derive(Debug, Default)]
-struct CommonJsParserAnalysis {
-    static_require_declarations: usize,
-    dynamic_require_calls: usize,
-    create_require_calls: usize,
-    require_cache_accesses: usize,
-    dynamic_import_calls: usize,
-    commonjs_export_objects: usize,
-    risky_commonjs_exports: usize,
-}
-
-struct CommonJsLineRewrite {
-    replacement_line: Option<String>,
-    hoisted_import: Option<String>,
-}
-
 fn rewrite_commonjs_requires(source: &str) -> CommonJsRewrite {
-    let parser_analysis = analyze_commonjs_with_js_parser(source);
-    let has_esm_syntax = source.lines().any(line_has_esm_module_syntax);
-    let mut line_rewrites = Vec::new();
-    let mut hoisted_imports = Vec::new();
-    let mut seen_hoisted_imports = BTreeSet::new();
-    let mut rewrite_count = 0_usize;
-    let mut risky_requires = 0_usize;
-    let mut risky_exports = 0_usize;
-
-    for line in source.split_inclusive('\n') {
-        let (body, line_ending) = split_line_ending(line);
-        if let Some(rewrite) = rewrite_commonjs_line(body) {
-            if let Some(import_line) = rewrite.hoisted_import.as_ref()
-                && seen_hoisted_imports.insert(import_line.clone())
-            {
-                hoisted_imports.push(import_line.clone());
-            }
-            line_rewrites.push((rewrite.replacement_line, line_ending.to_string()));
-            rewrite_count = rewrite_count.saturating_add(1);
-        } else {
-            if line_contains_require_call(body) {
-                risky_requires = risky_requires.saturating_add(1);
-            }
-            if line_has_commonjs_export(body) {
-                risky_exports = risky_exports.saturating_add(1);
-            }
-            line_rewrites.push((Some(body.to_string()), line_ending.to_string()));
-        }
-    }
-
-    let precondition_proof = prove_commonjs_to_esm_precondition(
-        parser_analysis.as_ref(),
-        has_esm_syntax,
-        rewrite_count,
-        risky_requires,
-        risky_exports,
-    );
-    let manual_findings = precondition_proof.manual_findings();
-
-    if !precondition_proof.passed() || rewrite_count == 0 {
-        return CommonJsRewrite {
-            rewritten_content: source.to_string(),
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    match module_specifiers::rewrite_commonjs(source, deadline) {
+        Ok((rewritten_content, rewrite_count)) => CommonJsRewrite {
+            rewritten_content,
+            rewrite_count,
+            manual_findings: Vec::new(),
+        },
+        Err(reason) => CommonJsRewrite {
+            rewritten_content: source.to_owned(),
             rewrite_count: 0,
-            manual_findings,
-        };
-    }
-
-    let mut rewritten_content = String::with_capacity(source.len());
-    let mut body_without_requires = String::with_capacity(source.len());
-    for (replacement_line, line_ending) in line_rewrites {
-        if let Some(replacement_line) = replacement_line {
-            body_without_requires.push_str(&replacement_line);
-            body_without_requires.push_str(&line_ending);
-        }
-    }
-    prepend_hoisted_imports(
-        &mut rewritten_content,
-        &body_without_requires,
-        &hoisted_imports,
-    );
-
-    CommonJsRewrite {
-        rewritten_content,
-        rewrite_count,
-        manual_findings: Vec::new(),
-    }
-}
-
-fn prove_commonjs_to_esm_precondition(
-    parser_analysis: Result<&CommonJsParserAnalysis, &String>,
-    has_esm_syntax: bool,
-    line_rewrite_count: usize,
-    risky_requires: usize,
-    risky_exports: usize,
-) -> CommonJsRewritePreconditionProof {
-    let mut failures = BTreeSet::new();
-    let mut parser_rewrite_count = 0_usize;
-
-    if has_esm_syntax && (line_rewrite_count > 0 || risky_requires > 0 || risky_exports > 0) {
-        failures
-            .insert("ESM/CJS module mixing detected; automatic require() rewrite skipped".into());
-    }
-
-    match parser_analysis {
-        Ok(analysis) => {
-            parser_rewrite_count = analysis
-                .static_require_declarations
-                .saturating_add(analysis.commonjs_export_objects);
-            if analysis.dynamic_require_calls > 0 {
-                failures.insert(format!(
-                    "dynamic or non-literal require() usage detected in {} place(s); manual migration required",
-                    analysis.dynamic_require_calls
-                ));
-            }
-            if analysis.create_require_calls > 0 {
-                failures.insert(format!(
-                    "createRequire() usage detected in {} place(s); manual migration required",
-                    analysis.create_require_calls
-                ));
-            }
-            if analysis.require_cache_accesses > 0 {
-                failures.insert(format!(
-                    "require.cache access detected in {} place(s); manual migration required",
-                    analysis.require_cache_accesses
-                ));
-            }
-            if analysis.dynamic_import_calls > 0 {
-                failures.insert(format!(
-                    "dynamic import() usage detected in {} place(s); manual migration required",
-                    analysis.dynamic_import_calls
-                ));
-            }
-            if analysis.risky_commonjs_exports > 0 || risky_exports > 0 {
-                failures.insert(
-                    "CommonJS export assignment detected; manual ESM export migration required"
-                        .to_string(),
-                );
-            }
-            if parser_rewrite_count != line_rewrite_count {
-                failures.insert(
-                    "parser-backed CommonJS rewrite coverage mismatch; manual migration required"
-                        .to_string(),
-                );
-            }
-        }
-        Err(reason) => {
-            failures.insert(reason.clone());
-            if risky_exports > 0 {
-                failures.insert(
-                    "CommonJS export assignment detected; manual ESM export migration required"
-                        .to_string(),
-                );
-            }
-            if risky_requires > 0 {
-                failures.insert(format!(
-                    "dynamic or non-literal require() usage detected in {risky_requires} place(s); manual migration required"
-                ));
-            }
-        }
-    }
-
-    CommonJsRewritePreconditionProof {
-        rule_id: COMMONJS_TO_ESM_REWRITE_RULE_ID,
-        rule_version: COMMONJS_TO_ESM_REWRITE_RULE_VERSION,
-        precondition_id: COMMONJS_TO_ESM_PRECONDITION_ID,
-        parser_rewrite_count,
-        line_rewrite_count,
-        failures: failures.into_iter().collect(),
+            manual_findings: vec![reason],
+        },
     }
 }
 
@@ -3113,587 +2924,10 @@ fn rewrite_esm_imports(source: &str, path: &Path) -> EsmImportRewrite {
     }
 }
 
-fn analyze_commonjs_with_js_parser(source: &str) -> Result<CommonJsParserAnalysis, String> {
-    let mut parser = JsParser::new();
-    let language: Language = tree_sitter_javascript::LANGUAGE.into();
-    parser
-        .set_language(&language)
-        .map_err(|err| format!("JavaScript parser unavailable: {err}"))?;
-    let tree = parser
-        .parse(source, None)
-        .ok_or_else(|| "JavaScript parser produced no syntax tree".to_string())?;
-    let root = tree.root_node();
-    if root.has_error() {
-        return Err("JavaScript parser rejected source; manual migration required".to_string());
-    }
-
-    let mut analysis = CommonJsParserAnalysis::default();
-    analyze_commonjs_js_node(root, source.as_bytes(), &mut analysis);
-    Ok(analysis)
-}
-
-fn analyze_commonjs_js_node(node: Node<'_>, source: &[u8], analysis: &mut CommonJsParserAnalysis) {
-    match node.kind() {
-        "variable_declarator" => analyze_commonjs_variable_declarator(node, source, analysis),
-        "call_expression" => analyze_commonjs_call_expression(node, source, analysis),
-        "member_expression" => analyze_commonjs_member_expression(node, source, analysis),
-        "assignment_expression" => analyze_commonjs_assignment(node, source, analysis),
-        _ => {}
-    }
-
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        analyze_commonjs_js_node(child, source, analysis);
-    }
-}
-
-fn analyze_commonjs_variable_declarator(
-    node: Node<'_>,
-    source: &[u8],
-    analysis: &mut CommonJsParserAnalysis,
-) {
-    let Some(name) = node.child_by_field_name("name") else {
-        return;
-    };
-    let Some(value) = node.child_by_field_name("value") else {
-        return;
-    };
-    if value.kind() == "call_expression"
-        && is_static_require_call(value, source)
-        && matches!(name.kind(), "identifier" | "object_pattern")
-    {
-        analysis.static_require_declarations =
-            analysis.static_require_declarations.saturating_add(1);
-    }
-}
-
-fn analyze_commonjs_call_expression(
-    node: Node<'_>,
-    source: &[u8],
-    analysis: &mut CommonJsParserAnalysis,
-) {
-    let Some(function_node) = node.child_by_field_name("function") else {
-        return;
-    };
-    if function_node.kind() == "import" {
-        analysis.dynamic_import_calls = analysis.dynamic_import_calls.saturating_add(1);
-        return;
-    }
-
-    let Some(function_text) = js_node_text(function_node, source) else {
-        return;
-    };
-    if function_text == "require" {
-        if !is_static_require_call(node, source) {
-            analysis.dynamic_require_calls = analysis.dynamic_require_calls.saturating_add(1);
-        }
-    } else if function_text == "createRequire" || function_text.ends_with(".createRequire") {
-        analysis.create_require_calls = analysis.create_require_calls.saturating_add(1);
-    }
-}
-
-fn analyze_commonjs_member_expression(
-    node: Node<'_>,
-    source: &[u8],
-    analysis: &mut CommonJsParserAnalysis,
-) {
-    let Some(object) = node.child_by_field_name("object") else {
-        return;
-    };
-    let Some(property) = node.child_by_field_name("property") else {
-        return;
-    };
-    if js_node_text_eq(object, source, "require") && js_node_text_eq(property, source, "cache") {
-        analysis.require_cache_accesses = analysis.require_cache_accesses.saturating_add(1);
-    }
-}
-
-fn analyze_commonjs_assignment(
-    node: Node<'_>,
-    source: &[u8],
-    analysis: &mut CommonJsParserAnalysis,
-) {
-    let Some(left) = node.child_by_field_name("left") else {
-        return;
-    };
-    if !is_commonjs_export_target(left, source) {
-        return;
-    }
-
-    let Some(right) = node.child_by_field_name("right") else {
-        analysis.risky_commonjs_exports = analysis.risky_commonjs_exports.saturating_add(1);
-        return;
-    };
-    if is_static_module_exports_member(left, source)
-        && is_simple_assignment_operator(left, right, source)
-        && right.kind() == "object"
-        && is_rewritable_commonjs_export_object(right, source)
-    {
-        analysis.commonjs_export_objects = analysis.commonjs_export_objects.saturating_add(1);
-    } else {
-        analysis.risky_commonjs_exports = analysis.risky_commonjs_exports.saturating_add(1);
-    }
-}
-
-fn is_static_require_call(node: Node<'_>, source: &[u8]) -> bool {
-    let Some(function_node) = node.child_by_field_name("function") else {
-        return false;
-    };
-    if !js_node_text_eq(function_node, source, "require") {
-        return false;
-    }
-    let Some(arguments) = node.child_by_field_name("arguments") else {
-        return false;
-    };
-    let mut cursor = arguments.walk();
-    let mut children = arguments.named_children(&mut cursor);
-    let Some(argument) = children.next() else {
-        return false;
-    };
-    if children.next().is_some() {
-        return false;
-    }
-    is_quoted_js_string_node(argument, source)
-}
-
-fn is_quoted_js_string_node(node: Node<'_>, source: &[u8]) -> bool {
-    if node.kind() != "string" {
-        return false;
-    }
-    js_node_text(node, source).is_some_and(|text| {
-        (text.starts_with('"') && text.ends_with('"'))
-            || (text.starts_with('\'') && text.ends_with('\''))
-    })
-}
-
-fn is_commonjs_export_target(node: Node<'_>, source: &[u8]) -> bool {
-    js_node_text(node, source).is_some_and(|text| {
-        text == "module.exports"
-            || text.starts_with("module.exports.")
-            || text.starts_with("module.exports[")
-            || text.starts_with("module[")
-            || text == "exports"
-            || text.starts_with("exports.")
-            || text.starts_with("exports[")
-    })
-}
-
-fn is_static_module_exports_member(node: Node<'_>, source: &[u8]) -> bool {
-    if node.kind() != "member_expression" {
-        return false;
-    }
-    let Some(object) = node.child_by_field_name("object") else {
-        return false;
-    };
-    let Some(property) = node.child_by_field_name("property") else {
-        return false;
-    };
-    js_node_text_eq(object, source, "module") && js_node_text_eq(property, source, "exports")
-}
-
-fn is_simple_assignment_operator(left: Node<'_>, right: Node<'_>, source: &[u8]) -> bool {
-    let Some(operator_source) = source.get(left.end_byte()..right.start_byte()) else {
-        return false;
-    };
-    std::str::from_utf8(operator_source)
-        .ok()
-        .is_some_and(|operator| operator.trim() == "=")
-}
-
-fn is_rewritable_commonjs_export_object(node: Node<'_>, source: &[u8]) -> bool {
-    let mut cursor = node.walk();
-    let mut has_export = false;
-    for child in node.named_children(&mut cursor) {
-        match child.kind() {
-            "shorthand_property_identifier" => {
-                let Some(identifier) = js_node_text(child, source) else {
-                    return false;
-                };
-                if !is_simple_js_identifier(identifier) {
-                    return false;
-                }
-                has_export = true;
-            }
-            "pair" => {
-                if !is_rewritable_commonjs_export_pair(child, source) {
-                    return false;
-                }
-                has_export = true;
-            }
-            _ => return false,
-        }
-    }
-    has_export
-}
-
-fn is_rewritable_commonjs_export_pair(node: Node<'_>, source: &[u8]) -> bool {
-    let Some(key) = node.child_by_field_name("key") else {
-        return false;
-    };
-    let Some(value) = node.child_by_field_name("value") else {
-        return false;
-    };
-    if key.kind() != "property_identifier" || value.kind() != "identifier" {
-        return false;
-    }
-    let Some(key_text) = js_node_text(key, source) else {
-        return false;
-    };
-    let Some(value_text) = js_node_text(value, source) else {
-        return false;
-    };
-    is_simple_js_identifier(key_text) && is_simple_js_identifier(value_text)
-}
-
-fn js_node_text<'source>(node: Node<'_>, source: &'source [u8]) -> Option<&'source str> {
-    node.utf8_text(source).ok()
-}
-
-fn js_node_text_eq(node: Node<'_>, source: &[u8], expected: &str) -> bool {
-    js_node_text(node, source).is_some_and(|text| text == expected)
-}
-
-fn prepend_hoisted_imports(output: &mut String, body: &str, imports: &[String]) {
-    if imports.is_empty() {
-        output.push_str(body);
-        return;
-    }
-    let mut rest = body;
-    if let Some(first_line) = body.split_inclusive('\n').next()
-        && first_line.starts_with("#!")
-    {
-        output.push_str(first_line);
-        rest = &body[first_line.len()..];
-    }
-    for import in imports {
-        output.push_str(import);
-        output.push('\n');
-    }
-    output.push_str(rest);
-}
-
-fn split_line_ending(line: &str) -> (&str, &str) {
-    if let Some(body) = line.strip_suffix("\r\n") {
-        return (body, "\r\n");
-    }
-    if let Some(body) = line.strip_suffix('\n') {
-        return (body, "\n");
-    }
-    (line, "")
-}
-
-fn line_has_esm_module_syntax(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    if is_ignorable_js_line(trimmed) {
-        return false;
-    }
-    trimmed.starts_with("import ")
-        || trimmed.starts_with("import{")
-        || trimmed.starts_with("import*")
-        || trimmed.starts_with("export ")
-        || trimmed.starts_with("export{")
-}
-
-fn line_has_commonjs_export(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    if is_ignorable_js_line(trimmed) {
-        return false;
-    }
-    trimmed.starts_with("module.exports")
-        || trimmed.starts_with("exports.")
-        || trimmed.starts_with("exports[")
-        || trimmed.starts_with("exports =")
-}
-
-fn line_contains_require_call(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    !is_ignorable_js_line(trimmed) && contains_js_call_outside_literals(line, "require")
-}
-
 fn is_ignorable_js_line(trimmed_line: &str) -> bool {
     trimmed_line.starts_with("//")
         || trimmed_line.starts_with("/*")
         || trimmed_line.starts_with('*')
-}
-
-fn rewrite_commonjs_line(line: &str) -> Option<CommonJsLineRewrite> {
-    if let Some(import_line) = rewrite_commonjs_require_line(line) {
-        return Some(CommonJsLineRewrite {
-            replacement_line: None,
-            hoisted_import: Some(import_line),
-        });
-    }
-    rewrite_commonjs_export_line(line).map(|replacement_line| CommonJsLineRewrite {
-        replacement_line: Some(replacement_line),
-        hoisted_import: None,
-    })
-}
-
-fn rewrite_commonjs_require_line(line: &str) -> Option<String> {
-    let (code, suffix_comment) = split_js_trailing_line_comment(line);
-    let trimmed_code = code.trim();
-    let declaration = trimmed_code
-        .strip_prefix("const ")
-        .or_else(|| trimmed_code.strip_prefix("let "))
-        .or_else(|| trimmed_code.strip_prefix("var "))?;
-    let (binding, initializer) = declaration.split_once('=')?;
-    let binding = binding.trim();
-    let (specifier, after_call) = parse_static_require_call(initializer.trim())?;
-    if !after_call.is_empty() && after_call != ";" {
-        return None;
-    }
-
-    let normalized_specifier = normalize_import_specifier(&specifier);
-    let import_line = if let Some(named_bindings) = parse_commonjs_object_binding(binding) {
-        format!(
-            "import {{ {} }} from \"{normalized_specifier}\";",
-            named_bindings.join(", ")
-        )
-    } else if is_simple_js_identifier(binding) {
-        format!("import {binding} from \"{normalized_specifier}\";")
-    } else {
-        return None;
-    };
-    Some(append_js_suffix_comment(import_line, suffix_comment))
-}
-
-fn parse_static_require_call(initializer: &str) -> Option<(String, &str)> {
-    let after_name = initializer.strip_prefix("require")?.trim_start();
-    let after_open = after_name.strip_prefix('(')?.trim_start();
-    let mut chars = after_open.char_indices();
-    let (_, quote) = chars.next()?;
-    if quote != '"' && quote != '\'' {
-        return None;
-    }
-    let specifier_start = quote.len_utf8();
-    let mut specifier_end = None;
-    let mut escaped = false;
-    for (index, ch) in after_open[specifier_start..].char_indices() {
-        if escaped {
-            return None;
-        }
-        if ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        if ch == quote {
-            specifier_end = Some(specifier_start + index);
-            break;
-        }
-    }
-    let specifier_end = specifier_end?;
-    let specifier = &after_open[specifier_start..specifier_end];
-    if specifier.trim().is_empty() || specifier.contains('"') || specifier.contains('\'') {
-        return None;
-    }
-    let after_specifier = &after_open[specifier_end + quote.len_utf8()..];
-    let after_call = after_specifier.trim_start().strip_prefix(')')?.trim();
-    Some((specifier.to_string(), after_call))
-}
-
-fn parse_commonjs_object_binding(binding: &str) -> Option<Vec<String>> {
-    let inner = binding.trim().strip_prefix('{')?.strip_suffix('}')?;
-    let mut named_bindings = Vec::new();
-    for member in split_js_top_level_commas(inner) {
-        let member = member.trim();
-        if member.is_empty()
-            || member.starts_with("...")
-            || member.contains('=')
-            || member.contains('{')
-            || member.contains('[')
-        {
-            return None;
-        }
-        let import_binding = if let Some((imported, local)) = member.split_once(':') {
-            let imported = imported.trim();
-            let local = local.trim();
-            if !is_simple_js_identifier(imported) || !is_simple_js_identifier(local) {
-                return None;
-            }
-            if imported == local {
-                imported.to_string()
-            } else {
-                format!("{imported} as {local}")
-            }
-        } else {
-            if !is_simple_js_identifier(member) {
-                return None;
-            }
-            member.to_string()
-        };
-        push_bounded(&mut named_bindings, import_binding, MAX_TOTAL_FINDINGS);
-    }
-    if named_bindings.is_empty() {
-        return None;
-    }
-    Some(named_bindings)
-}
-
-fn rewrite_commonjs_export_line(line: &str) -> Option<String> {
-    if line.chars().next().is_some_and(|ch| ch.is_whitespace()) {
-        return None;
-    }
-    let (code, suffix_comment) = split_js_trailing_line_comment(line);
-    let rhs = code
-        .trim()
-        .strip_prefix("module.exports")?
-        .trim_start()
-        .strip_prefix('=')?
-        .trim();
-    let rhs = rhs.strip_suffix(';').unwrap_or(rhs).trim();
-    let exports = parse_commonjs_export_object(rhs)?;
-    let export_line = format!("export {{ {} }};", exports.join(", "));
-    Some(append_js_suffix_comment(export_line, suffix_comment))
-}
-
-fn parse_commonjs_export_object(rhs: &str) -> Option<Vec<String>> {
-    let inner = rhs.strip_prefix('{')?.strip_suffix('}')?;
-    let mut exports = Vec::new();
-    for member in split_js_top_level_commas(inner) {
-        let member = member.trim();
-        if member.is_empty()
-            || member.starts_with("...")
-            || member.contains('(')
-            || member.contains('{')
-            || member.contains('[')
-        {
-            return None;
-        }
-        let export_binding = if let Some((exported, local)) = member.split_once(':') {
-            let exported = exported.trim();
-            let local = local.trim();
-            if !is_simple_js_identifier(exported) || !is_simple_js_identifier(local) {
-                return None;
-            }
-            if exported == local {
-                local.to_string()
-            } else {
-                format!("{local} as {exported}")
-            }
-        } else {
-            if !is_simple_js_identifier(member) {
-                return None;
-            }
-            member.to_string()
-        };
-        push_bounded(&mut exports, export_binding, MAX_TOTAL_FINDINGS);
-    }
-    if exports.is_empty() {
-        return None;
-    }
-    Some(exports)
-}
-
-fn split_js_top_level_commas(input: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut start = 0_usize;
-    let mut quote = None;
-    let mut escaped = false;
-    for (index, ch) in input.char_indices() {
-        if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == active_quote {
-                quote = None;
-            }
-            continue;
-        }
-        if ch == '"' || ch == '\'' || ch == '`' {
-            quote = Some(ch);
-        } else if ch == ',' {
-            parts.push(&input[start..index]);
-            start = index + ch.len_utf8();
-        }
-    }
-    parts.push(&input[start..]);
-    parts
-}
-
-fn split_js_trailing_line_comment(line: &str) -> (&str, &str) {
-    let mut quote = None;
-    let mut escaped = false;
-    for (index, ch) in line.char_indices() {
-        if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == active_quote {
-                quote = None;
-            }
-            continue;
-        }
-        if ch == '"' || ch == '\'' || ch == '`' {
-            quote = Some(ch);
-            continue;
-        }
-        if ch == '/' && line[index + ch.len_utf8()..].starts_with('/') {
-            return (line[..index].trim_end(), &line[index..]);
-        }
-    }
-    (line, "")
-}
-
-fn append_js_suffix_comment(mut line: String, suffix_comment: &str) -> String {
-    let suffix_comment = suffix_comment.trim_start();
-    if !suffix_comment.is_empty() {
-        line.push(' ');
-        line.push_str(suffix_comment);
-    }
-    line
-}
-
-fn contains_js_call_outside_literals(line: &str, function_name: &str) -> bool {
-    let mut quote = None;
-    let mut escaped = false;
-    for (index, ch) in line.char_indices() {
-        if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == active_quote {
-                quote = None;
-            }
-            continue;
-        }
-        if ch == '"' || ch == '\'' || ch == '`' {
-            quote = Some(ch);
-            continue;
-        }
-        if ch == '/' && line[index + ch.len_utf8()..].starts_with('/') {
-            return false;
-        }
-        let rest = &line[index..];
-        if let Some(after_name) = rest.strip_prefix(function_name) {
-            let before = line[..index].chars().next_back();
-            let after = after_name.chars().next();
-            if before.is_none_or(|candidate| !is_js_identifier_continue(candidate))
-                && after.is_some_and(|candidate| candidate == '(' || candidate.is_whitespace())
-                && after_name.trim_start().starts_with('(')
-            {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn is_js_identifier_continue(ch: char) -> bool {
-    ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()
-}
-
-fn is_simple_js_identifier(candidate: &str) -> bool {
-    let mut chars = candidate.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !(first == '_' || first == '$' || first.is_ascii_alphabetic()) {
-        return false;
-    }
-    chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
 }
 
 fn is_lockfile(name: &str) -> bool {
@@ -5676,6 +4910,14 @@ mod tests {
             entry.action == MigrationRewriteAction::RewriteEsmImport
                 && entry.path.as_deref() == Some("src/legacy.cjs")
         }));
+        assert_eq!(
+            report.rollback_entries[0].rewritten_content,
+            "const fs = require(\"node:fs\");\nmodule.exports = { fs };\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.join("src/legacy.cjs")).unwrap(),
+            "const fs = require(\"fs\");\nmodule.exports = { fs };\n"
+        );
     }
 
     #[test]
@@ -5729,9 +4971,10 @@ mod tests {
         assert_eq!(report.rollback_entries[0].original_content, original_source);
 
         let rewritten = std::fs::read_to_string(project.join("index.js")).expect("read source");
-        assert!(rewritten.contains("import fs from \"node:fs\";"));
-        assert!(rewritten.contains("import local from \"./local\";"));
-        assert!(!rewritten.contains("require("));
+        assert_eq!(
+            rewritten,
+            "const fs = require(\"node:fs\");\nconst local = require(\"./local\");\nconsole.log(fs.existsSync(\"package.json\"), local);\n"
+        );
 
         let backup = std::fs::read_to_string(project.join(".migrate-backup/index.js"))
             .expect("read source backup");
@@ -5753,16 +4996,12 @@ mod tests {
         assert_eq!(report.rewrites_applied, 1);
         assert_eq!(report.rollback_entries.len(), 1);
         let rewritten = std::fs::read_to_string(project.join("index.js")).expect("read source");
-        assert!(rewritten.starts_with("#!/usr/bin/env node\n"));
-        assert!(
-            rewritten
-                .contains("import { readFile, writeFile as write } from \"node:fs\"; // fs api")
+        assert_eq!(
+            rewritten,
+            original_source
+                .replace("require('fs')", "require('node:fs')")
+                .replace("require(\"os\")", "require(\"node:os\")")
         );
-        assert!(rewritten.contains("import os from \"node:os\";"));
-        assert!(rewritten.contains("export { readFile, write as writer };"));
-        assert!(rewritten.contains("const literal = \"require('path') remains a string\";"));
-        assert!(rewritten.contains("// const fake = require('crypto');"));
-        assert!(!rewritten.contains("const os = require(\"os\")"));
         assert_eq!(
             std::fs::read_to_string(project.join(".migrate-backup/index.js"))
                 .expect("read source backup"),
@@ -5781,10 +5020,6 @@ mod tests {
         let outside_path = temp.path().join("outside.js");
 
         write_hardened_manifest(project);
-        // bd-o776s: a bare `module.exports = fs;` is now (correctly) a non-automatable CommonJS
-        // export assignment that bails the require rewrite (rewrite_count == 0). The symlink
-        // fail-closed invariant under test only needs a source that DOES rewrite, so use a clean
-        // require with a benign usage line (no CommonJS export assignment).
         write_project_file(
             project,
             "index.js",
@@ -5886,99 +5121,64 @@ mod tests {
     #[test]
     fn rewrite_commonjs_requires_ignores_comment_and_string_require_calls() {
         let source = "const literal = \"require('fs')\";\n// const fake = require('path');\nconst path = require('path');\n";
-
         let rewrite = rewrite_commonjs_requires(source);
-
         assert_eq!(rewrite.rewrite_count, 1);
         assert!(rewrite.manual_findings.is_empty());
-        assert!(
-            rewrite
-                .rewritten_content
-                .contains("import path from \"node:path\";")
-        );
-        assert!(
-            rewrite
-                .rewritten_content
-                .contains("const literal = \"require('fs')\";")
-        );
-        assert!(
-            rewrite
-                .rewritten_content
-                .contains("// const fake = require('path');")
+        assert_eq!(
+            rewrite.rewritten_content,
+            "const literal = \"require('fs')\";\n// const fake = require('path');\nconst path = require('node:path');\n"
         );
     }
 
     #[test]
-    fn commonjs_rewrite_precondition_proof_accepts_static_equivalence_class() {
-        let source = "const fs = require('fs');\nmodule.exports = { fs };\n";
-        let analysis = analyze_commonjs_with_js_parser(source).expect("parser analysis");
-        let proof = prove_commonjs_to_esm_precondition(Ok(&analysis), false, 2, 0, 0);
-
-        assert!(proof.passed());
-        assert_eq!(proof.rule_id, COMMONJS_TO_ESM_REWRITE_RULE_ID);
-        assert_eq!(proof.rule_version, COMMONJS_TO_ESM_REWRITE_RULE_VERSION);
-        assert_eq!(proof.precondition_id, COMMONJS_TO_ESM_PRECONDITION_ID);
-        assert_eq!(proof.parser_rewrite_count, 2);
-        assert_eq!(proof.line_rewrite_count, 2);
-        assert!(proof.manual_findings().is_empty());
+    fn commonjs_normalization_preserves_exports_and_ignores_package_names() {
+        let source = "const pkg = require('fs/custom');\nconst local = require('./local');\nmodule.exports = function() { return pkg; };\n";
+        let rewrite = rewrite_commonjs_requires(source);
+        assert_eq!(rewrite.rewritten_content, source);
+        assert_eq!(rewrite.rewrite_count, 0);
+        assert!(rewrite.manual_findings.is_empty());
     }
 
     #[test]
     fn rewrite_commonjs_requires_bails_on_computed_require() {
         let source = "const target = './plugin';\nconst plugin = require(target);\n";
-
         let rewrite = rewrite_commonjs_requires(source);
-
         assert_eq!(rewrite.rewrite_count, 0);
         assert_eq!(rewrite.rewritten_content, source);
         assert!(rewrite.manual_findings.iter().any(|finding| {
-            finding.contains("dynamic or non-literal require() usage detected")
+            finding.contains("computed or unsupported require call")
         }));
     }
 
     #[test]
     fn rewrite_commonjs_requires_bails_on_require_cache_access() {
         let source = "const fs = require('fs');\nconsole.log(require.cache, fs.existsSync('package.json'));\n";
-
         let rewrite = rewrite_commonjs_requires(source);
-
         assert_eq!(rewrite.rewrite_count, 0);
         assert_eq!(rewrite.rewritten_content, source);
         assert!(rewrite.manual_findings.iter().any(|finding| {
-            finding.contains("require.cache access detected")
-                && finding.contains(COMMONJS_TO_ESM_REWRITE_RULE_ID)
-                && finding.contains(COMMONJS_TO_ESM_PRECONDITION_ID)
+            finding.contains("require rebinding, aliasing or property/cache access")
         }));
     }
 
     #[test]
     fn rewrite_commonjs_requires_bails_on_create_require() {
         let source = "const { createRequire } = require('module');\nconst localRequire = createRequire(import.meta.url);\nconst manifest = localRequire('./package.json');\n";
-
         let rewrite = rewrite_commonjs_requires(source);
-
         assert_eq!(rewrite.rewrite_count, 0);
         assert_eq!(rewrite.rewritten_content, source);
-        assert!(
-            rewrite
-                .manual_findings
-                .iter()
-                .any(|finding| finding.contains("createRequire() usage detected"))
-        );
+        assert!(rewrite.manual_findings.iter().any(|finding| {
+            finding.contains("dynamic loader construction or eval")
+        }));
     }
 
     #[test]
-    fn rewrite_commonjs_requires_bails_on_multiline_parser_mismatch() {
+    fn rewrite_commonjs_requires_preserves_multiline_load_sites() {
         let source = "const fs = require(\n  'fs'\n);\n";
-
         let rewrite = rewrite_commonjs_requires(source);
-
-        assert_eq!(rewrite.rewrite_count, 0);
-        assert_eq!(rewrite.rewritten_content, source);
-        assert!(rewrite
-            .manual_findings
-            .iter()
-            .any(|finding| finding.contains("parser-backed CommonJS rewrite coverage mismatch")));
+        assert_eq!(rewrite.rewrite_count, 1);
+        assert_eq!(rewrite.rewritten_content, "const fs = require(\n  'node:fs'\n);\n");
+        assert!(rewrite.manual_findings.is_empty());
     }
 
     #[test]
@@ -5986,31 +5186,21 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let project = temp.path();
         let source = "import path from \"node:path\";\nconst loader = require(runtimeName);\nmodule.exports = loader(path);\n";
-
         write_hardened_manifest(project);
         write_project_file(project, "index.js", source);
-
         let report = run_rewrite(project, false).expect("dry-run source rewrite");
-
         assert_eq!(report.rewrites_planned, 0);
         assert_eq!(report.rewrites_applied, 0);
         assert!(report.rollback_entries.is_empty());
-        assert!(report.manual_review_items >= 3);
+        assert_eq!(report.manual_review_items, 1);
         assert!(report.entries.iter().any(|entry| {
             entry.action == MigrationRewriteAction::ManualModuleReview
-                && entry.detail.contains("ESM/CJS module mixing")
+                && entry.detail.contains("mixed module syntax")
         }));
-        assert!(report.entries.iter().any(|entry| {
-            entry.action == MigrationRewriteAction::ManualModuleReview
-                && entry.detail.contains("dynamic or non-literal require()")
-        }));
-        assert!(report.entries.iter().any(|entry| {
-            entry.action == MigrationRewriteAction::ManualModuleReview
-                && entry.detail.contains("CommonJS export assignment")
-        }));
-
-        let unchanged = std::fs::read_to_string(project.join("index.js")).expect("read source");
-        assert_eq!(unchanged, source);
+        assert_eq!(
+            std::fs::read_to_string(project.join("index.js")).expect("read source"),
+            source
+        );
     }
 
     #[test]

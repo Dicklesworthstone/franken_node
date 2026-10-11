@@ -8,7 +8,7 @@
     {
       "path": "index.js",
       "original_content": "const fs = require(\"fs\");\nconsole.log(fs.existsSync(\"package.json\"));\n",
-      "rewritten_content": "import fs from \"node:fs\";\nconsole.log(fs.existsSync(\"package.json\"));\n"
+      "rewritten_content": "const fs = require(\"node:fs\");\nconsole.log(fs.existsSync(\"package.json\"));\n"
     },
     {
       "path": "package.json",

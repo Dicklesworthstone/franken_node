@@ -22,7 +22,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use super::module_specifiers::normalize_import_specifier;
 #[path = "checked_commonjs.rs"]
 mod checked_commonjs;
 
