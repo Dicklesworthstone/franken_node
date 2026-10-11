@@ -933,7 +933,10 @@ fn validate_request(request: &str) -> Result<()> {
             "invalid module request",
         ));
     }
-    if request.starts_with('/') || request.contains(':') && !request.starts_with("node:") {
+    // A colon inside query or fragment data is not a URL scheme or a
+    // filesystem path component. The selected path is still validated below.
+    let path = request.split(['?', '#']).next().unwrap_or_default();
+    if request.starts_with('/') || path.contains(':') && !request.starts_with("node:") {
         return Err(error(
             "ERR_UNSUPPORTED_MODULE_SPECIFIER",
             "absolute paths and URL loaders are not supported by project-contained resolution",
@@ -996,6 +999,10 @@ fn normalize(directory: &str, request: &str) -> Result<String> {
     Ok(path)
 }
 fn url_path(directory: &str, request: &str) -> Result<(String, String)> {
+    // WHATWG URL parsing removes trailing ASCII space from the input.
+    // Controls are already refused by request/target admission. CommonJS
+    // literal paths do not pass through this URL-resolution path.
+    let request = request.trim_end_matches(' ');
     let split = request.find(['?', '#']).unwrap_or(request.len());
     let (path, suffix) = request.split_at(split);
     let mut decoded = Vec::new();
@@ -1024,8 +1031,44 @@ fn url_path(directory: &str, request: &str) -> Result<(String, String)> {
     }
     let path = String::from_utf8(decoded)
         .map_err(|_| error("ERR_INVALID_MODULE_SPECIFIER", "non-UTF-8 URL path"))?;
-    Ok((normalize(directory, &path)?, suffix.into()))
+    Ok((normalize(directory, &path)?, serialized_url_suffix(suffix)?))
 }
+
+/// Serialize the query and fragment of a contained file URL. These are module
+/// identity, not decoded filesystem components or form-encoded search params.
+/// WHATWG's special-query set applies to file: URLs; the fragment set differs
+/// for apostrophes and backticks. Existing percent escapes retain their exact
+/// spelling, so percent-escape case and encoded delimiters remain distinct.
+/// Spec: https://url.spec.whatwg.org/#special-query-percent-encode-set
+///       https://url.spec.whatwg.org/#fragment-percent-encode-set
+fn serialized_url_suffix(suffix: &str) -> Result<String> {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut serialized = String::with_capacity(suffix.len().min(MAX_PATH));
+    let mut fragment = false;
+    for byte in suffix.bytes() {
+        if byte == b'#' {
+            fragment = true;
+        }
+        let encode = byte <= b' '
+            || byte >= 0x7f
+            || matches!(byte, b'"' | b'<' | b'>')
+            || (!fragment && byte == b'\'')
+            || (fragment && byte == b'`');
+        let width = if encode { 3 } else { 1 };
+        if serialized.len().saturating_add(width) > MAX_PATH {
+            return Err(limit());
+        }
+        if encode {
+            serialized.push('%');
+            serialized.push(char::from(HEX[usize::from(byte >> 4)]));
+            serialized.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        } else {
+            serialized.push(char::from(byte));
+        }
+    }
+    Ok(serialized)
+}
+
 fn package_parts(request: &str) -> Result<(&str, String)> {
     validate_request(request)?;
     let end = if request.starts_with('@') {

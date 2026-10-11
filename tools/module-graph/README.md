@@ -280,8 +280,11 @@ or a different installed version.
 
 Resolution defaults to `import`. Conditions default to `node` plus the selected
 mode; explicit `--condition` flags replace the complete set. ESM path percent
-encoding is decoded, while query/fragment suffixes remain separate module-identity
-evidence. CommonJS direct paths retain literal filename spelling. Resolution does
+encoding is decoded. Query/fragment suffixes use file-URL serialization, so raw
+spaces and Unicode share module identity with their serialized equivalents.
+Existing percent escapes retain their spelling and case; genuinely different
+suffixes remain separate identities. Serialized suffixes are bounded to 4,096
+bytes. CommonJS direct paths retain literal filename spelling. Resolution does
 not load any JavaScript, parse its syntax, invoke hooks, install dependencies,
 read `NODE_PATH`, or search outside the selected project. This is not the engine's
 module loader and does not change `franken-node run`.

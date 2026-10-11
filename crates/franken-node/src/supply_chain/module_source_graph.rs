@@ -1095,6 +1095,72 @@ mod tests {
     }
 
     #[test]
+    fn equivalent_esm_url_spellings_share_registry_identity_across_capsule_replay() {
+        let root = tempfile::tempdir().unwrap();
+        let raw = "./state.mjs?mode=a b#café";
+        let serialized = "./state.mjs?mode=a%20b#caf%C3%A9";
+        let different = "./state.mjs?mode=a%20b#caf%c3%a9";
+        put(
+            root.path(),
+            "app.mjs",
+            &format!("import {raw:?}; import {serialized:?}; import {different:?};"),
+        );
+        put(root.path(), "state.mjs", "export const state = {};");
+        let captured = graph(root.path());
+        assert!(captured.report().fully_resolved);
+        assert_eq!(captured.report().modules.len(), 3);
+        assert_eq!(captured.report().edges.len(), 3);
+        assert_eq!(
+            captured.report().edges[0].target,
+            captured.report().edges[1].target
+        );
+        assert_ne!(
+            captured.report().edges[0].target,
+            captured.report().edges[2].target
+        );
+        assert_eq!(
+            captured.report().edges[0]
+                .target
+                .as_ref()
+                .unwrap()
+                .url_suffix,
+            "?mode=a%20b#caf%C3%A9"
+        );
+        let pin = captured.report().input_hash.clone();
+        let capsule = capsule::encode(&captured).unwrap();
+        put(root.path(), "state.mjs", "throw new Error('source changed');");
+        let replayed = capsule::replay(capsule.bytes(), capsule.digest()).unwrap();
+        assert_eq!(captured.report(), replayed.report());
+        let registry = registry::PinnedModuleRegistry::new(replayed, &pin).unwrap();
+        let first = registry
+            .lookup(
+                Some(registry.entrypoint()),
+                raw,
+                registry::RequestStyle::Import,
+            )
+            .unwrap();
+        let alias = registry
+            .lookup(
+                Some(registry.entrypoint()),
+                serialized,
+                registry::RequestStyle::Import,
+            )
+            .unwrap();
+        let distinct = registry
+            .lookup(
+                Some(registry.entrypoint()),
+                different,
+                registry::RequestStyle::Import,
+            )
+            .unwrap();
+        assert_eq!(first.id(), alias.id());
+        assert_ne!(first.id(), distinct.id());
+        assert_eq!(first.source(), "export const state = {};");
+        assert_eq!(registry.summary().modules, 3);
+        assert_eq!(registry.summary().routes, 3);
+    }
+
+    #[test]
     fn contained_workspace_importer_uses_physical_dependency_context() {
         let root = tempfile::tempdir().unwrap();
         put(root.path(), "app.mjs", "import 'workspace';");

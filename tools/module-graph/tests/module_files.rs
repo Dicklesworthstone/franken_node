@@ -59,7 +59,8 @@ fn node(root: &Path, from: &str, request: &str, mode: &str) -> Value {
         command.args(["--experimental-import-meta-resolve", "--input-type=module", "-e", r#"
 import {pathToFileURL,fileURLToPath} from 'node:url';
 try { const u=new URL(import.meta.resolve(process.argv[2],pathToFileURL(process.argv[1])));
-console.log(JSON.stringify({path:fileURLToPath(u),suffix:u.search+u.hash})); }
+const suffixStart = u.href.search(/[?#]/);
+console.log(JSON.stringify({path:fileURLToPath(u),suffix:suffixStart < 0 ? '' : u.href.slice(suffixStart)})); }
 catch(e) { console.log(JSON.stringify({code:e.code})); }
 "#]);
     } else {
@@ -158,6 +159,102 @@ fn wildcard_urls_and_literal_commonjs_names_are_not_conflated() {
     for mode in ["import","require"] { same_as_node(root.path(), "app.js", "pkg/a%20b", mode); }
     source(root.path(), "literal%20name.cjs"); same_as_node(root.path(), "app.js", "./literal%20name.cjs", "require");
     source(root.path(), "space name.mjs"); same_as_node(root.path(), "app.js", "./space%20name.mjs?query=2#hash", "import");
+}
+
+#[test]
+fn esm_url_suffixes_match_node_serialization_without_decoding_existing_escapes() {
+    let root = fixture();
+    source(root.path(), "state.mjs");
+    for (request, suffix) in [
+        ("./state.mjs?mode=a b#café", "?mode=a%20b#caf%C3%A9"),
+        ("./state.mjs?mode=a%20b#caf%C3%A9", "?mode=a%20b#caf%C3%A9"),
+        (
+            r#"./state.mjs?quote='"<>`#quote='"<>`"#,
+            "?quote=%27%22%3C%3E`#quote='%22%3C%3E%60",
+        ),
+        (
+            "./state.mjs?origin=https://example.test#route:one",
+            "?origin=https://example.test#route:one",
+        ),
+        ("./state.mjs?tag=%7e#caf%c3%a9", "?tag=%7e#caf%c3%a9"),
+        ("./state.mjs?mode=done   ", "?mode=done"),
+        ("./state.mjs#frag   ", "#frag"),
+        ("./state.mjs?mode=a #x", "?mode=a%20#x"),
+        ("./state.mjs?mode=a%20", "?mode=a%20"),
+        ("./state.mjs   ", ""),
+    ] {
+        let report = same_as_node(root.path(), "app.js", request, "import");
+        assert_eq!(report["resolution"]["path"], "state.mjs", "{request}");
+        assert_eq!(report["resolution"]["url_suffix"], suffix, "{request}");
+    }
+
+    let literal = "literal.cjs?mode=a b#café";
+    source(root.path(), literal);
+    let request = format!("./{literal}");
+    let report = same_as_node(root.path(), "app.js", &request, "require");
+    assert_eq!(report["resolution"]["path"], literal);
+    assert_eq!(report["resolution"]["url_suffix"], "");
+}
+
+#[test]
+fn package_map_urls_share_serialized_esm_identity_and_discard_commonjs_suffixes() {
+    let root = fixture();
+    source(root.path(), "state.mjs");
+    let raw = "./state.mjs?mode=a b#café";
+    let encoded = "./state.mjs?mode=a%20b#caf%C3%A9";
+    let manifest = serde_json::json!({
+        "name": "application",
+        "exports": { "./raw": raw, "./encoded": encoded },
+        "imports": { "#raw": raw, "#encoded": encoded }
+    });
+    put(
+        root.path(),
+        "package.json",
+        &serde_json::to_vec(&manifest).unwrap(),
+    );
+    for mode in ["import", "require"] {
+        for request in ["application/raw", "application/encoded", "#raw", "#encoded"] {
+            let report = same_as_node(root.path(), "app.js", request, mode);
+            assert_eq!(report["resolution"]["path"], "state.mjs");
+            assert_eq!(
+                report["resolution"]["url_suffix"],
+                if mode == "import" {
+                    "?mode=a%20b#caf%C3%A9"
+                } else {
+                    ""
+                },
+                "{mode}: {request}"
+            );
+            assert_eq!(
+                report["resolution"]["mappings"].as_array().unwrap().len(),
+                1
+            );
+        }
+    }
+}
+
+#[test]
+fn url_serialization_expansion_and_external_schemes_fail_closed() {
+    let root = fixture();
+    source(root.path(), "state.mjs");
+    let oversized = format!("./state.mjs?mode={}", "é".repeat(700));
+    assert!(oversized.len() < 4096);
+    let (code, report) = run(root.path(), "app.js", &oversized, "import", &[]);
+    assert_eq!(code, 2, "{report}");
+    assert_eq!(report["error_code"], "ERR_MODULE_RESOLUTION_LIMIT");
+    assert_eq!(report["filesystem_verified"], false);
+    assert!(report["resolution"].is_null());
+    for request in [
+        "file:///outside/state.mjs?mode=a b",
+        "https://example.test/state.mjs?mode=a b",
+        "./state.mjs:external?origin=https://example.test",
+    ] {
+        let (code, report) = run(root.path(), "app.js", request, "import", &[]);
+        assert_eq!(code, 2, "{request}: {report}");
+        assert_eq!(report["error_code"], "ERR_UNSUPPORTED_MODULE_SPECIFIER");
+        assert_eq!(report["filesystem_verified"], false);
+        assert!(report["resolution"].is_null());
+    }
 }
 
 #[test]
