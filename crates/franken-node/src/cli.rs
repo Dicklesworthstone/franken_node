@@ -1457,6 +1457,12 @@ pub struct TrustScanArgs {
     #[arg(long)]
     pub audit: bool,
 
+    /// Rebuild existing cards from the freshly captured project, including
+    /// changed package versions or integrity pins. Retains revocation,
+    /// quarantine and behavioral findings; does not clear prior risk.
+    #[arg(long)]
+    pub refresh: bool,
+
     /// Emit structured JSON output.
     #[arg(long)]
     pub json: bool,

@@ -4222,6 +4222,134 @@ fn run_preflight_refuses_different_selected_artifacts_in_every_profile() {
 }
 
 #[test]
+fn trust_scan_explicit_refresh_repairs_changed_artifacts_without_resetting_history() {
+    use frankenengine_node::supply_chain::trust_card::{
+        CapturedDependencyTrust, DependencyArtifactMatch, TrustCard, match_trust_card_artifact,
+        verify_card_signature,
+    };
+
+    let workspace = tempfile::tempdir().expect("artifact refresh workspace");
+    fs::write(
+        workspace.path().join("franken_node.toml"),
+        explicit_fixture_registry_config("balanced"),
+    )
+    .expect("explicit trust config");
+    write_pipeline_package_manifest(
+        workspace.path(),
+        &[("runtime-alias", "npm:acme-runtime@*")],
+        &[],
+        &[],
+    );
+    let write_lock = |version: &str, byte: u8| {
+        fs::write(
+            workspace.path().join("package-lock.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "lockfileVersion": 3,
+                "packages": {
+                    "": {},
+                    "node_modules/runtime-alias": {
+                        "name": "acme-runtime", "version": version,
+                        "integrity": format!("sha256-{}", BASE64_STANDARD.encode([byte; 32]))
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    };
+    let exported_card = || {
+        let output = run_cli_in_workspace(
+            workspace.path(),
+            &["trust-card", "export", "npm:acme-runtime", "--json"],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let card: TrustCard = serde_json::from_value(parse_json_stdout(&output, "refreshed card"))
+            .expect("signed trust card schema");
+        verify_card_signature(&card, FIXTURE_REGISTRY_KEY).expect("card signature");
+        card
+    };
+
+    write_lock("1.0.0", 0xaa);
+    let initial_scan = run_cli_in_workspace(workspace.path(), &["trust", "scan", ".", "--json"]);
+    assert!(
+        initial_scan.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initial_scan.stderr)
+    );
+    let mut previous = exported_card();
+    let config = Config::resolve_with_env(
+        Some(&workspace.path().join("franken_node.toml")),
+        CliOverrides::default(),
+        &|_| None,
+    )
+    .expect("resolve signed-registry configuration")
+    .config;
+
+    // Cover a normal version upgrade and a replacement tarball at that same
+    // version. Both require explicit refresh of the captured artifact.
+    for (version, byte) in [("2.0.0", 0xbb), ("2.0.0", 0xcc)] {
+        write_lock(version, byte);
+        let capture = CapturedDependencyTrust::capture(workspace.path()).unwrap();
+        assert!(matches!(
+            match_trust_card_artifact(&previous, &capture.packages["npm:acme-runtime"]),
+            DependencyArtifactMatch::Mismatch(_)
+        ));
+        let skipped = run_cli_in_workspace(workspace.path(), &["trust", "scan", ".", "--json"]);
+        assert!(skipped.status.success());
+        assert_eq!(parse_json_stdout(&skipped, "ordinary rescan")["skipped_existing"], 1);
+        assert_eq!(exported_card().card_hash, previous.card_hash);
+
+        let refreshed = run_cli_in_workspace(
+            workspace.path(),
+            &["trust", "scan", ".", "--refresh", "--json"],
+        );
+        assert!(
+            refreshed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&refreshed.stderr)
+        );
+        let report = parse_json_stdout(&refreshed, "explicit artifact refresh");
+        assert_eq!(report["refresh"], true);
+        assert_eq!(report["refreshed_cards"], 1);
+        assert_eq!(report["created_cards"], 0);
+        assert_eq!(report["items"][0]["status"], "refreshed");
+        let card = exported_card();
+        assert_eq!(card.extension.version, version);
+        assert_eq!(card.trust_card_version, previous.trust_card_version + 1);
+        assert_eq!(card.previous_version_hash.as_deref(), Some(previous.card_hash.as_str()));
+        assert_eq!(card.audit_history.len(), previous.audit_history.len() + 1);
+        for evidence in &previous.derivation_evidence.as_ref().unwrap().evidence_refs {
+            assert!(card.derivation_evidence.as_ref().unwrap().evidence_refs.contains(evidence));
+        }
+        assert_eq!(
+            match_trust_card_artifact(&card, &capture.packages["npm:acme-runtime"]),
+            DependencyArtifactMatch::Matched
+        );
+        let requirements = RunTrustRequirements::new(
+            &["npm:acme-runtime".to_owned()],
+            &["npm:acme-runtime".to_owned()],
+            true,
+        )
+        .unwrap()
+        .with_dependency_capture(capture)
+        .unwrap();
+        requirements.verify_dependency_capture(workspace.path()).unwrap();
+        validate_execution_trust(
+            workspace.path(),
+            &config,
+            &requirements,
+            chrono::Utc::now().timestamp().max(0) as u64,
+        )
+        .expect("refreshed metadata binding satisfies the existing execution trust policy");
+        previous = card;
+    }
+}
+
+#[test]
 fn trust_transitive_revocation_blocks_native_run_before_guest_execution() {
     let workspace = tempfile::tempdir().expect("tempdir");
     write_run_package_manifest(workspace.path(), &[("entry-package", "^1.0.0")]);

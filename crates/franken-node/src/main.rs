@@ -640,6 +640,7 @@ struct TrustScanReport {
     lockfile_entries: usize,
     deep: bool,
     audit: bool,
+    refresh: bool,
     warnings: Vec<String>,
     items: Vec<TrustScanItem>,
 }
@@ -5454,6 +5455,17 @@ fn missing_trust_registry_message(path: &Path, policy_mode: Profile) -> String {
 
 fn run_preflight_block_error(report: &RunPreFlightReport) -> ActionableError {
     match &report.verdict {
+        PreFlightVerdict::Blocked {
+            reason, violations, ..
+        } if violations
+            .iter()
+            .any(|violation| violation.kind == TrustViolationKind::ArtifactMismatch) =>
+        {
+            ActionableError::new(
+                format!("run blocked by contradictory package trust evidence: {reason}"),
+                "franken-node trust scan --refresh",
+            )
+        }
         PreFlightVerdict::Blocked { reason, .. } => ActionableError::new(
             format!(
                 "run blocked by trust preflight: {reason}. Refresh trust state with `{}` after remediation",
@@ -16068,6 +16080,23 @@ mod trust_scan_tests {
             metadata.publisher_id.as_deref(),
             Some("npm-maintainer:maintainer")
         );
+        for malformed in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!("invalid")),
+        ] {
+            let mut missing_preferred = payload.clone();
+            let versions = missing_preferred["versions"].as_object_mut().unwrap();
+            versions.remove("1.5.0");
+            if let Some(malformed) = malformed {
+                versions.insert("1.5.0".to_owned(), malformed);
+            }
+            let metadata =
+                parse_trust_scan_npm_metadata(&missing_preferred, "example", Some("1.5.0"));
+            assert!(metadata.resolved_version.is_none());
+            assert!(metadata.registry_integrity_hashes.is_empty());
+            assert!(metadata.published_at.is_none());
+        }
     }
 
     #[test]
@@ -16987,7 +17016,8 @@ mod trust_command_tests {
         )
         .expect("write package manifest");
 
-        let report = run_trust_scan(tmp.path(), false, false).expect("trust scan should succeed");
+        let report =
+            run_trust_scan(tmp.path(), false, false, false).expect("trust scan should succeed");
 
         assert_eq!(report.command, "trust_scan");
         assert_eq!(report.scanned_dependencies, 2);
@@ -17048,7 +17078,7 @@ mod trust_command_tests {
         std::fs::write(tmp.path().join("package.json"), "{not-json")
             .expect("write malformed package manifest");
 
-        let err = run_trust_scan(tmp.path(), false, false).expect_err("scan should reject JSON");
+        let err = run_trust_scan(tmp.path(), false, false, false).expect_err("scan should reject JSON");
 
         assert!(err.to_string().contains("invalid dependency manifest JSON"));
     }
@@ -17062,8 +17092,9 @@ mod trust_command_tests {
         )
         .expect("write package manifest");
 
-        let first = run_trust_scan(tmp.path(), false, false).expect("first scan should succeed");
-        let second = run_trust_scan(tmp.path(), false, false).expect("second scan should succeed");
+        let first = run_trust_scan(tmp.path(), false, false, false).expect("first scan should succeed");
+        let second =
+            run_trust_scan(tmp.path(), false, false, false).expect("second scan should succeed");
 
         assert_eq!(first.created_cards, 2);
         assert_eq!(first.skipped_existing, 0);
@@ -19812,7 +19843,10 @@ fn collect_run_package_dependencies(
     )
 }
 
-fn collect_trust_scan_dependencies(project_root: &Path) -> Result<Vec<RunPackageDependency>> {
+fn collect_trust_scan_dependencies(project_root: &Path) -> Result<(
+    Vec<RunPackageDependency>,
+    supply_chain::trust_card::CapturedDependencyTrust,
+)> {
     collect_package_dependencies(
         project_root,
         &[
@@ -19823,7 +19857,6 @@ fn collect_trust_scan_dependencies(project_root: &Path) -> Result<Vec<RunPackage
         ],
         "trust scan",
     )?
-    .map(|(dependencies, _)| dependencies)
     .ok_or_else(|| {
         anyhow::anyhow!(
             "package.json not found at project path {}; trust scan requires an npm project root",
@@ -20061,21 +20094,18 @@ fn parse_trust_scan_npm_metadata(
     let versions = payload
         .get("versions")
         .and_then(serde_json::Value::as_object);
-    let resolved_version = preferred_version
-        .and_then(|version| {
-            versions
-                .and_then(|versions| versions.get(version))
-                .map(|_| version)
-        })
-        .map(ToString::to_string)
-        .or_else(|| {
-            payload
-                .get("dist-tags")
-                .and_then(serde_json::Value::as_object)
-                .and_then(|tags| tags.get("latest"))
-                .and_then(serde_json::Value::as_str)
-                .map(ToString::to_string)
-        });
+    let resolved_version = match preferred_version {
+        Some(version) => versions
+            .and_then(|versions| versions.get(version))
+            .filter(|version_payload| version_payload.is_object())
+            .map(|_| version.to_owned()),
+        None => payload
+            .get("dist-tags")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|tags| tags.get("latest"))
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string),
+    };
     let version_payload = resolved_version
         .as_deref()
         .and_then(|version| versions.and_then(|versions| versions.get(version)));
@@ -20303,6 +20333,13 @@ fn fetch_trust_scan_npm_metadata(
     let payload = serde_json::from_str::<serde_json::Value>(&body)
         .with_context(|| format!("invalid npm registry JSON for {dependency_name}"))?;
     let mut metadata = parse_trust_scan_npm_metadata(&payload, dependency_name, preferred_version);
+    if let Some(expected_version) = preferred_version
+        && metadata.resolved_version.as_deref() != Some(expected_version)
+    {
+        anyhow::bail!(
+            "npm registry metadata for {dependency_name} does not contain captured version {expected_version}; refusing to use another version's provenance"
+        );
+    }
     if let Some(resolved_version) = metadata.resolved_version.clone() {
         metadata.dependent_count = Some(fetch_trust_scan_dependent_count(
             dependency_name,
@@ -20768,22 +20805,23 @@ fn build_trust_scan_card_input(
     }
 }
 
-/// Why a `--deep`/`--audit` rescan leaves an existing card as is, or `None`
-/// to refresh it. A refresh needs evidence that was actually fetched and the
-/// same version, and may lower risk only on an OSV answer from the default
-/// endpoint (the rule `trust sync` applies).
+/// Why a rescan leaves an existing card as is, or `None` to refresh it.
+/// Without explicit artifact refresh, require fetched evidence for the same
+/// version and an authenticated OSV answer for risk lowering. Explicit refresh
+/// records current captured inventory and preserves the previous risk floor.
 fn trust_scan_refresh_refusal(
     existing: &TrustCard,
     input: &TrustCardInput,
     fetched_evidence: bool,
     lowering_authenticated: bool,
+    explicit_refresh: bool,
 ) -> Option<String> {
-    if !fetched_evidence {
+    if !fetched_evidence && !explicit_refresh {
         return Some("no deep or audit evidence was fetched".to_string());
     }
-    if existing.extension.version != input.extension.version {
+    if existing.extension.version != input.extension.version && !explicit_refresh {
         return Some(format!(
-            "card is for version {} but the project resolves {}",
+            "card is for version {} but the project resolves {}; run `franken-node trust scan --refresh` to record the captured artifact explicitly",
             existing.extension.version, input.extension.version
         ));
     }
@@ -20791,7 +20829,7 @@ fn trust_scan_refresh_refusal(
         existing.user_facing_risk_assessment.level,
         input.user_facing_risk_assessment.level,
     );
-    if to < from && !lowering_authenticated {
+    if to < from && !lowering_authenticated && !explicit_refresh {
         return Some(format!(
             "the new evidence would lower risk from {from:?} to {to:?}, which needs an --audit answer from the default OSV endpoint"
         ));
@@ -20822,7 +20860,7 @@ fn build_trust_scan_item(
 
 fn render_trust_scan_human(report: &TrustScanReport) -> String {
     let mut lines = vec![format!(
-        "trust scan completed: project={} scanned={} created={} refreshed={} skipped_existing={} lockfile_entries={} deep={} audit={} warnings={}",
+        "trust scan completed: project={} scanned={} created={} refreshed={} skipped_existing={} lockfile_entries={} deep={} audit={} refresh={} warnings={}",
         report.project_root,
         report.scanned_dependencies,
         report.created_cards,
@@ -20831,6 +20869,7 @@ fn render_trust_scan_human(report: &TrustScanReport) -> String {
         report.lockfile_entries,
         report.deep,
         report.audit,
+        report.refresh,
         report.warnings.len()
     )];
     for item in &report.items {
@@ -20858,14 +20897,19 @@ fn render_trust_scan_human(report: &TrustScanReport) -> String {
     lines.join("\n")
 }
 
-fn run_trust_scan(project_root: &Path, deep: bool, audit: bool) -> Result<TrustScanReport> {
+fn run_trust_scan(
+    project_root: &Path,
+    deep: bool,
+    audit: bool,
+    refresh: bool,
+) -> Result<TrustScanReport> {
     let project_root = project_root.canonicalize().with_context(|| {
         format!(
             "failed resolving trust scan project {}",
             project_root.display()
         )
     })?;
-    let dependencies = collect_trust_scan_dependencies(&project_root)?;
+    let (dependencies, captured_metadata) = collect_trust_scan_dependencies(&project_root)?;
     let now_secs = now_unix_secs();
     let config = trust_registry_config_for_project(&project_root)?;
     let mut state = trust_scan_registry_state(&project_root, &config.trust, now_secs)?;
@@ -20897,6 +20941,7 @@ fn run_trust_scan(project_root: &Path, deep: bool, audit: bool) -> Result<TrustS
         if let Some(existing) = &existing
             && !deep
             && !audit
+            && !refresh
         {
             skipped_existing = skipped_existing.saturating_add(1);
             items.push(build_trust_scan_item(
@@ -20984,6 +21029,7 @@ fn run_trust_scan(project_root: &Path, deep: bool, audit: bool) -> Result<TrustS
                 &input,
                 deep_fetched || audit_fetched,
                 audit_fetched && audit_metadata.risk_lowering_authenticated && !ambiguous_versions,
+                refresh,
             ) {
                 warnings.push(format!(
                     "{}: existing card not refreshed: {reason}",
@@ -21001,7 +21047,7 @@ fn run_trust_scan(project_root: &Path, deep: bool, audit: bool) -> Result<TrustS
             }
             let card = state
                 .registry
-                .refresh_from_scan(input, now_secs, "trace-cli-trust-scan")
+                .refresh_from_scan(input, refresh, now_secs, "trace-cli-trust-scan")
                 .map_err(|err| anyhow::anyhow!(err.to_string()))?;
             refreshed_cards = refreshed_cards.saturating_add(1);
             (card, TrustScanItemStatus::Refreshed)
@@ -21024,6 +21070,9 @@ fn run_trust_scan(project_root: &Path, deep: bool, audit: bool) -> Result<TrustS
     }
 
     if created_cards > 0 || refreshed_cards > 0 || !state.path.is_file() {
+        captured_metadata.verify_project(&project_root).context(
+            "project dependency metadata changed while scanning; no card updates were committed",
+        )?;
         persist_trust_card_cli_registry(&state)?;
     }
 
@@ -21038,6 +21087,7 @@ fn run_trust_scan(project_root: &Path, deep: bool, audit: bool) -> Result<TrustS
         lockfile_entries: dependencies.iter().filter(|dependency| dependency.lockfile_metadata.has_lockfile_pin).count(),
         deep,
         audit,
+        refresh,
         warnings,
         items,
     })
@@ -21095,6 +21145,15 @@ fn build_run_preflight_receipt(
     registry_path: Option<&Path>,
     verdict: &PreFlightVerdict,
 ) -> Result<Receipt> {
+    let recovery_command = if matches!(
+        verdict,
+        PreFlightVerdict::Blocked { violations, .. }
+            if violations.iter().any(|violation| violation.kind == TrustViolationKind::ArtifactMismatch)
+    ) {
+        "franken-node trust scan --refresh"
+    } else {
+        "franken-node trust sync --force"
+    };
     Receipt::new(
         "run_preflight_trust_gate",
         "franken-node run",
@@ -21116,7 +21175,7 @@ fn build_run_preflight_receipt(
             .unwrap_or_default(),
         vec!["policy.run.preflight.trust".to_string()],
         run_preflight_confidence(verdict),
-        "franken-node trust sync --force",
+        recovery_command,
     )
     .map_err(|err| anyhow::anyhow!(err.to_string()))
 }
@@ -21272,7 +21331,7 @@ fn evaluate_run_trust_preflight(
                                     );
                                     if let DependencyArtifactMatch::Mismatch(reason) = &artifact_match {
                                         let detail = format!(
-                                            "dependency `{extension_id}` has contradictory artifact evidence: {reason}; refresh its trust card against the current project"
+                                            "dependency `{extension_id}` has contradictory artifact evidence: {reason}; run `franken-node trust scan --refresh` against the current project"
                                         );
                                         violations.push(TrustViolation {
                                             dependency_name: Some(dependency_name.clone()),
@@ -34228,7 +34287,7 @@ fn main() -> Result<()> {
                 }
             }
             let trust_scan = if scan {
-                match run_trust_scan(bootstrap_root, false, false) {
+                match run_trust_scan(bootstrap_root, false, false, false) {
                     Ok(report) => Some(report),
                     Err(err) => return init_fail(json, err),
                 }
@@ -35320,7 +35379,7 @@ fn main() -> Result<()> {
                     .project_path
                     .as_deref()
                     .unwrap_or_else(|| Path::new("."));
-                let report = match run_trust_scan(project_root, args.deep, args.audit) {
+                let report = match run_trust_scan(project_root, args.deep, args.audit, args.refresh) {
                     Ok(report) => report,
                     Err(err) => return trust_fail("trust.scan", args.json, err),
                 };
@@ -36940,11 +36999,11 @@ mod run_trust_gate_tests {
         )
         .expect("write config");
 
-        let first = run_trust_scan(tmp.path(), false, false).expect("first trust scan");
+        let first = run_trust_scan(tmp.path(), false, false, false).expect("first trust scan");
         assert_eq!(first.created_cards, 1);
         assert_eq!(first.skipped_existing, 0);
 
-        let second = run_trust_scan(tmp.path(), false, false).expect("second trust scan");
+        let second = run_trust_scan(tmp.path(), false, false, false).expect("second trust scan");
         assert_eq!(second.created_cards, 0);
         assert_eq!(second.skipped_existing, 1);
 
@@ -38202,6 +38261,7 @@ mod run_trust_gate_tests {
                 lockfile_entries: usize::MAX,
                 deep: true,
                 audit: true,
+                refresh: true,
                 warnings: vec![
                     "Warning 1".to_string(),
                     "🦀".repeat(1000),

@@ -281,6 +281,19 @@ fn strong_digest_size(algorithm: &str) -> Option<usize> {
     }
 }
 
+fn canonical_artifact_bindings(hashes: &[String]) -> BTreeSet<&str> {
+    hashes
+        .iter()
+        .filter(|hash| {
+            hash.split_once(':').is_some_and(|(algorithm, digest)| {
+                strong_digest_size(algorithm)
+                    .is_some_and(|size| canonical_digest_hex(digest, size))
+            })
+        })
+        .map(String::as_str)
+        .collect()
+}
+
 /// Keep same-algorithm SRI alternatives together and use the strongest
 /// supported algorithm. A weak matching digest cannot hide a stronger
 /// contradiction. Unsupported or malformed tokens remain incomplete evidence.
@@ -2431,23 +2444,27 @@ impl TrustCardRegistry {
         Ok(next)
     }
 
-    /// Re-derive the latest card for `input.extension` from a fresh scan of
-    /// the same version (`trust scan --deep/--audit` over an existing card)
-    /// and append it as a new version.
+    /// Re-derive the latest card from fresh captured scan input and append
+    /// it to the signed history. A different package version or changed strong
+    /// integrity binding requires explicit artifact-refresh authorization.
     ///
     /// Scan-owned fields (publisher, provenance, reputation, risk assessment,
-    /// verification time, derivation evidence) come from `input`. Operator
+    /// verification time) come from `input`. Operator
     /// decisions carry over unchanged: certification level, revocation,
     /// quarantine, and camouflage hints, whose risk floor is re-applied so a
-    /// rescan cannot erase a camouflage bump. The audit history is kept.
+    /// rescan cannot erase a camouflage bump. An explicit artifact refresh
+    /// retains prior risk and derivation evidence, and resets artifact-specific
+    /// certification instead of extending an old certificate to new code.
+    /// The audit history is kept.
     ///
     /// # Errors
     /// `NotFound` without a card to refresh; `InvalidInput` when `input` names
-    /// a different version (a new artifact, not a refresh); `EvidenceMissing`
+    /// a different artifact without explicit authorization; `EvidenceMissing`
     /// without evidence; signing errors.
     pub fn refresh_from_scan(
         &mut self,
         input: TrustCardInput,
+        accept_artifact_change: bool,
         now_secs: u64,
         trace_id: &str,
     ) -> Result<TrustCard, TrustCardError> {
@@ -2458,19 +2475,52 @@ impl TrustCardRegistry {
             .latest_verified_card(&extension_id)?
             .cloned()
             .ok_or_else(|| TrustCardError::NotFound(extension_id.clone()))?;
-        if latest.extension.version != input.extension.version {
+        let previous_bindings =
+            canonical_artifact_bindings(&latest.provenance_summary.artifact_hashes);
+        let current_bindings =
+            canonical_artifact_bindings(&input.provenance_summary.artifact_hashes);
+        let binding_changed = previous_bindings != current_bindings;
+        // Adding a second digest or changing algorithms grants authority over
+        // additional bytes just as replacing the only digest does. Removing
+        // the binding also cannot carry an old artifact certificate forward.
+        let artifact_changed = latest.extension.version != input.extension.version
+            || (!previous_bindings.is_empty() && binding_changed);
+        if artifact_changed && !accept_artifact_change {
             return Err(TrustCardError::InvalidInput {
                 reason: format!(
-                    "card for `{extension_id}` is version `{}`; a scan of version `{}` is a new artifact, not a refresh",
+                    "card for `{extension_id}` is version `{}`; captured version `{}` or integrity changed; use trust scan --refresh to record the new artifact explicitly",
                     latest.extension.version, input.extension.version
                 ),
             });
+        }
+
+        let mut evidence_refs = input.evidence_refs;
+        if accept_artifact_change
+            && let Some(previous) = &latest.derivation_evidence
+        {
+            for reference in &previous.evidence_refs {
+                if !evidence_refs.contains(reference) {
+                    evidence_refs.push(reference.clone());
+                }
+            }
+            // Prior evidence supports the retained risk and containment. Do
+            // not evict it to make an explicit artifact refresh fit the cap.
+            ensure_evidence_refs_present(&evidence_refs)?;
         }
 
         let mut next = latest.clone();
         next.trust_card_version =
             next_trust_card_version(latest.trust_card_version, &extension_id)?;
         next.previous_version_hash = Some(latest.card_hash.clone());
+        next.extension = input.extension;
+        if artifact_changed || binding_changed {
+            next.certification_level = CertificationLevel::Unknown;
+        }
+        if artifact_changed {
+            next.capability_declarations = sorted_capabilities(input.capability_declarations);
+            next.behavioral_profile = input.behavioral_profile;
+            next.dependency_trust_summary = sorted_dependencies(input.dependency_trust_summary);
+        }
         next.publisher = input.publisher;
         next.provenance_summary = input.provenance_summary;
         next.reputation_score_basis_points = input.reputation_score_basis_points;
@@ -2478,12 +2528,18 @@ impl TrustCardRegistry {
         next.last_verified_timestamp = input.last_verified_timestamp;
         next.user_facing_risk_assessment =
             next.risk_with_camouflage_floor(input.user_facing_risk_assessment);
+        if accept_artifact_change
+            && latest.user_facing_risk_assessment.level > next.user_facing_risk_assessment.level
+        {
+            next.user_facing_risk_assessment = latest.user_facing_risk_assessment.clone();
+            next.reputation_score_basis_points = next
+                .reputation_score_basis_points
+                .min(latest.reputation_score_basis_points);
+            next.reputation_trend = latest.reputation_trend;
+        }
         next.derivation_evidence = Some(DerivationMetadata {
-            derivation_chain_hash: compute_trust_card_derivation_hash(
-                &input.evidence_refs,
-                now_secs,
-            ),
-            evidence_refs: input.evidence_refs,
+            derivation_chain_hash: compute_trust_card_derivation_hash(&evidence_refs, now_secs),
+            evidence_refs,
             derived_at_epoch: now_secs,
         });
         push_bounded(
@@ -2491,7 +2547,14 @@ impl TrustCardRegistry {
             AuditRecord {
                 timestamp: timestamp_from_secs(now_secs),
                 event_code: TRUST_CARD_UPDATED.to_string(),
-                detail: "trust card refreshed from scan".to_string(),
+                detail: if artifact_changed {
+                    format!(
+                        "trust card explicitly refreshed to captured artifact {} -> {}; prior risk and containment retained",
+                        latest.extension.version, next.extension.version
+                    )
+                } else {
+                    "trust card refreshed from scan".to_string()
+                },
                 trace_id: trace_id.to_string(),
             },
             MAX_AUDIT_HISTORY,
@@ -4403,6 +4466,195 @@ mod tests {
                 .collect(),
         );
         assert!(capture.validate().is_err());
+    }
+
+    #[test]
+    fn explicit_artifact_refresh_retains_containment_behavior_and_signed_history() {
+        let mut registry = TrustCardRegistry::default();
+        let initial = registry
+            .create(sample_input(), 1_000, "create-artifact")
+            .unwrap();
+        registry
+            .mark_camouflage_suspected(
+                &initial.extension.extension_id,
+                &[CamouflageHint {
+                    kind: CamouflageKind::GradualCreep,
+                    severity: 0.8,
+                    evidence: BTreeMap::from([("slope".to_owned(), 0.4)]),
+                    sample_indices: vec![0, 1, 2, 3],
+                }],
+                test_evidence_refs(),
+                1_001,
+                "observed-camouflage",
+            )
+            .unwrap();
+        let retained = registry
+            .update(
+                &initial.extension.extension_id,
+                TrustCardMutation {
+                    certification_level: None,
+                    revocation_status: Some(RevocationStatus::Revoked {
+                        reason: "publisher compromised".to_owned(),
+                        revoked_at: "2026-01-01T00:00:00Z".to_owned(),
+                    }),
+                    active_quarantine: Some(true),
+                    reputation_score_basis_points: None,
+                    reputation_trend: None,
+                    user_facing_risk_assessment: None,
+                    last_verified_timestamp: None,
+                    evidence_refs: None,
+                },
+                1_002,
+                "operator-containment",
+            )
+            .unwrap();
+        let mut next_input = sample_input();
+        next_input.extension.version = "2.0.0".to_owned();
+        next_input.provenance_summary.artifact_hashes = vec![format!("sha256:{}", "dd".repeat(32))];
+        next_input.user_facing_risk_assessment = RiskAssessment {
+            level: RiskLevel::Low,
+            summary: "fresh inventory contains no vulnerability measurements".to_owned(),
+        };
+        next_input.evidence_refs = vec![VerifiedEvidenceRef {
+            evidence_id: "manifest-new-artifact".to_owned(),
+            evidence_type: super::super::certification::EvidenceType::ManifestAdmission,
+            verified_at_epoch: 1_003,
+            verification_receipt_hash: "a".repeat(64),
+        }];
+        assert!(
+            registry
+                .refresh_from_scan(next_input.clone(), false, 1_003, "implicit-change")
+                .is_err()
+        );
+        let refreshed = registry
+            .refresh_from_scan(next_input, true, 1_003, "explicit-change")
+            .unwrap();
+        verify_card_signature(&refreshed, DEFAULT_REGISTRY_KEY).unwrap();
+        assert_eq!(refreshed.extension.version, "2.0.0");
+        assert_eq!(
+            refreshed.previous_version_hash.as_deref(),
+            Some(retained.card_hash.as_str())
+        );
+        assert_eq!(refreshed.trust_card_version, retained.trust_card_version + 1);
+        assert_eq!(refreshed.revocation_status, retained.revocation_status);
+        assert_eq!(
+            refreshed.effective_quarantine_sources(),
+            retained.effective_quarantine_sources()
+        );
+        assert_eq!(refreshed.camouflage_hints, retained.camouflage_hints);
+        assert!(
+            refreshed.user_facing_risk_assessment.level
+                >= retained.user_facing_risk_assessment.level
+        );
+        assert_eq!(refreshed.certification_level, CertificationLevel::Unknown);
+        assert_eq!(refreshed.audit_history.len(), retained.audit_history.len() + 1);
+        let evidence = &refreshed.derivation_evidence.as_ref().unwrap().evidence_refs;
+        assert!(evidence.iter().any(|reference| reference.evidence_id == "manifest-new-artifact"));
+        for previous in &retained.derivation_evidence.as_ref().unwrap().evidence_refs {
+            assert!(evidence.contains(previous));
+        }
+        assert_eq!(
+            match_trust_card_artifact(&refreshed, &[artifact_pin("2.0.0", 0xdd)]),
+            DependencyArtifactMatch::Matched
+        );
+    }
+
+    #[test]
+    fn same_version_integrity_replacement_requires_explicit_refresh() {
+        let mut registry = TrustCardRegistry::default();
+        let initial = registry
+            .create(sample_input(), 1_000, "create-artifact")
+            .unwrap();
+        let mut changed = sample_input();
+        changed.provenance_summary.artifact_hashes = vec![format!("sha256:{}", "dd".repeat(32))];
+        assert!(
+            registry
+                .refresh_from_scan(changed.clone(), false, 1_001, "ordinary-rescan")
+                .is_err()
+        );
+        let refreshed = registry
+            .refresh_from_scan(changed, true, 1_001, "explicit-rescan")
+            .unwrap();
+        assert_eq!(refreshed.extension.version, initial.extension.version);
+        assert_eq!(refreshed.certification_level, CertificationLevel::Unknown);
+        assert_eq!(
+            refreshed.previous_version_hash.as_deref(),
+            Some(initial.card_hash.as_str())
+        );
+        verify_card_signature(&refreshed, DEFAULT_REGISTRY_KEY).unwrap();
+        assert_eq!(
+            match_trust_card_artifact(&refreshed, &[artifact_pin("1.0.0", 0xdd)]),
+            DependencyArtifactMatch::Matched
+        );
+    }
+
+    #[test]
+    fn expanded_replaced_or_removed_hash_bindings_require_explicit_refresh() {
+        for hashes in [
+            vec![
+                format!("sha256:{}", "ee".repeat(32)),
+                format!("sha256:{}", "dd".repeat(32)),
+            ],
+            vec![format!("sha512:{}", "dd".repeat(64))],
+            Vec::new(),
+        ] {
+            let mut registry = TrustCardRegistry::default();
+            let initial = registry
+                .create(sample_input(), 1_000, "bound-artifact")
+                .unwrap();
+            let mut input = sample_input();
+            input.provenance_summary.artifact_hashes = hashes;
+            assert!(
+                registry
+                    .refresh_from_scan(input.clone(), false, 1_001, "implicit-new-binding")
+                    .is_err()
+            );
+            let next = registry
+                .refresh_from_scan(input, true, 1_001, "explicit-new-binding")
+                .unwrap();
+            verify_card_signature(&next, DEFAULT_REGISTRY_KEY).unwrap();
+            assert_eq!(next.certification_level, CertificationLevel::Unknown);
+            assert_eq!(
+                next.previous_version_hash.as_deref(),
+                Some(initial.card_hash.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn enriching_inventory_does_not_extend_an_unbound_artifact_certificate() {
+        let mut registry = TrustCardRegistry::default();
+        let mut inventory = sample_input();
+        inventory.provenance_summary.artifact_hashes.clear();
+        let initial = registry.create(inventory, 1_000, "inventory-card").unwrap();
+        assert_eq!(initial.certification_level, CertificationLevel::Gold);
+        let enriched = registry
+            .refresh_from_scan(sample_input(), false, 1_001, "enriched-inventory")
+            .unwrap();
+        assert_eq!(enriched.certification_level, CertificationLevel::Unknown);
+        assert_eq!(
+            match_trust_card_artifact(&enriched, &[artifact_pin("1.0.0", 0xee)]),
+            DependencyArtifactMatch::Matched
+        );
+    }
+
+    #[test]
+    fn explicit_artifact_refresh_never_evicts_evidence_to_fit_the_limit() {
+        let mut registry = TrustCardRegistry::default();
+        let mut input = sample_input();
+        input.evidence_refs = oversized_evidence_refs();
+        input.evidence_refs.pop();
+        let initial = registry.create(input, 1_000, "full-evidence-card").unwrap();
+        let error = registry
+            .refresh_from_scan(sample_input(), true, 1_001, "overflow-refresh")
+            .expect_err("retained evidence must fit without eviction");
+        assert!(error.to_string().contains("evidence_refs length"));
+        let retained = registry
+            .latest_verified_card(&initial.extension.extension_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.card_hash, initial.card_hash);
+        assert_eq!(retained.trust_card_version, initial.trust_card_version);
     }
 
     fn test_evidence_refs() -> Vec<VerifiedEvidenceRef> {
