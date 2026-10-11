@@ -28,6 +28,9 @@ mod workspaces;
 #[path = "dependency_graph_admission.rs"]
 mod graph;
 
+#[path = "dependency_installed.rs"]
+mod installed;
+
 const MAX_MANIFEST_BYTES: usize = 512 * 1024;
 const MAX_LOCK_BYTES: usize = 16 * 1024 * 1024;
 const MAX_METADATA_BYTES: usize = 64 * 1024 * 1024;
@@ -64,6 +67,12 @@ pub struct DependencyAdmission {
     pub scope: String,
     pub packages_scanned: usize,
     pub manifests_scanned: usize,
+    /// Completed inspection of the private staged installation, not approval
+    /// or authentication against registry artifacts. Findings still block use.
+    #[serde(default)]
+    pub installation_checked: bool,
+    #[serde(default)]
+    pub installed_packages_scanned: usize,
     pub inputs: Vec<MetadataInput>,
     pub findings: Vec<DependencyFinding>,
 }
@@ -423,10 +432,21 @@ fn declarations(report: &mut DependencyAdmission, manifest: &Value, packages: &B
     Ok(())
 }
 
-/// Assess private captured inputs before invoking ANY validation runtime.
-/// Invalid/ambiguous metadata returns an error; risky or unresolved metadata
-/// returns review findings. Neither may be converted into execution approval.
+/// Assess captured metadata without opening installed dependency contents.
+/// A clean metadata report alone is not permission to execute an installation;
+/// checked execution must use [`inspect_for_execution`] on its private capture.
 pub fn inspect(project: &Path, deadline: Instant) -> Result<DependencyAdmission> {
+    inspect_with_installation(project, deadline, false)
+}
+
+/// Inspect metadata AND the actual private staged installation before either
+/// comparison runtime starts. This is not a reusable approval of a mutable
+/// source tree, a sandbox, or registry-content authentication.
+pub fn inspect_for_execution(project: &Path, deadline: Instant) -> Result<DependencyAdmission> {
+    inspect_with_installation(project, deadline, true)
+}
+
+fn inspect_with_installation(project: &Path, deadline: Instant, check_installation: bool) -> Result<DependencyAdmission> {
     let mut capture = Capture::new(project, deadline)?;
     let manifest = capture.read("package.json", MAX_MANIFEST_BYTES)?.context("dependency admission requires package.json")?;
     let package_lock = capture.read("package-lock.json", MAX_LOCK_BYTES)?;
@@ -446,6 +466,7 @@ pub fn inspect(project: &Path, deadline: Instant) -> Result<DependencyAdmission>
     let mut report = DependencyAdmission {
         schema_version: "franken-node/native-dependency-admission/v1".into(), scope: SCOPE.into(),
         packages_scanned: packages.len(), manifests_scanned: manifests.len(), inputs: Vec::new(), findings: Vec::new(),
+        installation_checked: false, installed_packages_scanned: 0,
     };
     let workspace_links = workspaces::bind_links(&mut capture, &manifests, lock.as_ref(), &packages, &mut report)?;
     package_findings(&mut report, &packages, source, &workspace_links)?;
@@ -455,6 +476,13 @@ pub fn inspect(project: &Path, deadline: Instant) -> Result<DependencyAdmission>
         let source = workspaces::manifest_path(directory);
         declarations(&mut report, manifest, &packages, &source, &mut declared, deadline)?;
         workspaces::manifest_findings(&mut report, manifest, &source)?;
+    }
+    if check_installation {
+        if report.requires_review() {
+            report.scope.push_str("; installed tree not inspected because metadata already requires review");
+        } else {
+            installed::inspect(&mut capture, &packages, &manifests, lock.as_ref(), &mut report)?;
+        }
     }
     time_remaining(deadline)?;
     report.inputs = capture.inputs.into_values().collect();
