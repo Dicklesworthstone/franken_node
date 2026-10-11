@@ -4,9 +4,9 @@
 //! native product, optionally requiring agreement with an explicit Bun runtime.
 //! Validation is scoped to captured tests and persistent workspace changes;
 //! it is not release certification, a sandbox or a globally atomic transaction.
-//! Captured dependency metadata must pass native admission before any new
-//! candidate executes. Findings remain explicit review barriers, not scores
-//! that a passing test suite can outweigh.
+//! Captured dependency metadata and the actual staged installation must pass
+//! native admission before either comparison runtime executes. Findings remain
+//! explicit review barriers, not scores that a passing test suite can outweigh.
 
 use super::rewrite_transaction::{Edit, RewriteTransaction};
 use super::validation_suite::rewrite_candidate::{Replacement, RewriteCandidate};
@@ -49,7 +49,8 @@ pub struct CheckedRewriteReport {
     pub release_certification: bool,
     pub static_validation: Option<MigrationValidateReport>,
     /// Native assessment of the same private input capture used for planning.
-    /// This is metadata review, not package authentication or compatibility.
+    /// Includes installed manifest identity, required routes and native/build
+    /// markers; not registry-content authentication or compatibility proof.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dependency_admission: Option<dependency_admission::DependencyAdmission>,
     pub rewrite: Option<MigrationRewriteReport>,
@@ -184,9 +185,10 @@ fn run_with_evidence(
             );
             return Ok(());
         }
-        let dependencies = dependency_admission::inspect(&staged, deadline)?;
+        let dependencies = dependency_admission::inspect_for_execution(&staged, deadline)?;
         let review_count = dependencies.findings.len();
         let dependency_review = dependencies.requires_review();
+        let installation_checked = dependencies.installation_checked;
         report.dependency_admission = Some(dependencies);
         if dependency_review {
             report.status = CheckedRewriteStatus::Rejected;
@@ -195,6 +197,13 @@ fn run_with_evidence(
             ));
             return Ok(());
         }
+        // A metadata-only report must never become execution permission,
+        // even when it has no findings. The inspected tree above was staged
+        // from the same immutable capture the comparison runtimes will use.
+        ensure!(
+            installation_checked,
+            "checked execution requires completed staged dependency inspection"
+        );
         let mut plan = run_rewrite(&staged, false)?;
         // We do not rename .cjs files, change package type, or relink a module
         // graph. Refine legacy format-conversion proposals into literal-only
@@ -305,6 +314,12 @@ pub fn render(report: &CheckedRewriteReport) -> String {
             dependencies.packages_scanned,
             dependencies.manifests_scanned,
             dependencies.findings.len()
+        );
+        let _ = writeln!(
+            text,
+            "dependency_installation_checked={} installed_packages={}",
+            dependencies.installation_checked,
+            dependencies.installed_packages_scanned
         );
         for finding in &dependencies.findings {
             let _ = writeln!(
@@ -509,6 +524,157 @@ mod tests {
         assert_eq!(captured.bytes, lock.len());
         assert_eq!(captured.sha256, hex::encode(Sha256::digest(lock)));
         assert_eq!(report.rewrite.as_ref().unwrap().rewrites_applied, 0);
+        assert_eq!(source(root.path()), original);
+        assert!(!root.path().join(".migrate-backup/helper.mjs").exists());
+    }
+
+    fn declare_installed_dependency(root: &Path) {
+        fs::write(root.join("package.json"), r#"{
+            "name":"checked","type":"module","engines":{"node":">=20"},
+            "dependencies":{"ordinary":"^1"}
+        }"#).unwrap();
+        fs::write(root.join("package-lock.json"), r#"{
+            "lockfileVersion":3,"packages":{
+                "":{},"node_modules/ordinary":{"version":"1.0.0"}
+            }
+        }"#).unwrap();
+    }
+
+    fn installed_project() -> tempfile::TempDir {
+        let root = project();
+        declare_installed_dependency(root.path());
+        let package = root.path().join("node_modules/ordinary");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(package.join("package.json"), r#"{
+            "name":"ordinary","version":"1.0.0","type":"module","exports":"./index.mjs"
+        }"#).unwrap();
+        fs::write(package.join("index.mjs"), "export const answer = 42;\n").unwrap();
+        fs::write(root.path().join("case.test.mjs"),
+            "import {value} from './helper.mjs';\nimport {answer} from 'ordinary';\nif(value !== '42' || answer !== 42) throw new Error('incorrect dependency result');\nconsole.log(answer);\n"
+        ).unwrap();
+        root
+    }
+
+    #[test]
+    fn missing_staged_dependencies_block_pair_and_product_before_any_runtime_is_resolved() {
+        let root = project();
+        declare_installed_dependency(root.path());
+        assert_dependency_rejection(root.path(), "missing_installed_dependency");
+        for report in [
+            run_selected(root.path(), Path::new("/absent/native"), None, false),
+            run_product(root.path(), Path::new("/absent/native"), Path::new("/absent/bun")),
+        ] {
+            assert_eq!(report.status, CheckedRewriteStatus::Rejected, "{report:#?}");
+            let admission = report.dependency_admission.as_ref().unwrap();
+            assert!(admission.installation_checked);
+            assert_eq!(admission.installed_packages_scanned, 0);
+            assert!(admission.findings.iter().any(|f| f.code == "missing_installed_dependency"));
+            assert!(report.rewrite.is_none() && report.validation.is_none() && report.product_validation.is_none());
+            assert!(!root.path().join("node_modules").exists());
+        }
+    }
+
+    #[test]
+    fn actual_package_identity_and_undeclared_dependencies_block_checked_apply() {
+        for (manifest, code) in [
+            (r#"{"name":"different","version":"1.0.0"}"#, "installed_identity_mismatch"),
+            (r#"{"name":"ordinary","version":"1.9.0"}"#, "installed_identity_mismatch"),
+            (r#"{"name":"ordinary","version":"1.0.0","dependencies":{"hidden":"1"}}"#, "installed_dependency_metadata_mismatch"),
+        ] {
+            let root = installed_project();
+            fs::write(root.path().join("node_modules/ordinary/package.json"), manifest).unwrap();
+            assert!(!dependency_admission::inspect(root.path(), Instant::now() + Duration::from_secs(15)).unwrap().requires_review());
+            assert_dependency_rejection(root.path(), code);
+        }
+    }
+
+    #[test]
+    fn installed_lifecycle_and_native_payloads_block_execution_even_when_the_lock_is_clean() {
+        let root = installed_project();
+        fs::write(root.path().join("node_modules/ordinary/package.json"), r#"{
+            "name":"ordinary","version":"1.0.0","scripts":{"postinstall":"never execute me"}
+        }"#).unwrap();
+        assert_dependency_rejection(root.path(), "install_script");
+        for marker in ["binding.gyp", "build/Release/custom.node"] {
+            let root = installed_project();
+            let marker = root.path().join("node_modules/ordinary").join(marker);
+            fs::create_dir_all(marker.parent().unwrap()).unwrap();
+            fs::write(marker, "test marker, not executable code").unwrap();
+            assert_dependency_rejection(root.path(), "native_payload");
+        }
+    }
+
+    #[test]
+    fn application_local_unrecorded_package_shadows_cannot_enter_checked_validation() {
+        let root = installed_project();
+        let shadow = root.path().join("src/node_modules/ordinary");
+        fs::create_dir_all(&shadow).unwrap();
+        fs::write(shadow.join("package.json"), r#"{"name":"ordinary","version":"1.0.0"}"#).unwrap();
+        fs::write(shadow.join("index.js"), "module.exports=99;\n").unwrap();
+        assert_dependency_rejection(root.path(), "unrecorded_installed_package");
+    }
+
+    #[test]
+    fn malformed_installed_manifest_is_an_error_not_execution_permission() {
+        let root = installed_project();
+        let original = source(root.path());
+        fs::write(root.path().join("node_modules/ordinary/package.json"),
+            r#"{"name":"ordinary","version":"1.0.0","version":"2.0.0"}"#).unwrap();
+        let report = run_with_evidence(root.path(), |_| panic!("ambiguous installed metadata must not execute"));
+        assert_eq!(report.status, CheckedRewriteStatus::Error, "{report:#?}");
+        assert!(report.errors.iter().any(|e| e.contains("duplicate dependency JSON member")));
+        assert!(report.rewrite.is_none() && report.validation.is_none() && report.product_validation.is_none());
+        assert_eq!(source(root.path()), original);
+        assert!(!root.path().join(".migrate-backup/helper.mjs").exists());
+    }
+
+    #[test]
+    fn checked_installation_executes_the_captured_dependency_and_retains_its_manifest_hash() {
+        // Real Node/Node comparison exercises installation and source capture;
+        // this is not a claim that the native engine passes the application.
+        let root = installed_project();
+        let original = source(root.path());
+        let manifest_path = root.path().join("node_modules/ordinary/package.json");
+        let manifest = fs::read(&manifest_path).unwrap();
+        let report = node_pair(root.path());
+        assert_eq!(report.status, CheckedRewriteStatus::Applied, "{report:#?}");
+        let admission = report.dependency_admission.as_ref().unwrap();
+        assert!(admission.installation_checked && !admission.requires_review());
+        assert_eq!(admission.installed_packages_scanned, 1);
+        let input = admission.inputs.iter().find(|i| i.path == "node_modules/ordinary/package.json").unwrap();
+        assert_eq!(input.sha256, hex::encode(Sha256::digest(&manifest)));
+        assert_eq!(fs::read(manifest_path).unwrap(), manifest);
+        let measured = report.validation.as_ref().unwrap();
+        assert_eq!(measured.passed, 1);
+        assert_eq!(measured.cases[0].reference.as_ref().unwrap().stdout.sha256,
+            hex::encode(Sha256::digest(b"42\n")));
+        assert!(source(root.path()).contains("node:path"));
+        assert_eq!(fs::read_to_string(root.path().join(".migrate-backup/helper.mjs")).unwrap(), original);
+        assert!(render(&report).contains("dependency_installation_checked=true installed_packages=1"));
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["dependency_admission"]["installation_checked"], true);
+        assert!(!report.release_certification);
+    }
+
+    #[test]
+    fn installed_manifest_changes_after_measurement_cannot_authorize_installation() {
+        let root = installed_project();
+        let original = source(root.path());
+        let manifest_path = root.path().join("node_modules/ordinary/package.json");
+        let captured = fs::read(&manifest_path).unwrap();
+        let report = run_with_validator(root.path(), |candidate| {
+            let measured = candidate.validate_node_pair()?;
+            assert_eq!(measured.verdict, "PASS");
+            fs::write(&manifest_path, r#"{"name":"ordinary","version":"1.9.0"}"#)?;
+            Ok(measured)
+        });
+        assert_eq!(report.status, CheckedRewriteStatus::Error, "{report:#?}");
+        assert_eq!(report.validation.as_ref().unwrap().verdict, "PASS");
+        assert!(report.errors.iter().any(|e| e.contains("project changed")));
+        let admission = report.dependency_admission.as_ref().unwrap();
+        assert!(admission.installation_checked);
+        let input = admission.inputs.iter().find(|i| i.path == "node_modules/ordinary/package.json").unwrap();
+        assert_eq!(input.sha256, hex::encode(Sha256::digest(&captured)));
         assert_eq!(source(root.path()), original);
         assert!(!root.path().join(".migrate-backup/helper.mjs").exists());
     }
