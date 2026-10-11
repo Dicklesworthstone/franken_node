@@ -672,6 +672,9 @@ pub fn apply_camouflage_assessment(card: &mut TrustCard, hints: &[CamouflageHint
     if hints.is_empty() {
         return;
     }
+    // A new behavioral assessment makes the current aggregate authoritative.
+    // An older OSV baseline cannot later erase this independent evidence.
+    card.osv_risk_baseline = None;
 
     let mut max_severity: f64 = 0.0;
     for hint in hints {
@@ -1221,6 +1224,47 @@ impl QuarantineSource {
     }
 }
 
+/// Signed attribution for an active OSV overlay. It preserves the aggregate
+/// assessment that preceded OSV; human summary text never grants clearance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OsvRiskBaseline {
+    pub source_card_hash: String,
+    pub risk_assessment: RiskAssessment,
+    pub reputation_score_basis_points: u16,
+    pub reputation_trend: ReputationTrend,
+}
+
+const MAX_OSV_BASELINE_SUMMARY_BYTES: usize = 65_536;
+const MAX_OSV_REFRESH_VULNERABILITIES: usize = 10_000;
+
+impl OsvRiskBaseline {
+    fn validate(&self) -> Result<(), TrustCardError> {
+        if !canonical_digest_hex(&self.source_card_hash, 32)
+            || self.risk_assessment.summary.len() > MAX_OSV_BASELINE_SUMMARY_BYTES
+        {
+            return Err(TrustCardError::InvalidInput {
+                reason: "OSV risk baseline has an invalid source hash or excessive summary"
+                    .to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum OsvRiskRefreshOutcome {
+    Updated(TrustCard),
+    /// An active contribution requires a complete authenticated clean answer,
+    /// including when another source currently masks its aggregate risk level.
+    ClearanceRefused,
+}
+
+enum RiskUpdateOrigin {
+    Generic,
+    Osv(Option<OsvRiskBaseline>),
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrustCard {
     pub schema_version: String,
@@ -1244,6 +1288,10 @@ pub struct TrustCard {
     pub dependency_trust_summary: Vec<DependencyTrustStatus>,
     pub last_verified_timestamp: String,
     pub user_facing_risk_assessment: RiskAssessment,
+    /// Omitted for legacy and unattributed assessments, preserving their
+    /// canonical bytes. Only source-specific OSV updates establish attribution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub osv_risk_baseline: Option<OsvRiskBaseline>,
     pub audit_history: Vec<AuditRecord>,
     /// Derivation metadata linking this trust card to verified upstream evidence.
     pub derivation_evidence: Option<DerivationMetadata>,
@@ -1288,6 +1336,7 @@ impl std::fmt::Debug for TrustCard {
                 "user_facing_risk_assessment",
                 &self.user_facing_risk_assessment,
             )
+            .field("osv_risk_baseline", &self.osv_risk_baseline)
             .field("audit_history", &self.audit_history)
             .field("derivation_evidence", &self.derivation_evidence)
             .field("camouflage_hints", &self.camouflage_hints)
@@ -1298,6 +1347,18 @@ impl std::fmt::Debug for TrustCard {
 }
 
 impl TrustCard {
+    /// Whether a scan leaves this card's concrete artifact authority intact.
+    /// An audit-only refresh may then retain independent state unchanged.
+    #[must_use]
+    pub fn matches_scan_artifact(&self, input: &TrustCardInput) -> bool {
+        let current = canonical_artifact_bindings(&self.provenance_summary.artifact_hashes);
+        self.extension.extension_id == input.extension.extension_id
+            && exact_dependency_version(&self.extension.version)
+            && self.extension.version == input.extension.version
+            && !current.is_empty()
+            && current == canonical_artifact_bindings(&input.provenance_summary.artifact_hashes)
+    }
+
     /// Preserve risk supported by retained camouflage findings when another
     /// source refreshes its assessment. A severity of 0.50 implies High and
     /// 0.90 implies Critical. The registry's explicit camouflage admission
@@ -1363,6 +1424,18 @@ impl TrustCard {
         }
         for source in &self.quarantine_sources {
             source.validate()?;
+        }
+        Ok(())
+    }
+
+    fn validate_osv_risk_baseline(&self) -> Result<(), TrustCardError> {
+        if let Some(baseline) = &self.osv_risk_baseline {
+            baseline.validate()?;
+            if baseline.risk_assessment.level > self.user_facing_risk_assessment.level {
+                return Err(TrustCardError::InvalidInput {
+                    reason: "OSV overlay cannot lower its retained baseline risk".to_owned(),
+                });
+            }
         }
         Ok(())
     }
@@ -2150,6 +2223,7 @@ impl TrustCardRegistry {
             dependency_trust_summary: sorted_dependencies(input.dependency_trust_summary),
             last_verified_timestamp: input.last_verified_timestamp,
             user_facing_risk_assessment: input.user_facing_risk_assessment,
+            osv_risk_baseline: None,
             audit_history: vec![AuditRecord {
                 timestamp: timestamp_from_secs(now_secs),
                 event_code: TRUST_CARD_CREATED.to_string(),
@@ -2217,7 +2291,169 @@ impl TrustCardRegistry {
         now_secs: u64,
         trace_id: &str,
     ) -> Result<TrustCard, TrustCardError> {
-        self.update_with_quarantine_source(extension_id, mutation, None, None, now_secs, trace_id)
+        self.update_with_quarantine_source(
+            extension_id,
+            mutation,
+            None,
+            None,
+            RiskUpdateOrigin::Generic,
+            now_secs,
+            trace_id,
+        )
+    }
+
+    /// Apply a complete OSV query without changing other sources' authority.
+    /// Nonempty answers can raise risk without clearance authority. Clearing
+    /// an active overlay requires a complete authenticated clean answer, even
+    /// when independent risk masks its current level. The caller must set
+    /// `complete_clean_authenticated` only after validating the whole query.
+    /// Repeated findings derive penalties from the saved baseline, never from
+    /// the already penalized score. Generic reassessments invalidate attribution.
+    pub fn refresh_osv_risk(
+        &mut self,
+        extension_id: &str,
+        vulnerability_ids: &[String],
+        complete_clean_authenticated: bool,
+        now_secs: u64,
+        trace_id: &str,
+    ) -> Result<OsvRiskRefreshOutcome, TrustCardError> {
+        validate_extension_id(extension_id)?;
+        if vulnerability_ids.len() > MAX_OSV_REFRESH_VULNERABILITIES
+            || vulnerability_ids.iter().any(|id| {
+                id.is_empty()
+                    || id.len() > 256
+                    || id.chars().any(|ch| ch.is_whitespace() || ch.is_control())
+            })
+        {
+            return Err(TrustCardError::InvalidInput {
+                reason: "OSV vulnerability inventory is malformed or excessive".to_owned(),
+            });
+        }
+        let latest = self
+            .latest_verified_card(extension_id)?
+            .cloned()
+            .ok_or_else(|| TrustCardError::NotFound(extension_id.to_owned()))?;
+        let ids = vulnerability_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        if ids.is_empty()
+            && latest.osv_risk_baseline.is_some()
+            && (!complete_clean_authenticated
+                || !exact_dependency_version(&latest.extension.version))
+        {
+            return Ok(OsvRiskRefreshOutcome::ClearanceRefused);
+        }
+
+        let (risk, score, trend, baseline, detail) = if ids.is_empty() {
+            match &latest.osv_risk_baseline {
+                Some(baseline) => {
+                    let mut view = latest.clone();
+                    view.user_facing_risk_assessment = baseline.risk_assessment.clone();
+                    let mut risk = baseline.risk_assessment.clone();
+                    match (&latest.revocation_status, latest.active_quarantine) {
+                        (RevocationStatus::Revoked { reason, .. }, _) => {
+                            risk.level = RiskLevel::Critical;
+                            risk.summary = format!("{}; revoked: {reason}", risk.summary);
+                        }
+                        (_, true) => {
+                            risk.level = risk.level.max(RiskLevel::High);
+                            risk.summary =
+                                format!("{}; active quarantine remains in effect", risk.summary);
+                        }
+                        _ if latest.provenance_summary.artifact_hashes.is_empty() => {
+                            risk.level = risk.level.max(RiskLevel::Medium);
+                        }
+                        _ => {}
+                    }
+                    let risk = view.risk_with_camouflage_floor(risk);
+                    let trend = if latest.active_quarantine
+                        || matches!(latest.revocation_status, RevocationStatus::Revoked { .. })
+                    {
+                        ReputationTrend::Declining
+                    } else {
+                        baseline.reputation_trend
+                    };
+                    (
+                        risk,
+                        baseline.reputation_score_basis_points,
+                        trend,
+                        None,
+                        "authenticated complete OSV clearance restored the retained non-OSV assessment",
+                    )
+                }
+                None => (
+                    latest.user_facing_risk_assessment.clone(),
+                    latest.reputation_score_basis_points,
+                    latest.reputation_trend,
+                    None,
+                    "complete OSV query was clean; unattributed aggregate assessment retained",
+                ),
+            }
+        } else {
+            let baseline = latest
+                .osv_risk_baseline
+                .clone()
+                .unwrap_or_else(|| OsvRiskBaseline {
+                    source_card_hash: latest.card_hash.clone(),
+                    risk_assessment: latest.user_facing_risk_assessment.clone(),
+                    reputation_score_basis_points: latest.reputation_score_basis_points,
+                    reputation_trend: latest.reputation_trend,
+                });
+            baseline.validate()?;
+            let computed_risk = if ids.len() >= 3
+                || matches!(latest.revocation_status, RevocationStatus::Revoked { .. })
+            {
+                RiskLevel::Critical
+            } else {
+                RiskLevel::High
+            };
+            let shown = ids.iter().take(64).copied().collect::<Vec<_>>().join(", ");
+            let suffix = if ids.len() > 64 {
+                format!("; {} additional records omitted from display", ids.len() - 64)
+            } else {
+                String::new()
+            };
+            let risk = latest.risk_with_camouflage_floor(RiskAssessment {
+                level: latest.user_facing_risk_assessment.level.max(computed_risk),
+                summary: format!(
+                    "OSV refresh reported {} vulnerability record(s): {shown}{suffix}",
+                    ids.len()
+                ),
+            });
+            let penalty = (ids.len().min(5) as u16).saturating_mul(90);
+            let score = baseline
+                .reputation_score_basis_points
+                .saturating_sub(penalty)
+                .min(latest.reputation_score_basis_points);
+            (
+                risk,
+                score,
+                ReputationTrend::Declining,
+                Some(baseline),
+                "OSV vulnerability overlay applied with retained source baseline",
+            )
+        };
+
+        self.update_with_quarantine_source(
+            extension_id,
+            TrustCardMutation {
+                certification_level: None,
+                revocation_status: None,
+                active_quarantine: None,
+                reputation_score_basis_points: Some(score),
+                reputation_trend: Some(trend),
+                user_facing_risk_assessment: Some(risk),
+                last_verified_timestamp: Some(timestamp_from_secs(now_secs)),
+                evidence_refs: None,
+            },
+            None,
+            Some(detail.to_owned()),
+            RiskUpdateOrigin::Osv(baseline),
+            now_secs,
+            trace_id,
+        )
+        .map(OsvRiskRefreshOutcome::Updated)
     }
 
     /// Add or release one signed containment source, preserving all others.
@@ -2252,6 +2488,7 @@ impl TrustCardRegistry {
             },
             Some((source, active)),
             None,
+            RiskUpdateOrigin::Generic,
             now_secs,
             trace_id,
         )
@@ -2306,6 +2543,7 @@ impl TrustCardRegistry {
             Some(format!(
                 "local quarantine released by {operator_id}: {reason}"
             )),
+            RiskUpdateOrigin::Generic,
             now_secs,
             trace_id,
         )
@@ -2317,6 +2555,7 @@ impl TrustCardRegistry {
         mutation: TrustCardMutation,
         source_change: Option<(QuarantineSource, bool)>,
         audit_detail: Option<String>,
+        risk_origin: RiskUpdateOrigin,
         now_secs: u64,
         trace_id: &str,
     ) -> Result<TrustCard, TrustCardError> {
@@ -2339,6 +2578,17 @@ impl TrustCardRegistry {
         }
 
         let mut next = latest.clone();
+        match &risk_origin {
+            RiskUpdateOrigin::Generic
+                if mutation.user_facing_risk_assessment.is_some()
+                    || mutation.reputation_score_basis_points.is_some()
+                    || mutation.reputation_trend.is_some() =>
+            {
+                next.osv_risk_baseline = None;
+            }
+            RiskUpdateOrigin::Osv(baseline) => next.osv_risk_baseline = baseline.clone(),
+            RiskUpdateOrigin::Generic => {}
+        }
         next.trust_card_version = next_trust_card_version(latest.trust_card_version, extension_id)?;
         next.previous_version_hash = Some(latest.card_hash.clone());
         if let Some(level) = mutation.certification_level {
@@ -2397,7 +2647,12 @@ impl TrustCardRegistry {
             next.reputation_trend = trend;
         }
         if let Some(risk) = mutation.user_facing_risk_assessment {
-            next.user_facing_risk_assessment = next.risk_with_camouflage_floor(risk);
+            next.user_facing_risk_assessment = match risk_origin {
+                // The dedicated OSV path applies floors to the retained
+                // baseline, so an OSV-raised level is not its own risk floor.
+                RiskUpdateOrigin::Osv(_) => risk,
+                RiskUpdateOrigin::Generic => next.risk_with_camouflage_floor(risk),
+            };
         }
         if let Some(ts) = mutation.last_verified_timestamp {
             next.last_verified_timestamp = ts;
@@ -2526,6 +2781,9 @@ impl TrustCardRegistry {
         next.reputation_score_basis_points = input.reputation_score_basis_points;
         next.reputation_trend = input.reputation_trend;
         next.last_verified_timestamp = input.last_verified_timestamp;
+        // A scan is a new combined assessment. It cannot inherit authority to
+        // clear an OSV overlay from the assessment it replaces.
+        next.osv_risk_baseline = None;
         next.user_facing_risk_assessment =
             next.risk_with_camouflage_floor(input.user_facing_risk_assessment);
         if accept_artifact_change
@@ -2536,6 +2794,20 @@ impl TrustCardRegistry {
                 .reputation_score_basis_points
                 .min(latest.reputation_score_basis_points);
             next.reputation_trend = latest.reputation_trend;
+        }
+        if latest.osv_risk_baseline.is_some() {
+            // Combined reassessment is not source-specific clearance. Even
+            // at equal severity it must retain the active overlay's penalty
+            // and trend as unattributed floors when invalidating its baseline.
+            if latest.user_facing_risk_assessment.level
+                > next.user_facing_risk_assessment.level
+            {
+                next.user_facing_risk_assessment = latest.user_facing_risk_assessment.clone();
+            }
+            next.reputation_score_basis_points = next
+                .reputation_score_basis_points
+                .min(latest.reputation_score_basis_points);
+            next.reputation_trend = ReputationTrend::Declining;
         }
         next.derivation_evidence = Some(DerivationMetadata {
             derivation_chain_hash: compute_trust_card_derivation_hash(&evidence_refs, now_secs),
@@ -3472,6 +3744,7 @@ pub fn render_comparison_human(comparison: &TrustCardComparison) -> String {
 /// or either integrity check does not match.
 pub fn verify_card_signature(card: &TrustCard, registry_key: &[u8]) -> Result<(), TrustCardError> {
     card.validate_quarantine_sources()?;
+    card.validate_osv_risk_baseline()?;
     let expected_hash = compute_card_hash(card)?;
     if !constant_time::ct_eq(&card.card_hash, &expected_hash) {
         return Err(TrustCardError::CardHashMismatch(
@@ -3797,6 +4070,7 @@ fn canonical_card_without_hash_and_signature(card: &TrustCard) -> Result<Vec<u8>
 /// registry key is invalid.
 pub fn sign_card_in_place(card: &mut TrustCard, registry_key: &[u8]) -> Result<(), TrustCardError> {
     card.validate_quarantine_sources()?;
+    card.validate_osv_risk_baseline()?;
     card.card_hash = compute_card_hash(card)?;
     let mut mac =
         HmacSha256::new_from_slice(registry_key).map_err(|_| TrustCardError::InvalidRegistryKey)?;
@@ -4251,6 +4525,302 @@ mod tests {
     use tempfile::{NamedTempFile, TempDir};
 
     type TestResult = Result<(), String>;
+
+    fn apply_osv(
+        registry: &mut TrustCardRegistry,
+        ids: &[&str],
+        authenticated: bool,
+        now_secs: u64,
+    ) -> TrustCard {
+        let ids = ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+        match registry
+            .refresh_osv_risk(
+                "npm:@acme/plugin",
+                &ids,
+                authenticated,
+                now_secs,
+                "test-osv-source-attribution",
+            )
+            .expect("valid source-specific OSV refresh")
+        {
+            OsvRiskRefreshOutcome::Updated(card) => card,
+            OsvRiskRefreshOutcome::ClearanceRefused => panic!("unexpected clearance refusal"),
+        }
+    }
+
+    fn empty_risk_mutation() -> TrustCardMutation {
+        TrustCardMutation {
+            certification_level: None,
+            revocation_status: None,
+            active_quarantine: None,
+            reputation_score_basis_points: None,
+            reputation_trend: None,
+            user_facing_risk_assessment: None,
+            last_verified_timestamp: None,
+            evidence_refs: None,
+        }
+    }
+
+    #[test]
+    fn osv_clearance_restores_independent_high_risk_after_high_and_critical_overlays() {
+        for ids in [vec!["OSV-1"], vec!["OSV-1", "OSV-2", "OSV-3"]] {
+            let mut registry = TrustCardRegistry::default();
+            let mut input = sample_input();
+            input.user_facing_risk_assessment = RiskAssessment {
+                level: RiskLevel::High,
+                summary: "independent publisher takeover finding".to_owned(),
+            };
+            let initial = registry.create(input, 1_000, "independent-risk").unwrap();
+            let vulnerable = apply_osv(&mut registry, &ids, false, 1_001);
+            let baseline = vulnerable.osv_risk_baseline.as_ref().unwrap();
+            assert_eq!(baseline.source_card_hash, initial.card_hash);
+            assert_eq!(baseline.risk_assessment, initial.user_facing_risk_assessment);
+            assert_eq!(
+                vulnerable.user_facing_risk_assessment.level,
+                if ids.len() == 3 {
+                    RiskLevel::Critical
+                } else {
+                    RiskLevel::High
+                }
+            );
+            let clean = apply_osv(&mut registry, &[], true, 1_002);
+            assert_eq!(clean.user_facing_risk_assessment, initial.user_facing_risk_assessment);
+            assert_eq!(clean.reputation_score_basis_points, initial.reputation_score_basis_points);
+            assert_eq!(clean.reputation_trend, initial.reputation_trend);
+            assert!(clean.osv_risk_baseline.is_none());
+            assert_eq!(clean.previous_version_hash.as_deref(), Some(vulnerable.card_hash.as_str()));
+            verify_card_signature(&clean, DEFAULT_REGISTRY_KEY).unwrap();
+        }
+    }
+
+    #[test]
+    fn osv_baseline_survives_signed_durable_roundtrip_and_rejects_tampering() {
+        let mut registry = TrustCardRegistry::default();
+        let initial = registry.create(sample_input(), 1_000, "initial").unwrap();
+        let vulnerable = apply_osv(&mut registry, &["OSV-1"], false, 1_001);
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("trust-card-registry.json");
+        registry.persist_authoritative_state(&path).unwrap();
+        let mut restored = TrustCardRegistry::load_authoritative_state(
+            &path,
+            60,
+            1_002,
+            SnapshotSourceContext::TrustedFile,
+        )
+        .unwrap();
+        let retained = restored
+            .latest_verified_card("npm:@acme/plugin")
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.osv_risk_baseline, vulnerable.osv_risk_baseline);
+        assert_eq!(retained.card_hash, vulnerable.card_hash);
+        let mut tampered = retained.clone();
+        tampered.osv_risk_baseline.as_mut().unwrap().risk_assessment.summary =
+            "a forged independent finding".to_owned();
+        assert!(verify_card_signature(&tampered, DEFAULT_REGISTRY_KEY).is_err());
+        tampered = retained.clone();
+        tampered.osv_risk_baseline = None;
+        assert!(verify_card_signature(&tampered, DEFAULT_REGISTRY_KEY).is_err());
+        let clean = apply_osv(&mut restored, &[], true, 1_003);
+        assert_eq!(clean.user_facing_risk_assessment, initial.user_facing_risk_assessment);
+        assert_eq!(clean.reputation_score_basis_points, initial.reputation_score_basis_points);
+        restored.persist_authoritative_state(&path).unwrap();
+        verify_card_signature(&clean, DEFAULT_REGISTRY_KEY).unwrap();
+    }
+
+    #[test]
+    fn absent_osv_attribution_preserves_legacy_canonical_bytes_and_summary_has_no_authority() {
+        let mut registry = TrustCardRegistry::default();
+        let mut input = sample_input();
+        input.user_facing_risk_assessment = RiskAssessment {
+            level: RiskLevel::High,
+            summary: "OSV refresh reported a legacy or forged human summary".to_owned(),
+        };
+        let initial = registry.create(input, 1_000, "legacy").unwrap();
+        let value = serde_json::to_value(&initial).unwrap();
+        assert!(!value.as_object().unwrap().contains_key("osv_risk_baseline"));
+        let decoded: TrustCard = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            canonical_bytes(&value),
+            canonical_bytes(&serde_json::to_value(&decoded).unwrap())
+        );
+        assert_eq!(decoded.card_hash, initial.card_hash);
+        verify_card_signature(&decoded, DEFAULT_REGISTRY_KEY).unwrap();
+        let clean = apply_osv(&mut registry, &[], true, 1_001);
+        assert_eq!(clean.user_facing_risk_assessment, initial.user_facing_risk_assessment);
+        assert_eq!(clean.reputation_score_basis_points, initial.reputation_score_basis_points);
+        assert_eq!(clean.reputation_trend, initial.reputation_trend);
+        assert!(clean.osv_risk_baseline.is_none());
+    }
+
+    #[test]
+    fn repeated_or_smaller_osv_findings_do_not_compound_or_ease_penalties() {
+        let mut registry = TrustCardRegistry::default();
+        let initial = registry.create(sample_input(), 1_000, "initial").unwrap();
+        let first = apply_osv(&mut registry, &["OSV-1"], false, 1_001);
+        let repeated = apply_osv(&mut registry, &["OSV-1", "OSV-1"], false, 1_002);
+        assert_eq!(first.reputation_score_basis_points, 810);
+        assert_eq!(repeated.reputation_score_basis_points, first.reputation_score_basis_points);
+        assert_eq!(repeated.osv_risk_baseline, first.osv_risk_baseline);
+        let critical = apply_osv(&mut registry, &["OSV-1", "OSV-2", "OSV-3"], false, 1_003);
+        assert_eq!(critical.reputation_score_basis_points, 630);
+        assert_eq!(critical.user_facing_risk_assessment.level, RiskLevel::Critical);
+        let smaller = apply_osv(&mut registry, &["OSV-1"], false, 1_004);
+        assert_eq!(smaller.reputation_score_basis_points, critical.reputation_score_basis_points);
+        assert_eq!(smaller.user_facing_risk_assessment.level, RiskLevel::Critical);
+        let clean = apply_osv(&mut registry, &[], true, 1_005);
+        assert_eq!(clean.reputation_score_basis_points, initial.reputation_score_basis_points);
+        assert_eq!(clean.user_facing_risk_assessment, initial.user_facing_risk_assessment);
+    }
+
+    #[test]
+    fn masked_osv_overlay_needs_authenticated_exact_version_clearance() {
+        for (version, level, authenticated) in [
+            ("1.0.0", RiskLevel::High, false),
+            ("1.0.0", RiskLevel::Critical, false),
+            ("^1.0.0", RiskLevel::High, true),
+        ] {
+            let mut registry = TrustCardRegistry::default();
+            let mut input = sample_input();
+            input.extension.version = version.to_owned();
+            input.user_facing_risk_assessment.level = level;
+            registry.create(input, 1_000, "initial").unwrap();
+            let vulnerable = apply_osv(&mut registry, &["OSV-1"], false, 1_001);
+            let outcome = registry
+                .refresh_osv_risk("npm:@acme/plugin", &[], authenticated, 1_002, "untrusted-clean")
+                .unwrap();
+            assert_eq!(outcome, OsvRiskRefreshOutcome::ClearanceRefused);
+            let retained = registry.latest_verified_card("npm:@acme/plugin").unwrap().unwrap();
+            assert_eq!(retained.card_hash, vulnerable.card_hash);
+            assert_eq!(retained.trust_card_version, vulnerable.trust_card_version);
+        }
+    }
+
+    #[test]
+    fn generic_risk_or_reputation_mutation_invalidates_stale_osv_restore_authority() {
+        for field in ["risk", "score", "trend"] {
+            let mut registry = TrustCardRegistry::default();
+            registry.create(sample_input(), 1_000, "initial").unwrap();
+            apply_osv(&mut registry, &["OSV-1"], false, 1_001);
+            let mut mutation = empty_risk_mutation();
+            match field {
+                "risk" => mutation.user_facing_risk_assessment = Some(RiskAssessment {
+                    level: RiskLevel::High,
+                    summary: "new independent publisher finding".to_owned(),
+                }),
+                "score" => mutation.reputation_score_basis_points = Some(500),
+                "trend" => mutation.reputation_trend = Some(ReputationTrend::Improving),
+                _ => unreachable!(),
+            }
+            let changed = registry.update("npm:@acme/plugin", mutation, 1_002, "generic").unwrap();
+            assert!(changed.osv_risk_baseline.is_none());
+            let clean = apply_osv(&mut registry, &[], true, 1_003);
+            assert_eq!(clean.user_facing_risk_assessment, changed.user_facing_risk_assessment);
+            assert_eq!(clean.reputation_score_basis_points, changed.reputation_score_basis_points);
+            assert_eq!(clean.reputation_trend, changed.reputation_trend);
+        }
+    }
+
+    #[test]
+    fn combined_scan_and_explicit_artifact_repair_retain_osv_penalty_at_equal_risk() {
+        for explicit in [false, true] {
+            let mut registry = TrustCardRegistry::default();
+            let mut input = sample_input();
+            input.user_facing_risk_assessment.level = RiskLevel::High;
+            registry.create(input.clone(), 1_000, "independent-high").unwrap();
+            let vulnerable = apply_osv(&mut registry, &["OSV-1"], false, 1_001);
+            if explicit {
+                input.extension.version = "2.0.0".to_owned();
+                input.provenance_summary.artifact_hashes =
+                    vec![format!("sha256:{}", "a".repeat(64))];
+            }
+            let changed = registry.refresh_from_scan(input, explicit, 1_002, "scan").unwrap();
+            assert!(changed.osv_risk_baseline.is_none());
+            assert_eq!(changed.user_facing_risk_assessment.level, RiskLevel::High);
+            assert_eq!(
+                changed.reputation_score_basis_points,
+                vulnerable.reputation_score_basis_points
+            );
+            assert_eq!(changed.reputation_trend, ReputationTrend::Declining);
+            let clean = apply_osv(&mut registry, &[], true, 1_003);
+            assert_eq!(clean.user_facing_risk_assessment, changed.user_facing_risk_assessment);
+            assert_eq!(clean.reputation_score_basis_points, changed.reputation_score_basis_points);
+        }
+    }
+
+    #[test]
+    fn osv_cleanup_preserves_camouflage_and_later_behavioral_findings() {
+        let mut registry = TrustCardRegistry::default();
+        registry.create(sample_input(), 1_000, "initial").unwrap();
+        let hints = [CamouflageHint {
+            kind: CamouflageKind::PhaseShift,
+            severity: 0.82,
+            evidence: BTreeMap::from([("phase_shift_score".to_owned(), 0.82)]),
+            sample_indices: vec![0, 1, 2],
+        }];
+        let marked = registry
+            .mark_camouflage_suspected(
+                "npm:@acme/plugin",
+                &hints,
+                test_evidence_refs(),
+                1_001,
+                "behavior",
+            )
+            .unwrap();
+        assert_eq!(marked.user_facing_risk_assessment.level, RiskLevel::High);
+        apply_osv(&mut registry, &["OSV-1", "OSV-2", "OSV-3"], false, 1_002);
+        let clean = apply_osv(&mut registry, &[], true, 1_003);
+        assert_eq!(clean.user_facing_risk_assessment.level, RiskLevel::High);
+        assert_eq!(clean.camouflage_hints, marked.camouflage_hints);
+        apply_osv(&mut registry, &["OSV-1"], false, 1_004);
+        let changed = registry
+            .mark_camouflage_suspected(
+                "npm:@acme/plugin",
+                &hints,
+                test_evidence_refs(),
+                1_005,
+                "new-behavior",
+            )
+            .unwrap();
+        assert!(changed.osv_risk_baseline.is_none());
+        let retained = apply_osv(&mut registry, &[], true, 1_006);
+        assert_eq!(retained.user_facing_risk_assessment, changed.user_facing_risk_assessment);
+        assert_eq!(retained.camouflage_hints, changed.camouflage_hints);
+    }
+
+    #[test]
+    fn authenticated_osv_clearance_keeps_current_quarantine_and_revocation_floors() {
+        for revoked in [false, true] {
+            let mut registry = TrustCardRegistry::default();
+            registry.create(sample_input(), 1_000, "initial").unwrap();
+            apply_osv(&mut registry, &["OSV-1"], false, 1_001);
+            registry
+                .set_quarantine_source(
+                    "npm:@acme/plugin",
+                    QuarantineSource::Local,
+                    true,
+                    1_002,
+                    "contain",
+                )
+                .unwrap();
+            if revoked {
+                registry.update("npm:@acme/plugin", revoke_mutation(), 1_003, "revoke").unwrap();
+            }
+            let clean = apply_osv(&mut registry, &[], true, 1_004);
+            assert!(clean.active_quarantine);
+            assert!(clean.effective_quarantine_sources().contains(&QuarantineSource::Local));
+            assert_eq!(clean.reputation_trend, ReputationTrend::Declining);
+            assert_eq!(
+                clean.user_facing_risk_assessment.level,
+                if revoked { RiskLevel::Critical } else { RiskLevel::High }
+            );
+            assert_eq!(
+                matches!(clean.revocation_status, RevocationStatus::Revoked { .. }),
+                revoked
+            );
+            verify_card_signature(&clean, DEFAULT_REGISTRY_KEY).unwrap();
+        }
+    }
 
     fn artifact_match_card() -> TrustCard {
         TrustCardRegistry::default()
@@ -7897,6 +8467,7 @@ mod tests {
                 summary: "Well-maintained security tool with verified provenance".to_string(),
             },
             last_verified_timestamp: "2026-04-21T12:00:00Z".to_string(),
+            osv_risk_baseline: None,
             audit_history: vec![
                 AuditRecord {
                     timestamp: "2026-04-21T00:00:00Z".to_string(),

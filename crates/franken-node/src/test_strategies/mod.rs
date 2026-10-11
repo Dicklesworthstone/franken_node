@@ -594,6 +594,7 @@ pub fn trust_cards() -> BoxedStrategy<TrustCard> {
                 dependency_trust_summary,
                 last_verified_timestamp,
                 user_facing_risk_assessment,
+                osv_risk_baseline: None,
                 audit_history,
                 derivation_evidence,
                 camouflage_hints: Vec::new(),

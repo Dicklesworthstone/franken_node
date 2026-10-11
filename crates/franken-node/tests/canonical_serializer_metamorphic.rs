@@ -195,6 +195,7 @@ impl ArbitraryTrustCardData {
             }],
             last_verified_timestamp: input.last_verified_timestamp,
             user_facing_risk_assessment: input.user_facing_risk_assessment,
+            osv_risk_baseline: None,
             audit_history: Vec::new(),
             derivation_evidence: None,
             camouflage_hints: Vec::new(),

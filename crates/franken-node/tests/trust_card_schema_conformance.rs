@@ -265,6 +265,7 @@ fn create_minimal_trust_card() -> TrustCard {
             level: RiskLevel::Low,
             summary: "Minimal risk profile".to_string(),
         },
+        osv_risk_baseline: None,
         audit_history: vec![],
         derivation_evidence: None,
         camouflage_hints: Vec::new(),

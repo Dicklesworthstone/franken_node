@@ -16234,6 +16234,11 @@ mod trust_scan_tests {
             cache_ttl_secs: 60,
             trust_config: config::Config::for_profile(Profile::Balanced).trust,
         };
+        let initial = state
+            .registry
+            .read("npm:@acme/auth-guard", now_secs, "initial-baseline")
+            .unwrap()
+            .unwrap();
 
         let first_report =
             refresh_trust_sync_audit_with(&mut state, now_secs + 120, true, |name, _| match name {
@@ -16271,9 +16276,78 @@ mod trust_scan_tests {
             .expect("auth guard card");
         assert_eq!(auth_guard.user_facing_risk_assessment.level, RiskLevel::Low);
         assert_eq!(
-            auth_guard.user_facing_risk_assessment.summary,
-            "No known OSV vulnerabilities from latest refresh"
+            auth_guard.user_facing_risk_assessment,
+            initial.user_facing_risk_assessment
         );
+    }
+
+    #[test]
+    fn combined_scan_after_osv_clearance_retains_independent_risk_and_reputation() {
+        use supply_chain::trust_card::OsvRiskRefreshOutcome;
+
+        let mut registry = supply_chain::trust_card::fixture_registry(1_000).unwrap();
+        let extension = "npm:@acme/auth-guard";
+        registry
+            .update(
+                extension,
+                TrustCardMutation {
+                    certification_level: None,
+                    revocation_status: None,
+                    active_quarantine: None,
+                    reputation_score_basis_points: Some(400),
+                    reputation_trend: Some(ReputationTrend::Declining),
+                    user_facing_risk_assessment: Some(RiskAssessment {
+                        level: RiskLevel::High,
+                        summary: "independent publisher finding".to_owned(),
+                    }),
+                    last_verified_timestamp: None,
+                    evidence_refs: None,
+                },
+                1_001,
+                "independent-high",
+            )
+            .unwrap();
+        registry
+            .refresh_osv_risk(
+                extension,
+                &["OSV-1".to_owned(), "OSV-2".to_owned(), "OSV-3".to_owned()],
+                false,
+                1_002,
+                "vulnerable",
+            )
+            .unwrap();
+        let restored = match registry
+            .refresh_osv_risk(extension, &[], true, 1_003, "authenticated-clean")
+            .unwrap()
+        {
+            OsvRiskRefreshOutcome::Updated(card) => card,
+            OsvRiskRefreshOutcome::ClearanceRefused => panic!("exact-version clearance"),
+        };
+        let mut input = TrustCardInput {
+            extension: restored.extension.clone(),
+            publisher: restored.publisher.clone(),
+            certification_level: restored.certification_level,
+            capability_declarations: restored.capability_declarations.clone(),
+            behavioral_profile: restored.behavioral_profile.clone(),
+            revocation_status: restored.revocation_status.clone(),
+            provenance_summary: restored.provenance_summary.clone(),
+            reputation_score_basis_points: 950,
+            reputation_trend: ReputationTrend::Improving,
+            active_quarantine: restored.active_quarantine,
+            dependency_trust_summary: restored.dependency_trust_summary.clone(),
+            last_verified_timestamp: restored.last_verified_timestamp.clone(),
+            user_facing_risk_assessment: RiskAssessment {
+                level: RiskLevel::Low,
+                summary: "fresh metadata has no additional findings".to_owned(),
+            },
+            evidence_refs: restored.derivation_evidence.as_ref().unwrap().evidence_refs.clone(),
+        };
+        retain_trust_scan_risk_floor(&mut input, &restored);
+        let scanned = registry.refresh_from_scan(input, false, 1_004, "combined-scan").unwrap();
+        assert_eq!(scanned.user_facing_risk_assessment.level, RiskLevel::High);
+        assert_eq!(scanned.user_facing_risk_assessment, restored.user_facing_risk_assessment);
+        assert_eq!(scanned.reputation_score_basis_points, 400);
+        assert_eq!(scanned.reputation_trend, ReputationTrend::Declining);
     }
 
     #[test]
@@ -16318,7 +16392,7 @@ mod trust_scan_tests {
             second_report
                 .warnings
                 .iter()
-                .any(|warning| warning.contains("unauthenticated") && warning.contains("lower"))
+                .any(|warning| warning.contains("authenticated") && warning.contains("clear"))
         );
 
         let cards = state
@@ -20837,6 +20911,16 @@ fn trust_scan_refresh_refusal(
     None
 }
 
+fn retain_trust_scan_risk_floor(input: &mut TrustCardInput, retained: &TrustCard) {
+    if input.user_facing_risk_assessment.level < retained.user_facing_risk_assessment.level {
+        input.user_facing_risk_assessment = retained.user_facing_risk_assessment.clone();
+    }
+    input.reputation_score_basis_points = input
+        .reputation_score_basis_points
+        .min(retained.reputation_score_basis_points);
+    input.reputation_trend = input.reputation_trend.max(retained.reputation_trend);
+}
+
 fn build_trust_scan_item(
     dependency: &RunPackageDependency,
     card: &TrustCard,
@@ -21016,46 +21100,193 @@ fn run_trust_scan(
         let typosquat_warning =
             supply_chain::typosquat::detect_typosquat(&dependency.dependency_name)
                 .map(|finding| format!("{}: {}", dependency.extension_id, finding.describe()));
-        let input = build_trust_scan_card_input(
+        // A new card records independent scan risk before applying its OSV
+        // overlay, so later vulnerability clearance cannot erase that baseline.
+        let empty_audit = TrustScanAuditMetadata::default();
+        let input_audit = if existing.is_some() {
+            &audit_metadata
+        } else {
+            &empty_audit
+        };
+        let mut input = build_trust_scan_card_input(
             dependency,
             lockfile_entry,
             &deep_metadata,
-            &audit_metadata,
+            input_audit,
             now_secs,
         );
-        let (card, status) = if let Some(existing) = existing {
-            if let Some(reason) = trust_scan_refresh_refusal(
-                &existing,
-                &input,
-                deep_fetched || audit_fetched,
-                audit_fetched && audit_metadata.risk_lowering_authenticated && !ambiguous_versions,
-                refresh,
-            ) {
-                warnings.push(format!(
-                    "{}: existing card not refreshed: {reason}",
-                    dependency.extension_id
-                ));
-                skipped_existing = skipped_existing.saturating_add(1);
-                items.push(build_trust_scan_item(
-                    dependency,
+        let (card, status) = if let Some(mut existing) = existing {
+            let independent = build_trust_scan_card_input(
+                dependency,
+                lockfile_entry,
+                &deep_metadata,
+                &empty_audit,
+                now_secs,
+            );
+            let retained_risk = existing.osv_risk_baseline.as_ref().map_or(
+                existing.user_facing_risk_assessment.level,
+                |baseline| baseline.risk_assessment.level,
+            );
+            let same_artifact = !ambiguous_versions
+                && dependency.lockfile_metadata.resolved_version()
+                    == Some(existing.extension.version.as_str())
+                && existing.matches_scan_artifact(&input);
+            let authenticated_osv_clearance = audit_fetched
+                && audit_metadata.vulnerability_ids.is_empty()
+                && audit_metadata.risk_lowering_authenticated
+                && same_artifact;
+            let audit_only_same_artifact = !deep
+                && !refresh
+                && audit_fetched
+                && same_artifact
+                && independent.user_facing_risk_assessment.level <= retained_risk;
+            let retain_overlay_with_fresh_findings = !refresh
+                && audit_fetched
+                && same_artifact
+                && existing.osv_risk_baseline.is_some()
+                && !audit_metadata.vulnerability_ids.is_empty();
+            if audit_only_same_artifact || retain_overlay_with_fresh_findings {
+                if !audit_only_same_artifact {
+                    warnings.push(format!(
+                        "{}: fresh OSV findings applied; combined metadata reassessment deferred until source-specific clearance or explicit artifact refresh",
+                        dependency.extension_id
+                    ));
+                }
+                let outcome = state
+                    .registry
+                    .refresh_osv_risk(
+                        &dependency.extension_id,
+                        &audit_metadata.vulnerability_ids,
+                        audit_metadata.risk_lowering_authenticated,
+                        now_secs,
+                        "trace-cli-trust-scan-osv",
+                    )
+                    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+                match outcome {
+                    supply_chain::trust_card::OsvRiskRefreshOutcome::Updated(card) => {
+                        refreshed_cards = refreshed_cards.saturating_add(1);
+                        (card, TrustScanItemStatus::Refreshed)
+                    }
+                    supply_chain::trust_card::OsvRiskRefreshOutcome::ClearanceRefused => {
+                        warnings.push(format!(
+                            "{}: existing card not refreshed: OSV clearance needs complete authenticated exact-version evidence",
+                            dependency.extension_id
+                        ));
+                        skipped_existing = skipped_existing.saturating_add(1);
+                        items.push(build_trust_scan_item(
+                            dependency,
+                            &existing,
+                            TrustScanItemStatus::SkippedExisting,
+                            0,
+                            None,
+                        ));
+                        continue;
+                    }
+                }
+            } else {
+                let active_osv_overlay = existing.osv_risk_baseline.is_some();
+                // Equal aggregate severity does not authorize removing an
+                // OSV contribution or its reputation penalty. Explicit
+                // artifact repair instead retains those as aggregate floors.
+                if active_osv_overlay
+                    && !refresh
+                    && !authenticated_osv_clearance
+                {
+                    warnings.push(format!(
+                        "{}: existing card not refreshed: active OSV evidence needs a complete authenticated clean answer for the same captured artifact before combined reassessment; use --refresh for explicit artifact repair",
+                        dependency.extension_id
+                    ));
+                    skipped_existing = skipped_existing.saturating_add(1);
+                    items.push(build_trust_scan_item(
+                        dependency,
+                        &existing,
+                        TrustScanItemStatus::SkippedExisting,
+                        0,
+                        None,
+                    ));
+                    continue;
+                }
+                let cleared_osv_overlay = active_osv_overlay && authenticated_osv_clearance;
+                if cleared_osv_overlay {
+                    existing = match state
+                        .registry
+                        .refresh_osv_risk(
+                            &dependency.extension_id,
+                            &[],
+                            true,
+                            now_secs,
+                            "trace-cli-trust-scan-osv",
+                        )
+                        .map_err(|err| anyhow::anyhow!(err.to_string()))?
+                    {
+                        supply_chain::trust_card::OsvRiskRefreshOutcome::Updated(card) => card,
+                        supply_chain::trust_card::OsvRiskRefreshOutcome::ClearanceRefused => {
+                            anyhow::bail!("authenticated same-artifact OSV clearance was refused")
+                        }
+                    };
+                    // Source-specific clearance restores independent risk.
+                    // A combined scan cannot immediately erase that retained
+                    // source or improve its reputation under OSV authority.
+                    retain_trust_scan_risk_floor(&mut input, &existing);
+                }
+                if let Some(reason) = trust_scan_refresh_refusal(
                     &existing,
-                    TrustScanItemStatus::SkippedExisting,
-                    0,
-                    None,
-                ));
-                continue;
+                    &input,
+                    deep_fetched || audit_fetched,
+                    audit_fetched
+                        && audit_metadata.risk_lowering_authenticated
+                        && !ambiguous_versions,
+                    refresh,
+                ) {
+                    if cleared_osv_overlay {
+                        anyhow::bail!(
+                            "scan reassessment after OSV clearance refused: {reason}; no card updates were committed"
+                        );
+                    }
+                    warnings.push(format!(
+                        "{}: existing card not refreshed: {reason}",
+                        dependency.extension_id
+                    ));
+                    skipped_existing = skipped_existing.saturating_add(1);
+                    items.push(build_trust_scan_item(
+                        dependency,
+                        &existing,
+                        TrustScanItemStatus::SkippedExisting,
+                        0,
+                        None,
+                    ));
+                    continue;
+                }
+                let card = state
+                    .registry
+                    .refresh_from_scan(input, refresh, now_secs, "trace-cli-trust-scan")
+                    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+                refreshed_cards = refreshed_cards.saturating_add(1);
+                (card, TrustScanItemStatus::Refreshed)
             }
-            let card = state
-                .registry
-                .refresh_from_scan(input, refresh, now_secs, "trace-cli-trust-scan")
-                .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-            refreshed_cards = refreshed_cards.saturating_add(1);
-            (card, TrustScanItemStatus::Refreshed)
         } else {
-            let card = state
+            let mut card = state
                 .registry
                 .create(input, now_secs, "trace-cli-trust-scan")
                 .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+            if audit_fetched && !audit_metadata.vulnerability_ids.is_empty() {
+                let outcome = state
+                    .registry
+                    .refresh_osv_risk(
+                        &dependency.extension_id,
+                        &audit_metadata.vulnerability_ids,
+                        audit_metadata.risk_lowering_authenticated && !ambiguous_versions,
+                        now_secs,
+                        "trace-cli-trust-scan-osv",
+                    )
+                    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+                card = match outcome {
+                    supply_chain::trust_card::OsvRiskRefreshOutcome::Updated(card) => card,
+                    supply_chain::trust_card::OsvRiskRefreshOutcome::ClearanceRefused => {
+                        anyhow::bail!("nonempty OSV findings unexpectedly requested clearance")
+                    }
+                };
+            }
             created_cards = created_cards.saturating_add(1);
             (card, TrustScanItemStatus::Created)
         };
@@ -25567,65 +25798,6 @@ fn trust_sync_card_needs_network_refresh(
         .unwrap_or(true)
 }
 
-fn trust_sync_summary_is_from_osv(summary: &str) -> bool {
-    summary.starts_with("OSV refresh reported ")
-}
-
-fn trust_sync_clean_risk_assessment(card: &TrustCard) -> RiskAssessment {
-    if !trust_sync_summary_is_from_osv(&card.user_facing_risk_assessment.summary) {
-        return card.user_facing_risk_assessment.clone();
-    }
-
-    let clean = match (&card.revocation_status, card.active_quarantine) {
-        (RevocationStatus::Revoked { reason, .. }, _) => RiskAssessment {
-            level: RiskLevel::Critical,
-            summary: format!("Revoked: {reason}"),
-        },
-        (_, true) => RiskAssessment {
-            level: RiskLevel::High,
-            summary: "Active quarantine remains in effect after clean OSV refresh".to_string(),
-        },
-        (_, false) if card.provenance_summary.artifact_hashes.is_empty() => RiskAssessment {
-            level: RiskLevel::Medium,
-            summary: "No known OSV vulnerabilities from latest refresh, but artifact integrity hashes are missing".to_string(),
-        },
-        _ => RiskAssessment {
-            level: RiskLevel::Low,
-            summary: "No known OSV vulnerabilities from latest refresh".to_string(),
-        },
-    };
-    // OSV clears vulnerability evidence only. A clean answer cannot discharge
-    // independently verified behavioral findings retained on this card.
-    card.risk_with_camouflage_floor(clean)
-}
-
-fn trust_sync_clean_reputation_trend(card: &TrustCard) -> ReputationTrend {
-    if !trust_sync_summary_is_from_osv(&card.user_facing_risk_assessment.summary) {
-        return card.reputation_trend;
-    }
-
-    if matches!(card.revocation_status, RevocationStatus::Revoked { .. }) || card.active_quarantine
-    {
-        ReputationTrend::Declining
-    } else {
-        ReputationTrend::Stable
-    }
-}
-
-fn trust_sync_clean_reputation_score(card: &TrustCard, risk_assessment: &RiskAssessment) -> u16 {
-    if !trust_sync_summary_is_from_osv(&card.user_facing_risk_assessment.summary) {
-        return card.reputation_score_basis_points;
-    }
-
-    let floor = match risk_assessment.level {
-        RiskLevel::Low => 620,
-        RiskLevel::Medium => 440,
-        RiskLevel::High => 220,
-        RiskLevel::Critical => 80,
-    };
-    card.reputation_score_basis_points.max(floor)
-}
-
 fn refresh_trust_sync_audit_with<F>(
     state: &mut TrustCardCliRegistryState,
     now_secs: u64,
@@ -25635,6 +25807,8 @@ fn refresh_trust_sync_audit_with<F>(
 where
     F: FnMut(&str, Option<&str>) -> Result<TrustScanAuditMetadata>,
 {
+    use supply_chain::trust_card::OsvRiskRefreshOutcome;
+
     let cards = match state.registry.list(
         &TrustCardListFilter::empty(),
         "trace-cli-trust-sync-refresh",
@@ -25652,7 +25826,6 @@ where
         }
     };
 
-    let now_rfc3339 = rfc3339_timestamp_from_secs(now_secs);
     let mut report = TrustSyncAuditRefreshReport::default();
 
     for card in cards {
@@ -25665,84 +25838,34 @@ where
 
         match fetcher(package_name, Some(card.extension.version.as_str())) {
             Ok(audit_metadata) => {
-                let mutation = if audit_metadata.vulnerability_ids.is_empty() {
-                    let risk_assessment = trust_sync_clean_risk_assessment(&card);
-                    if risk_assessment.level < card.user_facing_risk_assessment.level
-                        && !audit_metadata.risk_lowering_authenticated
-                    {
-                        report.risk_lowering_rejections =
-                            report.risk_lowering_rejections.saturating_add(1);
-                        report.warnings.push(format!(
-                            "{}@{}: unauthenticated OSV refresh cannot lower risk from {:?} to {:?}",
-                            package_name,
-                            card.extension.version,
-                            card.user_facing_risk_assessment.level,
-                            risk_assessment.level
-                        ));
-                        continue;
-                    }
-                    TrustCardMutation {
-                        certification_level: None,
-                        revocation_status: None,
-                        active_quarantine: None,
-                        reputation_score_basis_points: Some(trust_sync_clean_reputation_score(
-                            &card,
-                            &risk_assessment,
-                        )),
-                        reputation_trend: Some(trust_sync_clean_reputation_trend(&card)),
-                        user_facing_risk_assessment: Some(risk_assessment),
-                        last_verified_timestamp: Some(now_rfc3339.clone()),
-                        evidence_refs: None,
-                    }
-                } else {
-                    let computed_risk = if audit_metadata.vulnerability_ids.len() >= 3 {
-                        RiskLevel::Critical
-                    } else {
-                        RiskLevel::High
-                    };
-                    let risk_level = card.user_facing_risk_assessment.level.max(computed_risk);
-                    let vulnerability_summary = format!(
-                        "OSV refresh reported {} vulnerability record(s): {}",
-                        audit_metadata.vulnerability_ids.len(),
-                        audit_metadata.vulnerability_ids.join(", ")
-                    );
-                    let vulnerability_penalty =
-                        (audit_metadata.vulnerability_ids.len().min(5) as u16).saturating_mul(90);
-                    let reputation_score_basis_points = card
-                        .reputation_score_basis_points
-                        .saturating_sub(vulnerability_penalty);
-
-                    TrustCardMutation {
-                        certification_level: None,
-                        revocation_status: None,
-                        active_quarantine: None,
-                        reputation_score_basis_points: Some(reputation_score_basis_points),
-                        reputation_trend: Some(ReputationTrend::Declining),
-                        user_facing_risk_assessment: Some(RiskAssessment {
-                            level: risk_level,
-                            summary: vulnerability_summary,
-                        }),
-                        last_verified_timestamp: Some(now_rfc3339.clone()),
-                        evidence_refs: None,
-                    }
-                };
-
-                report.refreshed_count = report.refreshed_count.saturating_add(1);
-                report.vulnerabilities_found = report
-                    .vulnerabilities_found
-                    .saturating_add(audit_metadata.vulnerability_ids.len());
-
-                if let Err(err) = state.registry.update(
+                match state.registry.refresh_osv_risk(
                     &card.extension.extension_id,
-                    mutation,
+                    &audit_metadata.vulnerability_ids,
+                    audit_metadata.risk_lowering_authenticated,
                     now_secs,
                     "trace-cli-trust-sync-refresh",
                 ) {
-                    report.network_errors = report.network_errors.saturating_add(1);
-                    report.warnings.push(format!(
-                        "{}: failed applying OSV refresh result: {}",
-                        card.extension.extension_id, err
-                    ));
+                    Ok(OsvRiskRefreshOutcome::Updated(_)) => {
+                        report.refreshed_count = report.refreshed_count.saturating_add(1);
+                        report.vulnerabilities_found = report
+                            .vulnerabilities_found
+                            .saturating_add(audit_metadata.vulnerability_ids.len());
+                    }
+                    Ok(OsvRiskRefreshOutcome::ClearanceRefused) => {
+                        report.risk_lowering_rejections =
+                            report.risk_lowering_rejections.saturating_add(1);
+                        report.warnings.push(format!(
+                            "{}@{}: OSV refresh cannot clear active vulnerability evidence without complete authenticated exact-version evidence, including when independent risk masks its level",
+                            package_name, card.extension.version
+                        ));
+                    }
+                    Err(err) => {
+                        report.network_errors = report.network_errors.saturating_add(1);
+                        report.warnings.push(format!(
+                            "{}: failed applying OSV refresh result: {}",
+                            card.extension.extension_id, err
+                        ));
+                    }
                 }
             }
             Err(err) => {

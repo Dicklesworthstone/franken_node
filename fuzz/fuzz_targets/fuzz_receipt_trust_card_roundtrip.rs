@@ -177,6 +177,7 @@ fn trust_card_from_input(input: &FuzzInput) -> TrustCard {
         reputation_score_basis_points: u16::from(input.confidence).saturating_mul(39).min(10_000),
         reputation_trend: input.reputation.into(),
         active_quarantine: input.selector % 11 == 0,
+        quarantine_sources: Default::default(),
         dependency_trust_summary: vec![DependencyTrustStatus {
             dependency_id: format!("npm:dep-{}", input.selector),
             trust_level: "verified".to_string(),
@@ -186,6 +187,7 @@ fn trust_card_from_input(input: &FuzzInput) -> TrustCard {
             level: input.risk.into(),
             summary: bounded_text(&input.reason),
         },
+        osv_risk_baseline: None,
         audit_history: vec![AuditRecord {
             timestamp: "2026-04-21T00:00:00Z".to_string(),
             event_code: "FUZZ_TRUST_CARD_ROUNDTRIP".to_string(),

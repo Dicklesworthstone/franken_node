@@ -71,6 +71,7 @@ fn base_trust_card() -> TrustCard {
             level: RiskLevel::Low,
             summary: "Verified provenance with bounded network-only capabilities.".to_string(),
         },
+        osv_risk_baseline: None,
         audit_history: vec![AuditRecord {
             timestamp: "2026-04-24T12:34:56Z".to_string(),
             event_code: "TRUST_CARD_CREATED".to_string(),

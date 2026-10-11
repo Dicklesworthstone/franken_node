@@ -57,6 +57,7 @@ fn test_trust_card_canonical_json_snapshot() {
             level: RiskLevel::Low,
             summary: "low user-facing risk".to_string(),
         },
+        osv_risk_baseline: None,
         audit_history: vec![],
         derivation_evidence: Some(DerivationMetadata {
             evidence_refs: vec![],

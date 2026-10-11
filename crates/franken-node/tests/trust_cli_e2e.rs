@@ -19,7 +19,7 @@ use frankenengine_node::ops::engine_dispatcher::{
 };
 use frankenengine_node::security::remote_cap::{CapabilityProvider, RemoteOperation, RemoteScope};
 use frankenengine_node::supply_chain::trust_card::{
-    QuarantineSource, SnapshotSourceContext, TrustCardListFilter, TrustCardMutation,
+    QuarantineSource, SnapshotSourceContext, TrustCard, TrustCardListFilter, TrustCardMutation,
     TrustCardRegistry, fixture_registry,
 };
 use frankenengine_node::supply_chain::trust_card_registry_store::TrustCardRegistryStore;
@@ -3879,7 +3879,7 @@ fn trust_sync_rejects_unauthenticated_clean_refresh_that_lowers_risk() {
     let stdout = String::from_utf8_lossy(&clean.stdout);
     assert!(stdout.contains("risk_lowering_rejections=1"));
     let stderr = String::from_utf8_lossy(&clean.stderr);
-    assert!(stderr.contains("unauthenticated OSV refresh cannot lower risk"));
+    assert!(stderr.contains("OSV refresh cannot clear active vulnerability evidence"));
     assert!(stderr.contains("@acme/auth-guard"));
 
     let exported = run_cli_in_workspace(
@@ -4025,12 +4025,12 @@ fn trust_sync_keeps_signed_camouflage_risk_after_vulnerable_then_clean_refresh()
     );
     assert_eq!(clean_requests.lock().expect("clean requests").len(), 2);
     let clean_report = parse_json_stdout(&clean, "clean refresh report");
-    assert_eq!(clean_report["refreshed"], 2);
+    assert_eq!(clean_report["refreshed"], 1);
     assert_eq!(clean_report["vulnerabilities"], 0);
-    // A loopback collector cannot authorize lowering risk. The correct clean
-    // refresh preserves the independent behavioral finding, so no lowering
-    // is proposed or rejected and the signed card still advances.
-    assert_eq!(clean_report["risk_lowering_rejections"], 0);
+    // Independent Critical risk masks the OSV overlay's level, but does not
+    // authorize removing that signed source or its penalty. The companion
+    // has no OSV overlay and may still record the complete clean query.
+    assert_eq!(clean_report["risk_lowering_rejections"], 1);
     let mut reloaded = load_registry();
     let after_clean = reloaded
         .read(EXTENSION, now_secs, "trace-read-after-clean-cve")
@@ -4040,12 +4040,11 @@ fn trust_sync_keeps_signed_camouflage_risk_after_vulnerable_then_clean_refresh()
         .expect("clean refresh card signature");
     assert_eq!(
         after_clean.trust_card_version,
-        after_vulnerable.trust_card_version + 1
+        after_vulnerable.trust_card_version
     );
-    assert_eq!(
-        after_clean.previous_version_hash.as_deref(),
-        Some(after_vulnerable.card_hash.as_str())
-    );
+    assert_eq!(after_clean.card_hash, after_vulnerable.card_hash);
+    assert_eq!(after_clean.osv_risk_baseline, after_vulnerable.osv_risk_baseline);
+    assert!(after_clean.osv_risk_baseline.is_some());
     assert_eq!(after_clean.camouflage_hints, marked.camouflage_hints);
     assert_eq!(
         after_clean.user_facing_risk_assessment.level,
@@ -4837,10 +4836,16 @@ fn trust_scan_is_idempotent() {
 }
 
 fn trust_scan_audit(workspace: &Path, osv_url: &str) -> Output {
+    trust_scan_audit_with_options(workspace, osv_url, &[])
+}
+
+fn trust_scan_audit_with_options(workspace: &Path, osv_url: &str, options: &[&str]) -> Output {
     let token_path = issue_osv_fixture_remotecap(workspace, osv_url);
+    let mut args = vec!["trust", "scan", ".", "--audit", "--json"];
+    args.extend_from_slice(options);
     run_cli_in_workspace_with_env(
         workspace,
-        &["trust", "scan", ".", "--audit", "--json"],
+        &args,
         &[
             ("FRANKEN_NODE_OSV_QUERY_URL", osv_url),
             ("FRANKEN_NODE_REMOTECAP_KEY", FIXTURE_REMOTECAP_KEY),
@@ -4850,6 +4855,201 @@ fn trust_scan_audit(workspace: &Path, osv_url: &str) -> Output {
             ),
         ],
     )
+}
+
+fn write_osv_scan_artifact(workspace: &Path, package: &str, version: &str, byte: Option<u8>) {
+    let mut artifact = serde_json::json!({ "name": package, "version": version });
+    if let Some(byte) = byte {
+        artifact["integrity"] =
+            Value::String(format!("sha256-{}", BASE64_STANDARD.encode([byte; 32])));
+    }
+    let mut packages = serde_json::Map::new();
+    packages.insert(String::new(), serde_json::json!({}));
+    packages.insert(format!("node_modules/{package}"), artifact);
+    fs::write(
+        workspace.join("package-lock.json"),
+        serde_json::to_vec(&serde_json::json!({ "lockfileVersion": 3, "packages": packages }))
+            .unwrap(),
+    )
+    .unwrap();
+}
+
+fn attributed_osv_scan_workspace(package: &str, byte: Option<u8>) -> tempfile::TempDir {
+    let workspace = tempfile::tempdir().expect("attributed OSV scan workspace");
+    fs::write(
+        workspace.path().join("franken_node.toml"),
+        explicit_fixture_registry_config("balanced"),
+    )
+    .unwrap();
+    write_pipeline_package_manifest(workspace.path(), &[(package, "*")], &[], &[]);
+    write_osv_scan_artifact(workspace.path(), package, "1.0.0", byte);
+    workspace
+}
+
+fn export_osv_scan_card(workspace: &Path, extension: &str) -> TrustCard {
+    let output = run_cli_in_workspace(
+        workspace,
+        &["trust-card", "export", extension, "--json"],
+    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    serde_json::from_value(parse_json_stdout(&output, "export attributed OSV card")).unwrap()
+}
+
+#[test]
+fn audited_scan_retains_attribution_across_repeats_and_authenticated_clearance() {
+    use frankenengine_node::supply_chain::trust_card::{
+        OsvRiskRefreshOutcome, RiskLevel, verify_card_signature,
+    };
+    use frankenengine_node::supply_chain::trust_card_registry_store::registry_snapshot_path;
+
+    for package in ["react", "lodahs"] {
+        let workspace = attributed_osv_scan_workspace(package, Some(0xaa));
+        let extension = format!("npm:{package}");
+        let (url, requests, server) = spawn_osv_static_response_server(
+            1,
+            200,
+            "OK",
+            r#"{"vulns":[{"id":"OSV-source-attribution-1"}]}"#,
+        );
+        let created = trust_scan_audit(workspace.path(), &url);
+        server.join().unwrap();
+        assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        let report = parse_json_stdout(&created, "initial audited scan");
+        assert_eq!(report["created_cards"], 1);
+        assert_eq!(report["refreshed_cards"], 0);
+        assert_eq!(report["items"][0]["vulnerability_count"], 1);
+        let first = export_osv_scan_card(workspace.path(), &extension);
+        verify_card_signature(&first, FIXTURE_REGISTRY_KEY).unwrap();
+        // One package creates a signed independent baseline and then its
+        // signed OSV overlay before the command persists the registry.
+        assert_eq!(first.trust_card_version, 2);
+        let baseline = first.osv_risk_baseline.clone().expect("signed OSV attribution");
+        assert_eq!(
+            baseline.risk_assessment.level,
+            if package == "lodahs" { RiskLevel::High } else { RiskLevel::Low }
+        );
+        if package == "lodahs" {
+            assert!(baseline.risk_assessment.summary.contains("typosquat"));
+            assert!(baseline.risk_assessment.summary.contains("lodash"));
+        }
+        assert_eq!(
+            first.reputation_score_basis_points,
+            baseline.reputation_score_basis_points.saturating_sub(90)
+        );
+
+        let (url, _, server) = spawn_osv_static_response_server(
+            1,
+            200,
+            "OK",
+            r#"{"vulns":[{"id":"OSV-source-attribution-1"}]}"#,
+        );
+        let repeated = trust_scan_audit(workspace.path(), &url);
+        server.join().unwrap();
+        assert!(repeated.status.success(), "{}", String::from_utf8_lossy(&repeated.stderr));
+        assert_eq!(parse_json_stdout(&repeated, "repeat audited scan")["refreshed_cards"], 1);
+        let retained = export_osv_scan_card(workspace.path(), &extension);
+        assert_eq!(retained.osv_risk_baseline, first.osv_risk_baseline);
+        assert_eq!(retained.reputation_score_basis_points, first.reputation_score_basis_points);
+        assert_eq!(retained.previous_version_hash.as_deref(), Some(first.card_hash.as_str()));
+        assert_eq!(retained.publisher, first.publisher);
+        assert_eq!(retained.behavioral_profile, first.behavioral_profile);
+
+        let (url, _, server) = spawn_osv_static_response_server(1, 200, "OK", r#"{"vulns":[]}"#);
+        let untrusted_clean = trust_scan_audit(workspace.path(), &url);
+        server.join().unwrap();
+        assert!(untrusted_clean.status.success());
+        let report = parse_json_stdout(&untrusted_clean, "unauthenticated masked cleanup");
+        assert_eq!(report["refreshed_cards"], 0);
+        assert_eq!(report["skipped_existing"], 1);
+        assert_eq!(
+            export_osv_scan_card(workspace.path(), &extension).card_hash,
+            retained.card_hash
+        );
+
+        let now_secs = chrono::Utc::now().timestamp() as u64;
+        let path = registry_snapshot_path(workspace.path());
+        let mut config = Config::for_profile(Profile::Balanced);
+        config.trust.registry_signing_key = Some(BASE64_STANDARD.encode(FIXTURE_REGISTRY_KEY));
+        let mut registry = TrustCardRegistry::load_authoritative_state_from_config(
+            &path,
+            &config.trust,
+            now_secs,
+            SnapshotSourceContext::TrustedFile,
+        )
+        .unwrap();
+        // Inject completed authenticated evidence at the shared production
+        // boundary; the loopback endpoint itself never gains clearance authority.
+        let clean = match registry
+            .refresh_osv_risk(&extension, &[], true, now_secs, "authenticated-test-query")
+            .unwrap()
+        {
+            OsvRiskRefreshOutcome::Updated(card) => card,
+            OsvRiskRefreshOutcome::ClearanceRefused => panic!("exact-version clearance"),
+        };
+        registry.persist_authoritative_state(&path).unwrap();
+        let exported = export_osv_scan_card(workspace.path(), &extension);
+        assert_eq!(exported.card_hash, clean.card_hash);
+        assert_eq!(exported.user_facing_risk_assessment, baseline.risk_assessment);
+        assert_eq!(exported.reputation_score_basis_points, baseline.reputation_score_basis_points);
+        assert_eq!(exported.reputation_trend, baseline.reputation_trend);
+        assert!(exported.osv_risk_baseline.is_none());
+        verify_card_signature(&exported, FIXTURE_REGISTRY_KEY).unwrap();
+    }
+}
+
+#[test]
+fn incomplete_artifact_scan_cannot_clear_masked_osv_and_explicit_repair_retains_penalty() {
+    use frankenengine_node::supply_chain::trust_card::{
+        ReputationTrend, RiskLevel, verify_card_signature,
+    };
+
+    let workspace = attributed_osv_scan_workspace("lodahs", None);
+    let extension = "npm:lodahs";
+    let (url, _, server) = spawn_osv_static_response_server(
+        1,
+        200,
+        "OK",
+        r#"{"vulns":[{"id":"OSV-masked-overlay-1"}]}"#,
+    );
+    let created = trust_scan_audit(workspace.path(), &url);
+    server.join().unwrap();
+    assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+    let vulnerable = export_osv_scan_card(workspace.path(), extension);
+    assert_eq!(vulnerable.user_facing_risk_assessment.level, RiskLevel::High);
+    let baseline = vulnerable.osv_risk_baseline.as_ref().unwrap();
+    assert_eq!(baseline.risk_assessment.level, RiskLevel::High);
+    assert!(vulnerable.reputation_score_basis_points < baseline.reputation_score_basis_points);
+
+    let (url, _, server) = spawn_osv_static_response_server(1, 200, "OK", r#"{"vulns":[]}"#);
+    let clean = trust_scan_audit(workspace.path(), &url);
+    server.join().unwrap();
+    assert!(clean.status.success());
+    let report = parse_json_stdout(&clean, "incomplete artifact cannot discard source");
+    assert_eq!(report["refreshed_cards"], 0);
+    assert_eq!(report["skipped_existing"], 1);
+    assert!(report["warnings"].as_array().unwrap().iter().any(|warning| {
+        warning.as_str().unwrap().contains("active OSV evidence")
+    }));
+    assert_eq!(export_osv_scan_card(workspace.path(), extension).card_hash, vulnerable.card_hash);
+
+    write_osv_scan_artifact(workspace.path(), "lodahs", "2.0.0", Some(0xbb));
+    let (url, requests, server) = spawn_osv_static_response_server(1, 200, "OK", r#"{"vulns":[]}"#);
+    let repaired = trust_scan_audit_with_options(workspace.path(), &url, &["--refresh"]);
+    server.join().unwrap();
+    assert!(repaired.status.success(), "{}", String::from_utf8_lossy(&repaired.stderr));
+    assert_eq!(parse_json_stdout(&repaired, "explicit artifact repair")["refreshed_cards"], 1);
+    let request: Value = serde_json::from_str(&requests.lock().unwrap()[0]).unwrap();
+    assert_eq!(request["version"], "2.0.0");
+    let card = export_osv_scan_card(workspace.path(), extension);
+    assert_eq!(card.extension.version, "2.0.0");
+    assert_eq!(card.user_facing_risk_assessment.level, RiskLevel::High);
+    assert_eq!(card.reputation_score_basis_points, vulnerable.reputation_score_basis_points);
+    assert_eq!(card.reputation_trend, ReputationTrend::Declining);
+    assert!(card.osv_risk_baseline.is_none(), "old artifact cannot grant clearance authority");
+    assert_eq!(card.previous_version_hash.as_deref(), Some(vulnerable.card_hash.as_str()));
+    assert_eq!(card.provenance_summary.artifact_hashes, vec![format!("sha256:{}", "b".repeat(64))]);
+    verify_card_signature(&card, FIXTURE_REGISTRY_KEY).unwrap();
 }
 
 /// bd-reality-20260923-26n9r.15: `init` seeds baseline cards, so a later

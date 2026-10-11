@@ -258,6 +258,7 @@ fn generated_trust_card(mut seed: u64) -> TrustCard {
             },
             summary: format!("Generated risk summary {:016x}", next_seed(&mut seed)),
         },
+        osv_risk_baseline: None,
         audit_history: vec![frankenengine_node::supply_chain::trust_card::AuditRecord {
             timestamp: verified_at,
             event_code: "GENERATED_EQUALITY_CASE".to_string(),

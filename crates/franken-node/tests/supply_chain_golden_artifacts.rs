@@ -136,6 +136,7 @@ fn canonical_trust_card_fixture() -> TrustCard {
             summary: "Well-maintained security tool with verified provenance".to_string(),
         },
         last_verified_timestamp: "2026-04-21T12:00:00Z".to_string(),
+        osv_risk_baseline: None,
         audit_history: vec![
             AuditRecord {
                 timestamp: "2026-04-21T00:00:00Z".to_string(),
