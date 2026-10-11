@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -49,6 +50,19 @@ class TestInstallScript(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
+
+    def test_every_array_expansion_is_bash32_safe(self) -> None:
+        # `curl | bash` on stock macOS runs /bin/bash 3.2, where `set -u` treats
+        # an empty array expanded as "${name[@]}" as unbound (PROXY_ARGS is
+        # empty when no proxy is set), so every expansion must be guarded.
+        special = {"BASH_SOURCE", "BASH_LINENO", "FUNCNAME", "PIPESTATUS", "BASH_REMATCH"}
+        bare = [
+            f"{number}: {line.strip()}"
+            for number, line in enumerate(INSTALL_SCRIPT.read_text().splitlines(), 1)
+            for name in re.findall(r'(?<!\+)"\$\{([A-Za-z_][A-Za-z0-9_]*)\[@\]\}"', line)
+            if name not in special
+        ]
+        self.assertEqual(bare, [], 'use ${name[@]+"${name[@]}"}: bare expansions are unbound on bash 3.2')
 
     def test_detect_platform_linux_x86_64(self) -> None:
         result = run_bash(
