@@ -99,7 +99,7 @@ jobs:
           TOML
           cat > "$tests/lib.rs" <<RUST
           #![forbid(unsafe_code)]
-          pub use verified_primary::migration::{MigrationRewriteAction, MigrationRewriteEntry, MigrationRollbackEntry, MigrationRewriteReport, MigrationValidateReport, run_rewrite, run_validate};
+          pub use verified_primary::migration::{AuditOutputFormat, MigrationCategory, MigrationSeverity, MigrationRewriteAction, MigrationRewriteEntry, MigrationRollbackEntry, MigrationRewriteReport, MigrationValidateReport, dependency_admission, render_audit_report, run_audit, run_one_command_report, run_rewrite, run_validate};
           #[allow(dead_code)]
           #[path = "$source/migration/module_specifiers.rs"]
           mod module_specifiers;
@@ -113,6 +113,9 @@ jobs:
           pub mod rewrite_transaction;
           #[path = "$source/migration/verified_rewrite.rs"]
           pub mod verified_rewrite;
+          #[cfg(test)]
+          #[path = "$source/migration/dependency_admission.rs"]
+          mod dependency_admission_contract_tests;
           RUST
           git rev-parse HEAD > evidence/revision.txt
           rustc +stable --version > evidence/rust-version.txt
@@ -129,6 +132,8 @@ jobs:
           done
           cargo +stable check --manifest-path "$primary/Cargo.toml" --lib 2>&1 | tee evidence/primary-check.log
           cargo +stable test --manifest-path "$tests/Cargo.toml" verified_rewrite:: -- --nocapture --test-threads=2 2>&1 | tee evidence/checked-apply-tests.log
+          cargo +stable test --manifest-path "$tests/Cargo.toml" dependency_admission_contract_tests:: -- --nocapture --test-threads=2 2>&1 | tee evidence/dependency-admission-tests.log
+          cargo +stable test --manifest-path "$tests/Cargo.toml" validation_suite::tests::audited_dependency -- --nocapture --test-threads=2 2>&1 | tee evidence/audited-dependency-execution-tests.log
           cargo +stable test --manifest-path "$tests/Cargo.toml" rewrite_candidate::tests -- --nocapture --test-threads=2 2>&1 | tee evidence/candidate-tests.log
           cargo +stable test --manifest-path "$tests/Cargo.toml" checked_rewrite_cli_tests -- --nocapture 2>&1 | tee evidence/cli-tests.log
           # Whole production libraries are linted. Existing CLI inline tests

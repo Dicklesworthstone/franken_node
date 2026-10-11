@@ -88,6 +88,8 @@ jobs:
           pub mod production_oracle;
           pub mod runtime { pub use crate::production_oracle as nversion_oracle; }
           pub mod migration {
+              #[path = "$source/migration/dependency_admission.rs"]
+              pub mod dependency_admission;
               #[path = "$source/migration/smoke_supervisor.rs"]
               pub mod smoke_supervisor;
               #[path = "$source/migration/validation_suite.rs"]

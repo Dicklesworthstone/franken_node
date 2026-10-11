@@ -35,6 +35,9 @@ pub(crate) mod smoke_supervisor;
 pub mod validation_suite;
 
 #[cfg(target_os = "linux")]
+pub mod dependency_admission;
+
+#[cfg(target_os = "linux")]
 mod rewrite_transaction;
 
 #[cfg(target_os = "linux")]
@@ -215,6 +218,15 @@ pub struct MigrationAuditReport {
     pub generated_at_utc: String,
     pub summary: MigrationAuditSummary,
     pub findings: Vec<MigrationAuditFinding>,
+    /// Captured npm metadata for the selected project and its workspaces.
+    /// Paths are relative to project_path, including a nested selected project.
+    #[cfg(target_os = "linux")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency_admission: Option<dependency_admission::DependencyAdmission>,
+    /// Diagnostic capture/format failure, never permission to execute.
+    #[cfg(target_os = "linux")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency_admission_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
@@ -446,6 +458,12 @@ pub struct MigrationValidateReport {
     pub checks: Vec<MigrationValidationCheck>,
     pub blocking_findings: Vec<MigrationAuditFinding>,
     pub warning_findings: Vec<MigrationAuditFinding>,
+    #[cfg(target_os = "linux")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency_admission: Option<dependency_admission::DependencyAdmission>,
+    #[cfg(target_os = "linux")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency_admission_error: Option<String>,
     /// Captured project tests compared against Node, when present on Linux.
     /// Absent in static-only and single-entrypoint smoke reports.
     #[cfg(target_os = "linux")]
@@ -698,6 +716,13 @@ pub fn run_audit(project_path: &Path) -> anyhow::Result<MigrationAuditReport> {
     summary.risky_scripts = scripts_flagged;
     summary.lockfiles = lockfiles.into_iter().collect();
     append_summary_findings(&summary, engine_gaps, &mut findings);
+    #[cfg(target_os = "linux")]
+    let (dependency_admission, dependency_admission_error) =
+        if summary.package_manifests == 0 {
+            (None, None)
+        } else {
+            audit_project_dependencies(project_path, &mut findings)?
+        };
     sort_and_assign_ids(&mut findings);
 
     Ok(MigrationAuditReport {
@@ -706,7 +731,100 @@ pub fn run_audit(project_path: &Path) -> anyhow::Result<MigrationAuditReport> {
         generated_at_utc: chrono::Utc::now().to_rfc3339(),
         summary,
         findings,
+        #[cfg(target_os = "linux")]
+        dependency_admission,
+        #[cfg(target_os = "linux")]
+        dependency_admission_error,
     })
+}
+
+/// Share the checked-rewrite metadata contract with the ordinary shipped audit
+/// and validation commands. Inspection reads no installed module content and
+/// executes no package manager, lifecycle hook, reference or native runtime.
+/// Metadata errors remain actionable audit findings; only a report-size limit
+/// aborts instead of returning an incomplete dependency inventory.
+#[cfg(target_os = "linux")]
+fn audit_project_dependencies(
+    project_path: &Path,
+    findings: &mut Vec<MigrationAuditFinding>,
+) -> anyhow::Result<(
+    Option<dependency_admission::DependencyAdmission>,
+    Option<String>,
+)> {
+    use anyhow::Context as _;
+
+    let inspection = (|| -> anyhow::Result<dependency_admission::DependencyAdmission> {
+        let project = project_path.canonicalize()?;
+        let manifest = select_smoke_package_manifest(&project)?;
+        let manifest =
+            canonicalize_project_package_manifest_path(&project, &manifest, "dependency audit")?;
+        let package_root = manifest.parent().context("package manifest has no parent")?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut report = dependency_admission::inspect(package_root, deadline)?;
+        let prefix = relative_display(&project, package_root);
+        if !prefix.is_empty() {
+            for input in &mut report.inputs {
+                input.path = format!("{prefix}/{}", input.path);
+            }
+            for finding in &mut report.findings {
+                finding.source = format!("{prefix}/{}", finding.source);
+                if let Some(path) = &mut finding.package_path {
+                    *path = format!("{prefix}/{path}");
+                }
+            }
+        }
+        Ok(report)
+    })();
+
+    match inspection {
+        Ok(report) => {
+            anyhow::ensure!(
+                report.findings.len() <= MAX_TOTAL_FINDINGS.saturating_sub(findings.len()),
+                "combined migration audit exceeds its complete-report finding limit; select a smaller project"
+            );
+            for finding in &report.findings {
+                findings.push(MigrationAuditFinding {
+                    id: String::new(),
+                    category: MigrationCategory::Dependencies,
+                    severity: MigrationSeverity::High,
+                    message: format!(
+                        "npm dependency review [{}]: package={} installed_as={} location={} version_or_request={}; {}",
+                        finding.code,
+                        finding.package,
+                        finding.installed_as,
+                        finding.package_path.as_deref().unwrap_or("(declaration)"),
+                        finding.version.as_deref().unwrap_or("(unrecorded)"),
+                        finding.detail
+                    ),
+                    path: Some(
+                        finding.source.split('#').next().unwrap_or(&finding.source).to_owned()
+                    ),
+                    recommendation: Some(
+                        "Resolve the named npm declaration, pin, workspace or lifecycle issue and rerun migrate audit; no package installation was performed. Non-npm lockfiles and installed-content authenticity are outside this metadata assessment.".into()
+                    ),
+                });
+            }
+            Ok((Some(report), None))
+        }
+        Err(error) => {
+            anyhow::ensure!(
+                findings.len() < MAX_TOTAL_FINDINGS,
+                "combined migration audit exceeds its complete-report finding limit; select a smaller project"
+            );
+            let error = format!("{error:#}");
+            findings.push(MigrationAuditFinding {
+                id: String::new(),
+                category: MigrationCategory::Dependencies,
+                severity: MigrationSeverity::High,
+                message: format!("npm dependency metadata could not be assessed: {error}"),
+                path: None,
+                recommendation: Some(
+                    "Select one project directory and repair its npm manifest/lockfile metadata. Audit remains diagnostic; incomplete capture cannot authorize migration validation.".into()
+                ),
+            });
+            Ok((None, Some(error)))
+        }
+    }
 }
 
 pub fn render_audit_report(
@@ -1162,8 +1280,15 @@ fn runtime_smoke_prerequisite_failure_check() -> MigrationValidationCheck {
     }
 }
 
+#[cfg(any(test, not(target_os = "linux")))]
 fn runtime_smoke_validation_check(project_path: &Path) -> MigrationValidationCheck {
-    match execute_migration_runtime_smoke(project_path) {
+    runtime_smoke_result_check(execute_migration_runtime_smoke(project_path))
+}
+
+fn runtime_smoke_result_check(
+    result: anyhow::Result<MigrationRuntimeSmokeReceipt>,
+) -> MigrationValidationCheck {
+    match result {
         Ok(receipt) => MigrationValidationCheck {
             id: "mig-validate-005".to_string(),
             passed: true,
@@ -1515,19 +1640,39 @@ fn select_smoke_package_manifest(project_path: &Path) -> anyhow::Result<PathBuf>
         return Ok(root_manifest);
     }
 
-    collect_project_files(project_path)?
+    let manifests: Vec<_> = collect_project_files(project_path)?
         .into_iter()
-        .find(|path| {
+        .filter(|path| {
             path.file_name()
                 .and_then(std::ffi::OsStr::to_str)
                 .is_some_and(|name| name == "package.json")
         })
-        .ok_or_else(|| {
-            anyhow::anyhow!(
+        .collect();
+    let directories: BTreeSet<_> = manifests.iter()
+        .filter_map(|manifest| manifest.parent().map(Path::to_path_buf))
+        .collect();
+    let roots: Vec<_> = manifests.iter().filter(|manifest| {
+        manifest.parent().is_some_and(|directory| {
+            !directory.ancestors().skip(1).any(|ancestor| directories.contains(ancestor))
+        })
+    }).collect();
+    match roots.as_slice() {
+        [manifest] => Ok((*manifest).clone()),
+        [] => {
+            anyhow::bail!(
                 "no package.json found for transformed-runtime smoke validation under {}",
                 project_path.display()
-            )
-        })
+            );
+        }
+        _ => {
+            anyhow::bail!(
+                "multiple independent package roots under {}; select one project directory explicitly (including {} and {})",
+                project_path.display(),
+                relative_display(project_path, roots[0]),
+                relative_display(project_path, roots[1])
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1945,6 +2090,50 @@ fn update_sha256_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
+#[cfg(target_os = "linux")]
+fn select_admitted_runtime_project(
+    project_path: &Path,
+    audit: &MigrationAuditReport,
+) -> anyhow::Result<(PathBuf, Vec<dependency_admission::MetadataInput>)> {
+    let project = project_path.canonicalize()?;
+    let manifest = select_smoke_package_manifest(&project)?;
+    let manifest =
+        canonicalize_project_package_manifest_path(&project, &manifest, "runtime validation")?;
+    let package_root = manifest
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("runtime validation package has no parent directory"))?
+        .to_path_buf();
+    let prefix = package_root.strip_prefix(&project)?;
+    let admission = audit.dependency_admission.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("runtime validation requires complete audited dependency metadata")
+    })?;
+    anyhow::ensure!(
+        audit.dependency_admission_error.is_none() && !admission.requires_review(),
+        "runtime validation dependency metadata requires review"
+    );
+    let inputs = admission
+        .inputs
+        .iter()
+        .map(|input| {
+            let path = Path::new(&input.path).strip_prefix(prefix).map_err(|error| {
+                anyhow::anyhow!(
+                    "selected runtime project differs from the dependency audit: {}: {error}",
+                    input.path
+                )
+            })?;
+            let path = path.to_str().ok_or_else(|| {
+                anyhow::anyhow!("audited dependency metadata path is not valid UTF-8")
+            })?;
+            Ok(dependency_admission::MetadataInput {
+                path: path.to_string(),
+                bytes: input.bytes,
+                sha256: input.sha256.clone(),
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok((package_root, inputs))
+}
+
 pub fn run_validate(
     project_path: &Path,
     static_only: bool,
@@ -2014,8 +2203,13 @@ pub fn run_validate(
     if !static_only {
         if checks.iter().all(|check| check.passed) {
             #[cfg(target_os = "linux")]
-            match validation_suite::run_if_present(project_path) {
-                Ok(Some(report)) => {
+            match select_admitted_runtime_project(project_path, &audit).and_then(
+                |(root, inputs)| {
+                    validation_suite::run_if_present_with_dependency_inputs(&root, &inputs)
+                        .map(|suite| (root, inputs, suite))
+                },
+            ) {
+                Ok((_, _, Some(report))) => {
                     checks.push(MigrationValidationCheck {
                         id: "mig-validate-005".into(),
                         passed: report.verdict == "PASS",
@@ -2030,7 +2224,13 @@ pub fn run_validate(
                     });
                     test_suite = Some(report);
                 }
-                Ok(None) => checks.push(runtime_smoke_validation_check(project_path)),
+                Ok((root, inputs, None)) => checks.push(runtime_smoke_result_check(
+                    validation_suite::with_captured_dependency_inputs(
+                        &root,
+                        &inputs,
+                        execute_migration_runtime_smoke,
+                    ),
+                )),
                 Err(error) => checks.push(MigrationValidationCheck {
                     id: "mig-validate-005".into(),
                     passed: false,
@@ -2061,6 +2261,10 @@ pub fn run_validate(
         checks,
         blocking_findings,
         warning_findings,
+        #[cfg(target_os = "linux")]
+        dependency_admission: audit.dependency_admission,
+        #[cfg(target_os = "linux")]
+        dependency_admission_error: audit.dependency_admission_error,
         #[cfg(target_os = "linux")]
         test_suite,
     })
@@ -2419,6 +2623,18 @@ pub fn render_validate_report(report: &MigrationValidateReport) -> String {
         report.blocking_findings.len(),
         report.warning_findings.len()
     );
+    #[cfg(target_os = "linux")]
+    if let Some(dependencies) = &report.dependency_admission {
+        let _ = writeln!(
+            &mut output,
+            "npm dependencies: packages={} manifests={} captured_inputs={} review_findings={}",
+            dependencies.packages_scanned,
+            dependencies.manifests_scanned,
+            dependencies.inputs.len(),
+            dependencies.findings.len()
+        );
+        let _ = writeln!(&mut output, "dependency scope: {}", dependencies.scope);
+    }
     let _ = writeln!(&mut output, "checks:");
     for check in &report.checks {
         let _ = writeln!(
@@ -4133,6 +4349,19 @@ fn render_human_audit_report(report: &MigrationAuditReport) -> String {
         report.summary.risky_scripts
     );
 
+    #[cfg(target_os = "linux")]
+    if let Some(dependencies) = &report.dependency_admission {
+        let _ = writeln!(
+            &mut output,
+            "npm dependencies: packages={} manifests={} captured_inputs={} review_findings={}",
+            dependencies.packages_scanned,
+            dependencies.manifests_scanned,
+            dependencies.inputs.len(),
+            dependencies.findings.len()
+        );
+        let _ = writeln!(&mut output, "dependency scope: {}", dependencies.scope);
+    }
+
     if !report.summary.lockfiles.is_empty() {
         let _ = writeln!(
             &mut output,
@@ -4234,7 +4463,11 @@ mod tests {
     }
 
     fn write_lockfile(project: &Path) {
-        write_project_file(project, "package-lock.json", "{}\n");
+        write_project_file(
+            project,
+            "package-lock.json",
+            "{\"lockfileVersion\":3,\"packages\":{\"\":{}}}\n",
+        );
     }
 
     fn write_metamorphic_rewrite_project(project: &Path, seed: u8) {
@@ -4482,6 +4715,10 @@ mod tests {
                 path: Some("package.json".to_string()),
                 recommendation: Some("Harden install scripts before rollout.".to_string()),
             }],
+            #[cfg(target_os = "linux")]
+            dependency_admission: None,
+            #[cfg(target_os = "linux")]
+            dependency_admission_error: None,
         };
 
         let rendered = render_audit_report(&report, AuditOutputFormat::Text).expect("text");
@@ -4513,6 +4750,10 @@ mod tests {
                 path: None,
                 recommendation: None,
             }],
+            #[cfg(target_os = "linux")]
+            dependency_admission: None,
+            #[cfg(target_os = "linux")]
+            dependency_admission_error: None,
         };
 
         let rendered = render_audit_report(&report, AuditOutputFormat::Sarif).expect("sarif");
@@ -5403,7 +5644,10 @@ mod tests {
             r#"{"name":"demo","version":"1.0.0","scripts":{"test":"node test.js"}}"#,
         )
         .expect("write package");
-        std::fs::write(project.join("package-lock.json"), "{}\n").expect("write lockfile");
+        std::fs::write(
+            project.join("package-lock.json"),
+            "{\"lockfileVersion\":3,\"packages\":{\"\":{}}}\n",
+        ).expect("write lockfile");
 
         let report = run_audit(project).expect("audit should succeed");
         let finding = report
@@ -5485,7 +5729,10 @@ mod tests {
             }"#,
         )
         .expect("write package");
-        std::fs::write(project.join("package-lock.json"), "{}\n").expect("write lockfile");
+        std::fs::write(
+            project.join("package-lock.json"),
+            "{\"lockfileVersion\":3,\"packages\":{\"\":{}}}\n",
+        ).expect("write lockfile");
 
         let report = run_validate(project, false).expect("validate report");
         assert!(report.is_pass());
@@ -5555,7 +5802,11 @@ mod tests {
         assert!(report.checks.iter().any(|check| {
             check.id == "mig-validate-004"
                 && !check.passed
-                && check.message == "high-severity audit findings: 1"
+                && check.message == if cfg!(target_os = "linux") {
+                    "high-severity audit findings: 2"
+                } else {
+                    "high-severity audit findings: 1"
+                }
         }));
         assert!(report.blocking_findings.iter().any(|finding| {
             finding.category == MigrationCategory::Project

@@ -9,6 +9,9 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+#[cfg(target_os = "linux")]
+#[path = "../../crates/franken-node/src/migration/dependency_admission.rs"]
+pub mod dependency_admission;
 #[path = "../../crates/franken-node/src/migration/report_attestation.rs"]
 pub mod report_attestation;
 #[cfg(target_os = "linux")]

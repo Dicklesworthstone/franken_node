@@ -16,7 +16,10 @@ fn project(kind: &str) -> tempfile::TempDir {
     fs::write(root.path().join("package.json"), serde_json::json!({
         "name":"typed-migration", "type":kind, "engines":{"node":">=22"}
     }).to_string()).unwrap();
-    fs::write(root.path().join("package-lock.json"), "{}\n").unwrap();
+    fs::write(
+        root.path().join("package-lock.json"),
+        "{\"lockfileVersion\":3,\"packages\":{\"\":{}}}\n",
+    ).unwrap();
     root
 }
 

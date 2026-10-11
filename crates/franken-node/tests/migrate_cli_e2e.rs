@@ -87,7 +87,10 @@ mod native_smoke_admission_regressions {
             std::fs::create_dir_all(&project).expect("project directory");
             std::fs::create_dir_all(&bin).expect("reference directory");
             std::fs::write(project.join("index.js"), source).expect("entrypoint");
-            std::fs::write(project.join("package-lock.json"), "{}\n").expect("lockfile");
+            std::fs::write(
+                project.join("package-lock.json"),
+                "{\"lockfileVersion\":3,\"packages\":{\"\":{}}}\n",
+            ).expect("lockfile");
             std::fs::write(
                 project.join("package.json"),
                 r#"{"name":"native-smoke","version":"1.0.0","main":"index.js","engines":{"node":">=20 <23"}}"#,
@@ -776,7 +779,10 @@ fn migration_demo_pipeline_runs_live_migrate_commands_end_to_end() {
         "console.log(JSON.stringify({ demo: 'migration-singularity', ok: true }));\n",
     )
     .expect("write app entrypoint");
-    std::fs::write(project_path.join("package-lock.json"), "{}\n").expect("write lockfile");
+    std::fs::write(
+        project_path.join("package-lock.json"),
+        "{\"lockfileVersion\":3,\"packages\":{\"\":{}}}\n",
+    ).expect("write lockfile");
     std::fs::write(
         project_path.join("package.json"),
         r#"{
@@ -2120,7 +2126,10 @@ fn migrate_validate_passes_for_hardened_project() {
 "#,
     )
     .expect("write package manifest");
-    std::fs::write(project_path.join("package-lock.json"), "{}\n").expect("write lockfile");
+    std::fs::write(
+        project_path.join("package-lock.json"),
+        "{\"lockfileVersion\":3,\"packages\":{\"\":{}}}\n",
+    ).expect("write lockfile");
 
     let project_arg = project_path.to_string_lossy().to_string();
     let output = run_cli(&["migrate", "validate", &project_arg]);
@@ -2190,7 +2199,10 @@ fn migrate_validate_native_failure_never_launches_hanging_reference() {
 "#,
         )
         .expect("write package manifest");
-        std::fs::write(project_path.join("package-lock.json"), "{}\n").expect("write lockfile");
+        std::fs::write(
+            project_path.join("package-lock.json"),
+            "{\"lockfileVersion\":3,\"packages\":{\"\":{}}}\n",
+        ).expect("write lockfile");
 
         let project_arg = project_path.to_string_lossy().to_string();
         let started = Instant::now();

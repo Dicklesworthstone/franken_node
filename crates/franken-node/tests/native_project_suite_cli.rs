@@ -20,7 +20,10 @@ fn project(first_case: &str) -> TempDir {
         r#"{"name":"native-suite-regression","version":"1.0.0","engines":{"node":">=20"}}"#,
     )
     .expect("manifest");
-    std::fs::write(project.path().join("package-lock.json"), "{}\n").expect("lockfile");
+    std::fs::write(
+        project.path().join("package-lock.json"),
+        "{\"lockfileVersion\":3,\"packages\":{\"\":{}}}\n",
+    ).expect("lockfile");
     std::fs::write(
         project.path().join("index.js"),
         "console.log('smoke-only');\n",
@@ -233,6 +236,68 @@ fn successful_native_suite_requires_two_complete_measured_cases() {
         );
     }
     assert_no_guest_state(&project);
+}
+
+#[cfg(feature = "engine")]
+#[test]
+fn validate_and_report_execute_only_the_selected_nested_package_inventory() {
+    let container = TempDir::new().expect("project container");
+    let app = container.path().join("app");
+    std::fs::create_dir_all(app.join(".franken-node")).expect("nested project");
+    let manifest = r#"{"name":"nested-suite","version":"1.0.0","engines":{"node":">=20"},"dependencies":{"ordinary":"^1"}}"#;
+    let lock = r#"{"lockfileVersion":3,"packages":{"":{"dependencies":{"ordinary":"^1"}},"node_modules/ordinary":{"version":"1.2.3"}}}"#;
+    let installed_manifest = r#"{"name":"ordinary","version":"1.2.3"}"#;
+    let inventory = r#"{"schema_version":"franken-node/migration-tests/v1","tests":["inside.test.js"]}"#;
+    let outside = "throw new Error('outside admitted package');\n";
+    let ignored = "throw new Error('not selected by package inventory');\n";
+    std::fs::write(app.join("package.json"), manifest).expect("manifest");
+    std::fs::write(app.join("package-lock.json"), lock).expect("lockfile");
+    std::fs::create_dir_all(app.join("node_modules/ordinary")).expect("installed package");
+    std::fs::write(app.join("node_modules/ordinary/package.json"), installed_manifest)
+        .expect("installed manifest");
+    std::fs::write(app.join("node_modules/ordinary/index.js"), "module.exports = 42;\n")
+        .expect("installed source");
+    std::fs::write(app.join(".franken-node/migration-tests.json"), inventory)
+        .expect("selected test inventory");
+    std::fs::write(app.join("inside.test.js"), "console.log(42);\n").expect("selected case");
+    std::fs::write(app.join("ignored.test.js"), ignored).expect("unselected case");
+    std::fs::write(container.path().join("outside.test.js"), outside).expect("outside case");
+
+    for report_mode in [false, true] {
+        let output = invoke(container.path(), report_mode, false, false);
+        let report = parse_json_stdout(&output, "nested package runtime scope");
+        assert!(output.status.success(), "{report}");
+        let validation = if report_mode { &report["validation"] } else { &report };
+        assert_eq!(validation["status"], "pass", "{report}");
+        let suite = &validation["test_suite"];
+        assert_eq!(suite["verdict"], "PASS", "{report}");
+        assert_eq!(suite["total_tests"], 1);
+        assert_eq!(suite["passed"], 1);
+        assert_eq!(suite["failed"], 0);
+        assert_eq!(suite["errored"], 0);
+        assert_eq!(suite["skipped"], 0);
+        let cases = suite["cases"].as_array().expect("measured cases");
+        assert_eq!(cases.len(), 1);
+        assert_eq!(cases[0]["test"], "inside.test.js");
+        assert_eq!(cases[0]["reference"]["exit_code"], 0);
+        assert_eq!(cases[0]["native"]["exit_code"], 0);
+        assert_eq!(cases[0]["native"]["stdout"]["bytes"], 3);
+        assert_eq!(cases[0]["reference"]["stdout"], cases[0]["native"]["stdout"]);
+        let inputs = validation["dependency_admission"]["inputs"].as_array()
+            .expect("audit evidence");
+        assert!(inputs.iter().all(|input| input["path"].as_str().unwrap().starts_with("app/")));
+        assert_eq!(std::fs::read_to_string(app.join("package.json")).unwrap(), manifest);
+        assert_eq!(std::fs::read_to_string(app.join("package-lock.json")).unwrap(), lock);
+        assert_eq!(
+            std::fs::read_to_string(app.join("node_modules/ordinary/package.json")).unwrap(),
+            installed_manifest,
+        );
+        assert_eq!(std::fs::read_to_string(app.join(".franken-node/migration-tests.json")).unwrap(), inventory);
+        assert_eq!(std::fs::read_to_string(app.join("ignored.test.js")).unwrap(), ignored);
+        assert_eq!(std::fs::read_to_string(container.path().join("outside.test.js")).unwrap(), outside);
+        assert!(!container.path().join(".franken-node").exists());
+        assert!(!container.path().join(".migrate-backup").exists());
+    }
 }
 
 #[test]

@@ -6,6 +6,7 @@
 //! exclusions. This is not release certification, deterministic replay, or an
 //! OS sandbox. Trusted code retains access to ambient/external authority.
 
+use super::dependency_admission::{self, MetadataInput};
 use super::smoke_supervisor;
 use anyhow::{Context, Result, bail, ensure};
 use rustix::fs::{Mode, OFlags, open};
@@ -348,6 +349,57 @@ impl Snapshot {
         test_inventory::discover(&self.entries)
     }
 
+    fn with_dependency_inputs<T>(
+        &self,
+        expected: &[MetadataInput],
+        deadline: Instant,
+        execute: impl FnOnce(&Path) -> Result<T>,
+    ) -> Result<T> {
+        budget(deadline)?;
+        // Reuse the authoritative workspace/lockfile inspector on immutable
+        // captured bytes. Checking only the expected paths would miss a newly
+        // added lockfile, glob-matched workspace or native-build marker.
+        let temporary = tempfile::Builder::new()
+            .prefix("franken-admitted-validation-")
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir()?;
+        let staged = temporary.path().join("project");
+        self.stage(&staged, deadline)?;
+        let observed = dependency_admission::inspect(&staged, deadline).context(
+            "captured dependency metadata could not be revalidated; no runtime was resolved or executed",
+        )?;
+        ensure!(
+            observed.inputs.as_slice() == expected,
+            "dependency metadata changed after audit; no runtime was resolved or executed"
+        );
+        ensure!(
+            !observed.requires_review(),
+            "captured dependency metadata requires review; no runtime was resolved or executed"
+        );
+        // The static audit intentionally needs no installed modules. Runtime
+        // admission additionally binds actual installed manifests and routes
+        // from this same private capture, before any executable is selected.
+        let installed = dependency_admission::inspect_for_execution(&staged, deadline).context(
+            "captured installation could not be assessed; no runtime was resolved or executed",
+        )?;
+        ensure!(
+            !installed.requires_review(),
+            "captured installation requires review; no runtime was resolved or executed: {}",
+            installed
+                .findings
+                .iter()
+                .map(|finding| format!("{} at {}", finding.code, finding.source))
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+        ensure!(
+            installed.installation_checked,
+            "captured installation assessment did not complete; no runtime was resolved or executed"
+        );
+        budget(deadline)?;
+        execute(&staged)
+    }
+
     fn stage(&self, destination: &Path, deadline: Instant) -> Result<()> {
         fs::create_dir(destination)?;
         for (relative, entry) in &self.entries {
@@ -684,13 +736,62 @@ pub fn run_if_present(project: &Path) -> Result<Option<SuiteReport>> {
     )
 }
 
+/// Validate the selected project using exactly the npm metadata admitted by
+/// its preceding static audit. Input paths must be relative to this project,
+/// in the order returned by dependency admission. A changed inventory or an
+/// unadmitted captured installation fails before runtime resolution, including
+/// when no test suite is present.
+pub fn run_if_present_with_dependency_inputs(
+    project: &Path,
+    expected: &[MetadataInput],
+) -> Result<Option<SuiteReport>> {
+    run_if_present_with_bound_inputs(
+        project,
+        Some(expected),
+        || Ok(std::env::current_exe()?),
+        || FailureArchive::from_environment([project, project]),
+    )
+}
+
+/// Run a caller's bounded smoke operation against private captured inputs whose
+/// npm metadata still matches the static audit and whose installed manifests
+/// and dependency routes pass execution admission. The staged tree remains
+/// alive throughout the operation; subsequent changes to the live checkout
+/// cannot replace its admitted inputs. A newly present suite must be measured
+/// instead of falling back to smoke. This is not registry authentication.
+pub fn with_captured_dependency_inputs<T>(
+    project: &Path,
+    expected: &[MetadataInput],
+    execute: impl FnOnce(&Path) -> Result<T>,
+) -> Result<T> {
+    let deadline = Instant::now() + TOTAL_TIMEOUT;
+    let snapshot = Snapshot::capture(project, deadline)?;
+    ensure!(
+        snapshot.tests()?.is_empty(),
+        "test suite appeared before smoke capture; rerun validation to measure the captured tests"
+    );
+    snapshot.with_dependency_inputs(expected, deadline, execute)
+}
+
 fn run_if_present_with(
     project: &Path,
     native: impl FnOnce() -> Result<PathBuf>,
     archive: impl FnOnce() -> Result<Option<FailureArchive>>,
 ) -> Result<Option<SuiteReport>> {
+    run_if_present_with_bound_inputs(project, None, native, archive)
+}
+
+fn run_if_present_with_bound_inputs(
+    project: &Path,
+    expected: Option<&[MetadataInput]>,
+    native: impl FnOnce() -> Result<PathBuf>,
+    archive: impl FnOnce() -> Result<Option<FailureArchive>>,
+) -> Result<Option<SuiteReport>> {
     let deadline = Instant::now() + TOTAL_TIMEOUT;
     let snapshot = Snapshot::capture(project, deadline)?;
+    if let Some(expected) = expected {
+        snapshot.with_dependency_inputs(expected, deadline, |_| Ok(()))?;
+    }
     if snapshot.tests()?.is_empty() {
         return Ok(None);
     }
@@ -1016,6 +1117,322 @@ mod tests {
                 Vec::new()
             },
         }
+    }
+
+    fn admitted_dependency_inputs(root: &Path) -> Vec<MetadataInput> {
+        let report =
+            dependency_admission::inspect(root, Instant::now() + Duration::from_secs(20))
+                .expect("capture admitted dependency metadata");
+        assert!(!report.requires_review(), "{report:#?}");
+        report.inputs
+    }
+
+    #[test]
+    fn audited_dependency_installed_failures_block_suite_and_smoke_before_dispatch() {
+        for (installed_manifest, code) in [
+            (
+                Some(r#"{"name":"ordinary","version":"1.9.0"}"#),
+                "installed_identity_mismatch",
+            ),
+            (
+                Some(r#"{"name":"ordinary","version":"1.2.3","scripts":{"postinstall":"never-execute-this-hook"}}"#),
+                "install_script",
+            ),
+            (None, "missing_installed_dependency"),
+        ] {
+            for has_suite in [false, true] {
+                let project = fixture();
+                write(
+                    project.path(),
+                    "package.json",
+                    r#"{"name":"checked","dependencies":{"ordinary":"^1"}}"#,
+                );
+                write(
+                    project.path(),
+                    "package-lock.json",
+                    r#"{"lockfileVersion":3,"packages":{
+                        "":{"dependencies":{"ordinary":"^1"}},
+                        "node_modules/ordinary":{"version":"1.2.3"}
+                    }}"#,
+                );
+                if installed_manifest.is_some() {
+                    write(
+                        project.path(),
+                        "node_modules/ordinary/package.json",
+                        r#"{"name":"ordinary","version":"1.2.3"}"#,
+                    );
+                    write(
+                        project.path(),
+                        "node_modules/ordinary/index.js",
+                        "module.exports = 42;",
+                    );
+                }
+                let expected = admitted_dependency_inputs(project.path());
+                if let Some(installed_manifest) = installed_manifest {
+                    write(
+                        project.path(),
+                        "node_modules/ordinary/package.json",
+                        installed_manifest,
+                    );
+                }
+                write(
+                    project.path(),
+                    if has_suite { "case.test.js" } else { "index.js" },
+                    "throw new Error('unadmitted installation must not execute');",
+                );
+                // Static metadata is still exactly the audited clean graph.
+                assert_eq!(admitted_dependency_inputs(project.path()), expected);
+                let error = if has_suite {
+                    run_if_present_with_bound_inputs(
+                        project.path(),
+                        Some(&expected),
+                        || panic!("installed admission must precede runtime resolution"),
+                        || panic!("installed admission must precede archive allocation"),
+                    )
+                    .unwrap_err()
+                } else {
+                    with_captured_dependency_inputs(
+                        project.path(),
+                        &expected,
+                        |_| -> Result<()> {
+                            panic!("installed admission must precede smoke execution")
+                        },
+                    )
+                    .unwrap_err()
+                };
+                assert!(error.to_string().contains(code), "{has_suite}: {error:#}");
+                assert!(
+                    error.to_string().contains("no runtime was resolved or executed"),
+                    "{error:#}",
+                );
+                if let Some(installed_manifest) = installed_manifest {
+                    assert_eq!(
+                        fs::read_to_string(
+                            project.path().join("node_modules/ordinary/package.json")
+                        )
+                        .unwrap(),
+                        installed_manifest,
+                    );
+                } else {
+                    assert!(!project.path().join("node_modules").exists());
+                }
+                assert!(!project.path().join(".franken-node").exists());
+            }
+        }
+    }
+
+    #[test]
+    fn audited_dependency_inputs_reject_changed_bytes_before_runtime_resolution() {
+        for changed in ["package.json", "package-lock.json"] {
+            let project = fixture();
+            write(project.path(), "package.json", r#"{"name":"checked"}"#);
+            write(
+                project.path(),
+                "package-lock.json",
+                r#"{"lockfileVersion":3,"packages":{}}"#,
+            );
+            write(
+                project.path(),
+                "case.test.js",
+                "throw new Error('must not execute');",
+            );
+            let expected = admitted_dependency_inputs(project.path());
+            let replacement = if changed == "package.json" {
+                r#"{"name":"changed"}"#
+            } else {
+                r#"{"lockfileVersion":3,"packages":{},"name":"changed"}"#
+            };
+            write(project.path(), changed, replacement);
+            let error = run_if_present_with_bound_inputs(
+                project.path(),
+                Some(&expected),
+                || panic!("changed metadata must precede runtime resolution"),
+                || panic!("changed metadata must precede archive allocation"),
+            )
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("dependency metadata changed after audit"),
+                "{changed}: {error:#}"
+            );
+            assert_eq!(
+                fs::read_to_string(project.path().join(changed)).unwrap(),
+                replacement,
+            );
+        }
+    }
+
+    #[test]
+    fn audited_dependency_inputs_reject_added_lock_workspace_and_native_build_metadata() {
+        for added in ["lock", "workspace", "native_build"] {
+            let project = fixture();
+            if added == "workspace" {
+                write(
+                    project.path(),
+                    "package.json",
+                    r#"{"name":"checked","workspaces":["packages/*"]}"#,
+                );
+                write(
+                    project.path(),
+                    "packages/a/package.json",
+                    r#"{"name":"a","version":"1.0.0"}"#,
+                );
+                write(
+                    project.path(),
+                    "package-lock.json",
+                    r#"{"lockfileVersion":3,"packages":{
+                        "packages/a":{"name":"a","version":"1.0.0"},
+                        "node_modules/a":{"resolved":"packages/a","link":true}
+                    }}"#,
+                );
+            } else {
+                write(project.path(), "package.json", r#"{"name":"checked"}"#);
+            }
+            write(
+                project.path(),
+                "case.test.js",
+                "throw new Error('must not execute');",
+            );
+            let expected = admitted_dependency_inputs(project.path());
+            match added {
+                "lock" => write(
+                    project.path(),
+                    "package-lock.json",
+                    r#"{"lockfileVersion":3,"packages":{}}"#,
+                ),
+                "workspace" => write(
+                    project.path(),
+                    "packages/b/package.json",
+                    r#"{"name":"b","version":"1.0.0"}"#,
+                ),
+                _ => write(project.path(), "binding.gyp", "{}"),
+            }
+            let error = run_if_present_with_bound_inputs(
+                project.path(),
+                Some(&expected),
+                || panic!("new metadata must precede runtime resolution"),
+                || panic!("new metadata must precede archive allocation"),
+            )
+            .unwrap_err();
+            let message = if added == "native_build" {
+                "captured dependency metadata requires review"
+            } else {
+                "dependency metadata changed after audit"
+            };
+            assert!(error.to_string().contains(message), "{added}: {error:#}");
+        }
+    }
+
+    #[test]
+    fn audited_dependency_inputs_are_verified_before_empty_suite_fallback() {
+        let project = fixture();
+        write(project.path(), "package.json", r#"{"name":"checked"}"#);
+        let expected = admitted_dependency_inputs(project.path());
+        assert!(
+            run_if_present_with_bound_inputs(
+                project.path(),
+                Some(&expected),
+                || panic!("empty suite resolves no runtime"),
+                || panic!("empty suite reserves no archive"),
+            )
+            .unwrap()
+            .is_none()
+        );
+        write(
+            project.path(),
+            "package-lock.json",
+            r#"{"lockfileVersion":3,"packages":{}}"#,
+        );
+        assert!(
+            run_if_present_with_dependency_inputs(project.path(), &expected)
+                .unwrap_err()
+                .to_string()
+                .contains("dependency metadata changed after audit")
+        );
+    }
+
+    #[test]
+    fn audited_dependency_smoke_refuses_a_new_suite_inventory() {
+        let project = fixture();
+        write(project.path(), "package.json", r#"{"name":"checked"}"#);
+        write(project.path(), "index.js", "console.log('smoke');");
+        let expected = admitted_dependency_inputs(project.path());
+        assert!(
+            run_if_present_with_dependency_inputs(project.path(), &expected)
+                .unwrap()
+                .is_none()
+        );
+        write(
+            project.path(),
+            "case.test.js",
+            "throw new Error('new test cannot be hidden by smoke');",
+        );
+        let error = with_captured_dependency_inputs(
+            project.path(),
+            &expected,
+            |_| -> Result<()> { panic!("new test inventory must precede smoke execution") },
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("test suite appeared before smoke capture")
+        );
+    }
+
+    #[test]
+    fn audited_dependency_smoke_callback_uses_private_captured_bytes() {
+        let project = fixture();
+        let manifest = r#"{"name":"checked","dependencies":{"ordinary":"^1"}}"#;
+        let installed_manifest = r#"{"name":"ordinary","version":"1.2.3"}"#;
+        write(project.path(), "package.json", manifest);
+        write(
+            project.path(),
+            "package-lock.json",
+            r#"{"lockfileVersion":3,"packages":{
+                "":{"dependencies":{"ordinary":"^1"}},
+                "node_modules/ordinary":{"version":"1.2.3"}
+            }}"#,
+        );
+        write(
+            project.path(),
+            "node_modules/ordinary/package.json",
+            installed_manifest,
+        );
+        write(
+            project.path(),
+            "node_modules/ordinary/index.js",
+            "module.exports = 42;",
+        );
+        write(project.path(), "index.js", "console.log('captured');");
+        let expected = admitted_dependency_inputs(project.path());
+        let result = with_captured_dependency_inputs(project.path(), &expected, |staged| {
+            assert_ne!(staged, project.path());
+            assert_eq!(
+                fs::metadata(staged.parent().unwrap())?.permissions().mode() & 0o777,
+                0o700,
+            );
+            write(project.path(), "package.json", r#"{"name":"changed"}"#);
+            write(
+                project.path(),
+                "node_modules/ordinary/package.json",
+                r#"{"name":"ordinary","version":"9.0.0"}"#,
+            );
+            write(
+                project.path(),
+                "index.js",
+                "throw new Error('changed live source');",
+            );
+            assert_eq!(fs::read_to_string(staged.join("package.json"))?, manifest);
+            assert_eq!(
+                fs::read_to_string(staged.join("node_modules/ordinary/package.json"))?,
+                installed_manifest,
+            );
+            Ok(fs::read_to_string(staged.join("index.js"))?)
+        })
+        .unwrap();
+        assert_eq!(result, "console.log('captured');");
     }
 
     fn measured(root: &Path) -> SuiteReport {

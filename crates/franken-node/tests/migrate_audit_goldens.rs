@@ -26,7 +26,8 @@ fn audit_fixture_json(fixture: &str) -> String {
 fn migrate_audit_risky_fixture_json_matches_golden() {
     let stdout_json = audit_fixture_json("risky");
     with_scrubbed_snapshot_settings("migrate_audit", || {
-        assert_snapshot!("risky", stdout_json);
+        let snapshot = if cfg!(target_os = "linux") { "risky.linux" } else { "risky" };
+        assert_snapshot!(snapshot, stdout_json);
     });
 }
 
@@ -34,6 +35,7 @@ fn migrate_audit_risky_fixture_json_matches_golden() {
 fn migrate_audit_hardened_fixture_json_matches_golden() {
     let stdout_json = audit_fixture_json("hardened");
     with_scrubbed_snapshot_settings("migrate_audit", || {
-        assert_snapshot!("hardened", stdout_json);
+        let snapshot = if cfg!(target_os = "linux") { "hardened.linux" } else { "hardened" };
+        assert_snapshot!(snapshot, stdout_json);
     });
 }

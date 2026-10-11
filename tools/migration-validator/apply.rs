@@ -9,6 +9,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[cfg(target_os = "linux")]
+#[path = "../../crates/franken-node/src/migration/dependency_admission.rs"]
+pub mod dependency_admission;
+#[cfg(target_os = "linux")]
 #[path = "../../crates/franken-node/src/migration/smoke_supervisor.rs"]
 mod smoke_supervisor;
 #[cfg(target_os = "linux")]

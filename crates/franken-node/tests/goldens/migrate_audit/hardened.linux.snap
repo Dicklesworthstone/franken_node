@@ -1,0 +1,65 @@
+---
+source: tests/migrate_audit_goldens.rs
+---
+{
+  "schema_version": "1.0.0",
+  "project_path": "[PATH]",
+  "generated_at_utc": "[TIMESTAMP]",
+  "summary": {
+    "files_scanned": 2,
+    "js_files": 0,
+    "ts_files": 0,
+    "package_manifests": 1,
+    "risky_scripts": 0,
+    "lockfiles": [
+      "package-lock.json"
+    ]
+  },
+  "findings": [
+    {
+      "id": "mig-audit-001",
+      "category": "runtime",
+      "severity": "low",
+      "message": "no JavaScript/TypeScript source files found",
+      "path": null,
+      "recommendation": "Confirm the migration target path points to the intended JS/TS project."
+    },
+    {
+      "id": "mig-audit-002",
+      "category": "project",
+      "severity": "info",
+      "message": "detected 1 package manifest(s)",
+      "path": null,
+      "recommendation": null
+    },
+    {
+      "id": "mig-audit-003",
+      "category": "dependencies",
+      "severity": "info",
+      "message": "detected 1 lockfile(s)",
+      "path": null,
+      "recommendation": null
+    }
+  ],
+  "dependency_admission": {
+    "schema_version": "franken-node/native-dependency-admission/v1",
+    "scope": "captured npm metadata and supported registry version ranges only; not installed-content authentication, npm override resolution or runtime compatibility proof",
+    "packages_scanned": 0,
+    "manifests_scanned": 1,
+    "installation_checked": false,
+    "installed_packages_scanned": 0,
+    "inputs": [
+      {
+        "path": "package-lock.json",
+        "bytes": 191,
+        "sha256": "e243ed8898ff11d92b34023b93663bf84bb07bee2d45371285e65d19926fe36d"
+      },
+      {
+        "path": "package.json",
+        "bytes": 153,
+        "sha256": "bf353ecadf71aa5d4a388d4bc89302c18b979c3f383dca4becb86d0753de31a1"
+      }
+    ],
+    "findings": []
+  }
+}

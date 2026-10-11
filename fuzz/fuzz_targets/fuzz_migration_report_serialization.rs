@@ -98,6 +98,10 @@ fn audit_report(input: &FuzzInput) -> MigrationAuditReport {
             lockfiles: vec!["package-lock.json".to_string()],
         },
         findings,
+        #[cfg(target_os = "linux")]
+        dependency_admission: None,
+        #[cfg(target_os = "linux")]
+        dependency_admission_error: None,
     }
 }
 
@@ -171,6 +175,10 @@ fn validate_report(input: &FuzzInput) -> MigrationValidateReport {
             .collect(),
         blocking_findings,
         warning_findings,
+        #[cfg(target_os = "linux")]
+        dependency_admission: None,
+        #[cfg(target_os = "linux")]
+        dependency_admission_error: None,
         #[cfg(target_os = "linux")]
         test_suite: None,
     }
