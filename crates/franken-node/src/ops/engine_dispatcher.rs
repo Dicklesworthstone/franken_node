@@ -16,7 +16,10 @@ use crate::{
         configured_child_process_spawn_admission_in_active_containment_from_authenticated_run_key,
     },
     security::revocation_freshness::{SafetyTier, registry_revocation_freshness_denial},
-    supply_chain::trust_card::{SnapshotSourceContext, TrustCardRegistry},
+    supply_chain::trust_card::{
+        CapturedDependencyTrust, DependencyArtifactMatch, SnapshotSourceContext, TrustCardRegistry,
+        match_trust_card_artifact,
+    },
 };
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -3053,6 +3056,10 @@ pub struct RunTrustRequirements {
     dependency_ids: Vec<String>,
     required_card_ids: Vec<String>,
     registry_required: bool,
+    /// Exact dependency metadata observed by product preflight. Explicit
+    /// name-only library callers retain risk checks without artifact claims.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dependency_capture: Option<CapturedDependencyTrust>,
 }
 
 impl RunTrustRequirements {
@@ -3073,6 +3080,7 @@ impl RunTrustRequirements {
                 .into_iter()
                 .collect(),
             registry_required: registry_required || !required_card_ids.is_empty(),
+            dependency_capture: None,
             required_card_ids: required_card_ids
                 .iter()
                 .cloned()
@@ -3082,6 +3090,32 @@ impl RunTrustRequirements {
         };
         requirements.validate()?;
         Ok(requirements)
+    }
+
+    /// Bind the selected lockfile observations and their topology to this
+    /// admission. Captured identities cannot be omitted by a separate name list.
+    pub fn with_dependency_capture(mut self, capture: CapturedDependencyTrust) -> Result<Self> {
+        self.validate()?;
+        capture.validate()?;
+        self.dependency_ids.extend(capture.packages.keys().cloned());
+        self.dependency_ids.sort();
+        self.dependency_ids.dedup();
+        self.dependency_capture = Some(capture);
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Recheck metadata at dispatch and authenticated worker launch. The live
+    /// control monitor only rereads signed trust state against these fixed
+    /// expectations; it does not rebuild the dependency graph on every poll.
+    /// Even an empty capture is checked so adding the first dependency cannot
+    /// turn the empty-identity fast path into a preflight bypass.
+    pub fn verify_dependency_capture(&self, project_root: &Path) -> Result<()> {
+        self.validate()?;
+        if let Some(capture) = &self.dependency_capture {
+            capture.verify_project(project_root)?;
+        }
+        Ok(())
     }
 
     fn validate_bounds(dependency_ids: &[String], required_card_ids: &[String]) -> Result<()> {
@@ -3128,6 +3162,18 @@ impl RunTrustRequirements {
             anyhow::bail!(
                 "execution trust requirements made a previously required registry optional"
             );
+        }
+        if let Some(capture) = &self.dependency_capture {
+            capture.validate()?;
+            if capture
+                .packages
+                .keys()
+                .any(|id| self.dependency_ids.binary_search(id).is_err())
+            {
+                anyhow::bail!(
+                    "execution trust requirements omitted a captured dependency identity"
+                );
+            }
         }
         Ok(())
     }
@@ -3216,6 +3262,23 @@ pub fn validate_execution_trust(
                 extension_id,
                 reason,
             );
+        }
+        if let Some(capture) = &requirements.dependency_capture {
+            if let Some(expected) = capture.packages.get(extension_id) {
+                match match_trust_card_artifact(&card, expected) {
+                    DependencyArtifactMatch::Matched => {}
+                    DependencyArtifactMatch::Unverified(detail) => warnings.push(format!(
+                        "dependency '{extension_id}' has unverified artifact binding at execution admission: {detail}"
+                    )),
+                    DependencyArtifactMatch::Mismatch(detail) => anyhow::bail!(
+                        "Execution blocked: dependency '{extension_id}' trust-card artifact mismatch at execution admission: {detail}"
+                    ),
+                }
+            } else {
+                warnings.push(format!(
+                    "dependency '{extension_id}' has no captured installation metadata; its trust card supplies package-wide risk state only"
+                ));
+            }
         }
         if card.active_quarantine {
             if config.profile != Profile::LegacyRisky {
@@ -3533,6 +3596,9 @@ pub struct EngineDispatcher {
     project_paths: Option<RunProjectPaths>,
     /// Every dependency inspected by preflight, including untracked identities.
     preflight_dependency_ids: Vec<String>,
+    /// Selected lockfile artifacts and the exact dependency topology assessed
+    /// by public preflight. Optional only for explicit name-only library use.
+    preflight_dependency_capture: Option<CapturedDependencyTrust>,
     /// Whether preflight relied on an available authoritative registry. Only
     /// legacy-risky's explicitly skipped preflight may start without one.
     preflight_registry_required: bool,
@@ -5779,6 +5845,7 @@ impl Default for EngineDispatcher {
             native_session_worker_path: None,
             project_paths: None,
             preflight_dependency_ids: Vec::new(),
+            preflight_dependency_capture: None,
             preflight_registry_required: true,
             preflight_fleet_policy: None,
             app_args: Vec::new(),
@@ -5963,6 +6030,17 @@ impl EngineDispatcher {
         self
     }
 
+    /// Retain the exact dependency observations used by public preflight.
+    /// They are validated before dispatch and again by the authenticated worker.
+    #[must_use]
+    pub fn with_preflight_dependency_capture(
+        mut self,
+        capture: Option<CapturedDependencyTrust>,
+    ) -> Self {
+        self.preflight_dependency_capture = capture;
+        self
+    }
+
     /// Preserve whether preflight consulted an authoritative registry. A false
     /// value only retains legacy-risky's existing missing/corrupt-state policy;
     /// newly available valid cards are always examined before execution.
@@ -6111,11 +6189,17 @@ impl EngineDispatcher {
             )
         })?;
 
-        let trust_requirements = RunTrustRequirements::new(
+        let mut trust_requirements = RunTrustRequirements::new(
             &self.preflight_dependency_ids,
             trusted_extension_ids,
             self.preflight_registry_required,
         )?;
+        if let Some(capture) = &self.preflight_dependency_capture {
+            trust_requirements = trust_requirements.with_dependency_capture(capture.clone())?;
+        }
+        trust_requirements
+            .verify_dependency_capture(project_paths.project_root())
+            .context("dependency metadata changed after run preflight")?;
         for warning in validate_execution_trust(
             project_paths.project_root(),
             config,
@@ -7549,6 +7633,9 @@ impl EngineDispatcher {
         project_paths
             .verify_target(&app_path_buf, &working_dir)
             .context("project authority changed before native-session launch")?;
+        trust_requirements
+            .verify_dependency_capture(project_paths.project_root())
+            .context("dependency metadata changed before native-session launch")?;
         let ProvisionedRuntimeEvidenceSession {
             grant: runtime_evidence_grant,
             capture_path: evidence_capture_path,
@@ -9208,6 +9295,14 @@ impl EngineDispatcher {
             .map_err(|error| {
                 native_engine_spawn_error_with_telemetry_cleanup(
                     format!("Run project authority changed before execution: {error:#}"),
+                    &mut telemetry_guard,
+                )
+            })?;
+        trust_requirements
+            .verify_dependency_capture(project_paths.project_root())
+            .map_err(|error| {
+                native_engine_spawn_error_with_telemetry_cleanup(
+                    format!("Native execution dependency metadata admission failed: {error:#}"),
                     &mut telemetry_guard,
                 )
             })?;
@@ -11272,6 +11367,297 @@ mod tests {
     };
     use std::fs;
     use tempfile::TempDir;
+
+    fn write_execution_trust_lock_fixture(root: &Path, version: &str, integrity: &str) {
+        fs::write(
+            root.join("package.json"),
+            serde_json::json!({
+                "name": "runtime-artifact-consumer",
+                "dependencies": {"fixture-alias": "npm:fixture-actual@*"}
+            })
+            .to_string(),
+        )
+        .expect("write declared alias");
+        fs::write(
+            root.join("package-lock.json"),
+            serde_json::json!({
+                "lockfileVersion": 3,
+                "packages": {
+                    "": {
+                        "name": "runtime-artifact-consumer",
+                        "dependencies": {"fixture-alias": "npm:fixture-actual@*"}
+                    },
+                    "node_modules/fixture-alias": {
+                        "name": "fixture-actual",
+                        "version": version,
+                        "integrity": integrity
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write selected installed artifact");
+    }
+
+    fn seed_execution_trust_artifact_registry(root: &Path, now_secs: u64) -> Config {
+        let mut config = Config::for_profile(Profile::Balanced);
+        config.synthesize_init_security_defaults();
+        let registry_path =
+            crate::supply_chain::trust_card_registry_store::registry_snapshot_path(root);
+        let mut registry =
+            TrustCardRegistry::from_config(&config.trust).expect("signed artifact registry");
+        registry
+            .create(
+                TrustCardInput {
+                    extension: ExtensionIdentity {
+                        extension_id: "npm:fixture-actual".to_string(),
+                        version: "1.0.0".to_string(),
+                    },
+                    publisher: PublisherIdentity {
+                        publisher_id: "artifact-publisher".to_string(),
+                        display_name: "Artifact publisher".to_string(),
+                    },
+                    certification_level: CertificationLevel::Gold,
+                    capability_declarations: vec![CapabilityDeclaration {
+                        name: "fixture.compute".to_string(),
+                        description: "Pure fixture computation".to_string(),
+                        risk: CapabilityRisk::Low,
+                    }],
+                    behavioral_profile: BehavioralProfile {
+                        network_access: false,
+                        filesystem_access: false,
+                        subprocess_access: false,
+                        profile_summary: "Pure fixture".to_string(),
+                    },
+                    revocation_status: RevocationStatus::Active,
+                    provenance_summary: ProvenanceSummary {
+                        attestation_level: "slsa-l3".to_string(),
+                        source_uri: "fixture://trust-card/runtime-artifact".to_string(),
+                        artifact_hashes: vec![format!("sha256:{}", "a5".repeat(32))],
+                        verified_at: "2026-02-20T12:00:00Z".to_string(),
+                    },
+                    reputation_score_basis_points: 8000,
+                    reputation_trend: ReputationTrend::Stable,
+                    active_quarantine: false,
+                    dependency_trust_summary: Vec::new(),
+                    last_verified_timestamp: "2026-02-20T12:00:00Z".to_string(),
+                    user_facing_risk_assessment: RiskAssessment {
+                        level: RiskLevel::Low,
+                        summary: "Verified fixture artifact".to_string(),
+                    },
+                    evidence_refs: vec![VerifiedEvidenceRef {
+                        evidence_id: "execution-artifact-provenance".to_string(),
+                        evidence_type: EvidenceType::ProvenanceChain,
+                        verified_at_epoch: now_secs,
+                        verification_receipt_hash: "b".repeat(64),
+                    }],
+                },
+                now_secs,
+                "test-execution-artifact",
+            )
+            .expect("create signed artifact card");
+        registry
+            .persist_authoritative_state(&registry_path)
+            .expect("persist signed artifact card");
+        crate::supply_chain::trust_card_registry_store::record_revocation_frontier(
+            &registry_path,
+            &config.trust,
+            now_secs,
+            "test-execution-artifact",
+        )
+        .expect("record independent fresh frontier");
+        config
+    }
+
+    #[test]
+    fn execution_trust_binds_signed_cards_to_selected_lock_artifacts() {
+        use base64::Engine as _;
+
+        let root = TempDir::new().expect("artifact workspace");
+        let now_secs = Utc::now().timestamp().max(0) as u64;
+        let mut config = seed_execution_trust_artifact_registry(root.path(), now_secs);
+        let original_integrity =
+            format!("sha256-{}", base64::engine::general_purpose::STANDARD.encode([0xa5; 32]));
+        let replaced_integrity =
+            format!("sha256-{}", base64::engine::general_purpose::STANDARD.encode([0x5a; 32]));
+
+        for (version, integrity, admitted) in [
+            ("1.0.0", original_integrity.as_str(), true),
+            ("2.0.0", original_integrity.as_str(), false),
+            ("1.0.0", replaced_integrity.as_str(), false),
+        ] {
+            write_execution_trust_lock_fixture(root.path(), version, integrity);
+            let capture =
+                CapturedDependencyTrust::capture(root.path()).expect("capture exact lock selection");
+            assert_eq!(
+                capture.packages.keys().map(String::as_str).collect::<Vec<_>>(),
+                vec!["npm:fixture-actual"],
+                "the installed alias must consult its actual package identity"
+            );
+            let requirements = RunTrustRequirements::new(
+                &[],
+                &["npm:fixture-actual".to_string()],
+                true,
+            )
+            .expect("required signed card")
+            .with_dependency_capture(capture)
+            .expect("bound preflight capture");
+            requirements
+                .verify_dependency_capture(root.path())
+                .expect("unchanged selected metadata");
+
+            for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+                config.profile = profile;
+                let result =
+                    validate_execution_trust(root.path(), &config, &requirements, now_secs);
+                if admitted {
+                    let warnings = result.expect("matching signed version and integrity");
+                    assert!(
+                        warnings.iter().all(|warning| !warning.contains("artifact")),
+                        "{warnings:?}"
+                    );
+                } else {
+                    let error = result.expect_err("a stale artifact card must block").to_string();
+                    assert!(error.contains("artifact mismatch"), "{error}");
+                    assert!(error.contains("npm:fixture-actual"), "{error}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn execution_trust_capture_rejects_changed_metadata_before_empty_identity_admission() {
+        for initial_manifest in [None, Some(r#"{"name":"empty","dependencies":{}}"#)] {
+            let root = TempDir::new().expect("empty dependency workspace");
+            if let Some(manifest) = initial_manifest {
+                fs::write(root.path().join("package.json"), manifest).expect("empty manifest");
+            }
+            let capture = CapturedDependencyTrust::capture(root.path()).expect("empty capture");
+            assert!(capture.packages.is_empty());
+            let requirements = RunTrustRequirements::new(&[], &[], true)
+                .expect("empty trust requirements")
+                .with_dependency_capture(capture)
+                .expect("bind empty capture");
+            requirements
+                .verify_dependency_capture(root.path())
+                .expect("original empty topology");
+            fs::write(
+                root.path().join("package.json"),
+                r#"{"name":"empty","dependencies":{"fixture-actual":"*"}} "#,
+            )
+            .expect("add first dependency after preflight");
+            assert!(
+                requirements.verify_dependency_capture(root.path()).is_err(),
+                "a newly declared dependency must not take the empty-name fast path"
+            );
+        }
+
+        use base64::Engine as _;
+        let root = TempDir::new().expect("lock replacement workspace");
+        let integrity =
+            format!("sha256-{}", base64::engine::general_purpose::STANDARD.encode([0xa5; 32]));
+        write_execution_trust_lock_fixture(root.path(), "1.0.0", &integrity);
+        let requirements = RunTrustRequirements::new(&[], &[], true)
+            .expect("untracked trust requirements")
+            .with_dependency_capture(
+                CapturedDependencyTrust::capture(root.path()).expect("original lock capture"),
+            )
+            .expect("bound original lock");
+        write_execution_trust_lock_fixture(root.path(), "2.0.0", &integrity);
+        assert!(
+            requirements.verify_dependency_capture(root.path()).is_err(),
+            "the same package name and digest cannot conceal a version change"
+        );
+
+        let mut encoded = serde_json::to_value(&requirements).expect("encode capture");
+        encoded["dependency_ids"] = serde_json::json!([]);
+        let truncated: RunTrustRequirements =
+            serde_json::from_value(encoded).expect("structural representation");
+        let error = validate_execution_trust(root.path(), &Config::default(), &truncated, 1)
+            .expect_err("captured identities are validated before the empty-set return")
+            .to_string();
+        assert!(error.contains("omitted a captured dependency identity"), "{error}");
+    }
+
+    #[test]
+    fn execution_trust_unpinned_cards_keep_risk_warnings_and_revocation_enforcement() {
+        let root = TempDir::new().expect("unpinned dependency workspace");
+        fs::write(
+            root.path().join("package.json"),
+            r#"{"dependencies":{"fixture-alias":"npm:fixture-actual@*"}} "#,
+        )
+        .expect("manifest without an artifact pin");
+        let now_secs = Utc::now().timestamp().max(0) as u64;
+        let mut config = seed_execution_trust_artifact_registry(root.path(), now_secs);
+        let requirements = RunTrustRequirements::new(
+            &[],
+            &["npm:fixture-actual".to_string()],
+            true,
+        )
+        .expect("retain consulted card")
+        .with_dependency_capture(
+            CapturedDependencyTrust::capture(root.path()).expect("unresolved capture"),
+        )
+        .expect("bind unresolved capture");
+        requirements
+            .verify_dependency_capture(root.path())
+            .expect("unchanged unresolved topology");
+        for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+            config.profile = profile;
+            let warnings =
+                validate_execution_trust(root.path(), &config, &requirements, now_secs)
+                    .expect("missing pins retain existing warning policy");
+            assert!(
+                warnings.iter().any(|warning| warning.contains("unverified artifact binding")),
+                "{warnings:?}"
+            );
+        }
+
+        let registry_path =
+            crate::supply_chain::trust_card_registry_store::registry_snapshot_path(root.path());
+        let mut registry = TrustCardRegistry::load_authoritative_state_from_config(
+            &registry_path,
+            &config.trust,
+            now_secs + 1,
+            SnapshotSourceContext::TrustedFile,
+        )
+        .expect("reload current signed registry");
+        registry
+            .update(
+                "npm:fixture-actual",
+                TrustCardMutation {
+                    certification_level: None,
+                    revocation_status: Some(RevocationStatus::Revoked {
+                        reason: "publisher key revoked after preflight".to_string(),
+                        revoked_at: "2026-02-20T12:00:01Z".to_string(),
+                    }),
+                    active_quarantine: Some(true),
+                    reputation_score_basis_points: None,
+                    reputation_trend: None,
+                    user_facing_risk_assessment: None,
+                    last_verified_timestamp: None,
+                    evidence_refs: None,
+                },
+                now_secs + 1,
+                "test-unpinned-revocation",
+            )
+            .expect("revoke package-wide identity");
+        registry
+            .persist_authoritative_state(&registry_path)
+            .expect("persist independent revocation");
+        for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+            config.profile = profile;
+            let error = validate_execution_trust(
+                root.path(),
+                &config,
+                &requirements,
+                now_secs + 1,
+            )
+            .expect_err("missing artifact pins never waive a signed revocation")
+            .to_string();
+            assert!(error.contains("revoked since preflight"), "{error}");
+        }
+    }
 
     #[cfg(feature = "engine")]
     #[test]

@@ -686,31 +686,22 @@ fn write_pipeline_package_manifest(
 }
 
 fn write_pipeline_lockfile(workspace: &Path) {
+    // These pipeline cases assert an exact integrity binding. Use full-size
+    // hermetic SHA-512 digests; shortened parser samples are inventory-only.
+    let integrity = |byte| format!("sha512-{}", BASE64_STANDARD.encode([byte; 64]));
     fs::write(
         workspace.join("package-lock.json"),
-        r#"{
-  "name": "full-pipeline-e2e",
-  "lockfileVersion": 3,
-  "packages": {
-    "": {
-      "name": "full-pipeline-e2e",
-      "version": "1.0.0"
-    },
-    "node_modules/react": {
-      "version": "19.2.4",
-      "integrity": "sha512-AQIDBA=="
-    },
-    "node_modules/typescript": {
-      "version": "5.8.3",
-      "integrity": "sha512-BQYHCA=="
-    },
-    "node_modules/@types/node": {
-      "version": "24.9.2",
-      "integrity": "sha512-CQoLDA=="
-    }
-  }
-}
-"#,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "name": "full-pipeline-e2e",
+            "lockfileVersion": 3,
+            "packages": {
+                "": {"name": "full-pipeline-e2e", "version": "1.0.0"},
+                "node_modules/react": {"version": "19.2.4", "integrity": integrity(1_u8)},
+                "node_modules/typescript": {"version": "5.8.3", "integrity": integrity(2_u8)},
+                "node_modules/@types/node": {"version": "24.9.2", "integrity": integrity(3_u8)}
+            }
+        }))
+        .expect("full-length integrity fixture"),
     )
     .expect("write package lockfile");
 }
@@ -4149,6 +4140,85 @@ fn trust_scan_seeds_registry_from_manifest_and_lockfile() {
         payload["provenance_summary"]["artifact_hashes"][0],
         "sha512:01020304"
     );
+}
+
+#[test]
+fn run_preflight_refuses_different_selected_artifacts_in_every_profile() {
+    let workspace = tempfile::tempdir().expect("artifact trust workspace");
+    fs::write(
+        workspace.path().join("franken_node.toml"),
+        explicit_fixture_registry_config("balanced"),
+    )
+    .expect("explicit trust config");
+    write_pipeline_package_manifest(
+        workspace.path(),
+        &[("runtime-alias", "npm:acme-runtime@*")],
+        &[],
+        &[],
+    );
+    fs::write(
+        workspace.path().join("index.js"),
+        "console.log('artifact-guest-must-not-start');\n",
+    )
+    .expect("guest marker");
+    let write_lock = |version: &str, byte: u8| {
+        fs::write(
+            workspace.path().join("package-lock.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "lockfileVersion": 3,
+                "packages": {
+                    "": {},
+                    "node_modules/runtime-alias": {
+                        "name": "acme-runtime", "version": version,
+                        "integrity": format!("sha256-{}", BASE64_STANDARD.encode([byte; 32]))
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    };
+    write_lock("1.0.0", 0xaa);
+    let scan = run_cli_in_workspace(workspace.path(), &["trust", "scan", ".", "--json"]);
+    assert!(
+        scan.status.success(),
+        "{}",
+        String::from_utf8_lossy(&scan.stderr)
+    );
+    for (version, byte) in [("2.0.0", 0xaa), ("1.0.0", 0xbb)] {
+        write_lock(version, byte);
+        for profile in ["strict", "balanced", "legacy-risky"] {
+            let run = run_cli_in_workspace(
+                workspace.path(),
+                &["run", "--policy", profile, "--json", "."],
+            );
+            assert!(
+                !run.status.success(),
+                "contradictory artifact must be refused under {profile}"
+            );
+            let report = parse_json_stdout(&run, "contradictory captured artifact");
+            assert_eq!(report["verdict"]["status"], "blocked", "{report}");
+            let results = report["verdict"]["results"]
+                .as_array()
+                .expect("preflight results");
+            assert!(
+                results.iter().any(|result| {
+                    result["extension_id"] == "npm:acme-runtime"
+                        && result["status"] == "artifact_mismatch"
+                }),
+                "{report}"
+            );
+            assert!(
+                report["verdict"]["violations"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|violation| violation["kind"] == "artifact_mismatch"),
+                "{report}"
+            );
+            assert!(!String::from_utf8_lossy(&run.stdout).contains("artifact-guest-must-not-start"));
+        }
+    }
 }
 
 #[test]

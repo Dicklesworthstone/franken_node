@@ -41,6 +41,319 @@ pub enum SnapshotSourceContext {
     UntrustedNetwork,
 }
 
+/// Metadata for one selected package placement. Version and integrity stay
+/// together: independently unioning them could lend one version another
+/// version's digest. These are captured lockfile facts, not a measurement of
+/// the installed files or an attestation from the package publisher.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapturedDependencyArtifact {
+    pub location: Option<String>,
+    pub version: Option<String>,
+    pub integrity: Option<String>,
+}
+
+/// The runtime dependency identities and artifact metadata from one bounded
+/// topology capture. The hash covers the same manifest/lockfile capture as
+/// the placements, including npm aliases, workspace links and optional peers.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapturedDependencyTrust {
+    pub topology_hash: Option<String>,
+    pub packages: BTreeMap<String, Vec<CapturedDependencyArtifact>>,
+}
+
+const MAX_CAPTURED_TRUST_PLACEMENTS: usize = 81_920;
+const MAX_CAPTURED_TRUST_BYTES: usize = 2 * 1024 * 1024;
+
+impl CapturedDependencyTrust {
+    /// Derive expectations without reopening or reparsing any project file.
+    pub fn from_topology(
+        topology: &super::module_resolution_graph::dependency_topology::DependencyTopology,
+    ) -> anyhow::Result<Self> {
+        let mut packages: BTreeMap<String, BTreeSet<CapturedDependencyArtifact>> = BTreeMap::new();
+        for dependency in topology.trust_dependencies(".", false)? {
+            packages
+                .entry(format!("npm:{}", dependency.package_name))
+                .or_default()
+                .insert(CapturedDependencyArtifact {
+                    location: dependency.target,
+                    version: dependency.pinned_version,
+                    integrity: dependency.integrity,
+                });
+        }
+        let capture = Self {
+            topology_hash: Some(topology.canonical_hash().to_owned()),
+            packages: packages
+                .into_iter()
+                .map(|(identity, placements)| (identity, placements.into_iter().collect()))
+                .collect(),
+        };
+        capture.validate()?;
+        Ok(capture)
+    }
+
+    pub fn capture(project_root: &Path) -> anyhow::Result<Self> {
+        use super::module_resolution_graph::{ModuleResolutionGraphError, dependency_topology};
+        match dependency_topology::build(project_root) {
+            Ok(topology) => Self::from_topology(&topology),
+            Err(ModuleResolutionGraphError::MissingRootManifest { .. }) => Ok(Self::default()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Validate imported worker-frame data before using it as an expectation.
+    /// Bounds reject the whole capture; no identity or placement is evicted.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.topology_hash.as_deref().is_none_or(|hash| {
+                hash.strip_prefix("sha256:")
+                    .is_some_and(|digest| canonical_digest_hex(digest, 32))
+            }),
+            "captured dependency topology hash is invalid"
+        );
+        anyhow::ensure!(
+            self.topology_hash.is_some() || self.packages.is_empty(),
+            "captured dependency expectations have no topology commitment"
+        );
+        let mut placements = 0_usize;
+        let mut text_bytes = 0_usize;
+        for (identity, artifacts) in &self.packages {
+            validate_extension_id(identity)?;
+            anyhow::ensure!(
+                identity.starts_with("npm:") && identity.len() <= 256,
+                "captured dependency identity is not a bounded npm package identity"
+            );
+            anyhow::ensure!(
+                !artifacts.is_empty() && artifacts.windows(2).all(|pair| pair[0] < pair[1]),
+                "captured dependency placements must be nonempty, sorted and unique"
+            );
+            placements = placements.saturating_add(artifacts.len());
+            anyhow::ensure!(
+                placements <= MAX_CAPTURED_TRUST_PLACEMENTS,
+                "captured dependency trust exceeds the placement limit"
+            );
+            text_bytes = text_bytes.saturating_add(identity.len());
+            for artifact in artifacts {
+                for (value, limit, sri) in [
+                    (artifact.location.as_deref(), 4_096, false),
+                    (artifact.version.as_deref(), 128, false),
+                    (artifact.integrity.as_deref(), 4_096, true),
+                ] {
+                    if let Some(value) = value {
+                        anyhow::ensure!(
+                            !value.is_empty()
+                                && value.len() <= limit
+                                && !value.chars().any(|ch| {
+                                    ch.is_control() && !(sri && ch.is_ascii_whitespace())
+                                }),
+                            "captured dependency artifact metadata is empty, excessive or contains controls"
+                        );
+                        text_bytes = text_bytes.saturating_add(value.len());
+                    }
+                }
+            }
+            anyhow::ensure!(
+                text_bytes <= MAX_CAPTURED_TRUST_BYTES,
+                "captured dependency trust exceeds the metadata byte limit"
+            );
+        }
+        anyhow::ensure!(
+            serde_json::to_vec(self)?.len() <= MAX_CAPTURED_TRUST_BYTES,
+            "captured dependency trust exceeds the serialized byte limit"
+        );
+        Ok(())
+    }
+
+    /// Recheck at dispatch and worker admission, before loading guest source.
+    /// A missing/new manifest or changed selected metadata requires a fresh
+    /// preflight, even if the captured dependency set happened to be empty.
+    pub fn verify_project(&self, project_root: &Path) -> anyhow::Result<()> {
+        self.validate()?;
+        anyhow::ensure!(
+            Self::capture(project_root)? == *self,
+            "dependency metadata changed after trust preflight; run preflight again against the current project"
+        );
+        Ok(())
+    }
+}
+
+/// Whether a card's package identity covers its captured runtime placements.
+/// `Matched` binds version and integrity metadata only; it does not verify
+/// installed file bytes. Insufficient inventory evidence is distinct from
+/// positive evidence that the card describes a different artifact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DependencyArtifactMatch {
+    Matched,
+    Unverified(String),
+    Mismatch(String),
+}
+
+pub fn match_trust_card_artifact(
+    card: &TrustCard,
+    expected: &[CapturedDependencyArtifact],
+) -> DependencyArtifactMatch {
+    let card_version = &card.extension.version;
+    if !exact_dependency_version(card_version) {
+        return DependencyArtifactMatch::Unverified(format!(
+            "trust card v{} records `{card_version}` as package inventory, not an exact artifact version",
+            card.trust_card_version
+        ));
+    }
+    if expected.is_empty() {
+        return DependencyArtifactMatch::Unverified(
+            "no captured package placement is available for this trust card".to_owned(),
+        );
+    }
+    let mut incomplete = false;
+    for artifact in expected {
+        let location = artifact
+            .location
+            .as_deref()
+            .unwrap_or("unresolved placement");
+        let version = artifact
+            .version
+            .as_deref()
+            .filter(|version| exact_dependency_version(version));
+        incomplete |= version.is_none();
+        if let Some(version) = version
+            && version != card_version
+        {
+            return DependencyArtifactMatch::Mismatch(format!(
+                "trust card describes package version `{card_version}`, but `{location}` selects `{version}`"
+            ));
+        }
+        let Some(integrity) = artifact.integrity.as_deref() else {
+            incomplete = true;
+            continue;
+        };
+        let (algorithm, expected_hashes, partial) = strongest_captured_integrity(integrity);
+        incomplete |= partial || artifact.location.is_none();
+        let Some(algorithm) = algorithm else {
+            incomplete = true;
+            continue;
+        };
+        let prefix = format!("{algorithm}:");
+        let card_hashes: BTreeSet<_> = card
+            .provenance_summary
+            .artifact_hashes
+            .iter()
+            .filter(|hash| {
+                hash.strip_prefix(&prefix).is_some_and(|digest| {
+                    canonical_digest_hex(digest, strong_digest_size(algorithm).unwrap_or(0))
+                })
+            })
+            .map(String::as_str)
+            .collect();
+        if card_hashes.is_empty() {
+            incomplete = true;
+        } else if !expected_hashes
+            .iter()
+            .any(|hash| card_hashes.contains(hash.as_str()))
+        {
+            return DependencyArtifactMatch::Mismatch(format!(
+                "trust card integrity for package version `{card_version}` disagrees with `{location}` ({algorithm})"
+            ));
+        }
+    }
+    if incomplete {
+        DependencyArtifactMatch::Unverified(
+            "package inventory lacks a complete exact version and comparable strong integrity binding for every captured placement".to_owned(),
+        )
+    } else {
+        DependencyArtifactMatch::Matched
+    }
+}
+
+fn canonical_digest_hex(digest: &str, byte_count: usize) -> bool {
+    digest.len() == byte_count.saturating_mul(2)
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn strong_digest_size(algorithm: &str) -> Option<usize> {
+    match algorithm {
+        "sha256" => Some(32),
+        "sha384" => Some(48),
+        "sha512" => Some(64),
+        _ => None,
+    }
+}
+
+/// Keep same-algorithm SRI alternatives together and use the strongest
+/// supported algorithm. A weak matching digest cannot hide a stronger
+/// contradiction. Unsupported or malformed tokens remain incomplete evidence.
+fn strongest_captured_integrity(raw: &str) -> (Option<&str>, BTreeSet<String>, bool) {
+    let mut algorithm = None;
+    let mut strongest_size = 0;
+    let mut hashes = BTreeSet::new();
+    let mut incomplete = false;
+    for token in raw.split_ascii_whitespace() {
+        let Some((name, encoded)) = token.split_once('-') else {
+            incomplete = true;
+            continue;
+        };
+        let Some(size) = strong_digest_size(name) else {
+            incomplete = true;
+            continue;
+        };
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
+            incomplete = true;
+            continue;
+        };
+        if bytes.len() != size {
+            incomplete = true;
+            continue;
+        }
+        if size < strongest_size {
+            continue;
+        }
+        if size > strongest_size {
+            hashes.clear();
+            strongest_size = size;
+            algorithm = Some(name);
+        }
+        hashes.insert(format!("{name}:{}", hex::encode(bytes)));
+    }
+    (algorithm, hashes, incomplete)
+}
+
+fn exact_dependency_version(version: &str) -> bool {
+    let (without_build, build) = version
+        .split_once('+')
+        .map_or((version, None), |(base, suffix)| (base, Some(suffix)));
+    let (core, prerelease) = without_build
+        .split_once('-')
+        .map_or((without_build, None), |(base, suffix)| (base, Some(suffix)));
+    let mut components = core.split('.');
+    for _ in 0..3 {
+        if components.next().is_none_or(|part| {
+            part.is_empty()
+                || !part.bytes().all(|byte| byte.is_ascii_digit())
+                || (part.len() > 1 && part.starts_with('0'))
+        }) {
+            return false;
+        }
+    }
+    components.next().is_none()
+        && [build, prerelease].into_iter().flatten().all(|suffix| {
+            suffix.split('.').all(|part| {
+                !part.is_empty()
+                    && part
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            })
+        })
+        && prerelease.is_none_or(|suffix| {
+            suffix.split('.').all(|part| {
+                part.len() == 1
+                    || !part.starts_with('0')
+                    || !part.bytes().all(|byte| byte.is_ascii_digit())
+            })
+        })
+}
+
 const MAX_TELEMETRY: usize = 4096;
 const MAX_CARD_VERSIONS: usize = 512;
 const MAX_AUDIT_HISTORY: usize = 256;
@@ -3875,6 +4188,222 @@ mod tests {
     use tempfile::{NamedTempFile, TempDir};
 
     type TestResult = Result<(), String>;
+
+    fn artifact_match_card() -> TrustCard {
+        TrustCardRegistry::default()
+            .create(sample_input(), 1_000, "artifact-match-test")
+            .expect("signed test card")
+    }
+
+    fn artifact_pin(version: &str, byte: u8) -> CapturedDependencyArtifact {
+        CapturedDependencyArtifact {
+            location: Some("node_modules/@acme/plugin".to_owned()),
+            version: Some(version.to_owned()),
+            integrity: Some(format!(
+                "sha256-{}",
+                base64::engine::general_purpose::STANDARD.encode([byte; 32])
+            )),
+        }
+    }
+
+    #[test]
+    fn artifact_match_binds_exact_version_and_integrity_per_placement() {
+        let mut card = artifact_match_card();
+        let matched = artifact_pin("1.0.0", 0xee);
+        assert_eq!(
+            match_trust_card_artifact(&card, std::slice::from_ref(&matched)),
+            DependencyArtifactMatch::Matched
+        );
+        for contradictory in [artifact_pin("2.0.0", 0xee), artifact_pin("1.0.0", 0xdd)] {
+            assert!(matches!(
+                match_trust_card_artifact(&card, &[contradictory]),
+                DependencyArtifactMatch::Mismatch(_)
+            ));
+        }
+
+        // A union of v1's and v2's hashes cannot make the v1 card apply to v2.
+        card.provenance_summary
+            .artifact_hashes
+            .push(format!("sha256:{}", "dd".repeat(32)));
+        let mut second = artifact_pin("2.0.0", 0xdd);
+        second.location = Some("node_modules/parent/node_modules/@acme/plugin".to_owned());
+        assert!(matches!(
+            match_trust_card_artifact(&card, &[matched, second]),
+            DependencyArtifactMatch::Mismatch(_)
+        ));
+    }
+
+    #[test]
+    fn artifact_match_distinguishes_inventory_from_contradictory_evidence() {
+        let mut card = artifact_match_card();
+        for inventory in ["^1.0.0", "latest", "multiple-or-unresolved"] {
+            card.extension.version = inventory.to_owned();
+            assert!(matches!(
+                match_trust_card_artifact(&card, &[artifact_pin("2.0.0", 0xdd)]),
+                DependencyArtifactMatch::Unverified(_)
+            ));
+        }
+        card.extension.version = "1.0.0".to_owned();
+        for (byte, mismatch) in [(0xee, false), (0xdd, true)] {
+            let pin = CapturedDependencyArtifact {
+                version: None,
+                ..artifact_pin("1.0.0", byte)
+            };
+            let result = match_trust_card_artifact(&card, &[pin]);
+            if mismatch {
+                assert!(matches!(result, DependencyArtifactMatch::Mismatch(_)));
+            } else {
+                assert!(matches!(result, DependencyArtifactMatch::Unverified(_)));
+            }
+        }
+        for incomplete in [
+            CapturedDependencyArtifact {
+                location: None,
+                version: None,
+                integrity: None,
+            },
+            CapturedDependencyArtifact {
+                integrity: None,
+                ..artifact_pin("1.0.0", 0xee)
+            },
+            CapturedDependencyArtifact {
+                integrity: Some("sha256-AQID".to_owned()),
+                ..artifact_pin("1.0.0", 0xee)
+            },
+        ] {
+            assert!(matches!(
+                match_trust_card_artifact(&card, &[incomplete]),
+                DependencyArtifactMatch::Unverified(_)
+            ));
+        }
+        card.provenance_summary.artifact_hashes.clear();
+        assert!(matches!(
+            match_trust_card_artifact(&card, &[artifact_pin("1.0.0", 0xee)]),
+            DependencyArtifactMatch::Unverified(_)
+        ));
+        assert!(matches!(
+            match_trust_card_artifact(&card, &[artifact_pin("2.0.0", 0xee)]),
+            DependencyArtifactMatch::Mismatch(_)
+        ));
+    }
+
+    #[test]
+    fn artifact_match_does_not_let_weak_or_malformed_tokens_hide_strong_mismatch() {
+        let mut card = artifact_match_card();
+        card.provenance_summary
+            .artifact_hashes
+            .push(format!("sha512:{}", "aa".repeat(64)));
+        let mut pin = artifact_pin("1.0.0", 0xee);
+        pin.integrity = Some(format!(
+            "{} sha512-{} unsupported-token",
+            pin.integrity.unwrap(),
+            base64::engine::general_purpose::STANDARD.encode([0xbb; 64])
+        ));
+        assert!(matches!(
+            match_trust_card_artifact(&card, &[pin]),
+            DependencyArtifactMatch::Mismatch(_)
+        ));
+        let mut alternatives = artifact_pin("1.0.0", 0xdd);
+        alternatives.integrity = Some(format!(
+            "{} {}",
+            alternatives.integrity.unwrap(),
+            artifact_pin("1.0.0", 0xee).integrity.unwrap()
+        ));
+        assert_eq!(
+            match_trust_card_artifact(&card, &[alternatives]),
+            DependencyArtifactMatch::Matched
+        );
+    }
+
+    #[test]
+    fn dependency_trust_capture_binds_alias_selection_and_metadata_changes() {
+        let root = TempDir::new().unwrap();
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{
+                "name":"capture-test", "version":"1.0.0",
+                "dependencies":{"plugin":"npm:@acme/plugin@1.0.0"}
+            }"#,
+        )
+        .unwrap();
+        let lockfile = |version| serde_json::json!({
+            "lockfileVersion": 3,
+            "packages": {
+                "": {"name":"capture-test", "dependencies":{"plugin":"npm:@acme/plugin@1.0.0"}},
+                "node_modules/plugin": {"name":"@acme/plugin", "version":version,
+                    "integrity":artifact_pin("1.0.0", 0xee).integrity.unwrap()}
+            }
+        });
+        std::fs::write(
+            root.path().join("package-lock.json"),
+            serde_json::to_vec(&lockfile("1.0.0")).unwrap(),
+        )
+        .unwrap();
+        let capture = CapturedDependencyTrust::capture(root.path()).unwrap();
+        capture.verify_project(root.path()).unwrap();
+        assert!(!capture.packages.contains_key("npm:plugin"));
+        let pin = &capture.packages["npm:@acme/plugin"][0];
+        assert_eq!(pin.location.as_deref(), Some("node_modules/plugin"));
+        assert_eq!(pin.version.as_deref(), Some("1.0.0"));
+        assert_eq!(
+            match_trust_card_artifact(
+                &artifact_match_card(),
+                &capture.packages["npm:@acme/plugin"]
+            ),
+            DependencyArtifactMatch::Matched
+        );
+        std::fs::write(
+            root.path().join("package-lock.json"),
+            serde_json::to_vec(&lockfile("2.0.0")).unwrap(),
+        )
+        .unwrap();
+        assert!(capture.verify_project(root.path()).is_err());
+    }
+
+    #[test]
+    fn dependency_trust_capture_rechecks_even_an_empty_preflight() {
+        let root = TempDir::new().unwrap();
+        let capture = CapturedDependencyTrust::capture(root.path()).unwrap();
+        assert!(capture.topology_hash.is_none());
+        capture.verify_project(root.path()).unwrap();
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"name":"appeared","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        assert!(capture.verify_project(root.path()).is_err());
+    }
+
+    #[test]
+    fn dependency_trust_capture_rejects_uncommitted_duplicate_and_oversized_pins() {
+        let mut capture = CapturedDependencyTrust {
+            topology_hash: None,
+            packages: BTreeMap::from([(
+                "npm:@acme/plugin".to_owned(),
+                vec![artifact_pin("1.0.0", 0xee)],
+            )]),
+        };
+        assert!(capture.validate().is_err());
+        capture.topology_hash = Some(format!("sha256:{}", "a".repeat(64)));
+        capture.validate().unwrap();
+        capture
+            .packages
+            .get_mut("npm:@acme/plugin")
+            .unwrap()
+            .push(artifact_pin("1.0.0", 0xee));
+        assert!(capture.validate().is_err());
+        capture.packages.insert(
+            "npm:@acme/plugin".to_owned(),
+            (0..300)
+                .map(|index| CapturedDependencyArtifact {
+                    location: Some(format!("{index:04}/{}", "a".repeat(4_090))),
+                    version: Some("1.0.0".to_owned()),
+                    integrity: Some("b".repeat(4_096)),
+                })
+                .collect(),
+        );
+        assert!(capture.validate().is_err());
+    }
 
     fn test_evidence_refs() -> Vec<VerifiedEvidenceRef> {
         use super::super::certification::EvidenceType;

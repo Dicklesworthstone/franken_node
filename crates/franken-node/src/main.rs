@@ -580,6 +580,11 @@ struct RunPackageDependency {
 #[serde(rename_all = "snake_case")]
 enum RunDependencyTrustStatus {
     Trusted,
+    /// A signed package inventory exists, but it does not bind all selected
+    /// placements to an exact version and comparable strong integrity digest.
+    Unverified,
+    /// Captured package metadata contradicts the card's exact artifact.
+    ArtifactMismatch,
     Untracked,
     Revoked,
     Quarantined,
@@ -728,6 +733,8 @@ struct TrustQuarantineCliReport<'a> {
 #[serde(rename_all = "snake_case")]
 enum TrustViolationKind {
     RegistryCorrupt,
+    /// The signed card and selected package metadata name different artifacts.
+    ArtifactMismatch,
     Revoked,
     Quarantined,
     /// bd-fp1je: the run target itself is under an active Sentinel
@@ -786,6 +793,8 @@ struct RunPreFlightReport {
     /// unavailable registry. The public verdict already describes that skip.
     #[serde(skip)]
     dependency_ids: Vec<String>,
+    #[serde(skip)]
+    dependency_capture: supply_chain::trust_card::CapturedDependencyTrust,
     verdict: PreFlightVerdict,
     receipt: Receipt,
 }
@@ -11833,7 +11842,7 @@ fn maybe_auto_quarantine_run_dependencies(
     )
 }
 
-/// Quarantine + risk-bump every Trusted dependency of the current run in the
+/// Quarantine + risk-bump every admitted tracked dependency of the current run in the
 /// authoritative trust registry. Shared by the SSRF-violation trigger above
 /// and the Sentinel escalation trigger (bd-fp1je), which differ only in the
 /// recorded rationale and evidence binding.
@@ -11865,7 +11874,12 @@ fn quarantine_trusted_run_dependencies(
         PreFlightVerdict::Passed { results, .. } | PreFlightVerdict::Blocked { results, .. } => {
             results
                 .iter()
-                .filter(|result| result.status == RunDependencyTrustStatus::Trusted)
+                .filter(|result| {
+                    matches!(
+                        result.status,
+                        RunDependencyTrustStatus::Trusted | RunDependencyTrustStatus::Unverified
+                    )
+                })
                 .map(|result| result.extension_id.clone())
                 .collect::<Vec<_>>()
         }
@@ -19699,7 +19713,12 @@ fn collect_package_dependencies(
     project_root: &Path,
     sections: &[&str],
     context: &str,
-) -> Result<Option<Vec<RunPackageDependency>>> {
+) -> Result<
+    Option<(
+        Vec<RunPackageDependency>,
+        supply_chain::trust_card::CapturedDependencyTrust,
+    )>,
+> {
     use supply_chain::module_resolution_graph::{
         DependencyKind, ModuleResolutionGraphError, dependency_topology,
     };
@@ -19710,6 +19729,7 @@ fn collect_package_dependencies(
             return Err(error).with_context(|| format!("capturing dependencies for {context}"));
         }
     };
+    let runtime_capture = supply_chain::trust_card::CapturedDependencyTrust::from_topology(&topology)?;
     let include_development = sections.contains(&"devDependencies");
     let mut roots = vec!["."];
     if include_development {
@@ -19774,12 +19794,17 @@ fn collect_package_dependencies(
         }
     }
 
-    Ok(Some(dependencies.into_values().collect()))
+    Ok(Some((dependencies.into_values().collect(), runtime_capture)))
 }
 
 fn collect_run_package_dependencies(
     project_root: &Path,
-) -> Result<Option<Vec<RunPackageDependency>>> {
+) -> Result<
+    Option<(
+        Vec<RunPackageDependency>,
+        supply_chain::trust_card::CapturedDependencyTrust,
+    )>,
+> {
     collect_package_dependencies(
         project_root,
         &["dependencies", "optionalDependencies", "peerDependencies"],
@@ -19798,6 +19823,7 @@ fn collect_trust_scan_dependencies(project_root: &Path) -> Result<Vec<RunPackage
         ],
         "trust scan",
     )?
+    .map(|(dependencies, _)| dependencies)
     .ok_or_else(|| {
         anyhow::anyhow!(
             "package.json not found at project path {}; trust scan requires an npm project root",
@@ -21102,8 +21128,15 @@ fn evaluate_run_trust_preflight(
     config: &config::Config,
     now_secs: u64,
 ) -> Result<RunPreFlightReport> {
+    use supply_chain::trust_card::{DependencyArtifactMatch, match_trust_card_artifact};
+
     let project_root = project_paths.project_root();
-    let dependencies = collect_run_package_dependencies(project_root)?;
+    let captured_dependencies = collect_run_package_dependencies(project_root)?;
+    let dependency_capture = captured_dependencies
+        .as_ref()
+        .map(|(_, capture)| capture.clone())
+        .unwrap_or_default();
+    let dependencies = captured_dependencies.map(|(dependencies, _)| dependencies);
     let dependency_ids = dependencies
         .as_ref()
         .into_iter()
@@ -21230,6 +21263,36 @@ fn evaluate_run_trust_preflight(
                                         continue;
                                     }
 
+                                    let artifact_match = match_trust_card_artifact(
+                                        &card,
+                                        dependency_capture
+                                            .packages
+                                            .get(&extension_id)
+                                            .map_or(&[], Vec::as_slice),
+                                    );
+                                    if let DependencyArtifactMatch::Mismatch(reason) = &artifact_match {
+                                        let detail = format!(
+                                            "dependency `{extension_id}` has contradictory artifact evidence: {reason}; refresh its trust card against the current project"
+                                        );
+                                        violations.push(TrustViolation {
+                                            dependency_name: Some(dependency_name.clone()),
+                                            extension_id: Some(extension_id.clone()),
+                                            kind: TrustViolationKind::ArtifactMismatch,
+                                            detail: detail.clone(),
+                                        });
+                                        results.push(RunDependencyTrustResult {
+                                            dependency_name,
+                                            version_requirement: dependency.version_requirement,
+                                            section: dependency.section,
+                                            extension_id,
+                                            status: RunDependencyTrustStatus::ArtifactMismatch,
+                                            trust_card_version: Some(card.trust_card_version),
+                                            risk_level,
+                                            detail,
+                                        });
+                                        continue;
+                                    }
+
                                     if card.active_quarantine {
                                         let detail =
                                             format!("dependency `{extension_id}` is quarantined");
@@ -21294,18 +21357,34 @@ fn evaluate_run_trust_preflight(
                                         }
                                     }
 
+                                    let (status, detail) = match artifact_match {
+                                        DependencyArtifactMatch::Matched => (
+                                            RunDependencyTrustStatus::Trusted,
+                                            format!(
+                                                "verified trust card v{} matches captured package version and integrity metadata; installed file bytes are not attested by this check",
+                                                card.trust_card_version
+                                            ),
+                                        ),
+                                        DependencyArtifactMatch::Unverified(reason) => {
+                                            let detail = format!(
+                                                "dependency `{extension_id}` has unverified artifact inventory: {reason}"
+                                            );
+                                            warnings.push(detail.clone());
+                                            (RunDependencyTrustStatus::Unverified, detail)
+                                        }
+                                        DependencyArtifactMatch::Mismatch(_) => {
+                                            unreachable!("artifact contradictions are refused before risk evaluation")
+                                        }
+                                    };
                                     results.push(RunDependencyTrustResult {
                                         dependency_name,
                                         version_requirement: dependency.version_requirement,
                                         section: dependency.section,
                                         extension_id,
-                                        status: RunDependencyTrustStatus::Trusted,
+                                        status,
                                         trust_card_version: Some(card.trust_card_version),
                                         risk_level,
-                                        detail: format!(
-                                            "verified trust card v{} allows execution",
-                                            card.trust_card_version
-                                        ),
+                                        detail,
                                     });
                                 }
                             }
@@ -21322,7 +21401,13 @@ fn evaluate_run_trust_preflight(
                         // working offline.
                         if results
                             .iter()
-                            .any(|result| result.status == RunDependencyTrustStatus::Trusted)
+                            .any(|result| {
+                                matches!(
+                                    result.status,
+                                    RunDependencyTrustStatus::Trusted
+                                        | RunDependencyTrustStatus::Unverified
+                                )
+                            })
                             && let Some(detail) = registry_revocation_freshness_denial(
                                 &authoritative_registry,
                                 &config.trust,
@@ -21409,6 +21494,7 @@ fn evaluate_run_trust_preflight(
         policy_mode: policy_mode.to_string(),
         registry_path: registry_path.map(|path| path.display().to_string()),
         dependency_ids,
+        dependency_capture,
         verdict,
         receipt,
     })
@@ -21427,12 +21513,16 @@ fn render_run_preflight_human(report: &RunPreFlightReport) -> String {
             results,
         } => {
             lines.push(format!(
-                "  verdict: passed checked={} warnings={} trusted={} untracked={}",
+                "  verdict: passed checked={} warnings={} trusted={} unverified={} untracked={}",
                 checked,
                 warnings.len(),
                 results
                     .iter()
                     .filter(|result| result.status == RunDependencyTrustStatus::Trusted)
+                    .count(),
+                results
+                    .iter()
+                    .filter(|result| result.status == RunDependencyTrustStatus::Unverified)
                     .count(),
                 results
                     .iter()
@@ -34308,11 +34398,13 @@ fn main() -> Result<()> {
             let preflight_dependency_ids = preflight.dependency_ids.clone();
             let preflight_registry_required =
                 matches!(preflight.verdict, PreFlightVerdict::Passed { .. });
-            // Cards on which preflight relied must also remain present.
+            // Every consulted card must remain present, including inventory
+            // cards whose artifact binding is incomplete. Its revocation and
+            // risk state still governed this admission.
             let trusted_extension_ids = match &preflight.verdict {
                 PreFlightVerdict::Passed { results, .. } => results
                     .iter()
-                    .filter(|result| result.status == RunDependencyTrustStatus::Trusted)
+                    .filter(|result| result.trust_card_version.is_some())
                     .map(|result| result.extension_id.clone())
                     .collect::<Vec<_>>(),
                 _ => Vec::new(),
@@ -34333,6 +34425,7 @@ fn main() -> Result<()> {
                     .with_project_paths(project_paths.clone())
                     .with_preflight_fleet_policy(active_fleet_policy)
                     .with_preflight_dependency_ids(preflight_dependency_ids)
+                    .with_preflight_dependency_capture(Some(preflight.dependency_capture.clone()))
                     .with_preflight_registry_requirement(preflight_registry_required)
                     .with_replay_capture(capture_replay)
                     .with_app_args(app_args);
