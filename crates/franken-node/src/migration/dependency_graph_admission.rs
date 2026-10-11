@@ -10,8 +10,9 @@
 //! PRESENT optional installations still undergo every identity/risk check.
 //! Transitive development dependencies are not runtime installation edges.
 //! Legacy `requires` lacks per-edge optionality: unresolved edges stay review
-//! findings rather than being guessed optional. Version-range satisfaction,
-//! installed-content authentication and JS resolution remain separate claims.
+//! findings rather than being guessed optional. Supported registry version
+//! ranges are checked; opaque requests require review. Installed-content
+//! authentication, npm overrides and JS resolution remain separate claims.
 
 use super::{
     DependencyAdmission, DependencyFinding, LockedPackage, MAX_DEPTH, MAX_PACKAGES,
@@ -22,7 +23,27 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::time::Instant;
 
+#[path = "npm_version_req.rs"]
+mod versions;
+
 const MAX_DEPENDENCY_EDGES: usize = 200_000;
+
+pub(super) fn version_review(
+    request: Option<&str>,
+    locked_version: Option<&str>,
+) -> Option<(&'static str, &'static str)> {
+    match request.zip(locked_version).and_then(|(request, version)| versions::matches(request, version)) {
+        Some(true) => None,
+        Some(false) => Some((
+            "dependency_version_mismatch",
+            "Nearest locked version does not satisfy the declared npm registry range; review stale pins or explicit overrides before execution",
+        )),
+        None => Some((
+            "unverifiable_dependency_version",
+            "Dependency request or locked version cannot be verified by the bounded registry-range checker; tags, URLs, Git and unsupported forms require explicit review",
+        )),
+    }
+}
 
 #[derive(Clone, Copy)]
 struct Edge<'a> {
@@ -50,7 +71,7 @@ impl Admission<'_> {
             self.edges <= MAX_DEPENDENCY_EDGES,
             "transitive dependency edge limit exceeded"
         );
-        let (actual, _) = alias(edge.installed_as, Some(edge.request))?;
+        let (actual, requirement) = alias(edge.installed_as, Some(edge.request))?;
         let source = format!("{}/package.json", edge.consumer);
         let selected = nearest_package(self.packages, &source, edge.installed_as);
         let private_peer = edge.peer
@@ -69,7 +90,10 @@ impl Admission<'_> {
             return Ok(());
         }
         let native = native_addon(actual) || native_addon(edge.installed_as);
-        if !represented || native {
+        let version_issue = if represented {
+            version_review(requirement, selected.and_then(|package| package.version.as_deref()))
+        } else { None };
+        if !represented || native || version_issue.is_some() {
             let (code, detail) = if native {
                 (
                     "native_addon",
@@ -80,6 +104,8 @@ impl Admission<'_> {
                     "invalid_peer_placement",
                     "Peer dependency is shadowed inside its consumer instead of being provided at or above the consumer's installation level",
                 )
+            } else if let Some(issue) = version_issue {
+                issue
             } else {
                 (
                     "unresolved_transitive_dependency",
@@ -339,6 +365,60 @@ mod tests {
             "node_modules/a":{"version":"1.0.0","devDependencies":{"uninstalled-test-tool":"1"}}
         })).unwrap();
         assert!(!report.requires_review());
+    }
+
+    #[test]
+    fn transitive_version_ranges_do_not_accept_an_incompatible_private_pin() {
+        let report = modern(json!({
+            "node_modules/a":{"version":"1.0.0","dependencies":{"b":"^2"}},
+            "node_modules/a/node_modules/b":{"version":"1.9.9"},
+            "node_modules/b":{"version":"2.1.0"}
+        })).unwrap();
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].code, "dependency_version_mismatch");
+        assert_eq!(report.findings[0].package_path.as_deref(), Some("node_modules/a/node_modules/b"));
+    }
+
+    #[test]
+    fn root_declarations_share_the_actual_version_admission_not_just_graph_checks() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("package.json"), r#"{"dependencies":{"a":"^2"}}"#).unwrap();
+        fs::write(root.path().join("package-lock.json"), serde_json::to_vec(&json!({
+            "lockfileVersion":3,"packages":{"node_modules/a":{"version":"1.0.0"}}
+        })).unwrap()).unwrap();
+        let report = super::super::inspect(root.path(), deadline()).unwrap();
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].code, "dependency_version_mismatch");
+        assert_eq!(report.findings[0].source, "package.json#dependencies");
+        assert!(!root.path().join("node_modules").exists());
+    }
+
+    #[test]
+    fn alias_and_legacy_requests_check_the_target_version_and_do_not_guess_tags() {
+        let report = assess(json!({"lockfileVersion":1,"dependencies":{
+            "a":{"version":"1.0.0","requires":{"alias":"npm:actual@^2"}},
+            "alias":{"version":"npm:actual@1.0.0"}
+        }})).unwrap();
+        assert_eq!(report.findings[0].code, "dependency_version_mismatch");
+        for request in ["latest", "npm:actual", "https://example.invalid/actual.tgz"] {
+            let report = modern(json!({
+                "node_modules/a":{"version":"1.0.0","dependencies":{"actual":request}},
+                "node_modules/actual":{"version":"1.0.0"}
+            })).unwrap();
+            assert_eq!(report.findings[0].code, "unverifiable_dependency_version", "{request}");
+        }
+    }
+
+    #[test]
+    fn installed_optional_and_peer_versions_remain_load_bearing() {
+        for section in ["optionalDependencies", "peerDependencies"] {
+            let mut record = json!({"version":"1.0.0"});
+            record[section] = json!({"b":"^2"});
+            let report = modern(json!({
+                "node_modules/a":record,"node_modules/b":{"version":"1.0.0"}
+            })).unwrap();
+            assert_eq!(report.findings[0].code, "dependency_version_mismatch", "{section}");
+        }
     }
 
     #[test]

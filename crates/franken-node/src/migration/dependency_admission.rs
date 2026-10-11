@@ -2,8 +2,9 @@
 //!
 //! Inventories every recorded installation location, not just root dependency
 //! names. No npm invocation, registry access, lifecycle execution or live
-//! node_modules traversal. This is NOT installed-content authentication, semver
-//! satisfaction, or runtime compatibility proof. Those remain separate gates.
+//! node_modules traversal. Supported registry version ranges must match the
+//! nearest recorded pin; opaque requests require review. This is NOT installed
+//! content authentication, a complete npm solver, or runtime compatibility proof.
 //!
 //! Format reference: https://docs.npmjs.com/cli/v11/configuring-npm/package-lock-json/
 
@@ -37,7 +38,7 @@ const MAX_DEPTH: usize = 64;
 const SECTIONS: &[&str] = &[
     "dependencies", "devDependencies", "peerDependencies", "optionalDependencies",
 ];
-const SCOPE: &str = "captured npm metadata only; not installed-content authentication, semver satisfaction or runtime compatibility proof";
+const SCOPE: &str = "captured npm metadata and supported registry version ranges only; not installed-content authentication, npm override resolution or runtime compatibility proof";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataInput {
@@ -397,20 +398,24 @@ fn declarations(report: &mut DependencyAdmission, manifest: &Value, packages: &B
             ensure!(*count <= MAX_PACKAGES, "declared dependency count exceeds limit");
             name(installed_as)?;
             let request = bounded_text(request, "dependency request")?;
-            let (actual, _) = alias(installed_as, Some(request))?;
-            let represented = nearest_package(packages, source, installed_as)
-                .is_some_and(|package| package.name == actual && !package.unresolved
+            let (actual, requirement) = alias(installed_as, Some(request))?;
+            let selected = nearest_package(packages, source, installed_as);
+            let represented = selected.is_some_and(|package| package.name == actual && !package.unresolved
                     // npm aliases, URL/Git and file requests are not authority
                     // to substitute a same-named local workspace installation.
                     && (!package.linked || !request.contains([':', '/', '\\'])));
             let native = native_addon(actual) || native_addon(installed_as);
-            if !represented || native {
+            let version_issue = if represented {
+                graph::version_review(requirement, selected.and_then(|package| package.version.as_deref()))
+            } else { None };
+            if !represented || native || version_issue.is_some() {
                 report.finding(DependencyFinding {
-                    code: if native { "native_addon" } else { "unresolved_declaration" }.into(),
+                    code: if native { "native_addon" }
+                        else { version_issue.map_or("unresolved_declaration", |issue| issue.0) }.into(),
                     source: format!("{source}#{section}"), package: actual.into(),
                     installed_as: installed_as.clone(), package_path: None, version: Some(request.into()),
                     detail: if native { "Declared native-addon/build dependency requires explicit migration review" }
-                        else { "Declaration has no matching complete nearest lockfile identity; version satisfaction is not established" }.into(),
+                        else { version_issue.map_or("Declaration has no matching complete nearest lockfile identity; version satisfaction is not established", |issue| issue.1) }.into(),
                 })?;
             }
         }
