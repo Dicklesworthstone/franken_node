@@ -311,6 +311,10 @@ const MAX_SENTINEL_QUARANTINE_RECORD_BYTES: u64 = 1 << 20;
 const MAX_SENTINEL_QUARANTINE_SUBJECT_BYTES: u64 = 64 << 20;
 const TRUST_SCAN_NPM_REGISTRY_BASE_URL: &str = "https://registry.npmjs.org";
 const TRUST_SCAN_OSV_QUERY_URL: &str = "https://api.osv.dev/v1/query";
+const TRUST_SCAN_OSV_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
+const TRUST_SCAN_OSV_MAX_PAGES: usize = 16;
+const TRUST_SCAN_OSV_MAX_VULNERABILITIES: usize = 10_000;
+const TRUST_SCAN_OSV_MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const TRUST_SCAN_DEPS_DEV_BASE_URL: &str = "https://api.deps.dev/v3alpha";
 const TRUST_SCAN_REMOTECAP_TOKEN_ENV: &str = "FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN";
 /// RemoteCap signing key provisioned by `init`, used when
@@ -16075,7 +16079,9 @@ mod trust_scan_tests {
             ]
         });
         assert_eq!(
-            parse_osv_vulnerability_ids(&payload),
+            parse_osv_query_page(&payload.to_string())
+                .expect("valid OSV query page")
+                .0,
             vec!["OSV-1".to_string(), "OSV-2".to_string()]
         );
     }
@@ -20281,22 +20287,64 @@ fn fetch_trust_scan_npm_metadata(
     Ok(metadata)
 }
 
-fn parse_osv_vulnerability_ids(payload: &serde_json::Value) -> Vec<String> {
-    let mut ids = payload
-        .get("vulns")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| {
-            entry
-                .get("id")
-                .and_then(serde_json::Value::as_str)
-                .map(ToString::to_string)
-        })
-        .collect::<Vec<_>>();
+fn parse_osv_query_page(body: &str) -> Result<(Vec<String>, Option<String>)> {
+    #[derive(Deserialize)]
+    struct Vulnerability {
+        id: String,
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct QueryPage {
+        #[serde(default)]
+        vulns: Vec<Vulnerability>,
+        #[serde(default)]
+        next_page_token: String,
+    }
+
+    // Serde's derived struct visitor also accepts a positional sequence. Check
+    // object shapes first, then decode the original JSON so duplicate fields
+    // cannot disappear through a Value round trip.
+    let shape: serde_json::Value =
+        serde_json::from_str(body).context("invalid OSV JSON response")?;
+    anyhow::ensure!(shape.is_object(), "OSV response must be an object");
+    if let Some(records) = shape.get("vulns").and_then(serde_json::Value::as_array) {
+        anyhow::ensure!(
+            records.iter().all(serde_json::Value::is_object),
+            "OSV vulnerability records must be objects"
+        );
+    }
+    drop(shape);
+
+    // Duplicate response fields, malformed records and error envelopes must
+    // never become an empty successful scan.
+    // OSV permits an empty object, or a token-only page, when no results are
+    // available in this page. Only a terminal page completes the query.
+    let page: QueryPage = serde_json::from_str(body).context("invalid OSV JSON response")?;
+    anyhow::ensure!(
+        page.vulns.len() <= TRUST_SCAN_OSV_MAX_VULNERABILITIES,
+        "OSV vulnerability inventory exceeds the complete-query limit"
+    );
+    anyhow::ensure!(
+        page.next_page_token.len() <= 4096
+            && !page.next_page_token.chars().any(char::is_whitespace)
+            && !page.next_page_token.chars().any(char::is_control),
+        "OSV response contains an invalid continuation token"
+    );
+    let mut ids = Vec::with_capacity(page.vulns.len());
+    for vulnerability in page.vulns {
+        anyhow::ensure!(
+            !vulnerability.id.is_empty()
+                && vulnerability.id.len() <= 256
+                && !vulnerability.id.chars().any(char::is_whitespace)
+                && !vulnerability.id.chars().any(char::is_control),
+            "OSV response contains an invalid vulnerability id"
+        );
+        ids.push(vulnerability.id);
+    }
     ids.sort();
     ids.dedup();
-    ids
+    let continuation = (!page.next_page_token.is_empty()).then_some(page.next_page_token);
+    Ok((ids, continuation))
 }
 
 fn fetch_trust_scan_audit_metadata_with_remote_cap(
@@ -20315,19 +20363,55 @@ fn fetch_trust_scan_audit_metadata_with_remote_cap(
     }
 
     let query_config = trust_scan_osv_query_config();
-    remote_cap.authorize_egress(&query_config.url)?;
-    let payload = trust_scan_http_post_json_body(
-        &query_config.url,
-        body.to_string(),
-        &format!("OSV query failed for {dependency_name}"),
-        &format!("failed reading OSV response for {dependency_name}"),
-    )?;
-    let payload = serde_json::from_str::<serde_json::Value>(&payload)
-        .with_context(|| format!("invalid OSV JSON for {dependency_name}"))?;
-    Ok(TrustScanAuditMetadata {
-        vulnerability_ids: parse_osv_vulnerability_ids(&payload),
-        risk_lowering_authenticated: query_config.risk_lowering_authenticated,
-    })
+    let deadline = Instant::now() + TRUST_SCAN_OSV_QUERY_TIMEOUT;
+    let mut vulnerability_ids = BTreeSet::new();
+    let mut continuation_tokens = BTreeSet::new();
+    let mut response_bytes = 0_usize;
+    // https://google.github.io/osv.dev/post-v1-query/#pagination
+    // Every continuation uses the same authorized endpoint and package/version
+    // request. No partial inventory is returned if any page fails or a bound
+    // is exhausted, so existing signed risk remains intact on failed refresh.
+    for _ in 0..TRUST_SCAN_OSV_MAX_PAGES {
+        anyhow::ensure!(Instant::now() < deadline, "OSV query deadline exceeded");
+        remote_cap.authorize_egress(&query_config.url)?;
+        let payload = trust_scan_http_post_json_body(
+            &query_config.url,
+            body.to_string(),
+            deadline,
+            &format!("OSV query failed for {dependency_name}"),
+            &format!("failed reading OSV response for {dependency_name}"),
+        )?;
+        response_bytes = response_bytes.saturating_add(payload.len());
+        anyhow::ensure!(
+            response_bytes <= TRUST_SCAN_OSV_MAX_RESPONSE_BYTES,
+            "OSV response bytes exceed the complete-query limit"
+        );
+        let (page_ids, continuation) = parse_osv_query_page(&payload).map_err(|error| {
+            anyhow::anyhow!("invalid OSV JSON for {dependency_name}: {error:#}")
+        })?;
+        vulnerability_ids.extend(page_ids);
+        anyhow::ensure!(
+            vulnerability_ids.len() <= TRUST_SCAN_OSV_MAX_VULNERABILITIES,
+            "OSV vulnerability inventory exceeds the complete-query limit"
+        );
+        anyhow::ensure!(Instant::now() < deadline, "OSV query deadline exceeded");
+        match continuation {
+            None => {
+                return Ok(TrustScanAuditMetadata {
+                    vulnerability_ids: vulnerability_ids.into_iter().collect(),
+                    risk_lowering_authenticated: query_config.risk_lowering_authenticated,
+                });
+            }
+            Some(token) => {
+                anyhow::ensure!(
+                    continuation_tokens.insert(token.clone()),
+                    "OSV pagination repeated a continuation token"
+                );
+                body["page_token"] = serde_json::Value::String(token);
+            }
+        }
+    }
+    anyhow::bail!("OSV pagination exceeds the complete-query page limit")
 }
 
 fn fetch_trust_scan_audit_metadata(
@@ -20372,16 +20456,16 @@ fn trust_scan_http_timeout() -> Duration {
 }
 
 #[cfg(feature = "http-client")]
-fn trust_scan_http_agent() -> ureq::Agent {
+fn trust_scan_http_agent(timeout: Duration) -> ureq::Agent {
     let config = ureq::Agent::config_builder()
-        .timeout_global(Some(trust_scan_http_timeout()))
+        .timeout_global(Some(timeout))
         .build();
     ureq::Agent::new_with_config(config)
 }
 
 #[cfg(feature = "http-client")]
 fn trust_scan_http_get_body(url: &str, request_error: &str, read_error: &str) -> Result<String> {
-    let agent = trust_scan_http_agent();
+    let agent = trust_scan_http_agent(trust_scan_http_timeout());
     let mut response = agent
         .get(url)
         .header("User-Agent", &trust_scan_user_agent())
@@ -20402,10 +20486,15 @@ fn trust_scan_http_get_body(url: &str, _request_error: &str, _read_error: &str) 
 fn trust_scan_http_post_json_body(
     url: &str,
     body: String,
+    deadline: Instant,
     request_error: &str,
     read_error: &str,
 ) -> Result<String> {
-    let agent = trust_scan_http_agent();
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .context("OSV query deadline exceeded")?;
+    let agent = trust_scan_http_agent(trust_scan_http_timeout().min(remaining));
     let mut response = agent
         .post(url)
         .header("User-Agent", &trust_scan_user_agent())
@@ -20422,6 +20511,7 @@ fn trust_scan_http_post_json_body(
 fn trust_scan_http_post_json_body(
     url: &str,
     _body: String,
+    _deadline: Instant,
     _request_error: &str,
     _read_error: &str,
 ) -> Result<String> {

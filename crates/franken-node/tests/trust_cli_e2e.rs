@@ -181,6 +181,16 @@ fn spawn_osv_static_response_server(
     status_text: &'static str,
     response_body: &'static str,
 ) -> (String, Arc<Mutex<Vec<String>>>, thread::JoinHandle<()>) {
+    spawn_osv_response_sequence_server(
+        (0..expected_requests)
+            .map(|_| (status_code, status_text, response_body.to_owned()))
+            .collect(),
+    )
+}
+
+fn spawn_osv_response_sequence_server(
+    responses: Vec<(u16, &'static str, String)>,
+) -> (String, Arc<Mutex<Vec<String>>>, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind static OSV fixture server");
     listener
         .set_nonblocking(true)
@@ -190,7 +200,7 @@ fn spawn_osv_static_response_server(
     let captured_requests = Arc::clone(&requests);
 
     let handle = thread::spawn(move || {
-        for _ in 0..expected_requests {
+        for (status_code, status_text, response_body) in responses {
             let mut stream = accept_osv_fixture_connection(&listener, "static OSV fixture");
             stream
                 .set_read_timeout(Some(Duration::from_secs(1)))
@@ -206,7 +216,7 @@ fn spawn_osv_static_response_server(
                         .unwrap_or_default()
                         .to_string(),
                 );
-            write_osv_response(&mut stream, status_code, status_text, response_body);
+            write_osv_response(&mut stream, status_code, status_text, &response_body);
         }
     });
 
@@ -3496,8 +3506,10 @@ fn trust_sync_honors_json() {
 #[test]
 fn trust_sync_offline_clean_refresh_reports_zero_vulnerabilities() {
     let workspace = seeded_fixture_trust_workspace();
-    let (osv_url, requests, server) =
-        spawn_osv_static_response_server(2, 200, "OK", r#"{"vulns":[]}"#);
+    let (osv_url, requests, server) = spawn_osv_response_sequence_server(vec![
+        (200, "OK", "{}".to_owned()),
+        (200, "OK", r#"{"vulns":[],"next_page_token":""}"#.to_owned()),
+    ]);
     let token_path = issue_osv_fixture_remotecap(workspace.path(), &osv_url);
     let token_path = token_path.to_str().expect("fixture token path is utf8");
     let output = run_cli_in_workspace_with_env(
@@ -3523,6 +3535,199 @@ fn trust_sync_offline_clean_refresh_reports_zero_vulnerabilities() {
 
     server.join().expect("join clean OSV fixture server");
     assert_eq!(requests.lock().expect("lock requests").len(), 2);
+}
+
+#[test]
+fn trust_sync_collects_all_osv_pages_before_updating_signed_risk() {
+    let workspace = seeded_fixture_trust_workspace();
+    let responses = (0..2)
+        .flat_map(|_| {
+            [
+                r#"{"next_page_token":"page-2"}"#,
+                r#"{"vulns":[{"id":"OSV-2"},{"id":"OSV-1"}],"next_page_token":"page-3"}"#,
+                r#"{"vulns":[{"id":"OSV-2"},{"id":"OSV-3"}]}"#,
+            ]
+            .map(|body| (200, "OK", body.to_owned()))
+        })
+        .collect();
+    let (osv_url, requests, server) = spawn_osv_response_sequence_server(responses);
+    let token = issue_osv_fixture_remotecap(workspace.path(), &osv_url);
+    let output = run_cli_in_workspace_with_env(
+        workspace.path(),
+        &["trust", "sync", "--force", "--json"],
+        &[
+            ("FRANKEN_NODE_OSV_QUERY_URL", osv_url.as_str()),
+            ("FRANKEN_NODE_REMOTECAP_KEY", FIXTURE_REMOTECAP_KEY),
+            (
+                "FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN",
+                token.to_str().expect("fixture token path"),
+            ),
+        ],
+    );
+    server.join().expect("join paginated OSV fixture");
+    assert!(output.status.success(), "{output:?}");
+    let report = parse_json_stdout(&output, "complete OSV pagination");
+    assert_eq!(report["refreshed"], 2);
+    assert_eq!(report["network_errors"], 0);
+    assert_eq!(report["vulnerabilities"], 6);
+
+    let captured = requests.lock().expect("captured paginated queries");
+    assert_eq!(captured.len(), 6);
+    for pages in captured.chunks_exact(3) {
+        let initial: Value = serde_json::from_str(&pages[0]).unwrap();
+        assert!(initial.get("page_token").is_none());
+        for (body, token) in pages[1..].iter().zip(["page-2", "page-3"]) {
+            let mut expected = initial.clone();
+            expected["page_token"] = serde_json::json!(token);
+            assert_eq!(serde_json::from_str::<Value>(body).unwrap(), expected);
+        }
+    }
+    let exported = run_cli_in_workspace(
+        workspace.path(),
+        &["trust-card", "export", "npm:@acme/auth-guard", "--json"],
+    );
+    assert!(exported.status.success(), "{exported:?}");
+    let card = parse_json_stdout(&exported, "paginated vulnerability card");
+    assert_eq!(card["user_facing_risk_assessment"]["level"], "critical");
+    assert!(
+        card["user_facing_risk_assessment"]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("OSV-1, OSV-2, OSV-3")
+    );
+    let card = serde_json::from_value(card).expect("decode signed trust card");
+    frankenengine_node::supply_chain::trust_card::verify_card_signature(&card, FIXTURE_REGISTRY_KEY)
+        .expect("all-page vulnerability assessment remains signed");
+}
+
+#[test]
+fn trust_sync_rejects_malformed_osv_success_envelopes_without_refreshing_cards() {
+    for response in [
+        "[]",
+        "null",
+        r#"{"error":{"code":503,"message":"unavailable"}}"#,
+        r#"{"vulns":{}}"#,
+        r#"{"vulns":null}"#,
+        r#"{"vulns":[{}]}"#,
+        r#"{"vulns":[["OSV-1"]]}"#,
+        r#"{"vulns":[{"id":""}]}"#,
+        r#"{"vulns":[{"id":42}]}"#,
+        r#"{"vulns":[{"id":"OSV 1"}]}"#,
+        r#"{"vulns":[{"id":"OSV-1","id":"OSV-2"}]}"#,
+        r#"{"vulns":[{"id":"OSV-1"}],"vulns":[]}"#,
+        r#"{"next_page_token":null}"#,
+        r#"{"next_page_token":42}"#,
+        r#"{"next_page_token":"token with spaces"}"#,
+        r#"{"next_page_token":"next","next_page_token":""}"#,
+    ] {
+        let workspace = seeded_fixture_trust_workspace();
+        let before = run_cli_in_workspace(
+            workspace.path(),
+            &["trust-card", "export", "npm:@acme/auth-guard", "--json"],
+        );
+        assert!(before.status.success(), "{before:?}");
+        let before = parse_json_stdout(&before, "card before malformed response");
+        let (osv_url, requests, server) = spawn_osv_static_response_server(2, 200, "OK", response);
+        let token = issue_osv_fixture_remotecap(workspace.path(), &osv_url);
+        let output = run_cli_in_workspace_with_env(
+            workspace.path(),
+            &["trust", "sync", "--force", "--json"],
+            &[
+                ("FRANKEN_NODE_OSV_QUERY_URL", osv_url.as_str()),
+                ("FRANKEN_NODE_REMOTECAP_KEY", FIXTURE_REMOTECAP_KEY),
+                (
+                    "FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN",
+                    token.to_str().expect("fixture token path"),
+                ),
+            ],
+        );
+        server.join().expect("join malformed OSV success fixture");
+        assert!(output.status.success(), "{response}: {output:?}");
+        let report = parse_json_stdout(&output, "malformed OSV success response");
+        assert_eq!(report["refreshed"], 0, "{response}");
+        assert_eq!(report["network_errors"], 2, "{response}");
+        assert_eq!(report["vulnerabilities"], 0, "{response}");
+        assert_eq!(requests.lock().unwrap().len(), 2, "{response}");
+        let after = run_cli_in_workspace(
+            workspace.path(),
+            &["trust-card", "export", "npm:@acme/auth-guard", "--json"],
+        );
+        assert!(after.status.success(), "{after:?}");
+        let after = parse_json_stdout(&after, "card after malformed response");
+        assert_eq!(after["card_hash"], before["card_hash"], "{response}");
+        assert_eq!(
+            after["last_verified_timestamp"],
+            before["last_verified_timestamp"],
+            "{response}"
+        );
+    }
+}
+
+#[test]
+fn trust_sync_rejects_incomplete_or_cyclic_osv_pagination_without_partial_updates() {
+    let page_limit = (0..16)
+        .map(|index| {
+            (
+                200,
+                "OK",
+                serde_json::json!({"next_page_token": format!("continuation-{index}")}).to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let scenarios = [
+        vec![
+            (
+                200,
+                "OK",
+                r#"{"vulns":[{"id":"OSV-1"}],"next_page_token":"next"}"#.into(),
+            ),
+            (200, "OK", r#"{"vulns":false}"#.into()),
+        ],
+        vec![
+            (200, "OK", r#"{"next_page_token":"same"}"#.into()),
+            (200, "OK", r#"{"next_page_token":"same"}"#.into()),
+        ],
+        page_limit,
+    ];
+    for pages in scenarios {
+        let workspace = seeded_fixture_trust_workspace();
+        let before = run_cli_in_workspace(
+            workspace.path(),
+            &["trust-card", "export", "npm:@acme/auth-guard", "--json"],
+        );
+        assert!(before.status.success(), "{before:?}");
+        let before = parse_json_stdout(&before, "card before incomplete query");
+        let expected_requests = pages.len() * 2;
+        let responses = pages.iter().chain(&pages).cloned().collect();
+        let (osv_url, requests, server) = spawn_osv_response_sequence_server(responses);
+        let token = issue_osv_fixture_remotecap(workspace.path(), &osv_url);
+        let output = run_cli_in_workspace_with_env(
+            workspace.path(),
+            &["trust", "sync", "--force", "--json"],
+            &[
+                ("FRANKEN_NODE_OSV_QUERY_URL", osv_url.as_str()),
+                ("FRANKEN_NODE_REMOTECAP_KEY", FIXTURE_REMOTECAP_KEY),
+                (
+                    "FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN",
+                    token.to_str().expect("fixture token path"),
+                ),
+            ],
+        );
+        server.join().expect("join incomplete OSV query fixture");
+        assert!(output.status.success(), "{output:?}");
+        let report = parse_json_stdout(&output, "incomplete OSV query");
+        assert_eq!(report["refreshed"], 0);
+        assert_eq!(report["network_errors"], 2);
+        assert_eq!(report["vulnerabilities"], 0);
+        assert_eq!(requests.lock().unwrap().len(), expected_requests);
+        let after = run_cli_in_workspace(
+            workspace.path(),
+            &["trust-card", "export", "npm:@acme/auth-guard", "--json"],
+        );
+        assert!(after.status.success(), "{after:?}");
+        let after = parse_json_stdout(&after, "card after incomplete query");
+        assert_eq!(after["card_hash"], before["card_hash"]);
+    }
 }
 
 #[test]
