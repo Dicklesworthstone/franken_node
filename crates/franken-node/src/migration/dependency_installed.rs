@@ -9,7 +9,7 @@
 
 use super::{
     Capture, DependencyAdmission, DependencyFinding, LockedPackage, MAX_DEPTH,
-    MAX_LOCK_BYTES, MAX_MANIFEST_BYTES, MAX_PACKAGES, SECTIONS, alias, bounded_text,
+    MAX_LOCK_BYTES, MAX_MANIFEST_BYTES, MAX_PACKAGES, bounded_text, declaration_selection,
     flag, graph, identity, name, nearest_package, relative, time_remaining, workspaces,
 };
 use anyhow::{Context, Result, ensure};
@@ -340,42 +340,21 @@ fn routes(
     for (consumer, manifest) in manifests {
         time_remaining(deadline)?;
         if !project && actual.get(consumer).is_some_and(|package| package.linked) { continue; }
-        let empty = Map::new();
-        let deps = section(manifest, "dependencies", &empty)?;
-        let optional = section(manifest, "optionalDependencies", &empty)?;
-        let dev = section(manifest, "devDependencies", &empty)?;
-        let peer_meta = section(manifest, "peerDependenciesMeta", &empty)?;
         let source = workspaces::manifest_path(consumer);
-        for field in SECTIONS {
-            if *field == "devDependencies" && !project { continue; }
-            for (installed_as, request) in section(manifest, field, &empty)? {
-                time_remaining(deadline)?;
-                *edges += 1;
-                ensure!(*edges <= MAX_EDGES, "installed dependency edge count exceeds limit");
-                name(installed_as)?;
-                let request = bounded_text(request, "installed dependency request")?;
-                let (package, _) = alias(installed_as, Some(request))?;
-                if (*field != "optionalDependencies" && optional.contains_key(installed_as))
-                    || (*field == "devDependencies" && deps.contains_key(installed_as))
-                    || (*field == "peerDependencies" && (deps.contains_key(installed_as)
-                        || (project && dev.contains_key(installed_as)))) { continue; }
-                let optional_peer = peer_meta.get(installed_as)
-                    .map(|value| flag(value.as_object().context("installed peer metadata must be an object")?, "optional"))
-                    .transpose()?.unwrap_or(false);
-                let selected = nearest_package(actual, &source, installed_as);
-                if selected.is_none() && (*field == "optionalDependencies" || (*field == "peerDependencies" && optional_peer)) { continue; }
-                let expected = nearest_package(locked, &source, installed_as);
-                let code = if selected.is_none() { Some("missing_installed_dependency") }
-                    else if selected.map(|p| &p.path) != expected.map(|p| &p.path) { Some("installed_dependency_route_mismatch") }
-                    else { None };
-                if let Some(code) = code {
-                    report.finding(DependencyFinding {
-                        code: code.into(), source: format!("{source}#{field}"), package: package.into(),
-                        installed_as: installed_as.clone(), version: Some(request.into()),
-                        package_path: expected.map(|package| package.path.clone()),
-                        detail: "Required staged dependency is missing or resolves at a different location than the locked nearest installation".into(),
-                    })?;
-                }
+        for edge in declaration_selection::select(manifest, project, deadline, edges, MAX_EDGES)? {
+            let selected = nearest_package(actual, &source, edge.installed_as);
+            if selected.is_none() && edge.optional { continue; }
+            let expected = nearest_package(locked, &source, edge.installed_as);
+            let code = if selected.is_none() { Some("missing_installed_dependency") }
+                else if selected.map(|p| &p.path) != expected.map(|p| &p.path) { Some("installed_dependency_route_mismatch") }
+                else { None };
+            if let Some(code) = code {
+                report.finding(DependencyFinding {
+                    code: code.into(), source: format!("{source}#{}", edge.section), package: edge.package.into(),
+                    installed_as: edge.installed_as.into(), version: Some(edge.request.into()),
+                    package_path: expected.map(|package| package.path.clone()),
+                    detail: "Required staged dependency is missing or resolves at a different location than the locked nearest installation".into(),
+                })?;
             }
         }
     }

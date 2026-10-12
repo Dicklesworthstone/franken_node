@@ -31,6 +31,9 @@ mod graph;
 #[path = "dependency_installed.rs"]
 mod installed;
 
+#[path = "dependency_declarations.rs"]
+mod declaration_selection;
+
 const MAX_MANIFEST_BYTES: usize = 512 * 1024;
 const MAX_LOCK_BYTES: usize = 16 * 1024 * 1024;
 const MAX_METADATA_BYTES: usize = 64 * 1024 * 1024;
@@ -398,35 +401,27 @@ fn nearest_package<'a>(packages: &'a BTreeMap<String, LockedPackage>, source: &s
 }
 
 fn declarations(report: &mut DependencyAdmission, manifest: &Value, packages: &BTreeMap<String, LockedPackage>, source: &str, count: &mut usize, deadline: Instant) -> Result<()> {
-    for section in SECTIONS {
-        let Some(value) = manifest.get(*section) else { continue; };
-        let values = value.as_object().with_context(|| format!("{section} must be an object"))?;
-        for (installed_as, request) in values {
-            time_remaining(deadline)?;
-            *count += 1;
-            ensure!(*count <= MAX_PACKAGES, "declared dependency count exceeds limit");
-            name(installed_as)?;
-            let request = bounded_text(request, "dependency request")?;
-            let (actual, requirement) = alias(installed_as, Some(request))?;
-            let selected = nearest_package(packages, source, installed_as);
-            let represented = selected.is_some_and(|package| package.name == actual && !package.unresolved
-                    // npm aliases, URL/Git and file requests are not authority
-                    // to substitute a same-named local workspace installation.
-                    && (!package.linked || !request.contains([':', '/', '\\'])));
-            let native = native_addon(actual) || native_addon(installed_as);
-            let version_issue = if represented {
-                graph::version_review(requirement, selected.and_then(|package| package.version.as_deref()))
-            } else { None };
-            if !represented || native || version_issue.is_some() {
-                report.finding(DependencyFinding {
-                    code: if native { "native_addon" }
-                        else { version_issue.map_or("unresolved_declaration", |issue| issue.0) }.into(),
-                    source: format!("{source}#{section}"), package: actual.into(),
-                    installed_as: installed_as.clone(), package_path: None, version: Some(request.into()),
-                    detail: if native { "Declared native-addon/build dependency requires explicit migration review" }
-                        else { version_issue.map_or("Declaration has no matching complete nearest lockfile identity; version satisfaction is not established", |issue| issue.1) }.into(),
-                })?;
-            }
+    for edge in declaration_selection::select(manifest, true, deadline, count, MAX_PACKAGES)? {
+        let selected = nearest_package(packages, source, edge.installed_as);
+        // Optionality belongs to the selected edge, not to the package name.
+        // Present installations still need exact identity and range checks.
+        if selected.is_none() && edge.optional { continue; }
+        let represented = selected.is_some_and(|package| package.name == edge.package && !package.unresolved
+            // Opaque requests cannot substitute a same-named local workspace.
+            && (!package.linked || !edge.request.contains([':', '/', '\\'])));
+        let native = native_addon(edge.package) || native_addon(edge.installed_as);
+        let version_issue = if represented {
+            graph::version_review(edge.requirement, selected.and_then(|package| package.version.as_deref()))
+        } else { None };
+        if !represented || native || version_issue.is_some() {
+            report.finding(DependencyFinding {
+                code: if native { "native_addon" }
+                    else { version_issue.map_or("unresolved_declaration", |issue| issue.0) }.into(),
+                source: format!("{source}#{}", edge.section), package: edge.package.into(),
+                installed_as: edge.installed_as.into(), package_path: None, version: Some(edge.request.into()),
+                detail: if native { "Declared native-addon/build dependency requires explicit migration review" }
+                    else { version_issue.map_or("Declaration has no matching complete nearest lockfile identity; version satisfaction is not established", |issue| issue.1) }.into(),
+            })?;
         }
     }
     Ok(())
@@ -613,8 +608,12 @@ mod tests {
             package.insert((*section).into(), json!({"ordinary":"^1"}));
             let root = fixture(Value::Object(package), None);
             let report = inspect(root.path(), deadline()).unwrap();
-            assert_eq!(codes(&report), ["unresolved_declaration"]);
-            assert_eq!(report.findings[0].source, format!("package.json#{section}"));
+            if *section == "optionalDependencies" {
+                assert!(!report.requires_review());
+            } else {
+                assert_eq!(codes(&report), ["unresolved_declaration"]);
+                assert_eq!(report.findings[0].source, format!("package.json#{section}"));
+            }
         }
     }
 
