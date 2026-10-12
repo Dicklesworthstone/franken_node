@@ -50,6 +50,13 @@ pub mod rollback;
 mod creations;
 pub use creations::CreateFile;
 
+#[path = "rewrite_trees.rs"]
+pub mod trees;
+pub use trees::CreateTree;
+
+#[path = "rewrite_tree_transaction.rs"]
+mod tree_transaction;
+
 pub const MAX_EDITS: usize = 1_000;
 pub const MAX_PLAN_BYTES: usize = 256 * 1024 * 1024;
 const MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
@@ -57,6 +64,7 @@ const MAX_JOURNAL_BYTES: usize = 2 * 1024 * 1024;
 const JOURNAL_VERSION: &str = "franken-node/rewrite-transaction/v1";
 const VERSIONED_JOURNAL_VERSION: &str = "franken-node/rewrite-transaction/v2";
 const REQUEST_JOURNAL_VERSION: &str = "franken-node/rewrite-transaction/v4";
+const TREE_JOURNAL_VERSION: &str = "franken-node/rewrite-transaction/v5";
 const STORE: &str = ".franken-rewrite";
 const PENDING: &str = "pending.json";
 
@@ -72,6 +80,8 @@ pub struct Edit<'a> {
 pub struct AppliedRewrite {
     pub transaction_id: String,
     pub journal_sha256: String,
+    /// Atomic installation targets. A complete new directory tree is one
+    /// target; its descendant counts are bound separately in the v5 journal.
     pub files: usize,
 }
 
@@ -153,6 +163,10 @@ struct Record {
     /// Version three distinguishes a missing preimage from an empty file.
     #[serde(default, skip_serializing_if = "is_false")]
     created: bool,
+    /// A complete absent-root subtree. Its after image is a canonical index,
+    /// not file contents. Omission keeps historical journal bytes unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tree: Option<trees::Summary>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -489,7 +503,8 @@ impl RewriteTransaction {
             journal.schema_version == JOURNAL_VERSION
                 || journal.schema_version == VERSIONED_JOURNAL_VERSION
                 || journal.schema_version == creations::JOURNAL_VERSION
-                || journal.schema_version == REQUEST_JOURNAL_VERSION,
+                || journal.schema_version == REQUEST_JOURNAL_VERSION
+                || journal.schema_version == TREE_JOURNAL_VERSION,
             "unsupported rewrite transaction schema"
         );
         ensure!(
@@ -501,14 +516,16 @@ impl RewriteTransaction {
                     .all(|b| b.is_ascii_alphanumeric() || b == b'-'),
             "invalid rewrite session"
         );
-        if journal.schema_version == REQUEST_JOURNAL_VERSION {
-            let request = journal.request.as_ref().context("request journal is missing its binding")?;
+        ensure!(journal.schema_version != REQUEST_JOURNAL_VERSION || journal.request.is_some(),
+            "request journal is missing its binding");
+        if let Some(request) = &journal.request {
+            ensure!(journal.schema_version == REQUEST_JOURNAL_VERSION
+                || journal.schema_version == TREE_JOURNAL_VERSION,
+                "request bindings require the request journal schema");
             request.validate()?;
             ensure!(journal.session == request.transaction_id(), "request journal slot differs from its binding");
             ensure!(!journal.records.is_empty() || request.input_sha256 == request.candidate_input_sha256,
                 "an unchanged request must bind identical captures");
-        } else {
-            ensure!(journal.request.is_none(), "request bindings require the request journal schema");
         }
         ensure!(
             (!journal.records.is_empty() || journal.schema_version == REQUEST_JOURNAL_VERSION)
@@ -517,13 +534,15 @@ impl RewriteTransaction {
         );
         let mut paths = BTreeSet::new();
         let mut total = 0_usize;
+        let mut entries = 0_usize;
         for record in &journal.records {
             validate_path(&record.path)?;
             ensure!(paths.insert(&record.path), "duplicate rewrite target");
             if record.created {
                 ensure!(
                     (journal.schema_version == creations::JOURNAL_VERSION
-                        || journal.schema_version == REQUEST_JOURNAL_VERSION)
+                        || journal.schema_version == REQUEST_JOURNAL_VERSION
+                        || journal.schema_version == TREE_JOURNAL_VERSION)
                         && record.before_bytes == 0
                         && record.before_sha256 == digest(b"")
                         && record.mode & 0o400 != 0,
@@ -549,10 +568,36 @@ impl RewriteTransaction {
                 .checked_add(record.before_bytes)
                 .and_then(|v| v.checked_add(record.after_bytes))
                 .context("rewrite journal byte overflow")?;
+            if let Some(tree) = &record.tree {
+                ensure!(journal.schema_version == TREE_JOURNAL_VERSION && record.created
+                    && record.mode & 0o500 == 0o500
+                    && record.after_bytes <= trees::MAX_INDEX_BYTES
+                    && tree.directories > 0 && tree.bytes <= MAX_PLAN_BYTES,
+                    "invalid absent-root tree record");
+                entries = entries.checked_add(tree.files)
+                    .and_then(|count| count.checked_add(tree.directories))
+                    .context("tree entry count overflow")?;
+                total = total.checked_add(tree.bytes).context("tree byte count overflow")?;
+            } else {
+                entries = entries.checked_add(1).context("rewrite entry count overflow")?;
+            }
             ensure!(
-                total <= MAX_PLAN_BYTES,
+                total <= MAX_PLAN_BYTES && entries <= MAX_EDITS,
                 "rewrite journal exceeds total byte budget"
             );
+        }
+        // New roots are indivisible rename units. Another record must not
+        // independently replace their parent, root or any descendant.
+        for (index, record) in journal.records.iter().enumerate() {
+            if record.tree.is_some() {
+                for (other_index, other) in journal.records.iter().enumerate() {
+                    if index != other_index {
+                        ensure!(!Path::new(&record.path).starts_with(&other.path)
+                            && !Path::new(&other.path).starts_with(&record.path),
+                            "tree roots overlap another installation target");
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -585,13 +630,28 @@ impl RewriteTransaction {
         schema: &str,
         request: Option<&InstallRequest>,
     ) -> Result<Journal> {
-        let count = edits.len().checked_add(creations.len()).context("rewrite count overflow")?;
+        self.prepare_bound_plan(edits, creations, &[], schema, request)
+    }
+
+    fn prepare_bound_plan(
+        &self,
+        edits: &[Edit<'_>],
+        creations: &[CreateFile<'_>],
+        trees: &[CreateTree<'_>],
+        schema: &str,
+        request: Option<&InstallRequest>,
+    ) -> Result<Journal> {
+        let count = edits.len().checked_add(creations.len())
+            .and_then(|count| count.checked_add(trees.len())).context("rewrite count overflow")?;
         ensure!(
             (count > 0 || request.is_some()) && count <= MAX_EDITS,
             "rewrite plan entry limit exceeded"
         );
-        ensure!(creations.is_empty() || schema == creations::JOURNAL_VERSION || schema == REQUEST_JOURNAL_VERSION,
+        ensure!(creations.is_empty() || schema == creations::JOURNAL_VERSION
+            || schema == REQUEST_JOURNAL_VERSION || schema == TREE_JOURNAL_VERSION,
             "new files require the creation journal schema");
+        ensure!(trees.is_empty() || schema == TREE_JOURNAL_VERSION,
+            "new directory trees require the tree journal schema");
         let versioned = schema != JOURNAL_VERSION;
         let mut journal = Journal {
             schema_version: schema.into(),
@@ -646,6 +706,7 @@ impl RewriteTransaction {
                 after_bytes: edit.after.len(),
                 mode,
                 created: false,
+                tree: None,
             });
         }
         for creation in creations {
@@ -671,7 +732,28 @@ impl RewriteTransaction {
                 after_bytes: creation.after.len(),
                 mode: creation.mode,
                 created: true,
+                tree: None,
             });
+        }
+        let mut tree_indexes = Vec::new();
+        for tree in trees {
+            validate_path(tree.path)?;
+            ensure!(paths.insert(tree.path), "duplicate rewrite target");
+            let (index, summary) = trees::encode(tree)?;
+            total = total.checked_add(index.len()).and_then(|n| n.checked_add(summary.bytes))
+                .context("tree plan byte overflow")?;
+            ensure!(total <= MAX_PLAN_BYTES, "rewrite plan byte limit exceeded");
+            let (parent, name) = parent_and_name(&self.root, tree.path, false)?;
+            ensure!(trees::verify(&parent, &name, &index)?.is_none(),
+                "tree creation target already exists: {}", tree.path);
+            ensure!(parent.metadata()?.dev() == self.store.metadata()?.dev(),
+                "tree creation must share the transaction filesystem: {}", tree.path);
+            journal.records.push(Record {
+                path: tree.path.into(), before_sha256: digest(b""), before_bytes: 0,
+                after_sha256: digest(&index), after_bytes: index.len(),
+                mode: tree.mode, created: true, tree: Some(summary),
+            });
+            tree_indexes.push(index);
         }
         Self::validate_journal(&journal)?;
         mkdirat(
@@ -729,6 +811,12 @@ impl RewriteTransaction {
                 creation.mode,
             )?;
         }
+        for (offset, (tree, index)) in trees.iter().zip(&tree_indexes).enumerate() {
+            let ordinal = edits.len() + creations.len() + offset;
+            self.publish_staged(&session, OsStr::new(&format!("{ordinal}.after")), index, 0o600)?;
+            trees::stage(&session, OsStr::new(&format!("{ordinal}.new")), tree, index)?;
+            record_barrier("tree");
+        }
         // Recovery material must be durable before the journal references it.
         self.flush_dirty()?;
         let encoded = serde_json::to_vec(&journal)?;
@@ -751,7 +839,8 @@ impl RewriteTransaction {
                 let (parent, name) = parent_and_name(&self.backups, &record.path, false)?;
                 read_required(&parent, &name, MAX_FILE_BYTES)
             }
-            VERSIONED_JOURNAL_VERSION | creations::JOURNAL_VERSION | REQUEST_JOURNAL_VERSION => {
+            VERSIONED_JOURNAL_VERSION | creations::JOURNAL_VERSION | REQUEST_JOURNAL_VERSION
+            | TREE_JOURNAL_VERSION => {
                 let session = directory(&self.store, Path::new(&journal.session), false)?;
                 let image = read_required(&session, OsStr::new(&format!("{index}.before")), MAX_FILE_BYTES)?;
                 ensure!(image.metadata.mode() & 0o7777 == 0o600,
@@ -841,6 +930,9 @@ impl RewriteTransaction {
             verify_image(&after, &record.after_sha256, record.after_bytes, None),
             "staged rewrite bytes changed"
         );
+        if record.tree.is_some() {
+            return self.install_tree(journal, index);
+        }
         if record.created {
             return self.install_created(journal, index);
         }
@@ -873,6 +965,9 @@ impl RewriteTransaction {
         let mut errors = Vec::new();
         for (index, record) in journal.records.iter().enumerate().rev() {
             let restored = (|| -> Result<()> {
+                if record.tree.is_some() {
+                    return self.restore_tree(&journal, index);
+                }
                 if record.created {
                     return self.restore_created(&journal, index);
                 }
@@ -979,6 +1074,10 @@ impl RewriteTransaction {
             // A source may have changed while other files/backups were staged.
             // Recheck the entire plan before replacing even the first source.
             for (index, record) in journal.records.iter().enumerate() {
+                if record.tree.is_some() {
+                    self.check_tree_ready(&journal, index)?;
+                    continue;
+                }
                 if record.created {
                     self.check_creation_ready(&journal, index)?;
                     continue;
@@ -1161,7 +1260,7 @@ mod tests {
                 // PREPARE: 2 backups + 2 after-images, data synced before rename.
                 "file", "file", "file", "file",
                 // One flush per distinct dirty directory: store (session mkdir),
-                // backups, session. Recovery material durable BEFORE the journal.
+                // backups, session. Recovery material BEFORE the journal.
                 "dir", "dir", "dir", // Journal data, then its directory entry.
                 "file", "journal",
                 // INSTALL: two replaced sources, data synced before each rename.

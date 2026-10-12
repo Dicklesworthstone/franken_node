@@ -1,3 +1,4 @@
+# Compile the full production writer, tree driver and rollback source.
 [package]
 name = "franken-rewrite-tree-tests"
 version = "0.1.0"
@@ -8,7 +9,7 @@ license = "LicenseRef-MIT-OpenAI-Anthropic-Rider"
 [workspace]
 
 [lib]
-path = "../../crates/franken-node/src/migration/rewrite_trees.rs"
+path = "../../crates/franken-node/src/migration/rewrite_transaction.rs"
 
 [dependencies]
 anyhow = "1.0"

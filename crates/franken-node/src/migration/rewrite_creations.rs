@@ -53,7 +53,9 @@ impl RewriteTransaction {
     fn inspect_creation(&self, journal: &Journal, index: usize) -> Result<CreationState> {
         let record = journal.records.get(index).context("invalid creation record index")?;
         ensure!((journal.schema_version == JOURNAL_VERSION
-            || journal.schema_version == super::REQUEST_JOURNAL_VERSION) && record.created,
+            || journal.schema_version == super::REQUEST_JOURNAL_VERSION
+            || journal.schema_version == super::TREE_JOURNAL_VERSION)
+            && record.created && record.tree.is_none(),
             "not a creation journal record");
         let session = directory(&self.store, Path::new(&journal.session), false)?;
         ensure!(session.metadata()?.mode() & 0o7777 == 0o700,
@@ -85,6 +87,9 @@ impl RewriteTransaction {
 
     /// Pure preview used by explicit rollback's all-file preflight.
     pub(super) fn creation_is_original(&self, journal: &Journal, index: usize) -> Result<bool> {
+        if journal.records.get(index).is_some_and(|record| record.tree.is_some()) {
+            return self.tree_is_original(journal, index);
+        }
         Ok(self.inspect_creation(journal, index)?.current.is_none())
     }
 

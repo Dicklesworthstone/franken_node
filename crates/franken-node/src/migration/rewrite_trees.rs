@@ -142,6 +142,7 @@ pub fn encode(tree: &CreateTree<'_>) -> Result<(Vec<u8>, Summary)> {
     let mut image = Image { schema_version: SCHEMA.into(), mode: tree.mode, entries: Vec::new() };
     let mut total = 0_usize;
     for entry in tree.entries {
+        relative(&format!("{}/{}", tree.path, entry.path))?;
         let data = match entry.contents {
             None => ImageData::Directory,
             Some(bytes) => {
@@ -164,6 +165,11 @@ pub fn encode(tree: &CreateTree<'_>) -> Result<(Vec<u8>, Summary)> {
 /// supplied separately from the canonical index.
 pub fn summarize(index: &[u8]) -> Result<Summary> {
     Image::decode(index)?.validate()
+}
+
+/// The enclosing journal must bind this mode as well as descendant counts.
+pub fn root_mode(index: &[u8]) -> Result<u32> {
+    Ok(Image::decode(index)?.mode)
 }
 
 fn directory(parent: &File, name: &OsStr) -> Result<File> {
