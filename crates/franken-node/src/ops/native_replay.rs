@@ -14,6 +14,10 @@
 //! An explicit process-shape grant is replayable: argv comes from the captured
 //! launch arguments, while platform and pid are fixed engine-contained values.
 //! This grant never admits environment values or access to the raw process object.
+//! Separately granted EnvRead consumes only recorded names and typed outcomes,
+//! never the replay host environment. Environment values retain their Secret
+//! IFC floor; serialized captures may contain private values and need private
+//! storage even though their Debug view is redacted.
 //! Runtime module loading is refused because the engine's module loader does
 //! not yet consume the host-I/O transcript. Statically lowered builtin facades
 //! remain usable, including their recorded filesystem and network effects.
@@ -34,12 +38,24 @@ pub enum NativeReplayTerminalState {
 }
 
 /// Exact serialized execution inputs, bound into the signed run receipt.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// JSON retains private source, arguments and observed environment values.
+/// Debug must not expose them through containing records or diagnostics.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeReplayCapture {
     pub schema_version: String,
     pub payload_json: String,
     pub payload_sha256: String,
+}
+
+impl std::fmt::Debug for NativeReplayCapture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Do not print even caller-supplied metadata strings before validation.
+        f.debug_struct("NativeReplayCapture")
+            .field("payload_bytes", &self.payload_json.len())
+            .field("payload", &"[redacted]")
+            .finish_non_exhaustive()
+    }
 }
 
 impl NativeReplayCapture {
@@ -693,6 +709,65 @@ mod engine {
         expected: CapturedAttempt,
     }
 
+    /// Admit only typed, bounded environment outcomes from the authenticated
+    /// transcript. This never assembles a live environment or grants EnvRead.
+    /// Keep validation diagnostics independent of private names and values.
+    fn validate_environment_transcript(
+        entries: &[(HostIoRequest, HostIoOutcome)],
+        capabilities: &[String],
+    ) -> Result<(), String> {
+        use frankenengine_extension_host::host_io::{
+            ENVIRONMENT_VALUE_MAX_BYTES, HostIoResponse, validate_environment_name,
+        };
+
+        let granted = capabilities.iter().any(|capability| {
+            RuntimeCapability::from_tag_str(capability) == Some(RuntimeCapability::EnvRead)
+        });
+        for (request, outcome) in entries {
+            match request {
+                HostIoRequest::EnvRead { name } => {
+                    if !granted {
+                        return Err(
+                            "captured environment read requires explicit EnvRead authority"
+                                .to_string(),
+                        );
+                    }
+                    validate_environment_name(name).map_err(|_| {
+                        "captured environment request has an invalid or oversized name".to_string()
+                    })?;
+                    match outcome {
+                        Ok(HostIoResponse::EnvRead { value }) => {
+                            if value.as_ref().is_some_and(|value| {
+                                value.len() > ENVIRONMENT_VALUE_MAX_BYTES || value.contains('\0')
+                            }) {
+                                return Err(
+                                    "captured environment response has an invalid or oversized value"
+                                        .to_string(),
+                                );
+                            }
+                        }
+                        Ok(_) => {
+                            return Err(
+                                "captured environment request has a mismatched response kind"
+                                    .to_string(),
+                            );
+                        }
+                        // Denials and other failures are observations, never
+                        // converted to an absent variable or an empty string.
+                        Err(_) => {}
+                    }
+                }
+                _ if matches!(outcome, Ok(HostIoResponse::EnvRead { .. })) => {
+                    return Err(
+                        "captured environment response has a mismatched request kind".to_string(),
+                    );
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     impl NativeReplayPayload {
         fn validate(&self) -> Result<(), String> {
             self.runtime
@@ -729,15 +804,14 @@ mod engine {
             }
             for capability in &self.package.capabilities {
                 match RuntimeCapability::from_tag_str(capability) {
-                    Some(RuntimeCapability::EnvRead) => {
-                        return Err(format!(
-                            "native replay does not support captured {capability} authority"
-                        ));
-                    }
                     Some(_) => {}
                     None => return Err(format!("unrecognized captured capability {capability}")),
                 }
             }
+            validate_environment_transcript(
+                &self.host_effect_transcript,
+                &self.package.capabilities,
+            )?;
             let has_process_authority = self.package.capabilities.iter().any(|capability| {
                 RuntimeCapability::from_tag_str(capability) == Some(RuntimeCapability::ProcessSpawn)
             });
@@ -1434,6 +1508,249 @@ mod engine {
                 .expect("start native test")
                 .join()
                 .expect("native test completed");
+        }
+
+        /// Use the real bounded environment provider with explicit fixture
+        /// values. No test reads or changes the test process environment.
+        fn record_environment(
+            source: &str,
+            values: BTreeMap<String, String>,
+        ) -> Result<NativeReplayCapture, String> {
+            use frankenengine_extension_host::host_io::EnvironmentSnapshotHostIo;
+
+            let config = OrchestratorConfig::default();
+            let runtime = RuntimeConfig::default();
+            let package = ExtensionPackage {
+                extension_id: "native-environment-replay".to_string(),
+                source: source.to_string(),
+                source_file: None,
+                module_root: None,
+                capabilities: ["vm_dispatch", "heap_allocate", "builtin", "console", "env_read"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                version: "1.0.0".to_string(),
+                metadata: BTreeMap::new(),
+            };
+            let authority = RuntimeEvidenceAuthority::generate_runtime_owned(
+                "franken-node.native-environment-replay-test",
+                config.epoch,
+                1,
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+            let mut orchestrator =
+                ExecutionOrchestrator::try_new_with_runtime_config_and_authority(
+                    config.clone(),
+                    runtime.clone(),
+                    AmbientAuthorityGrant::DenyAll,
+                    authority,
+                )
+                .map_err(|error| error.to_string())?;
+            let provider = EnvironmentSnapshotHostIo::with_provider(
+                values,
+                // Match the product capture's ProviderInternal exception
+                // provenance while denying every unrelated host-I/O family.
+                Arc::new(CapturedReplayHostIo),
+            )
+            .map_err(|error| error.to_string())?;
+            orchestrator.set_host_io(
+                Arc::new(provider),
+                Some(Arc::new(InMemoryHostIoTranscript::recording())),
+            );
+            match orchestrator.execute(&package) {
+                Ok(result) => NativeReplayCapture::from_execution(
+                    &package,
+                    &config,
+                    &runtime,
+                    AmbientAuthorityGrant::DenyAll,
+                    &[],
+                    None,
+                    &result,
+                ),
+                Err(error) => NativeReplayCapture::from_failed_execution(
+                    &package,
+                    &config,
+                    &runtime,
+                    AmbientAuthorityGrant::DenyAll,
+                    &[],
+                    None,
+                    &orchestrator,
+                    &error,
+                ),
+            }
+        }
+
+        fn environment_values() -> BTreeMap<String, String> {
+            BTreeMap::from([
+                ("PATH".to_string(), "captured-not-the-host-path".to_string()),
+                ("EMPTY".to_string(), String::new()),
+                ("UNICODE".to_string(), "βeta\nsecond line".to_string()),
+                ("UNUSED_PRIVATE".to_string(), "not-read-not-captured".to_string()),
+            ])
+        }
+
+        #[test]
+        fn native_environment_replay_preserves_values_absence_empty_and_presence() {
+            on_native_stack(|| {
+                for (source, name, value, result_value) in [
+                    ("process.env.PATH;", "PATH", Some("captured-not-the-host-path"), "captured-not-the-host-path"),
+                    ("process.env['PATH'];", "PATH", Some("captured-not-the-host-path"), "captured-not-the-host-path"),
+                    ("process.env.EMPTY;", "EMPTY", Some(""), ""),
+                    ("process.env.ABSENT;", "ABSENT", None, "undefined"),
+                    ("process.env[''];", "", None, "undefined"),
+                    ("'EMPTY' in process.env;", "EMPTY", Some(""), "true"),
+                    ("'ABSENT' in process.env;", "ABSENT", None, "false"),
+                    ("process.env.UNICODE;", "UNICODE", Some("βeta\nsecond line"), "βeta\nsecond line"),
+                ] {
+                    let capture = record_environment(source, environment_values())
+                        .expect("capture native environment expression");
+                    let payload: NativeReplayPayload =
+                        serde_json::from_str(&capture.payload_json).unwrap();
+                    let CapturedAttempt::Completed(expected) = &payload.expected else {
+                        panic!("environment expression must complete");
+                    };
+                    assert_eq!(expected.execution_value, result_value);
+                    assert_eq!(payload.host_effect_transcript, vec![(
+                        HostIoRequest::EnvRead { name: name.to_string() },
+                        Ok(HostIoResponse::EnvRead { value: value.map(str::to_string) }),
+                    )]);
+                    assert!(!capture.payload_json.contains("not-read-not-captured"));
+                    let outcome = reexecute(&capture).expect("transcript-only environment replay");
+                    assert!(outcome.matched, "{outcome:?}");
+                    assert_eq!(outcome.ir4_witness_match, Some(true));
+                    assert_eq!(outcome.execution_value_match, Some(true));
+                    assert!(outcome.host_effects_match && outcome.module_load_disabled);
+                }
+            });
+        }
+
+        #[test]
+        fn native_environment_replay_checks_order_exhaustion_and_unused_suffixes() {
+            on_native_stack(|| {
+                for throws in [false, true] {
+                    let source = format!(
+                        "process.env.EMPTY; process.env.PATH; process.env.EMPTY; {}",
+                        if throws { "throw 'environment-prefix-failure';" } else { "0;" },
+                    );
+                    let capture = record_environment(&source, environment_values()).unwrap();
+                    let payload: NativeReplayPayload =
+                        serde_json::from_str(&capture.payload_json).unwrap();
+                    assert_eq!(payload.host_effect_transcript.len(), 3);
+                    let outcome = reexecute(&capture).expect("replay completed or failed prefix");
+                    assert!(outcome.matched, "{outcome:?}");
+                    assert!(outcome.host_effects_match);
+                    assert_eq!(outcome.captured_terminal_state,
+                        if throws { NativeReplayTerminalState::UncaughtException }
+                        else { NativeReplayTerminalState::Completed });
+                    for mutate in [
+                        (|p: &mut NativeReplayPayload| { p.host_effect_transcript.remove(0); })
+                            as fn(&mut NativeReplayPayload),
+                        |p| p.host_effect_transcript.swap(0, 1),
+                        |p| p.host_effect_transcript.push(p.host_effect_transcript[0].clone()),
+                        |p| p.host_effect_transcript.clear(),
+                    ] {
+                        let mut changed = payload.clone();
+                        mutate(&mut changed);
+                        let changed = encode_capture(&changed).unwrap();
+                        assert!(reexecute(&changed).is_err(),
+                            "a matching terminal state cannot excuse an incomplete environment transcript");
+                    }
+                }
+            });
+        }
+
+        #[test]
+        fn native_environment_capture_keeps_secret_flow_and_authority_restrictions() {
+            on_native_stack(|| {
+                for source in [
+                    "console.log(process.env.PATH);",
+                    "const environment = process.env; environment.PATH;",
+                    "const raw = process; raw.env.PATH;",
+                    "process.env.PATH = 'replacement';",
+                ] {
+                    assert!(record_environment(source, environment_values()).is_err(),
+                        "environment replay must not grant raw process access, mutation, or declassification");
+                }
+                let capture = record_environment("process.env.PATH;", environment_values()).unwrap();
+                let mut payload: NativeReplayPayload =
+                    serde_json::from_str(&capture.payload_json).unwrap();
+                payload.package.capabilities.retain(|capability| capability != "env_read");
+                assert!(payload.validate().unwrap_err().contains("explicit EnvRead"));
+                assert!(reexecute(&encode_capture(&payload).unwrap()).is_err());
+            });
+        }
+
+        #[test]
+        fn environment_transcript_admission_uses_engine_limits_and_typed_outcomes() {
+            use frankenengine_extension_host::host_io::{
+                ENVIRONMENT_NAME_MAX_BYTES, ENVIRONMENT_VALUE_MAX_BYTES,
+            };
+            let granted = vec!["env_read".to_string()];
+            let request = HostIoRequest::EnvRead { name: "PRIVATE_NAME".to_string() };
+            for value in [None, Some(String::new()), Some("βeta".to_string())] {
+                let entries = vec![(request.clone(), Ok(HostIoResponse::EnvRead { value }))];
+                validate_environment_transcript(&entries, &granted).unwrap();
+                assert!(validate_environment_transcript(&entries, &[]).is_err());
+            }
+            validate_environment_transcript(&[], &granted).unwrap();
+            for name in ["invalid=name".to_string(), "invalid\0name".to_string(),
+                "X".repeat(ENVIRONMENT_NAME_MAX_BYTES + 1)] {
+                let entries = vec![(HostIoRequest::EnvRead { name },
+                    Ok(HostIoResponse::EnvRead { value: None }))];
+                assert!(validate_environment_transcript(&entries, &granted).is_err());
+            }
+            for response in [
+                HostIoResponse::EnvRead { value: Some("private\0value".to_string()) },
+                HostIoResponse::EnvRead { value: Some("X".repeat(ENVIRONMENT_VALUE_MAX_BYTES + 1)) },
+                HostIoResponse::FsRead { bytes: b"private-value".to_vec() },
+            ] {
+                let error = validate_environment_transcript(&[(request.clone(), Ok(response))], &granted)
+                    .expect_err("invalid environment result");
+                assert!(!error.contains("PRIVATE_NAME") && !error.contains("private-value"));
+            }
+            let inverse = vec![(HostIoRequest::FsRead { path: "file".to_string() },
+                Ok(HostIoResponse::EnvRead { value: Some("private-value".to_string()) }))];
+            assert!(validate_environment_transcript(&inverse, &granted).is_err());
+            let denial = vec![(request, Err(HostIoError::Denied { reason: "policy".to_string() }))];
+            validate_environment_transcript(&denial, &granted).unwrap();
+        }
+
+        #[test]
+        fn malformed_environment_capture_is_rejected_before_native_execution() {
+            on_native_stack(|| {
+                let capture = record_environment("process.env.PATH;", environment_values()).unwrap();
+                let original: NativeReplayPayload = serde_json::from_str(&capture.payload_json).unwrap();
+                for mutate in [
+                    (|p: &mut NativeReplayPayload| {
+                        p.host_effect_transcript[0].1 = Ok(HostIoResponse::FsRead { bytes: vec![] });
+                    }) as fn(&mut NativeReplayPayload),
+                    |p| p.host_effect_transcript[0].0 = HostIoRequest::EnvRead { name: "bad=name".to_string() },
+                    |p| p.host_effect_transcript[0].1 = Ok(HostIoResponse::EnvRead { value: Some("bad\0value".to_string()) }),
+                ] {
+                    let mut payload = original.clone();
+                    mutate(&mut payload);
+                    assert!(payload.validate().is_err());
+                    let error = reexecute(&encode_capture(&payload).unwrap()).unwrap_err();
+                    assert!(error.starts_with("captured environment"), "{error}");
+                }
+            });
+        }
+
+        #[test]
+        fn native_environment_replay_detects_changed_recorded_values() {
+            on_native_stack(|| {
+                let capture = record_environment("process.env.PATH;", environment_values()).unwrap();
+                let mut payload: NativeReplayPayload = serde_json::from_str(&capture.payload_json).unwrap();
+                payload.host_effect_transcript[0].1 = Ok(HostIoResponse::EnvRead {
+                    value: Some("different-captured-value".to_string()),
+                });
+                // Rehash only to test the execution comparison independently
+                // of the enclosing signature that an operator must verify.
+                let outcome = reexecute(&encode_capture(&payload).unwrap()).unwrap();
+                assert!(!outcome.matched);
+                assert_eq!(outcome.execution_value_match, Some(false));
+            });
         }
 
         fn record(root: &Path, source: &str) -> NativeReplayCapture {
@@ -2276,6 +2593,19 @@ mod tests {
             payload_json: payload.to_string(),
             payload_sha256: hex::encode(Sha256::digest(payload.as_bytes())),
         }
+    }
+
+    #[test]
+    fn replay_capture_debug_redacts_private_payload_without_changing_serialization() {
+        let capture = envelope(r#"{"source":"PRIVATE_SOURCE","environment":"PRIVATE_VALUE"}"#);
+        let debug = format!("{capture:?}");
+        assert!(debug.contains("payload_bytes") && debug.contains("redacted"));
+        assert!(!debug.contains("PRIVATE_SOURCE") && !debug.contains("PRIVATE_VALUE"));
+        let encoded = serde_json::to_string(&capture).unwrap();
+        assert!(encoded.contains("PRIVATE_SOURCE") && encoded.contains("PRIVATE_VALUE"));
+        let decoded: NativeReplayCapture = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, capture);
+        decoded.validate().unwrap();
     }
 
     #[test]
