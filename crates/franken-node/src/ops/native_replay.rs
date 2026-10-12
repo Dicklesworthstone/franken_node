@@ -35,6 +35,9 @@ pub const MAX_NATIVE_REPLAY_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 pub enum NativeReplayTerminalState {
     Completed,
     UncaughtException,
+    /// A typed interpreter capability denial or instruction-budget stop.
+    /// This never denotes a supervisor deadline, cancellation, or panic.
+    EngineFailure,
 }
 
 /// Exact serialized execution inputs, bound into the signed run receipt.
@@ -675,11 +678,83 @@ mod engine {
         console_output: Vec<ConsoleEntry>,
     }
 
+    /// Only engine-owned, reproducible stopping conditions. Do not classify
+    /// failures by a diagnostic substring or an exit code: guest exceptions
+    /// and external watchdogs can contain the same words or numbers.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+    enum EngineFailureReason {
+        CapabilityDenied { capability: String },
+        InstructionBudgetExhausted { budget: u64 },
+    }
+
+    fn engine_failure_reason(error: &InterpreterError) -> Option<EngineFailureReason> {
+        match error {
+            InterpreterError::CapabilityDenied { capability } => {
+                Some(EngineFailureReason::CapabilityDenied {
+                    capability: capability.clone(),
+                })
+            }
+            InterpreterError::BudgetExhausted { budget, .. } => {
+                Some(EngineFailureReason::InstructionBudgetExhausted { budget: *budget })
+            }
+            _ => None,
+        }
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct CapturedEngineFailure {
+        trace_id: String,
+        reason: EngineFailureReason,
+        /// Preserve the complete native diagnostic as well as its typed cause.
+        /// Budget diagnostics retain the engine's observed work count; that is
+        /// not a completed IR4 witness or a finalized nondeterminism trace.
+        diagnostic: String,
+        console_output: Vec<ConsoleEntry>,
+    }
+
+    impl CapturedEngineFailure {
+        fn validate(&self, payload: &NativeReplayPayload) -> Result<(), String> {
+            if self.trace_id.trim().is_empty()
+                || self.diagnostic.is_empty()
+                || self.diagnostic.len() > 4096
+            {
+                return Err("native engine-failure capture requires a trace and bounded diagnostic".to_string());
+            }
+            match &self.reason {
+                EngineFailureReason::CapabilityDenied { capability } => {
+                    let denied = RuntimeCapability::from_tag_str(capability).ok_or_else(|| {
+                        "native engine-failure capture has an unrecognized denied capability".to_string()
+                    })?;
+                    // Replay strips ModuleLoad. That artificial restriction
+                    // cannot stand in for an original denial of a granted cap.
+                    if denied == RuntimeCapability::ModuleLoad
+                        && payload.package.capabilities.iter().any(|capability| {
+                            RuntimeCapability::from_tag_str(capability).as_ref() == Some(&denied)
+                        })
+                    {
+                        return Err("native replay cannot certify a denial of originally granted module loading".to_string());
+                    }
+                }
+                EngineFailureReason::InstructionBudgetExhausted { budget } => {
+                    if *budget != payload.runtime.execution.deterministic_budget
+                        && *budget != payload.runtime.execution.throughput_budget
+                    {
+                        return Err("captured instruction limit does not belong to either captured execution profile".to_string());
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(tag = "terminal_state", rename_all = "snake_case")]
     enum CapturedAttempt {
         Completed(CapturedExecution),
         UncaughtException(CapturedGuestException),
+        EngineFailure(CapturedEngineFailure),
     }
 
     fn execution_decisions(result: &OrchestratorResult) -> Result<serde_json::Value, String> {
@@ -786,7 +861,8 @@ mod engine {
                     let argv_bytes = self.process_argv.iter().try_fold(0_usize, |total, arg| {
                         total.checked_add(arg.len()).ok_or_else(|| {
                             "native replay process argument length overflowed".to_string()
-                        })
+                        })?;
+                        Ok::<_, String>(total + arg.len())
                     })?;
                     if argv_bytes > MAX_NATIVE_REPLAY_PAYLOAD_BYTES {
                         return Err(
@@ -878,6 +954,7 @@ mod engine {
                     // Only the authenticated recorder boundary, not its length,
                     // establishes that this is a real failed guest attempt.
                 }
+                CapturedAttempt::EngineFailure(expected) => expected.validate(self)?,
             }
             Ok(())
         }
@@ -991,27 +1068,30 @@ mod engine {
         })
     }
 
-    struct ObservedGuestException {
-        exception: CapturedGuestException,
+    struct ObservedFailure {
+        attempt: CapturedAttempt,
         host_effect_transcript: Vec<(HostIoRequest, HostIoOutcome)>,
         host_effect_journal: Vec<HostEffectJournalEntry>,
     }
 
-    /// Accept only an actual uncaught guest exception whose recorder and cell
-    /// both finalized. An error prefix with an unknown effect boundary cannot
-    /// become replay evidence merely because some console output was retained.
-    fn observe_guest_exception(
+    /// Both guest exceptions and typed engine stops require the same finalized
+    /// recorder and cell. Retained console output alone is never evidence that
+    /// an interrupted, cancelled, or externally killed attempt is replayable.
+    fn observe_failure(
         orchestrator: &ExecutionOrchestrator,
         error: &OrchestratorError,
-    ) -> Result<ObservedGuestException, String> {
-        let OrchestratorError::Interpreter(InterpreterError::UncaughtException { value }) =
-            error.primary_error()
-        else {
+    ) -> Result<ObservedFailure, String> {
+        let primary = error.primary_error();
+        if !matches!(primary, OrchestratorError::Interpreter(
+            InterpreterError::UncaughtException { .. }
+                | InterpreterError::CapabilityDenied { .. }
+                | InterpreterError::BudgetExhausted { .. }
+        )) {
             return Err(
-                "native failure replay supports only a certified uncaught guest exception"
+                "native failure replay requires a certified guest exception, capability denial, or instruction-budget stop"
                     .to_string(),
             );
-        };
+        }
         let failure = error.post_cell_failure().ok_or_else(|| {
             "native failure replay requires execution-cell cleanup evidence".to_string()
         })?;
@@ -1082,12 +1162,26 @@ mod engine {
                 HostEffectJournalEntry::ProcessSpawn { .. } => None,
             })
             .collect();
-        Ok(ObservedGuestException {
-            exception: CapturedGuestException {
+        let attempt = match primary {
+            OrchestratorError::Interpreter(InterpreterError::UncaughtException { value }) => {
+                CapturedAttempt::UncaughtException(CapturedGuestException {
+                    trace_id: trace_id.to_string(),
+                    exception_value: value.clone(),
+                    console_output: orchestrator.last_failed_console_output(),
+                })
+            }
+            OrchestratorError::Interpreter(error) => CapturedAttempt::EngineFailure(CapturedEngineFailure {
                 trace_id: trace_id.to_string(),
-                exception_value: value.clone(),
+                reason: engine_failure_reason(error).ok_or_else(|| {
+                    "unsupported native failure reason".to_string()
+                })?,
+                diagnostic: error.to_string(),
                 console_output: orchestrator.last_failed_console_output(),
-            },
+            }),
+            _ => return Err("unsupported native failure boundary".to_string()),
+        };
+        Ok(ObservedFailure {
+            attempt,
             host_effect_transcript,
             host_effect_journal: entries.to_vec(),
         })
@@ -1177,11 +1271,41 @@ mod engine {
             orchestrator: &ExecutionOrchestrator,
             error: &OrchestratorError,
         ) -> Result<Self, String> {
-            let ObservedGuestException {
-                exception: expected,
+            // The native-session transport currently admits only this terminal
+            // state. Keep its existing contract until that transport explicitly
+            // opts into typed engine stops through from_finalized_failure.
+            if !matches!(error.primary_error(), OrchestratorError::Interpreter(
+                InterpreterError::UncaughtException { .. }
+            )) {
+                return Err("native failure replay supports only a certified uncaught guest exception".to_string());
+            }
+            Self::from_finalized_failure(
+                package, orchestrator_config, runtime_config, ambient_authority,
+                process_argv, process_preparation, orchestrator, error,
+            )
+        }
+
+        /// Capture a finalized guest exception, native capability denial, or
+        /// instruction-budget stop. This entrypoint never infers a failure's
+        /// cause from a log line, guest value, watchdog exit, or wall-clock time.
+        /// Authenticate the containing record before replaying these inputs.
+        /// Process-provider and source/settings contracts match from_execution.
+        #[allow(clippy::too_many_arguments)]
+        pub fn from_finalized_failure(
+            package: &ExtensionPackage,
+            orchestrator_config: &OrchestratorConfig,
+            runtime_config: &RuntimeConfig,
+            ambient_authority: AmbientAuthorityGrant,
+            process_argv: &[String],
+            process_preparation: Option<&CapturingProcessSpawnProvider>,
+            orchestrator: &ExecutionOrchestrator,
+            error: &OrchestratorError,
+        ) -> Result<Self, String> {
+            let ObservedFailure {
+                attempt: expected,
                 host_effect_transcript,
                 host_effect_journal: journal,
-            } = observe_guest_exception(orchestrator, error)?;
+            } = observe_failure(orchestrator, error)?;
             let payload = NativeReplayPayload {
                 package: package.clone(),
                 orchestrator: CapturedOrchestratorSettings::capture(orchestrator_config)?,
@@ -1193,7 +1317,7 @@ mod engine {
                 process_argv: process_argv.to_vec(),
                 host_effect_transcript,
                 process: CapturedProcessReplay::capture(process_preparation, &journal)?,
-                expected: CapturedAttempt::UncaughtException(expected),
+                expected,
             };
             payload.validate()?;
             encode_capture(&payload)
@@ -1287,46 +1411,117 @@ mod engine {
         Ok(outcome)
     }
 
-    struct GuestTerminalObservation {
+    struct TerminalObservation {
         terminal_state: NativeReplayTerminalState,
         trace_id: String,
         exception_value: Option<String>,
+        engine_failure: Option<(EngineFailureReason, String)>,
         console_output: Vec<ConsoleEntry>,
         host_effect_transcript: Vec<(HostIoRequest, HostIoOutcome)>,
         host_effect_journal: Vec<HostEffectJournalEntry>,
     }
 
+    impl TerminalObservation {
+        fn completed(result: OrchestratorResult) -> Self {
+            Self {
+                terminal_state: NativeReplayTerminalState::Completed,
+                trace_id: result.trace_id,
+                exception_value: None,
+                engine_failure: None,
+                console_output: result.console_output,
+                host_effect_transcript: result.host_effect_transcript,
+                host_effect_journal: result.host_effect_journal,
+            }
+        }
+
+        fn failed(observed: ObservedFailure) -> Result<Self, String> {
+            let (terminal_state, trace_id, exception_value, engine_failure, console_output) =
+                match observed.attempt {
+                    CapturedAttempt::UncaughtException(failure) => (
+                        NativeReplayTerminalState::UncaughtException,
+                        failure.trace_id,
+                        Some(failure.exception_value),
+                        None,
+                        failure.console_output,
+                    ),
+                    CapturedAttempt::EngineFailure(failure) => (
+                        NativeReplayTerminalState::EngineFailure,
+                        failure.trace_id,
+                        None,
+                        Some((failure.reason, failure.diagnostic)),
+                        failure.console_output,
+                    ),
+                    CapturedAttempt::Completed(_) => {
+                        return Err("failure observation cannot contain completed evidence".to_string());
+                    }
+                };
+            Ok(Self {
+                terminal_state,
+                trace_id,
+                exception_value,
+                engine_failure,
+                console_output,
+                host_effect_transcript: observed.host_effect_transcript,
+                host_effect_journal: observed.host_effect_journal,
+            })
+        }
+    }
+
     fn compare_failure_observation(
-        expected: &CapturedGuestException,
+        expected: &CapturedAttempt,
         expected_effects: &[(HostIoRequest, HostIoOutcome)],
         expected_journal: Option<&[HostEffectJournalEntry]>,
-        replayed: &GuestTerminalObservation,
-    ) -> NativeReplayOutcome {
+        replayed: &TerminalObservation,
+    ) -> Result<NativeReplayOutcome, String> {
+        let (trace_id, console_output, terminal_state, scope, note) = match expected {
+            CapturedAttempt::UncaughtException(failure) => (
+                &failure.trace_id,
+                &failure.console_output,
+                NativeReplayTerminalState::UncaughtException,
+                "guest_failure_prefix",
+                "This verdict verifies an uncaught guest exception, captured console, and finalized host-effect prefix. The failed run has no completed IR4 witness, finalized nondeterminism trace, total instruction count, or completed runtime decision to compare. Runtime module loading remains disabled.",
+            ),
+            CapturedAttempt::EngineFailure(failure) => (
+                &failure.trace_id,
+                &failure.console_output,
+                NativeReplayTerminalState::EngineFailure,
+                "engine_failure_prefix",
+                "This verdict verifies the typed interpreter stopping reason, exact native diagnostic, captured console, and finalized host-effect prefix. It does not replay a supervisor timeout, cancellation, or panic, and does not manufacture a completed IR4 witness, finalized nondeterminism trace, or total instruction count. Runtime module loading remains disabled.",
+            ),
+            CapturedAttempt::Completed(_) => {
+                return Err("failure comparison requires a captured failed attempt".to_string());
+            }
+        };
         let mut outcome = NativeReplayOutcome {
             schema_version: NATIVE_REPLAY_OUTCOME_SCHEMA.to_string(),
             replay_kind: "native_reexecution".to_string(),
-            verification_scope: "guest_failure_prefix".to_string(),
+            verification_scope: scope.to_string(),
             module_load_disabled: true,
             matched: false,
             divergences: Vec::new(),
-            captured_trace_id: expected.trace_id.clone(),
+            captured_trace_id: trace_id.clone(),
             replay_trace_id: replayed.trace_id.clone(),
-            captured_terminal_state: NativeReplayTerminalState::UncaughtException,
+            captured_terminal_state: terminal_state,
             replay_terminal_state: replayed.terminal_state,
-            terminal_state_match: replayed.terminal_state == NativeReplayTerminalState::UncaughtException,
+            terminal_state_match: replayed.terminal_state == terminal_state,
             ir3_hash_match: None,
             ir4_witness_match: None,
             execution_value_match: None,
             instruction_count_match: None,
-            console_match: expected.console_output == replayed.console_output,
+            console_match: *console_output == replayed.console_output,
             host_effects_match: expected_effects == replayed.host_effect_transcript
                 && expected_journal.is_none_or(|journal| journal == replayed.host_effect_journal),
             nondeterminism_trace_match: None,
             lane_match: None,
             exit_code_match: None,
-            exception_value_match: Some(replayed.exception_value.as_deref() == Some(expected.exception_value.as_str())),
+            exception_value_match: match expected {
+                CapturedAttempt::UncaughtException(failure) => Some(
+                    replayed.exception_value.as_deref() == Some(failure.exception_value.as_str()),
+                ),
+                _ => None,
+            },
             decisions_match: None,
-            policy_comparison_note: "This verdict verifies an uncaught guest exception, captured console, and finalized host-effect prefix. The failed run has no completed IR4 witness, finalized nondeterminism trace, total instruction count, or completed runtime decision to compare. Runtime module loading remains disabled.".to_string(),
+            policy_comparison_note: note.to_string(),
         };
         if expected_journal.is_some() {
             outcome.policy_comparison_note.push_str(" Process outcomes are consumed in global journal order without live dispatch; the engine's Unknown filesystem exception provenance remains in force.");
@@ -1334,13 +1529,13 @@ mod engine {
         for (matches, subject) in [
             (outcome.terminal_state_match, "terminal state"),
             (
-                outcome.exception_value_match == Some(true),
+                outcome.exception_value_match != Some(false),
                 "exception value",
             ),
             (outcome.console_match, "console output"),
             (outcome.host_effects_match, "host-effect prefix"),
             (
-                expected.trace_id == replayed.trace_id,
+                *trace_id == replayed.trace_id,
                 "execution trace identity",
             ),
         ] {
@@ -1350,8 +1545,23 @@ mod engine {
                 ));
             }
         }
+        if let CapturedAttempt::EngineFailure(failure) = expected {
+            let (reason_match, diagnostic_match) = replayed.engine_failure.as_ref()
+                .map(|(reason, diagnostic)| (reason == &failure.reason, diagnostic == &failure.diagnostic))
+                .unwrap_or((false, false));
+            for (matches, subject) in [
+                (reason_match, "engine failure reason"),
+                (diagnostic_match, "engine failure diagnostic"),
+            ] {
+                if !matches {
+                    outcome.divergences.push(format!(
+                        "re-executed {subject} differs from the captured failure"
+                    ));
+                }
+            }
+        }
         outcome.matched = outcome.divergences.is_empty();
-        outcome
+        Ok(outcome)
     }
 
     pub(super) fn reexecute(capture: &NativeReplayCapture) -> Result<NativeReplayOutcome, String> {
@@ -1434,25 +1644,14 @@ mod engine {
                     (CapturedAttempt::Completed(_), Err(error)) => {
                         Err(format!("native re-execution failed: {error}"))
                     }
-                    (CapturedAttempt::UncaughtException(expected), Err(error)) => {
-                        let ObservedGuestException {
-                            exception: observed,
-                            host_effect_transcript,
-                            host_effect_journal,
-                        } = observe_guest_exception(&orchestrator, &error).map_err(|reason| {
+                    (expected @ (CapturedAttempt::UncaughtException(_) | CapturedAttempt::EngineFailure(_)), Err(error)) => {
+                        let observed = observe_failure(&orchestrator, &error).map_err(|reason| {
                             format!(
                                 "native failure re-execution is not certified: {reason}; {error}"
                             )
                         })?;
-                        let replayed = GuestTerminalObservation {
-                            terminal_state: NativeReplayTerminalState::UncaughtException,
-                            trace_id: observed.trace_id,
-                            exception_value: Some(observed.exception_value),
-                            console_output: observed.console_output,
-                            host_effect_transcript,
-                            host_effect_journal,
-                        };
-                        Ok(compare_failure_observation(
+                        let replayed = TerminalObservation::failed(observed)?;
+                        compare_failure_observation(
                             expected,
                             &payload.host_effect_transcript,
                             payload
@@ -1460,18 +1659,11 @@ mod engine {
                                 .as_ref()
                                 .map(|process| process.journal.as_slice()),
                             &replayed,
-                        ))
+                        )
                     }
-                    (CapturedAttempt::UncaughtException(expected), Ok(replayed)) => {
-                        let replayed = GuestTerminalObservation {
-                            terminal_state: NativeReplayTerminalState::Completed,
-                            trace_id: replayed.trace_id,
-                            exception_value: None,
-                            console_output: replayed.console_output,
-                            host_effect_transcript: replayed.host_effect_transcript,
-                            host_effect_journal: replayed.host_effect_journal,
-                        };
-                        Ok(compare_failure_observation(
+                    (expected @ (CapturedAttempt::UncaughtException(_) | CapturedAttempt::EngineFailure(_)), Ok(replayed)) => {
+                        let replayed = TerminalObservation::completed(replayed);
+                        compare_failure_observation(
                             expected,
                             &payload.host_effect_transcript,
                             payload
@@ -1479,7 +1671,7 @@ mod engine {
                                 .as_ref()
                                 .map(|process| process.journal.as_slice()),
                             &replayed,
-                        ))
+                        )
                     }
                 }
             })
@@ -1755,6 +1947,272 @@ mod engine {
 
         fn record(root: &Path, source: &str) -> NativeReplayCapture {
             record_with_inputs(root, source, AmbientAuthorityGrant::DenyAll, &[])
+        }
+
+        const STOP_PREFIX: &str = "const fs = require('fs'); const value = fs.readFileSync('input.txt', 'utf8'); fs.writeFileSync('output.txt', value); console.log('before-engine-stop');";
+
+        // These are native stopping conditions, not Node reference fixtures.
+        // The original run really reads/writes a file before the engine stops.
+        fn stopped_run(
+            root: &Path,
+            budget_stop: bool,
+        ) -> (
+            ExtensionPackage,
+            OrchestratorConfig,
+            RuntimeConfig,
+            ExecutionOrchestrator,
+            OrchestratorError,
+        ) {
+            let config = OrchestratorConfig {
+                commonjs_entry: true,
+                ..OrchestratorConfig::default()
+            };
+            let runtime = RuntimeConfig {
+                execution: frankenengine_engine::runtime_config::ExecutionConfig {
+                    deterministic_budget: 100_000,
+                    throughput_budget: 100_000,
+                    ..Default::default()
+                },
+                ..RuntimeConfig::default()
+            };
+            let ending = if budget_stop {
+                "while (true) {}"
+            } else {
+                "process.env.MISSING;"
+            };
+            let source = format!("{STOP_PREFIX} {ending}");
+            let path = root.join("stopped.cjs");
+            std::fs::write(&path, &source).unwrap();
+            std::fs::write(root.join("input.txt"), "captured-before-stop").unwrap();
+            let package = ExtensionPackage {
+                extension_id: "native-engine-stop-replay".to_string(),
+                source,
+                source_file: Some(path.display().to_string()),
+                module_root: Some(root.display().to_string()),
+                capabilities: ["module_load", "fs_read", "fs_write", "builtin", "timer"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                version: "1.0.0".to_string(),
+                metadata: BTreeMap::new(),
+            };
+            let authority = RuntimeEvidenceAuthority::generate_runtime_owned(
+                "franken-node.native-engine-stop-test",
+                config.epoch,
+                1,
+                None,
+            )
+            .unwrap();
+            let mut orchestrator =
+                ExecutionOrchestrator::try_new_with_runtime_config_and_authority(
+                    config.clone(),
+                    runtime.clone(),
+                    AmbientAuthorityGrant::DenyAll,
+                    authority,
+                )
+                .unwrap();
+            orchestrator.set_host_io(
+                Arc::new(SandboxedHostIo::with_root(root).unwrap()),
+                Some(Arc::new(InMemoryHostIoTranscript::recording())),
+            );
+            let error = orchestrator.execute(&package).expect_err("native engine stop");
+            if budget_stop {
+                assert!(matches!(error.primary_error(), OrchestratorError::Interpreter(
+                    InterpreterError::BudgetExhausted { budget: 100_000, .. }
+                )), "{error}");
+            } else {
+                assert!(matches!(error.primary_error(), OrchestratorError::Interpreter(
+                    InterpreterError::CapabilityDenied { capability }
+                ) if capability == "env_read"), "{error}");
+            }
+            assert_eq!(std::fs::read_to_string(root.join("output.txt")).unwrap(),
+                "captured-before-stop");
+            (package, config, runtime, orchestrator, error)
+        }
+
+        fn capture_stop(root: &Path, budget_stop: bool) -> NativeReplayCapture {
+            let (package, config, runtime, orchestrator, error) = stopped_run(root, budget_stop);
+            // Existing native-session consumers have not opted into new wire
+            // states merely because a library can now capture them.
+            assert!(NativeReplayCapture::from_failed_execution(
+                &package, &config, &runtime, AmbientAuthorityGrant::DenyAll,
+                &[], None, &orchestrator, &error,
+            ).is_err());
+            NativeReplayCapture::from_finalized_failure(
+                &package, &config, &runtime, AmbientAuthorityGrant::DenyAll,
+                &[], None, &orchestrator, &error,
+            ).expect("capture the finalized native stop")
+        }
+
+        #[test]
+        fn engine_failure_replay_preserves_real_prefix_without_repeating_effects() {
+            on_native_stack(|| {
+                for budget_stop in [false, true] {
+                    let root = tempfile::tempdir().unwrap();
+                    let capture = capture_stop(root.path(), budget_stop);
+                    assert_eq!(capture.terminal_state().unwrap(), NativeReplayTerminalState::EngineFailure);
+                    let payload: NativeReplayPayload = serde_json::from_str(&capture.payload_json).unwrap();
+                    assert_eq!(payload.host_effect_transcript.len(), 2);
+                    let CapturedAttempt::EngineFailure(expected) = &payload.expected else {
+                        panic!("engine stop must not be relabeled as a guest exception");
+                    };
+                    assert!(!expected.console_output.is_empty());
+                    for name in ["stopped.cjs", "input.txt", "output.txt"] {
+                        std::fs::rename(root.path().join(name), root.path().join(format!("saved-{name}"))).unwrap();
+                    }
+                    let outcome = reexecute(&capture).expect("replay finalized native stop");
+                    assert!(outcome.matched, "{outcome:?}");
+                    assert_eq!(outcome.verification_scope, "engine_failure_prefix");
+                    assert!(outcome.terminal_state_match && outcome.console_match && outcome.host_effects_match);
+                    assert_eq!(outcome.replay_terminal_state, NativeReplayTerminalState::EngineFailure);
+                    assert_eq!(outcome.ir4_witness_match, None);
+                    assert_eq!(outcome.instruction_count_match, None);
+                    assert_eq!(outcome.nondeterminism_trace_match, None);
+                    assert_eq!(outcome.exception_value_match, None);
+                    assert_eq!(outcome.decisions_match, None);
+                    assert!(outcome.module_load_disabled);
+                    assert!(!root.path().join("output.txt").exists());
+                    assert_eq!(std::fs::read_to_string(root.path().join("saved-output.txt")).unwrap(),
+                        "captured-before-stop");
+                }
+            });
+        }
+
+        #[test]
+        fn engine_failure_replay_requires_exact_reason_and_native_diagnostic() {
+            on_native_stack(|| {
+                for budget_stop in [false, true] {
+                    let root = tempfile::tempdir().unwrap();
+                    let capture = capture_stop(root.path(), budget_stop);
+                    let original: NativeReplayPayload = serde_json::from_str(&capture.payload_json).unwrap();
+                    for change_reason in [false, true] {
+                        let mut changed = original.clone();
+                        let CapturedAttempt::EngineFailure(expected) = &mut changed.expected else { panic!() };
+                        if change_reason {
+                            expected.reason = EngineFailureReason::CapabilityDenied { capability: "fs_write".into() };
+                        } else {
+                            expected.diagnostic.push_str(" altered");
+                        }
+                        // Rehash to test execution comparison independently of
+                        // the enclosing signature, which would also reject it.
+                        let outcome = reexecute(&encode_capture(&changed).unwrap()).unwrap();
+                        assert!(!outcome.matched);
+                        assert!(outcome.terminal_state_match && outcome.host_effects_match);
+                        assert!(outcome.divergences.iter().any(|detail| detail.contains(
+                            if change_reason { "engine failure reason" } else { "diagnostic" }
+                        )), "{outcome:?}");
+                    }
+                }
+            });
+        }
+
+        #[test]
+        fn engine_failure_replay_never_confuses_completion_guest_throw_or_another_stop() {
+            on_native_stack(|| {
+                let root = tempfile::tempdir().unwrap();
+                let capture = capture_stop(root.path(), true);
+                let original: NativeReplayPayload = serde_json::from_str(&capture.payload_json).unwrap();
+                for ending in ["42;", "throw 'instruction budget exhausted';", "process.env.MISSING;"] {
+                    let mut changed = original.clone();
+                    changed.package.source = format!("{STOP_PREFIX} {ending}");
+                    let outcome = reexecute(&encode_capture(&changed).unwrap()).unwrap();
+                    assert!(!outcome.matched, "{ending}: {outcome:?}");
+                    assert!(outcome.console_match && outcome.host_effects_match);
+                    assert_eq!(outcome.exception_value_match, None);
+                    assert_eq!(outcome.terminal_state_match, ending == "process.env.MISSING;");
+                }
+            });
+        }
+
+        #[test]
+        fn engine_failure_replay_refuses_missing_reordered_and_unused_effects() {
+            on_native_stack(|| {
+                for budget_stop in [false, true] {
+                    let root = tempfile::tempdir().unwrap();
+                    let capture = capture_stop(root.path(), budget_stop);
+                    let original: NativeReplayPayload = serde_json::from_str(&capture.payload_json).unwrap();
+                    for mutate in [
+                        (|p: &mut NativeReplayPayload| { p.host_effect_transcript.remove(0); }) as fn(&mut NativeReplayPayload),
+                        |p| p.host_effect_transcript.swap(0, 1),
+                        |p| p.host_effect_transcript.clear(),
+                        |p| p.host_effect_transcript.push(p.host_effect_transcript[0].clone()),
+                    ] {
+                        let mut changed = original.clone();
+                        mutate(&mut changed);
+                        assert!(reexecute(&encode_capture(&changed).unwrap()).is_err(),
+                            "a matching stop cannot excuse an uncertified recorder boundary");
+                    }
+                }
+            });
+        }
+
+        #[test]
+        fn engine_failure_capture_rejects_uncertified_cleanup_and_wrong_trace() {
+            on_native_stack(|| {
+                for wrong_trace in [false, true] {
+                    let root = tempfile::tempdir().unwrap();
+                    let (package, config, runtime, orchestrator, mut error) = stopped_run(root.path(), false);
+                    let OrchestratorError::PostCellFailure(failure) = &mut error else {
+                        panic!("native stop must carry finalized cell evidence");
+                    };
+                    if wrong_trace {
+                        failure.cleanup.trace_id.push_str("-different");
+                    } else {
+                        failure.additional_errors.push(OrchestratorError::Interpreter(InterpreterError::Cancelled));
+                    }
+                    assert!(NativeReplayCapture::from_finalized_failure(
+                        &package, &config, &runtime, AmbientAuthorityGrant::DenyAll,
+                        &[], None, &orchestrator, &error,
+                    ).is_err());
+                }
+            });
+        }
+
+        #[test]
+        fn engine_failure_capture_never_infers_certification_from_diagnostic_text() {
+            assert!(engine_failure_reason(&InterpreterError::Cancelled).is_none());
+            for value in ["capability denied: env_read", "instruction budget exhausted", "wrapper_timeout"] {
+                assert!(engine_failure_reason(&InterpreterError::UncaughtException { value: value.into() }).is_none());
+            }
+            assert_eq!(engine_failure_reason(&InterpreterError::CapabilityDenied { capability: "env_read".into() }),
+                Some(EngineFailureReason::CapabilityDenied { capability: "env_read".into() }));
+            on_native_stack(|| {
+                let root = tempfile::tempdir().unwrap();
+                let (package, config, runtime, orchestrator, _) = stopped_run(root.path(), false);
+                for error in [
+                    OrchestratorError::Interpreter(InterpreterError::Cancelled),
+                    OrchestratorError::Interpreter(InterpreterError::CapabilityDenied { capability: "env_read".into() }),
+                    OrchestratorError::Interpreter(InterpreterError::UncaughtException { value: "instruction budget exhausted".into() }),
+                ] {
+                    assert!(NativeReplayCapture::from_finalized_failure(
+                        &package, &config, &runtime, AmbientAuthorityGrant::DenyAll,
+                        &[], None, &orchestrator, &error,
+                    ).is_err(), "a previous finalized attempt does not certify an unrelated error");
+                }
+            });
+        }
+
+        #[test]
+        fn engine_failure_payload_preflight_refuses_unbound_limits_and_module_authority() {
+            on_native_stack(|| {
+                let root = tempfile::tempdir().unwrap();
+                let capture = capture_stop(root.path(), true);
+                let original: NativeReplayPayload = serde_json::from_str(&capture.payload_json).unwrap();
+                for mutate in [
+                    (|f: &mut CapturedEngineFailure| f.trace_id.clear()) as fn(&mut CapturedEngineFailure),
+                    |f| f.diagnostic.clear(),
+                    |f| f.diagnostic = "x".repeat(4097),
+                    |f| f.reason = EngineFailureReason::CapabilityDenied { capability: "unknown_capability".into() },
+                    |f| f.reason = EngineFailureReason::CapabilityDenied { capability: "module_load".into() },
+                    |f| f.reason = EngineFailureReason::InstructionBudgetExhausted { budget: 7 },
+                ] {
+                    let mut changed = original.clone();
+                    let CapturedAttempt::EngineFailure(failure) = &mut changed.expected else { panic!() };
+                    mutate(failure);
+                    assert!(changed.validate().is_err());
+                    assert!(reexecute(&encode_capture(&changed).unwrap()).is_err());
+                }
+            });
         }
 
         fn record_with_inputs(
@@ -2593,6 +3051,20 @@ mod tests {
             payload_json: payload.to_string(),
             payload_sha256: hex::encode(Sha256::digest(payload.as_bytes())),
         }
+    }
+
+    #[test]
+    fn engine_failure_terminal_metadata_is_distinct_and_integrity_bound() {
+        let capture = envelope(r#"{"expected":{"terminal_state":"engine_failure","reason":{"kind":"capability_denied","capability":"env_read"}}}"#);
+        assert_eq!(capture.terminal_state().unwrap(), NativeReplayTerminalState::EngineFailure);
+        assert_ne!(NativeReplayTerminalState::EngineFailure, NativeReplayTerminalState::UncaughtException);
+        assert_eq!(serde_json::to_string(&NativeReplayTerminalState::EngineFailure).unwrap(), "\"engine_failure\"");
+        for unrelated in ["cancelled", "wrapper_timeout", "panic", "timeout_indeterminate"] {
+            assert!(serde_json::from_value::<NativeReplayTerminalState>(serde_json::json!(unrelated)).is_err());
+        }
+        let mut changed = capture;
+        changed.payload_json.push(' ');
+        assert!(changed.terminal_state().is_err());
     }
 
     #[test]
