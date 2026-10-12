@@ -1,0 +1,22 @@
+[package]
+name = "franken-rewrite-tree-tests"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "LicenseRef-MIT-OpenAI-Anthropic-Rider"
+
+[workspace]
+
+[lib]
+path = "../../crates/franken-node/src/migration/rewrite_trees.rs"
+
+[dependencies]
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.11"
+hex = "0.4"
+rustix = { version = "1.1", features = ["fs"] }
+
+[dev-dependencies]
+tempfile = "3.19"
