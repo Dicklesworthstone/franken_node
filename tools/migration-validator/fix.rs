@@ -127,8 +127,11 @@ mod cli_tests {
         let original = tempfile::tempdir().unwrap();
         let repaired = tempfile::tempdir().unwrap();
         let out = tempfile::tempdir().unwrap();
-        fs::write(original.path().join("case.test.js"), "globalThis.answer=42;").unwrap();
-        fs::write(repaired.path().join("case.test.js"), "globalThis.answer=6*7;").unwrap();
+        for root in [original.path(), repaired.path()] {
+            fs::write(root.join("case.test.js"), "require('./helper.cjs');").unwrap();
+        }
+        fs::write(original.path().join("helper.cjs"), "globalThis.answer=42;").unwrap();
+        fs::write(repaired.path().join("helper.cjs"), "globalThis.answer=6*7;").unwrap();
         let path = out.path().join("failure.json");
         // /bin/false deliberately fails the native role; /bin/true is an
         // explicitly empty second reference. Neither claims Franken/Bun parity.
