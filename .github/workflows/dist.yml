@@ -14,6 +14,7 @@ name: dist
 # relative path (../../../franken_engine/crates/franken-engine), so the build
 # checks out franken_engine as a sibling of franken_node. Linux ships gnu
 # (the engine links C deps; musl static is intentionally avoided).
+# Both Linux architectures are built and executed on native hardware.
 
 on:
   workflow_dispatch:
@@ -207,12 +208,19 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            arch: X64
+            archive: tar.xz
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            arch: ARM64
             archive: tar.xz
           - os: macos-14
             target: aarch64-apple-darwin
+            arch: ARM64
             archive: tar.xz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            arch: X64
             archive: zip
 
     runs-on: ${{ matrix.os }}
@@ -220,6 +228,17 @@ jobs:
       contents: write
 
     steps:
+      - name: Require native target architecture
+        shell: bash
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ARCH" = "$EXPECTED_ARCH" || {
+            echo "::error::runner architecture $RUNNER_ARCH does not match $EXPECTED_ARCH"
+            exit 1
+          }
+
       - name: Checkout franken_node
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -250,6 +269,7 @@ jobs:
         if: matrix.os != 'windows-latest'
         working-directory: franken_node
         run: |
+          set -euo pipefail
           ./target/${{ matrix.target }}/release/franken-node --version
           ./target/${{ matrix.target }}/release/franken-node --help
 
@@ -259,7 +279,9 @@ jobs:
         shell: pwsh
         run: |
           .\target\${{ matrix.target }}\release\franken-node.exe --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           .\target\${{ matrix.target }}\release\franken-node.exe --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Create tarball (Unix)
         if: matrix.os != 'windows-latest'
@@ -272,6 +294,21 @@ jobs:
           [ -f "$binary" ] || { echo "::error::expected binary not found at $binary"; exit 1; }
           tar -cJf "dist/$TARBALL" -C "target/${{ matrix.target }}/release" franken-node
           (cd dist && shasum -a 256 "$TARBALL" > "$TARBALL.sha256")
+
+      - name: Install and execute the packaged binary on its native host (Unix)
+        if: matrix.os != 'windows-latest'
+        working-directory: franken_node
+        shell: bash
+        run: |
+          set -euo pipefail
+          sandbox="$(mktemp -d "$RUNNER_TEMP/franken-release-install.XXXXXXXX")"
+          mkdir -p "$sandbox/home" "$sandbox/tmp" "$sandbox/bin"
+          HOME="$sandbox/home" TMPDIR="$sandbox/tmp" \
+            bash ./install.sh --offline "dist/franken-node-${{ matrix.target }}.tar.xz" \
+              --dest "$sandbox/bin" --verify --no-gum
+          cmp "target/${{ matrix.target }}/release/franken-node" "$sandbox/bin/franken-node"
+          "$sandbox/bin/franken-node" --version
+          "$sandbox/bin/franken-node" --help
 
       - name: Create zip archive (Windows)
         if: matrix.os == 'windows-latest'
@@ -295,6 +332,7 @@ jobs:
         with:
           name: ${{ matrix.target }}
           path: franken_node/dist/*
+          if-no-files-found: error
 
   release:
     needs: build
@@ -311,6 +349,21 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      - name: Require the complete platform set before signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          for asset in \
+            franken-node-x86_64-unknown-linux-gnu.tar.xz \
+            franken-node-aarch64-unknown-linux-gnu.tar.xz \
+            franken-node-aarch64-apple-darwin.tar.xz \
+            franken-node-x86_64-pc-windows-msvc.zip; do
+            test -s "$asset"
+            test -s "$asset.sha256"
+            sha256sum --check --strict "$asset.sha256"
+          done
 
       - name: List artifacts
         run: ls -laR dist
