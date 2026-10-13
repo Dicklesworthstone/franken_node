@@ -1,74 +1,94 @@
-# Verify a repaired migration project
+# Inspect and verify a repaired migration project
 
 `franken-migration-fix` checks a proposed source repair against a previously captured, independently pinned migration failure. It complements `franken-migration-suite` (capture/replay/reduction), `franken-migration-apply` (reviewed installation), and the attestation operators. It does not install anything or overwrite the seed capsule.
 
-Build the operator through the repository's approved Rust build environment:
+Build through the repository's approved Rust build environment:
 
 ```bash
 cargo build --manifest-path tools/migration-validator/Cargo.toml --bin franken-migration-fix
 ```
 
-## Pair capsule
+## Inspect before approving execution
+
+The same read-only command accepts either capsule schema:
 
 ```bash
 franken-migration-fix ./failure.json ./repaired-project \
   --expected-sha256 "$TRUSTED_CAPSULE_SHA256" \
+  --inspect \
+  --out ./repair-inspection.json
+```
+
+Use the capsule hash from trusted capture output or another authenticated channel. An unfamiliar capsule's self-declared hash is not authentication. Inspection validates the pinned archive and frozen test contract, captures the proposed repair, and reports its `candidate_input_sha256` plus a source-change summary. It does not resolve Node, Bun or native executables, stage workspaces, or run code. Optional report output is the only write.
+
+`INSPECTED` is not `PASS`, `FIX_VERIFIED`, or source approval. Review the actual application and dependency changes independently, then preserve the inspected candidate hash as `REVIEWED_REPAIR_SHA256`. Do not automatically approve whatever a mutable repair directory contains at execution time. The summary contains at most 64 sorted changes, reports truncation explicitly, and is not a substitute for reviewing all changed source.
+
+`--inspect` conflicts with `--execute`, both runtime selections, and `--expected-candidate-input-sha256`. An inspection report uses schema `franken-node/source-fix-inspection/v1`, `oracle: pair|product`, and `execution_performed: false`. It reveals no source bytes or symlink target text; source paths and content hashes are still sensitive metadata.
+
+## Execute the reviewed repair
+
+Both capsule and repair hashes are required by the CLI. A source substitution, mode change or new file after review is rejected before runtime resolution. The source tree is captured once for execution; the operator never fills in a missing approval hash automatically.
+
+### Pair capsule
+
+```bash
+franken-migration-fix ./failure.json ./repaired-project \
+  --expected-sha256 "$TRUSTED_CAPSULE_SHA256" \
+  --expected-candidate-input-sha256 "$REVIEWED_REPAIR_SHA256" \
   --native-bin /trusted/bin/franken-node \
   --execute \
   --out ./source-fix-report.json
 ```
 
-## Node/Bun/native capsule
+### Node/Bun/native capsule
 
 ```bash
 franken-migration-fix ./product-failure.json ./repaired-project \
   --expected-sha256 "$TRUSTED_CAPSULE_SHA256" \
+  --expected-candidate-input-sha256 "$REVIEWED_REPAIR_SHA256" \
   --native-bin /trusted/bin/franken-node \
   --bun-bin /trusted/bin/bun \
   --execute \
   --out ./product-source-fix-report.json
 ```
 
-Use the content hash from trusted capture output or another authenticated channel. Merely reading an unfamiliar capsule's self-declared hash does not authenticate it. A product capsule without `--bun-bin` is rejected, never downgraded to a pair comparison. Node is resolved using the existing absolute-PATH-entry rule. The original reference executable identities must match the capsule; recorded paths and arguments are not execution instructions.
+A product capsule without `--bun-bin` is rejected, never downgraded to a pair comparison. Node is resolved using the existing absolute-PATH-entry rule. Original reference executable identities must match the capsule; recorded paths and arguments are not execution instructions.
 
-These examples assume the built operator is on PATH. The executable otherwise resides under `tools/migration-validator/target/debug/`. Passing `--execute` approves both the archived reference code and the proposed repaired code. Workspace copies are not an OS sandbox; execute only trusted projects with appropriate external isolation.
+These examples assume the built operator is on PATH. Its default build location is `tools/migration-validator/target/debug/`. `--execute` approves both archived reference code and repaired code. Workspace copies are not an OS sandbox; use trusted projects and appropriate external isolation.
 
-## What changes, and what must stay fixed
+## What changes, and what stays fixed
 
-The repair tree is captured before runtime resolution. The archived original tree is not changed, and the captured candidate is replaced only in the in-memory execution input. Supporting sources and modules may be added, removed, or edited within the existing snapshot limits. The repaired tree must still select exactly the same tests, execution settings and independent oracle data as the original.
+The archived original tree and seed evidence are not changed. Only the in-memory candidate input is replaced by the repair capture. Supporting sources and modules may be added, removed or edited within existing snapshot limits. Comparison continues to use the entire recorded suite, not a selected passing subset.
 
-The existing shared admission check preserves per-test working directories, application arguments, environment overrides, stdin transport and bytes, concurrency, and stdout/stderr/file golden fixtures. A repair cannot weaken those conditions, omit a failing counterpart, or substitute expected output. Both runtime-comparison modes execute the same production replay/validation code used by ordinary replay.
+Selected test entrypoints must retain their archived **candidate** bytes, regular-file kind and permission modes. The complete `.franken-node/migration-tests.json` file is frozen too, including its bytes and permissions. The original reference's harness may have different source spelling after an earlier measured migration; that is not permission to alter the archived candidate's harness during a repair. To fix behavior, change application code behind a stable harness. A broken assertion or test itself requires a newly reviewed capture, not a claim that the old test now passes.
 
-Every recorded reference observation must remain unchanged, including persistent workspace effects when the capsule measured them. For product capsules this applies independently to BOTH Node and Bun. All repaired-candidate cases must then pass the comparison, including previously passing sibling cases. A reference disagreement or reference failure is not a usable fix-verification seed. Neither is a captured PASS.
+The shared inventory admission also preserves per-test working directories, application arguments, environment overrides, stdin transport and bytes, concurrency, and stdout/stderr/file golden fixture bytes. A repair cannot omit a failing counterpart or substitute expected output. `protected_paths` lists the byte-and-mode-frozen harnesses and manifest; other declared request/oracle bytes remain protected by the shared inventory contract.
 
-The native executable may also be updated. `native_runtime_changed` reports whether its admitted identity/arguments differ from the seed. This is explicit fix verification, not proof that source edits alone caused an improvement when the native runtime also changed.
+This does not identify every transitive test helper, package configuration or implicit input as a frozen oracle. Such supporting changes are included in the repair hash and change summary and must be reviewed independently. Passing proves recorded observations, not correctness on arbitrary inputs or safety of arbitrary dependencies.
 
-The validator implementation identity must satisfy the existing replay contract. A capsule produced by an incompatible validator build is rejected; the tool does not silently waive that check. Keep the capture/replay tools from the same compatible build. Inspection and offline export are separate operations and do not establish execution compatibility.
+Every recorded reference observation must remain unchanged, including persistent workspace effects when captured. For product capsules this applies independently to BOTH Node and Bun. All candidate cases must pass, including previously passing siblings. A reference disagreement, failed reference, or captured PASS is not a usable source-fix seed.
 
-## Results
+The native executable may also change; `native_runtime_changed` reports this explicitly. A combined source/runtime repair does not prove that source edits alone caused an improvement. The existing validator-identity requirement remains enforced: keep compatible capture/replay builds; inspection does not waive implementation compatibility.
 
-The JSON schema is `franken-node/source-fix-verification/v1`. Important fields are:
+## Results and storage
 
-- `seed_content_sha256`: the identity of the UNMODIFIED failure capsule.
-- `input_sha256`, `captured_candidate_input_sha256`, `candidate_input_sha256`: archived original, archived candidate, and freshly measured repair identities respectively.
-- `replay`: `oracle: pair` or `oracle: product`, with the full existing replay result under `result`; no reference observations are discarded.
-- `candidate_source_unchanged`: a post-execution recapture matched the measured repair input hash.
+Execution reports use `franken-node/source-fix-verification/v1`. `seed_content_sha256` identifies the unmodified capsule. `input_sha256`, `captured_candidate_input_sha256`, and `candidate_input_sha256` identify the archived original, archived candidate, and measured repair. `replay` retains the complete pair/product result without discarding any reference. `candidate_input_approved` records a matching caller-supplied repair hash before runtime lookup; it is not a successful validation verdict. `candidate_source_unchanged` records a post-execution recapture matching the measured repair.
 
-`FIX_VERIFIED` requires complete passing evidence and unchanged references AND a successful unchanged-source recheck. `FIX_NOT_VERIFIED` retains the complete failing comparison. `REFERENCE_DRIFT` means at least one archived reference observation changed. `SOURCE_DRIFT` means the captured repair passed, but the live repair tree changed; its nested replay still preserves the successful measurement of the earlier captured bytes. `ERROR` covers incomplete measurement, failed source rechecks and publication errors. Other negative results remain negative even when a source recheck also fails; `source_recheck_error` preserves that additional failure.
+Both report forms include `source_changes`: aggregate added/removed/modified path counts, up to 64 details, and a digest over **every** sorted change. Details contain entry kind, mode, byte length, and content/target digest, not raw bytes. Directory additions/removals count as paths too. The digest uses the domain `franken-node/source-fix-changes/v1` followed by NUL, then each compact serialized `SourceChange` preceded by its u64 little-endian encoded byte length. A truncated detail prefix cannot conceal changes from the full digest or candidate input pin.
 
-Exit codes are 0 only for a complete `FIX_VERIFIED` result with unchanged source, 1 for `FIX_NOT_VERIFIED`, and 2 for drift, invalid inputs, incomplete checks, or publication failures. Never interpret a nested `PASS` or `FIX_VERIFIED` as success when the top-level result is `SOURCE_DRIFT` or `ERROR`.
+`FIX_VERIFIED` requires a complete passing comparison, unchanged references and a successful source recheck. `FIX_NOT_VERIFIED` preserves a failing comparison. `REFERENCE_DRIFT` means reference observations changed. `SOURCE_DRIFT` means the captured repair passed but its live tree changed; the nested replay still retains the earlier captured result. `ERROR` covers incomplete measurement, failed rechecks and publication errors. Negative replay results remain negative when the source recheck also fails; `source_recheck_error` records that additional problem.
 
-The source recheck is not a filesystem lock. It establishes the observed tree identity at that point, not a guarantee against future editing. Use the separate reviewed-installation workflow to install a candidate; source-fix reports themselves do not authorize a write or fleet promotion.
+CLI exit 0 means either **inspection only** (`INSPECTED`, `execution_performed=false`) or complete `FIX_VERIFIED` with both `candidate_input_approved=true` and `candidate_source_unchanged=true`. Exit 1 means `FIX_NOT_VERIFIED`; exit 2 means drift, invalid inputs, incomplete checks or publication failure. Inspect the verdict, not only the exit code. A nested PASS cannot override a top-level failure.
 
-## Storage and limitations
+The seed and any output must be outside the repair tree. Report parents must exist; report paths must be new. Files are created with mode 0600. Publication errors preserve completed evidence on stdout and can leave a partial new file. Existing output is never overwritten. Repair roots cannot be symlinks; runtime paths must resolve outside them.
 
-The seed must be outside the repaired tree. The report destination must be new and outside the repair tree (including aliases); its parent must already exist. Reports are created with mode 0600. Publication failure preserves completed evidence on stdout, returns `ERROR`, and can leave an incomplete new output file after an I/O failure. Existing reports are never overwritten. The repair root cannot be a symlink, and each runtime must resolve outside it.
+A post-execution recheck is not a filesystem lock or permission to install. Use the separate reviewed-installation workflow for writes or fleet operations. Captures exclude `.git` as specified by the shared snapshot implementation. Ambient environment, clocks, external services and transient effects are not reconstructed. `environment_reproduced` and `release_certification` remain false.
 
-Comparison preserves the capsule's original scope; it does not upgrade a process-only capture to filesystem equivalence. Ambient environment, clocks, external services and transient/external filesystem effects are not reconstructed. `environment_reproduced` and `release_certification` remain false. Passing proves the captured test observations, not arbitrary-program equivalence, native ecosystem qualification, or a release gate.
+## Library and regression commands
 
-## Regression commands
+`source_fix::inspect` provides read-only inspection. `source_fix::verify_reviewed` checks both pins before runtime lookup and returns explicit approval metadata. The capture-now `source_fix::verify` API remains available to trusted library callers that already approved execution; its reports have `candidate_input_approved=false`. The CLI uses only the reviewed API for execution.
 
-Run through the repository's approved Rust execution path:
+Run through the approved Rust execution path:
 
 ```bash
 cargo test --manifest-path tools/migration-validator/Cargo.toml \
@@ -79,4 +99,4 @@ cargo clippy --manifest-path tools/migration-validator/Cargo.toml \
   --bin franken-migration-fix --all-targets -- -D warnings
 ```
 
-The source-repair tests execute real Node/Node processes. Deliberately named `/bin/true`, `/bin/false`, and shell observations exercise three-role orchestration and refusal paths, not successful Franken or Bun implementations. Positive native-runtime compatibility must be established separately with the genuine product executable and reference binaries.
+The tests include real Node/Node orchestration plus explicitly named `/bin/true`, `/bin/false` and shell observations for role/refusal checks. These are not positive Franken or Bun compatibility evidence. Run the Rust suites and genuine native qualification separately; JavaScript fixture checks alone do not compile or execute the Rust implementation.

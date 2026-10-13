@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
-//! Check a proposed source repair against a pinned failure capsule. This command
-//! neither installs source changes nor manufactures a new passing seed capsule.
-//! It uses the product's capture, replay, observation and runtime checks.
+//! Inspect a proposed repair, then verify precisely the reviewed source against
+//! a pinned failure capsule. This command never installs source changes or
+//! manufactures a new passing seed capsule. Both modes use product capture.
 
 use clap::Parser;
 use std::path::PathBuf;
@@ -19,7 +19,7 @@ mod smoke_supervisor;
 pub mod validation_suite;
 
 #[derive(Parser)]
-#[command(version, about = "Verify a repaired project against an independently pinned migration failure")]
+#[command(version, about = "Inspect and verify a repaired project against an independently pinned migration failure")]
 struct Args {
     /// Existing pair or product failure capsule. Never obtain the trusted pin from untrusted inspection.
     capsule: PathBuf,
@@ -28,14 +28,20 @@ struct Args {
     /// Independently trusted seed content SHA-256 (64 lowercase hexadecimal characters).
     #[arg(long)]
     expected_sha256: String,
+    /// Read repair hashes and changes without running code or resolving any runtime.
+    #[arg(long, conflicts_with_all = ["execute", "native_bin", "bun_bin", "expected_candidate_input_sha256"])]
+    inspect: bool,
+    /// Reviewed complete repair hash from inspection; required for execution, never inferred automatically.
+    #[arg(long, required_unless_present = "inspect")]
+    expected_candidate_input_sha256: Option<String>,
     /// Trusted local native product executable, outside the repaired project. It may also be updated.
-    #[arg(long)]
-    native_bin: PathBuf,
-    /// Required for product capsules; the Bun identity and every observation must match the seed.
-    #[arg(long)]
+    #[arg(long, required_unless_present = "inspect")]
+    native_bin: Option<PathBuf>,
+    /// Required for product execution; Bun's identity and every observation must match the seed.
+    #[arg(long, requires = "execute", conflicts_with = "inspect")]
     bun_bin: Option<PathBuf>,
     /// Consent to running both archived reference code and repaired code with your OS authority.
-    #[arg(long, required = true)]
+    #[arg(long, required_unless_present = "inspect")]
     execute: bool,
     /// New private JSON report outside the repaired project. JSON is also printed to stdout.
     #[arg(long)]
@@ -50,19 +56,32 @@ fn run(args: &Args) -> anyhow::Result<serde_json::Value> {
     use validation_suite::native_replay;
     use native_replay::failure_capture::product::source_fix;
 
-    // Programmatic callers do not pass through Clap, so consent and pin shape
-    // are checked before any path is read or created here as well.
-    ensure!(args.execute, "--execute is required: archived and repaired code run with your authority");
-    ensure!(args.expected_sha256.len() == 64 && args.expected_sha256.bytes()
-        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+    // These checks also protect programmatic callers that bypass Clap. None
+    // may read an input, reserve an output or resolve a runtime before consent.
+    ensure!(!args.inspect || (!args.execute && args.native_bin.is_none()
+        && args.bun_bin.is_none() && args.expected_candidate_input_sha256.is_none()),
+        "--inspect cannot be combined with execution, runtime or approval options");
+    ensure!(args.inspect || args.execute, "--execute is required: archived and repaired code run with your authority");
+    let valid_pin = |pin: &str| pin.len() == 64 && pin.bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    ensure!(valid_pin(&args.expected_sha256),
         "--expected-sha256 must be an independently trusted lowercase SHA-256");
+    if !args.inspect {
+        ensure!(args.expected_candidate_input_sha256.as_deref().is_some_and(valid_pin),
+            "--expected-candidate-input-sha256 must be the reviewed repair hash");
+        ensure!(args.native_bin.is_some(), "--native-bin is required for execution");
+    }
     let destination = args.out.as_deref().map(|path|
         native_replay::output_destination(path, &[args.candidate.as_path()])).transpose()?;
-    // Preserve the caller's capsule/candidate path: the backend must see and
-    // reject final symlinks rather than having canonicalization erase them.
-    let report = source_fix::verify(&args.capsule, &args.expected_sha256, &args.candidate,
-        &args.native_bin, args.bun_bin.as_deref())?;
-    let mut result = serde_json::to_value(report)?;
+    // Preserve final symlinks for the backend to refuse. Inspection dispatches
+    // schemas without selecting runtimes; execution never drops a product leg.
+    let mut result = if args.inspect {
+        serde_json::to_value(source_fix::inspect(&args.capsule, &args.expected_sha256, &args.candidate)?)?
+    } else {
+        serde_json::to_value(source_fix::verify_reviewed(&args.capsule, &args.expected_sha256, &args.candidate,
+            args.expected_candidate_input_sha256.as_deref().context("reviewed repair hash missing")?,
+            args.native_bin.as_deref().context("native runtime missing")?, args.bun_bin.as_deref())?)?
+    };
     if let Some(destination) = destination {
         let published = (|| -> anyhow::Result<()> {
             let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
@@ -75,9 +94,8 @@ fn run(args: &Args) -> anyhow::Result<serde_json::Value> {
         match published {
             Ok(()) => result["report_path"] = destination.to_string_lossy().as_ref().into(),
             Err(error) => {
-                // Do not lose a completed comparison to an output-directory
-                // failure, and do not claim a successful publication either.
-                result["verification_verdict"] = result["verdict"].clone();
+                // Keep completed inspection or execution evidence on stdout.
+                result["operation_verdict"] = result["verdict"].clone();
                 result["verdict"] = "ERROR".into();
                 result["publication_error"] = format!("{error:#}").into();
             }
@@ -93,7 +111,9 @@ fn run(_args: &Args) -> anyhow::Result<serde_json::Value> {
 
 fn result_exit_code(report: &serde_json::Value) -> u8 {
     match report["verdict"].as_str() {
-        Some("FIX_VERIFIED") if report["candidate_source_unchanged"] == true => 0,
+        Some("INSPECTED") if report["execution_performed"] == false => 0,
+        Some("FIX_VERIFIED") if report["candidate_source_unchanged"] == true
+            && report["candidate_input_approved"] == true => 0,
         Some("FIX_NOT_VERIFIED") => 1,
         _ => 2,
     }
@@ -116,11 +136,17 @@ mod cli_tests {
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::Path;
     use validation_suite::native_replay;
-    use native_replay::failure_capture::product;
+    use native_replay::failure_capture::product::{self, source_fix};
 
     fn args(capsule: &Path, candidate: &Path, pin: &str) -> Args {
         Args { capsule: capsule.into(), candidate: candidate.into(), expected_sha256: pin.into(),
-            native_bin: "/bin/false".into(), bun_bin: None, execute: true, out: None }
+            inspect: false, expected_candidate_input_sha256: Some("a".repeat(64)),
+            native_bin: Some("/bin/false".into()), bun_bin: None, execute: true, out: None }
+    }
+
+    fn approve(options: &mut Args) {
+        options.expected_candidate_input_sha256 = Some(source_fix::inspect(&options.capsule,
+            &options.expected_sha256, &options.candidate).unwrap().candidate_input_sha256);
     }
 
     fn fixture(product: bool) -> (tempfile::TempDir, tempfile::TempDir, PathBuf, String) {
@@ -146,13 +172,14 @@ mod cli_tests {
     }
 
     #[test]
-    fn clap_requires_consent_pin_and_explicit_runtime_without_other_execution_modes() {
+    fn clap_requires_consent_both_pins_and_explicit_runtime_for_execution() {
         let pin = "a".repeat(64);
         let base = ["fix", "seed.json", "repaired project", "--execute",
-            "--expected-sha256", &pin, "--native-bin", "/trusted/native"];
+            "--expected-sha256", &pin, "--expected-candidate-input-sha256", &pin,
+            "--native-bin", "/trusted/native"];
         let parsed = Args::try_parse_from(base).unwrap();
         assert_eq!(parsed.candidate, PathBuf::from("repaired project"));
-        for omitted in ["--execute", "--expected-sha256", "--native-bin"] {
+        for omitted in ["--execute", "--expected-sha256", "--expected-candidate-input-sha256", "--native-bin"] {
             let mut remaining = Vec::new();
             let mut skip_value = false;
             for token in base {
@@ -162,7 +189,7 @@ mod cli_tests {
             }
             assert!(Args::try_parse_from(remaining).is_err(), "{omitted}");
         }
-        for option in ["--list-tests", "--inspect-capsule", "--minimize-capsule", "--compare-filesystem"] {
+        for option in ["--list-tests", "--inspect-capsule", "--minimize-capsule", "--compare-filesystem", "--inspect"] {
             let mut flags = base.to_vec();
             flags.push(option);
             assert!(Args::try_parse_from(flags).is_err(), "{option}");
@@ -178,6 +205,11 @@ mod cli_tests {
         for pin in ["", "a", &"A".repeat(64), &"z".repeat(64)] {
             options.expected_sha256 = pin.into();
             assert!(run(&options).unwrap_err().to_string().contains("--expected-sha256"));
+        }
+        options.expected_sha256 = "a".repeat(64);
+        for pin in [None, Some(String::new()), Some("A".repeat(64)), Some("z".repeat(64))] {
+            options.expected_candidate_input_sha256 = pin;
+            assert!(run(&options).unwrap_err().to_string().contains("--expected-candidate-input-sha256"));
         }
     }
 
@@ -215,6 +247,7 @@ mod cli_tests {
             let original_capsule = fs::read(&path).unwrap();
             let original_source = fs::read(repaired.path().join("case.test.js")).unwrap();
             let mut options = args(&path, repaired.path(), &pin);
+            approve(&mut options);
             if is_product { options.bun_bin = Some("/bin/true".into()); }
             options.out = Some(out.path().join("report.json"));
             let report = run(&options).unwrap();
@@ -223,7 +256,9 @@ mod cli_tests {
             assert_eq!(report["seed_content_sha256"], pin);
             assert_ne!(report["candidate_input_sha256"], report["captured_candidate_input_sha256"]);
             assert_eq!(report["candidate_source_unchanged"], true);
+            assert_eq!(report["candidate_input_approved"], true);
             assert_eq!(report["native_runtime_changed"], false);
+            assert_eq!(report["source_changes"]["modified_paths"], 1);
             assert_eq!(report["replay"]["oracle"], role);
             let validation = &report["replay"]["result"]["validation"];
             assert_eq!(validation["candidate_input_sha256"], report["candidate_input_sha256"]);
@@ -243,31 +278,106 @@ mod cli_tests {
     fn explicit_candidate_runtime_update_is_reported_and_only_complete_fix_exits_zero() {
         let (repaired, _out, path, pin) = fixture(false);
         let mut options = args(&path, repaired.path(), &pin);
+        approve(&mut options);
         // This no-output fixture and explicit /bin/true test CLI plumbing,
         // NOT successful native engine execution of a repaired application.
-        options.native_bin = "/bin/true".into();
+        options.native_bin = Some("/bin/true".into());
         let report = run(&options).unwrap();
         assert_eq!(report["verdict"], "FIX_VERIFIED");
         assert_eq!(report["native_runtime_changed"], true);
         assert_eq!(result_exit_code(&report), 0);
         for verdict in ["ERROR", "REFERENCE_DRIFT", "SOURCE_DRIFT", "PASS", "REPRODUCED"] {
             assert_eq!(result_exit_code(&serde_json::json!({
-                "verdict": verdict, "candidate_source_unchanged": true,
+                "verdict": verdict, "candidate_source_unchanged": true, "candidate_input_approved": true,
                 "replay": {"result": {"verdict": "FIX_VERIFIED"}},
             })), 2);
         }
-        assert_eq!(result_exit_code(&serde_json::json!({
-            "verdict": "FIX_VERIFIED", "candidate_source_unchanged": false,
-        })), 2);
+        for (unchanged, approved) in [(false, true), (true, false)] {
+            assert_eq!(result_exit_code(&serde_json::json!({
+                "verdict": "FIX_VERIFIED", "candidate_source_unchanged": unchanged,
+                "candidate_input_approved": approved,
+            })), 2);
+        }
     }
 
     #[test]
     fn missing_product_reference_never_falls_back_to_a_pair_measurement() {
         let (repaired, out, path, pin) = fixture(true);
         let mut options = args(&path, repaired.path(), &pin);
+        approve(&mut options);
         options.out = Some(out.path().join("never.json"));
         let error = run(&options).unwrap_err();
         assert!(error.to_string().contains("native migration capsule"), "{error:#}");
         assert!(!options.out.unwrap().exists());
+    }
+
+    #[test]
+    fn inspection_clap_needs_no_runtime_and_rejects_every_execution_option() {
+        let pin = "a".repeat(64);
+        let base = ["fix", "seed.json", "repair", "--inspect", "--expected-sha256", &pin];
+        let parsed = Args::try_parse_from(base).unwrap();
+        assert!(parsed.inspect && !parsed.execute && parsed.native_bin.is_none());
+        for flags in [vec!["--execute"], vec!["--native-bin", "/bin/false"],
+            vec!["--bun-bin", "/bin/true"], vec!["--expected-candidate-input-sha256", &pin]] {
+            let mut argv = base.to_vec();
+            argv.extend(flags);
+            assert!(Args::try_parse_from(argv).is_err());
+        }
+        let options = Args { inspect: true, ..args(Path::new("missing"), Path::new("missing"), &pin) };
+        assert!(run(&options).unwrap_err().to_string().contains("--inspect cannot"));
+    }
+
+    #[test]
+    fn inspection_of_both_schemas_reports_changes_privately_without_executing_repair() {
+        for (is_product, role) in [(false, "pair"), (true, "product")] {
+            let (repaired, out, path, pin) = fixture(is_product);
+            let marker = out.path().join("executed");
+            fs::write(repaired.path().join("helper.cjs"), format!(
+                "require('fs').writeFileSync({}, 'must not run');", serde_json::to_string(&marker).unwrap())).unwrap();
+            let options = Args { inspect: true, execute: false, native_bin: None,
+                expected_candidate_input_sha256: None, out: Some(out.path().join("inspection.json")),
+                ..args(&path, repaired.path(), &pin) };
+            let before = fs::read(&path).unwrap();
+            let report = run(&options).unwrap();
+            assert_eq!(report["verdict"], "INSPECTED");
+            assert_eq!(report["oracle"], role);
+            assert_eq!(report["execution_performed"], false);
+            assert_eq!(report["source_changes"]["changes"][0]["path"], "helper.cjs");
+            assert_eq!(report["source_changes"]["modified_paths"], 1);
+            assert!(report.get("replay").is_none());
+            assert!(!serde_json::to_string(&report).unwrap().contains("must not run"));
+            assert!(!marker.exists());
+            assert_eq!(fs::read(&path).unwrap(), before);
+            assert_eq!(result_exit_code(&report), 0);
+            assert_eq!(fs::metadata(options.out.unwrap()).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn reviewed_execution_refuses_changed_source_before_resolving_a_missing_runtime() {
+        let (repaired, out, path, pin) = fixture(false);
+        let mut options = args(&path, repaired.path(), &pin);
+        approve(&mut options);
+        let marker = out.path().join("must-not-execute");
+        fs::write(repaired.path().join("helper.cjs"), format!(
+            "require('fs').writeFileSync({}, 'changed');", serde_json::to_string(&marker).unwrap())).unwrap();
+        options.native_bin = Some("/definitely/missing/native".into());
+        options.out = Some(out.path().join("never.json"));
+        let error = run(&options).unwrap_err();
+        assert!(error.to_string().contains("reviewed candidate input hash"), "{error:#}");
+        assert!(!marker.exists() && !options.out.unwrap().exists());
+    }
+
+    #[test]
+    fn even_a_newly_supplied_candidate_pin_cannot_authorize_replacing_the_harness() {
+        let (repaired, _out, path, pin) = fixture(false);
+        fs::write(repaired.path().join("case.test.js"), "void 0;").unwrap();
+        let mut options = args(&path, repaired.path(), &pin);
+        let captured = validation_suite::rewrite_candidate::RewriteCandidate::capture(repaired.path(),
+            std::time::Instant::now() + std::time::Duration::from_secs(60)).unwrap();
+        options.expected_candidate_input_sha256 = Some(captured.input_sha256().into());
+        options.native_bin = Some("/definitely/missing/native".into());
+        let error = run(&options).unwrap_err();
+        assert!(error.to_string().contains("frozen test input"), "{error:#}");
     }
 }
