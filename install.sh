@@ -16,6 +16,7 @@
 #                       then falls back to a source build. Values: auto|release|source.
 #   --node-ref REF      Git ref for the franken_node source bootstrap (default: main).
 #   --engine-ref REF    Git ref for the franken_engine source bootstrap (default: main).
+#                       Other Cargo siblings use packaging/source-siblings.tsv.
 #   --offline TARBALL   Install a local tarball and its .sha256 sidecar, without network.
 #   --easy-mode         Auto-update PATH in shell rc files (~/.zshrc, ~/.bashrc).
 #   --verify            Also check the installed binary (candidates are always checked).
@@ -410,32 +411,54 @@ install_from_offline() {
 clone_ref() {
   local repo="$1" dest="$2" ref="$3"
   local url="https://github.com/${OWNER}/${repo}.git"
-  if git clone --filter=blob:none --depth 1 --branch "$ref" "$url" "$dest" 2>/dev/null; then return 0; fi
-  rm -rf -- "$dest"; mkdir -p "$dest"
-  ( cd "$dest" && git init -q && git remote add origin "$url" \
-      && git fetch --depth 1 origin "$ref" && git checkout -q --detach FETCH_HEAD )
+  case "$repo" in ''|.|..|*[!a-zA-Z0-9_.-]*) err "invalid source repository name"; return 1 ;; esac
+  git check-ref-format --branch "$ref" >/dev/null 2>&1 || { err "invalid source ref"; return 1; }
+  [ ! -e "$dest" ] && [ ! -L "$dest" ] || { err "source destination already exists; refusing to replace it"; return 1; }
+  mkdir "$dest" || return 1
+  git -C "$dest" -c init.templateDir= init -q || return 1
+  git -C "$dest" remote add origin "$url" || return 1
+  git -C "$dest" fetch --no-tags --depth 1 origin "$ref" || return 1
+  local resolved
+  resolved="$(git -C "$dest" rev-parse --verify 'FETCH_HEAD^{commit}')" || return 1
+  if [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+    [ "$resolved" = "$ref" ] || { err "fetched source does not match requested commit"; return 1; }
+  fi
+  git -C "$dest" -c core.autocrlf=false -c core.hooksPath=/dev/null checkout -q --detach "$resolved"
 }
 
 install_from_source() {
   require_command git
   command_exists cargo || die "cargo is required for source bootstrap; install Rust via rustup, or use a published release"
-  local src="${WORK_DIR}/source" node_dir engine_dir built
+  require_command cmp
+  local src="${WORK_DIR}/source" node_dir engine_dir built bootstrap receipt after_receipt node_sha engine_sha
   node_dir="${src}/${REPO}"; engine_dir="${src}/${ENGINE_REPO}"
-  mkdir -p "$src"
+  mkdir -p "$src" || die "cannot reserve source workspace"
   info "Source bootstrap: ${REPO}@${NODE_REF} + ${ENGINE_REPO}@${ENGINE_REF} (side-by-side)"
   clone_ref "$REPO" "$node_dir" "$NODE_REF" || die "failed to clone ${REPO}@${NODE_REF}"
-  clone_ref "$ENGINE_REPO" "$engine_dir" "$ENGINE_REF" || die "failed to clone ${ENGINE_REPO}@${ENGINE_REF}"
-  # The workspace also resolves these siblings by relative path (frankentui
-  # is a dependency; fastapi_rust and sqlmodel_rust are dev-dependencies that
-  # Cargo still loads to resolve the workspace).
-  local sibling
-  for sibling in frankentui fastapi_rust sqlmodel_rust; do
-    clone_ref "$sibling" "${src}/${sibling}" main || die "failed to clone ${sibling}@main"
-  done
-  info "Building $BINARY_NAME from source (links franken_engine — this can take a while)"
-  run_with_spinner "cargo build --release" \
-    env RCH_CARGO_WRAPPER_BYPASS=1 \
-    cargo build --release --manifest-path "$node_dir/Cargo.toml" -p "$CARGO_PACKAGE" --bin "$BINARY_NAME"
+  # Use the selected checkout's own dependency lock, not today's floating
+  # sibling branches or a global /dp workspace. Old revisions without this
+  # contract fail explicitly rather than receiving an invented dependency set.
+  bootstrap="$node_dir/scripts/bootstrap_source.sh"
+  [ -f "$bootstrap" ] && [ ! -L "$bootstrap" ] && [ ! -L "$node_dir/scripts" ] \
+    || die "selected source lacks scripts/bootstrap_source.sh; choose a revision with locked source bootstrap"
+  receipt="$WORK_DIR/source-inputs.tsv"
+  after_receipt="$WORK_DIR/source-inputs-after-build.tsv"
+  bash "$bootstrap" --workspace "$node_dir" --engine-ref "$ENGINE_REF" --receipt "$receipt" \
+    || die "source dependency bootstrap failed; existing installation preserved"
+  node_sha="$(git -C "$node_dir" rev-parse HEAD)" || die "cannot identify source revision"
+  engine_sha="$(git -C "$engine_dir" rev-parse HEAD)" || die "cannot identify engine revision"
+  if [ "$QUIET" -eq 0 ]; then cat "$receipt"; fi
+  info "Building $BINARY_NAME from the recorded sources and Cargo.lock"
+  run_with_spinner "cargo build --release --locked" \
+    env RCH_CARGO_WRAPPER_BYPASS=1 CARGO_TARGET_DIR="$node_dir/target" \
+      FRANKEN_NODE_SOURCE_GIT_SHA="$node_sha" FRANKEN_ENGINE_SOURCE_GIT_SHA="$engine_sha" \
+    cargo build --release --locked --manifest-path "$node_dir/Cargo.toml" -p "$CARGO_PACKAGE" --bin "$BINARY_NAME" \
+    || die "source build failed; existing installation preserved"
+  # A build that changed sources or their lock is not the admitted build. This
+  # is a local Git/manifest recheck, not another network fetch or branch update.
+  bash "$bootstrap" --workspace "$node_dir" --engine-ref "$engine_sha" --verify-only --receipt "$after_receipt" \
+    || die "source inputs changed during build; existing installation preserved"
+  cmp "$receipt" "$after_receipt" || die "source revisions changed during build; existing installation preserved"
   built="$node_dir/target/release/$BINARY_NAME"
   [ -x "$built" ] || die "expected built binary at $built"
   install_binary "$built"

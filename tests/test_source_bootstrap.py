@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -258,6 +259,141 @@ class SourceBootstrapTests(unittest.TestCase):
         bare = [name for name in re.findall(r'(?<!\+)"\$\{([A-Za-z_][A-Za-z0-9_]*)\[@\]\}"', SCRIPT.read_text())
                 if name not in special]
         self.assertEqual(bare, [])
+
+    def installer_fixture(self, *, helper=True):
+        """Real source checkouts; only the expensive compiler boundary is a fixture."""
+        scripts = self.workspace / "scripts"
+        scripts.mkdir()
+        if helper:
+            (scripts / "bootstrap_source.sh").write_bytes(SCRIPT.read_bytes())
+        (self.workspace / ".gitignore").write_text("/target/\n")
+        (self.workspace / "Cargo.lock").write_text("# committed fixture lock\n")
+        self.commit_workspace()
+        self.node_pin = git(self.workspace, "rev-parse", "HEAD", env=self.env)
+        subprocess.run(["git", "clone", "--quiet", "--bare", str(self.workspace),
+                        str(self.remotes / "franken_node.git")], env=self.env, check=True,
+                       capture_output=True, timeout=15)
+        self.tools = self.root / "compiler boundary"
+        self.tools.mkdir()
+        self.install_dir = self.root / "installed"
+        self.install_dir.mkdir()
+        self.old_binary = b"#!/usr/bin/env bash\necho old-working-binary\n"
+        target = self.install_dir / "franken-node"
+        target.write_bytes(self.old_binary)
+        target.chmod(0o755)
+        self.candidate = self.root / "candidate-executable"
+        self.candidate.write_text("#!/usr/bin/env bash\necho franken-node-source-fixture\n")
+        self.args_log = self.root / "cargo-arguments"
+        self.env_log = self.root / "cargo-provenance"
+        compiler = self.tools / "cargo"
+        compiler.write_text('''#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$@" > "$TEST_CARGO_ARGS"
+printf '%s\\n' "$FRANKEN_NODE_SOURCE_GIT_SHA" "$FRANKEN_ENGINE_SOURCE_GIT_SHA" "$CARGO_TARGET_DIR" > "$TEST_CARGO_ENV"
+[ "${TEST_BUILD_FAIL:-0}" = 0 ] || exit 67
+mkdir -p "$CARGO_TARGET_DIR/release"
+cp "$TEST_CANDIDATE" "$CARGO_TARGET_DIR/release/franken-node"
+chmod 0755 "$CARGO_TARGET_DIR/release/franken-node"
+case "${TEST_MUTATE:-}" in
+  engine) printf changed >> "$(dirname "$(dirname "$CARGO_TARGET_DIR")")/franken_engine/selected.txt" ;;
+  lock) printf changed >> "$(dirname "$CARGO_TARGET_DIR")/Cargo.lock" ;;
+esac
+''')
+        compiler.chmod(0o755)
+        self.install_env = {**self.env, "PATH": str(self.tools) + os.pathsep + self.env["PATH"],
+                            "TEST_CARGO_ARGS": str(self.args_log), "TEST_CARGO_ENV": str(self.env_log),
+                            "TEST_CANDIDATE": str(self.candidate), "OWNER": "Dicklesworthstone",
+                            "REPO": "franken_node"}
+
+    def install_source(self, *, extra_env=None):
+        work = self.root / "source install working directory"
+        work.mkdir()
+        self.saved_receipt = self.root / "installed-source-inputs.tsv"
+        script = f"""source {shlex.quote(str(ROOT / 'install.sh'))}
+WORK_DIR={shlex.quote(str(work))}
+DEST_DIR={shlex.quote(str(self.install_dir))}
+QUIET=1
+NODE_REF={shlex.quote(self.node_pin)}
+ENGINE_REF={shlex.quote(self.pins['franken_engine'])}
+install_from_source
+cp "$WORK_DIR/source-inputs.tsv" {shlex.quote(str(self.saved_receipt))}
+"""
+        # The work directory is owned by this fixture, not the installer's
+        # normal TMPDIR pattern. Its refusal to auto-delete is intentional.
+        return subprocess.run(["bash", "-c", script], env={**self.install_env, **(extra_env or {})},
+                              capture_output=True, text=True, timeout=25)
+
+    def test_source_installer_builds_locked_inputs_then_installs_checked_candidate(self):
+        self.installer_fixture()
+        self.assert_success(self.install_source())
+        self.assertEqual((self.install_dir / "franken-node").read_bytes(), self.candidate.read_bytes())
+        arguments = self.args_log.read_text().splitlines()
+        self.assertIn("--locked", arguments)
+        self.assertNotIn("--no-default-features", arguments)
+        self.assertEqual(arguments[-4:], ["-p", "frankenengine-node", "--bin", "franken-node"])
+        provenance = self.env_log.read_text().splitlines()
+        self.assertEqual(provenance[:2], [self.node_pin, self.pins["franken_engine"]])
+        self.assertIn("source/franken_node/target", provenance[2])
+        self.assertIn("frankentui\t" + self.pins["frankentui"], self.saved_receipt.read_text())
+
+    def test_source_installer_compile_failure_never_replaces_working_binary(self):
+        self.installer_fixture()
+        self.assert_failure(self.install_source(extra_env={"TEST_BUILD_FAIL": "1"}), "source build failed")
+        self.assertEqual((self.install_dir / "franken-node").read_bytes(), self.old_binary)
+        self.assertFalse(self.saved_receipt.exists())
+
+    def test_source_installer_rejects_engine_changes_made_during_build(self):
+        self.installer_fixture()
+        self.assert_failure(self.install_source(extra_env={"TEST_MUTATE": "engine"}), "source inputs changed during build")
+        self.assertEqual((self.install_dir / "franken-node").read_bytes(), self.old_binary)
+
+    def test_source_installer_rejects_lock_changes_made_during_build(self):
+        self.installer_fixture()
+        self.assert_failure(self.install_source(extra_env={"TEST_MUTATE": "lock"}), "source inputs changed during build")
+        self.assertEqual((self.install_dir / "franken-node").read_bytes(), self.old_binary)
+
+    def test_source_installer_missing_bootstrap_does_not_invent_floating_dependencies(self):
+        self.installer_fixture(helper=False)
+        self.assert_failure(self.install_source(), "selected source lacks scripts/bootstrap_source.sh")
+        self.assertFalse(self.args_log.exists())
+        self.assertEqual((self.install_dir / "franken-node").read_bytes(), self.old_binary)
+
+    def test_source_installer_rejects_unrunnable_compiler_output_before_replacement(self):
+        self.installer_fixture()
+        self.candidate.write_text("#!/usr/bin/env bash\nexit 7\n")
+        self.assert_failure(self.install_source(), "candidate cannot run on this host")
+        self.assertEqual((self.install_dir / "franken-node").read_bytes(), self.old_binary)
+
+    def test_initial_clone_never_deletes_a_preexisting_checkout_even_in_conditional(self):
+        result = subprocess.run(["bash", "-c",
+            f"source {shlex.quote(str(ROOT / 'install.sh'))}; "
+            f"if clone_ref franken_node {shlex.quote(str(self.workspace))} main; then exit 99; fi"],
+            env=self.env, text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("source destination already exists", result.stderr)
+        self.assertEqual(self.lock.read_text(), self.lock_text())
+        self.assertEqual(git(self.workspace, "status", "--porcelain", env=self.env), "")
+
+    def test_checkout_under_autocrlf_keeps_executable_bootstrap_and_lock_in_lf(self):
+        scripts = self.workspace / "scripts"
+        scripts.mkdir()
+        (scripts / "bootstrap_source.sh").write_bytes(SCRIPT.read_bytes())
+        (self.workspace / ".gitattributes").write_bytes((ROOT / ".gitattributes").read_bytes())
+        self.commit_workspace()
+        parent = self.root / "windows-style-checkout"
+        parent.mkdir()
+        checkout = parent / "franken_node"
+        subprocess.run(["git", "-c", "core.autocrlf=true", "clone", "--quiet",
+                        str(self.workspace), str(checkout)], env=self.env, check=True,
+                       capture_output=True, timeout=15)
+        git(checkout, "config", "core.autocrlf", "true", env=self.env)
+        for path in ["scripts/bootstrap_source.sh", "packaging/source-siblings.tsv"]:
+            self.assertNotIn(b"\r", (checkout / path).read_bytes())
+        result = subprocess.run(["bash", str(checkout / "scripts/bootstrap_source.sh"),
+            "--workspace", str(checkout), "--engine-ref", self.pins["franken_engine"],
+            "--receipt", str(self.root / "autocrlf-inputs.tsv")], env=self.env,
+            text=True, capture_output=True, timeout=25)
+        self.assert_success(result)
 
 
 if __name__ == "__main__":

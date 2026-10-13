@@ -1,0 +1,4 @@
+# Bootstrap inputs are parsed/executed by Bash on every platform.
+/scripts/bootstrap_source.sh text eol=lf
+/packaging/source-siblings.tsv text eol=lf
+/install.sh text eol=lf
