@@ -11,11 +11,12 @@ use super::{
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 type Result<T> = std::result::Result<T, ResolutionError>;
 const ID_DOMAIN: &[u8] = b"franken-node/sealed-module-id/v1\0";
+type ImporterRoutes = BTreeMap<RequestStyle, BTreeMap<String, String>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -100,13 +101,83 @@ pub struct RegistrySummary {
     pub policy_admission_performed: bool,
 }
 
+/// A borrowed, resolved route. This is data, not a policy permit. Consumers
+/// must authorize every yielded route, including routes to an already visited
+/// module, before deduplicating module outputs.
+pub struct RegisteredRequest<'a> {
+    pub referrer: Option<&'a str>,
+    pub specifier: &'a str,
+    pub style: RequestStyle,
+    pub module: &'a RegisteredModule,
+}
+
+/// Lazy breadth-first route traversal. Only modules are queued, once each;
+/// high fan-in therefore retains O(modules), not O(routes), traversal state.
+/// Request strings and sources are borrowed from the immutable registry.
+/// Dropping the iterator stops traversal immediately after a policy denial.
+pub struct ReachableRequests<'a> {
+    registry: &'a PinnedModuleRegistry,
+    entry: Option<RegisteredRequest<'a>>,
+    pending: VecDeque<&'a RegisteredModule>,
+    scheduled: BTreeSet<&'a str>,
+    current: Option<(&'a RegisteredModule, usize)>,
+    failed: bool,
+}
+
+impl<'a> Iterator for ReachableRequests<'a> {
+    type Item = Result<RegisteredRequest<'a>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.failed {
+            return None;
+        }
+        if let Some(entry) = self.entry.take() {
+            return Some(Ok(entry));
+        }
+        loop {
+            if self.current.is_none() {
+                self.current = self.pending.pop_front().map(|module| (module, 0));
+            }
+            let (importer, index) = self.current?;
+            let Some(dependency) = importer.dependencies.get(index) else {
+                self.current = None;
+                continue;
+            };
+            self.current = Some((importer, index + 1));
+            if let Err(error) = validate_specifier(&dependency.specifier) {
+                self.failed = true;
+                return Some(Err(error));
+            }
+            let Some(module) = self.registry.modules.get(&dependency.target) else {
+                // Admission normally makes this impossible. Do not turn an
+                // inconsistent graph into a truncated successful traversal.
+                self.failed = true;
+                return Some(Err(invalid_graph()));
+            };
+            if self.scheduled.insert(module.id()) {
+                self.pending.push_back(module);
+            }
+            return Some(Ok(RegisteredRequest {
+                referrer: Some(importer.id()),
+                specifier: &dependency.specifier,
+                style: dependency.style,
+                module,
+            }));
+        }
+    }
+}
+
+impl std::iter::FusedIterator for ReachableRequests<'_> {}
+
 /// Thread-transferable immutable data, NOT an authorization decision or an
 /// evaluation cache. Engine policy must be checked again even on a cache hit.
 /// Canonical IDs are opaque and graph-scoped, never host paths to reopen.
 pub struct PinnedModuleRegistry {
     summary: RegistrySummary,
     modules: BTreeMap<String, RegisteredModule>,
-    routes: BTreeMap<(String, RequestStyle, String), String>,
+    // Split the key so BTreeMap's borrowed lookup can use &str directly.
+    // A tuple of owned strings allocated on every successful load.
+    routes: BTreeMap<String, ImporterRoutes>,
 }
 
 impl PinnedModuleRegistry {
@@ -198,7 +269,8 @@ impl PinnedModuleRegistry {
                 return Err(invalid_graph());
             }
         }
-        let mut routes = BTreeMap::new();
+        let mut routes = BTreeMap::<String, ImporterRoutes>::new();
+        let mut route_count = 0;
         for edge in &report.edges {
             if edge.state == EdgeState::TypeOnly {
                 continue;
@@ -209,14 +281,19 @@ impl PinnedModuleRegistry {
                 .ok_or_else(invalid_graph)?;
             let specifier = edge.specifier.as_ref().ok_or_else(invalid_graph)?;
             let style = RequestStyle::for_load(edge.kind);
-            let key = (importer.clone(), style, specifier.clone());
-            if let Some(previous) = routes.get(&key) {
+            let by_specifier = routes
+                .entry(importer.clone())
+                .or_default()
+                .entry(style)
+                .or_default();
+            if let Some(previous) = by_specifier.get(specifier) {
                 if previous != target {
                     return Err(invalid_graph());
                 }
                 continue;
             }
-            routes.insert(key, target.clone());
+            by_specifier.insert(specifier.clone(), target.clone());
+            route_count += 1;
             modules
                 .get_mut(importer)
                 .ok_or_else(invalid_graph)?
@@ -236,7 +313,7 @@ impl PinnedModuleRegistry {
             graph_input_hash: report.input_hash.clone(),
             entrypoint,
             modules: modules.len(),
-            routes: routes.len(),
+            routes: route_count,
             execution_performed: false,
             policy_admission_performed: false,
         };
@@ -257,6 +334,12 @@ impl PinnedModuleRegistry {
         self.modules[&self.summary.entrypoint].kind.entry_style()
     }
 
+    /// Immutable module inventory for preparing bounded engine-side caches.
+    /// Enumeration, like lookup, confers no policy or execution authority.
+    pub fn modules(&self) -> impl ExactSizeIterator<Item = &RegisteredModule> {
+        self.modules.values()
+    }
+
     /// Data lookup only. This never confers an execution/capability permit.
     /// With no referrer, only the exact entrypoint ID and its admitted style
     /// are accepted. With a referrer, even a known target's canonical ID cannot
@@ -267,13 +350,7 @@ impl PinnedModuleRegistry {
         specifier: &str,
         style: RequestStyle,
     ) -> Result<&RegisteredModule> {
-        if specifier.is_empty() || specifier.len() > 4096 || specifier.chars().any(char::is_control)
-        {
-            return Err(error(
-                "ERR_MODULE_REGISTRY_REQUEST",
-                "invalid module request",
-            ));
-        }
+        validate_specifier(specifier)?;
         let id = match referrer {
             None if specifier == self.entrypoint() && style == self.entry_style() => {
                 self.entrypoint()
@@ -292,7 +369,9 @@ impl PinnedModuleRegistry {
                     ));
                 }
                 self.routes
-                    .get(&(importer.to_owned(), style, specifier.to_owned()))
+                    .get(importer)
+                    .and_then(|styles| styles.get(&style))
+                    .and_then(|specifiers| specifiers.get(specifier))
                     .map(String::as_str)
                     .ok_or_else(|| {
                         error(
@@ -305,38 +384,65 @@ impl PinnedModuleRegistry {
         self.modules.get(id).ok_or_else(invalid_graph)
     }
 
+    /// Borrowed breadth-first routes with O(modules) retained traversal state.
+    /// Initial request validation happens before the iterator is returned.
+    /// Every distinct incoming route is yielded, including cycle back-edges.
+    pub fn walk_requests<'a>(
+        &'a self,
+        referrer: Option<&'a str>,
+        specifier: &'a str,
+        style: RequestStyle,
+    ) -> Result<ReachableRequests<'a>> {
+        let module = self.lookup(referrer, specifier, style)?;
+        Ok(ReachableRequests {
+            registry: self,
+            entry: Some(RegisteredRequest {
+                referrer,
+                specifier,
+                style,
+                module,
+            }),
+            pending: VecDeque::from([module]),
+            scheduled: BTreeSet::from([module.id()]),
+            current: None,
+            failed: false,
+        })
+    }
+
     /// Deterministic breadth-first requests, not evaluation order. Each route
     /// is included once, even when the target was already reached by another
     /// importer. An engine adapter must authorize those edges BEFORE deduping
     /// its returned module list, so diamond/cycle edges cannot bypass policy.
+    /// Consumers that can stop on denial should use `walk_requests` instead
+    /// of allocating this complete owned projection.
     pub fn reachable_requests(
         &self,
         referrer: Option<&str>,
         specifier: &str,
         style: RequestStyle,
     ) -> Result<Vec<(Option<String>, String, RequestStyle)>> {
-        let mut pending = std::collections::VecDeque::from([(
-            referrer.map(str::to_owned),
-            specifier.to_owned(),
-            style,
-        )]);
-        let mut expanded = BTreeSet::new();
-        let mut requests = Vec::new();
-        while let Some((referrer, specifier, style)) = pending.pop_front() {
-            let module = self.lookup(referrer.as_deref(), &specifier, style)?;
-            requests.push((referrer, specifier, style));
-            if expanded.insert(module.id()) {
-                for dependency in &module.dependencies {
-                    pending.push_back((
-                        Some(module.id.clone()),
-                        dependency.specifier.clone(),
-                        dependency.style,
-                    ));
-                }
-            }
-        }
-        Ok(requests)
+        self.walk_requests(referrer, specifier, style)?
+            .map(|request| {
+                request.map(|request| {
+                    (
+                        request.referrer.map(str::to_owned),
+                        request.specifier.to_owned(),
+                        request.style,
+                    )
+                })
+            })
+            .collect()
     }
+}
+
+fn validate_specifier(specifier: &str) -> Result<()> {
+    if specifier.is_empty() || specifier.len() > 4096 || specifier.chars().any(char::is_control) {
+        return Err(error(
+            "ERR_MODULE_REGISTRY_REQUEST",
+            "invalid module request",
+        ));
+    }
+    Ok(())
 }
 
 fn invalid_graph() -> ResolutionError {
@@ -718,5 +824,135 @@ mod tests {
                 .unwrap(),
             "module.exports=1;"
         );
+    }
+
+    #[test]
+    fn borrowed_walk_preserves_breadth_first_order_and_resolved_targets() {
+        let root = tempfile::tempdir().unwrap();
+        put(
+            root.path(),
+            "app.mjs",
+            "import './a.mjs'; import './b.mjs';",
+        );
+        put(root.path(), "a.mjs", "import './shared.mjs';");
+        put(root.path(), "b.mjs", "import './shared.mjs';");
+        put(root.path(), "shared.mjs", "import './app.mjs';");
+        let r = registry(root.path(), "app.mjs");
+        let mut walk = r
+            .walk_requests(None, r.entrypoint(), r.entry_style())
+            .unwrap();
+        let mut order = Vec::new();
+        for request in walk.by_ref() {
+            let request = request.unwrap();
+            let looked_up = r
+                .lookup(request.referrer, request.specifier, request.style)
+                .unwrap();
+            assert!(std::ptr::eq(looked_up, request.module));
+            order.push((
+                request.referrer.map(str::to_owned),
+                request.specifier.to_owned(),
+                request.style,
+            ));
+        }
+        assert_eq!(
+            order,
+            r.reachable_requests(None, r.entrypoint(), r.entry_style())
+                .unwrap()
+        );
+        assert_eq!(
+            order
+                .iter()
+                .map(|(_, specifier, _)| specifier.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                r.entrypoint(),
+                "./a.mjs",
+                "./b.mjs",
+                "./shared.mjs",
+                "./shared.mjs",
+                "./app.mjs"
+            ]
+        );
+        assert!(walk.next().is_none());
+        assert!(walk.next().is_none());
+    }
+
+    #[test]
+    fn high_fan_in_walk_queues_modules_not_all_incoming_edges() {
+        let root = tempfile::tempdir().unwrap();
+        let width = 24;
+        let leaves = (0..width)
+            .map(|i| format!("import './leaf{i}.mjs';"))
+            .collect::<String>();
+        let roots = (0..width)
+            .map(|i| format!("import './parent{i}.mjs';"))
+            .collect::<String>();
+        put(root.path(), "app.mjs", &roots);
+        for i in 0..width {
+            put(root.path(), &format!("parent{i}.mjs"), &leaves);
+            put(root.path(), &format!("leaf{i}.mjs"), "export const value=1;");
+        }
+        let r = registry(root.path(), "app.mjs");
+        assert_eq!(r.summary().routes, width + width * width);
+        assert_eq!(r.modules().len(), 1 + 2 * width);
+        let mut walk = r
+            .walk_requests(None, r.entrypoint(), r.entry_style())
+            .unwrap();
+        let mut count = 0;
+        while let Some(request) = walk.next() {
+            request.unwrap();
+            count += 1;
+            assert!(walk.pending.len() <= r.summary().modules);
+            assert!(walk.scheduled.len() <= r.summary().modules);
+        }
+        assert_eq!(count, 1 + width + width * width);
+    }
+
+    #[test]
+    fn borrowed_walk_validates_the_start_and_can_stop_before_expansion() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mjs", "import './dep.mjs';");
+        put(root.path(), "dep.mjs", "export const value=1;");
+        let r = registry(root.path(), "app.mjs");
+        assert_eq!(
+            r.walk_requests(Some("outside"), "./dep.mjs", RequestStyle::Import)
+                .err()
+                .unwrap()
+                .code,
+            "ERR_MODULE_REGISTRY_REFERRER"
+        );
+        assert_eq!(
+            r.walk_requests(None, r.entrypoint(), RequestStyle::Require)
+                .err()
+                .unwrap()
+                .code,
+            "ERR_MODULE_REGISTRY_ENTRY"
+        );
+        let mut walk = r
+            .walk_requests(None, r.entrypoint(), r.entry_style())
+            .unwrap();
+        assert_eq!(walk.next().unwrap().unwrap().module.id(), r.entrypoint());
+        assert_eq!(walk.scheduled.len(), 1);
+        assert!(walk.current.is_none());
+    }
+
+    #[test]
+    fn inconsistent_traversal_fails_once_instead_of_truncating_successfully() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mjs", "import './dep.mjs';");
+        put(root.path(), "dep.mjs", "export const value=1;");
+        let mut r = registry(root.path(), "app.mjs");
+        let entry_id = r.entrypoint().to_owned();
+        r.modules.get_mut(&entry_id).unwrap().dependencies[0].target = "missing".into();
+        let mut walk = r
+            .walk_requests(None, r.entrypoint(), r.entry_style())
+            .unwrap();
+        assert!(walk.next().unwrap().is_ok());
+        assert_eq!(
+            walk.next().unwrap().err().unwrap().code,
+            "ERR_MODULE_REGISTRY_GRAPH"
+        );
+        assert!(walk.next().is_none());
+        assert!(walk.next().is_none());
     }
 }
