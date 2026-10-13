@@ -567,6 +567,7 @@ fn execute_suite_pair(
     compare_filesystem: bool,
 ) -> Result<SuiteReport> {
     let tests = matched_tests(reference_snapshot, candidate_snapshot)?;
+    let concurrency = test_inventory::concurrency(reference_snapshot)?;
     let mut report = SuiteReport {
         schema_version: "franken-node/native-validation-suite/v1".into(),
         scope: if compare_filesystem {
@@ -600,11 +601,12 @@ fn execute_suite_pair(
         failure_capture: None,
     };
     let environment = std::env::vars_os().collect();
-    for test in tests {
-        if let Err(error) = budget(deadline) {
-            report.errors.push(error.to_string());
-            break;
-        }
+    // The manifest grants concurrency for independent cases, not shared
+    // external effects. Reuse the product oracle's bounded, joined scheduler:
+    // one case owns sequential runtime legs and private workspaces; immutable
+    // inputs and the original deadline are borrowed, not cloned or reset.
+    let completed = test_inventory::run_scheduled(&tests, concurrency, deadline, |test| {
+        budget(deadline)?;
         let mut row = TestCaseResult {
             test: test.to_string_lossy().into_owned(),
             status: "ERROR".into(),
@@ -627,7 +629,7 @@ fn execute_suite_pair(
                 let workspace = case.path().join(name);
                 snapshot.stage(&workspace, deadline)?;
                 ensure!(
-                    workspace.join(&test).is_file(),
+                    workspace.join(test).is_file(),
                     "discovered test is not a file"
                 );
                 let before = if compare_filesystem {
@@ -645,7 +647,7 @@ fn execute_suite_pair(
                     test_inventory::run_test(
                         snapshot,
                         invocation,
-                        &test,
+                        test,
                         &workspace,
                         &environment,
                         (timeout, DRAIN_TIMEOUT),
@@ -687,25 +689,28 @@ fn execute_suite_pair(
             }
             Ok(())
         })();
+        if let Err(error) = result {
+            row.errors.push(format!("{error:#}"));
+        }
+        row.status = if !row.errors.is_empty() {
+            "ERROR"
+        } else if row.divergences.is_empty() {
+            "PASS"
+        } else {
+            "FAIL"
+        }
+        .into();
+        // A measured case error is a row, not a scheduler failure. Keep peer
+        // observations and continue later batches while the budget permits.
+        Ok(row)
+    })?;
+    report.errors.extend(completed.errors);
+    for row in completed.rows {
         report.skipped -= 1;
-        match result {
-            Err(error) => {
-                row.errors.push(format!("{error:#}"));
-                report.errored += 1;
-            }
-            // A completed process is not a passed assertion. Count the case
-            // once even when both roles failed their post-execution checks.
-            Ok(()) if !row.errors.is_empty() => {
-                report.errored += 1;
-            }
-            Ok(()) if row.divergences.is_empty() => {
-                row.status = "PASS".into();
-                report.passed += 1;
-            }
-            Ok(()) => {
-                row.status = "FAIL".into();
-                report.failed += 1;
-            }
+        match row.status.as_str() {
+            "PASS" => report.passed += 1,
+            "FAIL" => report.failed += 1,
+            _ => report.errored += 1,
         }
         report.cases.push(row);
     }
