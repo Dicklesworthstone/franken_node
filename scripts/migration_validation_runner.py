@@ -28,8 +28,8 @@ import tempfile
 import time
 import unicodedata
 import zipfile
-from contextlib import contextmanager
-from dataclasses import dataclass
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -66,6 +66,8 @@ DEFAULT_MIGRATION_COMMAND = ("franken-node", "run", "--console-only", "{test}", 
 MAX_ARGUMENTS = 128
 MAX_ARGUMENT_BYTES = 4096
 MAX_ARGV_BYTES = 32 * 1024
+MAX_EXPECTATION_BYTES = 1024 * 1024
+MAX_EXPECTED_FILES = 64
 MAX_TEST_FILES = 1024
 MAX_PROJECT_FILES = 50_000
 MAX_PROJECT_BYTES = 256 * 1024 * 1024
@@ -201,6 +203,22 @@ class SnapshotEntry:
     link: str | None = None
 
 
+@dataclass(frozen=True)
+class OutputExpectations:
+    """An independent oracle from captured fixtures, not observed baseline output."""
+
+    stdout: str | None = None
+    stderr: str | None = None
+    files: tuple[tuple[str, str], ...] = ()
+
+    def fixtures(self):
+        for stream in (self.stdout, self.stderr):
+            if stream is not None:
+                yield stream
+        for _, fixture in self.files:
+            yield fixture
+
+
 @dataclass(frozen=True, repr=False)
 class ExecutionSettings:
     """Captured application inputs, never a shell or a runtime selection."""
@@ -209,6 +227,7 @@ class ExecutionSettings:
     stdin: str | None = None
     environment: tuple[tuple[str, str | None], ...] = ()
     arguments: tuple[str, ...] = ()
+    expectations: OutputExpectations = OutputExpectations()
 
     def __repr__(self) -> str:
         # Environment and argument values can be secrets. Never format them.
@@ -325,6 +344,34 @@ def _literal_arguments(raw: object) -> tuple[str, ...]:
     return tuple(raw)
 
 
+def _expectation_bytes(entries: dict[str, SnapshotEntry], name: object) -> bytes:
+    name = _canonical_test_path(name, EXECUTION_EXCLUSIONS)
+    data = _ordinary_file(entries, name)
+    if len(data) > MAX_EXPECTATION_BYTES:
+        raise ValueError("captured output expectation exceeds 1 MiB")
+    return data
+
+
+def _output_expectations(raw: object, entries: dict[str, SnapshotEntry]) -> OutputExpectations:
+    # Same manifest surface as the native validator: stdout/stderr fixture
+    # paths and a target->fixture map, never golden regeneration or exit-code
+    # normalization. Explicit null and empty assertions fail closed.
+    if not isinstance(raw, dict) or set(raw) - {"stdout", "stderr", "files"}:
+        raise ValueError("invalid or unknown output expectation fields")
+    for stream in ("stdout", "stderr"):
+        if stream in raw:
+            _expectation_bytes(entries, raw[stream])
+    files = raw.get("files", {})
+    if not isinstance(files, dict) or len(files) > MAX_EXPECTED_FILES:
+        raise ValueError("at most 64 file output expectations per test")
+    for target, fixture in files.items():
+        _canonical_test_path(target, EXECUTION_EXCLUSIONS)
+        _expectation_bytes(entries, fixture)
+    if not any(stream in raw for stream in ("stdout", "stderr")) and not files:
+        raise ValueError("explicit output expectations must not be empty")
+    return OutputExpectations(raw.get("stdout"), raw.get("stderr"), tuple(sorted(files.items())))
+
+
 def captured_test_inventory(capture: list[SnapshotEntry]) -> dict[str, ExecutionSettings]:
     """Interpret only immutable captured bytes; never read live project files."""
     entries = {entry.path: entry for entry in capture}
@@ -348,7 +395,7 @@ def captured_test_inventory(capture: list[SnapshotEntry]) -> dict[str, Execution
                          parse_constant=_reject_json_constant)
     except (ValueError, RecursionError):
         raise ValueError("invalid migration test manifest") from None
-    if (not isinstance(raw, dict) or set(raw) - {"schema_version", "tests", "execution"}
+    if (not isinstance(raw, dict) or set(raw) - {"schema_version", "tests", "execution", "expectations"}
             or raw.get("schema_version") != MIGRATION_TEST_SCHEMA):
         raise ValueError("unsupported migration test manifest schema or fields")
     names = raw.get("tests")
@@ -371,6 +418,14 @@ def captured_test_inventory(capture: list[SnapshotEntry]) -> dict[str, Execution
         if name not in tests:
             raise ValueError("execution settings refer to an unselected test")
         tests[name] = _execution_settings(value, entries, name)
+    expectations = raw.get("expectations", {})
+    if not isinstance(expectations, dict):
+        raise ValueError("migration output expectations must be an object")
+    for name, value in expectations.items():
+        _canonical_test_path(name)
+        if name not in tests:
+            raise ValueError("output expectations refer to an unselected test")
+        tests[name] = replace(tests[name], expectations=_output_expectations(value, entries))
     return dict(sorted(tests.items()))
 
 
@@ -386,6 +441,9 @@ def matched_test_execution(baseline: dict[str, ExecutionSettings], migration: di
     for name, settings in baseline.items():
         if _test_input(settings, baseline_entries) != _test_input(migration[name], migration_entries):
             raise ValueError("captured test stdin bytes differ between original and candidate")
+        for fixture in settings.expectations.fixtures():
+            if _expectation_bytes(baseline_entries, fixture) != _expectation_bytes(migration_entries, fixture):
+                raise ValueError("captured output expectation bytes differ between original and candidate")
 
 
 def _test_environment(base: dict[str, str], settings: ExecutionSettings) -> dict[str, str]:
@@ -1060,6 +1118,86 @@ def summarize_delta(delta: dict) -> dict:
             "details_truncated": len(delta) > 20}
 
 
+def _pin_output_workspace(workspace: Path, expectations: OutputExpectations) -> int | None:
+    """Pin before the guest starts; a later path replacement cannot redirect reads."""
+    if not expectations.files:
+        return None
+    return os.open(workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+
+
+def _matches_output_file(workspace: int, target: str, expected: bytes, deadline: float,
+                         cancellation: CancellationState | None) -> bool:
+    """Read only bounded regular output through retained, no-follow directory FDs.
+
+    Refuse symlinks at EVERY component, FIFOs, devices and multiply-linked
+    files. Inspect content, length and file version without leaking bytes into
+    diagnostics. This is an observation, not an atomic hostile-FS snapshot.
+    """
+    _canonical_test_path(target, EXECUTION_EXCLUSIONS)
+    with ExitStack() as handles:
+        parent = workspace
+        parts = target.split("/")
+        for index, part in enumerate(parts):
+            check_cancellation(cancellation)
+            if time.monotonic() >= deadline:
+                raise TimeoutError("file output expectation deadline exceeded")
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK | os.O_NOCTTY
+            if index + 1 < len(parts):
+                flags |= os.O_DIRECTORY
+            descriptor = os.open(part, flags, dir_fd=parent)
+            handles.callback(os.close, descriptor)
+            parent = descriptor
+        before = os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or before.st_size != len(expected)):
+            return False
+        offset = 0
+        while True:
+            check_cancellation(cancellation)
+            if time.monotonic() >= deadline:
+                raise TimeoutError("file output expectation deadline exceeded")
+            chunk = os.read(descriptor, min(8192, len(expected) - offset + 1))
+            if not chunk:
+                break
+            if chunk != expected[offset:offset + len(chunk)]:
+                return False
+            offset += len(chunk)
+        return (offset == len(expected)
+                and _file_version(before) == _file_version(os.fstat(descriptor)))
+
+
+def _check_output_expectations(expectations: OutputExpectations, entries: dict[str, SnapshotEntry],
+                               capture: dict, workspace: int | None, deadline: float, leg: str,
+                               cancellation: CancellationState | None = None) -> list[dict]:
+    """Both runtime legs must independently satisfy the same immutable fixtures.
+
+    This adds requirements; it never excuses a failed process, unequal streams,
+    timeout, incomplete capture, or differing workspace deltas. Reports contain
+    mismatch channels and target paths, never expected or observed content.
+    """
+    mismatches = []
+    for stream, fixture in (("stdout", expectations.stdout), ("stderr", expectations.stderr)):
+        if fixture is not None:
+            expected = _expectation_bytes(entries, fixture)
+            if not capture["streams"][stream]["complete"] or capture[stream] != expected:
+                mismatches.append({"channel": leg, "stream": stream, "reason": "expected_output_mismatch"})
+    for target, fixture in expectations.files:
+        if workspace is None:
+            raise ValueError("file output expectation workspace was not pinned")
+        expected = _expectation_bytes(entries, fixture)
+        try:
+            matches = _matches_output_file(workspace, target, expected, deadline, cancellation)
+        except OSError as error:
+            # TimeoutError is also OSError. It is infrastructure failure, not
+            # evidence that the guest produced an ordinary differing file.
+            if isinstance(error, TimeoutError):
+                raise
+            matches = False
+        if not matches:
+            mismatches.append({"channel": leg, "path": target, "reason": "expected_file_mismatch"})
+    return mismatches
+
+
 def resolve_command(command: tuple[str, ...] | list[str]) -> list[str]:
     if (not isinstance(command, (list, tuple)) or not command or len(command) > 256
             or any(not isinstance(arg, str) or not arg or "\0" in arg for arg in command)
@@ -1382,7 +1520,7 @@ def validate_project(project_dir: Path, *, migrated_project: Path | None = None,
                 deltas = {}
                 # Release each pair before the next test: disk use must not
                 # grow as number_of_tests * project_size.
-                with tempfile.TemporaryDirectory(prefix=f"case-{index}-", dir=root) as case_dir:
+                with tempfile.TemporaryDirectory(prefix=f"case-{index}-", dir=root) as case_dir, ExitStack() as output_roots:
                     for leg, entries, template in (("baseline", baseline_entries, baseline),
                                                    ("migration", migration_entries, migration)):
                         workspace = Path(case_dir) / leg
@@ -1393,6 +1531,9 @@ def validate_project(project_dir: Path, *, migrated_project: Path | None = None,
                         by_path = baseline_by_path if leg == "baseline" else migration_by_path
                         script = test[len(settings.cwd) + 1:] if settings.cwd else test
                         command = _test_command(template, script, settings.arguments)
+                        output_root = _pin_output_workspace(workspace, settings.expectations)
+                        if output_root is not None:
+                            output_roots.callback(os.close, output_root)
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
                             raise TimeoutError("total validation budget exhausted")
@@ -1408,6 +1549,8 @@ def validate_project(project_dir: Path, *, migrated_project: Path | None = None,
                         if bundle is not None:
                             bundle.record(test, leg, captures[leg])
                         check_cancellation(cancellation)
+                        row["divergences"].extend(_check_output_expectations(
+                            settings.expectations, by_path, captures[leg], output_root, deadline, leg, cancellation))
                         if compare_filesystem:
                             final_entries, _ = capture_project(workspace, deadline, cancellation=cancellation)
                             deltas[leg] = workspace_delta(entries, final_entries)
