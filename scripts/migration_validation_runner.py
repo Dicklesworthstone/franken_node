@@ -7,6 +7,11 @@ optional terminal {arguments} slot for captured application argv; no shell
 or package install is invoked. Execute only projects you trust: workspace copies
 isolate relative filesystem mutations, not arbitrary code, network, or absolute
 paths. This is a test-process oracle, not release certification or an OS sandbox.
+
+Use --replay-bundle with --verify-fix to test an explicitly selected replacement
+migration runtime against captured failures. The reference runtime, captured
+requests, environment identities, limits and oracles cannot be changed. A fix
+requires unchanged reference observations and every captured case passing.
 """
 
 from __future__ import annotations
@@ -770,9 +775,10 @@ def _validate_bundle_manifest(manifest: dict, objects: dict[str, bytes]) -> dict
             or not isinstance(report.get("inputs"), dict)):
         raise ValueError("invalid replay report")
     inventories = {role: captured_test_inventory(entries) for role, entries in snapshots.items()}
+    snapshot_indices = {role: {entry.path: entry for entry in entries}
+                        for role, entries in snapshots.items()}
     matched_test_execution(inventories["baseline"], inventories["migration"],
-        {entry.path: entry for entry in snapshots["baseline"]},
-        {entry.path: entry for entry in snapshots["migration"]})
+        snapshot_indices["baseline"], snapshot_indices["migration"])
     _validate_scheduling(report, inventories["baseline"])
     tests = list(inventories["baseline"])
     if not tests or report.get("test_discovery", {}).get("test_files") != tests:
@@ -796,6 +802,7 @@ def _validate_bundle_manifest(manifest: dict, objects: dict[str, bytes]) -> dict
     if not isinstance(rows, list) or len(rows) > len(tests):
         raise ValueError("invalid replay observation rows")
     expected: dict[tuple[str, str], dict] = {}
+    rows_by_test: dict[str, dict] = {}
     seen_tests: set[str] = set()
     for row in rows:
         if not isinstance(row, dict) or not isinstance(row.get("test"), str):
@@ -806,6 +813,7 @@ def _validate_bundle_manifest(manifest: dict, objects: dict[str, bytes]) -> dict
                 or row.get("band") not in {"core", "high-value", "edge"}):
             raise ValueError("duplicate or unselected replay test row")
         seen_tests.add(name)
+        rows_by_test[name] = row
         for role in ("baseline", "migration"):
             if role in row:
                 expected[name, role] = row[role]
@@ -836,6 +844,8 @@ def _validate_bundle_manifest(manifest: dict, objects: dict[str, bytes]) -> dict
                 raise ValueError("file stdin replay requires recorded transport evidence")
         elif capture["stdin_transport"] != transport:
             raise ValueError("replay stdin transport disagrees with captured execution settings")
+        _validate_file_outputs(capture, settings.expectations,
+            snapshot_indices[key[1]], rows_by_test[key[0]], key[1])
         streams = capture.get("streams")
         _bundle_keys(streams, {"stdout", "stderr"}, "streams")
         for channel in ("stdout", "stderr"):
@@ -964,6 +974,8 @@ def _observation_projection(report: dict) -> dict:
         for role in ("baseline", "migration"):
             capture = row[role]
             value[role] = {name: capture[name] for name in ("exit_code", "termination", "streams")}
+            if "file_outputs" in capture:
+                value[role]["file_outputs"] = capture["file_outputs"]
             if report["filesystem_comparison"]:
                 value[role]["workspace_delta"] = capture["workspace_delta"]
         rows.append(value)
@@ -971,18 +983,61 @@ def _observation_projection(report: dict) -> dict:
             "scheduling": report.get("scheduling", _scheduling_contract(1))}
 
 
+def _require_fix_reference(report: dict, snapshots: dict) -> None:
+    """A failing reference is not a valid baseline for verifying a runtime fix."""
+    if (report["summary"]["verdict"] != "FAIL"
+            or not any(row["status"] == "FAIL" for row in report["validation_results"])):
+        raise ValueError("fix verification requires a recorded failing migration")
+    _require_file_output_evidence(report, snapshots, ("baseline",))
+    inventory = captured_test_inventory(snapshots["baseline"])
+    entries = {entry.path: entry for entry in snapshots["baseline"]}
+    for row in report["validation_results"]:
+        reference = row["baseline"]
+        if (row["status"] not in {"PASS", "FAIL"} or reference["exit_code"] != 0
+                or reference["termination"] != "exited"
+                or any(stream["complete"] is not True for stream in reference["streams"].values())):
+            raise ValueError("fix verification requires successful complete reference runs")
+        expectations = inventory[row["test"]].expectations
+        for stream, fixture in (("stdout", expectations.stdout), ("stderr", expectations.stderr)):
+            if fixture is not None:
+                expected = _expectation_bytes(entries, fixture)
+                actual = reference["streams"][stream]
+                if (actual["bytes_observed"] != len(expected)
+                        or actual["sha256"] != hashlib.sha256(expected).hexdigest()):
+                    raise ValueError("original reference violates a captured output expectation")
+        for target, fixture in expectations.files:
+            expected = _expectation_bytes(entries, fixture)
+            actual = reference["file_outputs"][target]
+            if (actual["state"] != "regular" or actual["bytes_observed"] != len(expected)
+                    or actual["sha256"] != hashlib.sha256(expected).hexdigest()):
+                raise ValueError("original reference violates a captured file expectation")
+
+
+def _reference_drift(expected: dict, observed: dict) -> list[str]:
+    before = {row["test"]: row["baseline"] for row in expected["rows"]}
+    after = {row["test"]: row["baseline"] for row in observed["rows"]}
+    return [test for test in sorted(before.keys() | after.keys()) if before.get(test) != after.get(test)]
+
+
 def replay_captured_bundle(path: Path, *, expected_sha256: str,
                            baseline_command, migration_command,
-                           cancellation: CancellationState | None = None) -> dict:
+                           cancellation: CancellationState | None = None,
+                           verify_fix: bool = False) -> dict:
     """Re-execute verified captures with explicit operator-selected executables.
 
     Reproducing a failure is distinct from passing compatibility. This never
     launches a command merely because that command is stored in an archive.
+    Fix mode permits a replacement migration executable/template, not changed
+    reference code or test requests. It freshly measures every captured case
+    and rejects reference drift, even when the two current runtimes agree.
     """
     outcome = {"schema_version": "franken-node/migration-reexecution/v1", "phase": "reexecution",
                "replay_outcome": "ERROR", "errors": [], "release_certification": False,
-               "ambient_effects_replayable": False}
+               "ambient_effects_replayable": False,
+               "mode": "fix-verification" if verify_fix else "reexecution"}
     try:
+        if type(verify_fix) is not bool:
+            raise ValueError("verify_fix must be a boolean")
         check_cancellation(cancellation)
         if not _digest_string(expected_sha256):
             raise ValueError("re-execution requires the bundle SHA-256 from a trusted original report")
@@ -996,12 +1051,17 @@ def replay_captured_bundle(path: Path, *, expected_sha256: str,
                 or len(original["validation_results"]) != len(bundle.manifest["environment_sha256"])):
             raise ValueError("incomplete or runtime-unverified evidence can be inspected, not certified as reproduced")
         _runtime_measurements(original["runtime_identities"])
+        if verify_fix:
+            _require_fix_reference(original, bundle.snapshots)
+        else:
+            _require_file_output_evidence(original, bundle.snapshots)
         templates = {"baseline": resolve_command(baseline_command),
                      "migration": resolve_command(migration_command)}
         _bundle_keys(original["commands"], {"baseline", "migration"}, "commands")
         for role, template in templates.items():
             recorded = original["commands"][role]
-            if not isinstance(recorded, list) or not recorded or template[1:] != recorded[1:]:
+            if (not isinstance(recorded, list) or not recorded
+                    or ((role == "baseline" or not verify_fix) and template[1:] != recorded[1:])):
                 raise ValueError("replay command arguments differ from the recorded execution")
         limits = original["limits"]
         _bundle_keys(limits, {"per_leg_seconds", "total_seconds", "per_stream_bytes"}, "limits")
@@ -1013,6 +1073,16 @@ def replay_captured_bundle(path: Path, *, expected_sha256: str,
         band = original["validation_results"][0]["band"]
         if any(row["band"] != band for row in original["validation_results"]):
             raise ValueError("inconsistent replay compatibility bands")
+        admitted_identities = original["runtime_identities"]
+        if verify_fix:
+            # Pin the operator's replacement before staging. The validator
+            # checks it again before launch and after the suite, exactly as it
+            # checks the unchanged original reference. No identity waiver is
+            # passed into the executor, and no archive-provided argv is run.
+            check_cancellation(cancellation)
+            admitted_identities = {**admitted_identities,
+                "migration": runtime_identity(templates["migration"][0], time.monotonic() + 30)}
+            outcome["recorded_runtime_identities"] = original["runtime_identities"]
         with tempfile.TemporaryDirectory(prefix="franken-reexecute-") as temporary:
             root = Path(temporary)
             staging_deadline = time.monotonic() + 30
@@ -1025,12 +1095,19 @@ def replay_captured_bundle(path: Path, *, expected_sha256: str,
                 compare_filesystem=original["filesystem_comparison"],
                 cancellation=cancellation,
                 _replay_constraints={"inputs": original["inputs"],
-                    "runtime_identities": original["runtime_identities"],
+                    "runtime_identities": admitted_identities,
                     "environment_sha256": bundle.manifest["environment_sha256"]})
         outcome["execution"] = result
         if result["summary"]["verdict"] not in {"PASS", "FAIL"}:
             outcome["errors"] = result["errors"]
+        elif verify_fix:
+            _require_file_output_evidence(result, bundle.snapshots, ("baseline",))
+            drift = _reference_drift(expected, _observation_projection(result))
+            outcome.update(reference_drift_tests=drift, reference_observations_match=not drift,
+                replay_outcome=("REFERENCE_DRIFT" if drift else "FIX_VERIFIED"
+                                if result["summary"]["verdict"] == "PASS" else "FIX_NOT_VERIFIED"))
         else:
+            _require_file_output_evidence(result, bundle.snapshots)
             matches = _observation_projection(result) == expected
             outcome.update(observations_match=matches, replay_outcome="REPRODUCED" if matches else "CHANGED")
     except (OSError, ValueError, RuntimeError, KeyError, TypeError, AttributeError, RecursionError,
@@ -1178,15 +1255,82 @@ def _pin_output_workspace(workspace: Path, expectations: OutputExpectations) -> 
     return os.open(workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
 
 
+def _file_observation(state: str, count: int = 0, digest: str | None = None) -> dict:
+    return {"state": state, "bytes_observed": count, "sha256": digest,
+            "complete": state in {"regular", "missing"}}
+
+
+def _validate_file_outputs(capture: dict, expectations: OutputExpectations,
+                           entries: dict[str, SnapshotEntry], row: dict, leg: str) -> None:
+    """Verify measured file evidence, never substitute an expected fixture hash.
+
+    Historical captures without file observations remain inspectable. They do
+    not establish file-content identity and are rejected for certification by
+    _require_file_output_evidence. Interrupted rows may retain a strict subset.
+    """
+    if "file_outputs" not in capture:
+        return
+    observed = capture["file_outputs"]
+    fixtures = dict(expectations.files)
+    if (not isinstance(observed, dict) or observed.keys() - fixtures.keys()
+            or (row["status"] != "ERROR" and observed.keys() != fixtures.keys())):
+        raise ValueError("replay file output inventory disagrees with captured expectations")
+    for target, value in observed.items():
+        _bundle_keys(value, {"state", "bytes_observed", "sha256", "complete"}, "file output")
+        state, count, digest = value["state"], value["bytes_observed"], value["sha256"]
+        if (not isinstance(state, str)
+                or state not in {"regular", "missing", "not_regular", "multiple_links",
+                                 "over_limit", "changed", "unavailable"}
+                or type(count) is not int or not 0 <= count <= MAX_EXPECTATION_BYTES + 1
+                or type(value["complete"]) is not bool
+                or value["complete"] != (state in {"regular", "missing"})
+                or (digest is not None and not _digest_string(digest))
+                or (digest is None and count != 0)
+                or (state == "regular" and (digest is None or count > MAX_EXPECTATION_BYTES))
+                or (state == "missing" and (count != 0 or digest is not None))):
+            raise ValueError("invalid replay file output measurement")
+        if row["status"] != "ERROR":
+            expected = _expectation_bytes(entries, fixtures[target])
+            matched = (state == "regular" and count == len(expected)
+                       and digest == hashlib.sha256(expected).hexdigest())
+            mismatch = {"channel": leg, "path": target, "reason": "expected_file_mismatch"}
+            if (mismatch in row["divergences"]) == matched or (row["status"] == "PASS" and not matched):
+                raise ValueError("replay file output evidence contradicts assertion outcomes")
+
+
+def _require_file_output_evidence(report: dict, snapshots: dict,
+                                  roles: tuple[str, ...] = ("baseline", "migration")) -> None:
+    """Missing/partial measurements are not reproducible content observations."""
+    for role in roles:
+        inventory = captured_test_inventory(snapshots[role])
+        for row in report["validation_results"]:
+            targets = dict(inventory[row["test"]].expectations.files)
+            if not targets:
+                continue
+            observed = row[role].get("file_outputs")
+            if not isinstance(observed, dict) or observed.keys() != targets.keys():
+                raise ValueError("file-dependent replay requires measured file output evidence; recapture the case")
+            if any(value.get("complete") is not True for value in observed.values()):
+                raise ValueError("incomplete file output observations cannot certify reproduction")
+
+
 def _matches_output_file(workspace: int, target: str, expected: bytes, deadline: float,
-                         cancellation: CancellationState | None) -> bool:
+                         cancellation: CancellationState | None, *, observation: dict | None = None) -> bool:
     """Read only bounded regular output through retained, no-follow directory FDs.
 
     Refuse symlinks at EVERY component, FIFOs, devices and multiply-linked
     files. Inspect content, length and file version without leaking bytes into
-    diagnostics. This is an observation, not an atomic hostile-FS snapshot.
+    diagnostics. Hash the ACTUAL bounded file through EOF even after a mismatch:
+    two different wrong files must not become the same replay observation.
+    This is an observation, not an atomic hostile-FS snapshot.
     """
     _canonical_test_path(target, EXECUTION_EXCLUSIONS)
+
+    def record(state, count=0, digest=None):
+        if observation is not None:
+            observation.update(_file_observation(state, count, digest))
+        return False
+
     with ExitStack() as handles:
         parent = workspace
         parts = target.split("/")
@@ -1200,23 +1344,37 @@ def _matches_output_file(workspace: int, target: str, expected: bytes, deadline:
             descriptor = os.open(part, flags, dir_fd=parent)
             handles.callback(os.close, descriptor)
             parent = descriptor
+        # An ENOENT after opening the leaf is a read/metadata error, not
+        # evidence that the named output was absent before observation.
+        record("unavailable")
         before = os.fstat(descriptor)
-        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
-                or before.st_size != len(expected)):
-            return False
+        if not stat.S_ISREG(before.st_mode):
+            return record("not_regular")
+        if before.st_nlink != 1:
+            return record("multiple_links")
+        if before.st_size > MAX_EXPECTATION_BYTES:
+            return record("over_limit")
         offset = 0
+        matched = True
+        digest = hashlib.sha256()
         while True:
             check_cancellation(cancellation)
             if time.monotonic() >= deadline:
                 raise TimeoutError("file output expectation deadline exceeded")
-            chunk = os.read(descriptor, min(8192, len(expected) - offset + 1))
+            chunk = os.read(descriptor, min(8192, MAX_EXPECTATION_BYTES - offset + 1))
             if not chunk:
                 break
             if chunk != expected[offset:offset + len(chunk)]:
-                return False
+                matched = False
             offset += len(chunk)
-        return (offset == len(expected)
-                and _file_version(before) == _file_version(os.fstat(descriptor)))
+            digest.update(chunk)
+            record("unavailable", offset, digest.hexdigest())
+            if offset > MAX_EXPECTATION_BYTES:
+                return record("over_limit", offset, digest.hexdigest())
+        if offset != before.st_size or _file_version(before) != _file_version(os.fstat(descriptor)):
+            return record("changed", offset, digest.hexdigest())
+        record("regular", offset, digest.hexdigest())
+        return matched and offset == len(expected)
 
 
 def _check_output_expectations(expectations: OutputExpectations, entries: dict[str, SnapshotEntry],
@@ -1238,14 +1396,21 @@ def _check_output_expectations(expectations: OutputExpectations, entries: dict[s
         if workspace is None:
             raise ValueError("file output expectation workspace was not pinned")
         expected = _expectation_bytes(entries, fixture)
+        observation = {}
         try:
-            matches = _matches_output_file(workspace, target, expected, deadline, cancellation)
+            matches = _matches_output_file(workspace, target, expected, deadline, cancellation,
+                                           observation=observation)
+        except FileNotFoundError:
+            observation = observation or _file_observation("missing")
+            matches = False
         except OSError as error:
             # TimeoutError is also OSError. It is infrastructure failure, not
             # evidence that the guest produced an ordinary differing file.
             if isinstance(error, TimeoutError):
                 raise
+            observation = observation or _file_observation("unavailable")
             matches = False
+        capture.setdefault("file_outputs", {})[target] = observation
         if not matches:
             mismatches.append({"channel": leg, "path": target, "reason": "expected_file_mismatch"})
     return mismatches
@@ -1543,6 +1708,10 @@ def _execute_test_pair(index: int, test: str, *, root: Path,
                     input_bytes=_test_input(settings, by_path[leg]), cancellation=cancellation,
                     stdin_mode=settings.stdin_mode)
                 result.captures[leg] = capture
+                if settings.expectations.files:
+                    # Share the evidence map with the row before checking any
+                    # files, preserving earlier observations on interruption.
+                    capture["file_outputs"] = {}
                 row[leg] = {k: v for k, v in capture.items() if k not in {"stdout", "stderr"}}
                 check_cancellation(cancellation)
                 row["divergences"].extend(_check_output_expectations(
@@ -1921,7 +2090,11 @@ def main() -> int:
     modes.add_argument("--replay-bundle", type=Path,
                        help="re-execute captured projects; requires both explicit commands and the trusted bundle digest")
     parser.add_argument("--expected-bundle-sha256", help="trusted digest from the original report, not from the archive itself")
+    parser.add_argument("--verify-fix", action="store_true",
+                        help="with --replay-bundle, test a replacement migration runtime; require unchanged reference and all cases passing")
     args = parser.parse_args()
+    if args.verify_fix and args.replay_bundle is None:
+        parser.error("--verify-fix requires --replay-bundle")
     read_path = args.inspect_bundle or args.replay_bundle
     if not args.self_test and read_path is None and args.project_dir is None:
         parser.error("project_dir or a bundle operation is required")
@@ -1962,8 +2135,10 @@ def _execute_cli(args: argparse.Namespace, cancellation: CancellationState) -> i
     elif args.replay_bundle is not None:
         result = replay_captured_bundle(args.replay_bundle, expected_sha256=args.expected_bundle_sha256,
             baseline_command=args.baseline_command, migration_command=args.migration_command,
-            cancellation=cancellation)
-        verdict = {"REPRODUCED": "PASS", "CHANGED": "FAIL", "ERROR": "ERROR"}[result["replay_outcome"]]
+            cancellation=cancellation, verify_fix=args.verify_fix)
+        verdict = {"REPRODUCED": "PASS", "CHANGED": "FAIL", "ERROR": "ERROR",
+                   "FIX_VERIFIED": "PASS", "FIX_NOT_VERIFIED": "FAIL",
+                   "REFERENCE_DRIFT": "ERROR"}[result["replay_outcome"]]
     else:
         result = validate_project(args.project_dir, migrated_project=args.migrated_project,
                                   baseline_command=args.baseline_command if args.baseline_command is not None else DEFAULT_BASELINE_COMMAND,
@@ -1988,7 +2163,7 @@ def _execute_cli(args: argparse.Namespace, cancellation: CancellationState) -> i
         print(json.dumps(result, indent=2, allow_nan=False))
     else:
         if args.replay_bundle is not None:
-            print(f"Replay: {result['replay_outcome']}")
+            print(f"{'Fix verification' if args.verify_fix else 'Replay'}: {result['replay_outcome']}")
             print(json.dumps(result.get("execution", {}).get("summary", {}), indent=2))
         else:
             print(f"{'Integrity' if args.inspect_bundle is not None else 'Verdict'}: {verdict}")
