@@ -10,10 +10,10 @@ name: dist
 #   franken-node-x86_64-pc-windows-msvc.zip.sha256   (shasum -a 256 format)
 #   franken-node-x86_64-pc-windows-msvc.zip.sigstore.json (cosign, keyless)
 #
-# franken-node's default `engine` feature depends on franken_engine via a
-# relative path (../../../franken_engine/crates/franken-engine), so the build
-# checks out franken_engine as a sibling of franken_node. Linux ships gnu
-# (the engine links C deps; musl static is intentionally avoided).
+# The engine is explicitly pinned below; other Cargo path dependencies are
+# pinned in packaging/source-siblings.tsv. Certification and every target use
+# the same bootstrap and compare their source receipts before publication.
+# Linux ships gnu (the engine links C deps; musl static is intentionally avoided).
 # Both Linux architectures are built and executed on native hardware.
 
 on:
@@ -43,12 +43,14 @@ jobs:
           path: franken_node
           fetch-depth: 0
 
-      - name: Checkout pinned franken_engine release source
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        with:
-          repository: Dicklesworthstone/franken_engine
-          ref: ${{ env.FRANKEN_ENGINE_REVISION }}
-          path: franken_engine
+      - name: Materialize the complete pinned Cargo source set
+        working-directory: franken_node
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/bootstrap_source.sh --workspace "$PWD" \
+            --engine-ref "$FRANKEN_ENGINE_REVISION" \
+            --receipt "$RUNNER_TEMP/source-inputs.tsv"
 
       - name: Prove exact release source pair
         working-directory: franken_node
@@ -81,7 +83,17 @@ jobs:
           RCH_CARGO_WRAPPER_BYPASS: "1"
           FRANKEN_NODE_SOURCE_GIT_SHA: ${{ github.sha }}
           FRANKEN_ENGINE_SOURCE_GIT_SHA: ${{ env.FRANKEN_ENGINE_REVISION }}
-        run: cargo build --release -p frankenengine-node --bin franken-node
+        run: cargo build --release --locked -p frankenengine-node --bin franken-node
+
+      - name: Recheck certification build inputs before running the campaign
+        working-directory: franken_node
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/bootstrap_source.sh --workspace "$PWD" \
+            --engine-ref "$FRANKEN_ENGINE_REVISION" --verify-only \
+            --receipt "$RUNNER_TEMP/source-inputs-after-build.tsv"
+          cmp "$RUNNER_TEMP/source-inputs.tsv" "$RUNNER_TEMP/source-inputs-after-build.tsv"
 
       - name: Execute genuine compatibility corpus
         working-directory: franken_node
@@ -159,6 +171,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-evidence/payload
+          cp "$RUNNER_TEMP/source-inputs.tsv" release-evidence/payload/source-inputs.tsv
           cp artifacts/13/compatibility_corpus_results.json release-evidence/payload/
           cp artifacts/oracle/l1_product_verdict.json release-evidence/payload/
           cp artifacts/oracle/close_condition_receipt.json release-evidence/payload/
@@ -177,6 +190,9 @@ jobs:
           bundle="franken-node-release-certification-${GITHUB_SHA}.tar.xz"
           tar -cJf "release-evidence/${bundle}" -C release-evidence/payload .
           (cd release-evidence && shasum -a 256 "${bundle}" > "${bundle}.sha256")
+          sources="franken-node-source-inputs-${GITHUB_SHA}.tsv"
+          cp "$RUNNER_TEMP/source-inputs.tsv" "release-evidence/$sources"
+          (cd release-evidence && shasum -a 256 "$sources" > "$sources.sha256")
 
       - name: Upload release-certification evidence
         if: always()
@@ -184,6 +200,7 @@ jobs:
         with:
           name: release-certification-evidence
           path: |
+            ${{ runner.temp }}/source-inputs*.tsv
             /tmp/release_compatibility_corpus_run.json
             /tmp/release_verify_corpus.json
             /tmp/release_l1_evidence.json
@@ -199,6 +216,7 @@ jobs:
         with:
           name: release-certification-bundle
           path: franken_node/release-evidence/*
+          if-no-files-found: error
 
   build:
     needs: release-certification
@@ -244,12 +262,14 @@ jobs:
         with:
           path: franken_node
 
-      - name: Checkout franken_engine (sibling dependency)
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        with:
-          repository: Dicklesworthstone/franken_engine
-          ref: ${{ env.FRANKEN_ENGINE_REVISION }}
-          path: franken_engine
+      - name: Materialize the complete pinned Cargo source set
+        working-directory: franken_node
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/bootstrap_source.sh --workspace "$PWD" \
+            --engine-ref "$FRANKEN_ENGINE_REVISION" \
+            --receipt "$RUNNER_TEMP/source-inputs.tsv"
 
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb
@@ -263,7 +283,27 @@ jobs:
           RCH_CARGO_WRAPPER_BYPASS: "1"
           FRANKEN_NODE_SOURCE_GIT_SHA: ${{ github.sha }}
           FRANKEN_ENGINE_SOURCE_GIT_SHA: ${{ env.FRANKEN_ENGINE_REVISION }}
-        run: cargo build --release -p frankenengine-node --bin franken-node --target ${{ matrix.target }}
+        run: cargo build --release --locked -p frankenengine-node --bin franken-node --target ${{ matrix.target }}
+
+      - name: Verify and retain the exact platform build sources
+        working-directory: franken_node
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          bash scripts/bootstrap_source.sh --workspace "$PWD" \
+            --engine-ref "$FRANKEN_ENGINE_REVISION" --verify-only \
+            --receipt "$RUNNER_TEMP/source-inputs-after-build.tsv"
+          cmp "$RUNNER_TEMP/source-inputs.tsv" "$RUNNER_TEMP/source-inputs-after-build.tsv"
+          mkdir -p dist
+          sources="franken-node-$TARGET.source-inputs.tsv"
+          cp "$RUNNER_TEMP/source-inputs.tsv" "dist/$sources"
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd dist && sha256sum "$sources" > "$sources.sha256")
+          else
+            (cd dist && shasum -a 256 "$sources" > "$sources.sha256")
+          fi
 
       - name: Smoke test binary (Unix)
         if: matrix.os != 'windows-latest'
@@ -350,19 +390,26 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Require the complete platform set before signing
+      - name: Require the complete platform set and certified sources before signing
         shell: bash
         run: |
           set -euo pipefail
           cd dist
-          for asset in \
-            franken-node-x86_64-unknown-linux-gnu.tar.xz \
-            franken-node-aarch64-unknown-linux-gnu.tar.xz \
-            franken-node-aarch64-apple-darwin.tar.xz \
-            franken-node-x86_64-pc-windows-msvc.zip; do
+          certified="franken-node-source-inputs-${GITHUB_SHA}.tsv"
+          test -s "$certified"
+          test -s "$certified.sha256"
+          sha256sum --check --strict "$certified.sha256"
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin x86_64-pc-windows-msvc; do
+            case "$target" in *windows*) extension=zip ;; *) extension=tar.xz ;; esac
+            asset="franken-node-$target.$extension"
             test -s "$asset"
             test -s "$asset.sha256"
             sha256sum --check --strict "$asset.sha256"
+            sources="franken-node-$target.source-inputs.tsv"
+            test -s "$sources"
+            test -s "$sources.sha256"
+            sha256sum --check --strict "$sources.sha256"
+            cmp "$certified" "$sources"
           done
 
       - name: List artifacts
@@ -376,7 +423,7 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           cd dist
-          for f in franken-node-*.tar.xz franken-node-*.zip; do
+          for f in franken-node-*.tar.xz franken-node-*.zip franken-node-*.tsv; do
             cosign sign-blob --yes --bundle "${f}.sigstore.json" "$f"
           done
 

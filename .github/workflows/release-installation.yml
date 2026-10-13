@@ -5,6 +5,11 @@ on:
     branches: [main]
     paths:
       - 'install.sh'
+      - 'scripts/bootstrap_source.sh'
+      - 'packaging/source-siblings.tsv'
+      - '.gitattributes'
+      - 'tests/test_source_bootstrap.py'
+      - 'tests/test_release_source_binding.py'
       - 'tests/test_install_script.py'
       - 'tests/test_install_release_lifecycle.py'
       - '.github/workflows/dist.yml'
@@ -12,6 +17,11 @@ on:
   pull_request:
     paths:
       - 'install.sh'
+      - 'scripts/bootstrap_source.sh'
+      - 'packaging/source-siblings.tsv'
+      - '.gitattributes'
+      - 'tests/test_source_bootstrap.py'
+      - 'tests/test_release_source_binding.py'
       - 'tests/test_install_script.py'
       - 'tests/test_install_release_lifecycle.py'
       - '.github/workflows/dist.yml'
@@ -41,17 +51,24 @@ jobs:
           set -euo pipefail
           mkdir -p evidence
           git rev-parse HEAD > evidence/revision.txt
-          git hash-object install.sh tests/test_install_release_lifecycle.py > evidence/source-blobs.txt
+          git hash-object install.sh tests/test_install_release_lifecycle.py scripts/bootstrap_source.sh packaging/source-siblings.tsv > evidence/source-blobs.txt
           /bin/bash --version > evidence/bash-version.txt
           tar --version > evidence/tar-version.txt
           python3 --version > evidence/python-version.txt
           /bin/bash -n install.sh
           python3 -m unittest discover -s tests -p test_install_release_lifecycle.py -v 2>&1 | tee evidence/lifecycle-tests.log
-      - name: Run the original Linux installer regressions
+      - name: Exercise pinned source checkout and installation with real Git
+        shell: bash
+        run: |
+          set -euo pipefail
+          /bin/bash -n scripts/bootstrap_source.sh
+          PATH="/bin:$PATH" python3 -m unittest discover -s tests -p test_source_bootstrap.py -v 2>&1 | tee evidence/source-bootstrap-tests.log
+      - name: Exercise release source binding and original installer regressions
         if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
+          python3 -m unittest discover -s tests -p test_release_source_binding.py -v 2>&1 | tee evidence/release-source-binding-tests.log
           python3 -m unittest discover -s tests -p test_install_script.py -v 2>&1 | tee evidence/original-tests.log
       - name: Preserve exact installer evidence
         if: always()
@@ -61,6 +78,10 @@ jobs:
           path: |
             evidence/
             install.sh
+            scripts/bootstrap_source.sh
+            packaging/source-siblings.tsv
+            tests/test_source_bootstrap.py
+            tests/test_release_source_binding.py
             tests/test_install_release_lifecycle.py
           if-no-files-found: error
           retention-days: 7
