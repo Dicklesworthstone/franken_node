@@ -320,19 +320,28 @@ fn measure(
             .context("initial workspace observation failed")?;
         budget(deadline)?;
         let timeout = leg_timeout.min(deadline.saturating_duration_since(Instant::now()));
-        let output = test_inventory::run_test_cancellable(
-            snapshot,
-            invocation,
-            test,
-            workspace,
-            environment,
-            (timeout, DRAIN_TIMEOUT),
-            cancellation,
+        let (output, check_error) = test_inventory::retain_completed_output(
+            test_inventory::run_test_cancellable(
+                snapshot,
+                invocation,
+                test,
+                workspace,
+                environment,
+                (timeout, DRAIN_TIMEOUT),
+                cancellation,
+            ),
         )
         .context("execution failed")?;
-        // Keep completed evidence even when final filesystem collection fails.
+        // Keep completed evidence even when assertions or later collection
+        // fail. The check remains a blocking error, never a passing observation.
         leg.observation = Some(observe(&output));
         leg.output = Some(output);
+        if let Some(error) = check_error {
+            leg.error = Some(format!("test checks failed: {error:#}"));
+        }
+        // Do not continue scanning a workspace after cancellation just because
+        // there is a completed process result available for diagnostics.
+        check_cancellation(cancellation)?;
         if let Some(before) = before {
             let after = workspace_effects::observe(workspace, deadline)
                 .context("final workspace observation failed")?;
@@ -347,7 +356,13 @@ fn measure(
         Ok(())
     })();
     if let Err(error) = result {
-        leg.error = Some(format!("{error:#}"));
+        let detail = format!("{error:#}");
+        if let Some(previous) = &mut leg.error {
+            previous.push_str("; ");
+            previous.push_str(&detail);
+        } else {
+            leg.error = Some(detail);
+        }
     }
     leg
 }
@@ -776,12 +791,18 @@ const marker = {} + '/' + role;
         assert_eq!(report.cases[0].outcome, CaseOutcome::NativeDivergence);
         assert_eq!(report.cases[1].outcome, CaseOutcome::ReferenceDivergence);
         assert_eq!(report.cases[2].outcome, CaseOutcome::Error);
-        for row in &report.cases[..2] {
+        for row in &report.cases {
             assert!(row.node.is_some() && row.bun.is_some() && row.native.is_some());
         }
-        assert_eq!(report.cases[2].errors.len(), 6);
-        for role in ROLES {
-            assert!(report.cases[2].errors.contains(&format!("{role}: incomplete observation")));
+        // Completed output is diagnostic evidence, not a successful assertion.
+        // Each role retains its check error without claiming it never executed.
+        assert_eq!(report.cases[2].errors.len(), 3);
+        assert!(report.cases[2].errors.iter().all(|error|
+            error.contains("test checks failed") && !error.contains("incomplete observation")));
+        for observation in [&report.cases[2].node, &report.cases[2].bun, &report.cases[2].native] {
+            let observation = observation.as_ref().unwrap();
+            assert_eq!(observation.exit_code, Some(0));
+            assert!(observation.workspace_delta.is_some());
         }
     }
 

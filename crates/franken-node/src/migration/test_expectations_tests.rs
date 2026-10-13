@@ -292,3 +292,190 @@ fn guest_cannot_replace_its_workspace_fixture_to_bless_wrong_output() {
     assert_eq!(report.verdict, "ERROR", "{report:#?}");
     assert_eq!(report.passed, 0);
 }
+
+mod retained_output_tests {
+    use super::super::*;
+    use super::super::super::{execute_suite_pair, native_replay, node_on_path, product_oracle};
+    use std::fs;
+
+    fn deadline() -> Instant {
+        Instant::now() + Duration::from_secs(120)
+    }
+
+    fn node(role: &str) -> Invocation {
+        Invocation {
+            executable: node_on_path().expect("real Node required"),
+            before: Vec::new(),
+            after: vec![role.into()],
+        }
+    }
+
+    fn project(source: &str, expectations: serde_json::Value) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join(".franken-node")).unwrap();
+        fs::write(root.path().join("a.test.cjs"), source).unwrap();
+        fs::write(root.path().join("z.test.cjs"), "console.log('later case');").unwrap();
+        fs::write(root.path().join("golden"), "expected\n").unwrap();
+        fs::write(root.path().join(MANIFEST_PATH), serde_json::to_vec(&serde_json::json!({
+            "schema_version": MANIFEST_SCHEMA,
+            "tests": ["a.test.cjs", "z.test.cjs"],
+            "expectations": {"a.test.cjs": expectations},
+        })).unwrap()).unwrap();
+        root
+    }
+
+    fn pair(root: &Path, filesystem: bool) -> super::super::super::SuiteReport {
+        let deadline = deadline();
+        let snapshot = Snapshot::capture(root, deadline).unwrap();
+        execute_suite_pair(&snapshot, &snapshot, &node("reference"), &node("native"),
+            deadline, Duration::from_secs(5), filesystem).unwrap()
+    }
+
+    #[test]
+    fn strict_failure_retains_complete_bytes_once_without_logging_them() {
+        let outside = tempfile::tempdir().unwrap();
+        let marker = outside.path().join("executions");
+        let source = format!(
+            "require('fs').appendFileSync({}, 'once\\n');\nconsole.log('private-stdout'); console.error('private-stderr');",
+            serde_json::to_string(&marker).unwrap(),
+        );
+        let root = project(&source, serde_json::json!({"stdout": "golden"}));
+        let deadline = deadline();
+        let snapshot = Snapshot::capture(root.path(), deadline).unwrap();
+        let staged = outside.path().join("project");
+        snapshot.stage(&staged, deadline).unwrap();
+        let error = run_test(&snapshot, &node("reference"), Path::new("a.test.cjs"),
+            &staged, &std::env::vars_os().collect(),
+            (Duration::from_secs(5), Duration::from_secs(1))).unwrap_err();
+        assert!(!format!("{error:#}").contains("private-stdout"));
+        assert!(!format!("{error:#?}").contains("private-stderr"));
+        let (output, check_error) = retain_completed_output(Err(error)).unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(output.stdout, b"private-stdout\n");
+        assert_eq!(output.stderr, b"private-stderr\n");
+        assert!(check_error.unwrap().to_string().contains("captured output expectation"));
+        assert_eq!(fs::read_to_string(marker).unwrap(), "once\n");
+    }
+
+    #[test]
+    fn equal_wrong_output_keeps_both_legs_but_never_becomes_a_pass() {
+        let root = project(
+            "console.log('private-wrong'); require('fs').writeFileSync('artifact','changed');",
+            serde_json::json!({"stdout": "golden"}),
+        );
+        let report = pair(root.path(), true);
+        assert_eq!(report.verdict, "ERROR");
+        assert_eq!((report.total_tests, report.passed, report.errored, report.skipped), (2, 1, 1, 0));
+        let row = &report.cases[0];
+        assert_eq!(row.status, "ERROR");
+        assert_eq!(row.errors.len(), 2);
+        assert!(row.divergences.is_empty());
+        assert_eq!(row.reference, row.native);
+        assert_eq!(row.native.as_ref().unwrap().exit_code, Some(0));
+        assert_eq!(row.native.as_ref().unwrap().workspace_delta.as_ref().unwrap().changed_paths, 1);
+        assert_eq!(report.cases[1].status, "PASS");
+        assert!(!serde_json::to_string(&report).unwrap().contains("private-wrong"));
+        assert!(!root.path().join("artifact").exists());
+    }
+
+    #[test]
+    fn native_only_assertion_failure_keeps_the_differential_observation() {
+        let root = project(
+            "console.log(process.argv.includes('native') ? 'wrong' : 'expected');",
+            serde_json::json!({"stdout": "golden"}),
+        );
+        let report = pair(root.path(), false);
+        let row = &report.cases[0];
+        assert_eq!(report.verdict, "ERROR");
+        assert_eq!(row.errors.len(), 1);
+        assert!(row.errors[0].starts_with("native test checks failed"));
+        assert!(row.divergences.iter().any(|s| s == "stdout:byte_mismatch"));
+        assert_ne!(row.reference.as_ref().unwrap().stdout, row.native.as_ref().unwrap().stdout);
+        assert_eq!(row.reference.as_ref().unwrap().exit_code, Some(0));
+        assert_eq!(row.native.as_ref().unwrap().exit_code, Some(0));
+    }
+
+    #[test]
+    fn failed_file_assertion_does_not_erase_process_or_workspace_evidence() {
+        let root = project(
+            "require('fs').writeFileSync('artifact', process.argv.includes('native') ? 'wrong' : 'expected\\n');",
+            serde_json::json!({"files": {"artifact": "golden"}}),
+        );
+        let report = pair(root.path(), true);
+        let row = &report.cases[0];
+        assert_eq!(report.verdict, "ERROR");
+        assert_eq!(row.errors.len(), 1);
+        assert!(row.errors[0].contains("file output expectation failed"));
+        assert_eq!(row.reference.as_ref().unwrap().stdout.bytes, 0);
+        assert_eq!(row.native.as_ref().unwrap().stdout.bytes, 0);
+        assert_ne!(row.reference.as_ref().unwrap().workspace_delta,
+            row.native.as_ref().unwrap().workspace_delta);
+        assert!(row.divergences.iter().any(|s| s == "filesystem:workspace_delta_mismatch"));
+    }
+
+    #[test]
+    fn product_keeps_three_completed_legs_and_later_cases_after_assertion_errors() {
+        // Three explicitly named real Node processes exercise orchestration.
+        // This test does not substitute Node for Bun/Franken in production.
+        let root = project("console.log(process.argv[2]);",
+            serde_json::json!({"stdout": "golden"}));
+        let deadline = deadline();
+        let snapshot = Snapshot::capture(root.path(), deadline).unwrap();
+        let reference = node("node");
+        let second = node("second");
+        let native = node("native");
+        let identities = [reference.identity(deadline).unwrap(), second.identity(deadline).unwrap(),
+            native.identity(deadline).unwrap()];
+        let report = product_oracle::execute(&snapshot, &snapshot, [&reference, &second, &native],
+            identities, deadline, Duration::from_secs(5), true).unwrap();
+        assert_eq!(report.verdict, "ERROR");
+        assert_eq!((report.passed, report.errored, report.skipped), (1, 1, 0));
+        let row = &report.cases[0];
+        assert_eq!(row.outcome, product_oracle::CaseOutcome::Error);
+        assert_eq!(row.errors.len(), 3);
+        assert!(row.errors.iter().all(|s| !s.contains("incomplete observation")));
+        for observation in [&row.node, &row.bun, &row.native] {
+            let observation = observation.as_ref().unwrap();
+            assert_eq!(observation.exit_code, Some(0));
+            assert!(observation.workspace_delta.is_some());
+        }
+        assert!(row.divergences.iter().any(|s| s == "node/bun:stdout:byte_mismatch"));
+        assert!(row.divergences.iter().any(|s| s == "node/native:stdout:byte_mismatch"));
+        assert!(report.check_admission(&report.input_sha256, &report.candidate_input_sha256,
+            &snapshot.tests().unwrap()).is_err());
+    }
+
+    #[test]
+    fn unsafe_file_check_is_an_error_with_observed_output_not_an_accepted_link() {
+        let root = project(
+            "console.log('completed'); require('fs').symlinkSync('golden','artifact');",
+            serde_json::json!({"files": {"artifact": "golden"}}),
+        );
+        let report = pair(root.path(), false);
+        let row = &report.cases[0];
+        assert_eq!(report.verdict, "ERROR");
+        assert_eq!(row.errors.len(), 2);
+        assert_eq!(row.reference.as_ref().unwrap().stdout.bytes, 10);
+        assert_eq!(row.native.as_ref().unwrap().exit_code, Some(0));
+        assert!(!root.path().join("artifact").exists());
+    }
+
+    #[test]
+    fn retained_assertion_errors_are_not_promoted_into_replayable_capsules() {
+        let root = project("console.log('wrong');", serde_json::json!({"stdout": "golden"}));
+        let outputs = tempfile::tempdir().unwrap();
+        let captured = native_replay::capture_project(root.path(), None, Path::new("/bin/false"), true).unwrap();
+        assert_eq!(captured.report.verdict, "ERROR");
+        assert!(captured.report.cases[0].reference.is_some());
+        assert!(captured.report.cases[0].native.is_some());
+        let destination = outputs.path().join("must-not-exist.json");
+        assert!(captured.write_capsule(&destination).is_err());
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn unobserved_errors_cannot_manufacture_completed_execution() {
+        let error = anyhow::anyhow!("runtime could not be launched");
+        assert!(retain_completed_output(Err(error)).is_err());
+    }
+}

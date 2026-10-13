@@ -641,13 +641,15 @@ fn execute_suite_pair(
                 };
                 budget(deadline)?;
                 let timeout = leg_timeout.min(deadline.saturating_duration_since(Instant::now()));
-                let output = test_inventory::run_test(
-                    snapshot,
-                    invocation,
-                    &test,
-                    &workspace,
-                    &environment,
-                    (timeout, DRAIN_TIMEOUT),
+                let (output, check_error) = test_inventory::retain_completed_output(
+                    test_inventory::run_test(
+                        snapshot,
+                        invocation,
+                        &test,
+                        &workspace,
+                        &environment,
+                        (timeout, DRAIN_TIMEOUT),
+                    ),
                 )
                 .with_context(|| format!("{name} execution failed"))?;
                 let observation = if name == "reference" {
@@ -658,6 +660,9 @@ fn execute_suite_pair(
                 // Persist process evidence BEFORE filesystem observation so an
                 // unreadable/oversized output cannot erase completed execution.
                 let observation = observation.insert(observe(&output));
+                if let Some(error) = check_error {
+                    row.errors.push(format!("{name} test checks failed: {error:#}"));
+                }
                 if !output.status.success() {
                     row.divergences.push(format!("{name}:unsuccessful_exit"));
                 }
@@ -686,6 +691,11 @@ fn execute_suite_pair(
         match result {
             Err(error) => {
                 row.errors.push(format!("{error:#}"));
+                report.errored += 1;
+            }
+            // A completed process is not a passed assertion. Count the case
+            // once even when both roles failed their post-execution checks.
+            Ok(()) if !row.errors.is_empty() => {
                 report.errored += 1;
             }
             Ok(()) if row.divergences.is_empty() => {

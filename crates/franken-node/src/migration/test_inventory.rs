@@ -462,6 +462,46 @@ pub(super) fn matched_execution(original: &Snapshot, candidate: &Snapshot) -> Re
     Ok(())
 }
 
+/// A check failed after completed execution. Output is private and is moved,
+/// not rerun or copied, when a comparison records the failure diagnostically.
+struct ObservedTestFailure {
+    output: Output,
+    cause: anyhow::Error,
+}
+
+impl std::fmt::Debug for ObservedTestFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("ObservedTestFailure")
+            .field("cause", &self.cause).finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Display for ObservedTestFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "post-execution test check failed: {}", self.cause)
+    }
+}
+
+impl std::error::Error for ObservedTestFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.cause.as_ref())
+    }
+}
+
+/// Recover completed output for reporting only. The returned check error must
+/// remain blocking. Pre-execution and incomplete-execution errors stay errors.
+pub(super) fn retain_completed_output(
+    result: Result<Output>,
+) -> Result<(Output, Option<anyhow::Error>)> {
+    match result {
+        Ok(output) => Ok((output, None)),
+        Err(error) => match error.downcast::<ObservedTestFailure>() {
+            Ok(failure) => Ok((failure.output, Some(failure.cause))),
+            Err(error) => Err(error),
+        },
+    }
+}
+
 pub(super) fn run_test(
     snapshot: &Snapshot,
     invocation: &Invocation,
@@ -502,12 +542,16 @@ pub(super) fn run_test_cancellable(
         environment,
         (deadline, timing.1, cancellation),
     )?;
-    settings.expectations.check(snapshot, &output)?;
-    settings
-        .expectations
-        .check_files(snapshot, output_workspace.as_ref(), deadline)?;
-    if let Some(cancellation) = cancellation {
-        cancellation.check()?;
+    let checks = (|| -> Result<()> {
+        settings.expectations.check(snapshot, &output)?;
+        settings.expectations.check_files(snapshot, output_workspace.as_ref(), deadline)?;
+        if let Some(cancellation) = cancellation {
+            cancellation.check()?;
+        }
+        Ok(())
+    })();
+    if let Err(cause) = checks {
+        return Err(ObservedTestFailure { output, cause }.into());
     }
     Ok(output)
 }
