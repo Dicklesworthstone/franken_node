@@ -11,12 +11,16 @@
 //! `fs.read` of a recognized secret-bearing file
 //! ([`crate::security::lineage_tracker::classify_sensitive_source_path`] — the
 //! `.env` family, PEM/key/SSH/PKCS#12/credential files) has its bytes retained
-//! as a secret *sample* (bounded). Descriptor reads carry the classification
-//! captured at successful open and any later inherited source classification;
-//! unknown descriptors are treated as sensitive. Copy and rename propagate
-//! sensitivity before the effect, including a copy that writes before failing.
-//! Observed rename/symlink relationships remain live: a later sensitive copy
-//! into their target also reclassifies aliases and previously opened descriptors.
+//! as a secret *sample* (bounded). Explicit, capability-authorized environment
+//! read responses are also sensitive sources, regardless of the variable name.
+//! This provider never reads the ambient process environment itself. Descriptor
+//! reads carry the classification captured at successful open and any later
+//! inherited source classification; unknown descriptors are treated as sensitive.
+//! Copy and rename propagate sensitivity before the effect, including a copy
+//! that writes before failing. Ordinary writes, append and descriptor writes
+//! containing a known sample also label their destination before delegation.
+//! Observed rename/symlink relationships remain live: a later sensitive write
+//! or copy into their target reclassifies aliases and already-open descriptors.
 //! Before any subsequent network effect, the gate checks whether the outbound
 //! payload or destination CONTAINS a secret sample, literally or as a direct
 //! hex/base64/base64url encoding; if so — and absent a valid declassification
@@ -42,12 +46,13 @@
 //! aliases or mutations made outside this provider.
 //!
 //! Scope. This gate prevents secret NETWORK egress only. A local `fs.write`
-//! that copies a secret is labeled by the ledger for evidence but is not an
-//! external sink and is not blocked here. Encoded matching covers one direct
-//! encoding of a complete sample, including padded/unpadded base64 and mixed-case
-//! hex. Arbitrary slicing, nested encodings, or encoding a sample together with
-//! other data still need per-datum engine lineage; this is not a general taint
-//! engine. Behavioral coverage lives in
+//! that copies a secret is not an external sink and is not blocked here. Its
+//! destination remains sensitive so later partial reads cannot launder the
+//! bytes through a public-looking filename or descriptor. Encoded matching
+//! covers one direct encoding of a complete sample, including padded/unpadded
+//! base64 and mixed-case hex. Arbitrary slicing before a write, nested encodings,
+//! or encoding a sample together with other data still need per-datum engine
+//! lineage; this is not a general taint engine. Behavioral coverage lives in
 //! `crates/franken-node/tests/native_engine_compat.rs` and the registered
 //! `ssrf_gated_host_io_egress` integration target.
 
@@ -329,7 +334,7 @@ pub struct FlowGatedHostIo<P: HostIoProvider> {
     /// cannot change a read's provenance between the effect and observation.
     descriptors: Mutex<BTreeMap<u64, DescriptorSource>>,
     /// Lock order: lineage -> descriptors -> samples. Held through filesystem
-    /// effects/observations and network authorization/delegation, so a copy into
+    /// effects/observations and network authorization/delegation, so a write into
     /// an open file cannot race a read or a network authorization on this gate.
     lineage: Mutex<FileLineage>,
     trace_id: String,
@@ -376,7 +381,11 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
             }
             // Deduplicate before testing capacity: a full but complete sample
             // set remains complete when a known secret is reread.
-            if secrets.samples.iter().any(|existing| existing.source_bytes() == bytes) {
+            if secrets
+                .samples
+                .iter()
+                .any(|existing| existing.source_bytes() == bytes)
+            {
                 return;
             }
             if secrets.samples.len() >= MAX_SECRET_SAMPLES {
@@ -385,6 +394,50 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
                 secrets.samples.push(SecretSample::new(bytes));
             }
         }
+    }
+
+    /// Classification is not an authorization to deny local writes. Once
+    /// tracking is incomplete or poisoned, nonempty writes conservatively carry
+    /// sensitivity; neither a write nor an overwrite may restore egress.
+    fn write_carries_secret(&self, data: &[u8]) -> bool {
+        if data.is_empty() {
+            return false;
+        }
+        match self.secrets.lock() {
+            Ok(secrets) => {
+                secrets.incomplete || secrets.samples.iter().any(|sample| sample.occurs_in(data))
+            }
+            Err(_) => true,
+        }
+    }
+
+    /// Descriptor writes must use the identity captured at open, never the
+    /// guest-supplied path field. Retain labels even if the provider reports an
+    /// error after a partial write. Unknown identities close egress instead of
+    /// guessing a destination; local descriptor I/O is still delegated.
+    fn perform_descriptor_write(
+        &self,
+        arguments: &[String],
+        data: &[u8],
+        lineage: &mut FileLineage,
+        perform_inner: &dyn Fn() -> HostIoOutcome,
+    ) -> HostIoOutcome {
+        let descriptors = self.descriptors.lock().map_err(|_| HostIoError::Denied {
+            reason: format!(
+                "flow_policy: descriptor tracking lock poisoned ({})",
+                self.trace_id
+            ),
+        })?;
+        if self.write_carries_secret(data) {
+            match descriptor_argument(arguments)
+                .and_then(|fd| descriptors.get(&fd))
+                .and_then(|source| source.name.as_deref())
+            {
+                Some(name) => lineage.mark_sensitive(name),
+                None => lineage.incomplete = true,
+            }
+        }
+        perform_inner()
     }
 
     fn perform_descriptor_operation(
@@ -599,6 +652,13 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
                 self.check_outbound(endpoint.as_bytes(), &lineage)?;
                 dispatch(request, granted)
             }
+            HostIoRequest::EnvRead { .. } => {
+                let outcome = dispatch(request, granted);
+                if let Ok(HostIoResponse::EnvRead { value: Some(value) }) = &outcome {
+                    self.record_secret(value.as_bytes());
+                }
+                outcome
+            }
             // A sensitive read registers a secret sample AFTER it succeeds; the
             // read itself is a source, not a sink, and is never blocked.
             HostIoRequest::FsRead { path } => {
@@ -610,6 +670,26 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
                 }
                 outcome
             }
+            HostIoRequest::FsWrite { path, data }
+            | HostIoRequest::FsMeta {
+                operation: FsOperation::Write | FsOperation::Append,
+                path,
+                data,
+                ..
+            } => {
+                if self.write_carries_secret(data) {
+                    lineage.mark_sensitive(path);
+                }
+                dispatch(request, granted)
+            }
+            HostIoRequest::FsMeta {
+                operation: FsOperation::WriteFd,
+                arguments,
+                data,
+                ..
+            } => self.perform_descriptor_write(arguments, data, &mut lineage, &|| {
+                dispatch(request, granted)
+            }),
             HostIoRequest::FsMeta {
                 operation:
                     operation @ (FsOperation::Open | FsOperation::ReadFd | FsOperation::CloseFd),
@@ -634,12 +714,12 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
                 }
                 dispatch(request, granted)
             }
-            // Local mutations are not network sinks. Other FsMeta operations
-            // expose metadata, not file contents: an exists, stat or readlink
-            // result must not become a secret byte sample.
-            HostIoRequest::FsWrite { .. }
-            | HostIoRequest::FsMeta { .. }
-            | HostIoRequest::RandomRead { .. } => dispatch(request, granted),
+            // Metadata and entropy are not secret byte sources. In particular,
+            // stat/readlink results are not file contents, and mutation metadata
+            // must not clear labels recorded by an earlier write.
+            HostIoRequest::FsMeta { .. } | HostIoRequest::RandomRead { .. } => {
+                dispatch(request, granted)
+            }
         }
     }
 }
@@ -658,6 +738,52 @@ mod tests {
             gate.gate_outbound(payload),
             Err(HostIoError::Denied { .. })
         ));
+    }
+
+    /// Exercise the actual policy/delegation seam with a prescribed provider
+    /// result, including a failure after a write may already have taken effect.
+    fn dispatch_outcome(
+        gate: &FlowGatedHostIo<DenyAllHostIo>,
+        request: &HostIoRequest,
+        outcome: HostIoOutcome,
+    ) -> HostIoOutcome {
+        gate.gate(request, &[request.required_capability()], &|_, _| {
+            outcome.clone()
+        })
+    }
+
+    fn open_test_descriptor(gate: &FlowGatedHostIo<DenyAllHostIo>, path: &str, fd: u64) {
+        let request = HostIoRequest::FsMeta {
+            operation: FsOperation::Open,
+            path: path.into(),
+            arguments: vec!["flags=r+".into()],
+            data: Vec::new(),
+        };
+        dispatch_outcome(
+            gate,
+            &request,
+            Ok(HostIoResponse::FsMeta {
+                result: FsMetaResult::Unsigned(fd),
+            }),
+        )
+        .expect("open fixture descriptor");
+    }
+
+    fn read_test_descriptor(gate: &FlowGatedHostIo<DenyAllHostIo>, fd: u64, bytes: &[u8]) {
+        let request = HostIoRequest::FsMeta {
+            operation: FsOperation::ReadFd,
+            path: String::new(),
+            arguments: vec![format!("fd={fd}")],
+            data: Vec::new(),
+        };
+        dispatch_outcome(
+            gate,
+            &request,
+            Ok(HostIoResponse::FsMeta {
+                result: FsMetaResult::Bytes(bytes.to_vec()),
+            }),
+        )
+        .expect("read fixture descriptor");
     }
 
     #[test]
@@ -949,8 +1075,7 @@ mod tests {
         };
         assert!(matches!(
             gate.perform(&request, &[HostIoCapability::NetworkRecv]),
-            Err(HostIoError::Denied { reason }) if reason.starts_with("flow_policy:")
-        ));
+            Err(HostIoError::Denied { reason }) if reason.starts_with("flow_policy:")));
     }
 
     #[test]
@@ -1015,14 +1140,20 @@ mod tests {
         use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
         for length in [8, 9, 10] {
             let gate = gate();
-            // These bytes force + and / in standard base64, and - and _ in URL-safe base64.
-            let secret = vec![0xfb, 0xff, 0xff, 0xab, 0xcd, 0xef, 0x7f, 0x01, 0x02, 0x03];
+            // Force both alphabet-specific characters and all padding lengths.
+            let secret = [0xfb, 0xff, 0xff, 0xab, 0xcd, 0xef, 0x7f, 0x01, 0x02, 0x03];
             let secret = &secret[..length];
             gate.record_secret(secret);
             let mixed_hex: String = hex::encode(secret)
                 .chars()
                 .enumerate()
-                .map(|(index, value)| if index % 2 == 0 { value.to_ascii_uppercase() } else { value })
+                .map(|(index, value)| {
+                    if index % 2 == 0 {
+                        value.to_ascii_uppercase()
+                    } else {
+                        value
+                    }
+                })
                 .collect();
             for encoded in [
                 STANDARD.encode(secret),
@@ -1044,60 +1175,438 @@ mod tests {
 
     #[test]
     fn compiled_matcher_agrees_with_containment_for_overlaps_and_case() {
-        for needle in [b"a".as_slice(), b"aaaab", b"ababa", b"aabaaa", b"ABcd", b"\0\xff\0"] {
+        for needle in [
+            b"a".as_slice(),
+            b"aaaab",
+            b"ababa",
+            b"aabaaa",
+            b"ABcd",
+            b"\0\xff\0",
+        ] {
             for fold in [false, true] {
                 let pattern = SecretPattern::new(needle.to_vec(), fold);
-                for haystack in [b"".as_slice(), b"aaaaaaaab", b"abababababa", b"aabaaabaaa", b"xxaBcDyy", b"\0\0\xff\0"] {
+                for haystack in [
+                    b"".as_slice(),
+                    b"aaaaaaaab",
+                    b"abababababa",
+                    b"aabaaabaaa",
+                    b"xxaBcDyy",
+                    b"\0\0\xff\0",
+                ] {
                     let expected = haystack.windows(needle.len()).any(|window| {
-                        if fold { window.eq_ignore_ascii_case(needle) } else { window == needle }
+                        if fold {
+                            window.eq_ignore_ascii_case(needle)
+                        } else {
+                            window == needle
+                        }
                     });
                     assert_eq!(pattern.occurs_in(haystack), expected);
                 }
             }
         }
         assert!(!SecretPattern::new(Vec::new(), false).occurs_in(b"public"));
-        let pattern = SecretPattern::new([vec![b'a'; MAX_SECRET_SAMPLE_LEN - 1], vec![b'b']].concat(), false);
+        let pattern = SecretPattern::new(
+            [vec![b'a'; MAX_SECRET_SAMPLE_LEN - 1], vec![b'b']].concat(),
+            false,
+        );
         assert!(!pattern.occurs_in(&vec![b'a'; MAX_SECRET_SAMPLE_LEN * 4]));
     }
 
     #[test]
     fn encoded_network_requests_are_denied_before_provider_dispatch() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use base64::engine::general_purpose::STANDARD;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         #[derive(Debug)]
         struct ObservingHost {
             network_calls: Arc<AtomicUsize>,
         }
         impl HostIoProvider for ObservingHost {
-            fn name(&self) -> &str { "flow-regression-provider" }
+            fn name(&self) -> &str {
+                "flow-regression-provider"
+            }
+
             fn perform(&self, request: &HostIoRequest, _: &[HostIoCapability]) -> HostIoOutcome {
                 if matches!(request, HostIoRequest::FsRead { .. }) {
-                    return Ok(HostIoResponse::FsRead { bytes: b"secret-token".to_vec() });
+                    return Ok(HostIoResponse::FsRead {
+                        bytes: b"secret-token".to_vec(),
+                    });
                 }
                 self.network_calls.fetch_add(1, Ordering::SeqCst);
-                Err(HostIoError::Io { detail: "provider reached".into() })
+                Err(HostIoError::Io {
+                    detail: "provider reached".into(),
+                })
             }
         }
         let calls = Arc::new(AtomicUsize::new(0));
-        let gate = FlowGatedHostIo::new(ObservingHost { network_calls: Arc::clone(&calls) }, "encoded-egress");
-        let read = HostIoRequest::FsRead { path: ".env".into() };
-        gate.perform(&read, &[read.required_capability()]).expect("protected read");
+        let gate = FlowGatedHostIo::new(
+            ObservingHost {
+                network_calls: Arc::clone(&calls),
+            },
+            "encoded-egress",
+        );
+        let read = HostIoRequest::FsRead {
+            path: ".env".into(),
+        };
+        gate.perform(&read, &[read.required_capability()])
+            .expect("protected read");
         let encoded = STANDARD.encode(b"secret-token").into_bytes();
         let secret_endpoint = format!("{}.example.invalid:443", hex::encode(b"secret-token"));
         for request in [
-            HostIoRequest::NetworkSend { endpoint: "public.example.invalid:443".into(), payload: encoded.clone() },
-            HostIoRequest::NetworkRequest { endpoint: "public.example.invalid:443".into(), payload: encoded, max_len: 1, use_tls: true },
-            HostIoRequest::NetworkSend { endpoint: secret_endpoint.clone(), payload: Vec::new() },
-            HostIoRequest::NetworkRequest { endpoint: secret_endpoint.clone(), payload: Vec::new(), max_len: 1, use_tls: false },
-            HostIoRequest::NetworkRecv { endpoint: secret_endpoint, max_len: 1 },
+            HostIoRequest::NetworkSend {
+                endpoint: "public.example.invalid:443".into(),
+                payload: encoded.clone(),
+            },
+            HostIoRequest::NetworkRequest {
+                endpoint: "public.example.invalid:443".into(),
+                payload: encoded,
+                max_len: 1,
+                use_tls: true,
+            },
+            HostIoRequest::NetworkSend {
+                endpoint: secret_endpoint.clone(),
+                payload: Vec::new(),
+            },
+            HostIoRequest::NetworkRequest {
+                endpoint: secret_endpoint.clone(),
+                payload: Vec::new(),
+                max_len: 1,
+                use_tls: false,
+            },
+            HostIoRequest::NetworkRecv {
+                endpoint: secret_endpoint,
+                max_len: 1,
+            },
         ] {
-            assert!(matches!(gate.perform(&request, &[request.required_capability()]),
-                Err(HostIoError::Denied { reason }) if reason.starts_with("flow_policy:")));
+            assert!(matches!(
+                gate.perform(&request, &[request.required_capability()]),
+                Err(HostIoError::Denied { reason }) if reason.starts_with("flow_policy:")
+            ));
         }
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        let public = HostIoRequest::NetworkRecv { endpoint: "public.example.invalid:443".into(), max_len: 1 };
-        assert!(matches!(gate.perform(&public, &[public.required_capability()]), Err(HostIoError::Io { .. })));
+        let public = HostIoRequest::NetworkRecv {
+            endpoint: "public.example.invalid:443".into(),
+            max_len: 1,
+        };
+        assert!(matches!(
+            gate.perform(&public, &[public.required_capability()]),
+            Err(HostIoError::Io { .. })
+        ));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn writes_and_appends_label_aliases_and_open_descriptors_even_after_failure() {
+        for operation in [None, Some(FsOperation::Write), Some(FsOperation::Append)] {
+            for fail_after_write in [false, true] {
+                for encoded in [false, true] {
+                    let gate = gate();
+                    gate.record_secret(b"secret-token");
+                    gate.lineage
+                        .lock()
+                        .expect("lineage")
+                        .prepare_transfer(FsOperation::Symlink, "cache", "alias");
+                    open_test_descriptor(&gate, "alias", 7);
+                    let data = if encoded {
+                        hex::encode(b"secret-token").into_bytes()
+                    } else {
+                        b"secret-token".to_vec()
+                    };
+                    let fragment = data[..8].to_vec();
+                    // A fragment is not a complete original sample. The later
+                    // denial must come from the write's inherited source label.
+                    assert!(gate.gate_outbound(&fragment).is_ok());
+                    let request = match operation {
+                        None => HostIoRequest::FsWrite {
+                            path: "cache".into(),
+                            data,
+                        },
+                        Some(operation) => HostIoRequest::FsMeta {
+                            operation,
+                            path: "cache".into(),
+                            arguments: Vec::new(),
+                            data,
+                        },
+                    };
+                    let expected = if fail_after_write {
+                        Err(HostIoError::Io {
+                            detail: "fixture: partial write before failure".into(),
+                        })
+                    } else if operation.is_none() {
+                        Ok(HostIoResponse::FsWrite { bytes_written: 8 })
+                    } else {
+                        Ok(HostIoResponse::FsMeta {
+                            result: FsMetaResult::Unit,
+                        })
+                    };
+                    assert_eq!(dispatch_outcome(&gate, &request, expected.clone()), expected);
+                    {
+                        let lineage = gate.lineage.lock().expect("lineage");
+                        assert!(lineage.is_sensitive("cache"));
+                        assert!(lineage.is_sensitive("alias"));
+                        assert!(!lineage.is_sensitive("public"));
+                    }
+                    read_test_descriptor(&gate, 7, &fragment);
+                    assert_denied(&gate, &fragment);
+                    assert!(gate.gate_outbound(b"unrelated public payload").is_ok());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn descriptor_writes_use_captured_identity_and_first_fd_not_guest_path() {
+        for fail_after_write in [false, true] {
+            let gate = gate();
+            gate.record_secret(b"secret-token");
+            open_test_descriptor(&gate, "cache", 7);
+            open_test_descriptor(&gate, "public", 8);
+            let request = HostIoRequest::FsMeta {
+                operation: FsOperation::WriteFd,
+                path: "forged-destination".into(),
+                arguments: vec!["fd=7".into(), "fd=8".into()],
+                data: hex::encode(b"secret-token").into_bytes(),
+            };
+            let expected = if fail_after_write {
+                Err(HostIoError::Io {
+                    detail: "fixture: partial descriptor write".into(),
+                })
+            } else {
+                Ok(HostIoResponse::FsMeta {
+                    result: FsMetaResult::Unsigned(8),
+                })
+            };
+            assert_eq!(dispatch_outcome(&gate, &request, expected.clone()), expected);
+            {
+                let lineage = gate.lineage.lock().expect("lineage");
+                assert!(lineage.is_sensitive("cache"));
+                assert!(!lineage.is_sensitive("public"));
+                assert!(!lineage.is_sensitive("forged-destination"));
+                assert!(!lineage.incomplete);
+            }
+            let fragment = b"73656372";
+            assert!(gate.gate_outbound(fragment).is_ok());
+            read_test_descriptor(&gate, 7, fragment);
+            assert_denied(&gate, fragment);
+        }
+    }
+
+    #[test]
+    fn unknown_descriptor_secret_writes_close_egress_without_guessing_identity() {
+        for arguments in [
+            Vec::new(),
+            vec!["fd=99".into()],
+            vec!["fd=invalid".into(), "fd=7".into()],
+        ] {
+            let gate = gate();
+            gate.record_secret(b"secret-token");
+            open_test_descriptor(&gate, "public", 7);
+            let request = HostIoRequest::FsMeta {
+                operation: FsOperation::WriteFd,
+                path: "claimed-destination".into(),
+                arguments,
+                data: b"secret-token".to_vec(),
+            };
+            let expected = Err(HostIoError::Io {
+                detail: "fixture: descriptor write failed".into(),
+            });
+            assert_eq!(dispatch_outcome(&gate, &request, expected.clone()), expected);
+            {
+                let lineage = gate.lineage.lock().expect("lineage");
+                assert!(lineage.incomplete);
+                assert!(!lineage.is_sensitive("public"));
+                assert!(!lineage.is_sensitive("claimed-destination"));
+            }
+            assert_denied(&gate, b"");
+            assert_denied(&gate, b"public payload");
+        }
+    }
+
+    #[test]
+    fn public_and_empty_writes_stay_public_and_overwrites_cannot_clear_labels() {
+        let gate = gate();
+        gate.record_secret(b"secret-token");
+        open_test_descriptor(&gate, "public", 7);
+        for data in [Vec::new(), b"public payload".to_vec()] {
+            for request in [
+                HostIoRequest::FsWrite {
+                    path: "public".into(),
+                    data: data.clone(),
+                },
+                HostIoRequest::FsMeta {
+                    operation: FsOperation::Append,
+                    path: "public".into(),
+                    arguments: Vec::new(),
+                    data: data.clone(),
+                },
+                HostIoRequest::FsMeta {
+                    operation: FsOperation::WriteFd,
+                    path: "ignored".into(),
+                    arguments: vec!["fd=7".into()],
+                    data: data.clone(),
+                },
+            ] {
+                // A failed ordinary write also must not taint an unrelated file.
+                let expected = Err(HostIoError::Io {
+                    detail: "fixture: public write failure".into(),
+                });
+                assert_eq!(dispatch_outcome(&gate, &request, expected.clone()), expected);
+            }
+        }
+        assert!(!gate.lineage.lock().expect("lineage").is_sensitive("public"));
+        assert!(gate.gate_outbound(b"public payload").is_ok());
+        for data in [b"secret-token".to_vec(), b"public overwrite".to_vec()] {
+            let request = HostIoRequest::FsWrite {
+                path: "cache".into(),
+                data,
+            };
+            dispatch_outcome(
+                &gate,
+                &request,
+                Ok(HostIoResponse::FsWrite { bytes_written: 12 }),
+            )
+            .expect("local write is allowed");
+        }
+        assert!(gate.lineage.lock().expect("lineage").is_sensitive("cache"));
+    }
+
+    #[test]
+    fn write_capability_is_checked_before_any_label_or_incomplete_state_changes() {
+        let gate = gate();
+        gate.record_secret(b"secret-token");
+        for request in [
+            HostIoRequest::FsWrite {
+                path: "public".into(),
+                data: b"secret-token".to_vec(),
+            },
+            HostIoRequest::FsMeta {
+                operation: FsOperation::Append,
+                path: "public".into(),
+                arguments: Vec::new(),
+                data: b"secret-token".to_vec(),
+            },
+            HostIoRequest::FsMeta {
+                operation: FsOperation::WriteFd,
+                path: "public".into(),
+                arguments: vec!["fd=99".into()],
+                data: b"secret-token".to_vec(),
+            },
+        ] {
+            assert!(matches!(
+                gate.perform(&request, &[]),
+                Err(HostIoError::CapabilityMissing { .. })
+            ));
+        }
+        let lineage = gate.lineage.lock().expect("lineage");
+        assert!(lineage.sensitive_names.is_empty());
+        assert!(!lineage.incomplete);
+        drop(lineage);
+        assert!(gate.gate_outbound(b"public payload").is_ok());
+    }
+
+    #[test]
+    fn incomplete_or_poisoned_sample_tracking_keeps_nonempty_writes_sensitive() {
+        for poison in [false, true] {
+            let gate = gate();
+            if poison {
+                assert!(std::panic::catch_unwind(|| {
+                    let _guard = gate.secrets.lock().expect("sample state");
+                    panic!("fixture: poison sample tracking");
+                })
+                .is_err());
+            } else {
+                gate.record_secret(b"x");
+            }
+            for (path, data) in [("cache", b"public".as_slice()), ("empty", b"".as_slice())] {
+                let request = HostIoRequest::FsWrite {
+                    path: path.into(),
+                    data: data.to_vec(),
+                };
+                dispatch_outcome(
+                    &gate,
+                    &request,
+                    Ok(HostIoResponse::FsWrite {
+                        bytes_written: u64::try_from(data.len()).expect("fixture size"),
+                    }),
+                )
+                .expect("tracking failure does not block local writes");
+            }
+            {
+                let lineage = gate.lineage.lock().expect("lineage");
+                assert!(lineage.is_sensitive("cache"));
+                assert!(!lineage.is_sensitive("empty"));
+            }
+            assert_denied(&gate, b"public payload");
+            assert_denied(&gate, b"");
+        }
+    }
+
+    #[test]
+    fn explicit_environment_values_are_sensitive_regardless_of_variable_name() {
+        use base64::engine::general_purpose::STANDARD;
+
+        let gate = gate();
+        let request = HostIoRequest::EnvRead {
+            name: "PUBLIC_LOOKING_NAME".into(),
+        };
+        let expected = Ok(HostIoResponse::EnvRead {
+            value: Some("secret-token".into()),
+        });
+        assert_eq!(dispatch_outcome(&gate, &request, expected.clone()), expected);
+        assert_denied(&gate, b"header:secret-token:trailer");
+        assert_denied(&gate, STANDARD.encode(b"secret-token").as_bytes());
+        assert_denied(&gate, hex::encode_upper(b"secret-token").as_bytes());
+        assert!(gate.gate_outbound(b"public payload").is_ok());
+        // Repeated environment reads share the same source budget as files.
+        dispatch_outcome(&gate, &request, expected).expect("repeated environment read");
+        assert_eq!(gate.secrets.lock().expect("sample state").samples.len(), 1);
+    }
+
+    #[test]
+    fn absent_empty_and_failed_environment_reads_do_not_consume_samples() {
+        let gate = gate();
+        let request = HostIoRequest::EnvRead {
+            name: "EXPLICIT_FIXTURE_NAME".into(),
+        };
+        for expected in [
+            Ok(HostIoResponse::EnvRead { value: None }),
+            Ok(HostIoResponse::EnvRead {
+                value: Some(String::new()),
+            }),
+            Err(HostIoError::Io {
+                detail: "fixture: environment unavailable".into(),
+            }),
+        ] {
+            assert_eq!(dispatch_outcome(&gate, &request, expected.clone()), expected);
+        }
+        let samples = gate.secrets.lock().expect("sample state");
+        assert!(samples.samples.is_empty());
+        assert!(!samples.incomplete);
+        drop(samples);
+        assert!(gate.gate_outbound(b"public payload").is_ok());
+    }
+
+    #[test]
+    fn environment_capability_precedes_observation_and_short_values_fail_closed() {
+        let gate = gate();
+        let request = HostIoRequest::EnvRead {
+            name: "EXPLICIT_FIXTURE_NAME".into(),
+        };
+        let outcome = gate.gate(&request, &[], &|_, _| {
+            panic!("missing environment capability must never delegate")
+        });
+        assert!(matches!(outcome, Err(HostIoError::CapabilityMissing { .. })));
+        assert!(gate.secrets.lock().expect("sample state").samples.is_empty());
+        assert!(gate.gate_outbound(b"public payload").is_ok());
+        dispatch_outcome(
+            &gate,
+            &request,
+            Ok(HostIoResponse::EnvRead {
+                value: Some("x".into()),
+            }),
+        )
+        .expect("short environment source remains readable");
+        assert_denied(&gate, b"public payload");
+        assert_denied(&gate, b"");
     }
 }
