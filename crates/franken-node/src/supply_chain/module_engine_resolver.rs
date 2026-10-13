@@ -10,6 +10,7 @@ use super::registry::{
 };
 use super::{CapturedModuleGraph, ResolutionError as CaptureError};
 use frankenengine_engine::capability::RuntimeCapability;
+use frankenengine_engine::hash_tiers::ContentHash;
 use frankenengine_engine::module_compatibility_matrix::CompatibilityMode;
 use frankenengine_engine::module_resolver::{
     ImportStyle, ModuleDependency, ModulePolicyHook, ModuleProvenance, ModuleRecord, ModuleRequest,
@@ -17,6 +18,7 @@ use frankenengine_engine::module_resolver::{
     ResolutionErrorCode, ResolutionEvent, ResolutionOutcome, ResolutionResult, ResolvedModule,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
 
 const MAX_CHAIN_SOURCE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_CONTEXT_BYTES: usize = 1024;
@@ -27,6 +29,12 @@ const MAX_CONTEXT_BYTES: usize = 1024;
 pub struct CapturedEngineResolver {
     registry: PinnedModuleRegistry,
     chain_source_budget: usize,
+    // One small cell per admitted module, not an unbounded request-key cache.
+    // Cache content identity only. Authorization and request/event context are
+    // always fresh. No duplicate source strings are retained by this cache.
+    content_hashes: BTreeMap<String, OnceLock<ContentHash>>,
+    #[cfg(test)]
+    hash_computations: std::sync::atomic::AtomicUsize,
 }
 
 impl CapturedEngineResolver {
@@ -41,9 +49,16 @@ impl CapturedEngineResolver {
     }
 
     pub fn from_registry(registry: PinnedModuleRegistry) -> Self {
+        let content_hashes = registry
+            .modules()
+            .map(|module| (module.id().to_owned(), OnceLock::new()))
+            .collect();
         Self {
             registry,
             chain_source_budget: MAX_CHAIN_SOURCE_BYTES,
+            content_hashes,
+            #[cfg(test)]
+            hash_computations: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -158,7 +173,22 @@ impl CapturedEngineResolver {
         record: ModuleRecord,
         context: &ResolutionContext,
     ) -> ResolutionOutcome {
-        let content_hash = record.canonical_hash();
+        // Every record reaching this private method was constructed from the
+        // sealed registry. Its complete canonical form is immutable for this
+        // resolver's lifetime; caller-owned returned copies never enter here.
+        // Compute only after authorization, outside the policy callback, so
+        // denial does not populate the cache and reentrant policies cannot
+        // deadlock on an initializing cell. Use the actual engine hash API.
+        let compute = || {
+            #[cfg(test)]
+            self.hash_computations
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            record.canonical_hash()
+        };
+        let content_hash = match self.content_hashes.get(&record.id) {
+            Some(slot) => *slot.get_or_init(compute),
+            None => compute(),
+        };
         ResolutionOutcome {
             module: ResolvedModule {
                 request_specifier: request.specifier.clone(),
@@ -195,7 +225,7 @@ impl ModuleResolver for CapturedEngineResolver {
         self.validate_request(entry_request, context)?;
         let requests = self
             .registry
-            .reachable_requests(
+            .walk_requests(
                 entry_request.referrer.as_deref(),
                 &entry_request.specifier,
                 source_style(entry_request.style),
@@ -204,11 +234,12 @@ impl ModuleResolver for CapturedEngineResolver {
         let mut outcomes: Vec<ResolutionOutcome> = Vec::new();
         let mut positions = BTreeMap::<String, usize>::new();
         let mut source_bytes = 0_usize;
-        for (referrer, specifier, style) in requests {
-            let mut request = ModuleRequest::new(specifier, engine_style(style))
+        for route in requests {
+            let route = route.map_err(|error| registry_error(error, entry_request, context))?;
+            let mut request = ModuleRequest::new(route.specifier, engine_style(route.style))
                 .with_compatibility_mode(CompatibilityMode::NodeCompat);
-            request.referrer = referrer;
-            let module = self.lookup(&request, context)?;
+            request.referrer = route.referrer.map(str::to_owned);
+            let module = route.module;
             if let Some(&position) = positions.get(module.id()) {
                 // Cached source is not cached authorization. Checking this edge
                 // precedes output deduplication, even for a cycle's back-edge.
@@ -709,5 +740,119 @@ mod tests {
                 .unwrap()
                 .contains("private_source")
         );
+    }
+
+    #[test]
+    fn canonical_hash_is_computed_once_without_caching_policy_or_caller_mutations() {
+        use std::sync::atomic::Ordering;
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mjs", "export const answer=42;");
+        let r = resolver(root.path());
+        let request = r.entry_request();
+        let policy = ChangingPolicy {
+            allowed: Cell::new(false),
+            calls: Cell::new(0),
+        };
+        assert!(r.resolve(&request, &context(), &policy).is_err());
+        assert_eq!(r.hash_computations.load(Ordering::Relaxed), 0);
+        policy.allowed.set(true);
+        let mut first = r.resolve(&request, &context(), &policy).unwrap();
+        let expected_hash = first.module.content_hash;
+        first.module.record.source = "changed".into();
+        first.module.record.dependencies.clear();
+        first.module.record.required_capabilities.clear();
+        first.module.record.provenance.origin = "changed".into();
+        first.module.record.syntax = ModuleSyntax::CommonJs;
+        for i in 0..20 {
+            let current = ResolutionContext::new(format!("trace-{i}"), "decision", "policy");
+            let out = r.resolve(&request, &current, &policy).unwrap();
+            assert_eq!(out.module.content_hash, expected_hash);
+            assert_eq!(out.module.content_hash, out.module.record.canonical_hash());
+            assert_eq!(out.event.trace_id, format!("trace-{i}"));
+        }
+        policy.allowed.set(false);
+        assert!(r.resolve(&request, &context(), &policy).is_err());
+        assert_eq!(policy.calls.get(), 23);
+        assert_eq!(r.hash_computations.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn concurrent_resolves_share_one_canonical_hash_computation() {
+        use std::sync::atomic::Ordering;
+        use std::sync::{Arc, Barrier};
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mjs", "export const answer=42;");
+        let r = Arc::new(resolver(root.path()));
+        let barrier = Arc::new(Barrier::new(8));
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let r = Arc::clone(&r);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let out = r
+                        .resolve(&r.entry_request(), &context(), &granted())
+                        .unwrap();
+                    assert_eq!(out.module.content_hash, out.module.record.canonical_hash());
+                    out.module.content_hash
+                })
+            })
+            .collect();
+        let hashes: Vec<_> = workers.into_iter().map(|w| w.join().unwrap()).collect();
+        assert!(hashes.iter().all(|hash| hash == &hashes[0]));
+        assert_eq!(r.hash_computations.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn streamed_chains_reuse_hashes_but_reauthorize_every_route_on_every_call() {
+        use std::sync::atomic::Ordering;
+        let root = tempfile::tempdir().unwrap();
+        put(
+            root.path(),
+            "app.mjs",
+            "import './a.mjs'; import './b.mjs';",
+        );
+        put(root.path(), "a.mjs", "import './shared.mjs';");
+        put(root.path(), "b.mjs", "import './shared.mjs';");
+        put(root.path(), "shared.mjs", "import './app.mjs';");
+        let r = resolver(root.path());
+        let policy = EdgePolicy {
+            deny_referrer: None,
+            calls: RefCell::new(Vec::new()),
+        };
+        for _ in 0..3 {
+            let out = r
+                .resolve_chain(&r.entry_request(), &context(), &policy)
+                .unwrap();
+            assert_eq!(out.len(), 4);
+            for module in out {
+                assert_eq!(
+                    module.module.content_hash,
+                    module.module.record.canonical_hash()
+                );
+            }
+        }
+        assert_eq!(policy.calls.borrow().len(), 18);
+        assert_eq!(r.hash_computations.load(Ordering::Relaxed), 4);
+    }
+
+    #[test]
+    fn entry_denial_does_not_prepare_or_hash_the_rest_of_the_graph() {
+        use std::sync::atomic::Ordering;
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mjs", "import './dep.mjs';");
+        put(root.path(), "dep.mjs", "export const value=1;");
+        let r = resolver(root.path());
+        let policy = ChangingPolicy {
+            allowed: Cell::new(false),
+            calls: Cell::new(0),
+        };
+        assert!(
+            r.resolve_chain(&r.entry_request(), &context(), &policy)
+                .is_err()
+        );
+        assert_eq!(policy.calls.get(), 1);
+        assert_eq!(r.hash_computations.load(Ordering::Relaxed), 0);
+        assert!(r.content_hashes.values().all(|cell| cell.get().is_none()));
     }
 }
