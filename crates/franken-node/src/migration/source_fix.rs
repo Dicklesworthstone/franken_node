@@ -162,16 +162,12 @@ impl Prepared {
         // The executor used only captured bytes. Do not describe the CURRENT
         // repair as verified after an editor or a guest changed its live tree.
         // Preserve the completed measurement even when this recheck fails.
-        let recheck = (|| -> Result<()> {
-            let current = Snapshot::capture(&self.project, deadline)?;
-            ensure!(current.digest == self.repaired_hash,
-                "repaired project changed during fix verification");
-            Ok(())
-        })();
-        let unchanged = recheck.is_ok();
-        let verdict = if !unchanged && replay.verdict() == "FIX_VERIFIED" {
-            "SOURCE_DRIFT"
-        } else { replay.verdict() };
+        let (unchanged, source_verdict, source_recheck_error) = match Snapshot::capture(&self.project, deadline) {
+            Ok(current) if current.digest == self.repaired_hash => (true, "FIX_VERIFIED", None),
+            Ok(_) => (false, "SOURCE_DRIFT", Some("repaired project changed during fix verification".into())),
+            Err(error) => (false, "ERROR", Some(format!("repaired project recheck failed: {error:#}"))),
+        };
+        let verdict = if replay.verdict() == "FIX_VERIFIED" { source_verdict } else { replay.verdict() };
         Ok(SourceFixReport {
             schema_version: "franken-node/source-fix-verification/v1".into(),
             verdict: verdict.into(), seed_content_sha256: self.seed_pin,
@@ -181,7 +177,7 @@ impl Prepared {
             candidate_project: self.project, candidate_source_unchanged: unchanged,
             native_runtime_changed, execution_performed: true,
             environment_reproduced: false, release_certification: false,
-            source_recheck_error: recheck.err().map(|error| format!("{error:#}")), replay,
+            source_recheck_error, replay,
         })
     }
 }
@@ -215,13 +211,14 @@ pub fn verify(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super as product;
     use std::collections::BTreeMap;
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::time::Duration;
 
     fn deadline() -> Instant { Instant::now() + Duration::from_secs(120) }
     fn node() -> Invocation {
-        Invocation { executable: pair::super_node_for_source_fix_tests(), before: vec![], after: vec![] }
+        pair::runtime_invocations(Path::new("/bin/false")).unwrap().0
     }
     fn write(root: &Path, path: &str, source: &str) {
         let path = root.join(path);
@@ -352,8 +349,7 @@ mod tests {
             write(root, "request.bin", "request");
             write(root, "golden.txt", "42\n");
         }
-        // The replayable failing candidate still has complete process evidence;
-        // a golden mismatch is deliberately avoided in the seed construction.
+        // Keep golden expectations valid in the seed, and fail its other case.
         write(broken.path(), "helper.cjs", "module.exports=42;");
         write(broken.path(), "passing.test.cjs", "console.log('broken sibling');");
         let capsule = reports.path().join("failure.json");
@@ -412,5 +408,75 @@ mod tests {
         let prepared = Prepared::capture(&capsule, &pin, repaired.path(), false, deadline()).unwrap();
         let bad = Invocation { executable, before: vec![], after: vec![] };
         assert!(prepared.execute(&[&node(), &bad], deadline()).unwrap_err().to_string().contains("outside"));
+    }
+
+    fn product_seed(original: &Path, broken: &Path, path: &Path, second: &Invocation) -> String {
+        let reference = Snapshot::capture(original, deadline()).unwrap();
+        let candidate = Snapshot::capture(broken, deadline()).unwrap();
+        let node = node();
+        let runtimes = [&node, second, &node];
+        let identities = [node.identity(deadline()).unwrap(), second.identity(deadline()).unwrap(),
+            node.identity(deadline()).unwrap()];
+        let expected = product::product_oracle::execute(&reference, &candidate, runtimes, identities,
+            deadline(), Duration::from_secs(5), true).unwrap();
+        let stored = product::stored(&reference, &candidate, deadline()).unwrap();
+        let captured = product::captured(expected, [&reference, &candidate],
+            [original.into(), broken.into()], stored).unwrap();
+        captured.write_capsule(path).unwrap().content_sha256
+    }
+
+    #[test]
+    fn product_source_repairs_keep_all_roles_and_do_not_downgrade_to_pair() {
+        let original = tempfile::tempdir().unwrap();
+        let broken = tempfile::tempdir().unwrap();
+        let repair = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        for (root, code) in [(original.path(), "globalThis.answer=42;"),
+            (broken.path(), "process.exit(9);"), (repair.path(), "globalThis.answer=6*7;")] {
+            write(root, "case.test.js", code);
+        }
+        // /bin/true is an explicitly named second reference for orchestration,
+        // NOT a Bun implementation or a native compatibility claim.
+        let second = Invocation { executable: PathBuf::from("/bin/true").canonicalize().unwrap(),
+            before: vec![], after: vec![] };
+        let path = out.path().join("product.json");
+        let pin = product_seed(original.path(), broken.path(), &path, &second);
+        let bytes = fs::read(&path).unwrap();
+        assert!(Prepared::capture(&path, &pin, repair.path(), false, deadline()).is_err());
+        let prepared = Prepared::capture(&path, &pin, repair.path(), true, deadline()).unwrap();
+        let result = prepared.execute(&[&node(), &second, &node()], deadline()).unwrap();
+        assert_eq!(result.verdict, "FIX_VERIFIED", "{result:#?}");
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        let ReplayEvidence::Product(replay) = result.replay else { panic!("all roles required") };
+        assert_eq!(replay.validation.passed, 1);
+        assert!(replay.validation.cases[0].bun.is_some());
+        assert_eq!(replay.validation.candidate_input_sha256, result.candidate_input_sha256);
+    }
+
+    #[test]
+    fn second_reference_only_drift_prevents_product_source_fix() {
+        let original = tempfile::tempdir().unwrap();
+        let broken = tempfile::tempdir().unwrap();
+        let repair = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        for (root, code) in [(original.path(), "globalThis.answer=42;"),
+            (broken.path(), "process.exit(9);"), (repair.path(), "globalThis.answer=6*7;")] {
+            write(root, "case.test.js", code);
+        }
+        let marker = out.path().join("changed");
+        // Use a real shell solely to create a deterministic second-reference
+        // observation change. No Bun/native implementation is substituted.
+        let second = Invocation { executable: PathBuf::from("/bin/sh").canonicalize().unwrap(),
+            before: vec!["-c".into(), format!("if test -f '{}'; then printf drift; fi", marker.display()).into(),
+                "reference".into()], after: vec![] };
+        let path = out.path().join("product.json");
+        let pin = product_seed(original.path(), broken.path(), &path, &second);
+        fs::write(&marker, "changed").unwrap();
+        let result = Prepared::capture(&path, &pin, repair.path(), true, deadline()).unwrap()
+            .execute(&[&node(), &second, &node()], deadline()).unwrap();
+        assert_eq!(result.verdict, "REFERENCE_DRIFT", "{result:#?}");
+        let ReplayEvidence::Product(replay) = result.replay else { panic!("product") };
+        assert_eq!(replay.validation.reference_divergences, 1);
+        assert_eq!(replay.mismatched_tests, ["case.test.js"]);
     }
 }
