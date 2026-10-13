@@ -5,6 +5,10 @@ Captures include source, dependencies and configuration: treat them as sensitive
 Checksums detect corruption, not malicious re-signing; pin --expected-sha256 from
 an independently trusted channel. Replay requires --execute because project code
 runs with the caller's authority. Workspace copies are NOT an OS sandbox.
+
+SIGINT/SIGTERM request cancellation, drain the owned process supervisors and
+retain partial diagnostic observations. Interrupted runs cannot publish a new
+replayable capsule or verify a fix. Library calls never install signal handlers.
 """
 
 from __future__ import annotations
@@ -39,6 +43,27 @@ MAX_EXECUTABLE_BYTES = 512 * 1024 * 1024
 HASH_RE = re.compile(r"[0-9a-f]{64}\Z")
 ID_RE = re.compile(r"REPLAY-[a-zA-Z0-9-]{1,80}\Z")
 LEGS = ("baseline", "migration")
+
+
+class ReplayCancelled(runner.ExecutionCancelled):
+    """Cancellation with optional sanitized, already-collected execution evidence."""
+
+    def __init__(self, signum: int, execution: dict | None = None):
+        super().__init__(f"execution cancelled by signal {signum}")
+        self.execution = execution
+
+
+def check_cancellation(cancellation: runner.CancellationState | None,
+                       execution: dict | None = None) -> None:
+    if cancellation is not None and cancellation.signum is not None:
+        raise ReplayCancelled(cancellation.signum, execution)
+
+
+def record_cancellation(result: dict, cancellation: runner.CancellationState | None) -> None:
+    """A late signal must override even a completed fix or publication result."""
+    runner.record_cancellation(result, cancellation)
+    if cancellation is not None and cancellation.signum is not None:
+        result["verdict"] = "ERROR"
 
 
 def canonical_bytes(value) -> bytes:
@@ -272,8 +297,10 @@ def checked_options(options: dict) -> dict:
     return result
 
 
-def hash_regular_file(path: Path, deadline: float) -> str:
+def hash_regular_file(path: Path, deadline: float, *,
+                      cancellation: runner.CancellationState | None = None) -> str:
     """Bounded descriptor hash with before/after mutation detection, not a lock."""
+    check_cancellation(cancellation)
     with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW), "rb") as stream:
         before = os.fstat(stream.fileno())
         if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_EXECUTABLE_BYTES:
@@ -281,6 +308,7 @@ def hash_regular_file(path: Path, deadline: float) -> str:
         digest = hashlib.sha256()
         total = 0
         while True:
+            check_cancellation(cancellation)
             if time.monotonic() >= deadline:
                 raise ValueError("runtime fingerprinting exhausted total execution budget")
             chunk = stream.read(1024 * 1024)
@@ -294,16 +322,19 @@ def hash_regular_file(path: Path, deadline: float) -> str:
         fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
         if total != before.st_size or any(getattr(before, field) != getattr(after, field) for field in fields):
             raise ValueError("runtime/validator changed during fingerprinting")
+        check_cancellation(cancellation)
         return digest.hexdigest()
 
 
-def runtime_bindings(baseline_command, migration_command, deadline: float) -> tuple[dict, dict]:
+def runtime_bindings(baseline_command, migration_command, deadline: float, *,
+                     cancellation: runner.CancellationState | None = None) -> tuple[dict, dict]:
     """Resolve caller-owned commands; bind direct executables, argv and validators.
 
     Paths may relocate while bytes stay identical. Dynamic libraries, imported
     modules outside the snapshot and ambient environment remain outside this
     binding; it is not a hermetic executable-image or whole-machine claim.
     """
+    check_cancellation(cancellation)
     commands = {"baseline": runner.resolve_command(baseline_command),
                 "migration": runner.resolve_command(migration_command)}
     hashes = {}
@@ -311,7 +342,7 @@ def runtime_bindings(baseline_command, migration_command, deadline: float) -> tu
     def hashed(path):
         path = Path(path).resolve(strict=True)
         if path not in hashes:
-            hashes[path] = hash_regular_file(path, deadline)
+            hashes[path] = hash_regular_file(path, deadline, cancellation=cancellation)
         return hashes[path]
 
     bindings = {leg: {"executable_sha256": hashed(command[0]), "arguments": command[1:]}
@@ -421,7 +452,9 @@ def _validate_capsule_file_evidence(expected: dict, snapshots: dict) -> None:
 
 def execute_snapshots(snapshots: dict, baseline_command, migration_command,
                       options: dict, expected_inputs: dict | None = None,
-                      *, deadline: float | None = None) -> dict:
+                      *, deadline: float | None = None,
+                      cancellation: runner.CancellationState | None = None) -> dict:
+    check_cancellation(cancellation)
     options = checked_options(options)
     if deadline is None:
         deadline = time.monotonic() + options["total_timeout_seconds"]
@@ -429,8 +462,8 @@ def execute_snapshots(snapshots: dict, baseline_command, migration_command,
         root = Path(temporary)
         digests = {}
         for leg in LEGS:
-            runner.stage_project(snapshots[leg], root / leg, deadline)
-            _, digest = runner.capture_project(root / leg, deadline)
+            runner.stage_project(snapshots[leg], root / leg, deadline, cancellation=cancellation)
+            _, digest = runner.capture_project(root / leg, deadline, cancellation=cancellation)
             digests[f"{leg}_sha256"] = digest
         if expected_inputs is not None and digests != expected_inputs:
             raise ValueError("restored input digest mismatch; refusing execution")
@@ -439,7 +472,12 @@ def execute_snapshots(snapshots: dict, baseline_command, migration_command,
             raise ValueError("replay staging exhausted total execution budget")
         report = runner.validate_project(root / "baseline", migrated_project=root / "migration",
                                          baseline_command=baseline_command, migration_command=migration_command,
+                                         cancellation=cancellation,
                                          **{**options, "total_timeout_seconds": remaining})
+        # The runner joins workers, kills their process groups, reaps direct
+        # children and retains completed legs before returning. Do not turn its
+        # cancelled ERROR into a generic missing-input error or discard it.
+        check_cancellation(cancellation, report)
         if report.get("inputs") != digests:
             raise ValueError("executed inputs differ from the restored capsule")
         return report
@@ -447,26 +485,36 @@ def execute_snapshots(snapshots: dict, baseline_command, migration_command,
 
 def capture_migration(project: Path, *, migrated_project: Path | None = None,
                       baseline_command=runner.DEFAULT_BASELINE_COMMAND,
-                      migration_command=runner.DEFAULT_MIGRATION_COMMAND, **options) -> dict:
+                      migration_command=runner.DEFAULT_MIGRATION_COMMAND,
+                      cancellation: runner.CancellationState | None = None, **options) -> dict:
     """Capture inputs FIRST, then measure exactly those inputs, never a later tree."""
+    check_cancellation(cancellation)
     options = checked_options(options)
     deadline = time.monotonic() + options["total_timeout_seconds"]
-    commands, bindings = runtime_bindings(baseline_command, migration_command, deadline)
+    commands, bindings = runtime_bindings(baseline_command, migration_command, deadline,
+                                          cancellation=cancellation)
     snapshots = {}
     captured_roots = {}
     for leg, directory in (("baseline", project), ("migration", migrated_project or project)):
+        check_cancellation(cancellation)
         directory = Path(directory).resolve(strict=True)
         if not directory.is_dir():
             raise ValueError("capture source must be a directory")
         if directory not in captured_roots:
-            captured_roots[directory], _ = runner.capture_project(directory, deadline)
+            captured_roots[directory], _ = runner.capture_project(directory, deadline, cancellation=cancellation)
         snapshots[leg] = captured_roots[directory]
     manifests, blobs = encode_snapshots(snapshots)
     snapshots = decode_snapshots(manifests, blobs)
-    report = execute_snapshots(snapshots, commands["baseline"], commands["migration"], options, deadline=deadline)
+    report = execute_snapshots(snapshots, commands["baseline"], commands["migration"], options,
+                               deadline=deadline, cancellation=cancellation)
     # Preserve incomplete measured files for inspection, not as replay proof.
     expected = execution_observation(report, complete_file_roles=())
-    _, after_bindings = runtime_bindings(commands["baseline"], commands["migration"], deadline)
+    try:
+        _, after_bindings = runtime_bindings(commands["baseline"], commands["migration"], deadline,
+                                             cancellation=cancellation)
+    except runner.ExecutionCancelled:
+        check_cancellation(cancellation, report)
+        raise
     if after_bindings != bindings:
         raise ValueError("runtime or validator changed during capture")
     artifact = seal({
@@ -482,6 +530,7 @@ def capture_migration(project: Path, *, migrated_project: Path | None = None,
     })
     if len(canonical_bytes(artifact)) > MAX_CAPSULE_BYTES:
         raise ValueError("capsule exceeds serialized byte bound")
+    check_cancellation(cancellation, report)
     return artifact
 
 
@@ -498,7 +547,8 @@ def _require_fix_reference(expected: dict) -> None:
 
 
 def _capture_source_fix(snapshots: dict, expected: dict, project: Path,
-                        deadline: float) -> tuple[dict, dict, Path, dict]:
+                        deadline: float, *,
+                        cancellation: runner.CancellationState | None = None) -> tuple[dict, dict, Path, dict]:
     """Replace only the migration tree; preserve measured tests and requests.
 
     Read the repaired tree once, before any guest runs. Validate the old input
@@ -507,6 +557,7 @@ def _capture_source_fix(snapshots: dict, expected: dict, project: Path,
     edited. Transitive test helpers are not identified as immutable oracles;
     this is captured-case verification, not proof of arbitrary-input behavior.
     """
+    check_cancellation(cancellation)
     inventories = {leg: runner.captured_test_inventory(entries) for leg, entries in snapshots.items()}
     by_path = {leg: {entry.path: entry for entry in entries} for leg, entries in snapshots.items()}
     runner.matched_test_execution(inventories["baseline"], inventories["migration"],
@@ -518,14 +569,14 @@ def _capture_source_fix(snapshots: dict, expected: dict, project: Path,
     with tempfile.TemporaryDirectory(prefix="migration-fix-admission-") as temporary:
         for leg in LEGS:
             workspace = Path(temporary) / leg
-            runner.stage_project(snapshots[leg], workspace, deadline)
-            _, digest = runner.capture_project(workspace, deadline)
+            runner.stage_project(snapshots[leg], workspace, deadline, cancellation=cancellation)
+            _, digest = runner.capture_project(workspace, deadline, cancellation=cancellation)
             if digest != expected["inputs"][f"{leg}_sha256"]:
                 raise ValueError("original capsule input digest mismatch; refusing source substitution")
     root = Path(project).resolve(strict=True)
     if not root.is_dir():
         raise ValueError("candidate project must be a directory")
-    entries, digest = runner.capture_project(root, deadline)
+    entries, digest = runner.capture_project(root, deadline, cancellation=cancellation)
     candidate = runner.captured_test_inventory(entries)
     candidate_by_path = {entry.path: entry for entry in entries}
     original = inventories["migration"]
@@ -536,6 +587,7 @@ def _capture_source_fix(snapshots: dict, expected: dict, project: Path,
             protected.add(settings.stdin)
         protected.update(settings.expectations.fixtures())
     for name in sorted(protected):
+        check_cancellation(cancellation)
         # Entry identity includes mode, link type and bytes. An unchanged link
         # spelling is insufficient if its target was replaced by the candidate.
         runner._ordinary_file(by_path["migration"], name)
@@ -559,8 +611,10 @@ def replay_migration(artifact: dict, *, execute: bool = False,
                      baseline_command=runner.DEFAULT_BASELINE_COMMAND,
                      migration_command=runner.DEFAULT_MIGRATION_COMMAND,
                      expected_sha256: str | None = None, verify_fix: bool = False,
-                     candidate_project: Path | None = None) -> dict:
+                     candidate_project: Path | None = None,
+                     cancellation: runner.CancellationState | None = None) -> dict:
     """Re-execute, not self-compare. Never execute argv or environment from a capsule."""
+    check_cancellation(cancellation)
     if candidate_project is not None and (not verify_fix or expected_sha256 is None):
         raise ValueError("candidate project requires fix verification and an independently pinned capsule hash")
     snapshots = validate_capsule(artifact, expected_sha256)
@@ -578,8 +632,9 @@ def replay_migration(artifact: dict, *, execute: bool = False,
     candidate_root = None
     if candidate_project is not None:
         snapshots, expected_inputs, candidate_root, source_fix = _capture_source_fix(
-            snapshots, artifact["expected"], candidate_project, deadline)
-    commands, bindings = runtime_bindings(baseline_command, migration_command, deadline)
+            snapshots, artifact["expected"], candidate_project, deadline, cancellation=cancellation)
+    commands, bindings = runtime_bindings(baseline_command, migration_command, deadline,
+                                          cancellation=cancellation)
     if candidate_root is not None and any(Path(command[0]).is_relative_to(candidate_root)
                                           for command in commands.values()):
         raise ValueError("fix-verification executables must be outside the candidate project")
@@ -588,8 +643,13 @@ def replay_migration(artifact: dict, *, execute: bool = False,
     if any(bindings[component] != recorded_bindings[component] for component in required):
         raise ValueError("runtime provenance mismatch; ordinary replay requires the recorded executables and arguments")
     report = execute_snapshots(snapshots, commands["baseline"], commands["migration"],
-                               options, expected_inputs, deadline=deadline)
-    _, after_bindings = runtime_bindings(commands["baseline"], commands["migration"], deadline)
+                               options, expected_inputs, deadline=deadline, cancellation=cancellation)
+    try:
+        _, after_bindings = runtime_bindings(commands["baseline"], commands["migration"], deadline,
+                                             cancellation=cancellation)
+    except runner.ExecutionCancelled:
+        check_cancellation(cancellation, report)
+        raise
     if after_bindings != bindings:
         raise ValueError("runtime or validator changed during replay")
     result = {"schema_version": "migration-replay-result-v1", "replay_id": artifact["replay_id"],
@@ -621,12 +681,16 @@ def replay_migration(artifact: dict, *, execute: bool = False,
             result["verdict"] = "REFERENCE_DRIFT"
         else:
             result["verdict"] = "FIX_VERIFIED" if observed["validation_verdict"] == "PASS" else "FIX_NOT_VERIFIED"
+    check_cancellation(cancellation, report)
     return result
 
 
-def inspect_capsule(artifact: dict, expected_sha256: str | None = None) -> dict:
+def inspect_capsule(artifact: dict, expected_sha256: str | None = None, *,
+                     cancellation: runner.CancellationState | None = None) -> dict:
     """Offline validation and privacy-bounded summary; no commands are resolved."""
+    check_cancellation(cancellation)
     snapshots = validate_capsule(artifact, expected_sha256)
+    check_cancellation(cancellation)
     return {"verdict": "INTEGRITY_VALID", "replay_id": artifact["replay_id"],
             "content_sha256": artifact["content_sha256"],
             "independently_pinned": expected_sha256 is not None,
@@ -657,13 +721,18 @@ def validate_replay_artifact(artifact: dict) -> list[str]:
     return []
 
 
-def write_capsule(artifact: dict, path: Path) -> None:
+def write_capsule(artifact: dict, path: Path, *,
+                   cancellation: runner.CancellationState | None = None) -> None:
+    check_cancellation(cancellation)
     errors = validate_replay_artifact(artifact)
     if errors:
         raise ValueError("; ".join(errors))
     payload = canonical_bytes(artifact) + b"\n"
     if len(payload) > MAX_CAPSULE_BYTES:
         raise ValueError("capsule exceeds serialized byte bound")
+    # Once publication starts, latched signals cannot interrupt this write and
+    # leave half a capsule. The CLI still reports a late signal as interruption.
+    check_cancellation(cancellation)
     # Content may include .env and private keys. Never use default file modes,
     # follow an existing symlink, or overwrite an earlier capture.
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -697,26 +766,36 @@ def reject_constant(value):
     raise ValueError(f"nonfinite capsule JSON number: {value}")
 
 
-def load_replay(path: Path) -> dict:
+def load_replay(path: Path, *, cancellation: runner.CancellationState | None = None) -> dict:
+    check_cancellation(cancellation)
     flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
     with os.fdopen(os.open(path, flags), "rb") as stream:
         metadata = os.fstat(stream.fileno())
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_CAPSULE_BYTES:
             raise ValueError("capsule must be a bounded regular file")
-        data = stream.read(MAX_CAPSULE_BYTES + 1)
+        data = bytearray()
+        while len(data) <= MAX_CAPSULE_BYTES:
+            check_cancellation(cancellation)
+            chunk = stream.read(min(1024 * 1024, MAX_CAPSULE_BYTES + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
     if len(data) > MAX_CAPSULE_BYTES:
         raise ValueError("capsule exceeds serialized byte bound")
     try:
         artifact = json.loads(data, object_pairs_hook=unique_object, parse_constant=reject_constant)
     except (RecursionError, UnicodeError) as error:
         raise ValueError("invalid capsule JSON") from error
+    check_cancellation(cancellation)
     errors = validate_replay_artifact(artifact)
     if errors:
         raise ValueError("; ".join(errors))
+    check_cancellation(cancellation)
     return artifact
 
 
-def self_test() -> dict:
+def self_test(*, cancellation: runner.CancellationState | None = None) -> dict:
+    check_cancellation(cancellation)
     checks = []
     note = capture_failure("validation_runner", "fixture:fs:readFile:utf8-basic",
                            {"args": ["test.txt"]}, {"return_value": "hello"}, {"return_value": "HELLO"})
@@ -731,8 +810,10 @@ def self_test() -> dict:
         (before / "probe.test.js").write_text("print('before')\n", encoding="utf-8")
         (after / "probe.test.js").write_text("print('after')\n", encoding="utf-8")
         command = [sys.executable, "{test}"]
-        capsule = capture_migration(before, migrated_project=after, baseline_command=command, migration_command=command)
-        result = replay_migration(capsule, execute=True, baseline_command=command, migration_command=command)
+        capsule = capture_migration(before, migrated_project=after, baseline_command=command,
+                                     migration_command=command, cancellation=cancellation)
+        result = replay_migration(capsule, execute=True, baseline_command=command,
+                                  migration_command=command, cancellation=cancellation)
         reproduced = result["verdict"] == "REPRODUCED" and result["observed_validation_verdict"] == "FAIL"
         checks.append({"id": "REPLAY-EXECUTION", "status": "PASS" if reproduced else "FAIL"})
     failures = sum(check["status"] != "PASS" for check in checks)
@@ -769,44 +850,68 @@ def main() -> int:
         parser.error("--candidate-project requires --replay --verify-fix and --expected-sha256")
     if args.migrated_project is not None and not args.capture:
         parser.error("--migrated-project is capture-only; source-fix verification uses --candidate-project")
+    if args.capture and args.out is None:
+        parser.error("--capture requires --out; capsules contain sensitive project files")
+    if args.replay and not args.execute:
+        parser.error("--replay requires --execute: captured programs run with your authority")
+    if args.replay and args.out and args.out.resolve() == args.replay.resolve():
+        parser.error("replay report must not overwrite its input capsule")
+    cancellation = runner.CancellationState()
+    with runner.termination_signals(cancellation):
+        status = _execute_cli(args, cancellation)
+        return 128 + cancellation.signum if cancellation.signum is not None else status
+
+
+def _execute_cli(args: argparse.Namespace, cancellation: runner.CancellationState) -> int:
+    """Keep the first signal latched through supervision, diagnostics and writes."""
     try:
+        check_cancellation(cancellation)
         if args.self_test:
-            result = self_test()
+            result = self_test(cancellation=cancellation)
             code = 0 if result["verdict"] == "PASS" else 1
         elif args.inspect:
-            result = inspect_capsule(load_replay(args.inspect), args.expected_sha256)
+            result = inspect_capsule(load_replay(args.inspect, cancellation=cancellation),
+                                     args.expected_sha256, cancellation=cancellation)
             code = 0
         elif args.capture:
-            if args.out is None:
-                parser.error("--capture requires --out; capsules contain sensitive project files")
             if os.path.lexists(args.out):
                 raise ValueError("capture destination already exists; refusing to execute or overwrite it")
             artifact = capture_migration(args.capture, migrated_project=args.migrated_project,
                                          baseline_command=args.baseline_command, migration_command=args.migration_command,
                                          compare_filesystem=args.compare_filesystem, timeout_seconds=args.timeout_seconds,
-                                         total_timeout_seconds=args.total_timeout_seconds)
-            write_capsule(artifact, args.out)
+                                         total_timeout_seconds=args.total_timeout_seconds,
+                                         cancellation=cancellation)
+            write_capsule(artifact, args.out, cancellation=cancellation)
             result = {"verdict": "CAPTURED", "path": str(args.out), "replay_id": artifact["replay_id"],
                       "content_sha256": artifact["content_sha256"],
                       "validation_verdict": artifact["expected"]["validation_verdict"]}
             code = 0 if result["validation_verdict"] == "PASS" else 1
         else:
-            if not args.execute:
-                parser.error("--replay requires --execute: captured programs run with your authority")
-            artifact = load_replay(args.replay)
+            artifact = load_replay(args.replay, cancellation=cancellation)
             result = replay_migration(artifact, execute=True, baseline_command=args.baseline_command,
                                       migration_command=args.migration_command, expected_sha256=args.expected_sha256,
-                                      verify_fix=args.verify_fix, candidate_project=args.candidate_project)
+                                      verify_fix=args.verify_fix, candidate_project=args.candidate_project,
+                                      cancellation=cancellation)
             code = {"REPRODUCED": 0, "FIX_VERIFIED": 0, "DIVERGED": 1, "FIX_NOT_VERIFIED": 1,
                     "REFERENCE_DRIFT": 2, "ERROR": 2}[result["verdict"]]
-            if args.out:
-                if args.out.resolve() == args.replay.resolve():
-                    raise ValueError("replay report must not overwrite its input capsule")
-                runner.write_report(result, args.out)
+    except runner.ExecutionCancelled as error:
+        result, code = {"verdict": "ERROR", "error": str(error)}, 2
+        if isinstance(error, ReplayCancelled) and error.execution is not None:
+            result["execution"] = error.execution
     except (OSError, ValueError, TypeError, KeyError, RecursionError) as error:
         result, code = {"verdict": "ERROR", "error": str(error)}, 2
+    record_cancellation(result, cancellation)
+    # Replay --out is diagnostic output, including cancellation. Capture --out
+    # is exclusively a valid capsule: never replace it with a partial report.
+    if args.replay and args.out:
+        try:
+            runner.write_report(result, args.out)
+        except OSError as error:
+            result.update(verdict="ERROR", publication_error=str(error))
+            code = 2
+    record_cancellation(result, cancellation)
     print(json.dumps(result, indent=2, allow_nan=False) if args.json else f"{result['verdict']}: {json.dumps(result)}")
-    return code
+    return 128 + cancellation.signum if cancellation.signum is not None else code
 
 
 if __name__ == "__main__":
