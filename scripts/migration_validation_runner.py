@@ -2,7 +2,8 @@
 """Execute migration tests on two runtimes in independent workspace copies.
 
 Default commands are Node.js and the native franken-node run path. Custom
-commands are JSON argv arrays containing a standalone {test} argument; no shell
+commands are JSON argv arrays containing a standalone {test} argument and an
+optional terminal {arguments} slot for captured application argv; no shell
 or package install is invoked. Execute only projects you trust: workspace copies
 isolate relative filesystem mutations, not arbitrary code, network, or absolute
 paths. This is a test-process oracle, not release certification or an OS sandbox.
@@ -60,8 +61,11 @@ TEST_PATTERNS = [
 TIMESTAMP_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 PID_PATTERN = re.compile(r"\bpid[=: ]+\d+\b", re.IGNORECASE)
 ABS_PATH_PATTERN = re.compile(r"(/[a-zA-Z0-9_./-]+){3,}")
-DEFAULT_BASELINE_COMMAND = ("node", "{test}")
-DEFAULT_MIGRATION_COMMAND = ("franken-node", "run", "--console-only", "{test}")
+DEFAULT_BASELINE_COMMAND = ("node", "{test}", "{arguments}")
+DEFAULT_MIGRATION_COMMAND = ("franken-node", "run", "--console-only", "{test}", "--", "{arguments}")
+MAX_ARGUMENTS = 128
+MAX_ARGUMENT_BYTES = 4096
+MAX_ARGV_BYTES = 32 * 1024
 MAX_TEST_FILES = 1024
 MAX_PROJECT_FILES = 50_000
 MAX_PROJECT_BYTES = 256 * 1024 * 1024
@@ -204,11 +208,12 @@ class ExecutionSettings:
     cwd: str = ""
     stdin: str | None = None
     environment: tuple[tuple[str, str | None], ...] = ()
+    arguments: tuple[str, ...] = ()
 
     def __repr__(self) -> str:
-        # Environment values can be secrets. Do not include them in errors.
+        # Environment and argument values can be secrets. Never format them.
         return (f"ExecutionSettings(cwd={self.cwd!r}, stdin={self.stdin!r}, "
-                f"environment_count={len(self.environment)})")
+                f"environment_count={len(self.environment)}, argument_count={len(self.arguments)})")
 
 
 def _unique_json_object(pairs: list[tuple[str, object]]) -> dict:
@@ -269,8 +274,9 @@ def _application_variable(name: str) -> bool:
 
 
 def _execution_settings(raw: object, entries: dict[str, SnapshotEntry], test: str) -> ExecutionSettings:
-    if not isinstance(raw, dict) or set(raw) - {"cwd", "stdin", "environment"}:
+    if not isinstance(raw, dict) or set(raw) - {"cwd", "stdin", "environment", "arguments"}:
         raise ValueError("invalid or unknown migration test execution settings")
+    arguments = _literal_arguments(raw.get("arguments", []))
     cwd = raw.get("cwd")
     if cwd in (None, "."):
         cwd = ""
@@ -299,7 +305,24 @@ def _execution_settings(raw: object, entries: dict[str, SnapshotEntry], test: st
         size += len(name) + (0 if value is None else _utf8_size(value))
     if size > 16 * 1024:
         raise ValueError("test environment exceeds 16 KiB")
-    return ExecutionSettings(cwd, stdin, tuple(sorted(environment.items())))
+    return ExecutionSettings(cwd, stdin, tuple(sorted(environment.items())), arguments)
+
+
+def _literal_arguments(raw: object) -> tuple[str, ...]:
+    """Match native migration argv bounds without coercion or secret diagnostics."""
+    if not isinstance(raw, list) or len(raw) > MAX_ARGUMENTS:
+        raise ValueError("test arguments must be an array of at most 128 UTF-8 strings")
+    size = 0
+    for argument in raw:
+        if not isinstance(argument, str) or "\0" in argument:
+            raise ValueError("test arguments must be UTF-8 strings without NUL")
+        length = _utf8_size(argument)
+        if length > MAX_ARGUMENT_BYTES:
+            raise ValueError("test argument exceeds 4096 UTF-8 bytes")
+        size += length + 1  # Include OS terminators, including empty arguments.
+    if size > MAX_ARGV_BYTES:
+        raise ValueError("test arguments exceed 32 KiB")
+    return tuple(raw)
 
 
 def captured_test_inventory(capture: list[SnapshotEntry]) -> dict[str, ExecutionSettings]:
@@ -1042,12 +1065,38 @@ def resolve_command(command: tuple[str, ...] | list[str]) -> list[str]:
             or any(not isinstance(arg, str) or not arg or "\0" in arg for arg in command)
             or command.count("{test}") != 1 or command[0] == "{test}"):
         raise ValueError("runtime command must be a nonempty argv array with one standalone {test}")
-    if sum(len(arg.encode()) for arg in command) > 65536:
+    if (command.count("{arguments}") > 1
+            or any("{arguments}" in arg and arg != "{arguments}" for arg in command)
+            or ("{arguments}" in command and command[-1] != "{arguments}")):
+        raise ValueError("application arguments require one standalone terminal {arguments} slot after {test}")
+    if sum(_utf8_size(arg) for arg in command) > 65536:
         raise ValueError("runtime argv exceeds the 65536-byte bound")
     executable = shutil.which(command[0])
     if executable is None:
         raise ValueError(f"runtime executable not found: {command[0]}")
     return [str(Path(executable).resolve()), *command[1:]]
+
+
+def _test_command(template: list[str], script: str, arguments: tuple[str, ...]) -> list[str]:
+    """Expand trusted template slots once; application values remain literal.
+
+    A custom operator template must select its own safe argument boundary.
+    Never guess a runtime's option semantics from its executable filename.
+    The default native template explicitly places `--` before application argv.
+    """
+    if arguments and "{arguments}" not in template:
+        raise ValueError("captured application argv requires a terminal {arguments} command slot")
+    command = []
+    for argument in template:
+        if argument == "{test}":
+            command.append(f"./{script}")
+        elif argument == "{arguments}":
+            command.extend(arguments)
+        else:
+            command.append(argument)
+    if sum(_utf8_size(argument) + 1 for argument in command) > 65536:
+        raise ValueError("expanded runtime argv exceeds the 65536-byte bound")
+    return command
 
 
 def runtime_identity(executable: str, deadline: float) -> dict:
@@ -1288,6 +1337,14 @@ def validate_project(project_dir: Path, *, migrated_project: Path | None = None,
             baseline = resolve_command(baseline_command)
             migration = resolve_command(migration_command)
             commands = {"baseline": baseline, "migration": migration}
+            # Admit every test/template pair before the FIRST launch. A missing
+            # argv slot on a later test or the second leg must not allow partial
+            # execution of a request that cannot be represented on both sides.
+            for settings_by_test in (baseline_inventory, migration_inventory):
+                for test, settings in settings_by_test.items():
+                    script = test[len(settings.cwd) + 1:] if settings.cwd else test
+                    for template in commands.values():
+                        _test_command(template, script, settings.arguments)
             for command in commands.values():
                 if any(Path(command[0]).is_relative_to(project) for project in (baseline_root, migration_root)):
                     raise ValueError("runtime executables must be outside both measured projects")
@@ -1335,7 +1392,7 @@ def validate_project(project_dir: Path, *, migrated_project: Path | None = None,
                         settings = baseline_inventory[test] if leg == "baseline" else migration_inventory[test]
                         by_path = baseline_by_path if leg == "baseline" else migration_by_path
                         script = test[len(settings.cwd) + 1:] if settings.cwd else test
-                        command = [f"./{script}" if arg == "{test}" else arg for arg in template]
+                        command = _test_command(template, script, settings.arguments)
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
                             raise TimeoutError("total validation budget exhausted")
@@ -1496,9 +1553,9 @@ def main() -> int:
     parser.add_argument("project_dir", nargs="?", type=Path)
     parser.add_argument("--migrated-project", type=Path, help="post-rewrite tree (default: same input)")
     parser.add_argument("--baseline-command", type=_command_argument,
-                        help='JSON argv, e.g. ["node", "--test", "{test}"]')
+                        help='JSON argv, e.g. ["node", "{test}", "{arguments}"]; argv slot must be last')
     parser.add_argument("--migration-command", type=_command_argument,
-                        help='JSON argv, e.g. ["franken-node", "run", "--console-only", "{test}"]')
+                        help='JSON argv, e.g. ["franken-node", "run", "--console-only", "{test}", "--", "{arguments}"]')
     parser.add_argument("--timeout-seconds", type=float)
     parser.add_argument("--total-timeout-seconds", type=float)
     parser.add_argument("--max-output-bytes", type=int)
