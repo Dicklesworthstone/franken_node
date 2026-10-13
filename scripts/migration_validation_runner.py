@@ -230,11 +230,15 @@ class ExecutionSettings:
     environment: tuple[tuple[str, str | None], ...] = ()
     arguments: tuple[str, ...] = ()
     expectations: OutputExpectations = OutputExpectations()
+    # Historical standalone captures supplied pipes. Keep that meaning when
+    # replaying omitted fields; native migration's default is instead file.
+    stdin_mode: str = "pipe"
 
     def __repr__(self) -> str:
         # Environment and argument values can be secrets. Never format them.
         return (f"ExecutionSettings(cwd={self.cwd!r}, stdin={self.stdin!r}, "
-                f"environment_count={len(self.environment)}, argument_count={len(self.arguments)})")
+                f"environment_count={len(self.environment)}, argument_count={len(self.arguments)}, "
+                f"stdin_mode={self.stdin_mode!r})")
 
 
 class TestInventory(dict[str, ExecutionSettings]):
@@ -322,7 +326,7 @@ def _application_variable(name: str) -> bool:
 
 
 def _execution_settings(raw: object, entries: dict[str, SnapshotEntry], test: str) -> ExecutionSettings:
-    if not isinstance(raw, dict) or set(raw) - {"cwd", "stdin", "environment", "arguments"}:
+    if not isinstance(raw, dict) or set(raw) - {"cwd", "stdin", "stdin_mode", "environment", "arguments"}:
         raise ValueError("invalid or unknown migration test execution settings")
     arguments = _literal_arguments(raw.get("arguments", []))
     cwd = raw.get("cwd")
@@ -341,6 +345,11 @@ def _execution_settings(raw: object, entries: dict[str, SnapshotEntry], test: st
         stdin = _canonical_test_path(stdin, EXECUTION_EXCLUSIONS)
         if len(_ordinary_file(entries, stdin)) > MAX_INPUT_BYTES:
             raise ValueError("captured test stdin exceeds 1 MiB")
+    stdin_mode = raw.get("stdin_mode", "pipe")
+    if not isinstance(stdin_mode, str) or stdin_mode not in {"file", "pipe"}:
+        raise ValueError("stdin_mode must be file or pipe")
+    if "stdin_mode" in raw and stdin_mode == "pipe" and stdin is None:
+        raise ValueError("explicit pipe stdin mode requires a captured stdin file")
     environment = raw.get("environment", {})
     if not isinstance(environment, dict) or len(environment) > 64:
         raise ValueError("at most 64 application environment overrides per test")
@@ -353,7 +362,8 @@ def _execution_settings(raw: object, entries: dict[str, SnapshotEntry], test: st
         size += len(name) + (0 if value is None else _utf8_size(value))
     if size > 16 * 1024:
         raise ValueError("test environment exceeds 16 KiB")
-    return ExecutionSettings(cwd, stdin, tuple(sorted(environment.items())), arguments)
+    return ExecutionSettings(cwd, stdin, tuple(sorted(environment.items())), arguments,
+                             stdin_mode=stdin_mode)
 
 
 def _literal_arguments(raw: object) -> tuple[str, ...]:
@@ -819,6 +829,13 @@ def _validate_bundle_manifest(manifest: dict, objects: dict[str, bytes]) -> dict
         if (not isinstance(capture, dict) or type(capture.get("exit_code")) is not int
                 or capture.get("termination") not in {"exited", "signal", "timeout", "output_limit", "cancelled"}):
             raise ValueError("invalid replay process outcome")
+        settings = inventories[key[1]][key[0]]
+        transport = "none" if settings.stdin is None else settings.stdin_mode
+        if "stdin_transport" not in capture:
+            if transport == "file":
+                raise ValueError("file stdin replay requires recorded transport evidence")
+        elif capture["stdin_transport"] != transport:
+            raise ValueError("replay stdin transport disagrees with captured execution settings")
         streams = capture.get("streams")
         _bundle_keys(streams, {"stdout", "stderr"}, "streams")
         for channel in ("stdout", "stderr"):
@@ -1319,9 +1336,48 @@ def measure_runtime_identities(commands: dict[str, list[str]], deadline: float) 
     return {role: dict(measured[command[0]]) for role, command in commands.items()}
 
 
+@contextmanager
+def _stdin_source(input_bytes: bytes | None, stdin_mode: str, deadline: float,
+                  cancellation: CancellationState | None):
+    """Prepare independent, immutable input, never reopen a staged fixture.
+
+    File mode supplies a read-only open file description at offset zero. Close
+    and unlink the private writable staging file before launching the guest;
+    neither its path nor writable descriptor is inherited. Every leg owns a
+    fresh description, so seeks cannot change another test's input cursor.
+    """
+    check_cancellation(cancellation)
+    if time.monotonic() >= deadline:
+        raise TimeoutError("test stdin preparation deadline exceeded")
+    if input_bytes is None:
+        yield subprocess.DEVNULL
+        return
+    if stdin_mode == "pipe":
+        yield subprocess.PIPE
+        return
+    with ExitStack() as handles:
+        with tempfile.NamedTemporaryFile(prefix="franken-stdin-", mode="w+b") as stage:
+            for offset in range(0, len(input_bytes), 65536):
+                check_cancellation(cancellation)
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("test stdin preparation deadline exceeded")
+                stage.write(input_bytes[offset:offset + 65536])
+            stage.flush()
+            reader = os.open(stage.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+            handles.callback(os.close, reader)
+            observed = os.fstat(reader)
+            if (not stat.S_ISREG(observed.st_mode) or observed.st_size != len(input_bytes)
+                    or _file_version(observed) != _file_version(os.fstat(stage.fileno()))):
+                raise ValueError("captured stdin staging file changed before admission")
+        check_cancellation(cancellation)
+        if time.monotonic() >= deadline:
+            raise TimeoutError("test stdin preparation deadline exceeded")
+        yield reader
+
+
 def run_command(command: list[str], cwd: Path, *, timeout: float,
                 max_output_bytes: int, environment: dict[str, str], input_bytes: bytes | None = None,
-                cancellation: CancellationState | None = None) -> dict:
+                cancellation: CancellationState | None = None, stdin_mode: str = "pipe") -> dict:
     """Bound both pipes and process lifetime, including inherited child pipes.
 
     A new POSIX session lets timeout/overflow cleanup kill this leg's process
@@ -1329,14 +1385,16 @@ def run_command(command: list[str], cwd: Path, *, timeout: float,
     """
     if input_bytes is not None and (not isinstance(input_bytes, bytes) or len(input_bytes) > MAX_INPUT_BYTES):
         raise ValueError("captured test stdin must be bytes of at most 1 MiB")
+    if not isinstance(stdin_mode, str) or stdin_mode not in {"file", "pipe"}:
+        raise ValueError("stdin_mode must be file or pipe")
     check_cancellation(cancellation)
     started = time.monotonic()
     output = {"stdout": bytearray(), "stderr": bytearray()}
     counts = {name: 0 for name in output}
     hashes = {name: hashlib.sha256() for name in output}
     reason = None
-    with subprocess.Popen(command, cwd=cwd, env=environment,
-                          stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
+    with _stdin_source(input_bytes, stdin_mode, started + timeout, cancellation) as stdin, \
+         subprocess.Popen(command, cwd=cwd, env=environment, stdin=stdin,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           start_new_session=True) as process:
         try:
@@ -1426,6 +1484,7 @@ def run_command(command: list[str], cwd: Path, *, timeout: float,
                             if counts[name] > max_output_bytes:
                                 drain.unregister(key.fileobj)
     return {"exit_code": process.returncode,
+            "stdin_transport": "none" if input_bytes is None else stdin_mode,
             "termination": reason or ("signal" if process.returncode < 0 else "exited"),
             "elapsed_ms": round((time.monotonic() - started) * 1000),
             "stdout": bytes(output["stdout"]), "stderr": bytes(output["stderr"]),
@@ -1481,7 +1540,8 @@ def _execute_test_pair(index: int, test: str, *, root: Path,
                 capture = run_command(command, workspace / settings.cwd,
                     timeout=min(timeout_seconds, remaining), max_output_bytes=max_output_bytes,
                     environment=_test_environment(environment, settings),
-                    input_bytes=_test_input(settings, by_path[leg]), cancellation=cancellation)
+                    input_bytes=_test_input(settings, by_path[leg]), cancellation=cancellation,
+                    stdin_mode=settings.stdin_mode)
                 result.captures[leg] = capture
                 row[leg] = {k: v for k, v in capture.items() if k not in {"stdout", "stderr"}}
                 check_cancellation(cancellation)

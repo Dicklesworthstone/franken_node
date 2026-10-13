@@ -1,11 +1,13 @@
 # Captured migration test execution
 
-`scripts/migration_validation_runner.py` supports the inventory, application
-arguments, working directory, piped stdin, application environment and output
-expectations from the native v1 migration test manifest. It reads the manifest
-from the bounded input capture, not from a source tree that may change during
-execution. Native-only scheduling and `stdin_mode` settings remain unsupported
-by this standalone runner and fail closed instead of being silently ignored.
+`scripts/migration_validation_runner.py` supports the inventory, bounded test
+scheduling, application arguments, working directory, stdin transport, application
+environment and output expectations from the native v1 migration test manifest.
+It reads the manifest from the bounded input capture, not from a source tree that
+may change during execution. Select `stdin_mode` explicitly when sharing manifests
+with native migration: the historical standalone default is `pipe`, while the
+native validator defaults to `file`. Both retain their existing omitted-field
+semantics; replay never silently substitutes one transport for the other.
 
 ```json
 {
@@ -16,6 +18,7 @@ by this standalone runner and fail closed instead of being silently ignored.
       "arguments": ["--format", "json", ""],
       "cwd": "packages/api",
       "stdin": "fixtures/request.bin",
+      "stdin_mode": "pipe",
       "environment": {
         "NODE_ENV": "test",
         "APP_MODE": "migration",
@@ -88,6 +91,81 @@ Without a manifest, conventional `.test`/`.spec` files and files under `test` or
 test inventories. An empty implicit suite remains `NO_TESTS`; an invalid or empty
 explicit manifest is an error, not permission to fall back to heuristic tests.
 
+## Bounded concurrent test suites
+
+A top-level `max_concurrent_tests` integer explicitly permits independent test
+pairs to overlap. Omission means `1`; supported values are `1` through `4`.
+Booleans, floats, null, strings and out-of-range values are rejected before any
+runtime launches. For example:
+
+```json
+{
+  "schema_version": "franken-node/migration-tests/v1",
+  "max_concurrent_tests": 4,
+  "tests": ["api.test.cjs", "parser.test.cjs", "cli.test.cjs", "storage.test.cjs"]
+}
+```
+
+Each pair still runs its baseline before its candidate, in separate disposable
+workspaces. Pairs are admitted in lexical test order; execution and completion
+can interleave. Only a bounded window is submitted, rather than queuing the
+entire suite. Up to four direct runtime processes can execute at once, one per
+pair. Guest-created descendants are not covered by this process-count bound.
+Retained output and staged workspaces scale with the admitted window, not the
+number of selected tests. Result rows are sorted by test identity regardless of
+completion order. A single owner collects counters and writes the evidence spool.
+
+Ordinary compatibility failures do not hide later tests. An observed execution
+infrastructure or evidence-collection error stops admission of new pairs while
+already admitted pairs drain under their existing per-leg and shared deadlines.
+Operator cancellation reaches every active process supervisor and stops later
+legs once observed. The runner joins all owned workers before rechecking runtime
+identities, closing the temporary root, or publishing a bundle. Completed and
+partial leg observations remain available; skipped and errored tests cannot
+produce a successful suite verdict.
+
+Original and candidate manifests must select the same concurrency. Reports carry
+an explicit `scheduling` contract, checked against captured manifests on bundle
+inspection and replay. Historical reports without it are accepted only as serial
+captures. Replay preserves the admitted concurrency and pair ordering, **not the
+operating system's interleaving or external-service state**. External databases,
+ports and network services are not isolated by workspace copies. Use concurrent
+execution only for tests whose external effects may safely overlap. This feature
+does not establish the charter's migration-throughput KPI or a fixed speedup.
+
+## Captured stdin transport
+
+An execution entry may set `stdin_mode` to `pipe` or `file` alongside its captured
+`stdin` fixture. Transport is observable: a program may inspect file type or seek
+its input. The runner does not treat identical bytes through different transports
+as the same test request. Explicit null, invalid modes, and explicit `pipe` without
+a stdin fixture fail before execution. Without a fixture, omitted mode or `file`
+uses the null device, never the operator's terminal or inherited stdin.
+
+`pipe` queues the captured bytes while draining stdout and stderr under the same
+process deadline. Empty fixtures still supply a pipe ending at EOF. This supports
+EOF-terminated requests, not a terminal or interactive conversation; queued bytes
+do not prove guest consumption. Omitted `stdin_mode` retains the standalone
+runner's historical pipe semantics, including in old replay capsules.
+
+`file` supplies a fresh read-only, seekable regular-file description at offset
+zero for every runtime leg. Input comes from the immutable in-memory capture,
+not a fixture reopened from a guest-modifiable staged project. The private staging
+path and writable handle are removed before launch; only the read-only input
+description is supplied as stdin. File preparation counts against the process
+budget, checks cancellation, and closes its handles even when launch fails.
+Concurrent tests and repeated runtime legs never share input cursors. Empty file
+fixtures stay regular files, not pipes. This is input preparation, not a sandbox
+against code executing with the operator's ambient authority.
+
+Per-leg `stdin_transport` evidence reports `file`, `pipe`, or `none`. Bundle
+validation checks that evidence against the captured test request; file-mode
+captures cannot omit it or claim they used another transport. Historical pipe
+and null-device records remain readable without the newer field. Captured bytes
+and mode are restored for re-execution without reading the original project.
+Timeouts, output limits, nonzero exits and cancellation retain their existing
+failure semantics in both transports. The 1 MiB stdin bound remains unchanged.
+
 ## Independent output expectations
 
 Paired agreement alone can accept two runtimes producing the same wrong output.
@@ -127,10 +205,11 @@ existing comparison-only behavior rather than inventing a baseline-derived oracl
 ## Input and evidence boundaries
 
 The original and candidate must select identical tests and identical execution
-settings, including application argv and expectation mappings. Configured stdin
-and expectation fixture bytes must also match, even when their paths are
-unchanged. All of these checks happen before resolving or launching runtimes.
-Candidate source rewrites are allowed; changing the test request is not.
+settings, including scheduling, stdin transport, application argv and expectation
+mappings. Configured stdin and expectation fixture bytes must also match, even
+when their paths are unchanged. All of these checks happen before resolving or
+launching runtimes. Candidate source rewrites are allowed; changing the test
+request is not.
 
 The manifest is limited to 64 KiB and 1,024 tests. Application argv is limited to
 128 strings, each at most 4,096 UTF-8 bytes, with an aggregate 32 KiB budget that
@@ -138,12 +217,13 @@ includes one OS terminator per argument. The fully expanded runtime command has
 a separate 65,536-byte bound. NUL and invalid Unicode arguments are rejected;
 argument values are not echoed in validation errors or settings debug output.
 
-Stdin is limited to 1 MiB and is written concurrently with draining stdout and
-stderr under the same process budget. A test that never reads stdin cannot block
-the runner indefinitely. At most 64 application environment overrides are
-accepted, each value at most 4,096 UTF-8 bytes and all names/values together at
-most 16 KiB. Runtime, dynamic loader, and operator-control environment variables
-cannot be overridden by a manifest. NUL values and duplicate JSON keys are rejected.
+Stdin is limited to 1 MiB. Pipe delivery runs concurrently with draining stdout
+and stderr; file delivery is prepared under the same process budget. A test that
+never reads stdin cannot block the runner indefinitely under ordinary interruptible
+I/O. At most 64 application environment overrides are accepted, each value at most
+4,096 UTF-8 bytes and all names/values together at most 16 KiB. Runtime, dynamic
+loader, and operator-control environment variables cannot be overridden by a
+manifest. NUL values and duplicate JSON keys are rejected.
 
 Explicit entrypoints, input files, and working directories must be ordinary
 captured objects, not symlinks. Project capture retains its existing rules for
@@ -239,8 +319,9 @@ For older captures or custom commands, supply the exact template arrays recorded
 in the original report. Both projects, dependencies, binary stdin, application
 arguments, independent output oracles and per-test settings are reconstructed
 from the verified archive in new private temporary workspaces. The original
-project directories are not read and need not exist. Original limits, band and
-filesystem comparison mode are reused, not silently overridden.
+project directories are not read and need not exist. Original limits, band,
+scheduling, stdin transport and filesystem comparison mode are reused, not
+silently overridden.
 
 Before the first guest launch, the recovered input identities, selected runtime
 measurements and effective per-test environment hashes must all match. Restore
@@ -253,7 +334,7 @@ Results separate reproduction from compatibility:
 
 | Replay outcome | CLI exit | Meaning |
 | --- | --- | --- |
-| `REPRODUCED` | 0 | Actual process outcomes, exact stream hashes/counts/completeness, assertion outcomes, and requested workspace deltas match. |
+| `REPRODUCED` | 0 | Actual process outcomes, exact stream hashes/counts/completeness, assertion outcomes, and requested workspace deltas match under the verified scheduling and stdin contract. |
 | `CHANGED` | 1 | The verified inputs ran, but the observed behavior changed. |
 | `ERROR` | 2 | Verification, identity/environment admission, or execution infrastructure failed. |
 
@@ -285,9 +366,10 @@ from a source trusted independently of the bundle.
 
 The standalone runner owns SIGINT/SIGTERM for the duration of a CLI invocation.
 The first signal is latched rather than raised inside process launch, pipe
-handling, or cleanup. No later test or candidate leg is started after a
-cancellation request. The current process group is killed, its direct child is
-reaped, and already-written stdout/stderr receive a bounded best-effort drain.
+handling, or cleanup. Once cancellation is observed, the scheduler admits no
+later tests and workers start no later candidate legs. Active process groups
+are killed, their direct children are reaped, and already-written stdout/stderr
+receive a bounded best-effort drain. All workers join before publication.
 Repeated signals do not interrupt this cleanup or change first-signal attribution.
 
 A cancelled invocation exits 130 for SIGINT or 143 for SIGTERM. Its overall
@@ -320,9 +402,12 @@ Focused regression suites:
 ```sh
 python3 -m unittest discover -s tests -p test_migration_application_arguments.py -v
 python3 -m unittest discover -s tests -p test_migration_output_expectations.py -v
+python3 -m unittest discover -s tests -p test_migration_scheduling.py -v
+python3 -m unittest discover -s tests -p test_migration_stdin_transport.py -v
 ```
 
 The suites include real subprocess execution, real Node argv/output handling,
-fixture replacement and invalid-file rejection, and portable bundle re-execution.
+fixture replacement and invalid-file rejection, concurrent rendezvous, worker
+bounds, signal cleanup, read-only seekable input and portable bundle re-execution.
 Python/Python and Node/Node pairs test this runner, not runtime independence or
 native-engine compatibility.
