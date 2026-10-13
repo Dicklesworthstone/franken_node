@@ -152,6 +152,66 @@ class Utf8ReductionTests(unittest.TestCase):
         self.assertEqual(transcripts[0], transcripts[1])
 
 
+class BinaryReductionTests(unittest.TestCase):
+    def test_binary_request_reduces_without_unicode_decoding(self):
+        required = b"\0\xff\x80"
+        original = b"noise" + required + b"\xfeother"
+        self.assertEqual(reduction.reduce_bytes(original, lambda data: required in data), required)
+
+    def test_all_256_byte_values_are_preserved_when_required(self):
+        required = bytes(range(256))
+        self.assertEqual(reduction.reduce_bytes(b"head" + required + b"tail",
+                                              lambda data: required in data), required)
+
+    def test_empty_input_can_be_the_confirmed_reproducer(self):
+        self.assertEqual(reduction.reduce_bytes(b"\xff\0unused", lambda _: True), b"")
+
+    def test_irreducible_binary_input_is_unchanged(self):
+        original = b"\xff\0\xfe\x80"
+        self.assertEqual(reduction.reduce_bytes(original, lambda value: value == original), original)
+
+    def test_byte_budget_is_enforced_before_binary_oracle(self):
+        with self.assertRaises(ValueError):
+            reduction.reduce_bytes(b"x" * (reduction.MAX_REDUCTION_BYTES + 1),
+                                   lambda _: self.fail("over-budget input reached oracle"))
+        self.assertEqual(reduction.reduce_bytes(b"\xff" * reduction.MAX_REDUCTION_BYTES,
+                                              lambda _: True, max_candidates=1), b"")
+
+    def test_binary_candidate_budget_does_not_reset_on_acceptance(self):
+        seen = []
+        with self.assertRaises(reduction.CandidateBudgetExceeded):
+            reduction.reduce_bytes(b"prefix\0suffix", lambda data: seen.append(data) or b"\0" in data,
+                                   max_candidates=4)
+        self.assertEqual(len(seen), 4)
+
+    def test_binary_inputs_are_never_modified_in_place(self):
+        original = b"before\xffafter"
+        digest = hashlib.sha256(original).hexdigest()
+        self.assertEqual(reduction.reduce_bytes(original, lambda data: b"\xff" in data), b"\xff")
+        self.assertEqual(hashlib.sha256(original).hexdigest(), digest)
+
+    def test_binary_oracle_errors_are_propagated_not_cached_as_false(self):
+        failure = OSError("fixture execution unavailable")
+        def oracle(_):
+            raise failure
+        with self.assertRaises(OSError) as error:
+            reduction.reduce_bytes(b"abc", oracle)
+        self.assertIs(error.exception, failure)
+
+    def test_binary_search_requires_a_real_boolean_decision(self):
+        with self.assertRaises(TypeError):
+            reduction.reduce_bytes(b"abc", lambda _: "not a verified observation")
+
+    def test_binary_candidate_order_is_reproducible(self):
+        transcripts = []
+        for _ in range(2):
+            seen = []
+            result = reduction.reduce_bytes(b"abcd\0\xffefgh", lambda data: seen.append(data) or b"\0\xff" in data)
+            self.assertEqual(result, b"\0\xff")
+            transcripts.append(seen)
+        self.assertEqual(transcripts[0], transcripts[1])
+
+
 @unittest.skipUnless(shutil.which("node"), "real Node executable unavailable")
 class ExecutedSourceReductionTests(unittest.TestCase):
     def test_minified_code_reduces_only_when_both_measured_outcomes_stay_exact(self):
@@ -213,6 +273,53 @@ class ExecutedSourceReductionTests(unittest.TestCase):
             self.assertIn("雪😀".encode(), result)
             script.write_bytes(result)
             self.assertEqual(run(), expected)
+
+    def test_binary_stdin_reduction_preserves_both_real_runtime_outcomes(self):
+        node = shutil.which("node")
+        with tempfile.TemporaryDirectory(prefix="binary-node-oracle-") as temporary:
+            script = Path(temporary) / "stdin.cjs"
+            script.write_text(
+                "const b=require('fs').readFileSync(0);"
+                "process.stdout.write(b.includes(Buffer.from([0,255]))?process.argv[2]:'missing');")
+            original = b"irrelevant-prefix\0\xffirrelevant-suffix\x80"
+            def observe(data, role):
+                run = subprocess.run([node, str(script), role], input=data, capture_output=True,
+                                     timeout=3, check=False)
+                return run.returncode, run.stdout, run.stderr
+            expected = ((0, b"original", b""), (0, b"rewritten", b""))
+            accepted = []
+            def oracle(data):
+                for _ in range(2):
+                    if (observe(data, "original"), observe(data, "rewritten")) != expected:
+                        return False
+                accepted.append(data)
+                return True
+            reduced = reduction.reduce_bytes(original, oracle)
+            self.assertEqual(reduced, b"\0\xff")
+            self.assertTrue(accepted)
+            for _ in range(2):
+                self.assertEqual((observe(reduced, "original"), observe(reduced, "rewritten")), expected)
+
+    def test_binary_reduction_can_preserve_a_seekable_stdin_request(self):
+        node = shutil.which("node")
+        with tempfile.TemporaryDirectory(prefix="binary-file-oracle-") as temporary:
+            root = Path(temporary)
+            script = root / "stdin.cjs"
+            script.write_text(
+                "const fs=require('fs');"
+                "if(!fs.fstatSync(0).isFile())process.exit(9);"
+                "process.stdout.write(fs.readFileSync(0).includes(255)?'kept':'lost');")
+            def oracle(data):
+                path = root / "request.bin"
+                path.write_bytes(data)
+                for _ in range(2):
+                    with path.open("rb") as stream:
+                        run = subprocess.run([node, str(script)], stdin=stream,
+                                             capture_output=True, timeout=3, check=False)
+                    if (run.returncode, run.stdout, run.stderr) != (0, b"kept", b""):
+                        return False
+                return True
+            self.assertEqual(reduction.reduce_bytes(b"noise\xfftrailer", oracle), b"\xff")
 
 
 if __name__ == "__main__":

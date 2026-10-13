@@ -6,9 +6,9 @@
 **Authority**: [PLAN_TO_CREATE_FRANKEN_NODE.md](plans/PLAN_TO_CREATE_FRANKEN_NODE.md) Section 10.2
 **Related**: [L1_LOCKSTEP_RUNNER.md](L1_LOCKSTEP_RUNNER.md), [fixture_runner.py](../scripts/fixture_runner.py)
 
-Sections 1–5 describe the full target design. Section 7 documents the executable
-migration-capsule reducer delivered today; it does not claim a global minimum
-or automatic integration with the native L1 runner.
+Sections 1–5 describe the full target design. Sections 7–8 document the executable
+migration-capsule reducer, including opt-in sub-line source and binary stdin
+reduction; neither claims a global minimum or native L1 automatic integration.
 
 ---
 
@@ -112,7 +112,9 @@ python3 scripts/minimize_migration_failure.py \
   --json
 ```
 
-The defaults are `node {test}` and `franken-node run --console-only {test}`.
+Defaults use the Node and native `franken-node run` command templates documented
+in [MIGRATION_CAPTURED_EXECUTION.md](MIGRATION_CAPTURED_EXECUTION.md), including
+the application-argument slot and the native option terminator.
 Explicit `--baseline-command` and `--migration-command` JSON argv arrays can
 select other trusted executables. The tool never executes commands embedded in
 an untrusted capsule, installs dependencies, or changes product policy.
@@ -213,8 +215,95 @@ the replay contract.
 ### Remaining program work
 
 Native L1-triggered capture/reduction and divergence-ledger/fixture-corpus
-registration remain separate work. Expression/AST reduction, argument and
-literal simplification, timeout/crash-specific predicates, and full deterministic
-runtime/environment capture are not implemented by this line reducer. The
-regression suite uses explicit Node/Node processes to validate orchestration;
-native Franken compatibility must still be measured separately.
+registration remain separate work. Expression/AST-aware reduction, structured
+argument simplification, timeout/crash-specific predicates, and full deterministic
+runtime/environment capture are not implemented. Section 8 adds bounded deletion
+inside source lines and binary stdin fixtures, not a language-aware rewrite or
+general-purpose input generator. Regression suites use explicit Node/Node
+processes to validate orchestration; native Franken compatibility remains separate.
+
+## 8. Sub-Line Source and Paired Stdin Reduction
+
+### Minified sources
+
+Line-only reduction cannot meaningfully shrink a one-line minified dependency.
+Select `--source-granularity utf8` to add contiguous Unicode-scalar deletion
+after line reduction, using the same all-case execution predicate:
+
+```sh
+python3 scripts/minimize_migration_failure.py original-failure.json \
+  --execute --expected-sha256 "$CAPSULE_SHA256" \
+  --source-file lib/minified.cjs --source-granularity utf8 \
+  --max-executions 128 --seconds 120 --out reduced-source.json --json
+```
+
+This mode does not parse, reformat, normalize Unicode, or inject replacement
+code. Every source candidate remains valid UTF-8; syntax-invalid JavaScript,
+new reference failures, and changed output are rejected by the runtime oracle.
+Deletion can occur inside a literal, but acceptance proves only the recorded
+case observations, not equivalent behavior on arbitrary inputs. `.mts` and
+`.cts` join the existing explicit JS/TS source extensions. Default `lines`
+behavior and all source size, line-count and confirmation limits remain intact.
+
+### Binary request fixtures
+
+Select a fixture already declared as `stdin` in the captured test manifest:
+
+```sh
+python3 scripts/minimize_migration_failure.py original-failure.json \
+  --execute --expected-sha256 "$CAPSULE_SHA256" \
+  --stdin-file fixtures/request.bin \
+  --max-executions 128 --seconds 120 --out reduced-input.json --json
+```
+
+Without `--source-file`, stdin selection leaves every source file unchanged.
+Repeat `--stdin-file` for multiple declared fixtures, or combine explicit source
+and stdin selections for a fixed-point search across both kinds of input.
+An input candidate replaces the selected fixture with **identical bytes in
+both captured runtime workspaces**. NUL and invalid UTF-8 bytes are supported;
+there is no decoding, newline normalization or transport substitution. The
+captured `file`/`pipe` mode, arguments, environment, test inventory and concurrency
+remain unchanged. Every case using a shared fixture must preserve its recorded
+behavior, including previously passing cases, not just the selected failure.
+
+Selections must be distinct, ordinary captured files, at most 1 MiB each, and
+declared by both inventories. Undeclared files, symlinks, duplicate selections,
+source/stdin overlap and more than 16 distinct selected paths are rejected before
+runtime lookup. A stdin selection may not be any selected test entrypoint or
+any output-expectation fixture, even one belonging to a different passing test.
+The existing runner checks identical request settings and golden fixture bytes
+before execution; this feature does not waive that admission barrier.
+
+### Budgets, receipts and verification
+
+Both modes use strict deletion and the existing repeated full-suite acceptance
+checks, runtime/validator identity rechecks and fresh final confirmations. The
+reduction kernel's source digest is recorded and rechecked alongside the main
+reducer. A per-search partition bound of 4,096 oracle calls also applies;
+exhaustion retains only the last accepted state and reports incomplete search.
+The full-suite execution limit remains shared across source and stdin searches,
+with final confirmations and 20% of wall time reserved. There is no unbounded
+character-by-character scan followed by an unverified best-effort result.
+
+Metadata distinguishes `source_granularity`, `source_files`, `stdin_files`, and
+the reduction kernel hash. Attempt records identify `kind: source` or `stdin`;
+stdin attempts identify `leg: both`. Byte totals count selected bytes in both
+captured workspaces, so a shared 100-byte stdin fixture contributes 200 bytes.
+No raw source, request bytes or output is placed in minimization metadata.
+The new capsule still contains sensitive input material and requires private
+storage. Replay remains reproduction of a failure, not a verified fix.
+
+Focused checks:
+
+```sh
+python3 -m unittest discover -s tests -p test_migration_reduction.py -v
+python3 -m unittest discover -s tests -p test_migration_reduction_capsules.py -v
+python3 -m unittest discover -s tests -p test_minimize_migration_failure.py -v
+```
+
+The capsule regressions use the production capture, validation, minimization
+and replay functions with actual Node processes. They cover minified-source
+reduction, shared binary input preserving passing cases, file-mode replay after
+relocation, protected fixture admission and reserved confirmation budgets. They
+do not establish native engine compatibility, a migration-throughput KPI,
+general determinism, an OS sandbox, or a global/grammar-level minimum.

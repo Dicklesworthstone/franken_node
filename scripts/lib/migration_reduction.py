@@ -87,3 +87,16 @@ def reduce_utf8(data: bytes, interesting: Callable[[bytes], bool], *,
         raise ValueError("source reduction requires valid UTF-8") from None
     return _delete_complements(text, lambda value: interesting(value.encode("utf-8")),
                                max_candidates).encode("utf-8")
+
+
+def reduce_bytes(data: bytes, interesting: Callable[[bytes], bool], *,
+                 max_candidates: int = MAX_CANDIDATES) -> bytes:
+    """Delete binary input spans without decoding or inventing replacement bytes.
+
+    The caller must apply each candidate to BOTH captured runtime requests,
+    leaving output-oracle fixtures and execution settings unchanged. Repeated
+    full-suite execution, not substring detection, authorizes each acceptance.
+    Input size and attempted partitions are bounded independently of the oracle.
+    """
+    _bounded_bytes(data)
+    return _delete_complements(data, interesting, max_candidates)

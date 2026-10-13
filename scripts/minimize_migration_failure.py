@@ -86,6 +86,57 @@ def selected_sources(snapshots: dict, observation: dict, source_files) -> list[t
     return selected
 
 
+def selected_stdin(snapshots: dict, stdin_files, sources: list[tuple[str, int]]):
+    """Admit only explicit shared stdin fixtures, never the independent oracle.
+
+    This runs on authenticated in-memory observations, before runtime lookup.
+    Source reduction and input reduction are disjoint. A data fixture cannot
+    double as an executed test or any test's golden output, even a passing one.
+    """
+    if stdin_files is None:
+        return []
+    if (not isinstance(stdin_files, (list, tuple))
+            or not 1 <= len(stdin_files) <= MAX_SOURCE_FILES):
+        raise ValueError("select between 1 and 16 captured stdin files")
+    paths = []
+    for path in stdin_files:
+        replay.safe_path(path)
+        if path in paths:
+            raise ValueError("duplicate reduction stdin file")
+        paths.append(path)
+    source_paths = {snapshots[leg][index].path for leg, index in sources}
+    if source_paths.intersection(paths):
+        raise ValueError("source and stdin reduction selections must be disjoint")
+    if len(source_paths) + len(paths) > MAX_SOURCE_FILES:
+        raise ValueError("select at most 16 source and stdin paths in total")
+    inventories = {leg: runner.captured_test_inventory(snapshots[leg]) for leg in replay.LEGS}
+    entries = {leg: {entry.path: entry for entry in snapshots[leg]} for leg in replay.LEGS}
+    runner.matched_test_execution(inventories["baseline"], inventories["migration"],
+                                  entries["baseline"], entries["migration"])
+    for leg, inventory in inventories.items():
+        declared = {settings.stdin for settings in inventory.values() if settings.stdin is not None}
+        protected = set(inventory)
+        for settings in inventory.values():
+            protected.update(settings.expectations.fixtures())
+        if any(path not in declared for path in paths):
+            raise ValueError("stdin reduction requires a fixture declared by the captured test inventory")
+        if protected.intersection(paths):
+            raise ValueError("stdin reduction cannot change a test entrypoint or output expectation fixture")
+    positions = {leg: {entry.path: index for index, entry in enumerate(snapshots[leg])}
+                 for leg in replay.LEGS}
+    selected = []
+    for path in sorted(paths):
+        targets = []
+        for leg in replay.LEGS:
+            entry = entries[leg].get(path)
+            if (entry is None or entry.link is not None or type(entry.data) is not bytes
+                    or len(entry.data) > migration_reduction.MAX_REDUCTION_BYTES):
+                raise ValueError("stdin reduction requires regular captured files of at most 1 MiB")
+            targets.append((leg, positions[leg][path]))
+        selected.append((path, tuple(targets)))
+    return selected
+
+
 def reduce_lines(lines: list[bytes], interesting) -> list[bytes]:
     """Complement-based ddmin; syntax-breaking candidates simply fail the oracle.
 
@@ -126,7 +177,8 @@ def minimize_migration(artifact: dict, *, execute: bool = False,
                        migration_command=runner.DEFAULT_MIGRATION_COMMAND,
                        source_files=None, expected_sha256: str | None = None,
                        max_executions: int = 128, seconds: float = 120,
-                       confirmations: int = 2, source_granularity: str = "lines") -> dict:
+                       confirmations: int = 2, source_granularity: str = "lines",
+                       stdin_files=None) -> dict:
     """Return a newly measured capsule; never mutate the supplied capsule.
 
     Execution budget counts complete-suite oracle invocations, not individual
@@ -145,7 +197,12 @@ def minimize_migration(artifact: dict, *, execute: bool = False,
     best = replay.validate_capsule(artifact, expected_sha256)
     original = artifact["expected"]
     require_stable_failure(original)
-    selected = selected_sources(best, original, source_files)
+    # Explicit stdin selection alone leaves source unchanged. Supplying source
+    # paths too opts into a joint fixed-point search over the two input kinds.
+    sources = ([] if stdin_files is not None and source_files is None
+               else selected_sources(best, original, source_files))
+    inputs = selected_stdin(best, stdin_files, sources)
+    selected = sources + [target for _, targets in inputs for target in targets]
     options = replay.checked_options(artifact["options"])
     commands, bindings = replay.runtime_bindings(baseline_command, migration_command, deadline)
     if bindings != artifact["runtime_bindings"]:
@@ -199,12 +256,21 @@ def minimize_migration(artifact: dict, *, execute: bool = False,
                   hashlib.sha256(snapshots[leg][index].data).hexdigest()) for leg, index in selected]
         return hashlib.sha256(replay.canonical_bytes(state)).hexdigest()
 
-    def try_candidate(leg, index, lines):
+    def try_candidate(targets, data, kind):
         nonlocal best
-        previous = best[leg][index]
-        data = b"".join(lines)
+        # Cached rejections still cost partitioning and hashing work. They
+        # must not bypass the wall-time reserve for final confirmations.
+        if time.monotonic() >= search_deadline:
+            raise ReductionBudgetExhausted("wall_time_budget")
+        previous = best[targets[0][0]][targets[0][1]]
         candidate = {name: list(entries) for name, entries in best.items()}
-        candidate[leg][index] = replace(previous, data=data)
+        before_bytes = 0
+        for leg, index in targets:
+            entry = best[leg][index]
+            if len(data) >= len(entry.data):
+                raise ValueError("reduction candidate must strictly decrease selected input bytes")
+            before_bytes += len(entry.data)
+            candidate[leg][index] = replace(entry, data=data)
         key = candidate_key(candidate)
         if key in rejected:
             stats["cache_hits"] += 1
@@ -221,8 +287,10 @@ def minimize_migration(artifact: dict, *, execute: bool = False,
                 outcome = "rejected"
                 break
         stats[outcome] += 1
-        attempts.append({"candidate_sha256": key, "leg": leg, "path": previous.path,
-                         "before_bytes": len(previous.data), "after_bytes": len(data), "outcome": outcome})
+        attempts.append({"candidate_sha256": key, "kind": kind,
+                         "leg": targets[0][0] if len(targets) == 1 else "both", "path": previous.path,
+                         "before_bytes": before_bytes, "after_bytes": len(data) * len(targets),
+                         "outcome": outcome})
         if outcome == "accepted":
             best = candidate
             return True
@@ -235,16 +303,23 @@ def minimize_migration(artifact: dict, *, execute: bool = False,
     try:
         while True:
             accepted_before = stats["accepted"]
-            for leg, index in selected:
+            for leg, index in sources:
                 reduce_lines(best[leg][index].data.splitlines(keepends=True),
-                             lambda lines, leg=leg, index=index: try_candidate(leg, index, lines))
+                             lambda lines, leg=leg, index=index:
+                             try_candidate(((leg, index),), b"".join(lines), "source"))
                 if source_granularity == "utf8":
                     # Keep the SAME all-case execution predicate, confirmation
                     # count and reserved final budget. A smaller parse failure
                     # or changed successful case is not the original failure.
                     migration_reduction.reduce_utf8(
                         best[leg][index].data,
-                        lambda data, leg=leg, index=index: try_candidate(leg, index, [data]))
+                        lambda data, leg=leg, index=index:
+                        try_candidate(((leg, index),), data, "source"))
+            for _, targets in inputs:
+                leg, index = targets[0]
+                migration_reduction.reduce_bytes(
+                    best[leg][index].data,
+                    lambda data, targets=targets: try_candidate(targets, data, "stdin"))
             if stats["accepted"] == accepted_before:
                 break
     except (ReductionBudgetExhausted, migration_reduction.CandidateBudgetExceeded) as error:
@@ -265,13 +340,15 @@ def minimize_migration(artifact: dict, *, execute: bool = False,
     metadata = {
         "schema_version": "migration-minimization-v1",
         "parent_content_sha256": artifact["content_sha256"],
-        "algorithm": ("ddmin-line-complements-fixed-point-v1" if source_granularity == "lines"
+        "algorithm": ("ddmin-captured-source-stdin-fixed-point-v1" if inputs else
+                      "ddmin-line-complements-fixed-point-v1" if source_granularity == "lines"
                       else "ddmin-line-utf8-complements-fixed-point-v1"),
         "source_granularity": source_granularity,
         "predicate": "all-recorded-case-observations-exact",
         "implementation_sha256": implementation_hash,
         "reduction_kernel_sha256": kernel_hash,
-        "source_files": sorted({best[leg][index].path for leg, index in selected}),
+        "source_files": sorted({best[leg][index].path for leg, index in sources}),
+        "stdin_files": [path for path, _ in inputs],
         "initial_bytes": initial_bytes, "final_bytes": final_bytes,
         "confirmations": confirmations, "final_confirmations": confirmations,
         "max_executions": max_executions, "seconds": seconds,
@@ -337,6 +414,8 @@ def main() -> int:
     parser.add_argument("--source-file", action="append", help="shared JS/TS path; default: failing test files")
     parser.add_argument("--source-granularity", choices=("lines", "utf8"), default="lines",
                         help="utf8 also deletes sub-line spans for minified sources; every candidate executes both runtimes")
+    parser.add_argument("--stdin-file", action="append",
+                        help="reduce a declared captured stdin fixture on both runtimes; source is unchanged unless --source-file is also supplied")
     parser.add_argument("--expected-sha256")
     parser.add_argument("--baseline-command", type=json.loads, default=list(runner.DEFAULT_BASELINE_COMMAND))
     parser.add_argument("--migration-command", type=json.loads, default=list(runner.DEFAULT_MIGRATION_COMMAND))
@@ -390,7 +469,8 @@ def main() -> int:
                                           source_files=args.source_file, expected_sha256=args.expected_sha256,
                                           max_executions=args.max_executions, seconds=remaining,
                                           confirmations=args.confirmations,
-                                          source_granularity=args.source_granularity)
+                                          source_granularity=args.source_granularity,
+                                          stdin_files=args.stdin_file)
             replay.write_capsule(artifact, args.out)
             preserved.update(reduced_capsule=str(args.out), reduced_sha256=artifact["content_sha256"])
             result = {"verdict": "REDUCED" if artifact["minimized"] else "UNCHANGED",
