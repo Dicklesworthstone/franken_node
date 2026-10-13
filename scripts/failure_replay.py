@@ -223,8 +223,15 @@ def decode_snapshots(manifests: dict, blobs: dict) -> dict:
     return snapshots
 
 
-def execution_observation(report: dict) -> dict:
-    """Project only measured behavior; clocks and temporary roots are not behavior."""
+def execution_observation(report: dict, *, complete_file_roles: tuple[str, ...] = LEGS) -> dict:
+    """Retain measured behavior, including wrong generated-file contents.
+
+    Capture may retain incomplete files for offline diagnosis. Replay and
+    reduction require complete measurements; fix verification requires them
+    for the reference, while a still-broken candidate remains a failed fix.
+    Neither expected fixture hashes nor generic mismatch labels are actual
+    file observations. Do not project away this distinction.
+    """
     summary = report["summary"]
     if (summary["verdict"] not in {"PASS", "FAIL"} or not report["validation_results"]
             or summary["skipped"] or summary["errored"]):
@@ -234,6 +241,12 @@ def execution_observation(report: dict) -> dict:
         case = {key: row[key] for key in ("test", "band", "status", "severity", "divergences")}
         for leg in LEGS:
             case[leg] = {key: row[leg][key] for key in ("exit_code", "termination", "streams")}
+            if "file_outputs" in row[leg]:
+                outputs = row[leg]["file_outputs"]
+                if leg in complete_file_roles and any(value.get("complete") is not True
+                                                       for value in outputs.values()):
+                    raise ValueError("incomplete file output observations cannot certify reproduction")
+                case[leg]["file_outputs"] = outputs
             if report["filesystem_comparison"]:
                 delta = row[leg]["workspace_delta"]
                 case[leg]["workspace_delta"] = {key: delta[key] for key in ("sha256", "changed_paths")}
@@ -379,7 +392,31 @@ def validate_capsule(artifact: dict, expected_sha256: str | None = None) -> dict
                 if (not isinstance(value, dict) or not isinstance(value.get("sha256"), str)
                         or HASH_RE.fullmatch(value["sha256"]) is None):
                     raise ValueError("missing expected output digest")
-    return decode_snapshots(artifact.get("snapshots"), artifact.get("blobs"))
+    snapshots = decode_snapshots(artifact.get("snapshots"), artifact.get("blobs"))
+    _validate_capsule_file_evidence(expected, snapshots)
+    return snapshots
+
+
+def _validate_capsule_file_evidence(expected: dict, snapshots: dict) -> None:
+    """Check file measurements against captured fixtures without executing code.
+
+    Reuse the bounded observation contract of the ZIP reader. Historical
+    missing measurements remain inspectable; execution separately requires
+    evidence for every declared file, including on the unchanged reference.
+    """
+    inventories = {leg: runner.captured_test_inventory(entries) for leg, entries in snapshots.items()}
+    indices = {leg: {entry.path: entry for entry in entries} for leg, entries in snapshots.items()}
+    runner.matched_test_execution(inventories["baseline"], inventories["migration"],
+                                  indices["baseline"], indices["migration"])
+    if set(inventories["baseline"]) != {case["test"] for case in expected["cases"]}:
+        raise ValueError("capsule observation inventory differs from captured tests")
+    for case in expected["cases"]:
+        if (not isinstance(case.get("divergences"), list)
+                or any(not isinstance(item, dict) for item in case["divergences"])):
+            raise ValueError("invalid capsule divergence observations")
+        for leg in LEGS:
+            runner._validate_file_outputs(case[leg], inventories[leg][case["test"]].expectations,
+                                          indices[leg], case, leg)
 
 
 def execute_snapshots(snapshots: dict, baseline_command, migration_command,
@@ -427,7 +464,8 @@ def capture_migration(project: Path, *, migrated_project: Path | None = None,
     manifests, blobs = encode_snapshots(snapshots)
     snapshots = decode_snapshots(manifests, blobs)
     report = execute_snapshots(snapshots, commands["baseline"], commands["migration"], options, deadline=deadline)
-    expected = execution_observation(report)
+    # Preserve incomplete measured files for inspection, not as replay proof.
+    expected = execution_observation(report, complete_file_roles=())
     _, after_bindings = runtime_bindings(commands["baseline"], commands["migration"], deadline)
     if after_bindings != bindings:
         raise ValueError("runtime or validator changed during capture")
@@ -532,6 +570,9 @@ def replay_migration(artifact: dict, *, execute: bool = False,
     deadline = time.monotonic() + options["total_timeout_seconds"]
     if verify_fix:
         _require_fix_reference(artifact["expected"])
+    complete_file_roles = ("baseline",) if verify_fix else LEGS
+    runner._require_file_output_evidence(
+        {"validation_results": artifact["expected"]["cases"]}, snapshots, complete_file_roles)
     expected_inputs = artifact["expected"]["inputs"]
     source_fix = None
     candidate_root = None
@@ -562,7 +603,8 @@ def replay_migration(artifact: dict, *, execute: bool = False,
     if source_fix is not None:
         result["source_fix"] = source_fix
     try:
-        observed = execution_observation(report)
+        runner._require_file_output_evidence(report, snapshots, complete_file_roles)
+        observed = execution_observation(report, complete_file_roles=complete_file_roles)
     except ValueError as error:
         result["error"] = str(error)
         return result
