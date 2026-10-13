@@ -58,6 +58,63 @@ python3 scripts/failure_replay.py \
 
 Fix verification permits the migration executable/arguments to change, but not the baseline or validators. The original reference runs must have exited successfully with complete output. Every newly measured reference observation must still match its original observation, and every captured migration case must now pass. If both current runtimes agree only because the reference drifted, the result is `REFERENCE_DRIFT`, not a verified fix. `FIX_VERIFIED` covers these captured cases only; it is not a general compatibility or release certificate.
 
+### Repaired application source
+
+Use `--candidate-project` to verify a repaired application or dependency tree,
+not just an updated runtime executable:
+
+```bash
+python3 scripts/failure_replay.py \
+  --replay ./failure-capsule.json --execute --verify-fix \
+  --expected-sha256 "$CAPSULE_SHA256" \
+  --candidate-project ./repaired-project \
+  --out ./source-fix-result.json --json
+```
+
+The candidate must be a complete project tree. It is captured once before any
+guest execution and replaces only the capsule's migration snapshot. The
+reference snapshot comes exclusively from the pinned capsule; the original
+live projects need not exist. Both original input digest bindings are checked
+before substitution, and the staged repaired input is checked against its new
+capture digest before execution. Source capture and execution share the recorded
+total deadline. The 64 MiB combined expanded snapshot bound still applies.
+
+The selected test entrypoints, declared stdin files, and output-expectation
+fixtures must remain ordinary files with identical bytes and permission modes.
+The complete recorded case inventory, application arguments, working directory,
+environment overrides, stdin transport, expectation mappings, and concurrency
+must also be unchanged. These checks finish before runtime lookup or launch.
+Repair application code behind a stable test harness rather than editing or
+removing the harness to manufacture success. Other source, dependency, and
+configuration changes are captured and measured, not silently ignored.
+
+Source substitution requires `--verify-fix`, explicit execution consent, and an
+independently supplied capsule hash. It does not waive baseline executable or
+validator bindings. Runtime executables must remain outside the repaired tree.
+A reference that failed an independent output oracle is not an admissible seed,
+even when its exit code was zero. All cases, including previously passing cases,
+must pass, and reference drift still defeats agreement of both current runtimes.
+Ordinary replay and runtime-only fix verification retain their existing paths.
+
+Reports add `source_fix` with the original and repaired migration input hashes,
+protected paths, and a bounded source-change summary. They do not include raw
+source or request bytes. The failure capsule and live input trees are not edited.
+An invalid source request yields `ERROR`, an unsuccessful repair yields
+`FIX_NOT_VERIFIED`, and changed reference observations yield `REFERENCE_DRIFT`.
+`--migrated-project` remains capture-only; it cannot silently select replay input.
+
+The protection covers declared fixtures and selected entrypoints, not every
+transitive test helper or implicit data dependency. Passing proves these captured
+observations, not correctness on arbitrary inputs. Ambient environment and
+external services remain outside the capsule; this is not hostile-code isolation.
+Use trusted projects and review dependency/test-helper changes independently.
+Captures remain bound to their validator revisions; this feature does not waive
+the validator hash for capsules made using older code.
+
+```bash
+python3 -m unittest discover -s tests -p test_migration_source_fix.py -v
+```
+
 ## Capsule and Observation Contract
 
 Schema: `migration-failure-replay-v1`.

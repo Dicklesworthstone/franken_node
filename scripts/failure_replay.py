@@ -447,29 +447,107 @@ def capture_migration(project: Path, *, migrated_project: Path | None = None,
     return artifact
 
 
+def _require_fix_reference(expected: dict) -> None:
+    """A failed reference or independent oracle is not a basis for a fix claim."""
+    if (expected["validation_verdict"] != "FAIL"
+            or any(case["baseline"].get("exit_code") != 0
+                   or case["baseline"].get("termination") != "exited"
+                   or not all(stream.get("complete") is True
+                              for stream in case["baseline"]["streams"].values())
+                   or any(item.get("channel") == "baseline" for item in case["divergences"])
+                   for case in expected["cases"])):
+        raise ValueError("fix verification requires an original failing migration with successful complete reference runs and oracles")
+
+
+def _capture_source_fix(snapshots: dict, expected: dict, project: Path,
+                        deadline: float) -> tuple[dict, dict, Path, dict]:
+    """Replace only the migration tree; preserve measured tests and requests.
+
+    Read the repaired tree once, before any guest runs. Validate the old input
+    bindings before replacing them, so changing source cannot waive a corrupt
+    capsule's migration hash. Neither the capsule nor either live project is
+    edited. Transitive test helpers are not identified as immutable oracles;
+    this is captured-case verification, not proof of arbitrary-input behavior.
+    """
+    inventories = {leg: runner.captured_test_inventory(entries) for leg, entries in snapshots.items()}
+    by_path = {leg: {entry.path: entry for entry in entries} for leg, entries in snapshots.items()}
+    runner.matched_test_execution(inventories["baseline"], inventories["migration"],
+                                  by_path["baseline"], by_path["migration"])
+    if set(inventories["migration"]) != {case["test"] for case in expected["cases"]}:
+        raise ValueError("source fix must retain the complete recorded test inventory")
+    # Use the actual staging/capture contract, including directory traversal
+    # order and link normalization, rather than inventing another digest order.
+    with tempfile.TemporaryDirectory(prefix="migration-fix-admission-") as temporary:
+        for leg in LEGS:
+            workspace = Path(temporary) / leg
+            runner.stage_project(snapshots[leg], workspace, deadline)
+            _, digest = runner.capture_project(workspace, deadline)
+            if digest != expected["inputs"][f"{leg}_sha256"]:
+                raise ValueError("original capsule input digest mismatch; refusing source substitution")
+    root = Path(project).resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError("candidate project must be a directory")
+    entries, digest = runner.capture_project(root, deadline)
+    candidate = runner.captured_test_inventory(entries)
+    candidate_by_path = {entry.path: entry for entry in entries}
+    original = inventories["migration"]
+    runner.matched_test_execution(original, candidate, by_path["migration"], candidate_by_path)
+    protected = set(original)
+    for settings in original.values():
+        if settings.stdin is not None:
+            protected.add(settings.stdin)
+        protected.update(settings.expectations.fixtures())
+    for name in sorted(protected):
+        # Entry identity includes mode, link type and bytes. An unchanged link
+        # spelling is insufficient if its target was replaced by the candidate.
+        runner._ordinary_file(by_path["migration"], name)
+        runner._ordinary_file(candidate_by_path, name)
+        if by_path["migration"][name] != candidate_by_path[name]:
+            raise ValueError(f"source fix changed a protected test or fixture: {name}")
+    changed = runner.summarize_delta(runner.workspace_delta(snapshots["migration"], entries))
+    replacement = {"baseline": snapshots["baseline"], "migration": entries}
+    # Enforce the capsule's combined expanded-byte and path-graph bounds too,
+    # not merely the standalone runner's larger per-project capture allowance.
+    manifests, blobs = encode_snapshots(replacement)
+    replacement = decode_snapshots(manifests, blobs)
+    inputs = {**expected["inputs"], "migration_sha256": digest}
+    detail = {"original_migration_sha256": expected["inputs"]["migration_sha256"],
+              "candidate_migration_sha256": digest, "protected_paths": sorted(protected),
+              "source_changes": changed}
+    return replacement, inputs, root, detail
+
+
 def replay_migration(artifact: dict, *, execute: bool = False,
                      baseline_command=runner.DEFAULT_BASELINE_COMMAND,
                      migration_command=runner.DEFAULT_MIGRATION_COMMAND,
-                     expected_sha256: str | None = None, verify_fix: bool = False) -> dict:
+                     expected_sha256: str | None = None, verify_fix: bool = False,
+                     candidate_project: Path | None = None) -> dict:
     """Re-execute, not self-compare. Never execute argv or environment from a capsule."""
+    if candidate_project is not None and (not verify_fix or expected_sha256 is None):
+        raise ValueError("candidate project requires fix verification and an independently pinned capsule hash")
     snapshots = validate_capsule(artifact, expected_sha256)
     if not execute:
         raise ValueError("replay requires explicit execute=True / --execute consent")
     options = checked_options(artifact["options"])
     deadline = time.monotonic() + options["total_timeout_seconds"]
+    if verify_fix:
+        _require_fix_reference(artifact["expected"])
+    expected_inputs = artifact["expected"]["inputs"]
+    source_fix = None
+    candidate_root = None
+    if candidate_project is not None:
+        snapshots, expected_inputs, candidate_root, source_fix = _capture_source_fix(
+            snapshots, artifact["expected"], candidate_project, deadline)
     commands, bindings = runtime_bindings(baseline_command, migration_command, deadline)
+    if candidate_root is not None and any(Path(command[0]).is_relative_to(candidate_root)
+                                          for command in commands.values()):
+        raise ValueError("fix-verification executables must be outside the candidate project")
     recorded_bindings = artifact["runtime_bindings"]
     required = ("baseline", "validators") if verify_fix else (*LEGS, "validators")
     if any(bindings[component] != recorded_bindings[component] for component in required):
         raise ValueError("runtime provenance mismatch; ordinary replay requires the recorded executables and arguments")
-    if verify_fix and (artifact["expected"]["validation_verdict"] != "FAIL"
-                      or any(case["baseline"].get("exit_code") != 0
-                             or case["baseline"].get("termination") != "exited"
-                             or not all(stream.get("complete") is True for stream in case["baseline"]["streams"].values())
-                             for case in artifact["expected"]["cases"])):
-        raise ValueError("fix verification requires an original failing migration with successful complete reference runs")
     report = execute_snapshots(snapshots, commands["baseline"], commands["migration"],
-                               options, artifact["expected"]["inputs"], deadline=deadline)
+                               options, expected_inputs, deadline=deadline)
     _, after_bindings = runtime_bindings(commands["baseline"], commands["migration"], deadline)
     if after_bindings != bindings:
         raise ValueError("runtime or validator changed during replay")
@@ -481,6 +559,8 @@ def replay_migration(artifact: dict, *, execute: bool = False,
               "mode": "fix-verification" if verify_fix else "replay",
               "runtime_bindings": bindings,
               "environment_reproduced": False, "release_certification": False}
+    if source_fix is not None:
+        result["source_fix"] = source_fix
     try:
         observed = execution_observation(report)
     except ValueError as error:
@@ -632,6 +712,8 @@ def main() -> int:
     parser.add_argument("--migration-command", type=json.loads, default=list(runner.DEFAULT_MIGRATION_COMMAND))
     parser.add_argument("--execute", action="store_true", help="approve executing trusted captured project code")
     parser.add_argument("--verify-fix", action="store_true", help="allow a new migration runtime; require unchanged reference evidence and all captured cases passing")
+    parser.add_argument("--candidate-project", type=Path,
+                        help="with --replay --verify-fix and a pinned hash, capture repaired application source without changing tests or fixtures")
     parser.add_argument("--expected-sha256", help="capsule content hash obtained from an independent trusted channel")
     parser.add_argument("--compare-filesystem", action="store_true")
     parser.add_argument("--timeout-seconds", type=float, default=30.0)
@@ -641,6 +723,10 @@ def main() -> int:
     args = parser.parse_args()
     if args.verify_fix and not args.replay:
         parser.error("--verify-fix requires --replay")
+    if args.candidate_project is not None and (not args.verify_fix or args.expected_sha256 is None):
+        parser.error("--candidate-project requires --replay --verify-fix and --expected-sha256")
+    if args.migrated_project is not None and not args.capture:
+        parser.error("--migrated-project is capture-only; source-fix verification uses --candidate-project")
     try:
         if args.self_test:
             result = self_test()
@@ -668,7 +754,7 @@ def main() -> int:
             artifact = load_replay(args.replay)
             result = replay_migration(artifact, execute=True, baseline_command=args.baseline_command,
                                       migration_command=args.migration_command, expected_sha256=args.expected_sha256,
-                                      verify_fix=args.verify_fix)
+                                      verify_fix=args.verify_fix, candidate_project=args.candidate_project)
             code = {"REPRODUCED": 0, "FIX_VERIFIED": 0, "DIVERGED": 1, "FIX_NOT_VERIFIED": 1,
                     "REFERENCE_DRIFT": 2, "ERROR": 2}[result["verdict"]]
             if args.out:
