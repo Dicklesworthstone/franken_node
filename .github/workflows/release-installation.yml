@@ -1,0 +1,66 @@
+name: Release installation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'install.sh'
+      - 'tests/test_install_script.py'
+      - 'tests/test_install_release_lifecycle.py'
+      - '.github/workflows/dist.yml'
+      - '.github/workflows/release-installation.yml'
+  pull_request:
+    paths:
+      - 'install.sh'
+      - 'tests/test_install_script.py'
+      - 'tests/test_install_release_lifecycle.py'
+      - '.github/workflows/dist.yml'
+      - '.github/workflows/release-installation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    env:
+      INSTALL_TEST_BASH: /bin/bash
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Exercise archives and interrupted upgrades on the native host
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          git rev-parse HEAD > evidence/revision.txt
+          git hash-object install.sh tests/test_install_release_lifecycle.py > evidence/source-blobs.txt
+          /bin/bash --version > evidence/bash-version.txt
+          tar --version > evidence/tar-version.txt
+          python3 --version > evidence/python-version.txt
+          /bin/bash -n install.sh
+          python3 -m unittest discover -s tests -p test_install_release_lifecycle.py -v 2>&1 | tee evidence/lifecycle-tests.log
+      - name: Run the original Linux installer regressions
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tests -p test_install_script.py -v 2>&1 | tee evidence/original-tests.log
+      - name: Preserve exact installer evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: release-installation-${{ matrix.os }}
+          path: |
+            evidence/
+            install.sh
+            tests/test_install_release_lifecycle.py
+          if-no-files-found: error
+          retention-days: 7
