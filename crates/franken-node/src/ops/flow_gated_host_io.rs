@@ -18,10 +18,11 @@
 //! Observed rename/symlink relationships remain live: a later sensitive copy
 //! into their target also reclassifies aliases and previously opened descriptors.
 //! Before any subsequent network effect, the gate checks whether the outbound
-//! payload or destination CONTAINS a secret sample; if so — and absent a valid
-//! declassification (operator-authorized override, not yet wired) — the effect
-//! fails closed with [`HostIoError::Denied`] and never reaches the wrapped
-//! provider. The engine's host-I/O transcript records the denial.
+//! payload or destination CONTAINS a secret sample, literally or as a direct
+//! hex/base64/base64url encoding; if so — and absent a valid declassification
+//! (operator-authorized override, not yet wired) — the effect fails closed with
+//! [`HostIoError::Denied`] and never reaches the wrapped provider. The engine's
+//! host-I/O transcript records the denial.
 //!
 //! Containment (not exact-hash) is required because an http egress payload is
 //! the *framed* request (headers + body) — the secret appears as a substring.
@@ -42,9 +43,11 @@
 //!
 //! Scope. This gate prevents secret NETWORK egress only. A local `fs.write`
 //! that copies a secret is labeled by the ledger for evidence but is not an
-//! external sink and is not blocked here. Following a secret through in-guest
-//! transforms (encoding, slicing) needs per-datum lineage the transcript does
-//! not carry (engine-side). Behavioral coverage lives in
+//! external sink and is not blocked here. Encoded matching covers one direct
+//! encoding of a complete sample, including padded/unpadded base64 and mixed-case
+//! hex. Arbitrary slicing, nested encodings, or encoding a sample together with
+//! other data still need per-datum engine lineage; this is not a general taint
+//! engine. Behavioral coverage lives in
 //! `crates/franken-node/tests/native_engine_compat.rs` and the registered
 //! `ssrf_gated_host_io_egress` integration target.
 
@@ -56,6 +59,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "engine")]
+use base64::Engine as _;
+#[cfg(feature = "engine")]
 use frankenengine_extension_host::host_io::{
     FsMetaResult, FsOperation, HostIoCapability, HostIoControl, HostIoError,
     HostIoExceptionProvenance, HostIoOutcome, HostIoProvider, HostIoRequest, HostIoResponse,
@@ -64,9 +69,11 @@ use frankenengine_extension_host::host_io::{
 #[cfg(feature = "engine")]
 use crate::security::lineage_tracker::classify_sensitive_source_path;
 
-/// Bounds for exact containment tracking. Reads outside these bounds are NOT
-/// public: a nonempty untrackable read permanently closes the network gate.
-/// Empty reads reveal no bytes and do not consume the sample budget.
+/// Bounds for containment tracking. Reads outside these bounds are NOT public:
+/// a nonempty untrackable read permanently closes the network gate. Each source
+/// owns four bounded patterns and their u32 failure tables (under 29 MiB total
+/// pattern storage at the maximum sample count). Encodings do not consume extra
+/// source slots. Empty reads reveal no bytes and do not consume the budget.
 #[cfg(feature = "engine")]
 const MIN_SECRET_SAMPLE_LEN: usize = 8;
 #[cfg(feature = "engine")]
@@ -201,22 +208,102 @@ impl FileLineage {
     }
 }
 
+/// Compiled KMP pattern. Neither bytes nor failure tables implement Debug:
+/// even derived encodings and prefix lengths disclose protected source data.
+/// Compilation is linear in the bounded sample; matching is linear in outbound
+/// bytes and allocates nothing, including adversarial repeated-prefix inputs.
+#[cfg(feature = "engine")]
+struct SecretPattern {
+    bytes: Vec<u8>,
+    failure: Vec<u32>,
+    ascii_case_insensitive: bool,
+}
+
+#[cfg(feature = "engine")]
+impl SecretPattern {
+    fn new(mut bytes: Vec<u8>, ascii_case_insensitive: bool) -> Self {
+        if ascii_case_insensitive {
+            bytes.make_ascii_lowercase();
+        }
+        let mut failure = vec![0_u32; bytes.len()];
+        let mut matched = 0;
+        for index in 1..bytes.len() {
+            while matched > 0 && bytes[index] != bytes[matched] {
+                matched = failure[matched - 1] as usize;
+            }
+            if bytes[index] == bytes[matched] {
+                matched += 1;
+            }
+            failure[index] = u32::try_from(matched).expect("bounded secret pattern length");
+        }
+        Self {
+            bytes,
+            failure,
+            ascii_case_insensitive,
+        }
+    }
+
+    fn occurs_in(&self, outbound: &[u8]) -> bool {
+        if self.bytes.is_empty() || self.bytes.len() > outbound.len() {
+            return false;
+        }
+        let mut matched = 0;
+        for byte in outbound {
+            let byte = if self.ascii_case_insensitive {
+                byte.to_ascii_lowercase()
+            } else {
+                *byte
+            };
+            while matched > 0 && byte != self.bytes[matched] {
+                matched = self.failure[matched - 1] as usize;
+            }
+            if byte == self.bytes[matched] {
+                matched += 1;
+                if matched == self.bytes.len() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+#[cfg(feature = "engine")]
+struct SecretSample {
+    patterns: [SecretPattern; 4],
+}
+
+#[cfg(feature = "engine")]
+impl SecretSample {
+    fn new(bytes: &[u8]) -> Self {
+        use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
+        Self {
+            patterns: [
+                SecretPattern::new(bytes.to_vec(), false),
+                SecretPattern::new(hex::encode(bytes).into_bytes(), true),
+                // Omitting terminal padding matches both padded and unpadded
+                // forms as substrings. Base64 itself remains case-sensitive.
+                SecretPattern::new(STANDARD_NO_PAD.encode(bytes).into_bytes(), false),
+                SecretPattern::new(URL_SAFE_NO_PAD.encode(bytes).into_bytes(), false),
+            ],
+        }
+    }
+
+    fn source_bytes(&self) -> &[u8] {
+        &self.patterns[0].bytes
+    }
+
+    fn occurs_in(&self, outbound: &[u8]) -> bool {
+        self.patterns.iter().any(|pattern| pattern.occurs_in(outbound))
+    }
+}
+
 #[cfg(feature = "engine")]
 #[derive(Default)]
 struct SecretSamples {
-    samples: Vec<Vec<u8>>,
+    samples: Vec<SecretSample>,
     /// Sticky: dropping a sample must never restore permission to exfiltrate it.
     incomplete: bool,
-}
-
-/// True when `needle` occurs as a contiguous subsequence of `haystack`.
-#[cfg(feature = "engine")]
-fn slice_contains(haystack: &[u8], needle: &[u8]) -> bool {
-    !needle.is_empty()
-        && needle.len() <= haystack.len()
-        && haystack
-            .windows(needle.len())
-            .any(|window| window == needle)
 }
 
 /// Match the host provider's first `fd=` argument semantics, including refusing
@@ -289,13 +376,13 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
             }
             // Deduplicate before testing capacity: a full but complete sample
             // set remains complete when a known secret is reread.
-            if secrets.samples.iter().any(|existing| existing == bytes) {
+            if secrets.samples.iter().any(|existing| existing.source_bytes() == bytes) {
                 return;
             }
             if secrets.samples.len() >= MAX_SECRET_SAMPLES {
                 secrets.incomplete = true;
             } else {
-                secrets.samples.push(bytes.to_vec());
+                secrets.samples.push(SecretSample::new(bytes));
             }
         }
     }
@@ -411,7 +498,7 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
             Ok(secrets) => secrets
                 .samples
                 .iter()
-                .any(|sample| slice_contains(outbound, sample)),
+                .any(|sample| sample.occurs_in(outbound)),
             Err(_) => {
                 return Err(HostIoError::Denied {
                     reason: format!(
@@ -921,5 +1008,96 @@ mod tests {
         }
         assert_denied(&gate, b"");
         assert_denied(&gate, b"public");
+    }
+
+    #[test]
+    fn encoded_samples_block_both_base64_alphabets_padding_and_hex_case() {
+        use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+        for length in [8, 9, 10] {
+            let gate = gate();
+            // These bytes force + and / in standard base64, and - and _ in URL-safe base64.
+            let secret = vec![0xfb, 0xff, 0xff, 0xab, 0xcd, 0xef, 0x7f, 0x01, 0x02, 0x03];
+            let secret = &secret[..length];
+            gate.record_secret(secret);
+            let mixed_hex: String = hex::encode(secret)
+                .chars()
+                .enumerate()
+                .map(|(index, value)| if index % 2 == 0 { value.to_ascii_uppercase() } else { value })
+                .collect();
+            for encoded in [
+                STANDARD.encode(secret),
+                STANDARD_NO_PAD.encode(secret),
+                URL_SAFE.encode(secret),
+                URL_SAFE_NO_PAD.encode(secret),
+                hex::encode(secret),
+                hex::encode_upper(secret),
+                mixed_hex,
+            ] {
+                assert_denied(&gate, format!("header:{encoded}:trailer").as_bytes());
+            }
+            assert!(gate.gate_outbound(b"unrelated public data").is_ok());
+            let samples = gate.secrets.lock().expect("sample state");
+            assert_eq!(samples.samples.len(), 1);
+            assert!(!samples.incomplete);
+        }
+    }
+
+    #[test]
+    fn compiled_matcher_agrees_with_containment_for_overlaps_and_case() {
+        for needle in [b"a".as_slice(), b"aaaab", b"ababa", b"aabaaa", b"ABcd", b"\0\xff\0"] {
+            for fold in [false, true] {
+                let pattern = SecretPattern::new(needle.to_vec(), fold);
+                for haystack in [b"".as_slice(), b"aaaaaaaab", b"abababababa", b"aabaaabaaa", b"xxaBcDyy", b"\0\0\xff\0"] {
+                    let expected = haystack.windows(needle.len()).any(|window| {
+                        if fold { window.eq_ignore_ascii_case(needle) } else { window == needle }
+                    });
+                    assert_eq!(pattern.occurs_in(haystack), expected);
+                }
+            }
+        }
+        assert!(!SecretPattern::new(Vec::new(), false).occurs_in(b"public"));
+        let pattern = SecretPattern::new([vec![b'a'; MAX_SECRET_SAMPLE_LEN - 1], vec![b'b']].concat(), false);
+        assert!(!pattern.occurs_in(&vec![b'a'; MAX_SECRET_SAMPLE_LEN * 4]));
+    }
+
+    #[test]
+    fn encoded_network_requests_are_denied_before_provider_dispatch() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use base64::engine::general_purpose::STANDARD;
+
+        #[derive(Debug)]
+        struct ObservingHost {
+            network_calls: Arc<AtomicUsize>,
+        }
+        impl HostIoProvider for ObservingHost {
+            fn name(&self) -> &str { "flow-regression-provider" }
+            fn perform(&self, request: &HostIoRequest, _: &[HostIoCapability]) -> HostIoOutcome {
+                if matches!(request, HostIoRequest::FsRead { .. }) {
+                    return Ok(HostIoResponse::FsRead { bytes: b"secret-token".to_vec() });
+                }
+                self.network_calls.fetch_add(1, Ordering::SeqCst);
+                Err(HostIoError::Io { detail: "provider reached".into() })
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = FlowGatedHostIo::new(ObservingHost { network_calls: Arc::clone(&calls) }, "encoded-egress");
+        let read = HostIoRequest::FsRead { path: ".env".into() };
+        gate.perform(&read, &[read.required_capability()]).expect("protected read");
+        let encoded = STANDARD.encode(b"secret-token").into_bytes();
+        let secret_endpoint = format!("{}.example.invalid:443", hex::encode(b"secret-token"));
+        for request in [
+            HostIoRequest::NetworkSend { endpoint: "public.example.invalid:443".into(), payload: encoded.clone() },
+            HostIoRequest::NetworkRequest { endpoint: "public.example.invalid:443".into(), payload: encoded, max_len: 1, use_tls: true },
+            HostIoRequest::NetworkSend { endpoint: secret_endpoint.clone(), payload: Vec::new() },
+            HostIoRequest::NetworkRequest { endpoint: secret_endpoint.clone(), payload: Vec::new(), max_len: 1, use_tls: false },
+            HostIoRequest::NetworkRecv { endpoint: secret_endpoint, max_len: 1 },
+        ] {
+            assert!(matches!(gate.perform(&request, &[request.required_capability()]),
+                Err(HostIoError::Denied { reason }) if reason.starts_with("flow_policy:")));
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let public = HostIoRequest::NetworkRecv { endpoint: "public.example.invalid:443".into(), max_len: 1 };
+        assert!(matches!(gate.perform(&public, &[public.required_capability()]), Err(HostIoError::Io { .. })));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }
