@@ -27,6 +27,10 @@ path = "rollout_verify.rs"
 name = "franken-migration-apply"
 path = "apply.rs"
 
+[[bin]]
+name = "franken-migration-fix"
+path = "fix.rs"
+
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
