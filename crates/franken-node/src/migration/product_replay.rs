@@ -25,6 +25,9 @@ use std::time::Instant;
 #[path = "product_minimizer.rs"]
 pub mod minimizer;
 
+#[path = "source_fix.rs"]
+pub mod source_fix;
+
 const SCHEMA: &str = "franken-node/product-migration-capsule/v1";
 
 #[derive(Serialize, Deserialize)]
@@ -73,6 +76,7 @@ fn implementation() -> String {
         implementation_hash(),
         include_str!("product_replay.rs").to_owned(),
         include_str!("product_oracle.rs").to_owned(),
+        include_str!("source_fix.rs").to_owned(),
     ] {
         hash.update((source.len() as u64).to_le_bytes());
         hash.update(source.as_bytes());
