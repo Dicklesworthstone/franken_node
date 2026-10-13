@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import failure_replay as replay
+from lib import migration_reduction
 
 runner = replay.runner
 MAX_SOURCE_FILES = 16
@@ -64,7 +65,7 @@ def selected_sources(snapshots: dict, observation: dict, source_files) -> list[t
     paths = []
     for path in source_files:
         replay.safe_path(path)
-        if Path(path).suffix not in {".js", ".mjs", ".cjs", ".ts", ".tsx"}:
+        if Path(path).suffix not in {".js", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"}:
             raise ValueError("only explicit JS/TS source files may be reduced, not configuration")
         if path in paths:
             raise ValueError("duplicate reduction source file")
@@ -125,7 +126,7 @@ def minimize_migration(artifact: dict, *, execute: bool = False,
                        migration_command=runner.DEFAULT_MIGRATION_COMMAND,
                        source_files=None, expected_sha256: str | None = None,
                        max_executions: int = 128, seconds: float = 120,
-                       confirmations: int = 2) -> dict:
+                       confirmations: int = 2, source_granularity: str = "lines") -> dict:
     """Return a newly measured capsule; never mutate the supplied capsule.
 
     Execution budget counts complete-suite oracle invocations, not individual
@@ -136,6 +137,8 @@ def minimize_migration(artifact: dict, *, execute: bool = False,
     if not execute:
         raise ValueError("minimization requires execute=True / --execute consent")
     validate_limits(max_executions, seconds, confirmations)
+    if source_granularity not in ("lines", "utf8"):
+        raise ValueError("source granularity must be lines or utf8")
     started = time.monotonic()
     deadline = started + seconds
     search_deadline = started + seconds * 0.8
@@ -148,6 +151,8 @@ def minimize_migration(artifact: dict, *, execute: bool = False,
     if bindings != artifact["runtime_bindings"]:
         raise ValueError("runtime provenance mismatch; reduction must use the captured runtimes and validators")
     implementation_hash = replay.hash_regular_file(Path(__file__), deadline)
+    kernel_path = Path(migration_reduction.__file__)
+    kernel_hash = replay.hash_regular_file(kernel_path, deadline)
     stats = {"executions": 0, "accepted": 0, "rejected": 0, "unresolved": 0, "cache_hits": 0}
     attempts = []
     rejected = set()
@@ -157,7 +162,9 @@ def minimize_migration(artifact: dict, *, execute: bool = False,
 
     def check_bindings():
         _, observed = replay.runtime_bindings(commands["baseline"], commands["migration"], deadline)
-        if observed != bindings or replay.hash_regular_file(Path(__file__), deadline) != implementation_hash:
+        if (observed != bindings
+                or replay.hash_regular_file(Path(__file__), deadline) != implementation_hash
+                or replay.hash_regular_file(kernel_path, deadline) != kernel_hash):
             raise ValueError("runtime or validator changed during minimization")
 
     def measure(snapshots, phase, expected_inputs=None):
@@ -231,9 +238,16 @@ def minimize_migration(artifact: dict, *, execute: bool = False,
             for leg, index in selected:
                 reduce_lines(best[leg][index].data.splitlines(keepends=True),
                              lambda lines, leg=leg, index=index: try_candidate(leg, index, lines))
+                if source_granularity == "utf8":
+                    # Keep the SAME all-case execution predicate, confirmation
+                    # count and reserved final budget. A smaller parse failure
+                    # or changed successful case is not the original failure.
+                    migration_reduction.reduce_utf8(
+                        best[leg][index].data,
+                        lambda data, leg=leg, index=index: try_candidate(leg, index, [data]))
             if stats["accepted"] == accepted_before:
                 break
-    except ReductionBudgetExhausted as error:
+    except (ReductionBudgetExhausted, migration_reduction.CandidateBudgetExceeded) as error:
         budget_reason = str(error)
 
     # Never reuse a cached acceptance as final proof. Regenerate new input
@@ -251,9 +265,12 @@ def minimize_migration(artifact: dict, *, execute: bool = False,
     metadata = {
         "schema_version": "migration-minimization-v1",
         "parent_content_sha256": artifact["content_sha256"],
-        "algorithm": "ddmin-line-complements-fixed-point-v1",
+        "algorithm": ("ddmin-line-complements-fixed-point-v1" if source_granularity == "lines"
+                      else "ddmin-line-utf8-complements-fixed-point-v1"),
+        "source_granularity": source_granularity,
         "predicate": "all-recorded-case-observations-exact",
         "implementation_sha256": implementation_hash,
+        "reduction_kernel_sha256": kernel_hash,
         "source_files": sorted({best[leg][index].path for leg, index in selected}),
         "initial_bytes": initial_bytes, "final_bytes": final_bytes,
         "confirmations": confirmations, "final_confirmations": confirmations,
@@ -318,6 +335,8 @@ def main() -> int:
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--out", type=Path, required=True, help="new private replay capsule; never overwrite")
     parser.add_argument("--source-file", action="append", help="shared JS/TS path; default: failing test files")
+    parser.add_argument("--source-granularity", choices=("lines", "utf8"), default="lines",
+                        help="utf8 also deletes sub-line spans for minified sources; every candidate executes both runtimes")
     parser.add_argument("--expected-sha256")
     parser.add_argument("--baseline-command", type=json.loads, default=list(runner.DEFAULT_BASELINE_COMMAND))
     parser.add_argument("--migration-command", type=json.loads, default=list(runner.DEFAULT_MIGRATION_COMMAND))
@@ -370,7 +389,8 @@ def main() -> int:
                                           baseline_command=args.baseline_command, migration_command=args.migration_command,
                                           source_files=args.source_file, expected_sha256=args.expected_sha256,
                                           max_executions=args.max_executions, seconds=remaining,
-                                          confirmations=args.confirmations)
+                                          confirmations=args.confirmations,
+                                          source_granularity=args.source_granularity)
             replay.write_capsule(artifact, args.out)
             preserved.update(reduced_capsule=str(args.out), reduced_sha256=artifact["content_sha256"])
             result = {"verdict": "REDUCED" if artifact["minimized"] else "UNCHANGED",
