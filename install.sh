@@ -16,9 +16,9 @@
 #                       then falls back to a source build. Values: auto|release|source.
 #   --node-ref REF      Git ref for the franken_node source bootstrap (default: main).
 #   --engine-ref REF    Git ref for the franken_engine source bootstrap (default: main).
-#   --offline TARBALL   Install from a local release tarball; skip all network access.
+#   --offline TARBALL   Install a local tarball and its .sha256 sidecar, without network.
 #   --easy-mode         Auto-update PATH in shell rc files (~/.zshrc, ~/.bashrc).
-#   --verify            Run `franken-node --version` self-test after install.
+#   --verify            Also check the installed binary (candidates are always checked).
 #   --enable-process-spawn
 #                       Require a ready Linux Bubblewrap containment backend.
 #                       The installer never installs or configures Bubblewrap.
@@ -63,6 +63,9 @@ NO_CHECKSUM=0
 QUIET=0
 NO_GUM=0
 WORK_DIR=""
+STAGED_INSTALL_DIR=""
+# Bound the extracted executable, independently of the compressed archive size.
+MAX_BINARY_BYTES=536870912
 LOCK_DIR="${TMPDIR:-/tmp}/franken-node-install.lock"
 LOCK_HELD=0
 
@@ -142,6 +145,16 @@ usage() {
 
 # ── Cleanup / locking ─────────────────────────────────────────────────────────
 cleanup() {
+  # A failed copy, probe, rename or interruption must not leave an executable
+  # candidate behind, and must never remove the currently installed binary.
+  if [ -n "${STAGED_INSTALL_DIR:-}" ]; then
+    case "$STAGED_INSTALL_DIR" in
+      "${DEST_DIR:-}/.${BINARY_NAME}.install."*)
+        rm -f -- "$STAGED_INSTALL_DIR/$BINARY_NAME" 2>/dev/null || true
+        rmdir -- "$STAGED_INSTALL_DIR" 2>/dev/null || true ;;
+      *) warn "refusing to remove unexpected staging dir: $STAGED_INSTALL_DIR" ;;
+    esac
+  fi
   # rm -rf, not rmdir: the lock dir holds a `pid` file, so rmdir would always
   # fail and leak the lock (triggering a spurious stale-lock warning next run).
   if [ "$LOCK_HELD" -eq 1 ]; then rm -rf "$LOCK_DIR" 2>/dev/null || true; fi
@@ -152,7 +165,9 @@ cleanup() {
     esac
   fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 acquire_lock() {
   local tries=0
@@ -239,6 +254,7 @@ preflight_checks() {
   fi
   mkdir -p "$DEST_DIR" 2>/dev/null || die "cannot create install dir: $DEST_DIR"
   [ -w "$DEST_DIR" ] || die "install dir not writable: $DEST_DIR"
+  validate_install_destination
   if [ -x "$DEST_DIR/$BINARY_NAME" ]; then
     info "Existing install: $("$DEST_DIR/$BINARY_NAME" --version 2>/dev/null | head -n1 || echo unknown)"
   fi
@@ -257,16 +273,24 @@ verify_checksum() {
   [ "$NO_CHECKSUM" -eq 1 ] && { warn "checksum verification skipped (--no-verify)"; return 0; }
   local sha_file; sha_file="${WORK_DIR}/$(basename "$archive").sha256"
   download_file "$sha_url" "$sha_file" || { warn "no .sha256 sidecar for $(basename "$archive")"; return 1; }
+  verify_checksum_file "$archive" "$sha_file"
+}
+
+verify_checksum_file() {
+  local archive="$1" sha_file="$2"
+  [ "$NO_CHECKSUM" -eq 1 ] && { warn "checksum verification skipped (--no-verify)"; return 0; }
+  [ -f "$sha_file" ] || die "required .sha256 sidecar not found: $sha_file"
   local expected actual
-  expected="$(awk '{print $1; exit}' "$sha_file")"
-  [ -n "$expected" ] || { warn "empty checksum sidecar"; return 1; }
-  actual="$(compute_sha256 "$archive")"
+  expected="$(awk 'NR == 1 {print tolower($1); exit}' "$sha_file")" || die "cannot read checksum sidecar"
+  [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || die "malformed SHA-256 sidecar"
+  actual="$(compute_sha256 "$archive")" || die "cannot hash archive"
   [ "$actual" = "$expected" ] || die "SHA-256 mismatch: expected $expected, got $actual"
   ok "Checksum verified"
 }
 
 verify_sigstore() {
   local archive="$1" sig_url="$2"
+  [ "$NO_CHECKSUM" -eq 1 ] && { warn "signature verification skipped (--no-verify)"; return 0; }
   command_exists cosign || { info "cosign not found — skipping signature verification"; return 0; }
   local bundle; bundle="${WORK_DIR}/$(basename "$archive").sigstore.json"
   download_file "$sig_url" "$bundle" || { info "no sigstore bundle published — skipping"; return 0; }
@@ -280,22 +304,74 @@ verify_sigstore() {
 }
 
 # ── Install ───────────────────────────────────────────────────────────────────
+validate_install_destination() {
+  local target="$DEST_DIR/$BINARY_NAME"
+  [ ! -L "$target" ] || die "refusing to replace a symlinked install target: $target"
+  if [ -e "$target" ] && [ ! -f "$target" ]; then
+    die "install target is not a regular file: $target"
+  fi
+}
+
 install_binary() {
   require_command install
-  mkdir -p "$DEST_DIR"
-  install -m 0755 "$1" "$DEST_DIR/$BINARY_NAME"
+  require_command mv
+  [ -f "$1" ] && [ ! -L "$1" ] || die "install source must be a regular file"
+  mkdir -p "$DEST_DIR" || die "cannot create install directory"
+  DEST_DIR="$(cd "$DEST_DIR" && pwd -P)" || die "cannot resolve install directory"
+  validate_install_destination
+  # Stage on the destination filesystem: cross-device copy and partial writes
+  # happen BEFORE the rename, while the old executable remains usable. The
+  # cooperative install lock is not protection against a hostile same-UID user.
+  STAGED_INSTALL_DIR="$(mktemp -d "$DEST_DIR/.${BINARY_NAME}.install.XXXXXXXX")" \
+    || die "cannot reserve install staging directory"
+  chmod 0700 "$STAGED_INSTALL_DIR" || die "cannot make install staging private"
+  local staged="$STAGED_INSTALL_DIR/$BINARY_NAME"
+  # Explicit guards matter: Bash disables errexit inside the release fallback's
+  # if/&& call chain. A failed install/mv must never be followed by a success log.
+  install -m 0755 "$1" "$staged" || die "cannot stage binary; existing installation preserved"
+  "$staged" --version >/dev/null 2>&1 \
+    || die "candidate cannot run on this host; existing installation preserved"
+  if [ "$ENABLE_PROCESS_SPAWN" -eq 1 ]; then
+    "$staged" doctor process-spawn-readiness --json >/dev/null \
+      || die "process-spawn support requested, but candidate readiness failed; existing installation preserved"
+  fi
+  validate_install_destination
+  mv -f -- "$staged" "$DEST_DIR/$BINARY_NAME" \
+    || die "cannot publish binary; existing installation preserved"
+  rmdir -- "$STAGED_INSTALL_DIR" 2>/dev/null || true
+  STAGED_INSTALL_DIR=""
   ok "Installed $BINARY_NAME → $DEST_DIR/$BINARY_NAME"
 }
 
 extract_and_install() {
-  local archive="$1" extract_dir="${WORK_DIR}/extract"
+  local archive="$1" member relative selected="" count=0 metadata bytes
   require_command tar
-  mkdir -p "$extract_dir"
-  tar -xf "$archive" -C "$extract_dir"
-  local bin
-  bin="$(find "$extract_dir" -type f -name "$BINARY_NAME" -perm -u+x | head -n1)"
-  [ -n "$bin" ] || die "archive did not contain an executable $BINARY_NAME"
-  install_binary "$bin"
+  require_command head
+  # Never materialize archive paths, links, devices or permission metadata.
+  # Stream exactly one ordinary executable to our own private filename instead.
+  LC_ALL=C tar -tf "$archive" > "$WORK_DIR/archive-members" || die "cannot list release archive"
+  while IFS= read -r member || [ -n "$member" ]; do
+    relative="${member#./}"
+    relative="${relative%/}"
+    case "$relative" in
+      ''|.) continue ;;
+      /*|..|../*|*/../*|*/..|./*|*/./*|*/.|*\\*) die "unsafe release archive member" ;;
+    esac
+    case "$relative" in
+      "$BINARY_NAME"|*/"$BINARY_NAME") selected="$member"; count=$((count + 1)) ;;
+    esac
+  done < "$WORK_DIR/archive-members"
+  [ "$count" -eq 1 ] || die "archive must contain exactly one executable $BINARY_NAME"
+  LC_ALL=C tar -tvf "$archive" -- "$selected" > "$WORK_DIR/binary-metadata" \
+    || die "cannot inspect archived binary"
+  IFS= read -r metadata < "$WORK_DIR/binary-metadata" || die "missing binary metadata"
+  case "$metadata" in -??x*) ;; *) die "archived binary must be a regular owner-executable file" ;; esac
+  local payload="$WORK_DIR/release-binary"
+  tar -xOf "$archive" -- "$selected" | head -c "$((MAX_BINARY_BYTES + 1))" > "$payload" \
+    || die "cannot read bounded release binary"
+  bytes="$(wc -c < "$payload")" || die "cannot size release binary"
+  [ "$bytes" -gt 0 ] && [ "$bytes" -le "$MAX_BINARY_BYTES" ] || die "release binary size limit exceeded"
+  install_binary "$payload"
 }
 
 try_release_target() {
@@ -323,7 +399,12 @@ install_from_release() {
 install_from_offline() {
   [ -f "$OFFLINE_TARBALL" ] || die "offline tarball not found: $OFFLINE_TARBALL"
   info "Installing from local tarball: $OFFLINE_TARBALL"
-  extract_and_install "$OFFLINE_TARBALL"
+  # Verify and extract the same private copy, not a live caller-owned pathname.
+  local archive="$WORK_DIR/offline.tar.xz"
+  cp -- "$OFFLINE_TARBALL" "$archive" || die "cannot capture offline tarball"
+  verify_checksum_file "$archive" "$OFFLINE_TARBALL.sha256"
+  info "Offline mode checks SHA-256 only; verify publisher signatures separately before importing"
+  extract_and_install "$archive"
 }
 
 clone_ref() {
@@ -393,7 +474,7 @@ self_test() {
   [ "$VERIFY" -eq 1 ] || return 0
   info "Running self-test"
   "$DEST_DIR/$BINARY_NAME" --version >/dev/null 2>&1 \
-    && ok "Self-test passed" || warn "Self-test could not run $BINARY_NAME --version"
+    && ok "Self-test passed" || die "Self-test could not run $BINARY_NAME --version"
 }
 
 verify_process_spawn_backend() {
@@ -449,7 +530,7 @@ parse_args() {
 # ── Main ──────────────────────────────────────────────────────────────────────
 main() {
   parse_args "$@"
-  require_command curl
+  if [ "$METHOD" = "auto" ] || [ "$METHOD" = "release" ]; then require_command curl; fi
   setup_proxy
   banner
   detect_platform
