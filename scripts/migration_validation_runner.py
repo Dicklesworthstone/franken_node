@@ -28,6 +28,7 @@ import tempfile
 import time
 import unicodedata
 import zipfile
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -68,6 +69,7 @@ MAX_ARGUMENT_BYTES = 4096
 MAX_ARGV_BYTES = 32 * 1024
 MAX_EXPECTATION_BYTES = 1024 * 1024
 MAX_EXPECTED_FILES = 64
+MAX_CONCURRENT_TESTS = 4
 MAX_TEST_FILES = 1024
 MAX_PROJECT_FILES = 50_000
 MAX_PROJECT_BYTES = 256 * 1024 * 1024
@@ -235,6 +237,33 @@ class ExecutionSettings:
                 f"environment_count={len(self.environment)}, argument_count={len(self.arguments)})")
 
 
+class TestInventory(dict[str, ExecutionSettings]):
+    """Captured test requests and explicit permission to overlap test pairs."""
+
+    def __init__(self, tests: dict[str, ExecutionSettings], max_concurrent_tests: int = 1):
+        super().__init__(sorted(tests.items()))
+        self.max_concurrent_tests = max_concurrent_tests
+
+
+def _scheduling_contract(concurrency: int) -> dict:
+    return {"max_concurrent_tests": concurrency, "admission_order": "lexical",
+            "within_test_order": ["baseline", "migration"], "interleaving_replayable": False}
+
+
+def _validate_scheduling(report: dict, inventory: TestInventory) -> None:
+    recorded = report.get("scheduling")
+    if recorded is None and "scheduling" not in report and inventory.max_concurrent_tests == 1:
+        # Historical captures were serial. Never upgrade an unrecorded schedule
+        # to concurrent execution just because a new reader supports it.
+        return
+    expected = _scheduling_contract(inventory.max_concurrent_tests)
+    if (not isinstance(recorded, dict)
+            or type(recorded.get("max_concurrent_tests")) is not int
+            or recorded.get("interleaving_replayable") is not False
+            or recorded != expected):
+        raise ValueError("replay scheduling contract disagrees with captured test manifest")
+
+
 def _unique_json_object(pairs: list[tuple[str, object]]) -> dict:
     value = {}
     for key, item in pairs:
@@ -372,7 +401,7 @@ def _output_expectations(raw: object, entries: dict[str, SnapshotEntry]) -> Outp
     return OutputExpectations(raw.get("stdout"), raw.get("stderr"), tuple(sorted(files.items())))
 
 
-def captured_test_inventory(capture: list[SnapshotEntry]) -> dict[str, ExecutionSettings]:
+def captured_test_inventory(capture: list[SnapshotEntry]) -> TestInventory:
     """Interpret only immutable captured bytes; never read live project files."""
     entries = {entry.path: entry for entry in capture}
     if len(entries) != len(capture):
@@ -386,7 +415,7 @@ def captured_test_inventory(capture: list[SnapshotEntry]) -> dict[str, Execution
                  if (entry.data is not None or entry.link is not None) and _is_discovered_test(entry.path)}
         if len(tests) > MAX_TEST_FILES:
             raise ValueError(f"test discovery exceeds {MAX_TEST_FILES} files")
-        return dict(sorted(tests.items()))
+        return TestInventory(tests)
     contents = _ordinary_file(entries, MIGRATION_TEST_MANIFEST)
     if len(contents) > MAX_MANIFEST_BYTES:
         raise ValueError("migration test manifest exceeds the 64 KiB limit")
@@ -395,9 +424,12 @@ def captured_test_inventory(capture: list[SnapshotEntry]) -> dict[str, Execution
                          parse_constant=_reject_json_constant)
     except (ValueError, RecursionError):
         raise ValueError("invalid migration test manifest") from None
-    if (not isinstance(raw, dict) or set(raw) - {"schema_version", "tests", "execution", "expectations"}
+    if (not isinstance(raw, dict) or set(raw) - {"schema_version", "tests", "execution", "expectations", "max_concurrent_tests"}
             or raw.get("schema_version") != MIGRATION_TEST_SCHEMA):
         raise ValueError("unsupported migration test manifest schema or fields")
+    concurrency = raw.get("max_concurrent_tests", 1)
+    if type(concurrency) is not int or not 1 <= concurrency <= MAX_CONCURRENT_TESTS:
+        raise ValueError("max_concurrent_tests must be an integer between 1 and 4")
     names = raw.get("tests")
     if not isinstance(names, list) or not 0 < len(names) <= MAX_TEST_FILES:
         raise ValueError("explicit migration test inventory must contain 1 to 1024 tests")
@@ -426,18 +458,20 @@ def captured_test_inventory(capture: list[SnapshotEntry]) -> dict[str, Execution
         if name not in tests:
             raise ValueError("output expectations refer to an unselected test")
         tests[name] = replace(tests[name], expectations=_output_expectations(value, entries))
-    return dict(sorted(tests.items()))
+    return TestInventory(tests, concurrency)
 
 
 def _test_input(settings: ExecutionSettings, entries: dict[str, SnapshotEntry]) -> bytes | None:
     return None if settings.stdin is None else _ordinary_file(entries, settings.stdin)
 
 
-def matched_test_execution(baseline: dict[str, ExecutionSettings], migration: dict[str, ExecutionSettings],
+def matched_test_execution(baseline: TestInventory, migration: TestInventory,
                            baseline_entries: dict[str, SnapshotEntry],
                            migration_entries: dict[str, SnapshotEntry]) -> None:
     if baseline != migration:
         raise ValueError("test execution settings differ between original and candidate")
+    if baseline.max_concurrent_tests != migration.max_concurrent_tests:
+        raise ValueError("test concurrency differs between original and candidate")
     for name, settings in baseline.items():
         if _test_input(settings, baseline_entries) != _test_input(migration[name], migration_entries):
             raise ValueError("captured test stdin bytes differ between original and candidate")
@@ -729,6 +763,7 @@ def _validate_bundle_manifest(manifest: dict, objects: dict[str, bytes]) -> dict
     matched_test_execution(inventories["baseline"], inventories["migration"],
         {entry.path: entry for entry in snapshots["baseline"]},
         {entry.path: entry for entry in snapshots["migration"]})
+    _validate_scheduling(report, inventories["baseline"])
     tests = list(inventories["baseline"])
     if not tests or report.get("test_discovery", {}).get("test_files") != tests:
         raise ValueError("replay test inventory does not match captured inputs")
@@ -915,7 +950,8 @@ def _observation_projection(report: dict) -> dict:
             if report["filesystem_comparison"]:
                 value[role]["workspace_delta"] = capture["workspace_delta"]
         rows.append(value)
-    return {"summary": report["summary"], "rows": rows}
+    return {"summary": report["summary"], "rows": rows,
+            "scheduling": report.get("scheduling", _scheduling_contract(1))}
 
 
 def replay_captured_bundle(path: Path, *, expected_sha256: str,
@@ -1399,6 +1435,160 @@ def run_command(command: list[str], cwd: Path, *, timeout: float,
                                "retained_bytes": len(output[name])} for name in output}}
 
 
+@dataclass(repr=False)
+class TestPairResult:
+    """Worker-owned observations, including private output until collection."""
+
+    row: dict
+    captures: dict
+    error: dict | None = None
+
+
+def _execute_test_pair(index: int, test: str, *, root: Path,
+                       snapshots: dict[str, list[SnapshotEntry]],
+                       by_path: dict[str, dict[str, SnapshotEntry]], inventory: TestInventory,
+                       commands: dict[str, list[str]], environment: dict[str, str],
+                       deadline: float, timeout_seconds: float, max_output_bytes: int,
+                       band: str, compare_filesystem: bool,
+                       cancellation: CancellationState | None) -> TestPairResult:
+    """One owned pair: baseline, candidate, verification, then workspace cleanup.
+
+    Workers never mutate the report, counters or shared evidence spool. A
+    completed leg survives a later staging, execution or collection failure.
+    The caller joins all workers before publishing anything or closing inputs.
+    """
+    row = {"test": test, "band": band, "status": "ERROR", "divergences": []}
+    result = TestPairResult(row, {})
+    deltas = {}
+    try:
+        check_cancellation(cancellation)
+        settings = inventory[test]
+        with tempfile.TemporaryDirectory(prefix=f"case-{index}-", dir=root) as case_dir, ExitStack() as output_roots:
+            for leg in ("baseline", "migration"):
+                workspace = Path(case_dir) / leg
+                entries = snapshots[leg]
+                stage_project(entries, workspace, deadline, cancellation=cancellation)
+                if not (workspace / test).is_file():
+                    raise ValueError(f"{leg} project is missing test {test}")
+                script = test[len(settings.cwd) + 1:] if settings.cwd else test
+                command = _test_command(commands[leg], script, settings.arguments)
+                output_root = _pin_output_workspace(workspace, settings.expectations)
+                if output_root is not None:
+                    output_roots.callback(os.close, output_root)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("total validation budget exhausted")
+                capture = run_command(command, workspace / settings.cwd,
+                    timeout=min(timeout_seconds, remaining), max_output_bytes=max_output_bytes,
+                    environment=_test_environment(environment, settings),
+                    input_bytes=_test_input(settings, by_path[leg]), cancellation=cancellation)
+                result.captures[leg] = capture
+                row[leg] = {k: v for k, v in capture.items() if k not in {"stdout", "stderr"}}
+                check_cancellation(cancellation)
+                row["divergences"].extend(_check_output_expectations(
+                    settings.expectations, by_path[leg], capture, output_root, deadline, leg, cancellation))
+                if compare_filesystem:
+                    final_entries, _ = capture_project(workspace, deadline, cancellation=cancellation)
+                    deltas[leg] = workspace_delta(entries, final_entries)
+                    row[leg]["workspace_delta"] = summarize_delta(deltas[leg])
+            for leg, capture in result.captures.items():
+                if capture["termination"] != "exited" or capture["exit_code"] != 0:
+                    row["divergences"].append({"channel": leg, "reason": capture["termination"],
+                                               "exit_code": capture["exit_code"]})
+            for channel in ("stdout", "stderr"):
+                if result.captures["baseline"][channel] != result.captures["migration"][channel]:
+                    row["divergences"].append({"channel": channel, "reason": "byte_mismatch"})
+            if compare_filesystem and deltas["baseline"] != deltas["migration"]:
+                row["divergences"].append({"channel": "filesystem", "reason": "workspace_delta_mismatch"})
+            row["severity"] = classify_divergence_severity(row["divergences"], band)
+            row["status"] = "FAIL" if row["divergences"] else "PASS"
+    except Exception as error:
+        # Unexpected worker errors are infrastructure failures too. Do not lose
+        # already measured output or let a partially filled row become a PASS.
+        row["status"] = "ERROR"
+        result.error = {"test": test, "type": type(error).__name__, "message": str(error)}
+    return result
+
+
+def _run_scheduled_tests(tests: list[str], concurrency: int, execute, report: dict,
+                         bundle: ReplayBundleWriter | None, deadline: float,
+                         cancellation: CancellationState | None, *, band: str) -> None:
+    """Bound admitted work, not just the number of executing threads.
+
+    Only a window of at most four complete test pairs is submitted. Finished
+    results are consumed before replenishing that window, so retained outputs
+    and disposable workspaces cannot grow with the suite length. Observed
+    infrastructure failure stops new admission; already admitted pairs drain
+    under their original deadlines. Operator cancellation also reaches every
+    running process through its existing supervisor. No futures are detached.
+    """
+    if type(concurrency) is not int or not 1 <= concurrency <= MAX_CONCURRENT_TESTS:
+        raise ValueError("invalid bounded test concurrency")
+    summary = report["summary"]
+    next_index = 0
+    stopped = False
+    pending = {}
+    with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="migration-test") as pool:
+        while pending or (not stopped and next_index < len(tests)):
+            if not stopped:
+                try:
+                    check_cancellation(cancellation)
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("total validation budget exhausted during test scheduling")
+                    while next_index < len(tests) and len(pending) < concurrency:
+                        check_cancellation(cancellation)
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError("total validation budget exhausted during test scheduling")
+                        future = pool.submit(execute, next_index, tests[next_index])
+                        pending[future] = (next_index, tests[next_index])
+                        next_index += 1
+                except Exception as error:
+                    stopped = True
+                    report["errors"].append({"type": type(error).__name__, "message": str(error)})
+            if not pending:
+                break
+            done, _ = wait(pending, timeout=0.05, return_when=FIRST_COMPLETED)
+            # Completion order is not test identity. Harvest all available
+            # failures before admitting more work, and serialize evidence on
+            # this one owner thread, never on the shared spool's seek cursor.
+            for future in sorted(done, key=lambda item: pending[item][0]):
+                _, test = pending.pop(future)
+                try:
+                    result = future.result()
+                except Exception as error:
+                    # Also survive a failed worker entry/initialization: drain
+                    # other owned workers instead of abandoning their evidence.
+                    result = TestPairResult(
+                        {"test": test, "band": band,
+                         "status": "ERROR", "divergences": []}, {},
+                        {"test": test, "type": type(error).__name__, "message": str(error)})
+                row = result.row
+                report["validation_results"].append(row)
+                if bundle is not None and not bundle.failed:
+                    try:
+                        for leg in ("baseline", "migration"):
+                            if leg in result.captures:
+                                bundle.record(test, leg, result.captures[leg])
+                    except Exception as error:
+                        bundle.failed = True
+                        row["status"] = "ERROR"
+                        report["errors"].append({"test": test, "type": type(error).__name__,
+                                                 "message": "replay output collection failed"})
+                        stopped = True
+                if result.error is not None:
+                    report["errors"].append(result.error)
+                    stopped = True
+                summary["skipped"] -= 1
+                summary[{"PASS": "passed", "FAIL": "failed", "ERROR": "errored"}[row["status"]]] += 1
+                # The future also owns the result until this iteration ends.
+                # Clear private bytes now rather than retaining a completed
+                # pair while later tests in the next window run.
+                result.captures.clear()
+            done.clear()
+    report["validation_results"].sort(key=lambda row: row["test"])
+    report["errors"].sort(key=lambda error: (error.get("test", ""), error["type"], error["message"]))
+
+
 def validate_project(project_dir: Path, *, migrated_project: Path | None = None,
                      baseline_command=DEFAULT_BASELINE_COMMAND,
                      migration_command=DEFAULT_MIGRATION_COMMAND,
@@ -1456,6 +1646,7 @@ def validate_project(project_dir: Path, *, migrated_project: Path | None = None,
             root = Path(temporary)
             baseline_inventory = captured_test_inventory(baseline_entries)
             migration_inventory = captured_test_inventory(migration_entries)
+            report["scheduling"] = _scheduling_contract(baseline_inventory.max_concurrent_tests)
             baseline_by_path = {entry.path: entry for entry in baseline_entries}
             migration_by_path = {entry.path: entry for entry in migration_entries}
             baseline_tests = set(baseline_inventory)
@@ -1510,66 +1701,21 @@ def validate_project(project_dir: Path, *, migrated_project: Path | None = None,
                      for test, settings in baseline_inventory.items()})
             # Freeze a single inherited environment for both legs; do not invent
             # permissive policy, signing keys, or degraded-runtime overrides.
-            for index, test in enumerate(tests):
-                check_cancellation(cancellation)
-                row = {"test": test, "band": band, "status": "ERROR", "divergences": []}
-                report["validation_results"].append(row)
-                summary["skipped"] -= 1
-                summary["errored"] += 1
-                captures = {}
-                deltas = {}
-                # Release each pair before the next test: disk use must not
-                # grow as number_of_tests * project_size.
-                with tempfile.TemporaryDirectory(prefix=f"case-{index}-", dir=root) as case_dir, ExitStack() as output_roots:
-                    for leg, entries, template in (("baseline", baseline_entries, baseline),
-                                                   ("migration", migration_entries, migration)):
-                        workspace = Path(case_dir) / leg
-                        stage_project(entries, workspace, deadline, cancellation=cancellation)
-                        if not (workspace / test).is_file():
-                            raise ValueError(f"{leg} project is missing test {test}")
-                        settings = baseline_inventory[test] if leg == "baseline" else migration_inventory[test]
-                        by_path = baseline_by_path if leg == "baseline" else migration_by_path
-                        script = test[len(settings.cwd) + 1:] if settings.cwd else test
-                        command = _test_command(template, script, settings.arguments)
-                        output_root = _pin_output_workspace(workspace, settings.expectations)
-                        if output_root is not None:
-                            output_roots.callback(os.close, output_root)
-                        remaining = deadline - time.monotonic()
-                        if remaining <= 0:
-                            raise TimeoutError("total validation budget exhausted")
-                        captures[leg] = run_command(command, workspace / settings.cwd,
-                                                    timeout=min(timeout_seconds, remaining),
-                                                    max_output_bytes=max_output_bytes,
-                                                    environment=_test_environment(environment, settings),
-                                                    input_bytes=_test_input(settings, by_path),
-                                                    cancellation=cancellation)
-                        # Keep completed-leg evidence even if the other leg
-                        # encounters an infrastructure failure or total timeout.
-                        row[leg] = {k: v for k, v in captures[leg].items() if k not in {"stdout", "stderr"}}
-                        if bundle is not None:
-                            bundle.record(test, leg, captures[leg])
-                        check_cancellation(cancellation)
-                        row["divergences"].extend(_check_output_expectations(
-                            settings.expectations, by_path, captures[leg], output_root, deadline, leg, cancellation))
-                        if compare_filesystem:
-                            final_entries, _ = capture_project(workspace, deadline, cancellation=cancellation)
-                            deltas[leg] = workspace_delta(entries, final_entries)
-                            row[leg]["workspace_delta"] = summarize_delta(deltas[leg])
-                for leg, capture in captures.items():
-                    if capture["termination"] != "exited" or capture["exit_code"] != 0:
-                        row["divergences"].append({"channel": leg, "reason": capture["termination"],
-                                                   "exit_code": capture["exit_code"]})
-                for channel in ("stdout", "stderr"):
-                    if captures["baseline"][channel] != captures["migration"][channel]:
-                        row["divergences"].append({"channel": channel, "reason": "byte_mismatch"})
-                if compare_filesystem and deltas["baseline"] != deltas["migration"]:
-                    row["divergences"].append({"channel": "filesystem", "reason": "workspace_delta_mismatch"})
-                row["severity"] = classify_divergence_severity(row["divergences"], band)
-                row["status"] = "FAIL" if row["divergences"] else "PASS"
-                summary["passed" if row["status"] == "PASS" else "failed"] += 1
-                summary["errored"] -= 1
+            snapshots = {"baseline": baseline_entries, "migration": migration_entries}
+            by_path = {"baseline": baseline_by_path, "migration": migration_by_path}
+
+            def execute(index, test):
+                return _execute_test_pair(index, test, root=root, snapshots=snapshots,
+                    by_path=by_path, inventory=baseline_inventory, commands=commands,
+                    environment=environment, deadline=deadline, timeout_seconds=timeout_seconds,
+                    max_output_bytes=max_output_bytes, band=band,
+                    compare_filesystem=compare_filesystem, cancellation=cancellation)
+
+            _run_scheduled_tests(tests, baseline_inventory.max_concurrent_tests, execute,
+                                 report, bundle, deadline, cancellation, band=band)
             check_cancellation(cancellation)
-            summary["verdict"] = "FAIL" if summary["failed"] else "PASS"
+            summary["verdict"] = ("ERROR" if report["errors"] or summary["errored"] or summary["skipped"]
+                                  else "FAIL" if summary["failed"] else "PASS")
     except (OSError, ValueError, RuntimeError, TimeoutError, subprocess.SubprocessError) as error:
         report["errors"].append({"type": type(error).__name__, "message": str(error)})
         summary["verdict"] = "ERROR"
