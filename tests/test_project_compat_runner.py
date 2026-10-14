@@ -163,6 +163,24 @@ else:
         self.assertEqual(result["bun"]["differences"], ["stdout"])
         self.assertEqual(result["reference_disagreements"], ["stdout"])
 
+    def test_definite_failure_outranks_unrelated_reference_inconclusive(self):
+        bun = self.root / "mixed-outcome-bun-test-double"
+        bun.write_text(
+            f"#!{sys.executable}\nimport os, pathlib, sys\n"
+            f"node={str(self.node)!r}\n"
+            "if pathlib.Path(sys.argv[1]).name == 'disagree.js':\n"
+            "    print('41')\n"
+            "else:\n"
+            "    os.execv(node, [node, *sys.argv[1:]])\n")
+        bun.chmod(0o700)
+        report = self.run_triad(case("uncertain", "disagree.js"),
+                                case("native-bad", "wrong.js"), bun=bun)
+        self.assertEqual([row["verdict"] for row in report["results"]],
+                         ["INCONCLUSIVE", "FAIL"])
+        self.assertEqual(report["inconclusive_cases"], 1)
+        self.assertEqual(report["failing_cases"], 1)
+        self.assertEqual(report["verdict"], "FAIL")
+
     def test_agreeing_references_with_wrong_golden_are_reference_failed(self):
         value = case()
         value["expected"]["stdout"] = "wrong golden\n"
