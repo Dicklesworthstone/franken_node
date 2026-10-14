@@ -2868,7 +2868,9 @@ fn read_run_package_manifest(
 
 /// Resolve only inside the selected authority. Node's package boundary also
 /// stops before a node_modules directory; its parent's type must never turn an
-/// untyped dependency into an ES module. Explicit extensions bypass the scope.
+/// untyped dependency into an ES module. Explicit module-system extensions
+/// (.mjs/.mts and .cjs/.cts) bypass package scope; ambiguous .js/.ts and
+/// extensionless entries use the nearest captured package type.
 fn resolve_run_entrypoint_format(
     app_path: &Path,
     project_root: &Path,
@@ -2878,8 +2880,9 @@ fn resolve_run_entrypoint_format(
         .extension()
         .and_then(|extension| extension.to_str())
     {
-        Some("mjs") => return Ok(RunEntrypointFormat::EsModule),
-        Some("js") | None => {}
+        Some("mjs" | "mts") => return Ok(RunEntrypointFormat::EsModule),
+        Some("cjs" | "cts") => return Ok(RunEntrypointFormat::CommonJs),
+        Some("js" | "ts") | None => {}
         _ => return Ok(RunEntrypointFormat::CommonJs),
     }
     let mut directory = app_path

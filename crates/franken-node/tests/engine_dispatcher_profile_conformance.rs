@@ -255,18 +255,21 @@ fn process_shape_setting_keeps_strict_and_balanced_replay_admissible() {
 fn mjs_entrypoints_select_module_goal_bd_ergy0() {
     let config = config_with_profile(Profile::LegacyRisky);
     let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::write(dir.path().join("fixture.mjs"), "export const value = 1;\n")
-        .expect("write explicit module");
-    let module = RunProjectPaths::resolve(Path::new("fixture.mjs"), dir.path())
-        .expect("resolve explicit module");
-    assert_eq!(
-        EngineDispatcher::map_config_to_orchestrator_config_for_entrypoint_for_tests(
-            &config, &module,
-        )
-        .parse_goal,
-        ParseGoal::Module
-    );
-    for script_path in ["fixture.js", "fixture.cjs", "fixture", "fixture.MJS"] {
+    for module_path in ["fixture.mjs", "fixture.mts"] {
+        std::fs::write(dir.path().join(module_path), "export const value = 1;\n")
+            .expect("write explicit module");
+        let module = RunProjectPaths::resolve(Path::new(module_path), dir.path())
+            .expect("resolve explicit module");
+        assert_eq!(
+            EngineDispatcher::map_config_to_orchestrator_config_for_entrypoint_for_tests(
+                &config, &module,
+            )
+            .parse_goal,
+            ParseGoal::Module,
+            "{module_path} must select ModuleGoal"
+        );
+    }
+    for script_path in ["fixture.js", "fixture.cjs", "fixture.cts", "fixture", "fixture.MJS"] {
         std::fs::write(dir.path().join(script_path), "module.exports = 1;\n")
             .expect("write script");
         let script =
@@ -283,11 +286,11 @@ fn mjs_entrypoints_select_module_goal_bd_ergy0() {
 }
 
 #[test]
-fn run_package_scope_selects_nearest_manifest_for_js_and_extensionless_entries() {
+fn run_package_scope_selects_nearest_manifest_for_js_ts_and_extensionless_entries() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir(dir.path().join("src")).expect("source directory");
     std::fs::write(dir.path().join("package.json"), r#"{"type":"module"}"#).expect("module scope");
-    for name in ["main.js", "entry"] {
+    for name in ["main.js", "main.ts", "entry"] {
         std::fs::write(
             dir.path().join("src").join(name),
             "export const value = 1;\n",
@@ -295,7 +298,7 @@ fn run_package_scope_selects_nearest_manifest_for_js_and_extensionless_entries()
         .expect("entrypoint");
     }
     let config = config_with_profile(Profile::Balanced);
-    for name in ["src/main.js", "src/entry"] {
+    for name in ["src/main.js", "src/main.ts", "src/entry"] {
         let paths = RunProjectPaths::resolve(Path::new(name), dir.path()).expect("module paths");
         let mapped = EngineDispatcher::map_config_to_orchestrator_config_for_entrypoint_for_tests(
             &config, &paths,
@@ -306,7 +309,7 @@ fn run_package_scope_selects_nearest_manifest_for_js_and_extensionless_entries()
 
     for metadata in ["{}", r#"{"type":"commonjs"}"#, r#"{"type":"unrecognized"}"#] {
         std::fs::write(dir.path().join("src/package.json"), metadata).expect("nested scope");
-        for name in ["src/main.js", "src/entry"] {
+        for name in ["src/main.js", "src/main.ts", "src/entry"] {
             let paths =
                 RunProjectPaths::resolve(Path::new(name), dir.path()).expect("script paths");
             let mapped =
@@ -369,7 +372,7 @@ fn run_package_scope_stops_before_node_modules_even_inside_one_project() {
 #[test]
 fn run_package_scope_rejects_invalid_metadata_without_changing_explicit_formats() {
     let dir = tempfile::tempdir().expect("tempdir");
-    for name in ["main.js", "entry", "main.cjs", "main.mjs"] {
+    for name in ["main.js", "main.ts", "entry", "main.cjs", "main.cts", "main.mjs", "main.mts"] {
         std::fs::write(dir.path().join(name), "console.log('entry');\n").expect("entrypoint");
     }
     let config = config_with_profile(Profile::Balanced);
@@ -381,7 +384,7 @@ fn run_package_scope_rejects_invalid_metadata_without_changing_explicit_formats(
         r#"{"type":null}"#,
     ] {
         std::fs::write(dir.path().join("package.json"), metadata).expect("invalid manifest");
-        for name in ["main.js", "entry"] {
+        for name in ["main.js", "main.ts", "entry"] {
             let error = RunProjectPaths::resolve(Path::new(name), dir.path())
                 .expect_err("invalid package metadata must not select CommonJS")
                 .to_string();
@@ -393,7 +396,9 @@ fn run_package_scope_rejects_invalid_metadata_without_changing_explicit_formats(
         }
         for (name, goal) in [
             ("main.cjs", ParseGoal::Script),
+            ("main.cts", ParseGoal::Script),
             ("main.mjs", ParseGoal::Module),
+            ("main.mts", ParseGoal::Module),
         ] {
             let paths = RunProjectPaths::resolve(Path::new(name), dir.path())
                 .expect("explicit format bypasses package metadata");
