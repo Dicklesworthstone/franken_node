@@ -3,7 +3,13 @@
 //! This implements the real sibling engine trait, not a lookalike interface.
 //! Source selection is closed-world; the supplied engine policy runs on every
 //! resolve and every traversed edge, including cache hits and cycle back-edges.
-//! No builtin fallback, live I/O, transformation or evaluation happens here.
+//! No builtin fallback, live I/O or evaluation happens here. Source requiring
+//! preparation uses the sibling engine front end before registry admission.
+
+#[path = "module_engine_preparation.rs"]
+mod preparation;
+pub use preparation::ModulePreparationSummary;
+use preparation::{PreparedSources, SourcePreparer};
 
 use super::registry::{
     ModuleKind, PinnedModuleRegistry, RegisteredModule, RegistrySummary, RequestStyle,
@@ -24,8 +30,8 @@ const MAX_CHAIN_SOURCE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_CONTEXT_BYTES: usize = 1024;
 
 /// An embedding resolver, not an evaluator or a policy grant. It can be passed
-/// directly as &dyn FrankenEngine ModuleResolver. Only explicit JavaScript
-/// ESM/CommonJS formats are admitted; normalization and linking stay in engine.
+/// directly as &dyn FrankenEngine ModuleResolver. Syntax detection and source
+/// normalization use the engine; linking and evaluation remain engine work.
 pub struct CapturedEngineResolver {
     registry: PinnedModuleRegistry,
     chain_source_budget: usize,
@@ -33,6 +39,7 @@ pub struct CapturedEngineResolver {
     // Cache content identity only. Authorization and request/event context are
     // always fresh. No duplicate source strings are retained by this cache.
     content_hashes: BTreeMap<String, OnceLock<ContentHash>>,
+    prepared_sources: PreparedSources,
     #[cfg(test)]
     hash_computations: std::sync::atomic::AtomicUsize,
 }
@@ -42,10 +49,15 @@ impl CapturedEngineResolver {
         graph: CapturedModuleGraph,
         independent_graph_pin: &str,
     ) -> Result<Self, CaptureError> {
-        Ok(Self::from_registry(PinnedModuleRegistry::new(
+        let mut preparer = SourcePreparer::default();
+        let registry = PinnedModuleRegistry::new_with_kind_resolver(
             graph,
             independent_graph_pin,
-        )?))
+            |module, source, report| preparer.prepare(module, source, report),
+        )?;
+        let mut resolver = Self::from_registry(registry);
+        resolver.prepared_sources = preparer.finish();
+        Ok(resolver)
     }
 
     pub fn from_registry(registry: PinnedModuleRegistry) -> Self {
@@ -57,6 +69,7 @@ impl CapturedEngineResolver {
             registry,
             chain_source_budget: MAX_CHAIN_SOURCE_BYTES,
             content_hashes,
+            prepared_sources: PreparedSources::default(),
             #[cfg(test)]
             hash_computations: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -64,6 +77,12 @@ impl CapturedEngineResolver {
 
     pub fn summary(&self) -> &RegistrySummary {
         self.registry.summary()
+    }
+
+    /// Source-free evidence for files needing engine preparation. Explicit
+    /// JavaScript on the unchanged fast path has no preparation report.
+    pub fn preparation_reports(&self) -> impl Iterator<Item = &ModulePreparationSummary> {
+        self.prepared_sources.summaries()
     }
 
     pub fn entry_request(&self) -> ModuleRequest {
@@ -130,7 +149,7 @@ impl CapturedEngineResolver {
             },
             // The policy receives this candidate record, as required by the
             // engine contract. It is not returned to a caller before approval.
-            source: module.source().to_owned(),
+            source: self.prepared_sources.source(module).to_owned(),
             dependencies: module
                 .dependencies()
                 .iter()
@@ -247,7 +266,7 @@ impl ModuleResolver for CapturedEngineResolver {
                 continue;
             }
             source_bytes = source_bytes
-                .checked_add(module.source().len())
+                .checked_add(self.prepared_sources.source(module).len())
                 .ok_or_else(|| {
                     denied(
                         ResolutionErrorCode::UnsupportedSpecifier,
@@ -854,5 +873,254 @@ mod tests {
         assert_eq!(policy.calls.get(), 1);
         assert_eq!(r.hash_computations.load(Ordering::Relaxed), 0);
         assert!(r.content_hashes.values().all(|cell| cell.get().is_none()));
+    }
+
+    fn resolver_entry(root: &Path, entry: &str) -> CapturedEngineResolver {
+        let graph = capture(root, entry, GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        CapturedEngineResolver::new(graph, &pin).ok().unwrap()
+    }
+
+    #[test]
+    fn unmarked_javascript_uses_engine_commonjs_body_and_module_syntax_detection() {
+        for (source, syntax) in [
+            ("module.exports=42;", ModuleSyntax::CommonJs),
+            ("return;", ModuleSyntax::CommonJs),
+            ("export const answer=42;", ModuleSyntax::EsModule),
+            ("const module=42;", ModuleSyntax::EsModule),
+            ("const exports=42;", ModuleSyntax::EsModule),
+            ("const __filename=42;", ModuleSyntax::EsModule),
+            ("const __dirname=42;", ModuleSyntax::EsModule),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            put(root.path(), "app.js", source);
+            let r = resolver_entry(root.path(), "app.js");
+            let out = r.resolve(&r.entry_request(), &context(), &granted()).unwrap();
+            assert_eq!(out.module.record.syntax, syntax, "{source}");
+            assert_eq!(out.module.record.source, source);
+            assert_eq!(r.preparation_reports().count(), 1);
+        }
+    }
+
+    #[test]
+    fn installed_unmarked_npm_entry_keeps_its_captured_route_and_detected_format() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.cjs", "module.exports=require('pkg');");
+        put(
+            root.path(),
+            "node_modules/pkg/package.json",
+            r#"{"name":"pkg","main":"index.js"}"#,
+        );
+        for (source, syntax) in [
+            ("module.exports=42;", ModuleSyntax::CommonJs),
+            ("export const answer=42;", ModuleSyntax::EsModule),
+        ] {
+            put(root.path(), "node_modules/pkg/index.js", source);
+            let r = resolver_entry(root.path(), "app.cjs");
+            let out = r.resolve_chain(&r.entry_request(), &context(), &granted()).unwrap();
+            assert_eq!(out.len(), 2);
+            assert_eq!(out[1].module.record.syntax, syntax);
+            assert_eq!(out[1].module.record.source, source);
+            assert_eq!(out[1].module.request_specifier, "pkg");
+        }
+    }
+
+    #[test]
+    fn explicit_typescript_formats_use_the_shared_engine_normalizer() {
+        use frankenengine_engine::ts_normalization::prepare_source_entry_for_public_entrypoints;
+        for (path, source, syntax) in [
+            (
+                "app.mts",
+                "export const answer: number = 42;",
+                ModuleSyntax::EsModule,
+            ),
+            (
+                "app.cts",
+                "const answer: number = 42; module.exports=answer;",
+                ModuleSyntax::CommonJs,
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            put(root.path(), path, source);
+            let r = resolver_entry(root.path(), path);
+            let out = r.resolve(&r.entry_request(), &context(), &granted()).unwrap();
+            let expected = prepare_source_entry_for_public_entrypoints(
+                source,
+                path,
+                "captured-module-preparation",
+                &r.summary().graph_input_hash,
+                "franken-node.engine-source-preparation.v1",
+            )
+            .unwrap();
+            assert_eq!(out.module.record.source, expected.prepared_source);
+            assert_eq!(out.module.record.syntax, syntax);
+            assert_eq!(out.module.content_hash, out.module.record.canonical_hash());
+            let report = r.preparation_reports().next().unwrap();
+            assert_eq!(report.source_ingestion, expected.source_ingestion);
+            assert!(report.normalization_witness.is_some());
+            assert_eq!(report.path, path);
+        }
+    }
+
+    #[test]
+    fn normalized_typescript_type_only_imports_do_not_gain_load_authority() {
+        let root = tempfile::tempdir().unwrap();
+        put(
+            root.path(),
+            "app.mts",
+            "import type { Missing } from './absent.d.ts'; export const answer: number = 42;",
+        );
+        let r = resolver_entry(root.path(), "app.mts");
+        let out = r.resolve(&r.entry_request(), &context(), &granted()).unwrap();
+        assert!(out.module.record.dependencies.is_empty());
+        assert!(!out.module.record.source.contains("absent.d.ts"));
+        let request = ModuleRequest::new("./absent.d.ts", ImportStyle::Import)
+            .with_referrer(out.module.record.id)
+            .with_compatibility_mode(CompatibilityMode::NodeCompat);
+        assert_eq!(
+            r.resolve(&request, &context(), &granted()).unwrap_err().code,
+            ResolutionErrorCode::ModuleNotFound
+        );
+    }
+
+    #[test]
+    fn url_instances_share_preparation_but_keep_distinct_engine_identities() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mjs", "import './dep.mts?one'; import './dep.mts?two';");
+        put(root.path(), "dep.mts", "export const answer: number = 42;");
+        let r = resolver(root.path());
+        let out = r.resolve_chain(&r.entry_request(), &context(), &granted()).unwrap();
+        assert_eq!(out.len(), 3);
+        assert_eq!(r.preparation_reports().count(), 1);
+        assert_eq!(out[1].module.record.source, out[2].module.record.source);
+        assert_ne!(out[1].module.content_hash, out[2].module.content_hash);
+        assert_ne!(
+            out[1].module.canonical_specifier,
+            out[2].module.canonical_specifier
+        );
+    }
+
+    #[test]
+    fn engine_preparation_rejects_added_or_removed_runtime_dependency_routes() {
+        let root = tempfile::tempdir().unwrap();
+        put(
+            root.path(),
+            "app.mts",
+            "import './side.mjs'; export const answer: number=42;",
+        );
+        put(root.path(), "side.mjs", "export const effect=1;");
+        let graph = capture(root.path(), "app.mts", GraphOptions::default()).unwrap();
+        let module = graph
+            .report()
+            .modules
+            .iter()
+            .find(|m| m.id.path == "app.mts")
+            .unwrap();
+        for transformed_input in [
+            "export const answer: number=42;",
+            "import './side.mjs'; import './new.mjs'; export const answer: number=42;",
+        ] {
+            let mut preparer = SourcePreparer::default();
+            assert_eq!(
+                preparer
+                    .prepare(module, transformed_input, graph.report())
+                    .err()
+                    .unwrap()
+                    .code,
+                "ERR_MODULE_ENGINE_DEPENDENCY_DRIFT"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_capability_obligations_are_not_erased_at_the_module_boundary() {
+        let root = tempfile::tempdir().unwrap();
+        put(
+            root.path(),
+            "app.mts",
+            "hostcall<\"network.fetch\">('https://example.invalid');",
+        );
+        let graph = capture(root.path(), "app.mts", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        assert_eq!(
+            CapturedEngineResolver::new(graph, &pin).err().unwrap().code,
+            "ERR_MODULE_ENGINE_CAPABILITY_METADATA"
+        );
+    }
+
+    #[test]
+    fn prepared_source_replay_never_reopens_the_original_project() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mts", "export const answer: number=42;");
+        let graph = capture(root.path(), "app.mts", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        let encoded = capsule::encode(&graph).unwrap();
+        let live = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
+        let before = live.resolve(&live.entry_request(), &context(), &granted()).unwrap();
+        put(root.path(), "app.mts", "throw new Error('changed');");
+        let replay = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+        let restored = CapturedEngineResolver::new(replay, &pin).ok().unwrap();
+        assert_eq!(
+            before,
+            restored.resolve(&restored.entry_request(), &context(), &granted()).unwrap()
+        );
+        assert_eq!(
+            live.preparation_reports().collect::<Vec<_>>(),
+            restored.preparation_reports().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn chain_budget_is_applied_to_delivered_engine_prepared_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mts", "export const answer: number = 42;");
+        let mut r = resolver_entry(root.path(), "app.mts");
+        let out = r.resolve(&r.entry_request(), &context(), &granted()).unwrap();
+        r.chain_source_budget = out.module.record.source.len();
+        assert!(r.resolve_chain(&r.entry_request(), &context(), &granted()).is_ok());
+        r.chain_source_budget -= 1;
+        assert!(r.resolve_chain(&r.entry_request(), &context(), &granted()).is_err());
+    }
+
+    #[test]
+    fn hashbang_uses_engine_preparation_without_changing_the_graph_pin() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.cjs", "#!/usr/bin/env node\nmodule.exports=42;");
+        let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        let r = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
+        let out = r.resolve(&r.entry_request(), &context(), &granted()).unwrap();
+        assert_eq!(r.summary().graph_input_hash, pin);
+        assert_eq!(out.module.record.syntax, ModuleSyntax::CommonJs);
+        assert!(!out.module.record.source.contains("#!"));
+        assert!(out.module.record.source.ends_with("module.exports=42;"));
+        let report = r.preparation_reports().next().unwrap();
+        assert!(report.source_ingestion.normalization_applied);
+        assert!(report.normalization_witness.is_none());
+    }
+
+    #[test]
+    fn uncaptured_typescript_package_scope_is_not_invented() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "package.json", r#"{"type":"module"}"#);
+        put(root.path(), "app.ts", "export const answer: number=42;");
+        let graph = capture(root.path(), "app.ts", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        assert_eq!(
+            CapturedEngineResolver::new(graph, &pin).err().unwrap().code,
+            "ERR_MODULE_REGISTRY_FORMAT"
+        );
+    }
+
+    #[test]
+    fn syntax_detection_does_not_bypass_indirect_loader_capture_restrictions() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.js", "const require=42;");
+        let graph = capture(root.path(), "app.js", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        assert_eq!(
+            CapturedEngineResolver::new(graph, &pin).err().unwrap().code,
+            "ERR_MODULE_REGISTRY_INCOMPLETE"
+        );
     }
 }

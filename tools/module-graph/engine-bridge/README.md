@@ -47,12 +47,39 @@ ambient machine. Unknown requests fail rather than falling back to another
 resolver. Engine requests must use `NodeCompat`; the helper entry request does
 this explicitly. These captured choices cannot be relabelled Native or Bun.
 
-Only analyzed closed graphs with explicit JavaScript ESM/CommonJS formats are
-admitted. `.mjs`, `.cjs`, and `.js` with captured package `type` are supported.
-Unmarked JavaScript needs engine syntax detection; TypeScript/JSX needs an
-explicit normalization path; JSON, native addons, Wasm and builtins require
-separate providers. These are admission errors, not empty module shims. The
-existing broader inspection/capsule functionality remains available unchanged.
+Only analyzed closed graphs are admitted. The engine-independent
+`PinnedModuleRegistry::new` remains transform-free and requires explicit
+JavaScript ESM/CommonJS formats. The engine-backed constructor additionally
+prepares the following captured sources using the real sibling front end:
+
+- Unmarked `.js` and extensionless JavaScript: the engine parser tests a CommonJS
+  function body first, then an ES module. This accounts for top-level return and
+  lexical conflicts with CommonJS wrapper parameters without a second parser or
+  a text-based import/export heuristic. The detection wrapper is never delivered.
+- Explicit `.mts` and `.cts`: the engine's public source-preparation function
+  normalizes supported TypeScript, with ESM/CommonJS format fixed by extension.
+- JavaScript hashbangs: the same engine source-preparation function handles them.
+
+Preparation runs after independent pin and closed-graph checks, once per
+physical source. A changed source is rescanned by the production dependency
+scanner without filesystem or network authority. Its runtime importer-local
+specifier/style routes must exactly equal the captured routes; adding a load or
+removing a side-effect dependency is an admission error. Type-only edges remain
+non-authorizing. Original source pins and URL identities are not rewritten;
+engine canonical hashes cover the actual delivered prepared source.
+
+`preparation_reports()` exposes source-free ingestion hashes, normalization
+witnesses and source maps. Ordinary explicitly typed JavaScript without a
+hashbang stays on its existing unchanged path and has no preparation report.
+Prepared source storage is shared between URL instances and bounded to 32 MiB.
+
+Plain `.ts` remains unsupported here because its package-format scope is not
+captured by the file resolver. JSX, JSON, native addons, Wasm and builtins also
+need separate contracts/providers. Typed capability-intent annotations are
+rejected rather than erased without their engine obligation metadata. Implicit
+reclassification of JavaScript as TypeScript is likewise rejected. These are
+admission errors, not empty module shims. The broader inspection/capsule
+functionality remains available unchanged.
 
 ## Authorization is per load, not per cached byte
 
@@ -64,20 +91,25 @@ policy changes. Returned record mutations do not modify the sealed registry.
 The callback is trusted host code and receives the full candidate record,
 including source, before deciding; private source is returned only on success.
 
-`resolve_chain` checks every distinct incoming importer/style/specifier route,
+`resolve_chain` streams every distinct incoming importer/style/specifier route,
 including diamond edges and cycle back-edges, before deduplicating its returned
-modules. A denial discards the entire prepared vector; no partial success is
-returned. It does not roll back effects a custom policy callback performs.
-Traversal is deterministic breadth-first order, not ESM evaluation order.
-Returned source copies are bounded to 32 MiB per chain, including separate URL
-instances; cached records are reused for repeated policy checks.
+modules. A denial stops the walk and discards the prepared output vector; no
+partial success is returned. It does not roll back effects a custom policy
+callback performs. Traversal is deterministic breadth-first order, not ESM
+evaluation order. The queue retains each module once instead of allocating a
+complete vector of owned route requests. Returned source copies are bounded to
+32 MiB per chain using the delivered, normalized byte lengths, including separate
+URL instances; records are reused within the chain for repeated policy checks.
 
 Engine hashes use `ModuleRecord::canonical_hash`, not the source-only SHA-256.
-Success and failure carry current trace, decision and policy IDs. Failure output
-includes the request and, when known, target identity but no source contents.
-The provenance tag denotes captured project material, not authenticated npm
-registry origin. `ModuleLoad` says nothing about filesystem, network, process or
-other effects in the module body; their engine checks remain necessary.
+A per-module `OnceLock` caches only that immutable hash after authorization;
+concurrent cold loads share its initialization. It retains neither a policy
+result nor another copy of source. Success and failure carry current trace,
+decision and policy IDs. Failure output includes the request and, when known,
+target identity but no source contents. The provenance tag denotes captured
+project material, not authenticated npm registry origin. `ModuleLoad` says
+nothing about filesystem, network, process or other effects in the module body;
+their engine checks remain necessary.
 
 ## Integration boundary and verification
 
@@ -85,15 +117,17 @@ This is a real engine **resolution/source-delivery** adapter, not an evaluator.
 The source scanner still does not prove arbitrary runtime dependency completeness.
 Unknown computed loads fail at this adapter instead of gaining ambient fallback.
 Import/export binding validation, CommonJS cache initialization, execution cells,
-effect authority, cyclic evaluation and engine normalization are not implemented
-by this adapter. `ExecutionOrchestrator`'s current single-package execution path
-does not accept a resolver injection, so `franken-node run` is not changed here.
-Embedding consumers that accept the public engine trait can use it directly.
+effect authority and cyclic evaluation are not implemented by this adapter.
+`ExecutionOrchestrator`'s current single-package execution path does not accept a
+resolver injection, so `franken-node run` is not changed here. Embedding consumers
+that accept the public engine trait can use it directly.
 
-The engine-independent registry's fifteen unit tests run in the regular native
-module-graph suite. This separate focused host compiles the same production
-modules against the real sibling engine, with no duplicated contract structs or
-mock resolver. With sibling checkouts adjacent to one another:
+The engine-independent registry unit tests run in the regular native module-graph
+suite. This separate focused host compiles the same production modules against
+the real sibling engine, with no duplicated contract structs or mock resolver.
+Tests cover format preparation, dependency-route conservation, replay, concurrent
+hash reuse, per-edge authorization and normalized-source budgets. With sibling
+checkouts adjacent to one another:
 
 ```sh
 cargo test --manifest-path tools/module-graph/engine-bridge/Cargo.toml \
@@ -103,4 +137,4 @@ cargo test --manifest-path tools/module-graph/engine-bridge/Cargo.toml \
 The CI job pins the engine revision used for contract verification and reports
 both source revisions. Disabling optional engine sibling-service/persistence
 features avoids unrelated integrations; it does not replace the module resolver,
-policy hook, capabilities or canonical hashing implementations being tested.
+policy hook, capabilities, normalization or canonical hashing implementations.

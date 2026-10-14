@@ -14,6 +14,7 @@ on:
       - 'crates/franken-node/src/supply_chain/module_graph_capsule.rs'
       - 'crates/franken-node/src/supply_chain/module_source_registry.rs'
       - 'crates/franken-node/src/supply_chain/module_engine_resolver.rs'
+      - 'crates/franken-node/src/supply_chain/module_engine_preparation.rs'
       - 'crates/franken-node/src/schema_versions.rs'
   workflow_dispatch:
 
@@ -53,6 +54,7 @@ jobs:
           git archive HEAD crates/franken-node/src/supply_chain/module_resolution_graph.rs crates/franken-node/src/supply_chain/module_dependency_topology.rs crates/franken-node/src/supply_chain/package_target_resolution.rs crates/franken-node/src/supply_chain/module_file_resolution.rs crates/franken-node/src/supply_chain/module_source_graph.rs crates/franken-node/src/supply_chain/module_graph_capsule.rs crates/franken-node/src/schema_versions.rs tools/module-graph .github/workflows/module-graph.yml | gzip > evidence/native-module-graph-source.tar.gz
           git show HEAD:crates/franken-node/src/supply_chain/module_source_registry.rs > evidence/module_source_registry.rs
           git show HEAD:crates/franken-node/src/supply_chain/module_engine_resolver.rs > evidence/module_engine_resolver.rs
+          git show HEAD:crates/franken-node/src/supply_chain/module_engine_preparation.rs > evidence/module_engine_preparation.rs
       - uses: actions/upload-artifact@v4
         if: always()
         with:

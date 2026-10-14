@@ -182,6 +182,33 @@ pub struct PinnedModuleRegistry {
 
 impl PinnedModuleRegistry {
     pub fn new(graph: CapturedModuleGraph, independent_graph_pin: &str) -> Result<Self> {
+        Self::new_with_kind_resolver(graph, independent_graph_pin, |module, _, _| {
+            match (module.source_language, module.format_hint.as_str()) {
+                (SourceLanguage::JavaScript, "module") => Ok(ModuleKind::EsModule),
+                (SourceLanguage::JavaScript, "commonjs") => Ok(ModuleKind::CommonJs),
+                _ => Err(error(
+                    "ERR_MODULE_REGISTRY_FORMAT",
+                    format!(
+                        "module {:?} needs engine format detection or transformation",
+                        module.id.path
+                    ),
+                )),
+            }
+        })
+    }
+
+    /// Engine-owned preparation may assign a runtime kind to captured source.
+    /// The ordinary constructor remains transform-free. Crucially, pins and
+    /// graph completeness are checked BEFORE the callback sees source bytes.
+    /// The callback cannot rewrite identities, routes, source bytes or pins.
+    pub(super) fn new_with_kind_resolver<F>(
+        graph: CapturedModuleGraph,
+        independent_graph_pin: &str,
+        mut kind_of: F,
+    ) -> Result<Self>
+    where
+        F: FnMut(&super::SourceModule, &str, &super::SourceGraphReport) -> Result<ModuleKind>,
+    {
         let digest = independent_graph_pin.strip_prefix("sha256:").unwrap_or("");
         if digest.len() != 64
             || !digest
@@ -221,23 +248,9 @@ impl PinnedModuleRegistry {
         let mut modules = BTreeMap::new();
         let mut shared_sources = BTreeMap::<String, Arc<str>>::new();
         for module in &report.modules {
-            // Do not invent a TS/JSX transform, JSON-to-JS conversion, addon
-            // loader, or syntax-detection result at the engine boundary.
-            let kind = match (module.source_language, module.format_hint.as_str()) {
-                (SourceLanguage::JavaScript, "module") => ModuleKind::EsModule,
-                (SourceLanguage::JavaScript, "commonjs") => ModuleKind::CommonJs,
-                _ => {
-                    return Err(error(
-                        "ERR_MODULE_REGISTRY_FORMAT",
-                        format!(
-                            "module {:?} needs engine format detection or transformation",
-                            module.id.path
-                        ),
-                    ));
-                }
-            };
             let bytes = graph.source_bytes(&module.id).ok_or_else(invalid_graph)?;
             let text = std::str::from_utf8(bytes).map_err(|_| invalid_graph())?;
+            let kind = kind_of(module, text, report)?;
             let source = if let Some(existing) = shared_sources.get(&module.id.path) {
                 if existing.as_ref() != text {
                     return Err(invalid_graph());
@@ -954,5 +967,34 @@ mod tests {
         );
         assert!(walk.next().is_none());
         assert!(walk.next().is_none());
+    }
+
+    #[test]
+    fn engine_preparation_cannot_run_before_pin_and_closed_graph_admission() {
+        use std::cell::Cell;
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mts", "import './missing.mjs';");
+        let calls = Cell::new(0);
+        for mismatch in [true, false] {
+            let graph = capture(root.path(), "app.mts", GraphOptions::default()).unwrap();
+            let pin = if mismatch {
+                format!("sha256:{}", "0".repeat(64))
+            } else {
+                graph.report().input_hash.clone()
+            };
+            let result = PinnedModuleRegistry::new_with_kind_resolver(graph, &pin, |_, _, _| {
+                calls.set(calls.get() + 1);
+                Ok(ModuleKind::EsModule)
+            });
+            assert_eq!(
+                result.err().unwrap().code,
+                if mismatch {
+                    "ERR_MODULE_REGISTRY_PIN_MISMATCH"
+                } else {
+                    "ERR_MODULE_REGISTRY_INCOMPLETE"
+                }
+            );
+        }
+        assert_eq!(calls.get(), 0);
     }
 }
