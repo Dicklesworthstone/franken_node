@@ -58,7 +58,12 @@ prepares the following captured sources using the real sibling front end:
   a text-based import/export heuristic. The detection wrapper is never delivered.
 - Explicit `.mts` and `.cts`: the engine's public source-preparation function
   normalizes supported TypeScript, with ESM/CommonJS format fixed by extension.
+  Plain `.ts` uses the package scope captured by the file resolver; an explicit
+  unmarked-scope observation permits engine syntax detection. No live manifest
+  read or implicit `.ts` extension/index search is added during preparation.
 - JavaScript hashbangs: the same engine source-preparation function handles them.
+- JSON dependencies: the require-only contract below delivers a quoted
+  JavaScript adapter, validated by the engine and the same dependency scanner.
 
 Preparation runs after independent pin and closed-graph checks, once per
 physical source. A changed source is rescanned by the production dependency
@@ -77,13 +82,53 @@ goal that could misclassify a CommonJS source as ESM just because the unwrapped
 source fits a smaller budget. The temporary CommonJS wrapper is moved into the
 engine's owned-input API without another source-buffer copy.
 
-Plain `.ts` remains unsupported here because its package-format scope is not
-captured by the file resolver. JSX, JSON, native addons, Wasm and builtins also
-need separate contracts/providers. Typed capability-intent annotations are
-rejected rather than erased without their engine obligation metadata. Implicit
-reclassification of JavaScript as TypeScript is likewise rejected. These are
-admission errors, not empty module shims. The broader inspection/capsule
-functionality remains available unchanged.
+JSX, native addons, Wasm and builtins need separate contracts/providers. Typed
+capability-intent annotations are rejected rather than erased without their
+engine obligation metadata. Implicit reclassification of JavaScript as
+TypeScript is likewise rejected. These are admission errors, not empty module
+shims. The broader inspection/capsule functionality remains available unchanged.
+
+## CommonJS JSON dependencies
+
+A captured `.json` dependency can be delivered when every non-type-only incoming
+edge is `require`, it has no outgoing runtime routes, and it has no URL-instance
+suffix. This covers explicit JSON files, existing CommonJS extension/index
+search and JSON-valued package entrypoints. A bare JSON graph entrypoint, static
+or dynamic ESM JSON import, reexport, or mixed require/import access is refused
+with `ERR_MODULE_ENGINE_JSON_IMPORT`. The graph has no import-attribute evidence
+or shared ESM/CJS JSON namespace contract; knowing a target is JSON is not enough
+to authorize those semantics. No optional fallback loader is added.
+
+The original JSON text is encoded into one string literal in
+`module.exports = JSON.parse(<literal>);`. It is never emitted as a JavaScript
+object literal or reconstructed from a host `serde_json::Value`. Value creation
+therefore belongs to the engine's `JSON.parse`, as in its native CommonJS JSON
+loader: the adapter does not erase duplicate members, round numbers on the host,
+turn `__proto__` into object-literal prototype syntax, or interpret code-looking
+JSON strings as dependency requests. The engine frontend must preserve the
+adapter exactly and accept its CommonJS parse goal. The generated JavaScript
+is rescanned and must still have no dependency routes.
+
+The existing graph JSON validator remains authoritative. This change does not
+expand its accepted JSON syntax or resource envelope; invalid or unsupported
+capture inputs still prevent registry admission. It does not evaluate JSON while
+constructing the resolver, implement module evaluation caches, or certify an
+engine's complete JSON conformance.
+
+For these modules, `json_source_sha256` in the preparation report pins the
+original captured JSON bytes. `source_ingestion` hashes describe the generated
+JavaScript adapter, not an original JSON parser witness. No TypeScript witness
+or source map is invented. Original graph pins and canonical identities remain
+unchanged, while the engine record hash covers the delivered adapter. Source
+text is absent from these summaries.
+
+Escaping writes directly to a bounded output buffer using the remaining shared
+prepared-source budget. Oversized adapters return no partial success. Repeated
+physical targets share one preparation; incoming-mode validation is indexed
+once alongside the graph routes rather than rescanning every edge per file.
+The per-chain limit counts delivered adapter bytes, including escaping and the
+wrapper, not only original JSON byte lengths. These are logical byte bounds,
+not a process-RSS guarantee or a measured throughput claim.
 
 ## Authorization is per load, not per cached byte
 
@@ -130,8 +175,10 @@ The engine-independent registry unit tests run in the regular native module-grap
 suite. This separate focused host compiles the same production modules against
 the real sibling engine, with no duplicated contract structs or mock resolver.
 Tests cover format preparation, dependency-route conservation, replay, concurrent
-hash reuse, per-edge authorization and normalized-source budgets. With sibling
-checkouts adjacent to one another:
+hash reuse, per-edge authorization and normalized-source budgets. JSON tests also
+cover package/extension/index routes, cycles, contained aliases, capsule replay
+after source mutation, TypeScript consumers, independent source pins, and refusal
+of unsupported ESM and partial-budget cases. With sibling checkouts adjacent:
 
 ```sh
 cargo test --manifest-path tools/module-graph/engine-bridge/Cargo.toml \
@@ -142,3 +189,5 @@ The CI job pins the engine revision used for contract verification and reports
 both source revisions. Disabling optional engine sibling-service/persistence
 features avoids unrelated integrations; it does not replace the module resolver,
 policy hook, capabilities, normalization or canonical hashing implementations.
+A listed test or configured job is not execution evidence. Inspect native build
+and test results separately from Node reference checks before claiming success.
