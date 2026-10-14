@@ -1,4 +1,4 @@
-"""Executable runner tests. The candidate shim is NOT native-runtime evidence."""
+"""Executable runner tests. The candidate and Bun wrappers are NOT native evidence."""
 from __future__ import annotations
 
 import json
@@ -108,10 +108,21 @@ else:
 ''')
         self.native.chmod(0o700)
         self.node = runner.executable("node")
+        self.bun = self.root / "bun-reference-test-double"
+        # A distinct executable wrapper around real Node. It only tests triad
+        # orchestration and disagreement classification; it is NOT Bun evidence.
+        self.bun.write_text(
+            f"#!{sys.executable}\nimport os, sys\n"
+            f"os.execv({str(self.node)!r}, [{str(self.node)!r}, *sys.argv[1:]])\n")
+        self.bun.chmod(0o700)
 
     def run_cases(self, *cases, **kwargs):
         return runner.run_corpus(corpus(*cases), self.native, self.node,
                                  self.root / "artifacts", **kwargs)
+
+    def run_triad(self, *cases, bun=None, **kwargs):
+        return runner.run_corpus(corpus(*cases), self.native, self.node,
+                                 self.root / "artifacts", bun=bun or self.bun, **kwargs)
 
     def test_real_node_multifile_reference_and_candidate_command(self):
         report = self.run_cases(case())
@@ -124,6 +135,44 @@ else:
         receipt = json.loads((self.root / "artifacts/answer/candidate/execution/watchdog.json").read_text())
         self.assertIn("franken-engine", receipt["command"])
         self.assertTrue(receipt["output_complete"])
+
+    def test_three_runtime_reference_agreement_is_recorded(self):
+        report = self.run_triad(case())
+        self.assertEqual(report["verdict"], "PASS")
+        self.assertEqual(report["oracle"], "node-bun-native")
+        self.assertEqual(report["reference"], runner.fingerprint(self.node))
+        self.assertEqual(report["bun_reference"], runner.fingerprint(self.bun))
+        result = report["results"][0]
+        self.assertEqual(result["reference_disagreements"], [])
+        self.assertEqual(result["bun"]["differences"], [])
+        self.assertTrue((self.root / "artifacts/answer/reference/project/main.js").is_file())
+        self.assertTrue((self.root / "artifacts/answer/bun/project/main.js").is_file())
+        self.assertTrue((self.root / "artifacts/answer/candidate/project/main.js").is_file())
+
+    def test_bun_reference_disagreement_is_inconclusive_not_native_failure(self):
+        disagreeing = self.root / "bun-disagreement-test-double"
+        disagreeing.write_text(f"#!{sys.executable}\nprint('41')\n")
+        disagreeing.chmod(0o700)
+        report = self.run_triad(case(), bun=disagreeing)
+        result = report["results"][0]
+        self.assertEqual(report["verdict"], "INCONCLUSIVE")
+        self.assertEqual(report["inconclusive_cases"], 1)
+        self.assertEqual(result["verdict"], "INCONCLUSIVE")
+        self.assertEqual(result["reference"]["differences"], [])
+        self.assertEqual(result["candidate"]["differences"], [])
+        self.assertEqual(result["bun"]["differences"], ["stdout"])
+        self.assertEqual(result["reference_disagreements"], ["stdout"])
+
+    def test_agreeing_references_with_wrong_golden_are_reference_failed(self):
+        value = case()
+        value["expected"]["stdout"] = "wrong golden\n"
+        report = self.run_triad(value)
+        result = report["results"][0]
+        self.assertEqual(report["verdict"], "FAIL")
+        self.assertEqual(result["verdict"], "REFERENCE_FAILED")
+        self.assertEqual(result["reference_disagreements"], [])
+        self.assertEqual(result["reference"]["differences"], ["stdout"])
+        self.assertEqual(result["bun"]["differences"], ["stdout"])
 
     def test_mismatch_does_not_skip_following_case(self):
         report = self.run_cases(case("bad", "wrong.js"), case("good"))
@@ -167,9 +216,33 @@ else:
         self.assertTrue((base / "reference/project/reference-created.txt").exists())
         self.assertFalse((base / "candidate/project/reference-created.txt").exists())
 
+    def test_three_runtime_workspaces_are_mutation_isolated(self):
+        value = case()
+        value["files"]["main.js"] = (
+            "const fs=require('fs');"
+            "console.log(fs.existsSync('other-runtime.txt')?0:42);"
+            "fs.writeFileSync('other-runtime.txt','created');\n")
+        report = self.run_triad(value)
+        self.assertEqual(report["verdict"], "PASS", report)
+        base = self.root / "artifacts/answer"
+        for runtime in ("reference", "bun", "candidate"):
+            self.assertTrue((base / runtime / "project/other-runtime.txt").is_file())
+
     def test_identical_binary_rejected(self):
         with self.assertRaisesRegex(ValueError, "different runtime binaries"):
             runner.run_corpus(corpus(), self.node, self.node, self.root / "artifacts")
+
+    def test_node_and_bun_must_be_distinct_binaries(self):
+        with self.assertRaisesRegex(ValueError, "Node and Bun references"):
+            runner.run_corpus(corpus(), self.native, self.node, self.root / "artifacts",
+                              bun=self.node)
+        self.assertFalse((self.root / "artifacts").exists())
+
+    def test_candidate_and_bun_must_be_distinct_binaries(self):
+        with self.assertRaisesRegex(ValueError, "candidate and Bun"):
+            runner.run_corpus(corpus(), self.native, self.node, self.root / "artifacts",
+                              bun=self.native)
+        self.assertFalse((self.root / "artifacts").exists())
 
     def test_unknown_selection_rejected(self):
         with self.assertRaisesRegex(ValueError, "unknown case ids"):
@@ -197,6 +270,23 @@ else:
         self.assertEqual(result["verdict"], "FAIL")
         self.assertEqual(result["reference"]["differences"], [])
         self.assertEqual(result["candidate"]["differences"], ["file:result.txt"])
+
+    def test_bun_only_file_difference_is_inconclusive(self):
+        value = case()
+        value["files"]["main.js"] = (
+            "require('fs').writeFileSync('result.txt', '42'); console.log(42);\n")
+        value["expected"]["files"] = {"result.txt": "42"}
+        bun = self.root / "bun-file-disagreement"
+        bun.write_text(
+            f"#!{sys.executable}\nfrom pathlib import Path\n"
+            "Path('result.txt').write_text('different')\nprint(42)\n")
+        bun.chmod(0o700)
+        report = self.run_triad(value, bun=bun)
+        result = report["results"][0]
+        self.assertEqual(result["verdict"], "INCONCLUSIVE")
+        self.assertEqual(result["reference_disagreements"], ["files"])
+        self.assertEqual(result["reference"]["differences"], [])
+        self.assertEqual(result["bun"]["differences"], ["file:result.txt"])
 
     def test_setup_failure_is_not_a_comparison_pass(self):
         self.native.write_text(f"#!{sys.executable}\nraise SystemExit(7)\n")
@@ -235,6 +325,17 @@ else:
         separator = command.index("--")
         self.assertEqual(command[separator + 1:], value["args"])
         self.assertEqual(command[command.index("--runtime") + 1], "franken-engine")
+
+    def test_script_arguments_are_identical_for_both_references(self):
+        value = case()
+        value["args"] = ["--flag", "a b"]
+        report = self.run_triad(value)
+        self.assertEqual(report["verdict"], "PASS")
+        base = self.root / "artifacts/answer"
+        node_receipt = json.loads((base / "reference/execution/watchdog.json").read_text())
+        bun_receipt = json.loads((base / "bun/execution/watchdog.json").read_text())
+        self.assertEqual(node_receipt["command"][2:], value["args"])
+        self.assertEqual(bun_receipt["command"][2:], value["args"])
 
     def test_cancellation_never_passes_an_empty_run(self):
         cancellation = runner.Cancellation()

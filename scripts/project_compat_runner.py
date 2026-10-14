@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Execute frozen multi-file projects against Node and the native runtime.
+"""Execute frozen multi-file projects against Node, optional Bun, and native.
 
 This is an executable project corpus, not the singleton fixture schema checker.
 No packages are installed and no reference runtime substitutes for the native
 candidate. Fixtures are trusted programs, not sandboxed by this runner.
 
     python3 scripts/project_compat_runner.py --bin target/release/franken-node \
-        --artifacts-dir /tmp/project-compat-001
+        --bun bun --artifacts-dir /tmp/project-compat-001
 
 The artifact directory must be new. Exit 0 means every selected case passed;
-1 means a case/setup failure; 2 means invalid input or missing prerequisites. Individual
-case failures retain both runtime observations and do not stop the other cases.
+1 means a case/setup/reference failure or inconclusive reference disagreement;
+2 means invalid input or missing prerequisites. Individual case failures retain
+all completed runtime observations and do not stop later cases.
 """
 from __future__ import annotations
 
@@ -107,9 +108,9 @@ def validate_corpus(corpus: Any) -> dict[str, Any]:
             raise ValueError(f"{name}: project needs 1..{MAX_FILES} files")
         paths = set()
         total = 0
-        for path, content in files.items():
+        for path, text in files.items():
             paths.add(relative_path(path))
-            total += len(_text(content, path, MAX_PROJECT_BYTES).encode("utf-8"))
+            total += len(_text(text, path, MAX_PROJECT_BYTES).encode("utf-8"))
         if total > MAX_PROJECT_BYTES:
             raise ValueError(f"{name}: project exceeds {MAX_PROJECT_BYTES} bytes")
         for path in paths:
@@ -178,11 +179,11 @@ def fingerprint(path: Path) -> dict[str, str]:
 
 def stage(case: dict[str, Any], workspace: Path) -> None:
     workspace.mkdir(parents=True, exist_ok=False)
-    for name, content in sorted(case["files"].items()):
+    for name, text in sorted(case["files"].items()):
         target = workspace / name
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("xb") as output:
-            output.write(content.encode("utf-8"))
+            output.write(text.encode("utf-8"))
 
 
 def observation(receipt: dict[str, Any]) -> dict[str, Any]:
@@ -214,6 +215,24 @@ def differences(receipt: dict[str, Any], expected: dict[str, Any]) -> list[str]:
             failures.append(stream)
     return failures
 
+
+def reference_disagreements(node: dict[str, Any], bun: dict[str, Any]) -> list[str]:
+    """Compare measured reference behavior, excluding artifact-local receipt paths."""
+    channels = []
+    if (node["outcome"], node["exit_code"]) != (bun["outcome"], bun["exit_code"]):
+        channels.append("termination")
+    if (node["output_complete"], node["stdin_delivery_complete"]) != (
+            bun["output_complete"], bun["stdin_delivery_complete"]):
+        channels.append("completeness")
+    if (node["stdout_sha256"], node["stdout_bytes"]) != (
+            bun["stdout_sha256"], bun["stdout_bytes"]):
+        channels.append("stdout")
+    if (node["stderr_sha256"], node["stderr_bytes"]) != (
+            bun["stderr_sha256"], bun["stderr_bytes"]):
+        channels.append("stderr")
+    if node.get("files", {}) != bun.get("files", {}):
+        channels.append("files")
+    return channels
 
 
 def publish_report(path: Path, report: dict[str, Any]) -> None:
@@ -257,9 +276,11 @@ def inspect_output_file(workspace: Path, name: str, expected: str | None) -> dic
             data = source.read(MAX_PROJECT_BYTES + 1)
             after = os.fstat(source.fileno())
             named = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+
             def identity(info: os.stat_result) -> tuple[int, ...]:
                 return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
                         info.st_mtime_ns, info.st_ctime_ns)
+
             if (identity(before) != identity(after) or identity(after) != identity(named)
                     or len(data) != before.st_size):
                 return {"status": "changed", "matches": False}
@@ -281,15 +302,17 @@ def reject_runtime_overrides() -> None:
     if present:
         raise ValueError("unset ambient runtime overrides before comparison: " + ", ".join(present))
 
-def run_case(case: dict[str, Any], binary: Path, node: Path, directory: Path,
-             policy: str, limits: dict[str, Any]) -> dict[str, Any]:
+
+def run_case(case: dict[str, Any], binary: Path, node: Path, bun: Path | None,
+             directory: Path, policy: str, limits: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {"id": case["id"], "category": case["category"],
                               "case_sha256": digest(encoded(case)), "verdict": "ERROR"}
     directory.mkdir()
     (directory / "case.json").write_bytes(encoded(case))
-    # Separate workspaces prevent the reference's file mutations/cache/state
-    # from seeding the candidate's result. Neither process sees the source tree.
-    for runtime in ("reference", "candidate"):
+    runtimes = ("reference", "bun", "candidate") if bun is not None else ("reference", "candidate")
+    # Independent workspaces prevent either reference from seeding another role.
+    # None of the processes executes from the source checkout.
+    for runtime in runtimes:
         stage(case, directory / runtime / "project")
     native_cwd = directory / "candidate" / "project"
     setup = supervise([str(binary), "init", "--profile", policy, "--out-dir", "."],
@@ -300,9 +323,9 @@ def run_case(case: dict[str, Any], binary: Path, node: Path, directory: Path,
         return result
     # init must not silently replace captured inputs (for example a fixture
     # that conflicts with the generated project configuration).
-    for name, content in case["files"].items():
+    for name, text in case["files"].items():
         target = native_cwd / name
-        if target.is_symlink() or not target.is_file() or target.read_bytes() != content.encode("utf-8"):
+        if target.is_symlink() or not target.is_file() or target.read_bytes() != text.encode("utf-8"):
             result["detail"] = f"candidate initialization changed fixture input: {name}"
             return result
     entry = "./" + case["entry"]
@@ -310,10 +333,14 @@ def run_case(case: dict[str, Any], binary: Path, node: Path, directory: Path,
     commands = {
         "reference": [str(node), entry, *args],
         "candidate": [str(binary), "run", entry, "--policy", policy,
-                      "--runtime", "franken-engine", "--console-only", *(["--", *args] if args else [])],
+                      "--runtime", "franken-engine", "--console-only",
+                      *(["--", *args] if args else [])],
     }
+    if bun is not None:
+        commands["bun"] = [str(bun), entry, *args]
     stdin = case.get("stdin")
-    for runtime, command in commands.items():
+    for runtime in runtimes:
+        command = commands[runtime]
         receipt = supervise(command, directory / runtime / "execution",
                             cwd=directory / runtime / "project",
                             stdin_data=stdin.encode("utf-8") if stdin is not None else None, **limits)
@@ -325,7 +352,17 @@ def run_case(case: dict[str, Any], binary: Path, node: Path, directory: Path,
             result[runtime]["files"][name] = observed
             if not observed["matches"]:
                 result[runtime]["differences"].append("file:" + name)
-    if result["reference"]["differences"]:
+    if bun is not None:
+        result["reference_disagreements"] = reference_disagreements(result["reference"], result["bun"])
+        if result["reference_disagreements"]:
+            result["verdict"] = "INCONCLUSIVE"
+        elif result["reference"]["differences"] or result["bun"]["differences"]:
+            result["verdict"] = "REFERENCE_FAILED"
+        elif result["candidate"]["differences"]:
+            result["verdict"] = "FAIL"
+        else:
+            result["verdict"] = "PASS"
+    elif result["reference"]["differences"]:
         result["verdict"] = "REFERENCE_FAILED"
     elif result["candidate"]["differences"]:
         result["verdict"] = "FAIL"
@@ -335,7 +372,7 @@ def run_case(case: dict[str, Any], binary: Path, node: Path, directory: Path,
 
 
 def run_corpus(corpus: dict[str, Any], binary: Path, node: Path, artifacts: Path, *,
-               policy: str = "balanced", selected: Sequence[str] = (),
+               bun: Path | None = None, policy: str = "balanced", selected: Sequence[str] = (),
                wall_time_ms: int = 10000, max_output_bytes: int = 1024 * 1024,
                cancellation: Cancellation | None = None,
                expected_corpus_sha256: str | None = None) -> dict[str, Any]:
@@ -353,13 +390,20 @@ def run_corpus(corpus: dict[str, Any], binary: Path, node: Path, artifacts: Path
     positive_bytes(str(max_output_bytes))
     native_identity, reference_identity = fingerprint(binary), fingerprint(node)
     if native_identity["sha256"] == reference_identity["sha256"]:
-        raise ValueError("candidate and reference must be different runtime binaries")
+        raise ValueError("candidate and Node reference must be different runtime binaries")
+    bun_identity = fingerprint(bun) if bun is not None else None
+    if bun_identity is not None:
+        if bun_identity["sha256"] == reference_identity["sha256"]:
+            raise ValueError("Node and Bun references must be different runtime binaries")
+        if bun_identity["sha256"] == native_identity["sha256"]:
+            raise ValueError("candidate and Bun reference must be different runtime binaries")
     artifacts = artifacts.resolve()
     artifacts.mkdir(parents=True, exist_ok=False)
     (artifacts / "corpus.json").write_bytes(encoded(corpus))
     cases = [case for case in corpus["cases"] if not selected or case["id"] in selected]
     report: dict[str, Any] = {
         "schema_version": REPORT_SCHEMA, "verdict": "RUNNING", "policy": policy,
+        "oracle": "node-bun-native" if bun is not None else "node-native",
         "corpus_sha256": corpus_sha256, "corpus_case_count": len(corpus["cases"]),
         "selected_case_count": len(cases), "candidate": native_identity,
         "reference": reference_identity, "results": [],
@@ -368,29 +412,37 @@ def run_corpus(corpus: dict[str, Any], binary: Path, node: Path, artifacts: Path
         "environment_scope": "inherited; loader overrides rejected; not a hermetic environment replay",
         "claim_scope": "selected project cases only; not the micro-corpus compatibility score",
     }
+    if bun_identity is not None:
+        report["bun_reference"] = bun_identity
     cancellation = cancellation or Cancellation()
     limits = {"wall_time_ms": wall_time_ms, "max_output_bytes": max_output_bytes,
               "cancellation": cancellation}
     report_path = artifacts / "report.json"
     publish_report(report_path, report)
-    for case in cases:
+    for current_case in cases:
         if cancellation.signum is not None:
             break
         try:
-            result = run_case(case, binary, node, artifacts / case["id"], policy, limits)
+            result = run_case(current_case, binary, node, bun,
+                              artifacts / current_case["id"], policy, limits)
         except (OSError, ValueError) as error:
-            result = {"id": case["id"], "category": case["category"], "verdict": "ERROR",
-                      "detail": f"{type(error).__name__}: {error}"}
+            result = {"id": current_case["id"], "category": current_case["category"],
+                      "verdict": "ERROR", "detail": f"{type(error).__name__}: {error}"}
         report["results"].append(result)
         publish_report(report_path, report)
     report["categories"] = {}
     for row in report["results"]:
-        counts = report["categories"].setdefault(row["category"], {"total": 0, "passed": 0})
+        counts = report["categories"].setdefault(
+            row["category"], {"total": 0, "passed": 0, "inconclusive": 0})
         counts["total"] += 1
         counts["passed"] += row["verdict"] == "PASS"
+        counts["inconclusive"] += row["verdict"] == "INCONCLUSIVE"
     report["passing_cases"] = sum(row["verdict"] == "PASS" for row in report["results"])
+    report["inconclusive_cases"] = sum(
+        row["verdict"] == "INCONCLUSIVE" for row in report["results"])
     report["verdict"] = (
         "CANCELLED" if cancellation.signum is not None else
+        "INCONCLUSIVE" if report["inconclusive_cases"] else
         "PASS" if report["passing_cases"] == len(cases) else "FAIL")
     publish_report(report_path, report)
     return report
@@ -399,8 +451,10 @@ def run_corpus(corpus: dict[str, Any], binary: Path, node: Path, artifacts: Path
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
-    parser.add_argument("--bin", default=os.environ.get("FRANKEN_NODE_BIN", str(ROOT / "target/release/franken-node")))
+    parser.add_argument("--bin", default=os.environ.get(
+        "FRANKEN_NODE_BIN", str(ROOT / "target/release/franken-node")))
     parser.add_argument("--node", default="node")
+    parser.add_argument("--bun", help="optional second reference; disagreements make the case inconclusive")
     parser.add_argument("--expect-corpus-sha256", help="require this digest when rerunning a retained corpus")
     parser.add_argument("--artifacts-dir", required=True, type=Path)
     parser.add_argument("--policy", default="balanced", choices=["strict", "balanced", "legacy-risky"])
@@ -409,12 +463,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--max-output-bytes", type=positive_bytes, default=1024 * 1024)
     args = parser.parse_args(argv)
     try:
-        corpus = load_corpus(args.corpus)
+        corpus_value = load_corpus(args.corpus)
         with cancellation_signals() as cancellation:
-            report = run_corpus(corpus, executable(args.bin), executable(args.node), args.artifacts_dir,
-                                policy=args.policy, selected=args.selected, wall_time_ms=args.wall_time_ms,
-                                max_output_bytes=args.max_output_bytes, cancellation=cancellation,
-                                expected_corpus_sha256=args.expect_corpus_sha256)
+            report = run_corpus(
+                corpus_value, executable(args.bin), executable(args.node), args.artifacts_dir,
+                bun=executable(args.bun) if args.bun else None,
+                policy=args.policy, selected=args.selected, wall_time_ms=args.wall_time_ms,
+                max_output_bytes=args.max_output_bytes, cancellation=cancellation,
+                expected_corpus_sha256=args.expect_corpus_sha256)
     except (OSError, ValueError) as error:
         print(json.dumps({"schema_version": REPORT_SCHEMA, "verdict": "ERROR", "detail": str(error)}))
         return 2
