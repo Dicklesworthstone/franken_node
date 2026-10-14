@@ -98,26 +98,7 @@ impl SourcePreparer {
         source: &str,
         report: &SourceGraphReport,
     ) -> Result<ModuleKind> {
-        let explicit = match (module.source_language, module.format_hint.as_str()) {
-            (SourceLanguage::JavaScript, "module") => Some(ModuleKind::EsModule),
-            (SourceLanguage::JavaScript, "commonjs") => Some(ModuleKind::CommonJs),
-            (SourceLanguage::JavaScript, "javascript_unspecified") => None,
-            (SourceLanguage::TypeScript, _) if module.id.path.ends_with(".mts") => {
-                Some(ModuleKind::EsModule)
-            }
-            (SourceLanguage::TypeScript, _) if module.id.path.ends_with(".cts") => {
-                Some(ModuleKind::CommonJs)
-            }
-            _ => {
-                // .ts package scope is not yet captured by the file resolver;
-                // do not guess it or reopen package.json here. JSX, JSON and
-                // addons likewise need their own engine module contracts.
-                return Err(error(
-                    "ERR_MODULE_REGISTRY_FORMAT",
-                    "engine preparation requires JavaScript or explicit .mts/.cts module format",
-                ));
-            }
-        };
+        let explicit = captured_kind(module)?;
         let has_hashbang = source
             .strip_prefix('\u{feff}')
             .unwrap_or(source)
@@ -256,6 +237,40 @@ impl SourcePreparer {
     }
 }
 
+/// Format selection uses only captured metadata and physical source identity.
+/// In particular, .ts inherits its captured package scope, while .mts/.cts are
+/// explicit. An absent or legacy unknown hint is not evidence of an unmarked
+/// package: only the resolver's typescript_unspecified observation permits
+/// syntax detection. JSX, declarations, JSON and addons need other contracts.
+fn captured_kind(module: &SourceModule) -> Result<Option<ModuleKind>> {
+    match (module.source_language, module.format_hint.as_str()) {
+        (SourceLanguage::JavaScript, "module") => Ok(Some(ModuleKind::EsModule)),
+        (SourceLanguage::JavaScript, "commonjs") => Ok(Some(ModuleKind::CommonJs)),
+        (SourceLanguage::JavaScript, "javascript_unspecified") => Ok(None),
+        (SourceLanguage::TypeScript, _) if module.id.path.ends_with(".mts") => {
+            Ok(Some(ModuleKind::EsModule))
+        }
+        (SourceLanguage::TypeScript, _) if module.id.path.ends_with(".cts") => {
+            Ok(Some(ModuleKind::CommonJs))
+        }
+        (SourceLanguage::TypeScript, "module") if module.id.path.ends_with(".ts") => {
+            Ok(Some(ModuleKind::EsModule))
+        }
+        (SourceLanguage::TypeScript, "commonjs") if module.id.path.ends_with(".ts") => {
+            Ok(Some(ModuleKind::CommonJs))
+        }
+        (SourceLanguage::TypeScript, "typescript_unspecified")
+            if module.id.path.ends_with(".ts") =>
+        {
+            Ok(None)
+        }
+        _ => Err(error(
+            "ERR_MODULE_REGISTRY_FORMAT",
+            "engine preparation requires a captured JavaScript or TypeScript module format",
+        )),
+    }
+}
+
 fn expected_routes(report: &SourceGraphReport) -> Result<BTreeMap<ModuleId, Routes>> {
     let mut routes: BTreeMap<_, _> = report
         .modules
@@ -368,6 +383,51 @@ mod tests {
                 ..ParserBudget::default()
             },
             ..ParserOptions::default()
+        }
+    }
+
+    fn source_module(path: &str, language: SourceLanguage, format: &str) -> SourceModule {
+        SourceModule {
+            id: ModuleId {
+                path: path.into(),
+                url_suffix: String::new(),
+            },
+            content_sha256: String::new(),
+            content_bytes: 0,
+            format_hint: format.into(),
+            source_language: language,
+            analyzed: true,
+        }
+    }
+
+    #[test]
+    fn captured_typescript_scope_selects_the_engine_parse_goal() {
+        for (path, format, expected) in [
+            ("app.ts", "module", Some(ModuleKind::EsModule)),
+            ("app.ts", "commonjs", Some(ModuleKind::CommonJs)),
+            ("app.ts", "typescript_unspecified", None),
+            ("app.mts", "module", Some(ModuleKind::EsModule)),
+            ("app.cts", "commonjs", Some(ModuleKind::CommonJs)),
+        ] {
+            let module = source_module(path, SourceLanguage::TypeScript, format);
+            assert_eq!(captured_kind(&module).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn unknown_scope_and_non_runtime_languages_cannot_enter_ts_preparation() {
+        for (path, language, format) in [
+            ("app.ts", SourceLanguage::TypeScript, "unknown"),
+            ("app.ts", SourceLanguage::TypeScript, "javascript_unspecified"),
+            ("app.tsx", SourceLanguage::Tsx, "module"),
+            ("app.d.ts", SourceLanguage::Declaration, "module"),
+            ("app.json", SourceLanguage::Json, "module"),
+        ] {
+            let module = source_module(path, language, format);
+            assert_eq!(
+                captured_kind(&module).unwrap_err().code,
+                "ERR_MODULE_REGISTRY_FORMAT"
+            );
         }
     }
 
