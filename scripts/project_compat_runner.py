@@ -440,8 +440,13 @@ def run_corpus(corpus: dict[str, Any], binary: Path, node: Path, artifacts: Path
     report["passing_cases"] = sum(row["verdict"] == "PASS" for row in report["results"])
     report["inconclusive_cases"] = sum(
         row["verdict"] == "INCONCLUSIVE" for row in report["results"])
+    report["failing_cases"] = sum(
+        row["verdict"] in ("FAIL", "REFERENCE_FAILED", "ERROR") for row in report["results"])
+    # Definite measured failures outrank uncertainty. Otherwise one unrelated
+    # reference disagreement could hide a known native or oracle failure.
     report["verdict"] = (
         "CANCELLED" if cancellation.signum is not None else
+        "FAIL" if report["failing_cases"] else
         "INCONCLUSIVE" if report["inconclusive_cases"] else
         "PASS" if report["passing_cases"] == len(cases) else "FAIL")
     publish_report(report_path, report)
