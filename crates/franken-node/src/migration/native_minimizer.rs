@@ -246,15 +246,9 @@ pub(super) fn select_sources(
                     .any(|part| part.as_os_str() == ".franken-rewrite"),
             "dependencies, backups and reserved metadata cannot be reduction targets"
         );
-        ensure!(
-            path.extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(
-                    |extension| ["js", "mjs", "cjs", "ts", "mts", "cts", "jsx", "tsx"]
-                        .contains(&extension)
-                ),
-            "reduction targets must be explicit JS/TS sources, not configuration"
-        );
+        // The same filename-selected dialect is used for every structural
+        // proposal. Declaration-only files cannot enter even the line phase.
+        syntax_reduction::grammar_for_path(&path)?;
         ensure!(unique.insert(path), "duplicate reduction source file");
     }
     let mut result = Vec::new();
@@ -566,6 +560,9 @@ pub(super) fn reduce_inputs<O: ReductionOracle>(
         (2..=8).contains(&confirmations),
         "invalid reduction confirmation count"
     );
+    for target in targets {
+        syntax_reduction::grammar_for_path(&target.path)?;
+    }
     for _ in 0..confirmations {
         let measured = oracle
             .measure(&best, false)?
@@ -596,7 +593,7 @@ pub(super) fn reduce_inputs<O: ReductionOracle>(
                 break 'sweeps;
             }
             let bytes = source(best.selected(target), &target.path)?.to_vec();
-            let syntax = syntax_reduction::reduce(bytes, search_deadline, |bytes| {
+            let syntax = syntax_reduction::reduce(&target.path, bytes, search_deadline, |bytes| {
                 evaluate(
                     &mut best,
                     target,
@@ -794,13 +791,17 @@ mod tests {
         fs::write(path, source).unwrap();
     }
     fn seed(root: &Path, candidate: Option<&Path>) -> Loaded {
+        seed_with_runtimes(root, candidate, &node(false), &node(true))
+    }
+    fn seed_with_runtimes(root: &Path, candidate: Option<&Path>, reference: &Invocation,
+        native: &Invocation) -> Loaded {
         let original = Snapshot::capture(root, deadline()).unwrap();
         let candidate = candidate.map(|p| Snapshot::capture(p, deadline()).unwrap());
         let expected = execute_suite_pair(
             &original,
             candidate.as_ref().unwrap_or(&original),
-            &node(false),
-            &node(true),
+            reference,
+            native,
             deadline(),
             Duration::from_secs(5),
             true,
@@ -1078,6 +1079,7 @@ mod tests {
         put(root.path(), "case.test.js", failing_source());
         put(root.path(), "config.json", "{}");
         put(root.path(), "node_modules/pkg/source.js", "// vendor");
+        put(root.path(), "types.d.ts", "declare const answer:number;");
         symlink("case.test.js", root.path().join("alias.js")).unwrap();
         let loaded = seed(root.path(), None);
         for files in [
@@ -1086,6 +1088,7 @@ mod tests {
             vec!["alias.js"],
             vec!["missing.js"],
             vec!["node_modules/pkg/source.js"],
+            vec!["types.d.ts"],
             vec!["case.test.js", "case.test.js"],
         ] {
             let opts = Options {
@@ -1413,5 +1416,80 @@ mod tests {
                 .unwrap();
         assert!(!text.contains("dead"), "{text}");
         assert!(text.contains("live=42"), "{text}");
+    }
+
+    fn typed_node(candidate: bool) -> Invocation {
+        let mut invocation = node(candidate);
+        // Real Node's explicit TypeScript mode, not transpiled fixture bytes
+        // or a replacement for the native Franken implementation.
+        invocation.before = vec!["--experimental-strip-types".into(), "--no-warnings".into()];
+        invocation
+    }
+
+    #[test]
+    fn typed_supporting_sources_reduce_in_both_trees_and_replay_all_cases() {
+        let original = tempfile::tempdir().unwrap();
+        let candidate = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        for (root, answer) in [(original.path(), 42), (candidate.path(), 43)] {
+            put(root, "case.test.cjs", "console.log(require('./helper.cts'));");
+            put(root, "passing.test.cjs", "console.log('unchanged passing case');");
+            put(root, "helper.cts", &format!(
+                "const discarded:number=12345;const answer:number={answer};module.exports=answer;"));
+            fs::set_permissions(root.join("helper.cts"), fs::Permissions::from_mode(0o640)).unwrap();
+        }
+        let reference = typed_node(false);
+        let native = typed_node(false);
+        let loaded = seed_with_runtimes(original.path(), Some(candidate.path()), &reference, &native);
+        assert_eq!(loaded.capsule.payload.expected.verdict, "FAIL");
+        let expected = loaded.capsule.payload.expected.cases.clone();
+        let options = Options { source_files: vec!["helper.cts".into()], max_executions: 96, ..options() };
+        let reduced = minimize_loaded(loaded, &reference, &native, &options, Instant::now()).unwrap();
+        assert_eq!(reduced.report.verdict, "REDUCED");
+        assert_eq!(reduced.report.validation.cases, expected);
+        assert_eq!(reduced.report.validation.passed, 1);
+        assert_eq!(reduced.report.selected_sources.len(), 2);
+        assert!(reduced.report.statistics.syntax.accepted > 0);
+        assert!(reduced.report.statistics.syntax.grammar_passes.get("typescript").is_some_and(|passes| *passes > 0));
+        assert!(reduced.report.statistics.executions <= options.max_executions);
+        let path = output.path().join("typed.json");
+        let pin = reduced.write_capsule(&path).unwrap().content_sha256;
+        let loaded = load(&path, Some(&pin), deadline()).unwrap();
+        for snapshot in [&loaded.original, loaded.candidate()] {
+            assert_eq!(snapshot.entries[Path::new("helper.cts")].mode, 0o640);
+            assert!(!std::str::from_utf8(source(snapshot, Path::new("helper.cts")).unwrap()).unwrap().contains("discarded"));
+        }
+        let replayed = super::super::reexecute(loaded, &reference, &native, false, deadline()).unwrap();
+        assert_eq!(replayed.verdict, "REPRODUCED");
+        assert_eq!(replayed.validation.cases, expected);
+        for root in [original.path(), candidate.path()] {
+            assert!(fs::read_to_string(root.join("helper.cts")).unwrap().contains("discarded"));
+            assert!(!root.join(".migrate-backup").exists());
+        }
+    }
+
+    #[test]
+    fn minified_mts_entrypoint_reduces_without_changing_the_recorded_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let source = "interface Unused{n:number};const discarded:number=12345;const result:string=process.argv.includes('candidate')?'wrong':'right';console.log(result);";
+        put(root.path(), "case.test.mts", source);
+        let reference = typed_node(false);
+        let native = typed_node(true);
+        let loaded = seed_with_runtimes(root.path(), None, &reference, &native);
+        assert_eq!(loaded.capsule.payload.expected.verdict, "FAIL");
+        let expected = loaded.capsule.payload.expected.cases.clone();
+        let reduced = minimize_loaded(loaded, &reference, &native,
+            &Options { max_executions: 96, ..options() }, Instant::now()).unwrap();
+        assert_eq!(reduced.report.verdict, "REDUCED");
+        assert!(reduced.report.statistics.syntax.accepted > 0);
+        assert_eq!(reduced.report.validation.cases, expected);
+        let path = out.path().join("mts.json");
+        let pin = reduced.write_capsule(&path).unwrap().content_sha256;
+        let loaded = load(&path, Some(&pin), deadline()).unwrap();
+        let reduced_source = std::str::from_utf8(super::source(&loaded.original, Path::new("case.test.mts")).unwrap()).unwrap();
+        assert!(!reduced_source.contains("discarded"));
+        assert_eq!(super::super::reexecute(loaded, &reference, &native, false, deadline()).unwrap().verdict, "REPRODUCED");
+        assert_eq!(fs::read_to_string(root.path().join("case.test.mts")).unwrap(), source);
     }
 }
