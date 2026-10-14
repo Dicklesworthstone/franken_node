@@ -1,10 +1,12 @@
-//! Bun text-lock admission for the captured, hoisted registry-package subset.
+//! Bun text-lock admission for captured, hoisted registry/workspace packages.
 //!
 //! The v1/v2 package tuples and slash-separated installation keys are decoded
 //! into the existing internal installation graph. This is not an npm lockfile
 //! export, a Bun installer, or an assertion that a mutable installation matches.
 //! The original bun.lock bytes remain the evidence input, and checked execution
 //! still inspects every installed manifest/edge/native/lifecycle marker.
+//! Workspace tuples grant nothing by themselves: the common admission path
+//! independently selects and binds real manifests before inspecting link text.
 //!
 //! References: bun.com/docs/pm/lockfile and Bun's
 //! test/cli/install/lockfile-version-2.test.ts at
@@ -14,7 +16,10 @@ use super::{MAX_DEPTH, MAX_LOCK_BYTES, MAX_METADATA_BYTES, MAX_PACKAGES, SECTION
     bounded_text, graph, name, parse_unique, relative, time_remaining};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Map, Value, json};
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
+
+const MAX_WORKSPACES: usize = 1024;
 
 fn checkpoint(index: usize, next: &mut usize, deadline: Instant) -> Result<()> {
     if index >= *next {
@@ -253,8 +258,10 @@ fn tuple_record(tuple: Value, deadline: Instant) -> Result<Value> {
 
 /// Internal projection only: reuse the SAME graph/version/installed checks as
 /// npm, but keep the source filename and original-byte hash as Bun evidence.
-/// Isolated/workspace linking and override/catalog/patch semantics are not
-/// guessed. Unsupported formats fail before any comparison runtime starts.
+/// Workspace links are projected only to explicitly named source directories.
+/// Their identities and declarations are subsequently bound to real captured
+/// manifests by workspaces::bind_links. Isolated stores are NOT inferred from
+/// configVersion: execution admission still checks the actual hoisted layout.
 pub(super) fn project_lock(lock: Value, manifest: &Value, deadline: Instant) -> Result<Value> {
     time_remaining(deadline)?;
     let Value::Object(mut document) = lock else { bail!("Bun lockfile must be an object"); };
@@ -271,14 +278,15 @@ pub(super) fn project_lock(lock: Value, manifest: &Value, deadline: Instant) -> 
     no_resolution_controls(&document)?;
     let manifest = manifest.as_object().context("Bun project manifest must be an object")?;
     no_resolution_controls(manifest)?;
-    if let Some(workspaces) = manifest.get("workspaces") {
-        ensure!(workspaces.as_array().is_some_and(Vec::is_empty),
-            "Bun workspace linking requires a separate captured-layout contract");
-    }
+    let selectors = manifest.get("workspaces").map(|value|
+        value.as_array().context("Bun workspaces must be an array of captured selectors")
+    ).transpose()?;
     let workspaces = document.remove("workspaces").context("Bun workspaces missing")?;
     let Value::Object(mut workspaces) = workspaces else { bail!("Bun workspaces must be an object"); };
-    ensure!(workspaces.len() == 1 && workspaces.contains_key(""),
-        "only Bun's root workspace is admitted by the hoisted registry contract");
+    ensure!(workspaces.len() <= MAX_WORKSPACES && workspaces.contains_key(""),
+        "Bun workspaces must include the root and fit the manifest bound");
+    ensure!(workspaces.len() == 1 || selectors.is_some_and(|values| !values.is_empty()),
+        "Bun lock declares workspaces not selected by the project manifest");
     let root = workspaces.remove("").context("Bun root workspace missing")?;
     let Value::Object(mut root) = root else { bail!("Bun root workspace must be an object"); };
     declarations(&mut root, true, deadline)?;
@@ -292,31 +300,98 @@ pub(super) fn project_lock(lock: Value, manifest: &Value, deadline: Instant) -> 
     let entries = document.remove("packages").context("Bun packages missing")?;
     let Value::Object(entries) = entries else { bail!("Bun packages must be an object"); };
     ensure!(entries.len() <= MAX_PACKAGES, "Bun package count exceeds limit");
+    let mut names = BTreeSet::new();
+    if let Some(value) = manifest.get("name") {
+        names.insert(name(bounded_text(value, "Bun root name")?)?.to_owned());
+    }
     let mut packages = Map::new();
     packages.insert(String::new(), Value::Object(root));
     let mut retained = serde_json::to_vec(&packages)?.len();
+    let mut workspace_names = BTreeMap::new();
+    for (directory, record) in workspaces {
+        time_remaining(deadline)?;
+        workspace_directory(&directory)?;
+        let Value::Object(mut record) = record else { bail!("Bun workspace must be an object"); };
+        declarations(&mut record, true, deadline)?;
+        let package = name(bounded_text(record.get("name").context("Bun workspace name missing")?,
+            "Bun workspace name")?)?.to_owned();
+        let version = bounded_text(record.get("version").context("Bun workspace version missing")?,
+            "Bun workspace version")?;
+        ensure!(graph::version_review(Some(version), Some(version)).is_none(),
+            "Bun workspace needs a concrete captured version, not an invented default");
+        ensure!(names.insert(package.clone()), "duplicate Bun workspace/root package name");
+        workspace_names.insert(package, directory.clone());
+        let record = Value::Object(record);
+        account_record(&directory, &record, &mut retained)?;
+        ensure!(packages.insert(directory, record).is_none(), "duplicate Bun workspace directory");
+    }
+    let mut virtual_records = Map::new();
+    let mut workspace_links = BTreeMap::new();
     for (key, tuple) in entries {
         time_remaining(deadline)?;
         let path = installation_path(&key)?;
-        let record = tuple_record(tuple, deadline)?;
-        let size = serde_json::to_vec(&record)?.len();
-        retained = retained.checked_add(size).and_then(|n| n.checked_add(path.len() + 16))
-            .context("Bun graph byte count overflow")?;
-        ensure!(retained <= MAX_METADATA_BYTES, "Bun projected graph exceeds byte limit");
-        ensure!(packages.insert(path, record).is_none(), "duplicate Bun installation identity");
+        let record = if let Some(tuple) = tuple.as_array().filter(|tuple| tuple.len() == 1) {
+            let identity = bounded_text(&tuple[0], "Bun workspace tuple")?;
+            let (package, target) = identity.split_once("@workspace:")
+                .context("only explicit workspace tuples may omit registry metadata")?;
+            name(package)?;
+            workspace_directory(target)?;
+            ensure!(key == package && workspace_names.get(package).is_some_and(|path| path == target),
+                "Bun workspace link must be the canonical root name and its recorded workspace target");
+            workspace_links.insert(path.clone(), target.to_owned());
+            json!({"link":true,"resolved":target})
+        } else { tuple_record(tuple, deadline)? };
+        account_record(&path, &record, &mut retained)?;
+        ensure!(virtual_records.insert(path, record).is_none(), "duplicate Bun installation identity");
     }
     // A nested key cannot create an unrecorded parent installation. This also
     // refuses isolated-store spellings rather than treating them as hoists.
-    for path in packages.keys() {
+    for path in virtual_records.keys() {
         let mut current = path.as_str();
         while let Some((parent, _)) = current.rsplit_once("/node_modules/") {
             time_remaining(deadline)?;
-            ensure!(packages.contains_key(parent), "Bun nested package has no recorded parent");
+            ensure!(virtual_records.contains_key(parent), "Bun nested package has no recorded parent");
             current = parent;
         }
     }
+    ensure!(workspace_links.len() == workspace_names.len(),
+        "Bun workspace is missing its canonical root installation link");
+    for (path, record) in virtual_records {
+        time_remaining(deadline)?;
+        // Node resolves from a workspace's physical directory, not from the
+        // lexical node_modules symlink. Preserve private versions there. This
+        // is one indexed lookup per record, never a scan of all workspaces.
+        let physical = if let Some((root_link, rest)) = path.split_once("/node_modules/") {
+            workspace_links.get(root_link).map(|target| format!("{target}/node_modules/{rest}"))
+        } else { None };
+        let physical = physical.unwrap_or_else(|| path.clone());
+        retained = retained.checked_add(physical.len().saturating_sub(path.len()))
+            .context("Bun graph path byte count overflow")?;
+        ensure!(retained <= MAX_METADATA_BYTES, "Bun projected graph exceeds byte limit");
+        relative(&physical)?;
+        ensure!(physical.split('/').count() <= MAX_DEPTH,
+            "Bun physical installation exceeds path depth bound");
+        ensure!(packages.len() <= MAX_PACKAGES, "Bun projected package count exceeds limit");
+        ensure!(packages.insert(physical, record).is_none(), "Bun projected installation paths collide");
+    }
     time_remaining(deadline)?;
     Ok(json!({"lockfileVersion":3,"packages":packages}))
+}
+
+fn workspace_directory(directory: &str) -> Result<()> {
+    relative(directory)?;
+    ensure!(directory.split('/').count() <= MAX_DEPTH && directory.split('/').all(|part|
+        !["node_modules", ".bun", ".git", ".beads", ".franken-node", ".franken-rewrite", ".migrate-backup"].contains(&part)),
+        "Bun workspace target must be an ordinary project source directory");
+    Ok(())
+}
+
+fn account_record(path: &str, record: &Value, retained: &mut usize) -> Result<()> {
+    let size = serde_json::to_vec(record)?.len();
+    *retained = retained.checked_add(size).and_then(|n| n.checked_add(path.len() + 16))
+        .context("Bun graph byte count overflow")?;
+    ensure!(*retained <= MAX_METADATA_BYTES, "Bun projected graph exceeds byte limit");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -520,5 +595,145 @@ mod tests {
         fs::create_dir(root.path().join("node_modules")).unwrap();
         symlink(outside.path(),root.path().join("node_modules/ordinary")).unwrap();
         assert!(super::super::inspect_for_execution(root.path(),deadline()).unwrap().requires_review());
+    }
+
+    fn workspace_fixture() -> (tempfile::TempDir, Value, Value) {
+        let manifest = json!({"workspaces":["packages/*"],
+            "dependencies":{"@demo/app":"^1","private":"^1"}});
+        let member = json!({"name":"@demo/app","version":"1.0.0",
+            "dependencies":{"private":"^1","hoisted":"^2"}});
+        let mut document = lock(json!({"dependencies":{"@demo/app":"^1","private":"^1"}}), json!({
+            "@demo/app":["@demo/app@workspace:packages/app"],
+            "@demo/app/private":tuple("private@1.1.0",json!({"dependencies":{"@nested/value":"^3"}})),
+            "@demo/app/private/@nested/value":tuple("@nested/value@3.1.0",json!({})),
+            "private":tuple("private@1.0.0",json!({})),
+            "hoisted":tuple("hoisted@2.0.0",json!({}))
+        }));
+        document["configVersion"] = 0.into();
+        document["workspaces"]["packages/app"] = member.clone();
+        let root = fixture(&manifest, &document);
+        installed(root.path(), "packages/app", member);
+        installed(root.path(), "packages/app/node_modules/private",
+            json!({"name":"private","version":"1.1.0","dependencies":{"@nested/value":"^3"}}));
+        installed(root.path(), "packages/app/node_modules/private/node_modules/@nested/value",
+            json!({"name":"@nested/value","version":"3.1.0"}));
+        installed(root.path(), "node_modules/private", json!({"name":"private","version":"1.0.0"}));
+        installed(root.path(), "node_modules/hoisted", json!({"name":"hoisted","version":"2.0.0"}));
+        fs::create_dir_all(root.path().join("node_modules/@demo")).unwrap();
+        std::os::unix::fs::symlink("../../packages/app", root.path().join("node_modules/@demo/app")).unwrap();
+        (root, manifest, document)
+    }
+
+    #[test]
+    fn hoisted_workspaces_bind_real_manifests_and_physical_private_dependencies() {
+        let (root, manifest, document) = workspace_fixture();
+        let projected = project_lock(document, &manifest, deadline()).unwrap();
+        assert_eq!(projected["packages"]["node_modules/@demo/app"]["resolved"], "packages/app");
+        assert_eq!(projected["packages"]["packages/app/node_modules/private"]["version"], "1.1.0");
+        assert!(projected["packages"].get("node_modules/@demo/app/node_modules/private").is_none());
+        let report = super::super::inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(!report.requires_review(), "{report:?}");
+        assert!(report.installation_checked);
+        assert_eq!(report.packages_scanned, 5);
+        assert_eq!(report.installed_packages_scanned, 5);
+        for input in &report.inputs {
+            assert_eq!(input.sha256, hex::encode(Sha256::digest(fs::read(root.path().join(&input.path)).unwrap())));
+        }
+        assert!(report.inputs.iter().any(|input| input.path == "packages/app/package.json"));
+        assert_eq!(report, super::super::inspect_for_execution(root.path(), deadline()).unwrap());
+    }
+
+    #[test]
+    fn absent_private_workspace_copy_cannot_use_a_compatible_hoisted_copy() {
+        let (root, _, _) = workspace_fixture();
+        fs::rename(root.path().join("packages/app/node_modules/private"),
+            root.path().join("packages/app/retained-private")).unwrap();
+        let report = super::super::inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(report.findings.iter().any(|finding|
+            finding.code == "installed_dependency_route_mismatch"
+                && finding.source == "packages/app/package.json#dependencies"
+                && finding.installed_as == "private"
+                && finding.package_path.as_deref() == Some("packages/app/node_modules/private")),
+            "{report:?}");
+    }
+
+    #[test]
+    fn stale_workspace_identity_edges_and_lifecycle_fail_before_runtime_admission() {
+        for changed in [
+            json!({"name":"@demo/app","version":"2.0.0","dependencies":{"private":"^1","hoisted":"^2"}}),
+            json!({"name":"@demo/app","version":"1.0.0","dependencies":{"private":"^1","hoisted":"^2","hidden":"1"}}),
+            json!({"name":"@demo/app","version":"1.0.0","dependencies":{"private":"^1","hoisted":"^2"},
+                "scripts":{"prepare":"touch forbidden-workspace-effect"}}),
+        ] {
+            let (root, _, _) = workspace_fixture();
+            installed(root.path(), "packages/app", changed);
+            let report = super::super::inspect_for_execution(root.path(), deadline()).unwrap();
+            assert!(report.requires_review(), "{report:?}");
+            assert!(!report.installation_checked);
+            assert!(!root.path().join("forbidden-workspace-effect").exists());
+        }
+    }
+
+    #[test]
+    fn workspace_tuples_cannot_invent_identity_targets_or_nested_links() {
+        let (_, manifest, document) = workspace_fixture();
+        for descriptor in [
+            json!(["@demo/app@workspace:../outside"]),
+            json!(["@demo/app@workspace:node_modules/other"]),
+            json!(["@demo/app@workspace:packages/absent"]),
+            json!(["other@workspace:packages/app"]),
+            json!(["@demo/app@file:packages/app"]),
+        ] {
+            let mut changed = document.clone();
+            changed["packages"]["@demo/app"] = descriptor;
+            assert!(project_lock(changed, &manifest, deadline()).is_err());
+        }
+        let mut missing = document.clone();
+        missing["packages"].as_object_mut().unwrap().remove("@demo/app");
+        assert!(project_lock(missing, &manifest, deadline()).is_err());
+        let mut nested = document.clone();
+        nested["packages"]["private/@demo/app"] = json!(["@demo/app@workspace:packages/app"]);
+        assert!(project_lock(nested, &manifest, deadline()).is_err());
+        let mut duplicate = document;
+        duplicate["workspaces"]["packages/other"] = duplicate["workspaces"]["packages/app"].clone();
+        assert!(project_lock(duplicate, &manifest, deadline()).is_err());
+    }
+
+    #[test]
+    fn lock_only_workspace_cannot_clear_unselected_link_review() {
+        let (root, mut manifest, mut document) = workspace_fixture();
+        manifest["workspaces"] = json!(["packages/app"]);
+        let extra = json!({"name":"extra","version":"1.0.0"});
+        document["workspaces"]["packages/extra"] = extra.clone();
+        document["packages"]["extra"] = json!(["extra@workspace:packages/extra"]);
+        fs::write(root.path().join("package.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        fs::write(root.path().join("bun.lock"), serde_json::to_vec(&document).unwrap()).unwrap();
+        installed(root.path(), "packages/extra", extra);
+        let report = super::super::inspect(root.path(), deadline()).unwrap();
+        assert!(report.findings.iter().any(|finding| finding.code == "local_link"
+            && finding.package_path.as_deref() == Some("node_modules/extra")), "{report:?}");
+        assert!(!report.inputs.iter().any(|input| input.path == "packages/extra/package.json"));
+    }
+
+    #[test]
+    fn hoisted_workspace_cycles_use_bounded_shared_graph_checks() {
+        let manifest = json!({"workspaces":["packages/*"]});
+        let a = json!({"name":"a","version":"1.0.0","dependencies":{"b":"^1"}});
+        let b = json!({"name":"b","version":"1.1.0","dependencies":{"a":"^1"}});
+        let document = json!({"lockfileVersion":2,"configVersion":0,
+            "workspaces":{"":{},"packages/a":a,"packages/b":b},
+            "packages":{"a":["a@workspace:packages/a"],"b":["b@workspace:packages/b"]}});
+        let root = fixture(&manifest, &document);
+        installed(root.path(), "packages/a", document["workspaces"]["packages/a"].clone());
+        installed(root.path(), "packages/b", document["workspaces"]["packages/b"].clone());
+        fs::create_dir(root.path().join("node_modules")).unwrap();
+        for name in ["a", "b"] {
+            std::os::unix::fs::symlink(format!("../packages/{name}"),
+                root.path().join("node_modules").join(name)).unwrap();
+        }
+        let report = super::super::inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(!report.requires_review(), "{report:?}");
+        assert!(report.installation_checked);
+        assert_eq!(report.packages_scanned, 2);
     }
 }
