@@ -1100,15 +1100,154 @@ mod tests {
     }
 
     #[test]
-    fn uncaptured_typescript_package_scope_is_not_invented() {
+    fn package_scoped_typescript_uses_engine_normalization_and_detection() {
+        use frankenengine_engine::ts_normalization::prepare_source_entry_for_public_entrypoints;
+        for (manifest, source, syntax) in [
+            (r#"{"type":"module"}"#, "export const answer: number=42;", ModuleSyntax::EsModule),
+            (r#"{"type":"commonjs"}"#, "const answer: number=42; module.exports=answer;", ModuleSyntax::CommonJs),
+            ("{}", "export const answer: number=42;", ModuleSyntax::EsModule),
+            ("{}", "const answer: number=42; module.exports=answer;", ModuleSyntax::CommonJs),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            put(root.path(), "package.json", manifest);
+            put(root.path(), "app.ts", source);
+            let r = resolver_entry(root.path(), "app.ts");
+            let out = r.resolve(&r.entry_request(), &context(), &granted()).unwrap();
+            let expected = prepare_source_entry_for_public_entrypoints(
+                source,
+                "app.ts",
+                "captured-module-preparation",
+                &r.summary().graph_input_hash,
+                "franken-node.engine-source-preparation.v1",
+            ).unwrap();
+            assert_eq!(out.module.record.syntax, syntax);
+            assert_eq!(out.module.record.source, expected.prepared_source);
+            assert_eq!(out.module.content_hash, out.module.record.canonical_hash());
+            assert_eq!(r.preparation_reports().count(), 1);
+            let prepared = r.preparation_reports().next().unwrap();
+            assert_eq!(prepared.source_ingestion, expected.source_ingestion);
+            assert!(prepared.normalization_witness.is_some());
+        }
+    }
+
+    #[test]
+    fn explicit_commonjs_typescript_scope_cannot_be_relabelled_as_esm() {
         let root = tempfile::tempdir().unwrap();
-        put(root.path(), "package.json", r#"{"type":"module"}"#);
+        put(root.path(), "package.json", r#"{"type":"commonjs"}"#);
         put(root.path(), "app.ts", "export const answer: number=42;");
         let graph = capture(root.path(), "app.ts", GraphOptions::default()).unwrap();
         let pin = graph.report().input_hash.clone();
         assert_eq!(
             CapturedEngineResolver::new(graph, &pin).err().unwrap().code,
-            "ERR_MODULE_REGISTRY_FORMAT"
+            "ERR_MODULE_ENGINE_PARSE"
+        );
+    }
+
+    #[test]
+    fn typed_url_instances_share_preparation_and_reauthorize_cached_loads() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "package.json", r#"{"type":"module"}"#);
+        put(root.path(), "app.mjs", "import './dep.ts?one'; import './dep.ts?two';");
+        put(root.path(), "dep.ts", "export const answer: number=42;");
+        let r = resolver(root.path());
+        let policy = ChangingPolicy {
+            allowed: Cell::new(true),
+            calls: Cell::new(0),
+        };
+        let out = r.resolve_chain(&r.entry_request(), &context(), &policy).unwrap();
+        assert_eq!(out.len(), 3);
+        assert_eq!(r.preparation_reports().count(), 1);
+        assert_eq!(out[1].module.record.source, out[2].module.record.source);
+        assert_ne!(out[1].module.content_hash, out[2].module.content_hash);
+        assert_ne!(out[1].module.record.id, out[2].module.record.id);
+        let request = ModuleRequest::new("./dep.ts?one", ImportStyle::Import)
+            .with_referrer(out[0].module.record.id.clone())
+            .with_compatibility_mode(CompatibilityMode::NodeCompat);
+        policy.allowed.set(false);
+        assert_eq!(
+            r.resolve(&request, &context(), &policy).unwrap_err().code,
+            ResolutionErrorCode::PolicyDenied
+        );
+        assert_eq!(policy.calls.get(), 4);
+    }
+
+    #[test]
+    fn typed_package_scope_survives_capsule_replay_after_manifest_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "package.json", r#"{"type":"module"}"#);
+        put(root.path(), "app.ts", "export const answer: number=42;");
+        let graph = capture(root.path(), "app.ts", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        let encoded = capsule::encode(&graph).unwrap();
+        let live = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
+        let before = live.resolve(&live.entry_request(), &context(), &granted()).unwrap();
+        put(root.path(), "package.json", r#"{"type":"commonjs"}"#);
+        put(root.path(), "app.ts", "const answer: number=0; module.exports=answer;");
+        let changed = capture(root.path(), "app.ts", GraphOptions::default()).unwrap();
+        let changed_pin = changed.report().input_hash.clone();
+        assert_ne!(pin, changed_pin);
+        let fresh = CapturedEngineResolver::new(changed, &changed_pin).ok().unwrap();
+        assert_eq!(
+            fresh.resolve(&fresh.entry_request(), &context(), &granted()).unwrap().module.record.syntax,
+            ModuleSyntax::CommonJs
+        );
+        let replay = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+        let restored = CapturedEngineResolver::new(replay, &pin).ok().unwrap();
+        assert_eq!(
+            before,
+            restored.resolve(&restored.entry_request(), &context(), &granted()).unwrap()
+        );
+        assert_eq!(
+            live.preparation_reports().collect::<Vec<_>>(),
+            restored.preparation_reports().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn typed_runtime_routes_cannot_gain_or_lose_dependencies() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "package.json", r#"{"type":"module"}"#);
+        put(root.path(), "app.ts", "import type { Missing } from './absent.d.ts'; import './side.mjs'; export const answer: number=42;");
+        put(root.path(), "side.mjs", "export const effect=1;");
+        let graph = capture(root.path(), "app.ts", GraphOptions::default()).unwrap();
+        let module = graph.report().modules.iter().find(|m| m.id.path == "app.ts").unwrap();
+        for altered in [
+            "export const answer: number=42;",
+            "import './side.mjs'; import './new.mjs'; export const answer: number=42;",
+        ] {
+            assert_eq!(
+                SourcePreparer::default().prepare(module, altered, graph.report()).err().unwrap().code,
+                "ERR_MODULE_ENGINE_DEPENDENCY_DRIFT"
+            );
+        }
+        let pin = graph.report().input_hash.clone();
+        let r = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
+        let out = r.resolve_chain(&r.entry_request(), &context(), &granted()).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out[0].module.record.dependencies,
+            vec![ModuleDependency::new("./side.mjs", ImportStyle::Import)]
+        );
+        assert!(!out[0].module.record.source.contains("absent.d.ts"));
+        let request = ModuleRequest::new("./absent.d.ts", ImportStyle::Import)
+            .with_referrer(out[0].module.record.id.clone())
+            .with_compatibility_mode(CompatibilityMode::NodeCompat);
+        assert_eq!(
+            r.resolve(&request, &context(), &granted()).unwrap_err().code,
+            ResolutionErrorCode::ModuleNotFound
+        );
+    }
+
+    #[test]
+    fn typed_host_capability_intents_remain_non_erasable() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "package.json", r#"{"type":"module"}"#);
+        put(root.path(), "app.ts", "hostcall<\"network.fetch\">('https://example.invalid');");
+        let graph = capture(root.path(), "app.ts", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        assert_eq!(
+            CapturedEngineResolver::new(graph, &pin).err().unwrap().code,
+            "ERR_MODULE_ENGINE_CAPABILITY_METADATA"
         );
     }
 
