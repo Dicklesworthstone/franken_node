@@ -12,16 +12,19 @@ stay separate, including nested packages, aliases, development packages and
 optional dependencies. Conflicting lock authorities, invalid JSON, duplicate
 JSON members, unsupported schemas, unsafe metadata paths and resource-limit
 exhaustion fail with `ERROR`, never a clean inventory. Symlinked/nonregular
-metadata is not followed.
+metadata is not followed. A root or selected workspace `bun.lockb` is explicitly
+refused, including empty, linked and nonregular inputs; it is never silently
+ignored as though the project had no dependency authority.
 
 ## Bun text-lock admission
 
-Bun text-lock versions 1 and 2 can supply the dependency graph for a single-root
-project with hoisted registry packages. JSONC comments and trailing commas are
-accepted only in `bun.lock`; `package.json` and npm locks remain strict JSON.
-Duplicate keys (including escaped spellings), array holes, malformed comments,
-unknown versions and unsupported metadata are refused. The raw `bun.lock`
-bytes, not a stripped or reconstructed document, are fingerprinted in `inputs`.
+Bun text-lock versions 1 and 2 can supply the graph for hoisted registry packages
+and independently captured workspaces. JSONC comments and trailing commas are
+accepted only in named `bun.lock` inputs; `package.json` and npm locks remain
+strict JSON. Duplicate keys (including escaped spellings), array holes,
+malformed comments, unknown versions and unsupported metadata are refused.
+The original `bun.lock` bytes, not a stripped or reconstructed document, are
+fingerprinted in `inputs`.
 
 The decoder preserves scoped names, aliases, nested installation positions,
 production/optional/peer declarations and optional-peer metadata. Its internal
@@ -33,44 +36,67 @@ manifest identities and required routes, and checks lifecycle/native markers.
 Missing packages, stale installed manifests and arbitrary package links remain
 review barriers. Guest sources are not evaluated by the inspector.
 
+A canonical `name@workspace:relative/path` tuple can describe the root link for
+that named workspace. Its source descriptor must contain a concrete version;
+missing versions are not invented. The common workspace gate then independently
+selects and reads the real manifest and binds the name, version and dependency
+maps. Lockfile-only workspaces cannot clear link review. Private dependency keys
+below a workspace are projected to its physical source directory, not to the
+lexical root symlink. Scoped/nested packages retain distinct locations and
+versions. Projection uses indexed workspace lookup, bounded paths and an
+aggregate retained-byte limit; it does not scan every workspace for each edge.
+
+Bun project manifests may use `workspace:*`, `workspace:^`, `workspace:~`, or an
+explicit supported range such as `workspace:^1.2`. These requests require the
+nearest recorded installation to be a manifest-bound workspace link, never a
+registry namesake or an unselected local link. Shorthands select the captured
+local version, including a prerelease; explicit ranges must satisfy that
+version. Empty suffixes, path/alias protocols and unverifiable forms require
+review. Original declarations remain unchanged and fingerprinted. This Bun-only
+admission rule does not enable `workspace:` under an npm lockfile, and does not
+relax the installed physical-link, lifecycle, native-payload or route checks.
+
 This is not a full Bun installer/solver or proof of Bun runtime parity.
-Workspaces and isolated linking, binary `bun.lockb`, version 0 text locks,
-file/Git/workspace/direct-tarball tuple forms, catalogs, overrides, patches and
-nonempty trusted-dependency declarations are not admitted by this contract.
-An unsupported text lock fails explicitly, rather than being treated as an
-absent lock or converted into an empty successful graph. The same applies when
-Bun and npm lockfiles coexist: choose one authority before checked execution.
-Resolution URLs and integrity strings are retained metadata, not verified
-archive SRI or publisher authentication. Installed-content authentication and
-runtime comparison remain separate requirements.
+Isolated stores, binary `bun.lockb`, version 0 text locks, arbitrary file/Git/link/
+direct-tarball tuple forms, root/lockfile catalogs, overrides, patches and
+nonempty trusted-dependency declarations in those inputs remain outside the
+supported contract. `configVersion`
+does not prove a physical layout: only an inspected matching hoisted tree can
+pass execution admission. An unsupported text lock fails explicitly rather than
+becoming an empty successful graph. When Bun and npm locks coexist, select one
+authority before checked execution. Resolution URLs and integrity strings are
+retained metadata, not verified archive SRI or publisher authentication.
+Installed-content authentication and runtime comparison remain separate claims.
 
 ## Workspace admission
 
-For npm projects, a root `workspaces` array selects captured manifests with
-literal path components, component `*` wildcards and standalone `**`. One leading
-`./` and one trailing slash are accepted. Wildcards do not implicitly enter dot
-folders. Overlapping selectors read each manifest once. Unsupported pattern
-dialects, selectors matching no manifests, duplicate workspace/root names,
-nested workspace configurations and selected symlinks fail explicitly.
-Installed packages and reserved runtime/backup/state directories are excluded.
-Traversal is bounded by 64 selectors, depth 64, 4,096 directories, 50,000
-entries and 1,024 manifests including the root. Metadata and declaration budgets
-are shared across the entire inspection, not reset for each workspace.
+For npm and supported Bun projects, a root `workspaces` array selects captured
+manifests with literal path components, component `*` wildcards and standalone
+`**`. One leading `./` and one trailing slash are accepted. Wildcards do not
+implicitly enter dot folders. Overlapping selectors read each manifest once.
+Unsupported pattern dialects, selectors matching no manifests, duplicate
+workspace/root names, nested workspace configurations and selected symlinks
+fail explicitly. Installed packages and reserved runtime/backup/state
+directories are excluded. Traversal is bounded by 64 selectors, depth 64,
+4,096 directories, 50,000 entries and 1,024 manifests including the root.
+Metadata and declaration budgets are shared across the entire inspection.
 
 Every selected workspace must have a canonical root `node_modules/<name>` link
-in a modern npm lockfile. The recorded target, name, version, dependency maps
-and peer metadata must match its actual captured manifest before the link's
-review finding can be cleared. Workspace-private and hoisted dependency
-locations are checked nearest-first; a wrong nearer identity cannot be rescued
-by a matching root identity. Alias, URL, Git and file requests do not authorize
-substitution with a same-named workspace. Other local links remain review items.
-Legacy lockfiles can be inventoried but cannot establish workspace link binding.
+in a modern npm lockfile or supported Bun projection. The recorded target,
+name, version, dependency maps and peer metadata must match its actual captured
+manifest before the link's review finding can be cleared. Workspace-private and
+hoisted dependency locations are checked nearest-first. A wrong nearer identity
+cannot be rescued by a matching root identity; a missing private installation
+cannot silently fall through to a compatible but differently located hoisted
+copy. Alias, URL, Git and file requests do not authorize substitution with a
+same-named workspace. Other local links remain review items. Legacy npm locks
+can be inventoried but cannot establish workspace link binding.
 
 Known native-addon/build dependencies, recorded or captured install/prepare
 lifecycle scripts, `binding.gyp`/`gypfile` markers, incomplete identities,
-unresolved declarations and inconsistent workspace metadata produce
-`REJECTED`. Independent workspace lockfiles also require separate project
-assessment; they are fingerprinted but never mixed with the root's authority.
+unresolved declarations and inconsistent workspace metadata produce `REJECTED`.
+Independent npm or Bun text locks in selected workspaces are fingerprinted but
+never mixed with the root's authority; they require separate project assessment.
 A clean lockfile projection cannot hide a newly added workspace dependency or
 lifecycle script. These findings precede new candidate execution, so a passing
 test suite cannot outweigh them.
@@ -79,11 +105,9 @@ Checked JSON retains schema `franken-node/checked-rewrite/v1` and optional
 `dependency_admission`, with exact metadata SHA-256 fingerprints, package and
 manifest counts, scope, and structured findings. Human output reports each
 finding's code, source, package and location. Supported registry ranges must
-satisfy the recorded version; opaque forms require review. These observations
-are not installed-content authentication or runtime compatibility proof. No
-package manager, registry or lifecycle script is invoked by the inspector.
-Existing runtime comparison and source-drift checks remain necessary after
-clean dependency admission.
+satisfy the recorded version; opaque forms require review. No package manager,
+registry or lifecycle script is invoked by the inspector. Existing runtime
+comparison and source-drift checks remain necessary after clean admission.
 
 Opening the existing rewrite transaction can recover an earlier interrupted
 installation before these checks. Rejection prevents NEW execution/installation;

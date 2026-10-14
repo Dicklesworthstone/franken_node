@@ -4,7 +4,7 @@
 //! names. No npm invocation, registry access, lifecycle execution or live
 //! node_modules traversal in metadata-only mode. Supported registry version
 //! ranges must match the nearest recorded pin; opaque requests require review.
-//! npm v1/v2/v3 and the Bun v1/v2 hoisted registry subset share the same graph
+//! npm v1/v2/v3 and Bun v1/v2 hoisted registry/workspace inputs share the graph
 //! and installed-tree checks. This is NOT installed-content authentication,
 //! a complete package solver, or runtime compatibility proof.
 //!
@@ -16,7 +16,7 @@ use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{File, Metadata};
 use std::io::Read;
@@ -216,9 +216,9 @@ impl Capture {
                     && bytes.len() as u64 == before.len(), "{path}: metadata changed during capture");
                 self.bytes = self.bytes.checked_add(bytes.len()).context("metadata byte count overflow")?;
                 ensure!(self.bytes <= MAX_METADATA_BYTES, "dependency metadata exceeds aggregate byte limit");
-                // Bun's JSONC allowance is local to its selected text lock.
+                // Bun's JSONC allowance is local to named text lock inputs.
                 // npm manifests/locks remain strict, recursively unique JSON.
-                let value = if path == "bun.lock" {
+                let value = if path.rsplit('/').next() == Some("bun.lock") {
                     bun::parse(&bytes, self.deadline)
                 } else {
                     parse_unique(&bytes, self.deadline)
@@ -233,6 +233,17 @@ impl Capture {
                 OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())?);
         }
         bail!("empty dependency metadata path")
+    }
+
+    fn refuse_binary_bun_lock(&mut self, path: &str) -> Result<()> {
+        // Reuse the descriptor-relative, no-follow capture with a zero-byte
+        // budget. Any present input (even empty, linked or nonregular) fails;
+        // absence is the only successful result. No binary bytes are parsed.
+        let absent = self.read(path, 0).with_context(|| format!(
+            "{path}: binary Bun lockfiles are unsupported; convert to a reviewed bun.lock before checked execution"
+        ))?.is_none();
+        ensure!(absent, "unsupported binary Bun lockfile: {path}");
+        Ok(())
     }
 }
 
@@ -252,7 +263,7 @@ impl<'de> DeserializeSeed<'de> for JsonSeed<'_> {
 
 impl<'de> Visitor<'de> for JsonSeed<'_> {
     type Value = Value;
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("bounded JSON with unique object members") }
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> std::result::Result<(), fmt::Error> { f.write_str("bounded JSON with unique object members") }
     fn visit_unit<E: de::Error>(self) -> std::result::Result<Value, E> { Ok(Value::Null) }
     fn visit_bool<E: de::Error>(self, value: bool) -> std::result::Result<Value, E> { Ok(Value::Bool(value)) }
     fn visit_i64<E: de::Error>(self, value: i64) -> std::result::Result<Value, E> { Ok(value.into()) }
@@ -411,27 +422,52 @@ fn nearest_package<'a>(packages: &'a BTreeMap<String, LockedPackage>, source: &s
     }
 }
 
-fn declarations(report: &mut DependencyAdmission, manifest: &Value, packages: &BTreeMap<String, LockedPackage>, source: &str, count: &mut usize, deadline: Instant) -> Result<()> {
+fn declarations(report: &mut DependencyAdmission, manifest: &Value, packages: &BTreeMap<String, LockedPackage>, source: &str, count: &mut usize, deadline: Instant, bun_workspace_links: Option<&BTreeSet<String>>) -> Result<()> {
     for edge in declaration_selection::select(manifest, true, deadline, count, MAX_PACKAGES)? {
         let selected = nearest_package(packages, source, edge.installed_as);
         // Optionality belongs to the selected edge, not to the package name.
         // Present installations still need exact identity and range checks.
         if selected.is_none() && edge.optional { continue; }
+        // The prefix is authority, not just a range abbreviation. It cannot
+        // select a registry namesake, arbitrary link, or unselected workspace.
+        // npm paths keep their existing opaque-protocol refusal semantics.
+        let workspace_range = bun_workspace_links.and_then(|_| edge.request.strip_prefix("workspace:"));
         let represented = selected.is_some_and(|package| package.name == edge.package && !package.unresolved
-            // Opaque requests cannot substitute a same-named local workspace.
-            && (!package.linked || !edge.request.contains([':', '/', '\\'])));
+            && if workspace_range.is_some() {
+                package.linked && bun_workspace_links.is_some_and(|links| links.contains(&package.path))
+            } else {
+                // Opaque requests cannot substitute a same-named local workspace.
+                !package.linked || !edge.request.contains([':', '/', '\\'])
+            });
         let native = native_addon(edge.package) || native_addon(edge.installed_as);
+        let locked_version = selected.and_then(|package| package.version.as_deref());
+        let requirement = match workspace_range {
+            // These shorthands select the bound local version, including
+            // prereleases. They are NOT registry wildcards that omit prereleases.
+            Some("*" | "^" | "~") => locked_version,
+            Some(range) => Some(range),
+            None => edge.requirement,
+        };
         let version_issue = if represented {
-            graph::version_review(edge.requirement, selected.and_then(|package| package.version.as_deref()))
+            if workspace_range == Some("") {
+                Some(("unverifiable_dependency_version", "workspace: requires an explicit shorthand or supported version range"))
+            } else {
+                graph::version_review(requirement, locked_version)
+            }
         } else { None };
+        let unresolved = if workspace_range.is_some() {
+            ("unresolved_workspace_dependency", "workspace: request requires the nearest installation to be an independently selected and manifest-bound workspace link")
+        } else {
+            ("unresolved_declaration", "Declaration has no matching complete nearest lockfile identity; version satisfaction is not established")
+        };
         if !represented || native || version_issue.is_some() {
             report.finding(DependencyFinding {
                 code: if native { "native_addon" }
-                    else { version_issue.map_or("unresolved_declaration", |issue| issue.0) }.into(),
+                    else { version_issue.unwrap_or(unresolved).0 }.into(),
                 source: format!("{source}#{}", edge.section), package: edge.package.into(),
                 installed_as: edge.installed_as.into(), package_path: None, version: Some(edge.request.into()),
                 detail: if native { "Declared native-addon/build dependency requires explicit migration review" }
-                    else { version_issue.map_or("Declaration has no matching complete nearest lockfile identity; version satisfaction is not established", |issue| issue.1) }.into(),
+                    else { version_issue.unwrap_or(unresolved).1 }.into(),
             })?;
         }
     }
@@ -455,6 +491,7 @@ pub fn inspect_for_execution(project: &Path, deadline: Instant) -> Result<Depend
 fn inspect_with_installation(project: &Path, deadline: Instant, check_installation: bool) -> Result<DependencyAdmission> {
     let mut capture = Capture::new(project, deadline)?;
     let manifest = capture.read("package.json", MAX_MANIFEST_BYTES)?.context("dependency admission requires package.json")?;
+    capture.refuse_binary_bun_lock("bun.lockb")?;
     let package_lock = capture.read("package-lock.json", MAX_LOCK_BYTES)?;
     let shrinkwrap = capture.read("npm-shrinkwrap.json", MAX_LOCK_BYTES)?;
     ensure!(package_lock.is_none() || shrinkwrap.is_none(), "both npm lockfiles are present; dependency inventory is ambiguous");
@@ -483,10 +520,24 @@ fn inspect_with_installation(project: &Path, deadline: Instant, check_installati
     package_findings(&mut report, &packages, source, &workspace_links)?;
     graph::inspect(lock.as_ref(), &packages, source, &mut report, deadline)?;
     let mut declared = 0;
+    let bun_workspace_links = (source == "bun.lock").then_some(&workspace_links);
     for (directory, manifest) in &manifests {
         let source = workspaces::manifest_path(directory);
-        declarations(&mut report, manifest, &packages, &source, &mut declared, deadline)?;
+        declarations(&mut report, manifest, &packages, &source, &mut declared, deadline, bun_workspace_links)?;
         workspaces::manifest_findings(&mut report, manifest, &source)?;
+        if !directory.is_empty() {
+            capture.refuse_binary_bun_lock(&format!("{directory}/bun.lockb"))?;
+            let path = format!("{directory}/bun.lock");
+            if capture.read(&path, MAX_LOCK_BYTES)?.is_some() {
+                report.finding(DependencyFinding {
+                    code: "workspace_lockfile".into(), source: path,
+                    package: manifest.get("name").and_then(Value::as_str).unwrap_or_default().into(),
+                    installed_as: String::new(), package_path: Some(directory.clone()),
+                    version: manifest.get("version").and_then(Value::as_str).map(str::to_owned),
+                    detail: "Workspace has an independent Bun lockfile; assess it separately instead of mixing lock authorities".into(),
+                })?;
+            }
+        }
     }
     if check_installation {
         if report.requires_review() {
@@ -497,7 +548,7 @@ fn inspect_with_installation(project: &Path, deadline: Instant, check_installati
     }
     if source == "bun.lock" {
         report.scope = report.scope.replacen("captured npm metadata",
-            "captured Bun v1/v2 text-lock metadata (hoisted registry subset)", 1);
+            "captured Bun v1/v2 text-lock metadata (hoisted registry and manifest-bound workspace subset)", 1);
     }
     time_remaining(deadline)?;
     report.inputs = capture.inputs.into_values().collect();
@@ -724,5 +775,151 @@ mod tests {
         )).collect();
         let root = fixture(json!({}), Some(modern_fixture(Value::Object(packages))));
         assert!(inspect(root.path(), deadline()).unwrap_err().to_string().contains("complete-report limit"));
+    }
+
+    fn bun_workspace_fixture(request: &str, version: &str) -> tempfile::TempDir {
+        let manifest = json!({"workspaces":["packages/*"],"dependencies":{"@local/dep":request}});
+        let member = json!({"name":"@local/dep","version":version});
+        let lock = json!({"lockfileVersion":2,"configVersion":0,
+            "workspaces":{"":{"dependencies":{"@local/dep":request}},"packages/dep":member},
+            "packages":{"@local/dep":["@local/dep@workspace:packages/dep"]}});
+        let root = fixture(manifest, None);
+        fs::write(root.path().join("bun.lock"), serde_json::to_vec(&lock).unwrap()).unwrap();
+        fs::create_dir_all(root.path().join("packages/dep")).unwrap();
+        fs::write(root.path().join("packages/dep/package.json"),
+            serde_json::to_vec(&lock["workspaces"]["packages/dep"]).unwrap()).unwrap();
+        fs::write(root.path().join("packages/dep/index.js"), "throw Error('must not execute');").unwrap();
+        fs::create_dir_all(root.path().join("node_modules/@local")).unwrap();
+        std::os::unix::fs::symlink("../../packages/dep", root.path().join("node_modules/@local/dep")).unwrap();
+        root
+    }
+
+    #[test]
+    fn bun_workspace_protocol_shorthands_and_ranges_reach_staged_admission() {
+        for request in ["workspace:*", "workspace:^", "workspace:~", "workspace:1.2.3",
+            "workspace:^1.2", "workspace:~1.2.0", "workspace:>=1.2.0 <2"] {
+            let root = bun_workspace_fixture(request, "1.2.3");
+            let report = inspect_for_execution(root.path(), deadline()).unwrap();
+            assert!(!report.requires_review(), "{request}: {report:?}");
+            assert!(report.installation_checked);
+            assert_eq!(report.installed_packages_scanned, 1);
+            assert!(report.scope.contains("manifest-bound workspace"));
+            assert_eq!(report, inspect_for_execution(root.path(), deadline()).unwrap());
+        }
+        for request in ["workspace:*", "workspace:^", "workspace:~"] {
+            let root = bun_workspace_fixture(request, "1.2.3-beta.1+local");
+            assert!(!inspect_for_execution(root.path(), deadline()).unwrap().requires_review(), "{request}");
+        }
+    }
+
+    #[test]
+    fn bun_workspace_explicit_range_mismatches_and_opaque_suffixes_require_review() {
+        for (request, expected) in [
+            ("workspace:^2", "dependency_version_mismatch"),
+            ("workspace:<1", "dependency_version_mismatch"),
+            ("workspace:", "unverifiable_dependency_version"),
+            ("workspace:../dep", "unverifiable_dependency_version"),
+            ("workspace:npm:other@1", "unverifiable_dependency_version"),
+            ("workspace:latest", "unverifiable_dependency_version"),
+        ] {
+            let root = bun_workspace_fixture(request, "1.2.3");
+            let report = inspect_for_execution(root.path(), deadline()).unwrap();
+            assert!(report.findings.iter().any(|finding| finding.code == expected
+                && finding.source == "package.json#dependencies"), "{request}: {report:?}");
+            assert!(!report.installation_checked);
+        }
+    }
+
+    #[test]
+    fn bun_workspace_protocol_never_selects_a_registry_namesake_or_unbound_link() {
+        let manifest = json!({"dependencies":{"dep":"workspace:*"}});
+        let root = fixture(manifest.clone(), None);
+        let lock = json!({"lockfileVersion":2,"workspaces":{"":manifest},
+            "packages":{"dep":["dep@1.2.3","",{},""]}});
+        fs::write(root.path().join("bun.lock"), serde_json::to_vec(&lock).unwrap()).unwrap();
+        let report = inspect(root.path(), deadline()).unwrap();
+        assert!(codes(&report).contains(&"unresolved_workspace_dependency"));
+
+        let root = bun_workspace_fixture("workspace:*", "1.2.3");
+        fs::write(root.path().join("packages/dep/package.json"),
+            r#"{"name":"@local/dep","version":"2.0.0"}"#).unwrap();
+        let report = inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(codes(&report).contains(&"workspace_review"));
+        assert!(codes(&report).contains(&"unresolved_workspace_dependency"));
+        assert!(!report.installation_checked);
+    }
+
+    #[test]
+    fn npm_lock_cannot_opt_into_bun_workspace_protocol_admission() {
+        let root = bun_workspace_fixture("workspace:*", "1.2.3");
+        let lock = bun::parse(&fs::read(root.path().join("bun.lock")).unwrap(), deadline()).unwrap();
+        let manifest: Value = serde_json::from_slice(&fs::read(root.path().join("package.json")).unwrap()).unwrap();
+        let projected = bun::project_lock(lock, &manifest, deadline()).unwrap();
+        fs::rename(root.path().join("bun.lock"), root.path().join("retained-bun-lock.txt")).unwrap();
+        fs::write(root.path().join("package-lock.json"), serde_json::to_vec(&projected).unwrap()).unwrap();
+        let report = inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(report.requires_review());
+        assert!(codes(&report).contains(&"unresolved_declaration"));
+        assert!(!report.installation_checked);
+    }
+
+    #[test]
+    fn workspace_protocol_cycles_are_checked_from_real_project_manifests() {
+        let root = bun_workspace_fixture("workspace:*", "1.2.3");
+        let peer = json!({"name":"peer","version":"2.0.0","dependencies":{"@local/dep":"workspace:^"}});
+        let mut dep = json!({"name":"@local/dep","version":"1.2.3"});
+        dep["dependencies"] = json!({"peer":"workspace:~"});
+        let mut lock = bun::parse(&fs::read(root.path().join("bun.lock")).unwrap(), deadline()).unwrap();
+        lock["workspaces"]["packages/dep"] = dep.clone();
+        lock["workspaces"]["packages/peer"] = peer.clone();
+        lock["packages"]["peer"] = json!(["peer@workspace:packages/peer"]);
+        fs::write(root.path().join("bun.lock"), serde_json::to_vec(&lock).unwrap()).unwrap();
+        fs::write(root.path().join("packages/dep/package.json"), serde_json::to_vec(&dep).unwrap()).unwrap();
+        fs::create_dir(root.path().join("packages/peer")).unwrap();
+        fs::write(root.path().join("packages/peer/package.json"), serde_json::to_vec(&peer).unwrap()).unwrap();
+        std::os::unix::fs::symlink("../packages/peer", root.path().join("node_modules/peer")).unwrap();
+        let report = inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(!report.requires_review(), "{report:?}");
+        assert!(report.installation_checked);
+        assert_eq!(report.installed_packages_scanned, 2);
+    }
+
+    #[test]
+    fn independent_workspace_bun_lock_is_fingerprinted_but_never_unioned() {
+        let root = bun_workspace_fixture("workspace:*", "1.2.3");
+        let path = "packages/dep/bun.lock";
+        let raw = b"// independent project\n{\"lockfileVersion\":2,\"workspaces\":{\"\":{}},\"packages\":{},}\n";
+        fs::write(root.path().join(path), raw).unwrap();
+        let report = inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(report.findings.iter().any(|finding| finding.code == "workspace_lockfile" && finding.source == path));
+        assert!(!report.installation_checked);
+        assert_eq!(report.packages_scanned, 1);
+        let input = report.inputs.iter().find(|input| input.path == path).unwrap();
+        assert_eq!(input.sha256, hex::encode(Sha256::digest(raw)));
+        assert_eq!(input.bytes, raw.len());
+    }
+
+    #[test]
+    fn binary_bun_authority_never_disappears_into_a_clean_empty_inventory() {
+        for contents in [b"binary\0\xff".as_slice(), b"", b"{}"] {
+            let root = fixture(json!({}), None);
+            fs::write(root.path().join("bun.lockb"), contents).unwrap();
+            let error = inspect(root.path(), deadline()).unwrap_err();
+            assert!(format!("{error:#}").contains("binary Bun lockfiles are unsupported"));
+            let root = bun_workspace_fixture("workspace:*", "1.2.3");
+            fs::write(root.path().join("packages/dep/bun.lockb"), contents).unwrap();
+            assert!(inspect_for_execution(root.path(), deadline()).is_err());
+        }
+    }
+
+    #[test]
+    fn workspace_protocol_still_requires_the_physical_bound_link() {
+        let root = bun_workspace_fixture("workspace:*", "1.2.3");
+        fs::rename(root.path().join("node_modules/@local/dep"),
+            root.path().join("retained-workspace-link")).unwrap();
+        fs::create_dir_all(root.path().join("packages/wrong")).unwrap();
+        std::os::unix::fs::symlink("../../packages/wrong", root.path().join("node_modules/@local/dep")).unwrap();
+        let error = inspect_for_execution(root.path(), deadline()).unwrap_err();
+        assert!(error.to_string().contains("installed workspace link differs"), "{error:#}");
     }
 }
