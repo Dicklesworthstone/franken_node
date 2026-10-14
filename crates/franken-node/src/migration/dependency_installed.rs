@@ -4,8 +4,9 @@
 //! checks deliberately do not equate a package.json hash with archive SRI.
 //! The caller owns an immutable staged tree; no package manager, lifecycle
 //! command, guest code, registry request, or symlink traversal happens here.
-//! Ordinary npm packages and the already-admitted root workspace links are
-//! supported. Other installed links require review, rather than being followed.
+//! Hoisted packages and project-local Bun isolated stores share these checks.
+//! Isolated links are bound to physical lock identities before this inspector
+//! reads manifests; arbitrary/global links remain refused, never followed.
 
 use super::{
     Capture, DependencyAdmission, DependencyFinding, LockedPackage, MAX_DEPTH,
@@ -19,6 +20,9 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::Path;
 use std::time::Instant;
+
+#[path = "dependency_isolated.rs"]
+mod isolated;
 
 const MAX_TREE_ENTRIES: usize = 100_000;
 const MAX_TREE_DIRECTORIES: usize = 20_000;
@@ -154,6 +158,7 @@ struct Inspector<'a> {
     report: &'a mut DependencyAdmission,
     actual: BTreeMap<String, LockedPackage>,
     manifests: BTreeMap<String, Value>,
+    layout: Option<&'a isolated::Layout>,
 }
 
 impl Inspector<'_> {
@@ -230,6 +235,12 @@ impl Inspector<'_> {
 
     fn workspace_link(&mut self, path: &str, installed_as: &str, parent: &File, leaf: &str) -> Result<()> {
         self.report.installed_packages_scanned += 1;
+        if self.layout.is_some_and(|layout| layout.is_registry_alias(path)) {
+            // Do not read a manifest through this symlink. After the complete
+            // ordinary-tree walk, the alias receives its inspected physical
+            // record. Captured link text is rechecked before any success.
+            return Ok(());
+        }
         let expected = lock_record(self.lock, path)
             .filter(|_| self.locked.get(path).is_some_and(|package| package.linked))
             .and_then(|record| record.get("resolved")).and_then(Value::as_str)
@@ -259,7 +270,8 @@ impl Inspector<'_> {
             let fd = directory(&self.capture.root, &path)?;
             let before = fd.metadata()?;
             if !path.is_empty() && self.projects.contains_key(&path) { owner = Some(path.clone()); }
-            if let Some(installed_as) = installation_name(&path)? {
+            if (self.layout.is_none() || path != isolated::STORE)
+                && let Some(installed_as) = installation_name(&path)? {
                 self.ordinary_package(&path, &installed_as)?;
                 owner = Some(path.clone());
             }
@@ -368,9 +380,15 @@ pub(super) fn inspect(
     lock: Option<&Value>,
     report: &mut DependencyAdmission,
 ) -> Result<()> {
+    let layout = isolated::Layout::capture(capture, locked, projects, lock, report)?;
+    let locked = layout.as_ref().map_or(locked, |layout| &layout.packages);
+    let lock = layout.as_ref().map(|layout| &layout.lock).or(lock);
     let mut inspector = Inspector { capture, locked, projects, lock, report,
-        actual: BTreeMap::new(), manifests: BTreeMap::new() };
+        actual: BTreeMap::new(), manifests: BTreeMap::new(), layout: layout.as_ref() };
     inspector.walk()?;
+    if let Some(layout) = &layout {
+        layout.populate_aliases(&mut inspector.actual, inspector.capture.deadline)?;
+    }
     let mut edges = 0;
     routes(projects, true, &inspector.actual, locked, inspector.report, inspector.capture.deadline, &mut edges)?;
     routes(&inspector.manifests, false, &inspector.actual, locked, inspector.report, inspector.capture.deadline, &mut edges)?;
@@ -390,7 +408,10 @@ pub(super) fn inspect(
         ensure!(recheck.inputs.get(&input.path) == Some(input), "dependency metadata changed during installed inspection");
     }
     time_remaining(inspector.capture.deadline)?;
-    inspector.report.scope = INSTALLED_SCOPE.into();
+    inspector.report.scope = if let Some(layout) = &layout {
+        layout.recheck_and_record(inspector.capture)?;
+        isolated::SCOPE.into()
+    } else { INSTALLED_SCOPE.into() };
     inspector.report.installation_checked = true;
     Ok(())
 }
@@ -529,7 +550,7 @@ mod tests {
     #[test]
     fn actual_dependencies_cannot_be_hidden_by_a_clean_lockfile_projection() {
         let root = ordinary();
-        package(root.path(), "node_modules/a", json!({"name":"a","version":"1.2.3","dependencies":{"hidden":"^1"}}));
+        package(root.path(), "node_modules/a", json!({"name":"a","version":"1.2.3","dependencies":{"hidden":"1"}}));
         let report = inspect(root.path());
         assert!(codes(&report).contains(&"installed_dependency_metadata_mismatch"));
         assert!(codes(&report).contains(&"missing_installed_dependency"));
