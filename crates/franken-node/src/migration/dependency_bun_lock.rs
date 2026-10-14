@@ -19,6 +19,10 @@ use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
+#[path = "dependency_bun_catalogs.rs"]
+mod catalogs;
+pub(super) use catalogs::Catalogs;
+
 const MAX_WORKSPACES: usize = 1024;
 
 fn checkpoint(index: usize, next: &mut usize, deadline: Instant) -> Result<()> {
@@ -133,7 +137,7 @@ fn string_end(text: &[u8], start: usize, next: &mut usize, deadline: Instant) ->
 }
 
 fn no_resolution_controls(object: &Map<String, Value>) -> Result<()> {
-    for field in ["overrides", "resolutions", "patchedDependencies", "catalog", "catalogs"] {
+    for field in ["overrides", "resolutions", "patchedDependencies"] {
         if let Some(value) = object.get(field) {
             ensure!(value.as_object().is_some_and(Map::is_empty),
                 "Bun {field} needs explicit resolution/patch review before checked execution");
@@ -160,7 +164,9 @@ fn declarations(record: &mut Map<String, Value>, root: bool, deadline: Instant) 
             for (package, requirement) in entries {
                 time_remaining(deadline)?;
                 name(package)?;
-                bounded_text(requirement, "Bun dependency request")?;
+                let request = catalogs::request_text(requirement)?;
+                ensure!(root || !request.starts_with("catalog:"),
+                    "published Bun package cannot inherit a project's catalog definitions");
             }
         }
     }
@@ -262,7 +268,7 @@ fn tuple_record(tuple: Value, deadline: Instant) -> Result<Value> {
 /// Their identities and declarations are subsequently bound to real captured
 /// manifests by workspaces::bind_links. Isolated stores are NOT inferred from
 /// configVersion: execution admission still checks the actual hoisted layout.
-pub(super) fn project_lock(lock: Value, manifest: &Value, deadline: Instant) -> Result<Value> {
+pub(super) fn project_lock(lock: Value, manifest: &Value, deadline: Instant) -> Result<(Value, Catalogs)> {
     time_remaining(deadline)?;
     let Value::Object(mut document) = lock else { bail!("Bun lockfile must be an object"); };
     for key in document.keys() {
@@ -278,6 +284,7 @@ pub(super) fn project_lock(lock: Value, manifest: &Value, deadline: Instant) -> 
     no_resolution_controls(&document)?;
     let manifest = manifest.as_object().context("Bun project manifest must be an object")?;
     no_resolution_controls(manifest)?;
+    let catalogs = Catalogs::bind(manifest, &document, deadline)?;
     let selectors = manifest.get("workspaces").map(|value|
         value.as_array().context("Bun workspaces must be an array of captured selectors")
     ).transpose()?;
@@ -375,7 +382,7 @@ pub(super) fn project_lock(lock: Value, manifest: &Value, deadline: Instant) -> 
         ensure!(packages.insert(physical, record).is_none(), "Bun projected installation paths collide");
     }
     time_remaining(deadline)?;
-    Ok(json!({"lockfileVersion":3,"packages":packages}))
+    Ok((json!({"lockfileVersion":3,"packages":packages}), catalogs))
 }
 
 fn workspace_directory(directory: &str) -> Result<()> {
@@ -627,7 +634,7 @@ mod tests {
     #[test]
     fn hoisted_workspaces_bind_real_manifests_and_physical_private_dependencies() {
         let (root, manifest, document) = workspace_fixture();
-        let projected = project_lock(document, &manifest, deadline()).unwrap();
+        let (projected, _) = project_lock(document, &manifest, deadline()).unwrap();
         assert_eq!(projected["packages"]["node_modules/@demo/app"]["resolved"], "packages/app");
         assert_eq!(projected["packages"]["packages/app/node_modules/private"]["version"], "1.1.0");
         assert!(projected["packages"].get("node_modules/@demo/app/node_modules/private").is_none());

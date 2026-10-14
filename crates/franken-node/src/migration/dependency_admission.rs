@@ -498,10 +498,11 @@ fn inspect_with_installation(project: &Path, deadline: Instant, check_installati
     let bun_lock = capture.read("bun.lock", MAX_LOCK_BYTES)?;
     ensure!(bun_lock.is_none() || (package_lock.is_none() && shrinkwrap.is_none()),
         "Bun and npm lockfiles are both present; select one dependency authority before checked execution");
-    let (source, lock) = if let Some(bun_lock) = bun_lock {
-        ("bun.lock", Some(bun::project_lock(bun_lock, &manifest, deadline)?))
-    } else if package_lock.is_some() { ("package-lock.json", package_lock) }
-        else { ("npm-shrinkwrap.json", shrinkwrap) };
+    let (source, lock, catalogs) = if let Some(bun_lock) = bun_lock {
+        let (projection, catalogs) = bun::project_lock(bun_lock, &manifest, deadline)?;
+        ("bun.lock", Some(projection), Some(catalogs))
+    } else if package_lock.is_some() { ("package-lock.json", package_lock, None) }
+        else { ("npm-shrinkwrap.json", shrinkwrap, None) };
     let packages = match &lock {
         None => BTreeMap::new(),
         Some(lock) => match lock.get("lockfileVersion").and_then(Value::as_u64) {
@@ -510,13 +511,19 @@ fn inspect_with_installation(project: &Path, deadline: Instant, check_installati
             _ => bail!("unsupported or missing npm lockfileVersion; expected 1, 2 or 3"),
         },
     };
-    let manifests = workspaces::capture(&mut capture, manifest)?;
+    let mut manifests = workspaces::capture(&mut capture, manifest)?;
     let mut report = DependencyAdmission {
         schema_version: "franken-node/native-dependency-admission/v1".into(), scope: SCOPE.into(),
         packages_scanned: packages.len(), manifests_scanned: manifests.len(), inputs: Vec::new(), findings: Vec::new(),
         installation_checked: false, installed_packages_scanned: 0,
     };
     let workspace_links = workspaces::bind_links(&mut capture, &manifests, lock.as_ref(), &packages, &mut report)?;
+    if let Some(catalogs) = &catalogs {
+        // Match raw workspace declarations BEFORE expanding the private
+        // project projection. Capture still pins original manifest bytes;
+        // published registry manifests never inherit these root definitions.
+        catalogs.expand(&mut manifests, deadline)?;
+    }
     package_findings(&mut report, &packages, source, &workspace_links)?;
     graph::inspect(lock.as_ref(), &packages, source, &mut report, deadline)?;
     let mut declared = 0;
@@ -549,6 +556,9 @@ fn inspect_with_installation(project: &Path, deadline: Instant, check_installati
     if source == "bun.lock" {
         report.scope = report.scope.replacen("captured npm metadata",
             "captured Bun v1/v2 text-lock metadata (hoisted registry and manifest-bound workspace subset)", 1);
+    }
+    if catalogs.as_ref().is_some_and(bun::Catalogs::has_entries) {
+        report.scope.push_str("; project catalog references resolved from matching captured root/lock definitions");
     }
     time_remaining(deadline)?;
     report.inputs = capture.inputs.into_values().collect();
@@ -854,7 +864,7 @@ mod tests {
         let root = bun_workspace_fixture("workspace:*", "1.2.3");
         let lock = bun::parse(&fs::read(root.path().join("bun.lock")).unwrap(), deadline()).unwrap();
         let manifest: Value = serde_json::from_slice(&fs::read(root.path().join("package.json")).unwrap()).unwrap();
-        let projected = bun::project_lock(lock, &manifest, deadline()).unwrap();
+        let (projected, _) = bun::project_lock(lock, &manifest, deadline()).unwrap();
         fs::rename(root.path().join("bun.lock"), root.path().join("retained-bun-lock.txt")).unwrap();
         fs::write(root.path().join("package-lock.json"), serde_json::to_vec(&projected).unwrap()).unwrap();
         let report = inspect_for_execution(root.path(), deadline()).unwrap();
