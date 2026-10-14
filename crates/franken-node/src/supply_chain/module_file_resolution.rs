@@ -131,7 +131,7 @@ pub struct ResolutionReport {
     pub path: String,
     /// ESM URL identity suffix; CommonJS discards suffixes of package-map URLs.
     pub url_suffix: String,
-    /// Not a parser result. Unmarked JS needs engine syntax detection.
+    /// Not a parser result. Unmarked JS/TS needs engine syntax detection.
     pub format_hint: String,
     pub content_sha256: String,
     pub content_bytes: usize,
@@ -174,7 +174,6 @@ impl Entry {
     }
 }
 
-#[derive(Clone)]
 struct Manifest {
     maps: PackageMap,
     name: Option<String>,
@@ -185,7 +184,10 @@ struct Manifest {
 
 struct Resolver {
     entries: BTreeMap<String, Rc<Entry>>,
-    manifests: BTreeMap<String, Option<Manifest>>,
+    // Share immutable parsed maps across all lookups in this capture. Cloning
+    // a manifest here used to copy its entire conditional exports/imports tree
+    // on every dependency edge and package-scope query.
+    manifests: BTreeMap<String, Option<Rc<Manifest>>>,
     captured: usize,
     conditions: Vec<String>,
     mappings: Vec<Mapping>,
@@ -553,7 +555,7 @@ impl Resolver {
         Ok(entry)
     }
 
-    fn manifest(&mut self, directory: &str) -> Result<Option<Manifest>> {
+    fn manifest(&mut self, directory: &str) -> Result<Option<Rc<Manifest>>> {
         let path = join(directory, "package.json");
         if let Some(value) = self.manifests.get(&path) {
             return Ok(value.clone());
@@ -584,20 +586,20 @@ impl Resolver {
                         )),
                     }
                 };
-                Some(Manifest {
+                Some(Rc::new(Manifest {
                     maps,
                     name: field("name")?,
                     main: field("main")?,
                     package_type: field("type")?,
                     exports: value.get("exports").is_some_and(|v| !v.is_null()),
-                })
+                }))
             }
         };
         self.manifests.insert(path, manifest.clone());
         Ok(manifest)
     }
 
-    fn scope(&mut self, start: &str) -> Result<Option<(String, Manifest)>> {
+    fn scope(&mut self, start: &str) -> Result<Option<(String, Rc<Manifest>)>> {
         let mut directory = start;
         loop {
             if directory.rsplit('/').next() == Some("node_modules") {
@@ -838,7 +840,7 @@ impl Resolver {
         }
         if let Some(main) = self
             .manifest(directory)?
-            .and_then(|m| m.main)
+            .and_then(|m| m.main.clone())
             .filter(|s| !s.is_empty())
         {
             let target = normalize(directory, &main)?;
@@ -862,19 +864,25 @@ impl Resolver {
         self.directory(path, mode)
     }
     fn format(&mut self, path: &str) -> Result<String> {
-        Ok(match Path::new(path).extension().and_then(|s| s.to_str()) {
-            Some("mjs") => "module",
-            Some("cjs") => "commonjs",
+        let extension = Path::new(path).extension().and_then(|s| s.to_str());
+        Ok(match extension {
+            Some("mjs" | "mts") => "module",
+            Some("cjs" | "cts") => "commonjs",
             Some("json") => "json",
             Some("node") => "native_addon",
             Some("wasm") => "wasm",
-            Some("js") | None => match self
+            // Capture TS package scope with the source, including negative
+            // observations. The engine must not reopen package.json later to
+            // choose a parse goal. This does not add implicit .ts probing or
+            // claim that a file has passed normalization or execution.
+            Some("js" | "ts") | None => match self
                 .scope(parent(path))?
-                .and_then(|(_, m)| m.package_type)
-                .as_deref()
+                .as_ref()
+                .and_then(|(_, m)| m.package_type.as_deref())
             {
                 Some("module") => "module",
                 Some("commonjs") => "commonjs",
+                _ if extension == Some("ts") => "typescript_unspecified",
                 _ => "javascript_unspecified",
             },
             _ => "unknown",
@@ -1237,6 +1245,91 @@ mod tests {
             Err(e) => e.code,
             Ok(_) => panic!("unexpected linked resolution for {request}"),
         }
+    }
+
+    #[test]
+    fn package_scope_reuses_immutable_manifest_maps_within_one_capture() {
+        let root = fixture();
+        put(root.path(), "package.json", br##"{"type":"module","exports":{".":{"import":"./entry.mjs","require":"./entry.cjs"}},"imports":{"#local":"./entry.mjs"}}"##);
+        let mut resolver = Resolver::new(root.path(), &[], SymlinkPolicy::Reject).unwrap();
+        let first = resolver.manifest("").unwrap().unwrap();
+        let again = resolver.manifest("").unwrap().unwrap();
+        let scoped = resolver.scope("").unwrap().unwrap().1;
+        assert!(Rc::ptr_eq(&first, &again));
+        assert!(Rc::ptr_eq(&first, &scoped));
+        assert_eq!(Rc::strong_count(&first), 4);
+
+        // Filesystem mutation must neither refresh an existing capture nor
+        // leak its old manifest into a new capture.
+        put(root.path(), "package.json", br#"{"type":"commonjs"}"#);
+        let retained = resolver.manifest("").unwrap().unwrap();
+        assert!(Rc::ptr_eq(&first, &retained));
+        assert_eq!(retained.package_type.as_deref(), Some("module"));
+        let mut fresh = Resolver::new(root.path(), &[], SymlinkPolicy::Reject).unwrap();
+        let changed = fresh.manifest("").unwrap().unwrap();
+        assert!(!Rc::ptr_eq(&first, &changed));
+        assert_eq!(changed.package_type.as_deref(), Some("commonjs"));
+        assert_ne!(first.maps.input_hash(), changed.maps.input_hash());
+    }
+
+    #[test]
+    fn typescript_format_captures_nearest_package_scope_and_explicit_extensions() {
+        let root = fixture();
+        put(root.path(), "esm/package.json", br#"{"type":"module"}"#);
+        put(root.path(), "unmarked/package.json", b"{}");
+        for (path, expected) in [
+            ("value.ts", "commonjs"),
+            ("esm/value.ts", "module"),
+            ("unmarked/value.ts", "typescript_unspecified"),
+            ("forced.mts", "module"),
+            ("esm/forced.cts", "commonjs"),
+            ("node_modules/unmarked/value.ts", "typescript_unspecified"),
+        ] {
+            put(root.path(), path, b"const value: number = 42;");
+            for mode in [ResolutionMode::Import, ResolutionMode::Require] {
+                let captured = run(root.path(), "app.js", &format!("./{path}"), mode);
+                assert_eq!(captured.report.format_hint, expected, "{path}");
+                assert_eq!(captured.source_bytes(), b"const value: number = 42;");
+                assert!(!captured.report.execution_performed);
+            }
+        }
+    }
+
+    #[test]
+    fn typescript_scope_is_pinned_without_implicit_extension_or_index_search() {
+        let root = fixture();
+        put(root.path(), "lib/value.ts", b"const value: number = 42;");
+        put(root.path(), "lib/index.ts", b"const value: number = 42;");
+        let first = run(root.path(), "app.js", "./lib/value.ts", ResolutionMode::Import);
+        assert_eq!(first.report.format_hint, "commonjs");
+        assert!(first.report.probes.iter().any(|probe| {
+            probe.path == "lib/package.json" && probe.kind == ProbeKind::Missing
+        }));
+        put(root.path(), "lib/package.json", br#"{"type":"module"}"#);
+        let changed = run(root.path(), "app.js", "./lib/value.ts", ResolutionMode::Import);
+        assert_eq!(changed.report.format_hint, "module");
+        assert_eq!(first.report.content_sha256, changed.report.content_sha256);
+        assert_ne!(first.report.input_hash, changed.report.input_hash);
+        for request in ["./lib/value", "./lib/"] {
+            assert_eq!(
+                rejected(root.path(), "app.js", request, ResolutionMode::Require),
+                "MODULE_NOT_FOUND"
+            );
+        }
+    }
+
+    #[test]
+    fn linked_typescript_uses_physical_package_scope_not_link_extension() {
+        let root = fixture();
+        put(root.path(), "packages/typed/package.json", br#"{"type":"module"}"#);
+        put(root.path(), "packages/typed/value.ts", b"export const value: number = 42;");
+        link(root.path(), "entry.cts", "packages/typed/value.ts");
+        let captured = linked(
+            root.path(), "app.js", "./entry.cts?instance=one", ResolutionMode::Import,
+        ).unwrap();
+        assert_eq!(captured.report.path, "packages/typed/value.ts");
+        assert_eq!(captured.report.format_hint, "module");
+        assert_eq!(captured.report.url_suffix, "?instance=one");
     }
 
     #[test]
