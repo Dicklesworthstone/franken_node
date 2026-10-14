@@ -285,9 +285,7 @@ pub(super) fn project_lock(lock: Value, manifest: &Value, deadline: Instant) -> 
     let manifest = manifest.as_object().context("Bun project manifest must be an object")?;
     no_resolution_controls(manifest)?;
     let catalogs = Catalogs::bind(manifest, &document, deadline)?;
-    let selectors = manifest.get("workspaces").map(|value|
-        value.as_array().context("Bun workspaces must be an array of captured selectors")
-    ).transpose()?;
+    let selectors = catalogs::workspace_selectors(manifest)?;
     let workspaces = document.remove("workspaces").context("Bun workspaces missing")?;
     let Value::Object(mut workspaces) = workspaces else { bail!("Bun workspaces must be an object"); };
     ensure!(workspaces.len() <= MAX_WORKSPACES && workspaces.contains_key(""),

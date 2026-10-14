@@ -511,7 +511,10 @@ fn inspect_with_installation(project: &Path, deadline: Instant, check_installati
             _ => bail!("unsupported or missing npm lockfileVersion; expected 1, 2 or 3"),
         },
     };
-    let mut manifests = workspaces::capture(&mut capture, manifest)?;
+    let mut manifests = match &catalogs {
+        Some(catalogs) => catalogs.capture_workspaces(&mut capture, manifest)?,
+        None => workspaces::capture(&mut capture, manifest)?,
+    };
     let mut report = DependencyAdmission {
         schema_version: "franken-node/native-dependency-admission/v1".into(), scope: SCOPE.into(),
         packages_scanned: packages.len(), manifests_scanned: manifests.len(), inputs: Vec::new(), findings: Vec::new(),

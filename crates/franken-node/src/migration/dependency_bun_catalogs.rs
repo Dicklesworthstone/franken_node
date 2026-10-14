@@ -7,8 +7,8 @@
 //! project declaration projection is expanded, after raw workspace binding.
 
 use super::super::{
-    MAX_METADATA_BYTES, MAX_PACKAGES, SECTIONS, alias, bounded_text, graph, name,
-    time_remaining,
+    Capture, MAX_METADATA_BYTES, MAX_PACKAGES, SECTIONS, alias, bounded_text, graph, name,
+    time_remaining, workspaces,
 };
 use anyhow::{Context, Result, ensure};
 use serde_json::{Map, Value};
@@ -111,6 +111,23 @@ fn collect_fields(
     Ok(())
 }
 
+/// Bun's object form is a selector list plus root catalog definitions. Do
+/// not silently discard unimplemented layout controls such as selfContained
+/// or nohoist. npm callers never enter this Bun-only projection.
+pub(super) fn workspace_selectors(manifest: &Map<String, Value>) -> Result<Option<&Vec<Value>>> {
+    match manifest.get("workspaces") {
+        None => Ok(None),
+        Some(Value::Array(selectors)) => Ok(Some(selectors)),
+        Some(Value::Object(options)) => {
+            ensure!(options.keys().all(|key| ["packages", "catalog", "catalogs"].contains(&key.as_str())),
+                "unsupported Bun workspace object field; layout controls require separate review");
+            options.get("packages").and_then(Value::as_array).map(Some)
+                .context("Bun workspace object requires a packages selector array")
+        }
+        _ => anyhow::bail!("Bun workspaces must be an array or a supported workspace object"),
+    }
+}
+
 impl Catalogs {
     pub(in super::super) fn bind(
         manifest: &Map<String, Value>,
@@ -120,7 +137,14 @@ impl Catalogs {
         time_remaining(deadline)?;
         let mut declared = Definitions::new();
         let mut recorded = Definitions::new();
-        collect_fields(manifest, &mut declared, &mut Budget::default(), deadline)?;
+        let mut budget = Budget::default();
+        workspace_selectors(manifest)?;
+        collect_fields(manifest, &mut declared, &mut budget, deadline)?;
+        if let Some(Value::Object(options)) = manifest.get("workspaces") {
+            // One definition budget across BOTH root placements. Duplicate
+            // keys after namespace normalization remain errors, not overrides.
+            collect_fields(options, &mut declared, &mut budget, deadline)?;
+        }
         collect_fields(lock, &mut recorded, &mut Budget::default(), deadline)?;
         ensure!(declared == recorded,
             "Bun catalog definitions differ between captured package.json and bun.lock");
@@ -129,6 +153,26 @@ impl Catalogs {
 
     pub(in super::super) fn has_entries(&self) -> bool {
         !self.definitions.is_empty()
+    }
+
+    /// Adapt the already-bound root's workspace syntax to the existing
+    /// descriptor-relative selector. Do not use lockfile workspace paths as
+    /// selectors, and do not alter any on-disk manifest or fingerprint.
+    pub(in super::super) fn capture_workspaces(
+        &self,
+        capture: &mut Capture,
+        mut root: Value,
+    ) -> Result<BTreeMap<String, Value>> {
+        time_remaining(capture.deadline)?;
+        let object = root.as_object_mut().context("Bun root manifest must be an object")?;
+        workspace_selectors(object)?;
+        if let Some(Value::Object(options)) = object.get_mut("workspaces") {
+            // Move rather than clone a potentially large selector vector.
+            // The common selector retains its own count/path/glob budgets.
+            let selectors = options.remove("packages").context("Bun workspace selectors missing")?;
+            object.insert("workspaces".into(), selectors);
+        }
+        workspaces::capture(capture, root)
     }
 
     fn resolve<'a>(&'a self, package: &str, request: &str) -> Result<Option<&'a str>> {
@@ -353,5 +397,135 @@ mod tests {
             .map(|index| (format!("c{index}"), json!({"a":"1"}))).collect();
         let value = json!({"catalogs":catalogs});
         assert!(bind(value.clone(), value).is_err());
+    }
+
+    fn workspace_fixture(isolated: bool) -> (tempfile::TempDir, Value, Value) {
+        let manifest = json!({"name":"root",
+            "workspaces":{"packages":["packages/*"],"catalog":{"a":"^1"},
+                "catalogs":{"tooling":{"tool":"npm:@tools/real@~2.0"}}},
+            "dependencies":{"@demo/app":"workspace:*"}});
+        let member = json!({"name":"@demo/app","version":"1.0.0",
+            "dependencies":{"a":"catalog:"},"devDependencies":{"tool":"catalog:tooling"}});
+        let lock = json!({"lockfileVersion":2,"configVersion":0,
+            "catalog":{"a":"^1"},"catalogs":{"tooling":{"tool":"npm:@tools/real@~2.0"}},
+            "workspaces":{"":{"name":"root","dependencies":{"@demo/app":"workspace:*"}},
+                "packages/app":member},
+            "packages":{"@demo/app":["@demo/app@workspace:packages/app"],
+                "a":["a@1.2.3","",{},""],"tool":["@tools/real@2.0.1","",{},""]}});
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "package.json", &manifest);
+        put(root.path(), "bun.lock", &lock);
+        put(root.path(), "packages/app/package.json", &member);
+        fs::write(root.path().join("packages/app/index.js"), "throw Error('not executed');").unwrap();
+        fs::create_dir_all(root.path().join("node_modules/@demo")).unwrap();
+        std::os::unix::fs::symlink("../../packages/app", root.path().join("node_modules/@demo/app")).unwrap();
+        for (slot, package, version) in [("a", "a", "1.2.3"), ("tool", "@tools/real", "2.0.1")] {
+            let location = if isolated {
+                format!("node_modules/.bun/{slot}@{version}/node_modules/{slot}")
+            } else { format!("node_modules/{slot}") };
+            put(root.path(), &format!("{location}/package.json"), &json!({"name":package,"version":version}));
+            fs::write(root.path().join(&location).join("index.js"), "throw Error('not executed');").unwrap();
+            if isolated {
+                std::os::unix::fs::symlink(format!(".bun/{slot}@{version}/node_modules/{slot}"),
+                    root.path().join("node_modules").join(slot)).unwrap();
+            }
+        }
+        (root, manifest, lock)
+    }
+
+    #[test]
+    fn object_workspace_catalogs_reach_hoisted_and_isolated_staged_admission() {
+        for isolated in [false, true] {
+            let (root, manifest, lock) = workspace_fixture(isolated);
+            let raw_member = fs::read(root.path().join("packages/app/package.json")).unwrap();
+            let report = inspect_for_execution(root.path(), deadline()).unwrap();
+            assert!(!report.requires_review(), "isolated={isolated}: {report:?}");
+            assert!(report.installation_checked);
+            assert_eq!(report.packages_scanned, 3);
+            assert_eq!(report.installed_packages_scanned, 3);
+            assert!(report.scope.contains("catalog"));
+            for (path, raw) in [("package.json", serde_json::to_vec(&manifest).unwrap()),
+                ("bun.lock", serde_json::to_vec(&lock).unwrap()), ("packages/app/package.json", raw_member)] {
+                let input = report.inputs.iter().find(|input| input.path == path).unwrap();
+                assert_eq!(input.sha256, hex::encode(Sha256::digest(&raw)));
+                assert_eq!(fs::read(root.path().join(path)).unwrap(), raw);
+            }
+            assert_eq!(report, inspect_for_execution(root.path(), deadline()).unwrap());
+        }
+    }
+
+    #[test]
+    fn workspace_catalog_indirection_never_erases_raw_binding_or_lifecycle_findings() {
+        for mode in ["equivalent-reference", "lifecycle", "local-catalog"] {
+            let (root, _, lock) = workspace_fixture(false);
+            let mut member = lock["workspaces"]["packages/app"].clone();
+            match mode {
+                // Both expand to ^1, but the source and lock did not agree.
+                "equivalent-reference" => member["dependencies"]["a"] = "catalog:default".into(),
+                "lifecycle" => member["scripts"] = json!({"prepare":"touch catalog-must-not-run"}),
+                _ => member["catalog"] = json!({"a":"^9"}),
+            }
+            put(root.path(), "packages/app/package.json", &member);
+            let result = inspect_for_execution(root.path(), deadline());
+            if mode == "local-catalog" {
+                assert!(result.is_err());
+            } else {
+                let report = result.unwrap();
+                let code = if mode == "lifecycle" { "install_script" } else { "workspace_review" };
+                assert!(report.findings.iter().any(|finding| finding.code == code), "{report:?}");
+                assert!(!report.installation_checked);
+            }
+            assert!(!root.path().join("catalog-must-not-run").exists());
+            assert!(!root.path().join("packages/app/catalog-must-not-run").exists());
+        }
+    }
+
+    #[test]
+    fn embedded_and_top_level_catalogs_share_binding_and_duplicate_detection() {
+        let root = json!({"catalog":{"a":"1"},"workspaces":{"packages":[],
+            "catalogs":{"testing":{"tool":"2"}}}});
+        let recorded = json!({"catalog":{"a":"1"},"catalogs":{"testing":{"tool":"2"}}});
+        let catalogs = bind(root.clone(), recorded.clone()).unwrap();
+        assert_eq!(catalogs.resolve("a", "catalog:").unwrap(), Some("1"));
+        assert_eq!(catalogs.resolve("tool", "catalog:testing").unwrap(), Some("2"));
+        let mut duplicate = root.clone();
+        duplicate["workspaces"]["catalog"] = json!({"a":"1"});
+        assert!(bind(duplicate, recorded.clone()).is_err());
+        let mut stale = root;
+        stale["workspaces"]["catalogs"]["testing"]["tool"] = "3".into();
+        assert!(bind(stale, recorded).is_err());
+    }
+
+    #[test]
+    fn object_workspace_selectors_cannot_grant_lock_only_or_unknown_layout_authority() {
+        for options in [json!({"packages":"packages/*"}), json!({"catalog":{}}),
+            json!({"packages":[],"selfContained":true}),
+            json!({"packages":[],"nohoist":["**"]}), json!({"packages":[],"unknown":false})] {
+            assert!(bind(json!({"workspaces":options}), json!({})).is_err());
+        }
+        let (root, mut manifest, _) = workspace_fixture(false);
+        manifest["workspaces"]["packages"] = json!([]);
+        put(root.path(), "package.json", &manifest);
+        assert!(inspect_for_execution(root.path(), deadline()).is_err());
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "package.json", &json!({"workspaces":{"packages":[]}}));
+        put(root.path(), "package-lock.json", &json!({"lockfileVersion":3,"packages":{}}));
+        assert!(inspect(root.path(), deadline()).is_err());
+    }
+
+    #[test]
+    fn catalog_workspace_still_checks_native_payloads_and_exact_private_routes() {
+        let (root, _, mut lock) = workspace_fixture(false);
+        // A compatible hoist cannot replace the pinned private installation.
+        lock["packages"]["@demo/app/a"] = json!(["a@1.2.3","",{},""]);
+        put(root.path(), "bun.lock", &lock);
+        let report = inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(report.findings.iter().any(|finding|
+            finding.code == "installed_dependency_route_mismatch"
+                && finding.source == "packages/app/package.json#dependencies"), "{report:?}");
+        let (root, _, _) = workspace_fixture(true);
+        fs::write(root.path().join("node_modules/.bun/a@1.2.3/node_modules/a/native.node"), b"not executable").unwrap();
+        let report = inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(report.findings.iter().any(|finding| finding.code == "native_payload"), "{report:?}");
     }
 }

@@ -59,15 +59,54 @@ relax the installed physical-link, lifecycle, native-payload or route checks.
 
 This is not a full Bun installer/solver or proof of Bun runtime parity. Binary
 `bun.lockb`, version 0 text locks, arbitrary file/Git/link/direct-tarball tuple
-forms, root/lockfile catalogs, overrides, patches and nonempty trusted-dependency
-declarations in those inputs remain outside the supported contract.
-`configVersion` does not prove a physical layout: only an inspected matching
-installation can pass execution admission. An unsupported text lock fails
-explicitly rather than becoming an empty successful graph. When Bun and npm
-locks coexist, select one authority before checked execution. Resolution URLs
-and integrity strings are retained metadata, not verified archive SRI or
-publisher authentication. Installed-content authentication and runtime
-comparison remain separate claims.
+forms, overrides, patches and nonempty trusted-dependency declarations in those
+inputs remain outside the supported contract. `configVersion` does not prove a
+physical layout: only an inspected matching installation can pass execution
+admission. An unsupported text lock fails explicitly rather than becoming an
+empty successful graph. When Bun and npm locks coexist, select one authority
+before checked execution. Resolution URLs and integrity strings are retained
+metadata, not verified archive SRI or publisher authentication. Installed-content
+authentication and runtime comparison remain separate claims.
+
+## Bound Bun catalogs
+
+Default and named catalogs can live at the root of `package.json` or inside its
+object-form `workspaces`, alongside a `packages` selector array. The supported
+object keys are exactly `packages`, `catalog` and `catalogs`; layout controls
+such as `selfContained`, `nohoist` and unknown keys are not silently discarded.
+The ordinary descriptor-relative workspace selector still chooses and captures
+real manifests. A lockfile's workspace table never supplies those selectors.
+
+`catalog:`, `catalog:default` and bounded blank catalog names select the default
+catalog. `catalog:<name>` selects a case-sensitive named catalog. A default
+catalog may be split across `catalog` and `catalogs.default` only with disjoint
+package keys. Duplicate normalized keys, malformed maps, unsupported versions,
+missing references, recursive catalog references and workspace-local catalog
+definitions fail explicitly. All root definition placements share one bounded
+index and definition budget. Root definitions and the lockfile's definitions
+must agree before this index can be used; a stale catalog cannot certify a pin.
+
+The supported catalog values are registry version ranges and versioned npm
+aliases. Catalog references are expanded only in the private root/workspace
+metadata projection, across production, development, optional and peer sections.
+Raw workspace declarations are matched to the lock BEFORE expansion: changing
+`catalog:` to an equivalent `catalog:default` in only the source manifest still
+requires workspace review. All declarations are examined, so a missing catalog
+cannot hide in an optional or superseded edge. Published registry dependencies
+cannot inherit the application's catalog definitions. npm-lock projects do not
+gain Bun catalog semantics.
+
+Expansion feeds the existing alias/version/nearest-location checks, then the
+same installed-tree validation for hoisted and project-local isolated layouts.
+It does not rewrite any on-disk manifest, generate a lockfile, invoke a package
+manager, weaken lifecycle/native-payload checks or permit a compatible hoisted
+copy to replace a missing private pin. `inputs` fingerprints original bytes;
+`scope` identifies bound catalog expansion. Findings identify the declaration
+location and effective request; its original reference remains in the pinned
+manifest. The index admits at most 128 nonempty catalog namespaces, bounded
+names/requests, 50,000 definitions and a 64 MiB definition-byte budget. Expansion
+has its own shared 50,000-declaration and 64 MiB replacement-byte bounds across
+the complete project, not a fresh budget per workspace.
 
 ## Project-local isolated installation
 
@@ -119,14 +158,15 @@ that the runtime executes its packages correctly.
 
 For npm and supported Bun projects, a root `workspaces` array selects captured
 manifests with literal path components, component `*` wildcards and standalone
-`**`. One leading `./` and one trailing slash are accepted. Wildcards do not
-implicitly enter dot folders. Overlapping selectors read each manifest once.
-Unsupported pattern dialects, selectors matching no manifests, duplicate
-workspace/root names, nested workspace configurations and selected symlinks
-fail explicitly. Installed packages and reserved runtime/backup/state
-directories are excluded. Traversal is bounded by 64 selectors, depth 64,
-4,096 directories, 50,000 entries and 1,024 manifests including the root.
-Metadata and declaration budgets are shared across the entire inspection.
+`**`. Supported Bun workspace objects use their `packages` array identically.
+One leading `./` and one trailing slash are accepted. Wildcards do not implicitly
+enter dot folders. Overlapping selectors read each manifest once. Unsupported
+pattern dialects, selectors matching no manifests, duplicate workspace/root
+names, nested workspace configurations and selected symlinks fail explicitly.
+Installed packages and reserved runtime/backup/state directories are excluded.
+Traversal is bounded by 64 selectors, depth 64, 4,096 directories, 50,000 entries
+and 1,024 manifests including the root. Metadata and declaration budgets are
+shared across the entire inspection.
 
 Every selected workspace must have a canonical root `node_modules/<name>` link
 in a modern npm lockfile or supported Bun projection. The recorded target,
@@ -167,9 +207,10 @@ cargo test --manifest-path tools/dependency-admission/Cargo.toml
 ```
 
 This standalone manifest compiles the actual product inspector, Bun decoder,
-workspace selector, isolated-layout mapper and installed-tree checks and their
-unit tests without unrelated sibling workspaces. It does not compile the whole
-product binary. Integration regressions live in `verified_rewrite.rs`; the
-existing `verified-rewrite.yml` lane compiles that actual source and exercises
-the shared checked-apply orchestration. A configured workflow is not evidence
-of a successful run: inspect the job result before claiming these tests passed.
+catalog binder, workspace selector, isolated-layout mapper and installed-tree
+checks and their unit tests without unrelated sibling workspaces. It does not
+compile the whole product binary. Integration regressions live in
+`verified_rewrite.rs`; the existing `verified-rewrite.yml` lane compiles that
+actual source and exercises the shared checked-apply orchestration. A configured
+workflow is not evidence of a successful run: inspect the job result before
+claiming these tests passed.
