@@ -18,13 +18,14 @@ ignored as though the project had no dependency authority.
 
 ## Bun text-lock admission
 
-Bun text-lock versions 1 and 2 can supply the graph for hoisted registry packages
-and independently captured workspaces. JSONC comments and trailing commas are
-accepted only in named `bun.lock` inputs; `package.json` and npm locks remain
-strict JSON. Duplicate keys (including escaped spellings), array holes,
-malformed comments, unknown versions and unsupported metadata are refused.
-The original `bun.lock` bytes, not a stripped or reconstructed document, are
-fingerprinted in `inputs`.
+Bun text-lock versions 1 and 2 can supply the logical graph for registry packages
+and independently captured workspaces. Hoisted installations and the bounded
+project-local isolated layout below use the same admitted graph. JSONC comments
+and trailing commas are accepted only in named `bun.lock` inputs; `package.json`
+and npm locks remain strict JSON. Duplicate keys (including escaped spellings),
+array holes, malformed comments, unknown versions and unsupported metadata are
+refused. The original `bun.lock` bytes, not a stripped or reconstructed document,
+are fingerprinted in `inputs`.
 
 The decoder preserves scoped names, aliases, nested installation positions,
 production/optional/peer declarations and optional-peer metadata. Its internal
@@ -56,17 +57,63 @@ review. Original declarations remain unchanged and fingerprinted. This Bun-only
 admission rule does not enable `workspace:` under an npm lockfile, and does not
 relax the installed physical-link, lifecycle, native-payload or route checks.
 
-This is not a full Bun installer/solver or proof of Bun runtime parity.
-Isolated stores, binary `bun.lockb`, version 0 text locks, arbitrary file/Git/link/
-direct-tarball tuple forms, root/lockfile catalogs, overrides, patches and
-nonempty trusted-dependency declarations in those inputs remain outside the
-supported contract. `configVersion`
-does not prove a physical layout: only an inspected matching hoisted tree can
-pass execution admission. An unsupported text lock fails explicitly rather than
-becoming an empty successful graph. When Bun and npm locks coexist, select one
-authority before checked execution. Resolution URLs and integrity strings are
-retained metadata, not verified archive SRI or publisher authentication.
-Installed-content authentication and runtime comparison remain separate claims.
+This is not a full Bun installer/solver or proof of Bun runtime parity. Binary
+`bun.lockb`, version 0 text locks, arbitrary file/Git/link/direct-tarball tuple
+forms, root/lockfile catalogs, overrides, patches and nonempty trusted-dependency
+declarations in those inputs remain outside the supported contract.
+`configVersion` does not prove a physical layout: only an inspected matching
+installation can pass execution admission. An unsupported text lock fails
+explicitly rather than becoming an empty successful graph. When Bun and npm
+locks coexist, select one authority before checked execution. Resolution URLs
+and integrity strings are retained metadata, not verified archive SRI or
+publisher authentication. Installed-content authentication and runtime
+comparison remain separate claims.
+
+## Project-local isolated installation
+
+For a selected supported `bun.lock`, an ordinary `node_modules/.bun` directory
+activates physical-layout binding. Registry installation links must select
+ordinary packages inside this project-local store. Store labels are not trusted
+as package names or versions: actual captured manifests must match the exact
+logical lock pins. Registry aliases, scoped packages, store fallback links,
+nested versions and cycles retain their physical module-resolution contexts.
+Selected workspaces continue to resolve from their real source directories.
+A missing optional installation may remain absent; a present wrong installation
+cannot acquire an optionality exemption.
+
+The mapper resolves each declared edge from its physical consumer and binds the
+result to the nearest selected logical pin. Two logical dependency contexts may
+share one physical package only when their captured records agree; conflicting
+pins cannot collapse into one store entry. Store fallback/public aliases can
+expose an already-bound identity but cannot introduce an unbound package.
+Unreferenced store payloads and unknown aliases require review rather than being
+silently ignored. A physically nearer invalid slot cannot fall through to a
+more convenient outer copy. Private peer placement is still checked.
+
+The full installed-tree inspector then runs unchanged manifest, exact-version,
+dependency-declaration, lifecycle and native-payload checks on ordinary package
+contents. It never reads a package manifest through an installation symlink.
+Verified registry aliases reuse the inspected physical identity, not cloned
+source manifests. Graph admission checks outgoing declarations once per physical
+consumer while retaining all alias positions for incoming dependency lookups.
+Canonical identity consistency is checked before deduplication; equal names and
+versions in different physical peer contexts are not merged. The existing edge
+limit is unchanged and no timing speedup is claimed.
+
+All link text is bounded and interpreted without following filesystem symlinks;
+directory identities and original link text are rechecked before success. Link
+positions in `inputs` fingerprint the exact UTF-8 link text, not the target file
+or an archive. File positions continue to fingerprint original file bytes.
+The isolated `scope` explicitly identifies this distinction. Registry alias and
+scheduled-context fan-out have aggregate identity/path budgets, and the existing
+metadata, directory, entry, depth and findings limits remain fail-closed.
+
+Global-store symlinks, chained links, absolute/escaping links, linked installation
+containers and unverified payload links are not supported. An npm project does
+not gain Bun layout authority by creating a `.bun` directory. This is installed
+layout admission for the supported lock subset, not sandboxing, verification of
+archive integrity, proof that an installer generated the tree, or certification
+that the runtime executes its packages correctly.
 
 ## Workspace admission
 
@@ -120,9 +167,9 @@ cargo test --manifest-path tools/dependency-admission/Cargo.toml
 ```
 
 This standalone manifest compiles the actual product inspector, Bun decoder,
-workspace selector and installed-tree checks and their unit tests without
-unrelated sibling workspaces. It does not compile the whole product binary.
-Integration regressions live in `verified_rewrite.rs`; the existing
-`verified-rewrite.yml` lane compiles that actual source and exercises the shared
-checked-apply orchestration. A configured workflow is not evidence of a
-successful run: inspect the job result before claiming these tests passed.
+workspace selector, isolated-layout mapper and installed-tree checks and their
+unit tests without unrelated sibling workspaces. It does not compile the whole
+product binary. Integration regressions live in `verified_rewrite.rs`; the
+existing `verified-rewrite.yml` lane compiles that actual source and exercises
+the shared checked-apply orchestration. A configured workflow is not evidence
+of a successful run: inspect the job result before claiming these tests passed.

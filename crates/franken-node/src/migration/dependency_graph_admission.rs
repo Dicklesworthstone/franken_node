@@ -21,7 +21,7 @@ use super::{
 };
 use anyhow::{Context, Result, ensure};
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 #[path = "npm_version_req.rs"]
@@ -207,12 +207,28 @@ pub(super) fn inspect(
         Some(2 | 3) => {
             let records = lock.get("packages").and_then(Value::as_object)
                 .context("modern dependency graph requires packages")?;
+            let mut visited = BTreeSet::new();
             for package in packages.values() {
                 time_remaining(deadline)?;
+                // Installed aliases are lookup positions, not additional
+                // consumers. Validate their canonical identity BEFORE skipping
+                // repeated work, so a changed alias flag/version cannot hide
+                // behind the first observation. Ordinary lock maps point to
+                // themselves and preserve their previous behavior.
+                let canonical = packages.get(&package.path)
+                    .context("dependency alias has no canonical physical identity")?;
+                ensure!(canonical.path == package.path && canonical.name == package.name
+                    && canonical.version == package.version && canonical.linked == package.linked
+                    && canonical.install == package.install && canonical.unresolved == package.unresolved,
+                    "dependency alias conflicts with its canonical physical identity");
                 // Linked workspaces are already assessed from captured REAL
                 // manifests by the caller, not the link placeholder or a stale
                 // lockfile projection. Unbound links already require review.
                 if package.linked { continue; }
+                // Keep every alias in `packages` for every incoming lookup;
+                // only outgoing declaration validation is deduplicated. The
+                // physical path, NOT name/version, distinguishes peer contexts.
+                if !visited.insert(package.path.as_str()) { continue; }
                 let record = records.get(&package.path).and_then(Value::as_object)
                     .context("recorded package missing from dependency graph")?;
                 admission.modern_record(&package.path, record)?;
@@ -523,5 +539,140 @@ mod tests {
             request: "1", optional: true, peer: false,
         }).unwrap_err().to_string().contains("edge limit"));
         assert!(inspect(None, &packages, "package-lock.json", &mut report, Instant::now()).is_err());
+    }
+
+    fn physical_pin(package: &str, version: &str, path: &str) -> LockedPackage {
+        LockedPackage {
+            name: package.into(), installed_as: package.into(), version: Some(version.into()),
+            path: path.into(), install: false, linked: false, unresolved: false,
+        }
+    }
+
+    fn empty_report() -> DependencyAdmission {
+        DependencyAdmission {
+            schema_version: String::new(), scope: String::new(), packages_scanned: 0,
+            manifests_scanned: 0, inputs: Vec::new(), findings: Vec::new(),
+            installation_checked: false, installed_packages_scanned: 0,
+        }
+    }
+
+    #[test]
+    fn physical_alias_fanout_does_not_multiply_review_findings() {
+        let path = "node_modules/.bun/a@1.0.0/node_modules/a";
+        let mut packages = BTreeMap::from([(path.into(), physical_pin("a", "1.0.0", path))]);
+        for index in 0..2_000 {
+            packages.insert(format!("consumers/{index}/node_modules/a"), physical_pin("a", "1.0.0", path));
+        }
+        let lock = json!({"lockfileVersion":3,"packages":{
+            (path):{"name":"a","version":"1.0.0","dependencies":{"missing":"1"}}
+        }});
+        let mut report = empty_report();
+        inspect(Some(&lock), &packages, "captured-installed-manifests", &mut report, deadline()).unwrap();
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].package, "missing");
+        assert!(report.findings[0].source.contains(path));
+        assert!(!report.installation_checked);
+    }
+
+    #[test]
+    fn physical_alias_fanout_does_not_consume_a_fictitious_edge_budget() {
+        let path = "node_modules/.bun/a@1.0.0/node_modules/a";
+        let mut packages = BTreeMap::from([(path.into(), physical_pin("a", "1.0.0", path))]);
+        for index in 0..1_024 {
+            packages.insert(format!("consumers/{index}/node_modules/a"), physical_pin("a", "1.0.0", path));
+        }
+        let optional: Map<String, Value> = (0..256)
+            .map(|index| (format!("optional-{index}"), json!("1"))).collect();
+        let lock = json!({"lockfileVersion":3,"packages":{
+            (path):{"name":"a","version":"1.0.0","optionalDependencies":optional}
+        }});
+        let mut report = empty_report();
+        // The old path charged 1,025 * 256 edges for 256 real declarations.
+        // The bound is unchanged; aliases are still all available to lookups.
+        assert!(packages.len() * 256 > MAX_DEPENDENCY_EDGES);
+        inspect(Some(&lock), &packages, "captured-installed-manifests", &mut report, deadline()).unwrap();
+        assert!(report.findings.is_empty());
+    }
+
+    #[test]
+    fn inconsistent_or_missing_canonical_alias_identity_is_not_deduplicated_away() {
+        let path = "node_modules/.bun/a@1.0.0/node_modules/a";
+        let lock = json!({"lockfileVersion":3,"packages":{(path):{}}});
+        for corruption in 0..6 {
+            let mut packages = BTreeMap::new();
+            if corruption != 0 { packages.insert(path.into(), physical_pin("a", "1.0.0", path)); }
+            let mut alias = physical_pin("a", "1.0.0", path);
+            match corruption {
+                1 => alias.name = "wrong".into(),
+                2 => alias.version = Some("2.0.0".into()),
+                3 => alias.unresolved = true,
+                4 => alias.install = true,
+                5 => alias.linked = true,
+                _ => {}
+            }
+            packages.insert("node_modules/a".into(), alias);
+            let error = inspect(Some(&lock), &packages, "test", &mut empty_report(), deadline()).unwrap_err();
+            assert!(error.to_string().contains("canonical physical identity"), "{error}");
+        }
+    }
+
+    #[test]
+    fn same_name_and_version_with_distinct_physical_peer_contexts_stay_distinct() {
+        let a1 = "node_modules/.bun/a-peer-one/node_modules/a";
+        let a2 = "node_modules/.bun/a-peer-two/node_modules/a";
+        let b1 = "node_modules/.bun/b@1/node_modules/b";
+        let b2 = "node_modules/.bun/b@2/node_modules/b";
+        let mut packages = BTreeMap::from([
+            (a1.into(), physical_pin("a", "1.0.0", a1)),
+            (a2.into(), physical_pin("a", "1.0.0", a2)),
+            (b1.into(), physical_pin("b", "1.0.0", b1)),
+            (b2.into(), physical_pin("b", "2.0.0", b2)),
+        ]);
+        packages.insert("node_modules/.bun/a-peer-one/node_modules/b".into(), physical_pin("b", "1.0.0", b1));
+        packages.insert("node_modules/.bun/a-peer-two/node_modules/b".into(), physical_pin("b", "2.0.0", b2));
+        let lock = json!({"lockfileVersion":3,"packages":{
+            (a1):{"peerDependencies":{"b":"1"}},
+            (a2):{"peerDependencies":{"b":"1"}},
+            (b1):{}, (b2):{}
+        }});
+        let mut report = empty_report();
+        inspect(Some(&lock), &packages, "captured-installed-manifests", &mut report, deadline()).unwrap();
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].code, "dependency_version_mismatch");
+        assert!(report.findings[0].source.contains(a2));
+        assert_eq!(report.findings[0].package_path.as_deref(), Some(b2));
+    }
+
+    #[test]
+    fn bound_bun_workspace_can_use_project_local_isolated_registry_dependencies() {
+        let root = tempfile::tempdir().unwrap();
+        let member = json!({"name":"local","version":"1.0.0","dependencies":{"a":"1"}});
+        let root_manifest = json!({"workspaces":["packages/*"],"dependencies":{"local":"workspace:*"}});
+        let lock = json!({"lockfileVersion":2,"configVersion":1,
+            "workspaces":{"":{"dependencies":{"local":"workspace:*"}},"packages/local":member},
+            "packages":{"local":["local@workspace:packages/local"],"a":["a@1.0.0","",{},""]}
+        });
+        for (path, bytes) in [
+            ("package.json", serde_json::to_vec(&root_manifest).unwrap()),
+            ("bun.lock", serde_json::to_vec(&lock).unwrap()),
+            ("packages/local/package.json", serde_json::to_vec(&member).unwrap()),
+            ("packages/local/index.js", b"throw Error('must not execute');".to_vec()),
+            ("node_modules/.bun/a@1.0.0/node_modules/a/package.json", br#"{"name":"a","version":"1.0.0"}"#.to_vec()),
+            ("node_modules/.bun/a@1.0.0/node_modules/a/index.js", b"throw Error('must not execute');".to_vec()),
+        ] {
+            let path = root.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+        }
+        fs::create_dir_all(root.path().join("packages/local/node_modules")).unwrap();
+        std::os::unix::fs::symlink("../packages/local", root.path().join("node_modules/local")).unwrap();
+        std::os::unix::fs::symlink("../../../node_modules/.bun/a@1.0.0/node_modules/a",
+            root.path().join("packages/local/node_modules/a")).unwrap();
+        let report = super::super::inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(!report.requires_review(), "{report:#?}");
+        assert!(report.installation_checked);
+        assert!(report.scope.contains("isolated"));
+        assert_eq!(report.manifests_scanned, 3);
+        assert!(report.inputs.iter().any(|input| input.path == "packages/local/node_modules/a"));
     }
 }
