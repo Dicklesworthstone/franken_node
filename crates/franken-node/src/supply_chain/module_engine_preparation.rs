@@ -10,7 +10,7 @@ use super::super::{
 };
 use super::{CaptureError, ModuleKind, RegisteredModule, RequestStyle};
 use frankenengine_engine::ast::ParseGoal;
-use frankenengine_engine::parser::{CanonicalEs2020Parser, ParserOptions};
+use frankenengine_engine::parser::{CanonicalEs2020Parser, ParseErrorCode, ParserOptions};
 use frankenengine_engine::ts_normalization::{
     SourceIngestionSummary, SourceMapEntry, TsNormalizationWitness,
     prepare_source_entry_for_public_entrypoints,
@@ -289,30 +289,57 @@ fn request_style(kind: LoadKind) -> RequestStyle {
 /// Only detection uses this wrapper; delivered source is never wrapped here.
 /// All grammar and early-error decisions belong to the actual engine parser.
 fn detect_kind(source: &str, explicit: Option<ModuleKind>) -> Result<ModuleKind> {
+    detect_kind_with_options(source, explicit, &ParserOptions::default())
+}
+
+fn detect_kind_with_options(
+    source: &str,
+    explicit: Option<ModuleKind>,
+    options: &ParserOptions,
+) -> Result<ModuleKind> {
     let parser = CanonicalEs2020Parser;
-    let options = ParserOptions::default();
     if explicit != Some(ModuleKind::EsModule) {
         let wrapper = format!(
             "(function(exports, require, module, __filename, __dirname) {{\n{source}\n}});"
         );
-        if parser
-            .parse_with_options(&wrapper, ParseGoal::Script, &options)
-            .is_ok()
-        {
-            return Ok(ModuleKind::CommonJs);
+        // ParserInput accepts owned String and &str, not &String. Moving the
+        // temporary wrapper also avoids another full source-buffer copy.
+        match parser.parse_with_options(wrapper, ParseGoal::Script, options) {
+            Ok(_) => return Ok(ModuleKind::CommonJs),
+            Err(failure)
+                if matches!(
+                    failure.code,
+                    ParseErrorCode::InvalidGoal
+                        | ParseErrorCode::UnsupportedSyntax
+                        | ParseErrorCode::StrictModeWithStatement
+                        | ParseErrorCode::AwaitOutsideAsync
+                ) => {}
+            // Resource/input failure is not evidence of ESM syntax. In
+            // particular, a source may fit a module budget while its CommonJS
+            // wrapper does not. Retrying would silently select another format.
+            Err(failure) => return Err(parser_failure(failure.code)),
         }
     }
-    if explicit != Some(ModuleKind::CommonJs)
-        && parser
-            .parse_with_options(source, ParseGoal::Module, &options)
-            .is_ok()
-    {
-        return Ok(ModuleKind::EsModule);
+    if explicit != Some(ModuleKind::CommonJs) {
+        return parser
+            .parse_with_options(source, ParseGoal::Module, options)
+            .map(|_| ModuleKind::EsModule)
+            .map_err(|failure| parser_failure(failure.code));
     }
-    Err(error(
+    Err(parser_failure(ParseErrorCode::InvalidGoal))
+}
+
+fn parser_failure(code: ParseErrorCode) -> CaptureError {
+    if matches!(code, ParseErrorCode::SourceTooLarge | ParseErrorCode::BudgetExceeded) {
+        return error(
+            "ERR_MODULE_ENGINE_PARSE_LIMIT",
+            "engine source-format detection exceeded its parser budget",
+        );
+    }
+    error(
         "ERR_MODULE_ENGINE_PARSE",
         "captured source is not accepted by the engine in its selected module format",
-    ))
+    )
 }
 
 fn invalid_preparation() -> CaptureError {
@@ -327,4 +354,74 @@ fn preparation_limit() -> CaptureError {
         "ERR_MODULE_ENGINE_PREPARATION_LIMIT",
         "engine-prepared source exceeds the retained-source budget",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use frankenengine_engine::parser::ParserBudget;
+
+    fn source_budget(bytes: usize) -> ParserOptions {
+        ParserOptions {
+            budget: ParserBudget {
+                max_source_bytes: u64::try_from(bytes).unwrap(),
+                ..ParserBudget::default()
+            },
+            ..ParserOptions::default()
+        }
+    }
+
+    #[test]
+    fn wrapper_budget_failure_cannot_relabel_commonjs_as_a_module() {
+        let source = "const value=42;";
+        let options = source_budget(source.len());
+        // Establish that the tempting fallback would succeed. The wrapper
+        // exceeds this exact source budget, which is not a syntax decision.
+        assert!(
+            CanonicalEs2020Parser
+                .parse_with_options(source, ParseGoal::Module, &options)
+                .is_ok()
+        );
+        for explicit in [None, Some(ModuleKind::CommonJs)] {
+            assert_eq!(
+                detect_kind_with_options(source, explicit, &options)
+                    .unwrap_err()
+                    .code,
+                "ERR_MODULE_ENGINE_PARSE_LIMIT"
+            );
+        }
+        assert_eq!(
+            detect_kind_with_options(source, Some(ModuleKind::EsModule), &options).unwrap(),
+            ModuleKind::EsModule
+        );
+    }
+
+    #[test]
+    fn explicit_module_budget_failure_is_distinct_and_source_free() {
+        let source = "export const private_name=42;";
+        let failure = detect_kind_with_options(
+            source,
+            Some(ModuleKind::EsModule),
+            &source_budget(source.len() - 1),
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, "ERR_MODULE_ENGINE_PARSE_LIMIT");
+        assert!(!failure.detail.contains("private_name"));
+    }
+
+    #[test]
+    fn syntax_fallback_preserves_explicit_commonjs_boundaries() {
+        let source = "export const answer=42;";
+        assert_eq!(detect_kind(source, None).unwrap(), ModuleKind::EsModule);
+        assert_eq!(
+            detect_kind(source, Some(ModuleKind::CommonJs))
+                .unwrap_err()
+                .code,
+            "ERR_MODULE_ENGINE_PARSE"
+        );
+        assert_eq!(
+            detect_kind("return 42;", None).unwrap(),
+            ModuleKind::CommonJs
+        );
+    }
 }

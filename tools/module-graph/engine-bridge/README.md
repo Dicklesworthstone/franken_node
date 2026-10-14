@@ -72,6 +72,10 @@ engine canonical hashes cover the actual delivered prepared source.
 witnesses and source maps. Ordinary explicitly typed JavaScript without a
 hashbang stays on its existing unchanged path and has no preparation report.
 Prepared source storage is shared between URL instances and bounded to 32 MiB.
+Parser resource failures stop admission; they do not trigger a second parse
+goal that could misclassify a CommonJS source as ESM just because the unwrapped
+source fits a smaller budget. The temporary CommonJS wrapper is moved into the
+engine's owned-input API without another source-buffer copy.
 
 Plain `.ts` remains unsupported here because its package-format scope is not
 captured by the file resolver. JSX, JSON, native addons, Wasm and builtins also
@@ -131,7 +135,7 @@ checkouts adjacent to one another:
 
 ```sh
 cargo test --manifest-path tools/module-graph/engine-bridge/Cargo.toml \
-  --lib engine_resolver::tests
+  --lib engine_resolver::
 ```
 
 The CI job pins the engine revision used for contract verification and reports

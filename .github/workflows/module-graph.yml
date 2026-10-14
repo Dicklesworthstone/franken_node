@@ -91,7 +91,7 @@ jobs:
           rustc +stable --version | tee bridge-evidence/rust-version.txt
           git -C franken_node rev-parse HEAD > bridge-evidence/product-revision.txt
           git -C franken_engine rev-parse HEAD > bridge-evidence/engine-revision.txt
-          cargo +stable test --manifest-path franken_node/tools/module-graph/engine-bridge/Cargo.toml --lib engine_resolver::tests 2>&1 | tee bridge-evidence/native-tests.log
+          cargo +stable test --manifest-path franken_node/tools/module-graph/engine-bridge/Cargo.toml --lib engine_resolver:: 2>&1 | tee bridge-evidence/native-tests.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
