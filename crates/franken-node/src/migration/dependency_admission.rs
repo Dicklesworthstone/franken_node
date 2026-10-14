@@ -1,10 +1,12 @@
-//! Native checked-rewrite admission over captured npm metadata.
+//! Native checked-rewrite admission over captured dependency metadata.
 //!
 //! Inventories every recorded installation location, not just root dependency
 //! names. No npm invocation, registry access, lifecycle execution or live
-//! node_modules traversal. Supported registry version ranges must match the
-//! nearest recorded pin; opaque requests require review. This is NOT installed
-//! content authentication, a complete npm solver, or runtime compatibility proof.
+//! node_modules traversal in metadata-only mode. Supported registry version
+//! ranges must match the nearest recorded pin; opaque requests require review.
+//! npm v1/v2/v3 and the Bun v1/v2 hoisted registry subset share the same graph
+//! and installed-tree checks. This is NOT installed-content authentication,
+//! a complete package solver, or runtime compatibility proof.
 //!
 //! Format reference: https://docs.npmjs.com/cli/v11/configuring-npm/package-lock-json/
 
@@ -33,6 +35,9 @@ mod installed;
 
 #[path = "dependency_declarations.rs"]
 mod declaration_selection;
+
+#[path = "dependency_bun_lock.rs"]
+mod bun;
 
 const MAX_MANIFEST_BYTES: usize = 512 * 1024;
 const MAX_LOCK_BYTES: usize = 16 * 1024 * 1024;
@@ -211,7 +216,13 @@ impl Capture {
                     && bytes.len() as u64 == before.len(), "{path}: metadata changed during capture");
                 self.bytes = self.bytes.checked_add(bytes.len()).context("metadata byte count overflow")?;
                 ensure!(self.bytes <= MAX_METADATA_BYTES, "dependency metadata exceeds aggregate byte limit");
-                let value = parse_unique(&bytes, self.deadline).with_context(|| format!("invalid dependency JSON in {path}"))?;
+                // Bun's JSONC allowance is local to its selected text lock.
+                // npm manifests/locks remain strict, recursively unique JSON.
+                let value = if path == "bun.lock" {
+                    bun::parse(&bytes, self.deadline)
+                } else {
+                    parse_unique(&bytes, self.deadline)
+                }.with_context(|| format!("invalid dependency JSON in {path}"))?;
                 ensure!(value.is_object(), "{path}: dependency metadata must be an object");
                 self.inputs.insert(path.into(), MetadataInput {
                     path: path.into(), bytes: bytes.len(), sha256: hex::encode(Sha256::digest(&bytes)),
@@ -447,7 +458,12 @@ fn inspect_with_installation(project: &Path, deadline: Instant, check_installati
     let package_lock = capture.read("package-lock.json", MAX_LOCK_BYTES)?;
     let shrinkwrap = capture.read("npm-shrinkwrap.json", MAX_LOCK_BYTES)?;
     ensure!(package_lock.is_none() || shrinkwrap.is_none(), "both npm lockfiles are present; dependency inventory is ambiguous");
-    let (source, lock) = if package_lock.is_some() { ("package-lock.json", package_lock) }
+    let bun_lock = capture.read("bun.lock", MAX_LOCK_BYTES)?;
+    ensure!(bun_lock.is_none() || (package_lock.is_none() && shrinkwrap.is_none()),
+        "Bun and npm lockfiles are both present; select one dependency authority before checked execution");
+    let (source, lock) = if let Some(bun_lock) = bun_lock {
+        ("bun.lock", Some(bun::project_lock(bun_lock, &manifest, deadline)?))
+    } else if package_lock.is_some() { ("package-lock.json", package_lock) }
         else { ("npm-shrinkwrap.json", shrinkwrap) };
     let packages = match &lock {
         None => BTreeMap::new(),
@@ -478,6 +494,10 @@ fn inspect_with_installation(project: &Path, deadline: Instant, check_installati
         } else {
             installed::inspect(&mut capture, &packages, &manifests, lock.as_ref(), &mut report)?;
         }
+    }
+    if source == "bun.lock" {
+        report.scope = report.scope.replacen("captured npm metadata",
+            "captured Bun v1/v2 text-lock metadata (hoisted registry subset)", 1);
     }
     time_remaining(deadline)?;
     report.inputs = capture.inputs.into_values().collect();
