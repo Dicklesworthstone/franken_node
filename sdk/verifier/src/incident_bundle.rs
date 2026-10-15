@@ -18,6 +18,9 @@
 //! 4. timeline sequencing, timestamps, causal parents, deterministic bundle ID,
 //!    manifest endpoints and spans, canonical chunk boundaries and chunk hashes
 //!    are independently checked against the authenticated events.
+//! 5. an embedded native capture has a supported envelope, an exact raw-payload
+//!    digest, unambiguous nested JSON and a structurally consistent terminal
+//!    declaration. This does not certify that the guest was re-executed.
 //!
 //! The signature envelope's human-readable `signing_identity` label is outside
 //! the signed integrity view. Verified signer identity is therefore the
@@ -32,6 +35,10 @@
 
 #[path = "incident_bundle_structure.rs"]
 mod structure;
+
+#[path = "incident_native_capture.rs"]
+mod native_capture;
+pub use native_capture::{CapturedNativeTerminalState, VerifiedNativeCaptureMetadata};
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
@@ -83,6 +90,9 @@ pub struct VerifiedIncidentBundle {
     /// the bundle's unsigned `signature.signing_identity` label. Applications
     /// needing a human-readable name must use their own trusted key-to-name mapping.
     pub signing_identity: String,
+    /// Authenticated capture metadata, not a guest-execution verdict. The SDK
+    /// does not validate engine IR, policy decisions or replay consumption.
+    pub native_capture: Option<VerifiedNativeCaptureMetadata>,
 }
 
 /// Why a bundle failed independent verification.
@@ -519,6 +529,7 @@ pub fn verify_incident_bundle(
     // A valid signer can still produce inconsistent evidence. Do not promote
     // hashes and counts to a verified replay until their structure is checked.
     structure::verify_structure(&object)?;
+    let native_capture = native_capture::verify(&object["initial_state_snapshot"])?;
 
     Ok(VerifiedIncidentBundle {
         bundle_id: string_field(&object, "bundle_id")?.to_string(),
@@ -530,6 +541,7 @@ pub fn verify_incident_bundle(
         decision_sequence_hash: recomputed_sequence,
         signer_public_key_hex: anchor_hex,
         signing_identity: anchor_key_id,
+        native_capture,
     })
 }
 
