@@ -86,5 +86,11 @@ class PromiseFilesystemWriteProjectTests(PipelineProjectTests):
     case_count = 5
 
 
+class DiagnosticsProjectTests(PipelineProjectTests):
+    # Shared diagnostics are exercised across package and ESM boundaries.
+    corpus_path = ROOT / 'fixtures/compatibility/projects/diagnostics.corpus.json'
+    case_count = 4
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -1,0 +1,77 @@
+{
+  "schema_version": "franken-node/project-compat-corpus/v1",
+  "description": "Complete named-channel and tracing workflows using canonical franken_engine diagnostics_channel. Use scripts/project_compat_runner.py --corpus fixtures/compatibility/projects/diagnostics.corpus.json with real --bin/--node/--bun executables. Reference/host checks do not establish native module identity, accounting or ecosystem parity. Store objects in this cohort are user-supplied synchronous scopes, not an AsyncLocalStorage implementation.",
+  "cases": [
+    {
+      "id": "diagnostics-named-package-publication",
+      "category": "diagnostics-integration",
+      "description": "A package conditionally publishes projected records to an independently loaded subscriber; removing that subscriber stops later delivery.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const fs=require('node:fs');const observer=require('./observer.cjs').start();const project=require('fixture-projector');const result=project([20,21]);observer.stop();project([1]);fs.writeFileSync('report.json',JSON.stringify({result,events:observer.events})+'\\n');console.log('NAMED_CHANNELS',result.join(','),observer.events.length,require('node:diagnostics_channel').hasSubscribers('fixture.projected'));\n",
+        "observer.cjs": "const dc=require('diagnostics_channel');exports.start=function(){const events=[];function receive(message,name){events.push([name,message.input,message.output]);}dc.subscribe('fixture.projected',receive);return {events,stop(){if(!dc.unsubscribe('fixture.projected',receive))throw Error('subscription missing');}};};\n",
+        "node_modules/fixture-projector/package.json": "{\"name\":\"fixture-projector\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-projector/index.cjs": "const channel=require('node:diagnostics_channel').channel('fixture.projected');module.exports=function(values){return values.map(input=>{const output=input*2;if(channel.hasSubscribers)channel.publish({input,output});return output;});};\n"
+      },
+      "expected": {
+        "stdout": "NAMED_CHANNELS 40,42 2 false\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {"report.json": "{\"result\":[40,42],\"events\":[[\"fixture.projected\",20,40],[\"fixture.projected\",21,42]]}\n", "unexpected.txt": null}
+      }
+    },
+    {
+      "id": "diagnostics-esm-promise-lifecycle",
+      "category": "diagnostics-integration",
+      "description": "Conditional ESM exports and a core reexport connect a package promise trace to external observers, preserving successful results and a falsy rejection.",
+      "entry": "main.mjs",
+      "files": {
+        "main.mjs": "import fs from 'node:fs';import {channel} from './observe.mjs';import {work} from '@fixture/traced-work';const events=[];for(const name of ['start','end','asyncStart','asyncEnd','error'])channel('tracing:fixture.work:'+name).subscribe(c=>events.push(name+':'+c.id));(async function(){const value=await work(21,'ok');let same=false;try{await work(-1,'bad');}catch(error){same=error===false;}fs.writeFileSync('trace.json',JSON.stringify({value,same,events})+'\\n');console.log('ESM_DIAGNOSTICS',value,same,events.length);})();\n",
+        "observe.mjs": "export {channel} from 'node:diagnostics_channel';\n",
+        "node_modules/@fixture/traced-work/package.json": "{\"name\":\"@fixture/traced-work\",\"version\":\"1.0.0\",\"type\":\"module\",\"exports\":{\".\":{\"import\":\"./index.mjs\",\"require\":\"./wrong.cjs\"}}}\n",
+        "node_modules/@fixture/traced-work/index.mjs": "import {tracingChannel} from 'diagnostics_channel';const trace=tracingChannel('fixture.work');export function work(value,id){return trace.tracePromise(async function(){await Promise.resolve();if(value<0)throw false;return value*2;},{id});}\n",
+        "node_modules/@fixture/traced-work/wrong.cjs": "throw Error('wrong package condition');\n"
+      },
+      "expected": {
+        "stdout": "ESM_DIAGNOSTICS 42 true 9\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {"trace.json": "{\"value\":42,\"same\":true,\"events\":[\"start:ok\",\"end:ok\",\"asyncStart:ok\",\"asyncEnd:ok\",\"start:bad\",\"end:bad\",\"error:bad\",\"asyncStart:bad\",\"asyncEnd:bad\"]}\n", "unexpected.txt": null}
+      }
+    },
+    {
+      "id": "diagnostics-callback-package-store-scope",
+      "category": "diagnostics-integration",
+      "description": "A callback package retains its immediate ticket and callback receiver, while the observer binds a user-supplied synchronous store around actual continuation and file output.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const fs=require('node:fs'),dc=require('node:diagnostics_channel'),store=require('./scope.cjs');const trace=dc.tracingChannel('fixture.callback'),events=[];trace.asyncStart.bindStore(store,c=>c.result);for(const name of ['start','end','asyncStart','asyncEnd'])trace[name].subscribe(()=>events.push(name+':'+store.current()));let ticket;new Promise((resolve,reject)=>{ticket=require('fixture-callback')(21,function(error,value,extra){if(error){reject(error);return;}fs.writeFileSync('answer.txt',value+':'+this.tag+':'+store.current()+':'+extra+'\\n');resolve(value);});}).then(value=>{trace.asyncStart.unbindStore(store);fs.writeFileSync('events.json',JSON.stringify(events)+'\\n');console.log('CALLBACK_DIAGNOSTICS',ticket,value,store.current());});\n",
+        "scope.cjs": "let current='outside';exports.current=()=>current;exports.run=function(value,fn){const old=current;current=value;try{return fn();}finally{current=old;}};\n",
+        "node_modules/fixture-callback/package.json": "{\"name\":\"fixture-callback\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-callback/index.cjs": "const trace=require('diagnostics_channel').tracingChannel('fixture.callback');module.exports=function(value,callback){return trace.traceCallback(function(n,done){Promise.resolve().then(()=>done.call({tag:'worker'},null,n*2,'ok'));return 'ticket';},-1,{id:'call'},undefined,value,callback);};\n"
+      },
+      "expected": {
+        "stdout": "CALLBACK_DIAGNOSTICS ticket 42 outside\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {"answer.txt": "42:worker:42:ok\n", "events.json": "[\"start:outside\",\"end:outside\",\"asyncStart:42\",\"asyncEnd:42\"]\n", "unexpected.txt": null}
+      }
+    },
+    {
+      "id": "diagnostics-concurrent-package-contexts",
+      "category": "diagnostics-integration",
+      "description": "An initially unobserved package returns its original promise; after subscription, two operations settle in reverse order without mixing trace contexts.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const fs=require('node:fs'),dc=require('diagnostics_channel'),work=require('./work.cjs');const original=Promise.resolve(7),same=work.trace(original,{id:'silent'})===original;const events=[];const trace=dc.tracingChannel('fixture.concurrent');for(const name of ['start','end','asyncStart','asyncEnd'])trace[name].subscribe(c=>events.push(name+':'+c.id));let finishA,finishB;const a={id:'a'},b={id:'b'};const pa=work.trace(new Promise(resolve=>finishA=resolve),a);const pb=work.trace(new Promise(resolve=>finishB=resolve),b);(async function(){finishB(2);await pb;finishA(1);await pa;fs.writeFileSync('concurrent.json',JSON.stringify({same,a:a.result,b:b.result,events})+'\\n');console.log('CONCURRENT_DIAGNOSTICS',same,a.result,b.result,events.length);})();\n",
+        "work.cjs": "const tracing=require('node:diagnostics_channel').tracingChannel('fixture.concurrent');exports.trace=function(promise,context){return tracing.tracePromise(()=>promise,context);};\n"
+      },
+      "expected": {
+        "stdout": "CONCURRENT_DIAGNOSTICS true 1 2 8\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {"concurrent.json": "{\"same\":true,\"a\":1,\"b\":2,\"events\":[\"start:a\",\"end:a\",\"start:b\",\"end:b\",\"asyncStart:b\",\"asyncEnd:b\",\"asyncStart:a\",\"asyncEnd:a\"]}\n", "unexpected.txt": null}
+      }
+    }
+  ]
+}
