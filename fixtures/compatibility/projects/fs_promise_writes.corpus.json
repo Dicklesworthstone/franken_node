@@ -1,0 +1,91 @@
+{
+  "schema_version": "franken-node/project-compat-corpus/v1",
+  "cases": [
+    {
+      "id": "promise-write-package-publication",
+      "category": "filesystem-integration",
+      "description": "A CommonJS package waits for a flush-requested exclusive temporary-file write before renaming it and publishing its completion marker. File checks do not certify power-loss durability.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const publish=require('fixture-publish');publish('release.txt','release é\\n').then(()=>console.log('PROMISE_PUBLISH_COMPLETE'));\n",
+        "node_modules/fixture-publish/package.json": "{\"name\":\"fixture-publish\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-publish/index.cjs": "const fs=require('node:fs/promises');module.exports=async function(file,text){await fs.writeFile(file+'.pending',text,{flag:'wx',flush:true});await fs.rename(file+'.pending',file);await fs.writeFile('complete.txt','published\\n',{flush:true});};\n"
+      },
+      "expected": {
+        "stdout": "PROMISE_PUBLISH_COMPLETE\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {"release.txt":"release é\n","release.txt.pending":null,"complete.txt":"published\n","unexpected.txt":null}
+      }
+    },
+    {
+      "id": "promise-write-esm-view-append",
+      "category": "filesystem-integration",
+      "description": "An ESM package supplies a DataView and a Uint16Array with nonzero offsets; pathname writes consume raw viewed bytes, preserve append flags and encode a hexadecimal suffix.",
+      "entry": "main.mjs",
+      "files": {
+        "main.mjs": "import {parts} from '@fixture/payload';import {writeFile,appendFile} from 'node:fs/promises';async function run(){const p=parts();await writeFile('result.txt',p[0],{flag:'a',flush:true});await appendFile('result.txt',p[1],{flush:true});await appendFile('result.txt','c3a9210a',{encoding:'hex',flush:true});console.log('PROMISE_VIEWS_COMPLETE');}run();\n",
+        "node_modules/@fixture/payload/package.json": "{\"name\":\"@fixture/payload\",\"version\":\"1.0.0\",\"type\":\"module\",\"exports\":\"./index.mjs\"}\n",
+        "node_modules/@fixture/payload/index.mjs": "export function parts(){const a=Uint8Array.from([95,65,66,95]);const b=Uint8Array.from([95,95,67,68,95,95]);return [new DataView(a.buffer,1,2),new Uint16Array(b.buffer,2,1)];}\n",
+        "result.txt": "prefix:"
+      },
+      "expected": {
+        "stdout": "PROMISE_VIEWS_COMPLETE\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {"result.txt":"prefix:ABCDé!\n","unexpected.txt":null}
+      }
+    },
+    {
+      "id": "promise-write-package-preflight",
+      "category": "filesystem-integration",
+      "description": "A package rejects invalid flush settings, pre-abort, and an exclusive-open collision without truncating the existing release or creating a success file.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "require('./attempts.cjs')().then(results=>console.log('PROMISE_PREFLIGHT_COMPLETE',results.join(',')));\n",
+        "attempts.cjs": "const fs=require('fs/promises');module.exports=async function(){const results=[];try{await fs.writeFile('release.txt','bad',{flush:'yes'});await fs.writeFile('unexpected.txt','invalid option accepted');}catch(e){results.push(e.code);}const c=new AbortController();c.abort(false);try{await fs.writeFile('release.txt','bad',{flush:true,signal:c.signal});await fs.writeFile('unexpected.txt','abort accepted');}catch(e){results.push(e.code+':'+(e.cause===false));}try{await fs.writeFile('release.txt','bad',{flag:'wx',flush:true});await fs.writeFile('unexpected.txt','collision accepted');}catch(e){results.push(e.code);}return results;};\n",
+        "release.txt": "preserved\n"
+      },
+      "expected": {
+        "stdout": "PROMISE_PREFLIGHT_COMPLETE ERR_INVALID_ARG_TYPE,ABORT_ERR:true,EEXIST\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {"release.txt":"preserved\n","unexpected.txt":null}
+      }
+    },
+    {
+      "id": "promise-write-package-borrowed-handle",
+      "category": "filesystem-integration",
+      "description": "A package writes through a FileHandle owned by its caller; both Promise namespace operations retain the descriptor cursor and leave closing to the caller.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const fs=require('node:fs/promises');const edit=require('fixture-edit');async function run(){const h=await fs.open('data.txt','r+');await h.read(Buffer.alloc(2));await edit(h);console.log('PROMISE_HANDLE_OPEN',h.fd>=0);await h.close();console.log('PROMISE_HANDLE_COMPLETE',h.fd);}run();\n",
+        "node_modules/fixture-edit/package.json": "{\"name\":\"fixture-edit\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-edit/index.cjs": "const fs=require('fs/promises');module.exports=async function(handle){await fs.writeFile(handle,'XY');await fs.appendFile(handle,Buffer.from('!'));};\n",
+        "data.txt": "abcdef\n"
+      },
+      "expected": {
+        "stdout": "PROMISE_HANDLE_OPEN true\nPROMISE_HANDLE_COMPLETE -1\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {"data.txt":"abXY!f\n","unexpected.txt":null}
+      }
+    },
+    {
+      "id": "promise-write-package-cancelled-append",
+      "category": "filesystem-integration",
+      "description": "A scalar write is followed by an iterable append that aborts between chunks. Rejection must preserve only accepted bytes, close the producer and refuse a successful completion file.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const failure={why:'stop'};require('./build.cjs')(failure).catch(e=>console.log('PROMISE_CANCEL_COMPLETE',e.code,e.cause===failure));\n",
+        "build.cjs": "const fs=require('node:fs/promises');const sync=require('node:fs');module.exports=async function(reason){const c=new AbortController();await fs.writeFile('result.txt','start\\n',{flush:true});async function* chunks(){try{yield 'accepted\\n';c.abort(reason);yield 'rejected\\n';}finally{sync.writeFileSync('producer.closed','closed\\n');}}await fs.appendFile('result.txt',chunks(),{flush:true,signal:c.signal});await fs.writeFile('unexpected.txt','incorrect success\\n');};\n"
+      },
+      "expected": {
+        "stdout": "PROMISE_CANCEL_COMPLETE ABORT_ERR true\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {"result.txt":"start\naccepted\n","producer.closed":"closed\n","unexpected.txt":null}
+      }
+    }
+  ]
+}
