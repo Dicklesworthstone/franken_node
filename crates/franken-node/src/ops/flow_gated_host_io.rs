@@ -22,8 +22,9 @@
 //! Observed rename/symlink relationships remain live: a later sensitive write
 //! or copy into their target reclassifies aliases and already-open descriptors.
 //! Before any subsequent network effect, the gate checks whether the outbound
-//! payload or destination CONTAINS a secret sample, literally or as a direct
-//! hex/base64/base64url encoding; if so — and absent a valid declassification
+//! payload or destination CONTAINS a secret sample, literally, as a direct
+//! hex/base64/base64url encoding, or through a supported decoded byte view;
+//! if so — and absent a valid declassification
 //! (operator-authorized override, not yet wired) — the effect fails closed with
 //! [`HostIoError::Denied`] and never reaches the wrapped provider. The engine's
 //! host-I/O transcript records the denial.
@@ -49,12 +50,16 @@
 //! that copies a secret is not an external sink and is not blocked here. Its
 //! destination remains sensitive so later partial reads cannot launder the
 //! bytes through a public-looking filename or descriptor. Encoded matching
-//! covers one direct encoding of a complete sample, including padded/unpadded
-//! base64 and mixed-case hex. Arbitrary slicing before a write, nested encodings,
-//! or encoding a sample together with other data still need per-datum engine
-//! lineage; this is not a general taint engine. Behavioral coverage lives in
+//! covers direct encodings plus the bounded decoded views in `encoded_secret`.
+//! Arbitrary slicing before a write and transformations outside those views
+//! still need per-datum engine lineage; this is not a general taint engine.
+//! Behavioral coverage lives in
 //! `crates/franken-node/tests/native_engine_compat.rs` and the registered
 //! `ssrf_gated_host_io_egress` integration target.
+
+#[cfg(feature = "engine")]
+#[path = "flow_encoded_secret.rs"]
+mod encoded_secret;
 
 #[cfg(feature = "engine")]
 use std::collections::{BTreeMap, BTreeSet};
@@ -300,6 +305,11 @@ impl SecretSample {
 
     fn occurs_in(&self, outbound: &[u8]) -> bool {
         self.patterns.iter().any(|pattern| pattern.occurs_in(outbound))
+            || encoded_secret::contains(
+                &self.patterns[0].bytes,
+                &self.patterns[0].failure,
+                outbound,
+            )
     }
 }
 
