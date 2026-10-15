@@ -86,6 +86,27 @@
         "exit_code": 0,
         "files": {"result.txt":"start\naccepted\n","producer.closed":"closed\n","unexpected.txt":null}
       }
+    },
+    {
+      "id": "descriptor-package-authenticated-byte-views",
+      "category": "filesystem-integration",
+      "description": "A scoped ESM package supplies viewed storage with misleading own metadata. Descriptor writes and reads must use the original storage, return original objects, and leave decoys unchanged.",
+      "entry": "main.mjs",
+      "files": {
+        "main.mjs": "import {edit} from '@fixture/byte-window';import {writeFile} from 'node:fs/promises';\nconst result=await edit('data.txt');await writeFile('receipt.json',JSON.stringify(result)+'\\n');console.log('VIEW_WINDOW_COMPLETE',result.written,result.read);\n",
+        "node_modules/@fixture/byte-window/package.json": "{\"name\":\"@fixture/byte-window\",\"version\":\"1.0.0\",\"type\":\"module\",\"exports\":\"./index.mjs\"}\n",
+        "node_modules/@fixture/byte-window/index.mjs": "import {open} from 'node:fs/promises';\nfunction part(text){const storage=Uint8Array.from(Buffer.from('__'+text+'__'));const decoy=Uint8Array.from(Buffer.from('FAKE'));const view=new DataView(storage.buffer,2,4);Object.defineProperties(view,{buffer:{value:decoy.buffer},byteOffset:{value:0},byteLength:{value:4}});return {view,storage,decoy};}\nexport async function edit(file){const input=part('REAL'),output=part('----');const handle=await open(file,'w+');try{const written=await handle.write(input.view,{offset:0,length:4,position:0});const read=await handle.read(output.view,{offset:0,length:4,position:0});await handle.sync();return {written:written.bytesWritten,read:read.bytesRead,inputIdentity:written.buffer===input.view,outputIdentity:read.buffer===output.view,storage:Buffer.from(output.storage).toString(),decoy:Buffer.from(output.decoy).toString()};}finally{await handle.close();}}\n"
+      },
+      "expected": {
+        "stdout": "VIEW_WINDOW_COMPLETE 4 4\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "data.txt": "REAL",
+          "receipt.json": "{\"written\":4,\"read\":4,\"inputIdentity\":true,\"outputIdentity\":true,\"storage\":\"__REAL__\",\"decoy\":\"FAKE\"}\n",
+          "unexpected.txt": null
+        }
+      }
     }
   ]
 }
