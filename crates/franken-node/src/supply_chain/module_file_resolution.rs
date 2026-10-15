@@ -760,8 +760,12 @@ impl Resolver {
                 )
             }
             TargetKind::ExternalPackage => {
-                // Imports targets use package resolution, not a new # lookup or
-                // CommonJS extension search on the target's package subpath.
+                // Package-import targets recurse through ordinary package
+                // resolution while preserving HOW the # import was requested.
+                // In particular require('#alias') must retain CommonJS
+                // extension/directory search and require-conditional exports;
+                // forcing Import here made valid external targets such as
+                // "dep/feature" miss an existing "dep/feature.js".
                 if bare_builtin(&selection.target) {
                     return Err(error(
                         "ERR_RUNTIME_MODULE_REQUIRED",
@@ -771,12 +775,7 @@ impl Resolver {
                 if depth + 1 >= MAX_DEPTH {
                     return Err(limit());
                 }
-                let result = self.package(
-                    directory,
-                    &selection.target,
-                    ResolutionMode::Import,
-                    depth + 1,
-                )?;
+                let result = self.package(directory, &selection.target, mode, depth + 1)?;
                 Ok((
                     result.0,
                     if mode == ResolutionMode::Import {
@@ -1245,6 +1244,53 @@ mod tests {
             Err(e) => e.code,
             Ok(_) => panic!("unexpected linked resolution for {request}"),
         }
+    }
+
+    #[test]
+    fn require_package_import_external_target_preserves_commonjs_resolution_mode() {
+        let root = fixture();
+        put(
+            root.path(),
+            "package.json",
+            br##"{
+                "name":"application",
+                "type":"commonjs",
+                "imports":{"#feature":"dep/feature"}
+            }"##,
+        );
+        put(
+            root.path(),
+            "node_modules/dep/package.json",
+            br#"{"name":"dep","type":"commonjs"}"#,
+        );
+        put(
+            root.path(),
+            "node_modules/dep/feature.js",
+            b"module.exports = 42;",
+        );
+
+        let required = run(
+            root.path(),
+            "app.js",
+            "#feature",
+            ResolutionMode::Require,
+        );
+        assert_eq!(required.report.path, "node_modules/dep/feature.js");
+        assert_eq!(required.report.mode, ResolutionMode::Require);
+        assert_eq!(required.report.format_hint, "commonjs");
+        assert_eq!(required.source_bytes(), b"module.exports = 42;");
+
+        // Static import remains strict: the package subpath is extensionless
+        // and ESM resolution must not borrow CommonJS extension searching.
+        assert_eq!(
+            rejected(
+                root.path(),
+                "app.js",
+                "#feature",
+                ResolutionMode::Import,
+            ),
+            "ERR_MODULE_NOT_FOUND"
+        );
     }
 
     #[test]
