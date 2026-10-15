@@ -1,0 +1,66 @@
+{
+  "schema_version": "franken-node/project-compat-corpus/v1",
+  "description": "Complete package workflows for the canonical engine's Duplex.fromWeb/toWeb bridge. Run scripts/project_compat_runner.py --corpus fixtures/compatibility/projects/stream-duplex.corpus.json --bin target/release/franken-node --node node --bun bun --artifacts-dir /tmp/franken-stream-duplex-001. Reference-only tests are not native runtime or npm/Bun parity evidence.",
+  "cases": [
+    {
+      "id": "duplex-web-package-jsonl",
+      "category": "stream-integration",
+      "description": "A CommonJS package exports a Web transform; the Node pipeline adapts both sides and writes exact JSONL output.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const fs=require('node:fs');const {Readable,Duplex}=require('node:stream');const {pipeline}=require('node:stream/promises');const t=require('fixture-records')();const rows=JSON.parse(fs.readFileSync('input.json','utf8'));pipeline(Readable.from(rows),Duplex.fromWeb(t,{objectMode:true}),fs.createWriteStream('result.jsonl')).then(()=>console.log('DUPLEX_PACKAGE_COMPLETE',t.readable.locked,t.writable.locked));\n",
+        "node_modules/fixture-records/package.json": "{\"name\":\"fixture-records\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-records/index.cjs": "const {TransformStream}=require('node:stream/web');module.exports=function(){return new TransformStream({transform(row,c){c.enqueue(JSON.stringify({id:row.id,total:row.price*2})+'\\n');}});};\n",
+        "input.json": "[{\"id\":\"a\",\"price\":21},{\"id\":\"b\",\"price\":22}]\n"
+      },
+      "expected": {"stdout":"DUPLEX_PACKAGE_COMPLETE true true\n","stderr":"","exit_code":0,"files":{"result.jsonl":"{\"id\":\"a\",\"total\":42}\n{\"id\":\"b\",\"total\":44}\n","unexpected.txt":null}}
+    },
+    {
+      "id": "duplex-node-package-web-pipeline",
+      "category": "stream-integration",
+      "description": "A conditional ESM package's Node transform is adapted into a Web pipeline; async sink close writes a separately checked completion file.",
+      "entry": "main.mjs",
+      "files": {
+        "main.mjs": "import {make} from '@fixture/transform';import {Duplex} from 'node:stream';import {ReadableStream,WritableStream} from 'node:stream/web';import fs from 'node:fs';const t=make();ReadableStream.from([20,21]).pipeThrough(Duplex.toWeb(t)).pipeTo(new WritableStream({write(value){fs.appendFileSync('result.txt',value+'\\n');},async close(){await Promise.resolve();fs.writeFileSync('complete.txt','closed\\n');}})).then(()=>console.log('DUPLEX_ESM_COMPLETE',t.writableFinished));\n",
+        "node_modules/@fixture/transform/package.json": "{\"name\":\"@fixture/transform\",\"version\":\"1.0.0\",\"type\":\"module\",\"exports\":{\".\":{\"import\":\"./index.mjs\",\"require\":\"./reject.cjs\"}}}\n",
+        "node_modules/@fixture/transform/index.mjs": "import {Transform} from 'node:stream';export function make(){return new Transform({objectMode:true,transform(value,encoding,done){done(null,value+2);},flush(done){this.push('flushed');done();}});}\n",
+        "node_modules/@fixture/transform/reject.cjs": "throw Error('wrong package condition');\n"
+      },
+      "expected": {"stdout":"DUPLEX_ESM_COMPLETE true\n","stderr":"","exit_code":0,"files":{"result.txt":"22\n23\nflushed\n","complete.txt":"closed\n","unexpected.txt":null}}
+    },
+    {
+      "id": "duplex-node-web-roundtrip-build",
+      "category": "stream-integration",
+      "description": "A dependency adapts its Node transform to a Web pair and back; ordinary Node build output is not collected by the adapter.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const fs=require('fs');const {Readable}=require('stream');const {pipeline}=require('stream/promises');pipeline(Readable.from(['alpha','beta']),require('./endpoint.cjs')(),fs.createWriteStream('result.txt')).then(()=>console.log('DUPLEX_ROUNDTRIP_COMPLETE'));\n",
+        "endpoint.cjs": "const {Duplex,Transform}=require('node:stream');module.exports=function(){const inner=new Transform({objectMode:true,transform(value,encoding,done){done(null,value.toUpperCase()+'\\n');}});return Duplex.fromWeb(Duplex.toWeb(inner),{objectMode:true,highWaterMark:1});};\n"
+      },
+      "expected": {"stdout":"DUPLEX_ROUNDTRIP_COMPLETE\n","stderr":"","exit_code":0,"files":{"result.txt":"ALPHA\nBETA\n","unexpected.txt":null}}
+    },
+    {
+      "id": "duplex-package-paired-cleanup",
+      "category": "stream-integration",
+      "description": "A package's two Web endpoint cleanup callbacks write durable evidence before the adapted Duplex close event reports completion.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const {Duplex}=require('stream');const pair=require('fixture-endpoint')();const d=Duplex.fromWeb(pair);let message;d.on('error',error=>{message=error.message;});d.on('close',()=>console.log('DUPLEX_CLEANUP_COMPLETE',message,pair.readable.locked,pair.writable.locked));d.destroy(new Error('stop'));\n",
+        "node_modules/fixture-endpoint/package.json": "{\"name\":\"fixture-endpoint\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-endpoint/index.cjs": "const web=require('stream/web'),fs=require('node:fs');module.exports=function(){return {readable:new web.ReadableStream({async cancel(reason){await Promise.resolve();fs.appendFileSync('cleanup.log','cancel:'+reason.message+'\\n');}},{highWaterMark:0}),writable:new web.WritableStream({async abort(reason){await Promise.resolve();fs.appendFileSync('cleanup.log','abort:'+reason.message+'\\n');}})};};\n"
+      },
+      "expected": {"stdout":"DUPLEX_CLEANUP_COMPLETE stop true true\n","stderr":"","exit_code":0,"files":{"cleanup.log":"cancel:stop\nabort:stop\n","result.txt":null}}
+    },
+    {
+      "id": "duplex-esm-fragmented-utf8",
+      "category": "stream-integration",
+      "description": "An ESM dependency returns a Web identity transform; Duplex decoding preserves a Unicode scalar split over three byte chunks before file output.",
+      "entry": "main.mjs",
+      "files": {
+        "main.mjs": "import {make} from './endpoint.mjs';import {Readable,Duplex} from 'node:stream';import {pipeline} from 'node:stream/promises';import fs from 'node:fs';const pieces=[new Uint8Array([226]),new Uint8Array([130]),new Uint8Array([172,33,10])];pipeline(Readable.from(pieces),Duplex.fromWeb(make(),{encoding:'utf8',highWaterMark:1}),fs.createWriteStream('result.txt')).then(()=>console.log('DUPLEX_UTF8_COMPLETE'));\n",
+        "endpoint.mjs": "import {TransformStream} from 'node:stream/web';export function make(){return new TransformStream();}\n"
+      },
+      "expected": {"stdout":"DUPLEX_UTF8_COMPLETE\n","stderr":"","exit_code":0,"files":{"result.txt":"€!\n","unexpected.txt":null}}
+    }
+  ]
+}
