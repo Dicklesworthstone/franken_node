@@ -9266,6 +9266,15 @@ impl EngineDispatcher {
                 &mut telemetry_guard,
             )
         })?;
+        config
+            .runtime
+            .validate_environment_allowlist()
+            .map_err(|error| {
+                native_engine_spawn_error_with_telemetry_cleanup(
+                    error.to_string(),
+                    &mut telemetry_guard,
+                )
+            })?;
         let parser_budget = config.runtime.effective_parse_budget(config.profile);
 
         // Process and environment authority both have typed replay inputs:
