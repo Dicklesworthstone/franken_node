@@ -1,0 +1,88 @@
+{
+  "schema_version": "franken-node/project-compat-corpus/v1",
+  "description": "Complete Node/Web stream bridge projects; native execution is required separately from reference/host checks.",
+  "cases": [
+    {
+      "id": "bridge-package-file-text-roundtrip",
+      "category": "stream-integration",
+      "description": "A CommonJS package sends one-byte file reads through Web text transforms and all four adapters into a Node file sink; completion requires finalization.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "require('fixture-stream-bridge')().then(finished=>console.log('BRIDGE_FILE_COMPLETE',finished));\n",
+        "node_modules/fixture-stream-bridge/package.json": "{\"name\": \"fixture-stream-bridge\", \"version\": \"1.0.0\", \"main\": \"index.cjs\"}\n",
+        "node_modules/fixture-stream-bridge/index.cjs": "const s=require('node:stream');const w=require('node:stream/web');const fs=require('node:fs');module.exports=async function(){const output=fs.createWriteStream('output.txt',{highWaterMark:1});const input=s.Readable.toWeb(fs.createReadStream('input.txt',{highWaterMark:1}));const converted=input.pipeThrough(new w.TextDecoderStream()).pipeThrough(new w.TransformStream({transform(text,c){c.enqueue(text.toUpperCase());}})).pipeThrough(new w.TextEncoderStream());await s.promises.pipeline(s.Readable.fromWeb(converted),s.Writable.fromWeb(s.Writable.toWeb(output)));return output.writableFinished;};\n",
+        "input.txt": "hello é\n"
+      },
+      "expected": {
+        "stdout": "BRIDGE_FILE_COMPLETE true\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "output.txt": "HELLO É\n",
+          "input.txt": "hello é\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "bridge-esm-package-byte-source",
+      "category": "stream-integration",
+      "description": "An ESM package returns a Web stream of byte views to an independently imported Node adapter and file sink; native cross-package identity must actually work.",
+      "entry": "main.mjs",
+      "files": {
+        "main.mjs": "import {Readable} from 'node:stream';import {pipeline} from 'node:stream/promises';import {createWriteStream} from 'node:fs';import {make} from '@fixture/web-bytes';const source=make();pipeline(Readable.fromWeb(source),createWriteStream('result.txt')).then(()=>console.log('BRIDGE_ESM_COMPLETE',source.locked));\n",
+        "node_modules/@fixture/web-bytes/package.json": "{\"name\": \"@fixture/web-bytes\", \"version\": \"1.0.0\", \"type\": \"module\", \"exports\": \"./index.mjs\"}\n",
+        "node_modules/@fixture/web-bytes/index.mjs": "import {ReadableStream} from 'stream/web';export function make(){let count=0;return new ReadableStream({pull(c){if(count++===0)c.enqueue(new Uint8Array([99,111,110,101,10,88]).subarray(1,5));else if(count===2)c.enqueue(new Uint8Array([116,119,111,10]));else c.close();}});}\n"
+      },
+      "expected": {
+        "stdout": "BRIDGE_ESM_COMPLETE true\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "result.txt": "one\ntwo\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "bridge-package-sink-error-cleanup",
+      "category": "stream-integration",
+      "description": "A Web writer waits for an accepted Node write, then observes the original sink error and destruction without publishing a successful finalization file.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "require('fixture-bridge-error')().then(same=>console.log('BRIDGE_FAILURE_COMPLETE',same));\n",
+        "node_modules/fixture-bridge-error/package.json": "{\"name\": \"fixture-bridge-error\", \"version\": \"1.0.0\", \"main\": \"index.cjs\"}\n",
+        "node_modules/fixture-bridge-error/index.cjs": "const s=require('stream'),fs=require('fs');module.exports=async function(){const error=Error('sink refused');let writes=0;const target=new s.Writable({write(bytes,encoding,done){if(++writes===1){fs.appendFileSync('accepted.txt',bytes);done();}else done(error);},destroy(reason,done){fs.writeFileSync('cleanup.txt','destroyed\\n');done(reason);},final(done){fs.writeFileSync('unexpected.txt','incorrect completion');done();}});const writer=s.Writable.toWeb(target).getWriter();await writer.write('accepted\\n');try{await writer.write('rejected\\n');return false;}catch(reason){return reason===error;}};\n"
+      },
+      "expected": {
+        "stdout": "BRIDGE_FAILURE_COMPLETE true\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "accepted.txt": "accepted\n",
+          "cleanup.txt": "destroyed\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "bridge-package-abort-stalled-source",
+      "category": "stream-integration",
+      "description": "An application aborts a stalled Web source through its Node adapter; close must follow one completed cancel algorithm and publish no late data.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "require('./session.cjs')().then(result=>console.log('BRIDGE_CANCEL_COMPLETE',...result));\n",
+        "session.cjs": "const {Readable}=require('stream');const {ReadableStream}=require('stream/web');const fs=require('fs');module.exports=function(){return new Promise((resolve,reject)=>{const control=new AbortController();let code,cancels=0;const source=new ReadableStream({pull(){return new Promise(()=>{});},async cancel(reason){await Promise.resolve();cancels++;fs.writeFileSync('cancelled.txt',reason.code+'\\n');}},{highWaterMark:0});const input=Readable.fromWeb(source,{signal:control.signal});input.on('data',()=>fs.writeFileSync('unexpected.txt','late data'));input.on('error',error=>{code=error.code;});input.on('close',()=>resolve([code,cancels,input.destroyed,source.locked]));input.resume();setImmediate(()=>control.abort('application-stop'));});};\n"
+      },
+      "expected": {
+        "stdout": "BRIDGE_CANCEL_COMPLETE ABORT_ERR 1 true true\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "cancelled.txt": "ABORT_ERR\n",
+          "unexpected.txt": null
+        }
+      }
+    }
+  ]
+}
