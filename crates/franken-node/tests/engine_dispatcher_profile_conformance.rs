@@ -184,7 +184,7 @@ fn process_shape_override_changes_only_the_narrow_ambient_grant() {
 
 #[test]
 #[cfg(feature = "engine")]
-fn legacy_replay_refusal_precedes_source_and_worker_resolution() {
+fn legacy_replay_admission_reaches_ordinary_target_resolution() {
     use frankenengine_node::config::PreferredRuntime;
 
     for allowed in [None, Some(false), Some(true)] {
@@ -202,22 +202,16 @@ fn legacy_replay_refusal_precedes_source_and_worker_resolution() {
                 &[],
                 2_000,
             )
-            .expect_err("unsupported replay authority must refuse before loading any source")
+            .expect_err("target resolution should follow successful replay admission")
             .to_string();
-        assert!(
-            error.contains("native replay capture"),
-            "{profile}: {error}"
-        );
-        assert!(
-            error.contains("environment values are not replay inputs"),
-            "{error}"
-        );
+        assert!(error.contains("resolve run target"), "{profile}: {error}");
+        assert!(!error.contains("native replay capture"), "{error}");
         assert_eq!(
             std::fs::read_dir(directory.path())
-                .expect("inspect rejected run fixture")
+                .expect("inspect unresolved run fixture")
                 .count(),
             0,
-            "replay refusal must not provision run state, output or worker files"
+            "target-resolution failure must not provision run state, output or worker files"
         );
     }
 }
