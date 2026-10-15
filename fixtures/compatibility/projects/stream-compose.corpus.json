@@ -1,0 +1,110 @@
+{
+  "schema_version": "franken-node/project-compat-corpus/v1",
+  "description": "Complete reusable Node/Web composition workflows. Runtime implementation is in franken_engine. Run scripts/project_compat_runner.py --corpus fixtures/compatibility/projects/stream-compose.corpus.json with actual --bin, --node and --bun executables; host/reference checks alone are not native compatibility proof.",
+  "cases": [
+    {
+      "id": "compose-package-reusable-transform",
+      "category": "stream-integration",
+      "description": "A CommonJS package exports a reusable chain of Web transforms with object-valued interior stages and a final flush, consumed by a Node file pipeline.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const s=require('node:stream'),fs=require('node:fs');const chain=require('fixture-compose')();s.promises.pipeline(s.Readable.from(['alpha\\n','beta\\n']),chain,fs.createWriteStream('output.txt')).then(()=>console.log('COMPOSE_PACKAGE_COMPLETE',chain.readableObjectMode,chain.writableObjectMode));\n",
+        "node_modules/fixture-compose/package.json": "{\"name\":\"fixture-compose\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-compose/index.cjs": "const {compose}=require('stream');const {TransformStream:T}=require('stream/web');module.exports=function(){return compose(new T({async transform(value,c){await 0;c.enqueue({text:String(value).toUpperCase()});}}),new T({transform(value,c){c.enqueue(value.text);},flush(c){c.enqueue('DONE\\n');}}));};\n"
+      },
+      "expected": {
+        "stdout": "COMPOSE_PACKAGE_COMPLETE false false\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "output.txt": "ALPHA\nBETA\nDONE\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "compose-esm-unicode-file-chain",
+      "category": "filesystem-integration",
+      "description": "A conditional ESM package composes incremental Web text codecs and a text transform; one-byte Node file reads preserve Unicode through the reusable chain.",
+      "entry": "main.mjs",
+      "files": {
+        "main.mjs": "import make from '@fixture/text';import fs from 'node:fs';import {pipeline} from 'node:stream/promises';await pipeline(fs.createReadStream('input.txt',{highWaterMark:1}),make(),fs.createWriteStream('output.txt'));fs.writeFileSync('receipt.txt','complete\\n');console.log('ESM_COMPOSE_FILE_COMPLETE');\n",
+        "node_modules/@fixture/text/package.json": "{\"name\":\"@fixture/text\",\"version\":\"1.0.0\",\"type\":\"module\",\"exports\":{\".\":{\"import\":\"./index.mjs\",\"require\":\"./index.cjs\"}}}\n",
+        "node_modules/@fixture/text/index.mjs": "import {compose} from 'node:stream';import {TextDecoderStream,TransformStream,TextEncoderStream} from 'node:stream/web';export default function(){return compose(new TextDecoderStream(),new TransformStream({transform(value,c){c.enqueue(value.toUpperCase());}}),new TextEncoderStream());}\n",
+        "node_modules/@fixture/text/index.cjs": "throw Error('wrong package condition');\n",
+        "input.txt": "héllo 😀\n"
+      },
+      "expected": {
+        "stdout": "ESM_COMPOSE_FILE_COMPLETE\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "output.txt": "HÉLLO 😀\n",
+          "receipt.txt": "complete\n",
+          "input.txt": "héllo 😀\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "compose-readable-operator-package",
+      "category": "stream-integration",
+      "description": "Readable.from values use the instance composition operator with a Web transform returned across a CommonJS module boundary, then flow to a file sink.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const {Readable,promises}=require('node:stream');const fs=require('fs'),make=require('./uppercase.cjs');promises.pipeline(Readable.from(['blue\\n','green\\n']).compose(make()),fs.createWriteStream('output.txt')).then(()=>console.log('OPERATOR_COPY_COMPLETE'));\n",
+        "uppercase.cjs": "const {TransformStream}=require('node:stream/web');module.exports=()=>new TransformStream({async transform(value,c){await 0;c.enqueue(String(value).toUpperCase());}});\n"
+      },
+      "expected": {
+        "stdout": "OPERATOR_COPY_COMPLETE\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "output.txt": "BLUE\nGREEN\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "compose-package-async-sink-close",
+      "category": "filesystem-integration",
+      "description": "A writable-only composite preserves the Node head object mode and awaits a Web sink close that writes a separately checked completion file.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const s=require('node:stream');const sink=require('./sink.cjs')();sink.write({name:'one'});sink.end({name:'two'});s.promises.finished(sink).then(()=>console.log('SINK_COMPOSE_COMPLETE',sink.writableFinished));\n",
+        "sink.cjs": "const s=require('node:stream'),w=require('node:stream/web'),fs=require('fs');module.exports=function(){fs.writeFileSync('records.jsonl','');return s.compose(new s.Transform({objectMode:true,transform(value,encoding,done){done(null,value);}}),new w.TransformStream({transform(value,c){c.enqueue(JSON.stringify(value)+'\\n');}}),new w.WritableStream({write(value){fs.appendFileSync('records.jsonl',value);},async close(){await 0;fs.writeFileSync('closed.txt','sink closed\\n');}}));};\n"
+      },
+      "expected": {
+        "stdout": "SINK_COMPOSE_COMPLETE true\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "records.jsonl": "{\"name\":\"one\"}\n{\"name\":\"two\"}\n",
+          "closed.txt": "sink closed\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "compose-package-failure-after-accepted-output",
+      "category": "filesystem-integration",
+      "description": "A reusable package transform fails after an independently acknowledged file write; pipeline rejection preserves the accepted bytes and does not run sink finalization.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const s=require('node:stream'),fs=require('fs');let acknowledge;const accepted=new Promise(resolve=>{acknowledge=resolve;});async function* source(){yield 'first';await accepted;yield 'bad';}fs.writeFileSync('output.txt','');const sink=new s.Writable({write(value,encoding,done){fs.appendFileSync('output.txt',value);acknowledge();done();},final(done){fs.writeFileSync('final.txt','unexpected\\n');done();}});s.promises.pipeline(s.Readable.from(source()),require('./convert.cjs')(),sink).then(()=>console.log('UNEXPECTED_SUCCESS'),error=>{fs.writeFileSync('failed.txt',error.message+'\\n');console.log('COMPOSE_FAILED',error.message);});\n",
+        "convert.cjs": "const s=require('node:stream'),w=require('stream/web');module.exports=function(){return s.compose(new s.Transform({objectMode:true,transform(value,encoding,done){done(null,value);}}),new w.TransformStream({transform(value,c){if(value==='bad')throw Error('bad-record');c.enqueue(value+'\\n');}}));};\n"
+      },
+      "expected": {
+        "stdout": "COMPOSE_FAILED bad-record\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "output.txt": "first\n",
+          "failed.txt": "bad-record\n",
+          "final.txt": null,
+          "unexpected.txt": null
+        }
+      }
+    }
+  ]
+}

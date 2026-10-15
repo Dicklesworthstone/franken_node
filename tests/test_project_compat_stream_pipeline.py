@@ -1,4 +1,4 @@
-"""Reference expectations for direct Web stages in the shared Node pipeline.
+"""Reference expectations for shared Node/Web pipelines and reusable composition.
 
 These trusted local fixture programs are not sandboxed. Native compatibility
 requires the existing project_compat_runner.py and a real FRANKEN_NODE_BIN.
@@ -17,11 +17,14 @@ CORPUS = ROOT / 'fixtures/compatibility/projects/stream-pipeline.corpus.json'
 
 
 class PipelineProjectTests(unittest.TestCase):
-    def test_seven_complete_projects_with_independent_file_expectations(self):
-        corpus = json.loads(CORPUS.read_text(encoding='utf-8'))
+    corpus_path = CORPUS
+    case_count = 7
+
+    def test_complete_projects_with_independent_file_expectations(self):
+        corpus = json.loads(self.corpus_path.read_text(encoding='utf-8'))
         self.assertEqual(corpus['schema_version'], 'franken-node/project-compat-corpus/v1')
-        self.assertEqual(len(corpus['cases']), 7)
-        self.assertEqual(len({case['id'] for case in corpus['cases']}), 7)
+        self.assertEqual(len(corpus['cases']), self.case_count)
+        self.assertEqual(len({case['id'] for case in corpus['cases']}), self.case_count)
         self.assertTrue(all(len(case['files']) > 1 and case['expected']['files'] for case in corpus['cases']))
 
     @unittest.skipUnless(shutil.which('node'), 'requires a real Node reference')
@@ -29,7 +32,7 @@ class PipelineProjectTests(unittest.TestCase):
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith('FRANKEN_NODE_') and key not in
                        {'NODE_OPTIONS', 'NODE_PATH', 'BUN_OPTIONS', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES'}}
-        corpus = json.loads(CORPUS.read_text(encoding='utf-8'))
+        corpus = json.loads(self.corpus_path.read_text(encoding='utf-8'))
         for case in corpus['cases']:
             with self.subTest(case=case['id']), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -56,12 +59,19 @@ class PipelineProjectTests(unittest.TestCase):
         binary = os.environ['FRANKEN_NODE_BIN']
         with tempfile.TemporaryDirectory() as directory:
             command = [shutil.which('python3'), str(ROOT / 'scripts/project_compat_runner.py'),
-                       '--corpus', str(CORPUS), '--bin', binary, '--node', shutil.which('node'),
+                       '--corpus', str(self.corpus_path), '--bin', binary, '--node', shutil.which('node'),
                        '--artifacts-dir', str(Path(directory) / 'results')]
             if shutil.which('bun'):
                 command.extend(['--bun', shutil.which('bun')])
             result = subprocess.run(command, cwd=ROOT, capture_output=True, timeout=180, check=False)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+class CompositionProjectTests(PipelineProjectTests):
+    # Apply the same exact-output and opt-in native checks to the new cohort.
+    # The original pipeline corpus and its seven-case requirement are unchanged.
+    corpus_path = ROOT / 'fixtures/compatibility/projects/stream-compose.corpus.json'
+    case_count = 5
 
 
 if __name__ == '__main__':
