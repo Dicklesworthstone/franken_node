@@ -1,0 +1,91 @@
+{
+  "schema_version": "franken-node/project-compat-corpus/v1",
+  "description": "Executable package workflows using canonical engine text codecs and Web Streams. Run with scripts/project_compat_runner.py --corpus fixtures/compatibility/projects/text_streams.corpus.json. Hand-authored projects, not third-party npm certification.",
+  "cases": [
+    {
+      "id": "text-stream-package-utf8-fanout",
+      "category": "stream-integration",
+      "description": "A CommonJS package encodes split UTF-16 chunks once, fans out shared bytes to a file and a decoder, and awaits both sink closes before completion.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "require('fixture-text-export')().then(() => console.log('TEXT_EXPORT_COMPLETE'));\n",
+        "node_modules/fixture-text-export/package.json": "{\"name\":\"fixture-text-export\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-text-export/index.cjs": "const web=require('node:stream/web');const fs=require('node:fs');module.exports=async function(){const source=web.ReadableStream.from(['A','\\ud83d','','\\ude00','é','\\ud800','\\n']);const [raw,text]=source.pipeThrough(new web.TextEncoderStream()).tee();function sink(path){return new web.WritableStream({start(){fs.writeFileSync(path,'');},async write(chunk){await Promise.resolve();fs.appendFileSync(path,chunk);},async close(){await Promise.resolve();fs.writeFileSync(path+'.complete','closed\\n');}});}await Promise.all([raw.pipeTo(sink('raw.txt')),text.pipeThrough(new web.TextDecoderStream()).pipeTo(sink('decoded.txt'))]);};\n"
+      },
+      "expected": {
+        "stdout": "TEXT_EXPORT_COMPLETE\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "raw.txt": "A😀é�\n",
+          "decoded.txt": "A😀é�\n",
+          "raw.txt.complete": "closed\n",
+          "decoded.txt.complete": "closed\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "text-stream-esm-split-json",
+      "category": "stream-integration",
+      "description": "An ESM package reexports the decoder constructor. A consumer decodes one-byte offset views, including a split BOM and multibyte JSON text, before publishing parsed application output.",
+      "entry": "main.mjs",
+      "files": {
+        "main.mjs": "import {ReadableStream,WritableStream} from 'node:stream/web';import {Decoder} from '@fixture/text-codec';import {readFileSync,writeFileSync} from 'node:fs';const input=readFileSync('input.json');function* bytes(){for(let i=0;i<input.length;i++)yield new DataView(input.buffer,input.byteOffset+i,1);}const decoder=new Decoder('UTF8',{fatal:true});const parts=[];ReadableStream.from(bytes()).pipeThrough(decoder).pipeTo(new WritableStream({write(text){parts.push(text);}})).then(()=>{const value=JSON.parse(parts.join(''));writeFileSync('result.json',JSON.stringify(value)+'\\n');console.log('TEXT_JSON_COMPLETE',value.answer,value.label,decoder.encoding,decoder.fatal,decoder.ignoreBOM);});\n",
+        "node_modules/@fixture/text-codec/package.json": "{\"name\":\"@fixture/text-codec\",\"version\":\"1.0.0\",\"type\":\"module\",\"exports\":\"./index.mjs\"}\n",
+        "node_modules/@fixture/text-codec/index.mjs": "export {TextDecoderStream as Decoder} from 'stream/web';\n",
+        "input.json": "﻿{\"answer\":42,\"label\":\"é😀日\"}\n"
+      },
+      "expected": {
+        "stdout": "TEXT_JSON_COMPLETE 42 é😀日 utf-8 true false\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "result.json": "{\"answer\":42,\"label\":\"é😀日\"}\n",
+          "input.json": "﻿{\"answer\":42,\"label\":\"é😀日\"}\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "text-stream-package-fatal-eof",
+      "category": "stream-integration",
+      "description": "A fatal decoder reaches an incomplete UTF-8 character at EOF; the application keeps the prior visible chunk but must abort rather than publish a completion artifact.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "require('./decode.cjs')().then(result=>console.log('TEXT_FATAL_COMPLETE',result));\n",
+        "decode.cjs": "const web=require('stream/web');const fs=require('fs');module.exports=async function(){const decoder=new web.TextDecoderStream('utf8',{fatal:true});let aborted;const source=web.ReadableStream.from([new Uint8Array([79,75,10]),new Uint8Array([226,130])]);try{await source.pipeThrough(decoder).pipeTo(new web.WritableStream({write(value){fs.appendFileSync('partial.txt',value);},abort(reason){aborted=reason;fs.writeFileSync('aborted.txt','fatal EOF\\n');},close(){fs.writeFileSync('complete.txt','incorrect success');}}));throw Error('fatal error was lost');}catch(error){if(!(error instanceof TypeError)||error!==aborted)throw error;return error===aborted;}};\n"
+      },
+      "expected": {
+        "stdout": "TEXT_FATAL_COMPLETE true\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "partial.txt": "OK\n",
+          "aborted.txt": "fatal EOF\n",
+          "complete.txt": null,
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "text-stream-package-backpressure-cancel",
+      "category": "stream-integration",
+      "description": "A package holds a write behind readable-side backpressure. Cancellation rejects that accepted write with exact identity without invoking user string conversion or creating its output file.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "require('fixture-text-session')().then(values=>console.log('TEXT_CANCEL_COMPLETE',...values));\n",
+        "node_modules/fixture-text-session/package.json": "{\"name\":\"fixture-text-session\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-text-session/index.cjs": "const {TextEncoderStream}=require('node:stream/web');const fs=require('node:fs');module.exports=async function(){let conversions=0;const encoder=new TextEncoderStream();const writer=encoder.writable.getWriter();const reason={stop:true};const pending=writer.write({toString(){conversions++;fs.writeFileSync('unexpected.txt','conversion should not run');return 'no';}}).then(()=>false,error=>error===reason);await Promise.resolve();await Promise.resolve();const before=conversions;await encoder.readable.cancel(reason);const refused=await pending;writer.releaseLock();return [before,conversions,refused,encoder.writable.locked];};\n"
+      },
+      "expected": {
+        "stdout": "TEXT_CANCEL_COMPLETE 0 0 true false\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "unexpected.txt": null
+        }
+      }
+    }
+  ]
+}
