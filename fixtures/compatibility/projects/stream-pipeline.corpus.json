@@ -1,0 +1,108 @@
+{
+  "schema_version": "franken-node/project-compat-corpus/v1",
+  "description": "Raw Web stages in the shared engine Node pipeline. Reference-only runs do not establish native compatibility. Use scripts/project_compat_runner.py --corpus fixtures/compatibility/projects/stream-pipeline.corpus.json with actual --bin, --node and --bun executables. Null chunks at the Node adapter boundary and pending-read cancellation divergences have separate engine tests, not parity claims.",
+  "cases": [
+    {
+      "id": "pipeline-web-package-to-node-file",
+      "category": "stream-integration",
+      "description": "A captured package supplies a Web transform directly to the Node pipeline; the final Node file stream is checked after completion.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const {pipeline}=require('node:stream/promises');const {ReadableStream}=require('node:stream/web');const fs=require('node:fs');const transform=require('fixture-projector')();const out=fs.createWriteStream('records.jsonl');pipeline(ReadableStream.from([1,2,3]),transform,out).then(()=>console.log('PACKAGE_PIPELINE',out.writableFinished));\n",
+        "node_modules/fixture-projector/package.json": "{\"name\":\"fixture-projector\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-projector/index.cjs": "const {TransformStream}=require('node:stream/web');module.exports=function(){return new TransformStream({transform(value,c){c.enqueue(JSON.stringify({value:value*2})+'\\n');}});};\n"
+      },
+      "expected": {
+        "stdout": "PACKAGE_PIPELINE true\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "records.jsonl": "{\"value\":2}\n{\"value\":4}\n{\"value\":6}\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "pipeline-esm-conditional-web-sink",
+      "category": "stream-integration",
+      "description": "A conditional ESM package supplies a raw Web writable; pipeline resolves only after its asynchronous close writes a completion receipt.",
+      "entry": "main.mjs",
+      "files": {
+        "main.mjs": "import {pipeline} from 'node:stream/promises';import {Readable} from 'node:stream';import {TransformStream} from 'node:stream/web';import {sink} from '@fixture/sink';pipeline(Readable.from([20,21]),new TransformStream({transform(value,c){c.enqueue(String(value*2)+'\\n');}}),sink).then(()=>console.log('ESM_PIPELINE',sink.locked));\n",
+        "node_modules/@fixture/sink/package.json": "{\"name\":\"@fixture/sink\",\"version\":\"1.0.0\",\"type\":\"module\",\"exports\":{\".\":{\"import\":\"./index.mjs\",\"require\":\"./wrong.cjs\"}}}\n",
+        "node_modules/@fixture/sink/index.mjs": "import {WritableStream} from 'node:stream/web';import fs from 'node:fs';export const sink=new WritableStream({write(value){fs.appendFileSync('values.txt',value);},async close(){await Promise.resolve();fs.writeFileSync('closed.txt','complete\\n');}});\n",
+        "node_modules/@fixture/sink/wrong.cjs": "throw new Error('wrong package condition');\n"
+      },
+      "expected": {
+        "stdout": "ESM_PIPELINE true\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "values.txt": "40\n42\n",
+          "closed.txt": "complete\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "pipeline-callback-web-file-output",
+      "category": "stream-integration",
+      "description": "A CommonJS helper supplies a raw Web source and sink; callback completion preserves destination identity and observes close-file effects.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const {pipeline}=require('node:stream');const {source,sink}=require('./endpoints.cjs');const returned=pipeline([source,sink],error=>{if(error)throw error;console.log('CALLBACK_PIPELINE',returned===sink);});\n",
+        "endpoints.cjs": "const {ReadableStream,WritableStream}=require('node:stream/web');const fs=require('node:fs');exports.source=ReadableStream.from(['alpha\\n','beta\\n']);exports.sink=new WritableStream({write(value){fs.appendFileSync('output.txt',value);},async close(){await Promise.resolve();fs.writeFileSync('closed.txt','closed\\n');}});\n"
+      },
+      "expected": {
+        "stdout": "CALLBACK_PIPELINE true\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "output.txt": "alpha\nbeta\n",
+          "closed.txt": "closed\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "pipeline-web-source-function-sink",
+      "category": "stream-integration",
+      "description": "A package Web source enters an async-generator transform and promise-returning function sink without losing the computed return value.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const s=require('node:stream');const fs=require('node:fs');s.promises.pipeline(require('./source.cjs'),async function*(input){for await(const value of input)yield value*2;},async function(input){let sum=0;for await(const value of input)sum+=value;fs.writeFileSync('sum.txt',String(sum)+'\\n');return sum;}).then(value=>console.log('PIPELINE_SUM',value));\n",
+        "source.cjs": "const {ReadableStream}=require('node:stream/web');module.exports=ReadableStream.from([1,2,3]);\n"
+      },
+      "expected": {
+        "stdout": "PIPELINE_SUM 12\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "sum.txt": "12\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "pipeline-web-failure-retains-accepted-output",
+      "category": "stream-integration",
+      "description": "A raw Web sink failure preserves accepted bytes, cancels its endless source, and never reports normal sink closure. Cancellation reason identity is intentionally not compared across runtimes.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const {pipeline}=require('node:stream/promises');const fs=require('node:fs');const {source,sink,error}=require('./endpoints.cjs');pipeline(source,sink).then(()=>{throw Error('unexpected success');},e=>{if(e!==error)throw e;console.log('PIPELINE_FAILED',fs.existsSync('cancelled.txt'));});\n",
+        "endpoints.cjs": "const {ReadableStream,WritableStream}=require('node:stream/web');const fs=require('node:fs');const error=Error('stop');let value=0;exports.error=error;exports.source=new ReadableStream({pull(c){c.enqueue(++value);},cancel(){fs.writeFileSync('cancelled.txt','cancelled\\n');}},{highWaterMark:0});exports.sink=new WritableStream({write(value){if(value===2)throw error;fs.appendFileSync('accepted.txt',String(value)+'\\n');},close(){fs.writeFileSync('closed.txt','unexpected\\n');}});\n"
+      },
+      "expected": {
+        "stdout": "PIPELINE_FAILED true\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "accepted.txt": "1\n",
+          "cancelled.txt": "cancelled\n",
+          "closed.txt": null,
+          "unexpected.txt": null
+        }
+      }
+    }
+  ]
+}
