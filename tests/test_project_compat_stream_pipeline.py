@@ -74,5 +74,11 @@ class CompositionProjectTests(PipelineProjectTests):
     case_count = 5
 
 
+class CallbackFilesystemProjectTests(PipelineProjectTests):
+    # Callback-based file workflows use the same exact-output and native gate.
+    corpus_path = ROOT / 'fixtures/compatibility/projects/fs_callbacks.corpus.json'
+    case_count = 5
+
+
 if __name__ == '__main__':
     unittest.main()

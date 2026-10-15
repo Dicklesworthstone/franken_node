@@ -1,0 +1,119 @@
+{
+  "schema_version": "franken-node/project-compat-corpus/v1",
+  "cases": [
+    {
+      "id": "fs-callback-package-descriptor-transfer",
+      "category": "filesystem-integration",
+      "description": "A callback-style package copies bounded byte chunks with partial-write retry, fsync and descriptor closure before the application publishes the result.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const fs=require('fs');require('fixture-copy-callback')('input.txt','copy.txt',function(error){if(error)throw error;fs.stat('copy.txt',function(error,s){if(error)throw error;fs.rename('copy.txt','result.txt',function(error){if(error)throw error;console.log('FD_PACKAGE_COMPLETE',s.size);});});});\n",
+        "node_modules/fixture-copy-callback/package.json": "{\"name\":\"fixture-copy-callback\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-copy-callback/index.cjs": "const fs=require('node:fs');\nmodule.exports=function(source,destination,done){\n  let input,output,finished=false;\n  function finish(error){\n    if(finished)return;finished=true;\n    function closeInput(previous){if(input===undefined)return done(previous);fs.close(input,function(closeError){done(previous||closeError);});}\n    if(output===undefined)return closeInput(error);\n    fs.close(output,function(closeError){closeInput(error||closeError);});\n  }\n  fs.open(source,'r',function(error,fd){\n    if(error)return finish(error);input=fd;\n    fs.open(destination,'w',function(error,fd){\n      if(error)return finish(error);output=fd;const buffer=Buffer.alloc(3);\n      function next(){fs.read(input,buffer,0,buffer.length,null,function(error,n,original){\n        if(error)return finish(error);if(original!==buffer)return finish(Error('read identity'));\n        if(n===0)return fs.fsync(output,function(error){finish(error);});\n        let offset=0;\n        function write(){fs.write(output,buffer,offset,n-offset,null,function(error,count,original){\n          if(error)return finish(error);if(original!==buffer||count===0)return finish(Error('write progress'));\n          offset+=count;if(offset<n)write();else next();\n        });}write();\n      });}next();\n    });\n  });\n};\n",
+        "input.txt": "héllo\nworld\n"
+      },
+      "expected": {
+        "stdout": "FD_PACKAGE_COMPLETE 13\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "result.txt": "héllo\nworld\n",
+          "copy.txt": null,
+          "input.txt": "héllo\nworld\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "fs-callback-esm-package-inventory",
+      "category": "filesystem-integration",
+      "description": "A scoped ESM package uses callback readdir and stat imports to inventory real files, then the application checks sorted metadata and publishes JSON.",
+      "entry": "main.mjs",
+      "files": {
+        "main.mjs": "import {inspect} from '@fixture/callback-inventory';import {writeFileSync} from 'node:fs';inspect('tree',function(error,rows){if(error)throw error;writeFileSync('inventory.json',JSON.stringify(rows)+'\\n');console.log('INVENTORY_COMPLETE',rows.length,rows.map(x=>x.name+':'+x.size).join(','));});\n",
+        "node_modules/@fixture/callback-inventory/package.json": "{\"name\":\"@fixture/callback-inventory\",\"version\":\"1.0.0\",\"type\":\"module\",\"exports\":\"./index.mjs\"}\n",
+        "node_modules/@fixture/callback-inventory/index.mjs": "import {readdir,stat} from 'node:fs';\nexport function inspect(path,done){\n  readdir(path,{withFileTypes:true},function(error,entries){\n    if(error)return done(error);\n    const names=entries.filter(x=>x.isFile()).map(x=>x.name).sort(),rows=[];\n    let index=0;\n    function next(){\n      if(index===names.length)return done(null,rows);\n      const name=names[index++];\n      stat(path+'/'+name,function(error,s){if(error)return done(error);rows.push({name,size:s.size,file:s.isFile()});next();});\n    }next();\n  });\n}\n",
+        "tree/a.txt": "abc",
+        "tree/b.txt": "é\n",
+        "tree/sub/ignored.txt": "not a direct child\n"
+      },
+      "expected": {
+        "stdout": "INVENTORY_COMPLETE 2 a.txt:3,b.txt:3\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "inventory.json": "[{\"name\":\"a.txt\",\"size\":3,\"file\":true},{\"name\":\"b.txt\",\"size\":3,\"file\":true}]\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "fs-callback-package-promisified-vectors",
+      "category": "filesystem-integration",
+      "description": "A callback-style package promisifies raw descriptor vector I/O without losing byte counts, plural/singular result fields or the original arrays.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "require('fixture-vector-io')().then(result=>{require('fs').writeFileSync('report.json',JSON.stringify(result)+'\\n');console.log('VECTOR_PACKAGE_COMPLETE',result.written,result.read,result.writeIdentity,result.readIdentity);});\n",
+        "node_modules/fixture-vector-io/package.json": "{\"name\":\"fixture-vector-io\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-vector-io/index.cjs": "const fs=require('node:fs');const {promisify}=require('node:util');\nmodule.exports=async function(){\n  const fd=await promisify(fs.open)('vector.txt','w+');\n  try{\n    const input=[Buffer.from('ABC'),Buffer.from('\\n')];\n    const output=[Buffer.alloc(2),Buffer.alloc(4,95)];\n    const written=await promisify(fs.writev)(fd,input,0);\n    const read=await promisify(fs.readv)(fd,output,0);\n    return {written:written.bytesWritten,read:read.bytesRead,writeIdentity:written.buffer===input,\n      readIdentity:read.buffers===output,text:Buffer.concat(output).toString()};\n  }finally{await promisify(fs.close)(fd);}\n};\n"
+      },
+      "expected": {
+        "stdout": "VECTOR_PACKAGE_COMPLETE 4 4 true true\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "vector.txt": "ABC\n",
+          "report.json": "{\"written\":4,\"read\":4,\"writeIdentity\":true,\"readIdentity\":true,\"text\":\"ABC\\n__\"}\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "fs-callback-async-filtered-build",
+      "category": "filesystem-integration",
+      "description": "A build package awaits Promise-valued callback-copy filters, prunes a private directory and publishes selected assets only after rename and access complete.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "require('./build.cjs')(function(error,size){if(error)throw error;console.log('CALLBACK_BUILD_COMPLETE',size);});\n",
+        "build.cjs": "const fs=require('node:fs');\nmodule.exports=function(done){\n  fs.cp('src','stage',{recursive:true,async filter(source){\n    await Promise.resolve();return !source.endsWith('private');\n  }},function(error){\n    if(error)return done(error);\n    fs.copyFile('stage/entry.txt','published.txt',function(error){\n      if(error)return done(error);\n      fs.rename('stage','dist',function(error){\n        if(error)return done(error);\n        fs.access('published.txt',fs.constants.R_OK,function(error){\n          if(error)return done(error);fs.stat('published.txt',function(error,s){done(error,s&&s.size);});\n        });\n      });\n    });\n  });\n};\n",
+        "src/entry.txt": "asset\n",
+        "src/sub/info.txt": "nested\n",
+        "src/private/key.txt": "not published\n"
+      },
+      "expected": {
+        "stdout": "CALLBACK_BUILD_COMPLETE 6\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "published.txt": "asset\n",
+          "dist/entry.txt": "asset\n",
+          "dist/sub/info.txt": "nested\n",
+          "dist/private/key.txt": null,
+          "stage/entry.txt": null,
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "fs-callback-closed-descriptor-failure",
+      "category": "filesystem-integration",
+      "description": "A package closes its descriptor before a later read and must report EBADF with zero progress and original buffer, never successful partial publication.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "require('./closed-read.cjs')(function(error,n,same){if(!error)throw Error('missing error');require('fs').writeFileSync('failure.json',JSON.stringify({code:error.code,n,same})+'\\n');console.log('READ_FAILURE_COMPLETE',error.code,n,same);});\n",
+        "closed-read.cjs": "const fs=require('fs');\nmodule.exports=function(done){\n  fs.open('input.txt','r',function(error,fd){\n    if(error)return done(error,0,false);\n    fs.close(fd,function(error){\n      if(error)return done(error,0,false);\n      const buffer=Buffer.alloc(4);\n      fs.read(fd,buffer,0,4,0,function(error,n,original){\n        if(!error)fs.writeFileSync('unexpected.txt',buffer);\n        done(error,n,original===buffer);\n      });\n    });\n  });\n};\n",
+        "input.txt": "unchanged\n"
+      },
+      "expected": {
+        "stdout": "READ_FAILURE_COMPLETE EBADF 0 true\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "failure.json": "{\"code\":\"EBADF\",\"n\":0,\"same\":true}\n",
+          "input.txt": "unchanged\n",
+          "unexpected.txt": null
+        }
+      }
+    }
+  ]
+}
