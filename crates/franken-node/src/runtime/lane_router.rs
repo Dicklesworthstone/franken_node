@@ -1248,6 +1248,7 @@ mod tests {
             lanes,
             drain_timeout_ms: None,
             allow_process_shape: None,
+            environment_allowlist: Default::default(),
             max_instructions: None,
             max_registers: None,
             max_call_depth: None,
