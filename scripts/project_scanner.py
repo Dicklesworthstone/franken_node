@@ -13,7 +13,9 @@ Usage:
 import json
 import os
 import re
+import stat
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -60,6 +62,137 @@ NATIVE_ADDON_PACKAGES = {
 
 JS_EXTENSIONS = {".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".jsx", ".tsx"}
 
+# Inspect application sources, not installed npm/Bun trees or the scanner's
+# own prior artifacts. Match complete directory entries, never substrings of
+# a caller's root or a legitimate source filename.
+SOURCE_EXCLUSIONS = frozenset({"node_modules", ".git", ".beads", ".franken-node",
+                               ".migrate-backup", ".franken-rewrite"})
+MAX_SOURCE_BYTES = 4 * 1024 * 1024
+MAX_TOTAL_SOURCE_BYTES = 128 * 1024 * 1024
+MAX_SOURCE_FILES = 20_000
+MAX_SOURCE_ENTRIES = 100_000
+MAX_SOURCE_DIRECTORIES = 20_000
+MAX_SOURCE_DEPTH = 64
+MAX_SOURCE_PATH_BYTES = 8 * 1024 * 1024
+MAX_SOURCE_SECONDS = 30.0
+
+
+class _SourceBudget:
+    def __init__(self):
+        self.deadline = time.monotonic() + MAX_SOURCE_SECONDS
+        self.bytes = self.files = self.entries = self.directories = self.path_bytes = 0
+
+    def check(self):
+        if time.monotonic() >= self.deadline:
+            raise InventoryError("source inventory deadline exceeded")
+
+
+def _source_identity(metadata):
+    return (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_size,
+            metadata.st_mtime_ns, metadata.st_ctime_ns)
+
+
+def _read_source(filepath, budget, *, directory=None, expected=None):
+    """Read one bounded regular file; a failed/racing read is not zero usage.
+
+    Project traversal supplies a held parent descriptor and the enumerated
+    identity. Standalone scan_file callers retain the same no-follow leaf
+    check. Neither path executes source code or follows an installed package.
+    """
+    budget.check()
+    budget.files += 1
+    if budget.files > MAX_SOURCE_FILES:
+        raise InventoryError("source inventory file limit exceeded")
+    target = filepath if directory is None else filepath.name
+    before = expected if expected is not None else filepath.lstat()
+    if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_SOURCE_BYTES:
+        raise InventoryError(f"{filepath}: expected a bounded regular source file")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(target, flags, dir_fd=directory)
+    try:
+        if _source_identity(before) != _source_identity(os.fstat(fd)):
+            raise InventoryError(f"{filepath}: source changed before capture")
+        chunks, length = [], 0
+        while True:
+            budget.check()
+            chunk = os.read(fd, min(64 * 1024, MAX_SOURCE_BYTES + 1 - length))
+            if not chunk:
+                break
+            length += len(chunk)
+            budget.bytes += len(chunk)
+            if length > MAX_SOURCE_BYTES or budget.bytes > MAX_TOTAL_SOURCE_BYTES:
+                raise InventoryError("source inventory byte limit exceeded")
+            chunks.append(chunk)
+        after = os.stat(target, dir_fd=directory, follow_symlinks=False)
+        if (length != before.st_size or _source_identity(before) != _source_identity(os.fstat(fd))
+                or _source_identity(before) != _source_identity(after)):
+            raise InventoryError(f"{filepath}: source changed during capture")
+        # Match Path.read_text's previous UTF-8 replacement/universal-newline
+        # behavior. API detection and risk classification are unchanged.
+        return b"".join(chunks).decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+    finally:
+        os.close(fd)
+
+
+def _scan_sources(project, registry):
+    """One deterministic, bounded walk; prune before descending.
+
+    Held directory descriptors prevent parent-symlink replacement from
+    redirecting source reads. This POSIX scanner refuses unsupported platforms
+    rather than claiming equivalent containment there. The deadline is checked
+    between operations, not a hard interrupt of an individual regex search.
+    """
+    if (os.open not in os.supports_dir_fd or os.stat not in os.supports_dir_fd
+            or os.scandir not in os.supports_fd or not hasattr(os, "O_NOFOLLOW")):
+        raise InventoryError("source inventory requires descriptor-relative, no-follow filesystem access")
+    budget = _SourceBudget()
+    results = []
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+    def visit(fd, relative, depth):
+        budget.check()
+        budget.directories += 1
+        if depth > MAX_SOURCE_DEPTH or budget.directories > MAX_SOURCE_DIRECTORIES:
+            raise InventoryError("source inventory directory/depth limit exceeded")
+        before = os.fstat(fd)
+        children = []
+        with os.scandir(fd) as entries:
+            for entry in entries:
+                budget.check()
+                budget.entries += 1
+                budget.path_bytes += len(os.fsencode(relative / entry.name))
+                if budget.entries > MAX_SOURCE_ENTRIES or budget.path_bytes > MAX_SOURCE_PATH_BYTES:
+                    raise InventoryError("source inventory entry/path limit exceeded")
+                if entry.name in SOURCE_EXCLUSIONS:
+                    continue
+                children.append((entry.name, entry.stat(follow_symlinks=False)))
+        for leaf, metadata in sorted(children):
+            budget.check()
+            path = relative / leaf
+            if stat.S_ISLNK(metadata.st_mode):
+                raise InventoryError(f"{project / path}: source inventory cannot follow symlinks")
+            if stat.S_ISDIR(metadata.st_mode):
+                child = os.open(leaf, flags, dir_fd=fd)
+                try:
+                    if _source_identity(metadata) != _source_identity(os.fstat(child)):
+                        raise InventoryError(f"{project / path}: directory changed before capture")
+                    visit(child, path, depth + 1)
+                finally:
+                    os.close(child)
+            elif path.suffix in JS_EXTENSIONS:
+                text = _read_source(project / path, budget, directory=fd, expected=metadata)
+                results.extend(_scan_text(project / path, text, registry))
+                budget.check()
+        if _source_identity(before) != _source_identity(os.fstat(fd)):
+            raise InventoryError(f"{project / relative}: directory changed during capture")
+
+    root = os.open(project, flags)
+    try:
+        visit(root, Path(), 0)
+    finally:
+        os.close(root)
+    return results
+
 
 def load_registry() -> dict:
     """Load compatibility registry for band/status lookups."""
@@ -94,12 +227,16 @@ def classify_risk(band: str | None, impl_status: str | None, is_unsafe: bool = F
 
 
 def scan_file(filepath: Path, registry: dict) -> list[dict]:
-    """Scan a single JS/TS file for API usage."""
+    """Scan a bounded regular JS/TS source; incomplete reads raise an error."""
+    filepath = Path(filepath)
+    budget = _SourceBudget()
+    result = _scan_text(filepath, _read_source(filepath, budget), registry)
+    budget.check()
+    return result
+
+
+def _scan_text(filepath: Path, text: str, registry: dict) -> list[dict]:
     results = []
-    try:
-        text = filepath.read_text(errors="replace")
-    except OSError:
-        return results
 
     for family, api_name, pattern in API_PATTERNS:
         if pattern.search(text):
@@ -147,17 +284,11 @@ def compute_readiness(risk_dist: dict) -> str:
 
 def scan_project(project_dir: Path) -> dict:
     """Full project scan producing a report."""
+    project_dir = Path(project_dir)
     registry = load_registry()
     timestamp = datetime.now(timezone.utc).isoformat()
 
-    # Scan source files
-    api_usage = []
-    if project_dir.is_dir():
-        for ext in JS_EXTENSIONS:
-            for f in project_dir.rglob(f"*{ext}"):
-                if "node_modules" in str(f):
-                    continue
-                api_usage.extend(scan_file(f, registry))
+    api_usage = _scan_sources(project_dir, registry)
 
     # Scan dependencies
     dependencies = scan_dependencies(project_dir)
