@@ -98,5 +98,11 @@ class RecursiveReaddirProjectTests(PipelineProjectTests):
     case_count = 5
 
 
+class WindowsPathProjectTests(PipelineProjectTests):
+    # First-class namespaces are shared by package imports and escaped helpers.
+    corpus_path = ROOT / 'fixtures/compatibility/projects/path-win32.corpus.json'
+    case_count = 5
+
+
 if __name__ == '__main__':
     unittest.main()

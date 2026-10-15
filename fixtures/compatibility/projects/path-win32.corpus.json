@@ -1,0 +1,110 @@
+{
+  "schema_version": "franken-node/project-compat-corpus/v1",
+  "description": "Complete first-class Windows/POSIX path package workflows. Engine implementation remains in franken_engine. Host reference execution is not native module-identity, security, or Windows filesystem proof. Use the existing project_compat_runner.py with actual --bin/--node/--bun executables.",
+  "cases": [
+    {
+      "id": "path-win32-package-manifest",
+      "category": "path-namespace-integration",
+      "description": "A CJS package exposes Windows path helpers as function values and writes a portable deployment manifest.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const fs=require('node:fs'), pack=require('fixture-paths');\nconst rows=pack.manifest(['src\\\\main.ts','assets\\\\..\\\\config.json','C:\\\\build\\\\nested\\\\unicode-😀.txt']);\nfs.writeFileSync('manifest.txt',rows.join('\\n')+'\\n');\nconsole.log('WINDOWS_MANIFEST',rows.length,pack.windows===require('path/win32'));\n",
+        "node_modules/fixture-paths/package.json": "{\"name\":\"fixture-paths\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-paths/index.cjs": "const windows=require('node:path/win32');const {resolve,relative}=windows;\nexports.windows=windows;\nexports.manifest=values=>values.map(value=>relative('C:\\\\build',resolve('C:\\\\build',value)));\n"
+      },
+      "expected": {
+        "stdout": "WINDOWS_MANIFEST 3 true\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "manifest.txt": "src\\main.ts\nconfig.json\nnested\\unicode-😀.txt\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "path-win32-conditional-esm",
+      "category": "path-namespace-integration",
+      "description": "A scoped ESM package reexports Windows helpers; separate default and named imports share their namespace links.",
+      "entry": "main.mjs",
+      "files": {
+        "main.mjs": "import fs from 'node:fs';import windows from 'node:path/win32';\nimport {build,win32,posix} from '@fixture/path-build';\nconst output=build('C:/src/app.js');\nfs.writeFileSync('build.json',JSON.stringify({output,portable:posix.join('bundle','app.js')})+'\\n');\nconsole.log('ESM_PATH',output,windows===win32,win32.posix===posix);\n",
+        "node_modules/@fixture/path-build/package.json": "{\"name\":\"@fixture/path-build\",\"version\":\"1.0.0\",\"type\":\"module\",\"exports\":{\".\":{\"import\":\"./index.mjs\",\"require\":\"./wrong.cjs\"}}}\n",
+        "node_modules/@fixture/path-build/index.mjs": "import {parse,format} from './helpers.mjs';export {win32,posix} from './helpers.mjs';\nexport function build(input){return format({dir:'C:\\\\out',name:parse(input).name,ext:'js'});}\n",
+        "node_modules/@fixture/path-build/helpers.mjs": "export {parse,format,win32,posix} from 'path/win32';\n",
+        "node_modules/@fixture/path-build/wrong.cjs": "throw Error('wrong package condition');\n"
+      },
+      "expected": {
+        "stdout": "ESM_PATH C:\\out\\app.js true true\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "build.json": "{\"output\":\"C:\\\\out\\\\app.js\",\"portable\":\"bundle/app.js\"}\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "path-win32-shared-mutation",
+      "category": "path-namespace-integration",
+      "description": "A temporary package namespace override must be visible to inline calls and other imports, then restore the original helper.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const fs=require('node:fs'), observer=require('./observer.cjs'), hook=require('fixture-path-hook');\nconst restore=hook();\nconst rows=[observer(),require('path').win32.join('C:\\\\root','a'),require('node:path/win32').join('C:\\\\root','b')];\nrestore();rows.push(require('path').win32.join('C:\\\\root','c'));\nfs.writeFileSync('paths.txt',rows.join('\\n')+'\\n');console.log('PATH_MUTATION',rows.length);\n",
+        "observer.cjs": "const path=require('node:path/posix');module.exports=()=>path.win32.join('C:\\\\root','observed');\n",
+        "node_modules/fixture-path-hook/package.json": "{\"name\":\"fixture-path-hook\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-path-hook/index.cjs": "const path=require('path/win32');module.exports=function(){const before=path.join;path.join=()=> 'instrumented';return ()=>{path.join=before;};};\n"
+      },
+      "expected": {
+        "stdout": "PATH_MUTATION 4\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "paths.txt": "instrumented\ninstrumented\ninstrumented\nC:\\root\\c\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "path-win32-network-share",
+      "category": "path-namespace-integration",
+      "description": "A reusable package renders UNC, drive and Unicode metadata without accessing any Windows filesystem.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const fs=require('node:fs'), inspect=require('fixture-network-path');\nconst rows=inspect('\\\\\\\\server\\\\share\\\\docs\\\\readme.md');\nfs.writeFileSync('network.json',JSON.stringify(rows)+'\\n');console.log('NETWORK_PATH',rows[0].name,rows[1]);\n",
+        "node_modules/fixture-network-path/package.json": "{\"name\":\"fixture-network-path\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-network-path/index.cjs": "const {parse,relative,toNamespacedPath}=require('path/win32');\nmodule.exports=value=>[parse(value),relative('\\\\\\\\server\\\\share\\\\docs','\\\\\\\\server\\\\share\\\\next'),toNamespacedPath(value)];\n"
+      },
+      "expected": {
+        "stdout": "NETWORK_PATH readme ..\\next\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "network.json": "[{\"root\":\"\\\\\\\\server\\\\share\\\\\",\"dir\":\"\\\\\\\\server\\\\share\\\\docs\",\"base\":\"readme.md\",\"ext\":\".md\",\"name\":\"readme\"},\"..\\\\next\",\"\\\\\\\\?\\\\UNC\\\\server\\\\share\\\\docs\\\\readme.md\"]\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "path-win32-validation-before-publication",
+      "category": "path-namespace-integration",
+      "description": "Invalid input must fail before a package overwrites a published manifest; a later valid call still completes.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const fs=require('node:fs'), publish=require('fixture-path-publish');\nlet code='';try{publish(null);}catch(error){code=error.code;}\nconst preserved=fs.readFileSync('published.txt','utf8')==='previous\\n';\npublish('C:\\\\out\\\\release.txt');console.log('PATH_RECOVERY',code,preserved);\n",
+        "published.txt": "previous\n",
+        "node_modules/fixture-path-publish/package.json": "{\"name\":\"fixture-path-publish\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-path-publish/index.cjs": "const fs=require('node:fs'),{parse,format}=require('node:path/win32');\nmodule.exports=function(input){const data=parse(input);const output=format(data);fs.writeFileSync('published.txt',output+'\\n');};\n"
+      },
+      "expected": {
+        "stdout": "PATH_RECOVERY ERR_INVALID_ARG_TYPE true\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "published.txt": "C:\\out\\release.txt\n",
+          "unexpected.txt": null
+        }
+      }
+    }
+  ]
+}
