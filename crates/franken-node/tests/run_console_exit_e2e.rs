@@ -167,6 +167,159 @@ fn run_app_with_policy_and_env(
     (dir, outcome)
 }
 
+/// Exercise the product argv -> engine process shape -> native util factory
+/// path, not a Node/Bun fallback or a standalone JavaScript reference shim.
+#[test]
+fn util_parse_args_defaults_to_native_invocation_arguments() {
+    for specifier in ["util", "node:util"] {
+        let source = format!(
+            r#"
+const {{ parseArgs }} = require('{specifier}');
+const options = {{
+  verbose: {{ type: 'boolean', short: 'v' }},
+  output: {{ type: 'string', short: 'o' }},
+  include: {{ type: 'string', short: 'I', multiple: true }}
+}};
+const parsed = parseArgs({{ options, allowPositionals: true, tokens: true }});
+const nullArgs = parseArgs({{ args: null, options, allowPositionals: true }});
+console.log('argv-result:' + JSON.stringify([
+  parsed.values.verbose, parsed.values.output, parsed.values.include,
+  parsed.positionals, parsed.tokens[0].index,
+  nullArgs.values.output, nullArgs.positionals
+]));
+"#
+        );
+        let (_workspace, outcome) = run_app_with_policy_and_env(
+            &source,
+            "balanced",
+            &[
+                "--",
+                "-v",
+                "-o",
+                "two words",
+                "-Ione",
+                "-I",
+                "two",
+                "--",
+                "--literal",
+                "βeta",
+            ],
+            &[("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE", "true")],
+        );
+        assert_eq!(
+            outcome.exit_code,
+            Some(0),
+            "{specifier}: stdout={} stderr={}",
+            outcome.stdout,
+            outcome.stderr
+        );
+        let payload = outcome
+            .stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("argv-result:"))
+            .expect("the embedded engine must emit the parsed argument values");
+        let actual: Value = serde_json::from_str(payload).expect("guest argument JSON");
+        assert_eq!(
+            actual,
+            serde_json::json!([
+                true,
+                "two words",
+                ["one", "two"],
+                ["--literal", "βeta"],
+                0,
+                "two words",
+                ["--literal", "βeta"]
+            ]),
+            "{specifier} must consume application arguments, not CLI policy flags"
+        );
+    }
+}
+
+#[test]
+fn util_parse_args_explicit_arguments_do_not_require_process_authority() {
+    let source = r#"
+const util = require('node:util');
+const options = { output: { type: 'string' } };
+const explicit = util.parseArgs({ args: ['--output=explicit'], options });
+const empty = util.parseArgs({ args: [], options });
+console.log('explicit-argv:' + JSON.stringify([
+  explicit.values.output, Object.keys(empty.values).length, empty.positionals.length
+]));
+"#;
+    let (_workspace, outcome) = run_app_with_policy_and_env(
+        source,
+        "strict",
+        &["--", "--unknown-option-must-not-be-read"],
+        &[("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE", "false")],
+    );
+    assert_eq!(
+        outcome.exit_code,
+        Some(0),
+        "explicit args must not acquire process authority during lowering or execution: {}",
+        outcome.stderr
+    );
+    assert!(
+        outcome
+            .stdout
+            .lines()
+            .any(|line| line == "explicit-argv:[\"explicit\",0,0]"),
+        "stdout={} stderr={}",
+        outcome.stdout,
+        outcome.stderr
+    );
+}
+
+#[test]
+fn util_parse_args_does_not_capture_a_guest_process_binding() {
+    let source = r#"
+const process = { argv: ['spoof', 'spoof.js', '--output=wrong'] };
+const util = require('util');
+const result = util.parseArgs({ options: { output: { type: 'string' } } });
+console.log('real-argv:' + result.values.output);
+console.log('guest-binding:' + process.argv[2]);
+"#;
+    let (_workspace, outcome) = run_app_with_policy_and_env(
+        source,
+        "balanced",
+        &["--", "--output=real"],
+        &[("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE", "true")],
+    );
+    assert_eq!(outcome.exit_code, Some(0), "{}", outcome.stderr);
+    assert!(outcome.stdout.lines().any(|line| line == "real-argv:real"));
+    assert!(
+        outcome
+            .stdout
+            .lines()
+            .any(|line| line == "guest-binding:--output=wrong")
+    );
+}
+
+#[test]
+fn util_parse_args_default_arguments_do_not_grant_process_authority() {
+    let source = r#"
+const util = require('util');
+const result = util.parseArgs({ options: { verbose: { type: 'boolean' } } });
+console.log('UNAUTHORIZED_ARGV_RESULT:' + JSON.stringify(result));
+"#;
+    let (_workspace, outcome) = run_app_with_policy_and_env(
+        source,
+        "strict",
+        &["--", "--verbose"],
+        &[("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE", "false")],
+    );
+    assert_ne!(
+        outcome.exit_code,
+        Some(0),
+        "process authority must remain denied"
+    );
+    assert!(!outcome.stdout.contains("UNAUTHORIZED_ARGV_RESULT:"));
+    assert!(
+        outcome.stderr.to_ascii_lowercase().contains("ambient authority"),
+        "failure must identify the authority boundary, not a generic parser failure: {}",
+        outcome.stderr
+    );
+}
+
 /// bd-reality-20260820-w0fc6.7: default `run` (no degraded-fallback env)
 /// executes fixture JS through the embedded engine and surfaces stdout.
 #[test]
