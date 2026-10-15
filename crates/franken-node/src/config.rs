@@ -4134,7 +4134,8 @@ impl RuntimeConfig {
         for name in &self.environment_allowlist {
             if name.is_empty()
                 || name.len() > MAX_NAME_BYTES
-                || name.contains(['\0', '='])
+                || name.contains('\0')
+                || name.contains('=')
                 || name.starts_with("FRANKEN_NODE_INTERNAL_")
             {
                 return Err(ConfigError::ValidationFailed(format!(
@@ -6562,6 +6563,44 @@ registry_signing_key = "x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c="
                 assert_eq!(decoded.allows_process_shape(profile), allowed);
             }
         }
+    }
+
+    #[test]
+    fn environment_allowlist_merges_by_profile_and_rejects_internal_names() {
+        let (_dir, path) = security_baseline_file();
+        let baseline = std::fs::read_to_string(&path).expect("baseline config");
+        std::fs::write(
+            &path,
+            format!(
+                "{baseline}\n[runtime]\nenvironment_allowlist = [\"BASE_ENV\"]\n\
+                 [profiles.balanced.runtime]\nenvironment_allowlist = [\"NODE_ENV\", \"CI\"]\n",
+            ),
+        )
+        .expect("write environment policy");
+        let resolved = Config::resolve_with_env(
+            Some(&path),
+            CliOverrides::default(),
+            &map_lookup(BTreeMap::new()),
+        )
+        .expect("resolve environment policy");
+        assert_eq!(
+            resolved.config.runtime.environment_allowlist,
+            BTreeSet::from(["CI".to_string(), "NODE_ENV".to_string()])
+        );
+        assert!(resolved.decisions.iter().any(|decision| {
+            decision.field == "runtime.environment_allowlist"
+                && decision.stage == MergeStage::Profile
+                && decision.value == "CI,NODE_ENV"
+        }));
+
+        let mut invalid = resolved.config;
+        invalid.runtime.environment_allowlist =
+            BTreeSet::from(["FRANKEN_NODE_INTERNAL_CORPUS_AUTH_NONCE".to_string()]);
+        let error = invalid.validate().expect_err("private worker names are reserved");
+        assert!(
+            error.to_string().contains("runtime.environment_allowlist"),
+            "{error}"
+        );
     }
 
     #[test]
