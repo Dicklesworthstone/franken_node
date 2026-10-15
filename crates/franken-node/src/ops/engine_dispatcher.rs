@@ -50,8 +50,8 @@ use frankenengine_extension_host::host_effect_journal::{
 };
 #[cfg(feature = "engine")]
 use frankenengine_extension_host::host_io::{
-    HostIoCapability, HostIoError, HostIoExceptionProvenance, HostIoOutcome, HostIoProvider,
-    HostIoRequest,
+    EnvironmentSnapshotHostIo, HostIoCapability, HostIoError, HostIoExceptionProvenance,
+    HostIoOutcome, HostIoProvider, HostIoRequest,
 };
 #[cfg(feature = "engine")]
 use frankenengine_extension_host::process_spawn::{
@@ -4463,19 +4463,6 @@ struct DispatchResolutionInputs<'a> {
     embedded_engine: Option<&'a Path>,
 }
 
-/// Keep public dispatch and authenticated worker admission on the same replay
-/// policy. Signed process authority has its own authentication and containment
-/// gates; capture records that provider's preparation and ordered journal.
-/// Environment authority still has no replay input contract.
-fn validate_native_replay_capture_mode(profile: Profile, capture_replay: bool) -> Result<()> {
-    if capture_replay && profile == Profile::LegacyRisky {
-        anyhow::bail!(
-            "native replay capture requires strict or balanced policy; environment values are not replay inputs"
-        );
-    }
-    Ok(())
-}
-
 struct DispatchReportInputs<'a> {
     runtime: &'a str,
     runtime_path: &'a Path,
@@ -6119,7 +6106,9 @@ impl EngineDispatcher {
         config.runtime.validate_execution_budget()?;
         config.runtime.validate_parse_budget()?;
 
-        validate_native_replay_capture_mode(config.profile, self.capture_replay)?;
+        // Environment authority is replayable through the same typed host-I/O
+        // transcript as filesystem/network effects; no profile needs a replay
+        // exclusion once named environment inputs are explicit.
 
         // An external executable named by --engine-bin, the environment, or
         // project config has no authenticated identity. In builds without the
@@ -8673,6 +8662,11 @@ impl EngineDispatcher {
             ));
         }
         let mut capabilities = Self::map_profile_to_capabilities(config.profile);
+        if !config.runtime.environment_allowlist.is_empty()
+            && !capabilities.iter().any(|capability| capability == "env_read")
+        {
+            capabilities.push("env_read".to_string());
+        }
         if let Some(admission) = process_spawn_admission {
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -9274,15 +9268,8 @@ impl EngineDispatcher {
         })?;
         let parser_budget = config.runtime.effective_parse_budget(config.profile);
 
-        // Recheck the same policy inside the authenticated worker. Process
-        // authority was independently reauthenticated against active containment
-        // before arriving here; capture must not reject that supported path.
-        validate_native_replay_capture_mode(config.profile, capture_replay).map_err(|error| {
-            native_engine_spawn_error_with_telemetry_cleanup(
-                error.to_string(),
-                &mut telemetry_guard,
-            )
-        })?;
+        // Process and environment authority both have typed replay inputs:
+        // process preparation/journal plus the ordinary host-I/O transcript.
 
         // The parent selected this authority before dependency preflight and
         // checked that its evidence root is outside it. Retain the same root
@@ -9554,7 +9541,35 @@ impl EngineDispatcher {
                     crate::ops::flow_gated_host_io::FlowGatedHostIo::new(gated, run_egress_trace);
                 let cancellation_gated =
                     CancellationGatedHostIo::new(Arc::new(flow_gated), cancellation.clone());
-                let host_io: Arc<dyn HostIoProvider> = Arc::new(cancellation_gated);
+                let mut host_io: Arc<dyn HostIoProvider> = Arc::new(cancellation_gated);
+                if !config.runtime.environment_allowlist.is_empty() {
+                    let mut environment = std::collections::BTreeMap::new();
+                    for name in &config.runtime.environment_allowlist {
+                        if let Some(value) = std::env::var_os(name) {
+                            let value = value.into_string().map_err(|_| {
+                                native_engine_spawn_error_with_telemetry_cleanup(
+                                    format!(
+                                        "Allowlisted environment variable {name:?} is not valid UTF-8"
+                                    ),
+                                    &mut telemetry_guard,
+                                )
+                            })?;
+                            environment.insert(name.clone(), value);
+                        }
+                    }
+                    host_io = Arc::new(
+                        EnvironmentSnapshotHostIo::with_provider(environment, host_io).map_err(
+                            |error| {
+                                native_engine_spawn_error_with_telemetry_cleanup(
+                                    format!(
+                                        "Could not construct bounded guest environment snapshot: {error}"
+                                    ),
+                                    &mut telemetry_guard,
+                                )
+                            },
+                        )?,
+                    );
+                }
                 let host_io = if replay_process_provider.is_some() {
                     // Ordered replay has the engine's conservative Unknown
                     // exception provenance. Use that same restriction in the
@@ -10653,21 +10668,22 @@ impl EngineDispatcher {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "engine")]
     #[test]
-    fn replay_capture_admission_retains_the_environment_exclusion() {
+    fn explicit_environment_allowlist_adds_only_env_read_capability() {
         for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
-            validate_native_replay_capture_mode(profile, false)
-                .expect("ordinary execution retains its profile policy");
-            let capture = validate_native_replay_capture_mode(profile, true);
-            if profile == Profile::LegacyRisky {
-                assert!(
-                    capture
-                        .expect_err("environment authority has no replay inputs")
-                        .to_string()
-                        .contains("environment values are not replay inputs")
-                );
-            } else {
-                capture.expect("strict and balanced support authenticated process captures");
+            let mut config = Config::for_profile(profile);
+            let baseline = EngineDispatcher::resolve_capabilities_for_execution(&config, None)
+                .expect("baseline capabilities");
+            config
+                .runtime
+                .environment_allowlist
+                .insert("NODE_ENV".to_string());
+            let allowed = EngineDispatcher::resolve_capabilities_for_execution(&config, None)
+                .expect("explicit environment capability");
+            assert!(allowed.iter().any(|capability| capability == "env_read"));
+            for capability in baseline {
+                assert!(allowed.contains(&capability), "{profile}: lost {capability}");
             }
         }
     }
