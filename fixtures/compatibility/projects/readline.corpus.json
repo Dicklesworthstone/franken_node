@@ -60,6 +60,21 @@
         "stdout": "CANCELLED_QUESTION_COMPLETE accepted\n", "stderr": "", "exit_code": 0,
         "files": {"answer.txt": "accepted\n", "unexpected.txt": null}
       }
+    },
+    {
+      "id": "readline-package-promisified-questions",
+      "category": "readline-integration",
+      "description": "A callback-style package uses util.promisify on readline.question, cancels one question, accepts an empty answer, and writes output only after all expected settlements.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "require('fixture-promisified-questions')().then(row=>{require('fs').writeFileSync('answers.json',JSON.stringify(row)+'\\n');console.log('PROMISIFIED_QUESTIONS_COMPLETE',row.answer,row.cancelled,row.empty);});\n",
+        "node_modules/fixture-promisified-questions/package.json": "{\"name\":\"fixture-promisified-questions\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-promisified-questions/index.cjs": "const {promisify}=require('node:util');const {PassThrough}=require('node:stream');const {createInterface}=require('node:readline');module.exports=async function(){const input=new PassThrough();const rl=createInterface({input,terminal:false});const ask=promisify(rl.question).bind(rl);try{const first=ask('value?');input.write('42\\n');const answer=await first;const c=new AbortController();const pending=ask('cancel?',{signal:c.signal});c.abort(false);let cancelled=false;try{await pending;}catch(error){if(error.code!=='ABORT_ERR'||error.cause!==false)throw error;cancelled=true;}const next=ask('empty?');input.write('\\n');const empty=(await next)==='';return {answer,cancelled,empty};}finally{rl.close();}};\n"
+      },
+      "expected": {
+        "stdout": "PROMISIFIED_QUESTIONS_COMPLETE 42 true true\n", "stderr": "", "exit_code": 0,
+        "files": {"answers.json": "{\"answer\":\"42\",\"cancelled\":true,\"empty\":true}\n", "unexpected.txt": null}
+      }
     }
   ]
 }

@@ -30,8 +30,8 @@ class ReadlineProjectTests(unittest.TestCase):
     def test_projects_have_exact_observable_outputs(self):
         corpus = json.loads(CORPUS.read_text(encoding="utf-8"))
         self.assertEqual(corpus["schema_version"], "franken-node/project-compat-corpus/v1")
-        self.assertEqual(len(corpus["cases"]), 4)
-        self.assertEqual(len({case["id"] for case in corpus["cases"]}), 4)
+        self.assertEqual(len(corpus["cases"]), 5)
+        self.assertEqual(len({case["id"] for case in corpus["cases"]}), 5)
         self.assertEqual({case["entry"] for case in corpus["cases"]}, {"main.cjs", "main.mjs"})
         for case in corpus["cases"]:
             self.assertGreater(len(case["files"]), 1)
@@ -85,8 +85,8 @@ class ReadlineProjectTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             report = json.loads(result.stdout)
             self.assertEqual(report["verdict"], "PASS")
-            self.assertEqual(report["passing_cases"], 4)
-            self.assertEqual(report["selected_case_count"], 4)
+            self.assertEqual(report["passing_cases"], 5)
+            self.assertEqual(report["selected_case_count"], 5)
 
 
 if __name__ == "__main__":
