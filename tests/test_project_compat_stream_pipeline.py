@@ -92,5 +92,11 @@ class DiagnosticsProjectTests(PipelineProjectTests):
     case_count = 4
 
 
+class RecursiveReaddirProjectTests(PipelineProjectTests):
+    # Nested package discovery must produce complete files, not a shallow list.
+    corpus_path = ROOT / 'fixtures/compatibility/projects/fs_recursive_readdir.corpus.json'
+    case_count = 5
+
+
 if __name__ == '__main__':
     unittest.main()

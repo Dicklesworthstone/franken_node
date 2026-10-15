@@ -1,0 +1,128 @@
+{
+  "schema_version": "franken-node/project-compat-corpus/v1",
+  "cases": [
+    {
+      "id": "recursive-readdir-package-workspace-index",
+      "category": "filesystem-integration",
+      "description": "A CommonJS package finds nested and hidden workspace manifests through readdirSync, then publishes an exact package index.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const fs = require('node:fs');\nconst index = require('fixture-workspace-index')('packages');\nfs.writeFileSync('workspace.json', JSON.stringify(index) + '\\n');\nconsole.log('WORKSPACE_INDEX_COMPLETE', index.length);\n",
+        "node_modules/fixture-workspace-index/package.json": "{\"name\":\"fixture-workspace-index\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-workspace-index/index.cjs": "const { readdirSync, readFileSync } = require('fs');\nmodule.exports = function (root) {\n  return readdirSync(root, { recursive: true })\n    .filter(name => name === 'package.json' || name.endsWith('/package.json'))\n    .sort().map(name => {\n      const manifest = JSON.parse(readFileSync(root + '/' + name, 'utf8'));\n      return { path: name, name: manifest.name, version: manifest.version };\n    });\n};\n",
+        "packages/alpha/package.json": "{\"name\":\"alpha\",\"version\":\"1.2.0\"}\n",
+        "packages/group/béta/package.json": "{\"name\":\"béta\",\"version\":\"2.0.1\"}\n",
+        "packages/.tools/kit/package.json": "{\"name\":\"kit\",\"version\":\"0.4.0\"}\n",
+        "packages/readme.txt": "not a manifest\n",
+        "packages/alpha/src/main.js": "module.exports=42;\n"
+      },
+      "expected": {
+        "stdout": "WORKSPACE_INDEX_COMPLETE 3\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "workspace.json": "[{\"path\":\".tools/kit/package.json\",\"name\":\"kit\",\"version\":\"0.4.0\"},{\"path\":\"alpha/package.json\",\"name\":\"alpha\",\"version\":\"1.2.0\"},{\"path\":\"group/béta/package.json\",\"name\":\"béta\",\"version\":\"2.0.1\"}]\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "recursive-readdir-esm-typed-inventory",
+      "category": "filesystem-integration",
+      "description": "A scoped ESM package reexports recursive Promise discovery; the app uses lexical Dirent parent paths to read Unicode data files.",
+      "entry": "main.mjs",
+      "files": {
+        "main.mjs": "import { listData } from '@fixture/data-index';\nimport { writeFile } from 'node:fs/promises';\nconst rows = await listData('data');\nawait writeFile('data-index.txt', rows.join('\\n') + '\\n');\nconsole.log('TYPED_DATA_COMPLETE', rows.length);\n",
+        "node_modules/@fixture/data-index/package.json": "{\"name\":\"@fixture/data-index\",\"version\":\"1.0.0\",\"main\":\"index.mjs\",\"type\":\"module\",\"exports\":\"./index.mjs\"}\n",
+        "node_modules/@fixture/data-index/discovery.mjs": "export { readdir as scan } from 'node:fs/promises';\n",
+        "node_modules/@fixture/data-index/index.mjs": "import { scan } from './discovery.mjs';\nimport { readFile } from 'node:fs/promises';\nexport async function listData(root) {\n  const entries = await scan(root, { recursive: true, withFileTypes: true });\n  const files = entries.filter(entry => entry.isFile() && entry.name.endsWith('.json'))\n    .map(entry => entry.parentPath + '/' + entry.name).sort();\n  const rows = [];\n  for (const file of files) rows.push(file + '=' + JSON.parse(await readFile(file, 'utf8')).value);\n  return rows;\n}\n",
+        "data/.config/options.json": "{\"value\":\"hidden\"}\n",
+        "data/en/deep/greeting.json": "{\"value\":\"hello\"}\n",
+        "data/fr/é.json": "{\"value\":\"été\"}\n",
+        "data/fr/notes.txt": "not JSON\n"
+      },
+      "expected": {
+        "stdout": "TYPED_DATA_COMPLETE 3\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "data-index.txt": "data/.config/options.json=hidden\ndata/en/deep/greeting.json=hello\ndata/fr/é.json=été\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "recursive-readdir-callback-template-build",
+      "category": "filesystem-integration",
+      "description": "A callback-style package discovers nested templates and writes every rendered output before reporting successful build completion.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const build = require('fixture-template-build');\nbuild('templates', 'dist', function (error, count) {\n  if (error) throw error;\n  console.log('TEMPLATE_BUILD_COMPLETE', count);\n});\n",
+        "node_modules/fixture-template-build/package.json": "{\"name\":\"fixture-template-build\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-template-build/index.cjs": "const fs = require('node:fs');\nconst path = require('node:path');\nmodule.exports = function (source, destination, done) {\n  fs.readdir(source, { recursive: true }, function (error, entries) {\n    if (error) return done(error);\n    let count = 0;\n    try {\n      for (const name of entries.sort()) {\n        if (!name.endsWith('.tpl')) continue;\n        const target = destination + '/' + name.slice(0, -4);\n        fs.mkdirSync(path.dirname(target), { recursive: true });\n        fs.writeFileSync(target, fs.readFileSync(source + '/' + name, 'utf8').replace('[APP]', 'Franken'));\n        count++;\n      }\n    } catch (failure) { done(failure); return; }\n    done(null, count);\n  });\n};\n",
+        "templates/index.html.tpl": "<h1>[APP]</h1>\n",
+        "templates/pages/deep/about.html.tpl": "About [APP]\n",
+        "templates/.well-known/app.txt.tpl": "name=[APP]\n",
+        "templates/ignore.txt": "not copied\n"
+      },
+      "expected": {
+        "stdout": "TEMPLATE_BUILD_COMPLETE 3\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "dist/index.html": "<h1>Franken</h1>\n",
+          "dist/pages/deep/about.html": "About Franken\n",
+          "dist/.well-known/app.txt": "name=Franken\n",
+          "dist/ignore.txt": null,
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "recursive-readdir-promisified-alias-inventory",
+      "category": "filesystem-integration",
+      "description": "A promisified callback package sees both a real directory and its symlink alias while keeping typed basenames and lexical parents.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const fs = require('fs');\nfs.symlinkSync('real', 'tree/alias', 'dir');\nrequire('fixture-alias-index')('tree').then(rows => {\n  fs.writeFileSync('aliases.txt', rows.join('\\n') + '\\n');\n  console.log('ALIAS_INDEX_COMPLETE', rows.length);\n});\n",
+        "node_modules/fixture-alias-index/package.json": "{\"name\":\"fixture-alias-index\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-alias-index/index.cjs": "const fs = require('node:fs');\nconst scan = require('node:util').promisify(fs.readdir);\nmodule.exports = async function (root) {\n  const entries = await scan(root, { recursive: true, withFileTypes: true });\n  return entries.filter(entry => entry.isFile()).map(entry => {\n    const file = entry.parentPath + '/' + entry.name;\n    return file + '=' + fs.readFileSync(file, 'utf8').trim();\n  }).sort();\n};\n",
+        "tree/real/deep/data.txt": "shared\n",
+        "tree/top.txt": "top\n"
+      },
+      "expected": {
+        "stdout": "ALIAS_INDEX_COMPLETE 3\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "aliases.txt": "tree/alias/deep/data.txt=shared\ntree/real/deep/data.txt=shared\ntree/top.txt=top\n",
+          "tree/real/deep/data.txt": "shared\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "recursive-readdir-failure-preserves-published-index",
+      "category": "filesystem-integration",
+      "description": "A package refuses to publish a partial scan on missing-root failure; a later successful Promise scan proves the error does not poison subsequent discovery.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const fs = require('node:fs');\nrequire('fixture-safe-index')('missing', 'published.txt', async function (error) {\n  if (!error || error.code !== 'ENOENT') throw Error('expected missing root');\n  const entries = await fs.promises.readdir('available', { recursive: true });\n  fs.writeFileSync('recovery.txt', entries.sort().join('|') + '\\n');\n  console.log('SCAN_FAILURE_RECOVERED', error.code, entries.length);\n});\n",
+        "node_modules/fixture-safe-index/package.json": "{\"name\":\"fixture-safe-index\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-safe-index/index.cjs": "const fs = require('fs');\nmodule.exports = function (root, output, done) {\n  fs.readdir(root, { recursive: true }, function (error, entries) {\n    if (error) {\n      if (entries !== undefined) throw Error('partial result leaked');\n      done(error); return;\n    }\n    fs.writeFileSync(output, entries.join('\\n'));\n    fs.writeFileSync('unexpected.txt', 'published invalid scan');\n    done(null);\n  });\n};\n",
+        "published.txt": "previous complete index\n",
+        "available/nested/entry.txt": "retained\n"
+      },
+      "expected": {
+        "stdout": "SCAN_FAILURE_RECOVERED ENOENT 2\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "published.txt": "previous complete index\n",
+          "recovery.txt": "nested|nested/entry.txt\n",
+          "unexpected.txt": null
+        }
+      }
+    }
+  ]
+}
