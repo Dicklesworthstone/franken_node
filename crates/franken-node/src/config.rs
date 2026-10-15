@@ -1429,6 +1429,18 @@ impl Config {
                     MAX_MERGE_DECISIONS,
                 );
             }
+            if let Some(value) = &section.environment_allowlist {
+                self.runtime.environment_allowlist.clone_from(value);
+                push_bounded(
+                    decisions,
+                    MergeDecision::new(
+                        stage.clone(),
+                        "runtime.environment_allowlist",
+                        value.iter().cloned().collect::<Vec<_>>().join(","),
+                    ),
+                    MAX_MERGE_DECISIONS,
+                );
+            }
             if let Some(value) = section.max_instructions {
                 self.runtime.max_instructions = Some(value);
                 push_bounded(
@@ -2357,6 +2369,7 @@ impl Config {
         }
         self.runtime.validate_execution_budget()?;
         self.runtime.validate_parse_budget()?;
+        self.runtime.validate_environment_allowlist()?;
         validate_opt_score(
             "migration.verification_threshold",
             self.migration.verification_threshold,
@@ -3276,6 +3289,7 @@ struct RuntimeOverrides {
     pub lanes: Option<BTreeMap<String, RuntimeLaneOverrides>>,
     pub drain_timeout_ms: Option<u64>,
     pub allow_process_shape: Option<bool>,
+    pub environment_allowlist: Option<BTreeSet<String>>,
     pub max_instructions: Option<u64>,
     pub max_registers: Option<u32>,
     pub max_call_depth: Option<usize>,
@@ -4032,6 +4046,14 @@ pub struct RuntimeConfig {
     /// Native replay capture cannot record this ambient process state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_process_shape: Option<bool>,
+    /// Exact host environment variable names that native `run` may expose
+    /// through named `process.env.NAME` / `process.env["NAME"]` reads.
+    /// Values are snapshotted once inside the authenticated worker, never
+    /// inherited implicitly, and the engine labels every returned value Secret.
+    /// Raw `process.env` possession, enumeration, mutation, and dynamic-name
+    /// access remain denied by lowering.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub environment_allowlist: BTreeSet<String>,
     /// Instruction budget for one `run` of guest code in the native engine,
     /// replacing the profile's default (strict 200M, balanced 1B,
     /// legacy-risky 5B). The wall-clock timeout still applies.
@@ -4095,6 +4117,32 @@ impl RuntimeConfig {
     pub fn allows_process_shape(&self, profile: Profile) -> bool {
         self.allow_process_shape
             .unwrap_or(profile == Profile::LegacyRisky)
+    }
+
+    /// Validate the explicit environment-name grant before native admission.
+    ///
+    /// Product-internal worker/authentication namespaces are never guest
+    /// environment inputs, even when an operator tries to allowlist them.
+    pub fn validate_environment_allowlist(&self) -> Result<(), ConfigError> {
+        const MAX_ENTRIES: usize = 4096;
+        const MAX_NAME_BYTES: usize = 4096;
+        if self.environment_allowlist.len() > MAX_ENTRIES {
+            return Err(ConfigError::ValidationFailed(format!(
+                "runtime.environment_allowlist must contain at most {MAX_ENTRIES} names"
+            )));
+        }
+        for name in &self.environment_allowlist {
+            if name.is_empty()
+                || name.len() > MAX_NAME_BYTES
+                || name.contains(['\0', '='])
+                || name.starts_with("FRANKEN_NODE_INTERNAL_")
+            {
+                return Err(ConfigError::ValidationFailed(format!(
+                    "runtime.environment_allowlist contains an invalid or reserved name"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Effective per-lane instruction ceiling, shared by native execution and
@@ -4262,6 +4310,7 @@ impl RuntimeConfig {
             ),
             drain_timeout_ms: None,
             allow_process_shape: None,
+            environment_allowlist: BTreeSet::new(),
             max_instructions: None,
             max_registers: None,
             max_call_depth: None,
@@ -4298,6 +4347,7 @@ impl RuntimeConfig {
             ),
             drain_timeout_ms: None,
             allow_process_shape: None,
+            environment_allowlist: BTreeSet::new(),
             max_instructions: None,
             max_registers: None,
             max_call_depth: None,
@@ -4334,6 +4384,7 @@ impl RuntimeConfig {
             ),
             drain_timeout_ms: None,
             allow_process_shape: None,
+            environment_allowlist: BTreeSet::new(),
             max_instructions: None,
             max_registers: None,
             max_call_depth: None,
