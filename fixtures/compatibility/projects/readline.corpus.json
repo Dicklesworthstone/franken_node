@@ -1,0 +1,65 @@
+{
+  "schema_version": "franken-node/project-compat-corpus/v1",
+  "description": "Captured non-terminal readline package workflows. Not npm certification or terminal editing coverage.",
+  "cases": [
+    {
+      "id": "readline-package-jsonl-file-index",
+      "category": "readline-integration",
+      "description": "A captured package reads Unicode JSONL through one-byte file chunks and writes its result only after the interface completes.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const fs=require('node:fs');require('fixture-line-index')('input.jsonl').then(rows=>{fs.writeFileSync('result.json',JSON.stringify(rows)+'\\n');console.log('LINE_INDEX_COMPLETE',rows.length);});\n",
+        "node_modules/fixture-line-index/package.json": "{\"name\":\"fixture-line-index\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-line-index/index.cjs": "const fs=require('node:fs');const {createInterface}=require('node:readline');module.exports=async function(path){const input=fs.createReadStream(path,{highWaterMark:1});const rl=createInterface({input,crlfDelay:Infinity});const rows=[];for await(const line of rl){if(line.length)rows.push(JSON.parse(line));}if(!rl.closed)throw Error('incomplete interface');return rows;};\n",
+        "input.jsonl": "{\"name\":\"café\",\"value\":21}\r\n\n{\"name\":\"🚀\",\"value\":42}"
+      },
+      "expected": {
+        "stdout": "LINE_INDEX_COMPLETE 2\n", "stderr": "", "exit_code": 0,
+        "files": {"result.json": "[{\"name\":\"café\",\"value\":21},{\"name\":\"🚀\",\"value\":42}]\n", "unexpected.txt": null}
+      }
+    },
+    {
+      "id": "readline-esm-package-reexport",
+      "category": "readline-integration",
+      "description": "A package reexports the promise readline constructor to an ESM caller that consumes a separately imported stream and writes exact selected lines.",
+      "entry": "main.mjs",
+      "files": {
+        "main.mjs": "import {createInterface} from '@fixture/lines';import {Readable} from 'node:stream';import {writeFileSync} from 'node:fs';const rl=createInterface({input:Readable.from(['alpha\\r','\\nbeta\\n','last']),crlfDelay:Infinity});(async function(){const lines=[];for await(const line of rl)lines.push(line);writeFileSync('lines.json',JSON.stringify(lines)+'\\n');console.log('ESM_LINES_COMPLETE',lines.join('|'),rl.closed);})();\n",
+        "node_modules/@fixture/lines/package.json": "{\"name\":\"@fixture/lines\",\"version\":\"1.0.0\",\"type\":\"module\",\"exports\":\"./index.mjs\"}\n",
+        "node_modules/@fixture/lines/index.mjs": "export {createInterface} from 'node:readline/promises';\n"
+      },
+      "expected": {
+        "stdout": "ESM_LINES_COMPLETE alpha|beta|last true\n", "stderr": "", "exit_code": 0,
+        "files": {"lines.json": "[\"alpha\",\"beta\",\"last\"]\n", "unexpected.txt": null}
+      }
+    },
+    {
+      "id": "readline-package-question-script",
+      "category": "readline-integration",
+      "description": "A module asks successive promise questions through a caller-owned input, writes prompts to a file and releases listeners without destroying the input.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const fs=require('fs');const session=require('./session.cjs')();session.input.write('Ada\\n');Promise.resolve().then(()=>session.input.write('42\\n'));session.done.then(row=>{fs.writeFileSync('answer.json',JSON.stringify(row)+'\\n');console.log('QUESTIONS_COMPLETE',row.name,row.code,session.input.listenerCount('data'),session.input.destroyed);});\n",
+        "session.cjs": "const {PassThrough,Writable}=require('node:stream');const {createInterface}=require('node:readline/promises');const fs=require('node:fs');module.exports=function(){const input=new PassThrough();const output=new Writable({write(chunk,encoding,done){fs.appendFileSync('prompts.txt',chunk);done();}});const rl=createInterface({input,output,terminal:false});const done=(async function(){const name=await rl.question('Name? ');const code=await rl.question('Code? ');rl.close();return {name,code};})();return {input,done};};\n"
+      },
+      "expected": {
+        "stdout": "QUESTIONS_COMPLETE Ada 42 0 false\n", "stderr": "", "exit_code": 0,
+        "files": {"prompts.txt": "Name? Code? ", "answer.json": "{\"name\":\"Ada\",\"code\":\"42\"}\n", "unexpected.txt": null}
+      }
+    },
+    {
+      "id": "readline-package-cancelled-question",
+      "category": "readline-integration",
+      "description": "A cancelled question preserves a falsy application reason, frees its slot, and completes a later question without invoking the cancelled success path.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "require('./questions.cjs')().then(value=>console.log('CANCELLED_QUESTION_COMPLETE',value));\n",
+        "questions.cjs": "const fs=require('node:fs');const {PassThrough}=require('stream');const {createInterface}=require('readline/promises');module.exports=async function(){const input=new PassThrough();const rl=createInterface({input,terminal:false});const control=new AbortController();const pending=rl.question('cancel?',{signal:control.signal}).then(()=>fs.writeFileSync('unexpected.txt','wrong success'));control.abort(false);try{await pending;throw Error('missing rejection');}catch(error){if(error.code!=='ABORT_ERR'||error.cause!==false)throw error;}const next=rl.question('next?');input.write('accepted\\n');const answer=await next;rl.close();fs.writeFileSync('answer.txt',answer+'\\n');return answer;};\n"
+      },
+      "expected": {
+        "stdout": "CANCELLED_QUESTION_COMPLETE accepted\n", "stderr": "", "exit_code": 0,
+        "files": {"answer.txt": "accepted\n", "unexpected.txt": null}
+      }
+    }
+  ]
+}
