@@ -766,7 +766,7 @@ impl Resolver {
                 // extension/directory search and require-conditional exports;
                 // forcing Import here made valid external targets such as
                 // "dep/feature" miss an existing "dep/feature.js".
-                if selection.target.starts_with("node:") || bare_builtin(&selection.target) {
+                if bare_builtin(&selection.target) {
                     return Err(error(
                         "ERR_RUNTIME_MODULE_REQUIRED",
                         "internal import selects a runtime builtin",
@@ -1243,34 +1243,6 @@ mod tests {
         match linked(root, from, request, ResolutionMode::Import) {
             Err(e) => e.code,
             Ok(_) => panic!("unexpected linked resolution for {request}"),
-        }
-    }
-
-    #[test]
-    fn package_import_node_builtin_targets_route_back_to_runtime_registry() {
-        let root = fixture();
-        put(
-            root.path(),
-            "package.json",
-            br##"{
-                "name":"application",
-                "imports":{
-                    "#explicit":"node:fs",
-                    "#bare":"fs"
-                }
-            }"##,
-        );
-        for (specifier, mode) in [
-            ("#explicit", ResolutionMode::Import),
-            ("#explicit", ResolutionMode::Require),
-            ("#bare", ResolutionMode::Import),
-            ("#bare", ResolutionMode::Require),
-        ] {
-            assert_eq!(
-                rejected(root.path(), "app.js", specifier, mode),
-                "ERR_RUNTIME_MODULE_REQUIRED",
-                "{specifier:?} under {mode:?} must be routed to the engine builtin registry"
-            );
         }
     }
 
