@@ -1,0 +1,84 @@
+{
+  "schema_version": "franken-node/project-compat-corpus/v1",
+  "description": "Complete package fan-out workflows using the canonical franken_engine stream/web implementation. Run with scripts/project_compat_runner.py --corpus fixtures/compatibility/projects/stream-tee.corpus.json --bin target/release/franken-node --node node --bun bun --artifacts-dir /tmp/franken-stream-tee-001. Reference tests alone are not native-runtime or npm/Bun parity evidence.",
+  "cases": [
+    {
+      "id": "tee-package-dual-file-pipeline",
+      "category": "stream-integration",
+      "description": "One package source feeds an original-file sink and a transformed-file sink with independently checked bytes and completion.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "require('fixture-dual-output')().then(count=>console.log('TEE_FILES_COMPLETE',count));\n",
+        "node_modules/fixture-dual-output/package.json": "{\"name\":\"fixture-dual-output\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-dual-output/index.cjs": "const fs=require('node:fs');const web=require('node:stream/web');module.exports=async function(){const input=fs.readFileSync('input.txt','utf8');let offset=0,count=0;const original=new web.ReadableStream({pull(c){if(offset===input.length){c.close();return;}const chunk=input.slice(offset,offset+2);offset+=chunk.length;c.enqueue(chunk);}});const [copy,upper]=original.tee();function sink(name){const parts=[];return new web.WritableStream({write(chunk){parts.push(chunk);},close(){fs.writeFileSync(name,parts.join(''));}});}await Promise.all([copy.pipeTo(sink('copy.txt')),upper.pipeThrough(new web.TransformStream({transform(chunk,c){count+=chunk.length;c.enqueue(chunk.toUpperCase());}})).pipeTo(sink('upper.txt'))]);fs.writeFileSync('audit.json',JSON.stringify({characters:count,locked:original.locked})+'\\n');return count;};\n",
+        "input.txt": "alpha\nβeta\n"
+      },
+      "expected": {
+        "stdout": "TEE_FILES_COMPLETE 11\n", "stderr": "", "exit_code": 0,
+        "files": {"copy.txt":"alpha\nβeta\n","upper.txt":"ALPHA\nΒETA\n","audit.json":"{\"characters\":11,\"locked\":true}\n","input.txt":"alpha\nβeta\n","unexpected.txt":null}
+      }
+    },
+    {
+      "id": "tee-scoped-esm-abandoned-consumer",
+      "category": "stream-integration",
+      "description": "A conditional ESM package re-export tees an iterable; cancelling an unused branch must not truncate the other or hang its cleanup.",
+      "entry": "main.mjs",
+      "files": {
+        "main.mjs": "import {multicast} from '@fixture/multicast';import {writeFileSync as write} from 'node:fs';const {original,branches}=multicast(['red','green','blue']);(async function(){let settled=false;const stopped=branches[0].cancel('unused').then(()=>{settled=true;});const values=[];for await(const value of branches[1])values.push(value);await stopped;write('values.json',JSON.stringify(values)+'\\n');console.log('TEE_ESM_COMPLETE',values.length,settled,original.locked);})();\n",
+        "node_modules/@fixture/multicast/package.json": "{\"name\":\"@fixture/multicast\",\"version\":\"1.0.0\",\"type\":\"module\",\"exports\":{\".\":{\"import\":\"./index.mjs\",\"require\":\"./wrong.cjs\"}}}\n",
+        "node_modules/@fixture/multicast/index.mjs": "export {multicast} from './fan.mjs';\n",
+        "node_modules/@fixture/multicast/fan.mjs": "import {ReadableStream as R} from 'node:stream/web';export function multicast(values){const original=R.from(values);return {original,branches:original.tee()};}\n",
+        "node_modules/@fixture/multicast/wrong.cjs": "throw Error('wrong conditional export');\n"
+      },
+      "expected": {
+        "stdout": "TEE_ESM_COMPLETE 3 true true\n", "stderr": "", "exit_code": 0,
+        "files": {"values.json":"[\"red\",\"green\",\"blue\"]\n","unexpected.txt":null}
+      }
+    },
+    {
+      "id": "tee-nested-package-cleanup-failure",
+      "category": "stream-integration",
+      "description": "Three downstream cancellations reach the original once in branch order, and a falsy asynchronous cleanup failure reaches all cancelling consumers.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "require('./multicast.cjs')().then(result=>console.log('TEE_CANCEL_COMPLETE',result.join(',')));\n",
+        "multicast.cjs": "const fs=require('node:fs');const {ReadableStream:R}=require('node:stream/web');module.exports=async function(){let count=0;const original=new R({cancel(reasons){count++;fs.writeFileSync('cleanup.json',JSON.stringify(reasons)+'\\n');return Promise.reject(false);}});const [left,right]=original.tee();const [cache,preview]=left.tee();function outcome(p){return p.then(()=>false,error=>error===false);}const a=outcome(cache.cancel('cache'));const r=outcome(right.cancel('primary'));const b=outcome(preview.cancel('preview'));const values=await Promise.all([a,b,r]);values.push(count);return values;};\n"
+      },
+      "expected": {
+        "stdout": "TEE_CANCEL_COMPLETE true,true,true,1\n", "stderr": "", "exit_code": 0,
+        "files": {"cleanup.json":"[[\"cache\",\"preview\"],\"primary\"]\n","unexpected.txt":null}
+      }
+    },
+    {
+      "id": "tee-package-isolates-sink-failure",
+      "category": "stream-integration",
+      "description": "One sink fails halfway through a duplicated source; the surviving sink still writes the whole input and the failed pipe retains its exact reason.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "require('fixture-independent-sinks')().then(value=>console.log('TEE_SURVIVOR_COMPLETE',value));\n",
+        "node_modules/fixture-independent-sinks/package.json": "{\"name\":\"fixture-independent-sinks\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-independent-sinks/index.cjs": "const fs=require('fs');const web=require('stream/web');module.exports=async function(){const values=JSON.parse(fs.readFileSync('input.json','utf8'));let n=0;const original=new web.ReadableStream({pull(c){c.enqueue(values[n++]);if(n===values.length)c.close();}});const [optional,required]=original.tee();const parts=[];const failure=optional.pipeTo(new web.WritableStream({write(value){if(value==='b')throw false;}})).then(()=>false,error=>error===false);await required.pipeTo(new web.WritableStream({write(value){parts.push(value);},close(){fs.writeFileSync('survived.txt',parts.join('\\n')+'\\n');}}));return await failure;};\n",
+        "input.json": "[\"a\",\"b\",\"c\"]\n"
+      },
+      "expected": {
+        "stdout": "TEE_SURVIVOR_COMPLETE true\n", "stderr": "", "exit_code": 0,
+        "files": {"survived.txt":"a\nb\nc\n","discarded.txt":null,"input.json":"[\"a\",\"b\",\"c\"]\n"}
+      }
+    },
+    {
+      "id": "tee-esm-fragmented-utf8-consumers",
+      "category": "stream-integration",
+      "description": "A byte-fragment source is duplicated into incremental text consumption and exact binary reconstruction through ESM package boundaries.",
+      "entry": "main.mjs",
+      "files": {
+        "main.mjs": "import {split} from './source.mjs';import {text as consumeText} from 'node:stream/consumers';import {writeFileSync as write} from 'node:fs';const pair=split();(async function(){const decoded=consumeText(pair[0]);const parts=[];for await(const bytes of pair[1])parts.push(bytes);const raw=Buffer.concat(parts);write('bytes.txt',raw);write('text.txt',await decoded);console.log('TEE_UTF8_COMPLETE',raw.length);})();\n",
+        "source.mjs": "import {ReadableStream as R} from 'node:stream/web';import {readFileSync as read} from 'node:fs';export function split(){const bytes=read('input.txt');let n=0;return new R({pull(c){if(n===bytes.length){c.close();return;}c.enqueue(bytes.subarray(n,n+1));n++;}}).tee();}\n",
+        "input.txt": "A😀é\n"
+      },
+      "expected": {
+        "stdout": "TEE_UTF8_COMPLETE 8\n", "stderr": "", "exit_code": 0,
+        "files": {"bytes.txt":"A😀é\n","text.txt":"A😀é\n","input.txt":"A😀é\n","unexpected.txt":null}
+      }
+    }
+  ]
+}
