@@ -1,0 +1,84 @@
+{
+  "schema_version": "franken-node/project-compat-corpus/v1",
+  "description": "Package-level consumers of the engine-owned util.parseEnv factory. Run scripts/project_compat_runner.py --corpus fixtures/compatibility/projects/dotenv.corpus.json --bin target/release/franken-node --node node --bun bun --artifacts-dir /tmp/franken-dotenv-001. Captured inputs only; no install, environment mutation, shell execution or native fallback.",
+  "cases": [
+    {
+      "id": "commonjs-package-dotenv-layers",
+      "category": "configuration-integration",
+      "description": "A CommonJS package reads two explicit configuration files, merges parsed strings and writes the exact application configuration through the ordinary filesystem facade.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const fs = require('node:fs'); const load = require('fixture-config'); const config = load(['.env', '.env.local']); fs.writeFileSync('config.json', JSON.stringify(config) + '\\n'); console.log(config.APP, config.PORT, typeof config.PORT, config.MESSAGE.split('\\n').length);\n",
+        "node_modules/fixture-config/package.json": "{\"name\":\"fixture-config\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-config/index.cjs": "const fs = require('node:fs'); const { parseEnv } = require('node:util'); module.exports = function (paths) { const merged = {}; for (const path of paths) Object.assign(merged, parseEnv(fs.readFileSync(path, 'utf8'))); return merged; };\n",
+        ".env": "export APP=franken\nPORT=3000\nMESSAGE=\"first\\nsecond # literal\"\nEMPTY=\nLITERAL=${HOME}\n",
+        ".env.local": "PORT=4000 # local override\nAPP=package-config\n"
+      },
+      "expected": {
+        "stdout": "package-config 4000 string 2\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "config.json": "{\"APP\":\"package-config\",\"EMPTY\":\"\",\"LITERAL\":\"${HOME}\",\"MESSAGE\":\"first\\nsecond # literal\",\"PORT\":\"4000\"}\n",
+          ".env.local": "PORT=4000 # local override\nAPP=package-config\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "esm-package-dotenv-conditional-export",
+      "category": "configuration-integration",
+      "description": "A scoped package selects its ESM export, re-exports parseEnv through a barrel, and preserves multiline quoted data and CRLF normalization without evaluating shell-like text.",
+      "entry": "main.mjs",
+      "files": {
+        "main.mjs": "import { readFileSync, writeFileSync } from 'node:fs'; import { parseEnv, mode } from '@fixture/config'; const value = parseEnv(readFileSync('app.env', 'utf8')); writeFileSync('result.json', JSON.stringify(value) + '\\n'); console.log(mode, JSON.stringify(value.MESSAGE), value.COMMAND, value.RAW);\n",
+        "node_modules/@fixture/config/package.json": "{\"name\":\"@fixture/config\",\"version\":\"1.0.0\",\"exports\":{\".\":{\"import\":\"./index.mjs\",\"require\":\"./wrong.cjs\"}}}\n",
+        "node_modules/@fixture/config/index.mjs": "export { parseEnv } from './util.mjs'; export const mode = 'esm';\n",
+        "node_modules/@fixture/config/util.mjs": "export { parseEnv } from 'node:util';\n",
+        "node_modules/@fixture/config/wrong.cjs": "throw new Error('wrong conditional export');\n",
+        "app.env": "MESSAGE=\"first\r\nsecond\"\r\nCOMMAND='$(never execute)'\r\nRAW=`${UNCHANGED}`\r\n"
+      },
+      "expected": {
+        "stdout": "esm \"first\\nsecond\" $(never execute) ${UNCHANGED}\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "result.json": "{\"COMMAND\":\"$(never execute)\",\"MESSAGE\":\"first\\nsecond\",\"RAW\":\"${UNCHANGED}\"}\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "package-dotenv-cli-overrides",
+      "category": "configuration-integration",
+      "description": "The same package composes parseEnv defaults with explicit parseArgs arguments, including a negative boolean, repeated values and an option terminator.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const run = require('fixture-config-cli'); const first = run(require('node:fs').readFileSync('cli.env', 'utf8'), ['--no-color', '-talpha', '-t', 'beta', '--port=9000', '--', '--literal']); console.log(JSON.stringify(first.values)); console.log(JSON.stringify(first.positionals)); console.log(first.tokens.map(token => token.index).join(',')); console.log(JSON.stringify(run('PORT=7000\\nCOLOR=false', []).values));\n",
+        "node_modules/fixture-config-cli/package.json": "{\"name\":\"fixture-config-cli\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-config-cli/index.cjs": "const { parseEnv, parseArgs } = require('util'); module.exports = function (content, args) { const env = parseEnv(content); return parseArgs({args: args, allowNegative: true, allowPositionals: true, tokens: true, options: {color: {type: 'boolean', default: env.COLOR === 'true'}, port: {type: 'string', default: env.PORT}, tag: {type: 'string', short: 't', multiple: true}}}); };\n",
+        "cli.env": "PORT=8080\nCOLOR=true\n"
+      },
+      "expected": {
+        "stdout": "{\"color\":false,\"tag\":[\"alpha\",\"beta\"],\"port\":\"9000\"}\n[\"--literal\"]\n0,1,2,4,5,6\n{\"color\":false,\"port\":\"7000\"}\n",
+        "stderr": "",
+        "exit_code": 0
+      }
+    },
+    {
+      "id": "esm-dotenv-validation-and-isolation",
+      "category": "configuration-integration",
+      "description": "Named imports remain bound to the shared factory despite guest global shadows; non-string validation, prototype-sensitive keys and consecutive independent parses survive a dependency boundary.",
+      "entry": "main.mjs",
+      "files": {
+        "main.mjs": "import { run } from './config.mjs'; console.log(JSON.stringify(run()));\n",
+        "config.mjs": "import { parseEnv as parse } from 'node:util'; const Object = 'shadow'; const String = 'shadow'; export function run() { const first = parse('__proto__=text\\nconstructor=ordinary\\nZ=last\\nA=first'); let code; try { parse(42); } catch (error) { code = error.name + ':' + error.code; } const next = parse('A=second'); first.A = 'changed'; return [globalThis.Object.getPrototypeOf(first) === globalThis.Object.prototype, globalThis.Object.prototype.hasOwnProperty.call(first, '__proto__'), first.constructor, globalThis.Object.keys(first).join(','), next.A, code]; }\n"
+      },
+      "expected": {
+        "stdout": "[true,false,\"ordinary\",\"A,Z,constructor\",\"second\",\"TypeError:ERR_INVALID_ARG_TYPE\"]\n",
+        "stderr": "",
+        "exit_code": 0
+      }
+    }
+  ]
+}
