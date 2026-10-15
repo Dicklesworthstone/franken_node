@@ -530,6 +530,9 @@ pub fn verify_incident_bundle(
     // hashes and counts to a verified replay until their structure is checked.
     structure::verify_structure(&object)?;
     let native_capture = native_capture::verify(&object["initial_state_snapshot"])?;
+    native_capture::verify_terminal_events(
+        &object["initial_state_snapshot"], timeline, native_capture.as_ref(),
+    )?;
 
     Ok(VerifiedIncidentBundle {
         bundle_id: string_field(&object, "bundle_id")?.to_string(),

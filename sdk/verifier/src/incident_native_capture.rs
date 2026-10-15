@@ -5,6 +5,9 @@
 //! outer duplicate-key checks cannot see duplicate members inside that string.
 //! This module checks its own envelope/digest and terminal declaration, not IR
 //! correctness, provider outcomes, cleanup certification or replayability.
+//! Run references and terminal events must agree with the capture when present.
+//! These are consistency checks on signed assertions, not independent signature
+//! verification of an original run receipt that the bundle does not contain.
 
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -37,6 +40,15 @@ pub enum CapturedNativeTerminalState {
     Completed,
     UncaughtException,
     EngineFailure,
+}
+
+impl CapturedNativeTerminalState {
+    fn is_failure(self) -> bool {
+        match self {
+            Self::Completed => false,
+            Self::UncaughtException | Self::EngineFailure => true,
+        }
+    }
 }
 
 /// Metadata derived from a capture carried by an authenticated incident bundle.
@@ -161,6 +173,90 @@ fn terminal(payload: &Value) -> Result<CapturedNativeTerminalState> {
     Ok(state)
 }
 
+fn run_context(initial: &Value) -> Result<Option<(&str, &str)>> {
+    if initial.get("run_receipt_id").is_none() && initial.get("run_receipt_hash").is_none() {
+        return Ok(None);
+    }
+    let id = nonblank(&initial["run_receipt_id"], ".binding.run_receipt_id")?;
+    let hash = nonblank(&initial["run_receipt_hash"], ".binding.run_receipt_hash")?;
+    Ok(Some((id, hash)))
+}
+
+fn run_failure(initial: &Value) -> Result<Option<&str>> {
+    initial.get("execution_failure")
+        .map(|value| nonblank(value, ".binding.execution_failure"))
+        .transpose()
+}
+
+fn bind_run_context(initial: &Value, payload: &Value, state: CapturedNativeTerminalState) -> Result<()> {
+    let context = run_context(initial)?;
+    let failure = run_failure(initial)?;
+    // Operator-authored captures need not claim a run receipt. Once a run is
+    // named, however, its failure marker and the native declaration must agree.
+    // A completed process can have a nonzero exit code: never infer failure
+    // from exit_code, stderr, or text resembling an engine diagnostic.
+    if (context.is_some() && state.is_failure() != failure.is_some())
+        || (failure.is_some() && !state.is_failure())
+    {
+        return Err(invalid(".binding.execution_failure", "run context disagrees with captured terminal state"));
+    }
+    if let Some(trace) = initial.get("trace_id") {
+        if nonblank(trace, ".binding.trace_id")? != payload["expected"]["trace_id"].as_str().unwrap_or_default() {
+            return Err(invalid(".binding.trace_id", "run context names a different execution trace"));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn verify_terminal_events(
+    initial: &Value,
+    timeline: &[Value],
+    capture: Option<&VerifiedNativeCaptureMetadata>,
+) -> Result<()> {
+    let mut terminals = 0_usize;
+    for event in timeline {
+        let payload = &event["payload"];
+        for (field, failed) in [("native_execution_completed", false), ("native_execution_failed", true)] {
+            let Some(marker) = payload.get(field) else { continue; };
+            terminals += 1;
+            if terminals > 1 {
+                return Err(invalid(".binding.terminal_event", "multiple native terminal events"));
+            }
+            let capture = capture.ok_or_else(|| invalid(".binding.terminal_event", "native terminal event has no capture"))?;
+            let (id, hash) = run_context(initial)?
+                .ok_or_else(|| invalid(".binding.terminal_event", "native terminal event has no run context"))?;
+            let fields: &[&str] = if failed {
+                &["run_receipt_id", "run_receipt_hash", "payload_sha256", "execution_failure"]
+            } else {
+                &["run_receipt_id", "run_receipt_hash", "payload_sha256"]
+            };
+            let marker = exact(marker, ".binding.terminal_event", fields, &[])?;
+            if event["event_type"].as_str() != Some("state_change")
+                || failed != capture.captured_terminal_state.is_failure()
+                || text(&marker["run_receipt_id"], ".binding.terminal_event.run_receipt_id")? != id
+                || !ct_str_eq(text(&marker["run_receipt_hash"], ".binding.terminal_event.run_receipt_hash")?, hash)
+                || !ct_str_eq(text(&marker["payload_sha256"], ".binding.terminal_event.payload_sha256")?, &capture.payload_sha256)
+            {
+                return Err(invalid(".binding.terminal_event", "terminal event disagrees with captured run"));
+            }
+            if failed && Some(text(&marker["execution_failure"], ".binding.terminal_event.execution_failure")?) != run_failure(initial)? {
+                return Err(invalid(".binding.terminal_event.execution_failure", "terminal event reports a different run failure"));
+            }
+        }
+    }
+    if capture.is_some() && run_context(initial)?.is_some() {
+        if let Some(count) = initial.get("effect_count") {
+            let count = count.as_u64().ok_or_else(|| invalid(".binding.effect_count", "expected unsigned effect count"))?;
+            // The product represents a run with no host effects using one
+            // state event. It must not silently vanish or become a fake effect.
+            if count == 0 && terminals != 1 {
+                return Err(invalid(".binding.terminal_event", "zero-effect run requires one native terminal event"));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn verify(initial: &Value) -> Result<Option<VerifiedNativeCaptureMetadata>> {
     let Some(capture) = initial.get("native_replay") else { return Ok(None); };
     let envelope = exact(capture, "", ENVELOPE_FIELDS, &[])?;
@@ -212,6 +308,7 @@ pub(super) fn verify(initial: &Value) -> Result<Option<VerifiedNativeCaptureMeta
         }
     }
     let captured_terminal_state = terminal(&payload)?;
+    bind_run_context(initial, &payload, captured_terminal_state)?;
     Ok(Some(VerifiedNativeCaptureMetadata {
         payload_sha256: digest,
         payload_bytes: raw.len(),
@@ -364,5 +461,163 @@ mod tests {
         value["expected"]["reason"]["kind"] = json!(secret);
         let error = verify(&captured(&value)).unwrap_err();
         assert!(!format!("{error:?}: {error}").contains(secret));
+    }
+
+    fn with_run_context(state: &str) -> Value {
+        let mut initial = captured(&payload(state));
+        initial["run_receipt_id"] = json!("run-1");
+        initial["run_receipt_hash"] = json!("a".repeat(64));
+        initial["trace_id"] = json!("trace-1");
+        if state != "completed" {
+            initial["execution_failure"] = json!("original wrapper diagnostic");
+        }
+        initial
+    }
+
+    fn terminal_event(initial: &Value, failed: bool) -> Value {
+        let mut marker = json!({
+            "run_receipt_id":initial["run_receipt_id"],
+            "run_receipt_hash":initial["run_receipt_hash"],
+            "payload_sha256":initial["native_replay"]["payload_sha256"]
+        });
+        if failed { marker["execution_failure"] = initial["execution_failure"].clone(); }
+        let mut payload = json!({});
+        payload[if failed { "native_execution_failed" } else { "native_execution_completed" }] = marker;
+        json!({"event_type":"state_change","payload":payload})
+    }
+
+    #[test]
+    fn native_run_context_checks_failure_kind_and_trace_without_relabeling_exits() {
+        for state in ["completed", "uncaught_exception", "engine_failure"] {
+            let initial = with_run_context(state);
+            assert!(verify(&initial).is_ok());
+            let mut wrong = initial.clone();
+            if state == "completed" { wrong["execution_failure"] = json!("failed"); }
+            else { wrong.as_object_mut().unwrap().remove("execution_failure"); }
+            assert!(verify(&wrong).is_err());
+            let mut wrong = initial.clone();
+            wrong["trace_id"] = json!("different");
+            assert!(verify(&wrong).is_err());
+            for field in ["run_receipt_id", "run_receipt_hash"] {
+                let mut wrong = initial.clone();
+                wrong.as_object_mut().unwrap().remove(field);
+                assert!(verify(&wrong).is_err());
+            }
+        }
+        let mut completed = payload("completed");
+        completed["expected"]["exit_code"] = json!(1);
+        let mut initial = with_run_context("completed");
+        initial["native_replay"] = captured(&completed)["native_replay"].clone();
+        assert_eq!(verify(&initial).unwrap().unwrap().captured_terminal_state, CapturedNativeTerminalState::Completed);
+    }
+
+    #[test]
+    fn native_terminal_events_bind_exact_digest_receipt_and_failure() {
+        for state in ["completed", "uncaught_exception", "engine_failure"] {
+            let mut initial = with_run_context(state);
+            initial["effect_count"] = json!(0);
+            let metadata = verify(&initial).unwrap().unwrap();
+            let event = terminal_event(&initial, state != "completed");
+            assert!(verify_terminal_events(&initial, &[event.clone()], Some(&metadata)).is_ok());
+            assert!(verify_terminal_events(&initial, &[], Some(&metadata)).is_err());
+            assert!(verify_terminal_events(&initial, &[event.clone(), event.clone()], Some(&metadata)).is_err());
+            assert!(verify_terminal_events(&initial, &[event.clone()], None).is_err());
+            let field = if state == "completed" { "native_execution_completed" } else { "native_execution_failed" };
+            for key in ["run_receipt_id", "run_receipt_hash", "payload_sha256"] {
+                let mut wrong = event.clone();
+                wrong["payload"][field][key] = json!("different");
+                assert!(verify_terminal_events(&initial, &[wrong], Some(&metadata)).is_err(), "{key}");
+            }
+            let mut wrong = event.clone();
+            wrong["event_type"] = json!("external_signal");
+            assert!(verify_terminal_events(&initial, &[wrong], Some(&metadata)).is_err());
+            if state != "completed" {
+                let mut wrong = event.clone();
+                wrong["payload"][field]["execution_failure"] = json!("another failure");
+                assert!(verify_terminal_events(&initial, &[wrong], Some(&metadata)).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn native_event_markers_cannot_claim_the_opposite_terminal_state() {
+        for state in ["completed", "uncaught_exception", "engine_failure"] {
+            let initial = with_run_context(state);
+            let metadata = verify(&initial).unwrap().unwrap();
+            let wrong = terminal_event(&initial, state == "completed");
+            assert!(verify_terminal_events(&initial, &[wrong], Some(&metadata)).is_err());
+        }
+    }
+
+    fn signing_key() -> ed25519_dalek::SigningKey {
+        let mut seed = [0_u8; 32];
+        hex::decode_to_slice("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60", &mut seed).unwrap();
+        ed25519_dalek::SigningKey::from_bytes(&seed)
+    }
+
+    fn signed_bundle(initial: Value) -> Vec<u8> {
+        use ed25519_dalek::Signer;
+        use super::super::{incident_bundle_canonical_digest, incident_bundle_signature_payload};
+        // The original timeline/chunks and their deterministic identity remain
+        // the actual committed CLI fixture, not a synthetic replacement graph.
+        let mut bundle: Value = serde_json::from_slice(include_bytes!(
+            "../tests/fixtures/cli_incident_bundle/INC-SDK-FIXTURE-1.fnbundle"
+        )).unwrap();
+        bundle["initial_state_snapshot"] = initial;
+        bundle["manifest"]["decision_sequence_hash"] = json!(incident_bundle_canonical_digest(&json!({
+            "timeline":bundle["timeline"], "initial_state_snapshot":bundle["initial_state_snapshot"],
+            "policy_version":bundle["policy_version"]
+        }), "$").unwrap());
+        let mut view = bundle.as_object().unwrap().clone();
+        view.remove("signature");
+        view.remove("integrity_hash");
+        let integrity = incident_bundle_canonical_digest(&Value::Object(view), "$").unwrap();
+        let signed = incident_bundle_signature_payload(&integrity);
+        let key = signing_key();
+        let signature = key.sign(&signed);
+        key.verifying_key().verify_strict(&signed, &signature).unwrap();
+        bundle["integrity_hash"] = json!(integrity);
+        bundle["signature"]["signature_hex"] = json!(hex::encode(signature.to_bytes()));
+        bundle["signature"]["signed_payload_sha256"] = json!(hex::encode(Sha256::digest(&signed)));
+        serde_json::to_vec(&bundle).unwrap()
+    }
+
+    #[test]
+    fn public_sdk_verification_requires_external_anchor_before_capture_metadata() {
+        use super::super::verify_incident_bundle;
+        for state in ["completed", "uncaught_exception", "engine_failure"] {
+            let raw = signed_bundle(with_run_context(state));
+            let verified = verify_incident_bundle(&raw, &signing_key().verifying_key()).unwrap();
+            assert!(verified.native_capture.is_some());
+            assert_eq!(verified.event_count, 3);
+            let stranger = ed25519_dalek::SigningKey::from_bytes(&[0x12; 32]);
+            assert!(matches!(verify_incident_bundle(&raw, &stranger.verifying_key()), Err(IncidentBundleError::SignerNotTrusted)));
+        }
+    }
+
+    #[test]
+    fn resigned_capture_contradictions_fail_after_valid_signature_and_outer_structure() {
+        use super::super::verify_incident_bundle;
+        let original = with_run_context("engine_failure");
+        for change in 0..5 {
+            let mut invalid = original.clone();
+            match change {
+                0 => invalid["native_replay"]["payload_sha256"] = json!("0".repeat(64)),
+                1 => { invalid.as_object_mut().unwrap().remove("execution_failure"); }
+                2 => invalid["trace_id"] = json!("wrong-trace"),
+                3 => invalid["native_replay"]["schema_version"] = json!("unsupported"),
+                _ => {
+                    let raw = invalid["native_replay"]["payload_json"].as_str().unwrap()
+                        .replacen("\"trace_id\":", "\"trace_id\":\"erased\",\"trace_id\":", 1);
+                    invalid["native_replay"] = captured_raw(raw)["native_replay"].clone();
+                }
+            }
+            // Recompute both outer hashes and an actual Ed25519 signature for
+            // the contradiction, so rejection is attributable to native checks.
+            let raw = signed_bundle(invalid);
+            assert!(matches!(verify_incident_bundle(&raw, &signing_key().verifying_key()),
+                Err(IncidentBundleError::Structure { ref path, .. })
+                    if path.starts_with("$.initial_state_snapshot.native_replay")), "mutation {change}");
+        }
     }
 }
