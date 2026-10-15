@@ -95,7 +95,7 @@ class DiagnosticsProjectTests(PipelineProjectTests):
 class RecursiveReaddirProjectTests(PipelineProjectTests):
     # Nested package discovery must produce complete files, not a shallow list.
     corpus_path = ROOT / 'fixtures/compatibility/projects/fs_recursive_readdir.corpus.json'
-    case_count = 5
+    case_count = 9
 
 
 class WindowsPathProjectTests(PipelineProjectTests):

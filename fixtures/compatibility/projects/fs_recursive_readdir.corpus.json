@@ -123,6 +123,84 @@
           "unexpected.txt": null
         }
       }
+    },
+    {
+      "id": "callback-dir-package-manifest-index",
+      "category": "filesystem-integration",
+      "description": "A callback-style package processes workspace manifests from one recursive directory cursor and publishes only after close completes.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const fs=require('node:fs');\nrequire('fixture-cursor-index')('packages',(error,rows)=>{if(error)throw error;fs.writeFileSync('index.json',JSON.stringify(rows)+'\\n');console.log('CALLBACK_INDEX_COMPLETE',rows.length);});\n",
+        "node_modules/fixture-cursor-index/package.json": "{\"name\":\"fixture-cursor-index\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-cursor-index/index.cjs": "const fs=require('fs');\nmodule.exports=function(root,done){fs.opendir(root,{recursive:true},(error,dir)=>{if(error){done(error);return;}const rows=[];function next(error,entry){if(error){dir.close(()=>done(error));return;}if(entry===null){dir.close(error=>done(error,rows.sort()));return;}try{if(entry.isFile()&&entry.name==='package.json'){const manifest=JSON.parse(fs.readFileSync(entry.parentPath+'/'+entry.name,'utf8'));rows.push(manifest.name+'@'+manifest.version);}}catch(error){dir.close(()=>done(error));return;}dir.read(next);}dir.read(next);});};\n",
+        "packages/alpha/package.json": "{\"name\":\"alpha\",\"version\":\"1.0.0\"}\n",
+        "packages/.tools/kit/package.json": "{\"name\":\"kit\",\"version\":\"2.0.0\"}\n",
+        "packages/group/béta/package.json": "{\"name\":\"béta\",\"version\":\"3.0.0\"}\n"
+      },
+      "expected": {
+        "stdout": "CALLBACK_INDEX_COMPLETE 3\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {"index.json": "[\"alpha@1.0.0\",\"béta@3.0.0\",\"kit@2.0.0\"]\n", "unexpected.txt": null}
+      }
+    },
+    {
+      "id": "callback-dir-esm-shared-cursor",
+      "category": "filesystem-integration",
+      "description": "An ESM package reexports promisified callback opening; the application mixes callback and Promise reads before closing and publishes no duplicate entries.",
+      "entry": "main.mjs",
+      "files": {
+        "main.mjs": "import {open} from '@fixture/cursor';\nimport {promisify} from 'node:util';\nimport {writeFile} from 'node:fs/promises';\nconst dir=await open('inputs');const names=[];\nconst first=await promisify(dir.read).call(dir);names.push(first.name);\nlet entry;while((entry=await dir.read())!==null)names.push(entry.name);\nawait promisify(dir.close).call(dir);\nlet closed=false;try{dir.read();}catch(error){closed=error.code==='ERR_DIR_CLOSED';}\nif(!closed)throw Error('directory still open');\nawait writeFile('entries.txt',names.sort().join('|')+'\\n');\nconsole.log('ESM_CURSOR_COMPLETE',names.length,closed);\n",
+        "node_modules/@fixture/cursor/package.json": "{\"name\":\"@fixture/cursor\",\"version\":\"1.0.0\",\"type\":\"module\",\"exports\":\"./index.mjs\"}\n",
+        "node_modules/@fixture/cursor/index.mjs": "import {opendir} from 'node:fs';import {promisify} from 'node:util';export const open=promisify(opendir);\n",
+        "inputs/a.txt": "a\n",
+        "inputs/b.txt": "b\n",
+        "inputs/é.txt": "é\n"
+      },
+      "expected": {
+        "stdout": "ESM_CURSOR_COMPLETE 3 true\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {"entries.txt": "a.txt|b.txt|é.txt\n", "unexpected.txt": null}
+      }
+    },
+    {
+      "id": "callback-dir-parse-failure-cleanup",
+      "category": "filesystem-integration",
+      "description": "An application-level parse failure closes a package-owned callback directory, leaves the published index intact, and permits a subsequent scan.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const fs=require('fs');const scan=require('fixture-safe-cursor');\nscan('bad',(error,closed)=>{if(!(error instanceof SyntaxError)||!closed)throw Error('parse failure or cleanup lost');scan('good',(error,closed,names)=>{if(error)throw error;if(!closed)throw Error('cursor not closed');fs.writeFileSync('recovered.txt',names.sort().join('|')+'\\n');console.log('CURSOR_RECOVERY_COMPLETE',names.length);});});\n",
+        "node_modules/fixture-safe-cursor/package.json": "{\"name\":\"fixture-safe-cursor\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-safe-cursor/index.cjs": "const fs=require('fs');module.exports=function(root,done){fs.opendir(root,(error,dir)=>{if(error){done(error);return;}const names=[];function finish(error){dir.close(closeError=>{let closed=false;try{dir.read();}catch(e){closed=e.code==='ERR_DIR_CLOSED';}done(error||closeError,closed,names);});}function next(error,entry){if(error){finish(error);return;}if(entry===null){finish(null);return;}try{names.push(JSON.parse(fs.readFileSync(root+'/'+entry.name,'utf8')).name);}catch(error){finish(error);return;}dir.read(next);}dir.read(next);});};\n",
+        "bad/broken.json": "not JSON\n",
+        "good/entry.json": "{\"name\":\"recovered\"}\n",
+        "published.txt": "previous valid index\n"
+      },
+      "expected": {
+        "stdout": "CURSOR_RECOVERY_COMPLETE 1\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {"published.txt": "previous valid index\n", "recovered.txt": "recovered\n", "unexpected.txt": null}
+      }
+    },
+    {
+      "id": "callback-dir-early-close-package",
+      "category": "filesystem-integration",
+      "description": "A callback package stops a recursive cursor at its first directory, closes without entering the subtree, and cannot read again after completion.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const fs=require('fs');require('fixture-first-directory')('tree',(error,name)=>{if(error)throw error;fs.writeFileSync('first.txt',name+'\\n');console.log('EARLY_CURSOR_COMPLETE',name);});\n",
+        "node_modules/fixture-first-directory/package.json": "{\"name\":\"fixture-first-directory\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-first-directory/index.cjs": "const fs=require('fs');module.exports=function(root,done){fs.opendir(root,{recursive:true},(error,dir)=>{if(error){done(error);return;}dir.read((error,entry)=>{if(error){dir.close(()=>done(error));return;}if(!entry.isDirectory())throw Error('expected directory');dir.close(error=>{if(error){done(error);return;}let closed=false;try{dir.read(()=>{});}catch(e){closed=e.code==='ERR_DIR_CLOSED';}if(!closed)throw Error('closed cursor readable');done(null,entry.name);});});});};\n",
+        "tree/private/nested/data.txt": "not traversed\n"
+      },
+      "expected": {
+        "stdout": "EARLY_CURSOR_COMPLETE private\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {"first.txt": "private\n", "unexpected.txt": null}
+      }
     }
   ]
 }
