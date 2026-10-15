@@ -2708,6 +2708,88 @@ fn process_shape_opt_in_runs_entrypoint_arguments_and_binds_the_grant_to_receipt
 }
 
 #[test]
+fn named_process_environment_allowlist_is_exact_and_replayable() {
+    const ALLOWED_NAME: &str = "FRANKEN_NODE_E2E_ALLOWED_ENV";
+    const ALLOWED_VALUE: &str = "captured-compat-value";
+    const UNLISTED_NAME: &str = "FRANKEN_NODE_E2E_UNLISTED_ENV";
+    const UNLISTED_VALUE: &str = "must-not-enter-guest-snapshot";
+
+    let dir = profile_selection_workspace(Some("balanced"));
+    std::fs::write(
+        dir.path().join("app.js"),
+        "void process.env.FRANKEN_NODE_E2E_ALLOWED_ENV;\n\
+         void process.env.FRANKEN_NODE_E2E_UNLISTED_ENV;\n\
+         console.log('environment-snapshot-complete');\n",
+    )
+    .expect("write environment fixture");
+
+    let config_path = dir.path().join("franken_node.toml");
+    let mut config: frankenengine_node::config::Config =
+        toml::from_str(&std::fs::read_to_string(&config_path).expect("read initialized config"))
+            .expect("parse initialized config");
+    config
+        .runtime
+        .environment_allowlist
+        .insert(ALLOWED_NAME.to_string());
+    std::fs::write(
+        &config_path,
+        config.to_toml().expect("serialize environment policy"),
+    )
+    .expect("write environment policy");
+
+    let output = Command::new(franken_node_bin())
+        .args([
+            "run",
+            "app.js",
+            "--policy",
+            "balanced",
+            "--runtime",
+            "franken-engine",
+            "--engine-bin",
+            franken_node_bin(),
+            "--capture-replay",
+            "--json",
+        ])
+        .env(ALLOWED_NAME, ALLOWED_VALUE)
+        .env(UNLISTED_NAME, UNLISTED_VALUE)
+        .env_remove("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE")
+        .current_dir(dir.path())
+        .output()
+        .expect("run allowlisted environment fixture");
+    let outcome = RunOutcome {
+        exit_code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    };
+    assert_eq!(outcome.exit_code, Some(0), "{}", outcome.stderr);
+
+    let report = last_json_document(&outcome.stdout);
+    assert_eq!(
+        report["dispatch"]["captured_output"]["stdout"],
+        "environment-snapshot-complete\n"
+    );
+    let payload_json = report["dispatch"]["native_replay"]["payload_json"]
+        .as_str()
+        .expect("native replay payload");
+    let payload: Value = serde_json::from_str(payload_json).expect("typed replay payload JSON");
+    assert!(
+        payload["package"]["capabilities"]
+            .as_array()
+            .is_some_and(|capabilities| capabilities.iter().any(|value| value == "env_read")),
+        "explicit environment policy must add exactly the engine EnvRead authority"
+    );
+    let transcript = serde_json::to_string(&payload["host_effect_transcript"])
+        .expect("serialize captured host transcript");
+    assert!(transcript.contains(ALLOWED_NAME), "{transcript}");
+    assert!(transcript.contains(ALLOWED_VALUE), "{transcript}");
+    assert!(transcript.contains(UNLISTED_NAME), "{transcript}");
+    assert!(
+        !transcript.contains(UNLISTED_VALUE),
+        "unlisted host values must never enter guest/replay inputs: {transcript}"
+    );
+}
+
+#[test]
 fn process_shape_opt_in_keeps_environment_aliases_and_computed_access_denied() {
     for source in [
         "console.log(process.env.PATH);\n",
