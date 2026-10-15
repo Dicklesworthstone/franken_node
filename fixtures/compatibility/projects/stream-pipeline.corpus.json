@@ -103,6 +103,40 @@
           "unexpected.txt": null
         }
       }
+    },
+    {
+      "id": "pipeline-generic-web-readable-package",
+      "category": "stream-integration",
+      "description": "Generic Duplex.from adopts a package Web readable as byte-mode input, preserving viewed bytes through a Node file pipeline.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const s=require('node:stream');const fs=require('node:fs');const source=require('fixture-web-bytes')();const input=s.Duplex.from(source);const output=fs.createWriteStream('bytes.txt');s.promises.pipeline(input,output).then(()=>console.log('GENERIC_PACKAGE',input.readableObjectMode,input.writable,source.locked,output.writableFinished));\n",
+        "node_modules/fixture-web-bytes/package.json": "{\"name\":\"fixture-web-bytes\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-web-bytes/index.cjs": "const {ReadableStream}=require('node:stream/web');module.exports=function(){return new ReadableStream({start(c){const bytes=new Uint8Array([99,65,66,67,88]);c.enqueue(bytes.subarray(1,4));c.enqueue(Buffer.from('\\n'));c.close();}});};\n"
+      },
+      "expected": {
+        "stdout": "GENERIC_PACKAGE false false true true\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {"bytes.txt": "ABC\n", "unexpected.txt": null}
+      }
+    },
+    {
+      "id": "pipeline-generic-web-transform-esm",
+      "category": "stream-integration",
+      "description": "Generic Duplex.from adopts a scoped ESM package's Web transform and retains its final flush before reporting file completion.",
+      "entry": "main.mjs",
+      "files": {
+        "main.mjs": "import {Duplex,Readable} from 'node:stream';import {pipeline} from 'node:stream/promises';import fs from 'node:fs';import {transform} from '@fixture/web-transform';const d=Duplex.from(transform);pipeline(Readable.from(['alpha\\n','beta\\n']),d,fs.createWriteStream('transformed.txt')).then(()=>console.log('GENERIC_ESM',d.readableObjectMode,d.writableObjectMode,transform.readable.locked,transform.writable.locked));\n",
+        "node_modules/@fixture/web-transform/package.json": "{\"name\":\"@fixture/web-transform\",\"version\":\"1.0.0\",\"type\":\"module\",\"exports\":{\".\":\"./index.mjs\"}}\n",
+        "node_modules/@fixture/web-transform/index.mjs": "import {TransformStream} from 'node:stream/web';export const transform=new TransformStream({transform(chunk,c){c.enqueue(Buffer.from(chunk).toString().toUpperCase());},flush(c){c.enqueue('END\\n');}});\n"
+      },
+      "expected": {
+        "stdout": "GENERIC_ESM false false true true\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {"transformed.txt": "ALPHA\nBETA\nEND\n", "unexpected.txt": null}
+      }
     }
   ]
 }

@@ -17,11 +17,11 @@ CORPUS = ROOT / 'fixtures/compatibility/projects/stream-pipeline.corpus.json'
 
 
 class PipelineProjectTests(unittest.TestCase):
-    def test_five_complete_projects_with_independent_file_expectations(self):
+    def test_seven_complete_projects_with_independent_file_expectations(self):
         corpus = json.loads(CORPUS.read_text(encoding='utf-8'))
         self.assertEqual(corpus['schema_version'], 'franken-node/project-compat-corpus/v1')
-        self.assertEqual(len(corpus['cases']), 5)
-        self.assertEqual(len({case['id'] for case in corpus['cases']}), 5)
+        self.assertEqual(len(corpus['cases']), 7)
+        self.assertEqual(len({case['id'] for case in corpus['cases']}), 7)
         self.assertTrue(all(len(case['files']) > 1 and case['expected']['files'] for case in corpus['cases']))
 
     @unittest.skipUnless(shutil.which('node'), 'requires a real Node reference')
