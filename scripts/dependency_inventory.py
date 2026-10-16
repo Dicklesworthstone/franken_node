@@ -1,4 +1,4 @@
-"""Bounded npm/Bun dependency inventory for the migration project scanner.
+"""Bounded npm/Bun/pnpm inventory for the migration project scanner.
 
 Read-only metadata analysis, not package installation, provenance verification,
 version-range satisfaction, or proof of the actual node_modules contents. Each
@@ -663,10 +663,16 @@ def scan_dependencies(project: Path, native: set[str], *,
     caller owns their byte budget; conflicting observations are never merged.
     """
     project = Path(project)
-    paths = [project / name for name in ("package-lock.json", "npm-shrinkwrap.json", "bun.lock", "bun.lockb")
+    paths = [project / name for name in ("package-lock.json", "npm-shrinkwrap.json", "bun.lock", "bun.lockb", "pnpm-lock.yaml")
              if os.path.lexists(project / name)]
     if len(paths) > 1:
         raise InventoryError("multiple lockfiles exist; select one authoritative inventory explicitly")
+    if paths and paths[0].name == "pnpm-lock.yaml":
+        if __package__:
+            from .pnpm_dependency_inventory import scan_pnpm_dependencies
+        else:
+            from pnpm_dependency_inventory import scan_pnpm_dependencies
+        return scan_pnpm_dependencies(project, native, additional_manifests=additional_manifests)
     bun = bool(paths and paths[0].name == "bun.lock")
     package = _read(project / "package.json", MAX_MANIFEST_BYTES)
     manifests = dict([("package.json", package or {}), *_workspace_manifests(project, package or {}, bun=bun)])
