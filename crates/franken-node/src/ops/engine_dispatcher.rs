@@ -8467,7 +8467,7 @@ impl EngineDispatcher {
                             Err("the captured failure's effects or console could not be authenticated".to_string())
                         } else {
                             capture.terminal_state().and_then(|state| {
-                                if state == crate::ops::native_replay::NativeReplayTerminalState::UncaughtException {
+                                if matches!(state, crate::ops::native_replay::NativeReplayTerminalState::UncaughtException | crate::ops::native_replay::NativeReplayTerminalState::EngineFailure) {
                                     Ok(())
                                 } else {
                                     Err("failed response carried a completed replay capture".to_string())
