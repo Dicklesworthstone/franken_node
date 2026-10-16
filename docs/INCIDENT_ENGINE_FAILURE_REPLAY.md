@@ -14,13 +14,16 @@ with the live orchestrator and its returned error. Only the typed primary error
 selects the stopping reason. Matching words in a guest exception, stderr, exit
 code or watchdog receipt cannot manufacture an engine failure.
 
-This is a library capture API. The native-session transport currently accepts
-only completed or uncaught-exception captures. `from_failed_execution` retains
-that exception-only contract, so existing `run --capture-replay` callers do not
-silently produce a terminal state their receiver rejects. Automatic CLI capture
-of engine stops requires the dispatcher to select `from_finalized_failure` and
-explicitly admit `EngineFailure` on its authenticated failed-response path.
-This change does not claim that integration is present.
+The run-facing `from_failed_execution` entrypoint now delegates every certified
+post-cell failure to `from_finalized_failure`. Existing `run --capture-replay`
+callers can therefore retain uncaught guest exceptions, capability denials, and
+instruction-budget exhaustion without inferring a stop from stderr, an exit
+code, or a watchdog. The capture and verifier schemas carry the terminal state
+explicitly as `uncaught_exception` or `engine_failure`.
+
+This does not broaden the accepted failure boundary: supervisor deadlines,
+external cancellation, panics, interrupted effects, and incomplete cleanup
+remain non-replayable.
 
 ## Required finalization
 

@@ -71,7 +71,7 @@ Under `franken-node`:
 - If the malicious behavior had already executed, `incident bundle` +
   `incident replay` integrity-verify the recorded bundle. Runs recorded with
   `--capture-replay` also support `incident replay --execute` for native guest
-  execution or a certified uncaught-exception prefix, using captured host-I/O
+  execution, a certified uncaught-exception prefix, or a finalized typed engine-stop prefix, using captured host-I/O
   and admitted process results. `incident counterfactual --policy strict` scores
   an alternative policy against the recorded evidence.
 

@@ -1271,14 +1271,11 @@ mod engine {
             orchestrator: &ExecutionOrchestrator,
             error: &OrchestratorError,
         ) -> Result<Self, String> {
-            // The native-session transport currently admits only this terminal
-            // state. Keep its existing contract until that transport explicitly
-            // opts into typed engine stops through from_finalized_failure.
-            if !matches!(error.primary_error(), OrchestratorError::Interpreter(
-                InterpreterError::UncaughtException { .. }
-            )) {
-                return Err("native failure replay supports only a certified uncaught guest exception".to_string());
-            }
+            // The finalized-failure encoder and replay/verifier schemas already
+            // distinguish uncaught guest exceptions from typed interpreter
+            // stops. Keep one capture boundary for all certified post-cell
+            // failures so run --capture-replay does not discard capability
+            // denials or instruction-budget exhaustion after cleanup succeeds.
             Self::from_finalized_failure(
                 package, orchestrator_config, runtime_config, ambient_authority,
                 process_argv, process_preparation, orchestrator, error,
@@ -2032,16 +2029,20 @@ mod engine {
 
         fn capture_stop(root: &Path, budget_stop: bool) -> NativeReplayCapture {
             let (package, config, runtime, orchestrator, error) = stopped_run(root, budget_stop);
-            // Existing native-session consumers have not opted into new wire
-            // states merely because a library can now capture them.
-            assert!(NativeReplayCapture::from_failed_execution(
+            let capture = NativeReplayCapture::from_failed_execution(
                 &package, &config, &runtime, AmbientAuthorityGrant::DenyAll,
                 &[], None, &orchestrator, &error,
-            ).is_err());
-            NativeReplayCapture::from_finalized_failure(
+            ).expect("capture the finalized native stop through the run-facing entrypoint");
+            assert_eq!(
+                capture.terminal_state().expect("typed terminal state"),
+                NativeReplayTerminalState::EngineFailure,
+            );
+            let explicit = NativeReplayCapture::from_finalized_failure(
                 &package, &config, &runtime, AmbientAuthorityGrant::DenyAll,
                 &[], None, &orchestrator, &error,
-            ).expect("capture the finalized native stop")
+            ).expect("capture the same finalized native stop explicitly");
+            assert_eq!(capture, explicit);
+            capture
         }
 
         #[test]

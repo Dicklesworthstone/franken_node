@@ -330,8 +330,9 @@ pub struct RunArgs {
     /// Retain the entry source, supplied arguments, process-metadata grant, and
     /// raw host-I/O results for offline native re-execution with
     /// `incident replay --execute`. Captured data may contain application
-    /// secrets. Supports completed native runs and certified
-    /// uncaught-exception prefixes; the original run's exit status is retained.
+    /// secrets. Supports completed native runs, certified uncaught-exception
+    /// prefixes, and finalized capability-denial/instruction-budget stops; the
+    /// original run's exit status is retained.
     #[arg(long)]
     pub capture_replay: bool,
 
