@@ -83,7 +83,7 @@ class CallbackFilesystemProjectTests(PipelineProjectTests):
 class PromiseFilesystemWriteProjectTests(PipelineProjectTests):
     # Exercise the shared descriptor writer without changing any prior cohort.
     corpus_path = ROOT / 'fixtures/compatibility/projects/fs_promise_writes.corpus.json'
-    case_count = 6
+    case_count = 10
 
 
 class DiagnosticsProjectTests(PipelineProjectTests):

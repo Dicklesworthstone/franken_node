@@ -107,6 +107,94 @@
           "unexpected.txt": null
         }
       }
+    },
+    {
+      "id": "file-web-package-text-pipeline",
+      "category": "filesystem-integration",
+      "description": "A CommonJS package returns a FileHandle byte stream to its caller's shared Web text pipeline. Asynchronous sink completion precedes the marker, and the borrowed descriptor is closed by its caller.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const acquire=require('fixture-file-source');const web=require('node:stream/web');const fs=require('node:fs/promises');\nasync function run(){const source=await acquire('input.txt');let finished=false;try{const same=source.stream instanceof web.ReadableStream;await source.stream.pipeThrough(new web.TextDecoderStream()).pipeThrough(new web.TransformStream({transform(text,controller){controller.enqueue(text.toUpperCase());}})).pipeTo(new web.WritableStream({async write(text){await fs.appendFile('result.txt',text);},async close(){await fs.writeFile('sink.closed','closed\\n');finished=true;}}));console.log('FILE_WEB_PIPE',same,finished,source.handle.fd>=0);}finally{await source.handle.close();}console.log('FILE_WEB_CLOSED',source.handle.fd);}run();\n",
+        "node_modules/fixture-file-source/package.json": "{\"name\":\"fixture-file-source\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-file-source/index.cjs": "const fs=require('fs/promises');module.exports=async function(path){const handle=await fs.open(path);return {handle,stream:handle.readableWebStream()};};\n",
+        "input.txt": "hé😀\nsecond\n"
+      },
+      "expected": {
+        "stdout": "FILE_WEB_PIPE true true true\nFILE_WEB_CLOSED -1\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "result.txt": "HÉ😀\nSECOND\n",
+          "sink.closed": "closed\n",
+          "input.txt": "hé😀\nsecond\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "file-web-esm-byob-manifest",
+      "category": "filesystem-integration",
+      "description": "A scoped ESM package decodes a Unicode manifest through three-byte BYOB views after a descriptor prefix read. Transferred caller storage and the shared cursor are checked before publishing exact JSON.",
+      "entry": "main.mjs",
+      "files": {
+        "main.mjs": "import {readManifest} from '@fixture/manifest-stream';import {writeFile} from 'node:fs/promises';\nconst result=await readManifest('input.txt');await writeFile('manifest.json',JSON.stringify(result)+'\\n');console.log('FILE_WEB_BYOB',result.prefix,result.value.name,result.transferred,result.openAtEnd,result.closed);\n",
+        "node_modules/@fixture/manifest-stream/package.json": "{\"name\":\"@fixture/manifest-stream\",\"version\":\"1.0.0\",\"type\":\"module\",\"exports\":\"./index.mjs\"}\n",
+        "node_modules/@fixture/manifest-stream/index.mjs": "import {open} from 'node:fs/promises';\nexport async function readManifest(path){const handle=await open(path);let result,reader;try{const prefix=(await handle.read(Buffer.alloc(2))).buffer.toString();reader=handle.readableWebStream().getReader({mode:'byob'});const decoder=new TextDecoder();let text='',transferred=true;for(;;){const input=new Uint8Array(3);const part=await reader.read(input,{min:2});transferred=transferred&&input.buffer.byteLength===0;text+=decoder.decode(part.value,{stream:true});if(part.done)break;}text+=decoder.decode();await reader.closed;reader.releaseLock();reader=undefined;result={prefix,value:JSON.parse(text),transferred,openAtEnd:handle.fd>=0};}finally{if(reader){await reader.cancel();reader.releaseLock();}await handle.close();}result.closed=handle.fd===-1;return result;}\n",
+        "input.txt": "##{\"name\":\"byte-app\",\"symbol\":\"é😀\"}\n"
+      },
+      "expected": {
+        "stdout": "FILE_WEB_BYOB ## byte-app true true true\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "manifest.json": "{\"prefix\":\"##\",\"value\":{\"name\":\"byte-app\",\"symbol\":\"é😀\"},\"transferred\":true,\"openAtEnd\":true,\"closed\":true}\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "file-web-package-cancel-cursor",
+      "category": "filesystem-integration",
+      "description": "A package cancels its borrowed Web reader after one four-byte demand; subsequent caller descriptor reads continue at the accepted cursor rather than after hidden whole-file prefetch.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const fs=require('fs/promises');const prefix=require('fixture-prefix-reader');\nasync function run(){const handle=await fs.open('input.txt');let result;try{const first=await prefix(handle);const open=handle.fd>=0;const next=(await handle.read(Buffer.alloc(4))).buffer.toString();result={first,next,open};}finally{await handle.close();}result.closed=handle.fd===-1;await fs.writeFile('cursor.json',JSON.stringify(result)+'\\n');console.log('FILE_WEB_CURSOR',result.first,result.next,result.open,result.closed);}run();\n",
+        "node_modules/fixture-prefix-reader/package.json": "{\"name\":\"fixture-prefix-reader\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-prefix-reader/index.cjs": "module.exports=async function(handle){const reader=handle.readableWebStream().getReader({mode:'byob'});try{return Buffer.from((await reader.read(new Uint8Array(4))).value).toString();}finally{await reader.cancel('prefix complete');reader.releaseLock();}};\n",
+        "input.txt": "ABCDEFGHIJKL"
+      },
+      "expected": {
+        "stdout": "FILE_WEB_CURSOR ABCD EFGH true true\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "cursor.json": "{\"first\":\"ABCD\",\"next\":\"EFGH\",\"open\":true,\"closed\":true}\n",
+          "input.txt": "ABCDEFGHIJKL",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "file-web-package-sink-failure",
+      "category": "filesystem-integration",
+      "description": "A file source fails downstream after an acknowledged write. Its borrowed handle is closed, the original sink failure survives, accepted output is preserved and normal sink finalization cannot publish success.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const build=require('fixture-file-build');const fs=require('fs/promises');const reason={why:'sink failed'};\nasync function run(){const result=await build('input.txt',reason);await fs.writeFile('failure.json',JSON.stringify(result)+'\\n');console.log('FILE_WEB_FAILURE',result.same,result.closed);}run();\n",
+        "node_modules/fixture-file-build/package.json": "{\"name\":\"fixture-file-build\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/fixture-file-build/index.cjs": "const fs=require('node:fs/promises');const {WritableStream}=require('node:stream/web');\nmodule.exports=async function(path,reason){const handle=await fs.open(path);let same=false;try{await handle.readableWebStream().pipeTo(new WritableStream({async write(chunk){await fs.appendFile('accepted.txt',Buffer.from(chunk));throw reason;},async close(){await fs.writeFile('unexpected.txt','incorrect success\\n');}}));await fs.writeFile('unexpected.txt','incorrect resolution\\n');}catch(error){same=error===reason;}finally{await handle.close();}return {same,closed:handle.fd===-1};};\n",
+        "input.txt": "accepted\n"
+      },
+      "expected": {
+        "stdout": "FILE_WEB_FAILURE true true\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "accepted.txt": "accepted\n",
+          "failure.json": "{\"same\":true,\"closed\":true}\n",
+          "unexpected.txt": null
+        }
+      }
     }
   ]
 }
