@@ -1,6 +1,4 @@
 """Actual filesystem/public-scanner-API tests; no package-manager execution."""
-import copy
-import importlib.util
 import json
 from pathlib import Path
 import random
@@ -229,7 +227,7 @@ class PnpmInventoryTests(unittest.TestCase):
         self.write(".pnpmfile.cjs", "throw 'MUST_NOT_EXECUTE';")
         with self.assertRaisesRegex(core.InventoryError, "hooks"):
             self.scan()
-        for field in ["catalogs", "overrides", "patchedDependencies", "packageExtensionsChecksum"]:
+        for field in ["catalogs", "packageExtensionsChecksum", "configDependencies", "packageManagerDependencies"]:
             lock = basic()
             lock[field] = {"sharp": "1"}
             with self.subTest(field=field), self.assertRaises(core.InventoryError):
@@ -318,6 +316,133 @@ class PnpmInventoryTests(unittest.TestCase):
             add(lock, "web", snapshot={field: value})
             with self.subTest(field=field), self.assertRaises(core.InventoryError):
                 pnpm.inventory(lock, NATIVE, {})
+
+    def catalog_fixture(self, current="npm:ordinary@1", label="default"):
+        lock = basic()
+        add(lock, "ordinary")
+        lock["catalogs"] = {label: {"image": {"specifier": "npm:ordinary@1", "version": "ordinary@1.0.0"}}}
+        lock["importers"]["."] = {"dependencies": {"image": {
+            "specifier": "catalog:" if label == "default" else f"catalog:{label}",
+            "version": "ordinary@1.0.0"}}}
+        self.write("pnpm-lock.yaml", lock)
+        self.write("package.json", {"dependencies": {"image": "catalog:" if label == "default" else f"catalog:{label}"}})
+        self.write("pnpm-workspace.yaml", {"catalog": {"image": current}} if label == "default"
+                   else {"catalogs": {label: {"image": current}}})
+        return lock
+
+    def test_default_and_named_catalogs_resolve_exact_captured_declarations(self):
+        for label in ["default", "legacy"]:
+            self.catalog_fixture(label=label)
+            rows = self.scan()
+            self.assertEqual([row["name"] for row in rows], ["ordinary"])
+            self.assertFalse(rows[0]["resolution_verified"])
+
+    def test_changed_catalog_alias_exposes_native_target_behind_stale_lock(self):
+        self.catalog_fixture(current="npm:sharp@1")
+        rows = self.scan()
+        sharp = next(row for row in rows if row["name"] == "sharp")
+        self.assertEqual(sharp["source"], "package.json")
+        self.assertEqual(sharp["risk_level"], "critical")
+
+    def test_missing_recursive_and_ambiguous_catalogs_fail_explicitly(self):
+        self.catalog_fixture()
+        for workspace in [{}, {"catalog": {"image": "catalog:"}},
+                          {"catalog": {}, "catalogs": {"default": {}}},
+                          {"catalog": {"image": {"specifier": "1"}}}]:
+            self.write("pnpm-workspace.yaml", workspace)
+            with self.subTest(workspace=workspace), self.assertRaises(core.InventoryError):
+                self.scan()
+
+    def test_catalog_changes_in_selected_workspace_are_not_hidden(self):
+        self.catalog_fixture(current="npm:canvas@1")
+        self.write("package.json", {})
+        self.write("pnpm-workspace.yaml", {"packages": ["packages/*"], "catalog": {"image": "npm:canvas@1"}})
+        self.write("packages/app/package.json", {"name": "app", "dependencies": {"image": "catalog:"}})
+        self.assertTrue(any(row["name"] == "canvas" and row["source"] == "packages/app/package.json" for row in self.scan()))
+
+    def test_native_override_targets_are_visible_from_all_captured_sources(self):
+        for source in ["pnpm-lock.yaml", "pnpm-workspace.yaml", "package.json"]:
+            lock = basic()
+            add(lock, "ordinary")
+            self.write("pnpm-lock.yaml", lock)
+            self.write("package.json", {})
+            self.write("pnpm-workspace.yaml", {})
+            if source == "pnpm-lock.yaml":
+                lock["overrides"] = {"parent@1>ordinary": "npm:sharp@1"}
+                self.write(source, lock)
+            elif source == "package.json":
+                self.write(source, {"pnpm": {"overrides": {"ordinary": "npm:sharp@1"}}})
+            else:
+                self.write(source, {"overrides": {"ordinary": "npm:sharp@1"}})
+            sharp = next(row for row in self.scan() if row["name"] == "sharp")
+            self.assertEqual(sharp["risk_level"], "critical")
+            self.assertEqual(sharp["dependency_kind"], "override")
+            self.assertTrue(sharp["source"].startswith(source))
+
+    def test_override_references_resolve_source_alias_not_old_snapshot(self):
+        self.write("pnpm-lock.yaml", basic())
+        self.write("package.json", {"dependencies": {"replacement": "npm:sharp@1"},
+                                   "pnpm": {"overrides": {"ordinary": "$replacement"}}})
+        row = next(row for row in self.scan() if row.get("dependency_kind") == "override")
+        self.assertEqual(row["name"], "sharp")
+        self.assertEqual(row["override_selector"], "ordinary")
+        self.assertEqual(row["risk_level"], "critical")
+
+    def test_unresolved_and_ambiguous_override_references_are_errors(self):
+        self.write("pnpm-lock.yaml", basic())
+        for request, dependencies in [("$missing", {}), ("$tool", {"tool": "$tool"})]:
+            self.write("package.json", {"dependencies": dependencies, "pnpm": {"overrides": {"other": request}}})
+            with self.assertRaises(core.InventoryError):
+                self.scan()
+        self.write("package.json", {"dependencies": {"tool": "1"}, "devDependencies": {"tool": "2"},
+                                   "pnpm": {"overrides": {"other": "$tool"}}})
+        with self.assertRaises(core.InventoryError):
+            self.scan()
+
+    def test_patches_and_removal_requests_remain_review_without_opening_targets(self):
+        lock = basic()
+        add(lock, "ordinary")
+        lock["patchedDependencies"] = {"ordinary@1.0.0": {"path": "../not-opened.patch", "hash": "recorded"}}
+        self.write("pnpm-lock.yaml", lock)
+        self.write("pnpm-workspace.yaml", {"overrides": {"parent@1>ordinary": "-"}})
+        rows = self.scan()
+        patch_row = next(row for row in rows if row.get("dependency_kind") == "patch")
+        removal = next(row for row in rows if row.get("dependency_kind") == "override")
+        self.assertEqual(patch_row["patch_reference"], "../not-opened.patch")
+        self.assertEqual(patch_row["risk_level"], "high")
+        self.assertEqual(removal["version"], "-")
+        self.assertEqual(removal["risk_level"], "high")
+
+    def test_catalog_override_and_patch_entries_share_edge_budget(self):
+        lock = basic()
+        lock["overrides"] = {"a": "1", "b": "2"}
+        with patch.object(core, "MAX_DEPENDENCY_EDGES", 1), self.assertRaises(core.InventoryError):
+            pnpm.inventory(lock, NATIVE, {})
+        lock = basic()
+        lock["catalogs"] = {"default": {"a": {"specifier": "1", "version": "1.0.0"}}}
+        with patch.object(core, "MAX_DEPENDENCY_EDGES", 0), self.assertRaises(core.InventoryError):
+            pnpm.inventory(lock, NATIVE, {})
+
+    def test_standalone_script_import_uses_the_same_inventory(self):
+        self.write("pnpm-lock.yaml", LOCK)
+        program = "import json,sys; from pathlib import Path; from dependency_inventory import scan_dependencies; print(json.dumps(scan_dependencies(Path(sys.argv[1]), {'sharp'})))"
+        process = subprocess.run([sys.executable, "-c", program, str(self.root)],
+                                 cwd=ROOT / "scripts", capture_output=True, timeout=10)
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertTrue(any(row["name"] == "sharp" for row in json.loads(process.stdout)))
+
+    def test_missing_bare_peer_pin_is_not_misread_as_an_alias(self):
+        lock = basic()
+        add(lock, "web", snapshot={"dependencies": {"widget": "1.0.0(react@18.0.0)"}})
+        rows = pnpm.inventory(lock, NATIVE, {})
+        missing = next(row for row in rows if row["name"] == "widget")
+        self.assertEqual(missing["version"], "1.0.0")
+        self.assertEqual(missing["risk_level"], "high")
+
+    def test_additional_root_configuration_cannot_bypass_hook_review(self):
+        self.write("pnpm-lock.yaml", basic())
+        with self.assertRaises(core.InventoryError):
+            self.scan(additional_manifests={"package.json": {"pnpm": {"packageExtensions": {"web": {}}}}})
 
 
 if __name__ == "__main__":

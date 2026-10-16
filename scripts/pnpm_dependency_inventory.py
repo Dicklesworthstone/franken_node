@@ -8,6 +8,12 @@ hooks, validates semver/SRI, or approves the native migration execution gate.
 The YAML reader accepts the single-line scalar/block/flow mapping and sequence
 subset emitted in ordinary pnpm locks. Unsupported YAML fails explicitly. It
 never evaluates constructors, aliases, tags, merge keys or block scalars.
+
+Called by scripts/project_scanner.py through scan_dependencies. Default/named
+catalogs use captured current declarations separately from locked requests.
+Overrides and patches are review observations, not an override solver. Current
+workspace selection supports explicit directories, * and **; other glob syntax
+and package-extension/executable configuration fail rather than hide risk.
 """
 from __future__ import annotations
 
@@ -287,7 +293,7 @@ def _review(row, note):
         row["risk_level"] = "high"
 
 
-def inventory(lock, native, manifests):
+def inventory(lock, native, manifests, workspace=None):
     if str(lock.get("lockfileVersion")) != "9.0":
         raise core.InventoryError("unsupported pnpm lockfileVersion (expected 9.0)")
     packages = _mapping(lock.get("packages", {}), "packages")
@@ -295,10 +301,12 @@ def inventory(lock, native, manifests):
     importers = _mapping(lock.get("importers"), "importers", core.MAX_WORKSPACES + 1)
     if "." not in importers:
         raise core.InventoryError("pnpm lockfile requires the root importer")
-    # Do not silently ignore configuration that can replace package identities.
-    for field in ("catalogs", "overrides", "patchedDependencies", "packageExtensionsChecksum"):
+    # Extended/multi-document environment locks and executable configuration
+    # are not equivalent to the ordinary application-lock graph inspected here.
+    for field in ("configDependencies", "packageManagerDependencies", "packageExtensionsChecksum"):
         if lock.get(field):
             raise core.InventoryError(f"pnpm {field} requires explicit inventory support")
+    workspace = {} if workspace is None else workspace
     rows, locations, metadata, referenced = [], {}, {}, set()
     edges = 0
 
@@ -312,6 +320,45 @@ def inventory(lock, native, manifests):
         edges += 1
         if edges > core.MAX_DEPENDENCY_EDGES:
             raise core.InventoryError("pnpm dependency edge budget exceeded")
+
+    def catalog_map(value, recorded=False):
+        result = {}
+        for name, entry in _mapping(value, "catalog entries").items():
+            account()
+            core._name(name)
+            if recorded:
+                _mapping(entry, "recorded catalog entry")
+                core._string(entry.get("version"), "recorded catalog version")
+                entry = entry.get("specifier")
+            request = core._string(entry, "catalog declaration")
+            if request.startswith("catalog:"):
+                raise core.InventoryError("recursive pnpm catalogs are unsupported")
+            core._alias(name, request)
+            result[name] = request
+        return result
+
+    locked_catalogs = {}
+    for label, entries in _mapping(lock.get("catalogs", {}), "catalogs", core.MAX_WORKSPACES).items():
+        core._string(label, "pnpm catalog label")
+        locked_catalogs[label] = catalog_map(entries, True)
+    current_catalogs = {}
+    for label, entries in _mapping(workspace.get("catalogs", {}), "workspace catalogs", core.MAX_WORKSPACES).items():
+        core._string(label, "pnpm catalog label")
+        current_catalogs[label] = catalog_map(entries)
+    if "catalog" in workspace:
+        if "default" in current_catalogs:
+            raise core.InventoryError("ambiguous pnpm default catalog definitions")
+        current_catalogs["default"] = catalog_map(workspace["catalog"])
+
+    def expand(name, request, recorded=False):
+        if not request.startswith("catalog:"):
+            return request
+        label = request[len("catalog:"):] or "default"
+        catalogs = locked_catalogs if recorded else current_catalogs
+        value = catalogs.get(label, {}).get(name)
+        if value is None:
+            raise core.InventoryError("pnpm catalog reference has no captured declaration")
+        return value
 
     for key, record in packages.items():
         base, name, version = _identity(key)
@@ -379,7 +426,8 @@ def inventory(lock, native, manifests):
         name, version = core._alias(installed_as, request)
         # Locked aliases store the real dependency ID, not npm: syntax.
         if pin is not None and not pin.startswith(("link:", "file:", "workspace:")):
-            candidate = pin if pin.find("@", 1) > 0 else f"{installed_as}@{pin}"
+            base = pin.split("(", 1)[0]
+            candidate = pin if base.find("@", 1) > 0 else f"{installed_as}@{pin}"
             _, name, version = _identity(candidate)
         row = core._row(name, version, native, source=source, location=None,
                         unresolved=True, linked=request.startswith(("link:", "file:", "workspace:")), alias=installed_as)
@@ -419,7 +467,7 @@ def inventory(lock, native, manifests):
                 account()
                 core._name(name)
                 _mapping(edge, "importer edge")
-                request = core._string(edge.get("specifier"), "pnpm importer specifier")
+                request = expand(name, core._string(edge.get("specifier"), "pnpm importer specifier"), True)
                 pin = core._string(edge.get("version"), "pnpm importer pin")
                 actual, _ = core._alias(name, request)
                 selected = resolve(name, pin)
@@ -434,29 +482,97 @@ def inventory(lock, native, manifests):
             for name, request in _mapping(manifest.get(section, {}), section).items():
                 account()
                 name = core._name(name)
-                request = core._string(request, "pnpm current declaration")
+                request = expand(name, core._string(request, "pnpm current declaration"))
                 actual, _ = core._alias(name, request)
                 locked_request, selected = locked_edges.get(directory, {}).get(name, (None, None))
                 if (selected is None or selected["name"] != actual or request != locked_request
                         or (name in native and not selected["has_native_addon"])):
                     unresolved(name, request, source, section)
+
+    # Inventory replacement requests separately, never claim to solve overrides
+    # or allow an old pure-JS snapshot to hide a new native alias. Each source
+    # retains its own observation, including changes not yet in the lockfile.
+    root = manifests.get("package.json", {})
+    root_config = _mapping(root.get("pnpm", {}), "package.json pnpm configuration")
+    if set(root_config) - {"overrides", "patchedDependencies"}:
+        raise core.InventoryError("unsupported package.json pnpm configuration requires review")
+    configurations = [("pnpm-lock.yaml", lock), ("pnpm-workspace.yaml", workspace),
+                      ("package.json#pnpm", root_config)]
+
+    def selector_name(selector):
+        selector = core._string(selector, "pnpm override/patch selector")
+        # Parent selectors are retained, not interpreted as a range solver.
+        # Only an unambiguous parent>child shape is admitted here.
+        parts = selector.split(">")
+        if any(not part or part[0] in "=0123456789" for part in parts):
+            raise core.InventoryError("unsupported pnpm selector syntax")
+        for part in parts:
+            separator = part.find("@", 1)
+            core._name(part if separator < 0 else part[:separator])
+        leaf = parts[-1]
+        separator = leaf.find("@", 1)
+        return core._name(leaf if separator < 0 else leaf[:separator])
+
+    def override_request(name, request):
+        request = core._string(request, "pnpm override request")
+        if request.startswith("$"):
+            reference = core._name(request[1:])
+            candidates = set()
+            for section in SECTIONS:
+                values = _mapping(root.get(section, {}), section)
+                if reference in values:
+                    candidates.add(core._string(values[reference], "pnpm referenced request"))
+            if len(candidates) != 1:
+                raise core.InventoryError("pnpm override reference is missing or ambiguous")
+            request = expand(reference, candidates.pop())
+            if request.startswith("$"):
+                raise core.InventoryError("recursive pnpm override reference")
+        return expand(name, request)
+
+    for source, configuration in configurations:
+        for selector, request in _mapping(configuration.get("overrides", {}), "overrides").items():
+            account()
+            name = selector_name(selector)
+            request = override_request(name, request)
+            actual, version = core._alias(name, request)
+            row = core._row(actual, version, native, source=f"{source}#overrides", location=None, alias=name)
+            row.update(override_selector=selector, dependency_kind="override")
+            _review(row, "pnpm override/removal request; target/range application is unverified")
+            append(row)
+        for selector, patch in _mapping(configuration.get("patchedDependencies", {}), "patches").items():
+            account()
+            name = selector_name(selector)
+            if isinstance(patch, dict):
+                _mapping(patch, "patch record")
+                if set(patch) - {"path", "hash"}:
+                    raise core.InventoryError("unsupported pnpm patch fields")
+                reference = core._string(patch.get("path"), "pnpm patch path")
+                if "hash" in patch:
+                    core._string(patch["hash"], "pnpm patch hash")
+            else:
+                reference = core._string(patch, "pnpm patch path")
+            row = core._row(name, None, native, source=f"{source}#patchedDependencies", location=None)
+            row.update(patch_selector=selector, patch_reference=reference, dependency_kind="patch")
+            _review(row, "pnpm patch alters package content; patch target was not opened or verified")
+            append(row)
     return sorted(rows, key=lambda row: (row["name"], row["version"] or "",
                                         row["package_path"] or "", row["source"]))
 
 
 def scan_pnpm_dependencies(project: Path, native: set[str], *, additional_manifests=None):
-    if os.path.lexists(project / ".pnpmfile.cjs"):
+    if any(os.path.lexists(project / name) for name in (".pnpmfile.cjs", ".pnpmfile.mjs")):
         raise core.InventoryError("pnpm readPackage hooks require explicit review; no hook was executed")
     lock = read_yaml(project / "pnpm-lock.yaml", core.MAX_LOCK_BYTES)
     if lock is None:
         raise core.InventoryError("selected pnpm lockfile disappeared")
     workspace = read_yaml(project / "pnpm-workspace.yaml", core.MAX_MANIFEST_BYTES) or {}
-    for field in ("catalog", "catalogs", "overrides", "patchedDependencies", "packageExtensions"):
+    for field in ("packageExtensions", "configDependencies", "packageManagerDependencies"):
         if workspace.get(field):
             raise core.InventoryError(f"pnpm workspace {field} requires explicit inventory support")
     package = core._read(project / "package.json", core.MAX_MANIFEST_BYTES)
-    if package and package.get("pnpm"):
-        raise core.InventoryError("package.json pnpm configuration requires explicit inventory support")
+    root_config = _mapping((package or {}).get("pnpm", {}), "package.json pnpm configuration")
+    if set(root_config) - {"overrides", "patchedDependencies"}:
+        raise core.InventoryError("unsupported package.json pnpm configuration requires review")
     manifests = {} if package is None else {"package.json": package}
     manifests.update(core._workspace_manifests(project, {"workspaces": workspace.get("packages", [])}))
     if additional_manifests is not None:
@@ -469,4 +585,4 @@ def scan_pnpm_dependencies(project: Path, native: set[str], *, additional_manife
             manifests[source] = manifest
     if len(manifests) > core.MAX_WORKSPACES + 1:
         raise core.InventoryError("combined pnpm manifest count exceeds inventory limit")
-    return inventory(lock, native, manifests)
+    return inventory(lock, native, manifests, workspace)
