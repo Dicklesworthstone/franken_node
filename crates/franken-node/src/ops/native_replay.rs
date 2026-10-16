@@ -40,51 +40,6 @@ pub enum NativeReplayTerminalState {
     EngineFailure,
 }
 
-impl NativeReplayTerminalState {
-    /// Classify a validated capture for worker transport and signed-receipt
-    /// binding. This is not evidence of finalization or authentication; those
-    /// checks must already have succeeded at their respective boundaries.
-    #[must_use]
-    pub const fn is_failure(self) -> bool {
-        match self {
-            Self::Completed => false,
-            Self::UncaughtException | Self::EngineFailure => true,
-        }
-    }
-
-    /// Check the execution-failure marker in an independently authenticated run
-    /// receipt. Keep this boundary in the library so the CLI and registered
-    /// tests exercise the same logic. Exit codes and diagnostic words are not
-    /// terminal-state evidence; explicit null is not equivalent to omission.
-    ///
-    /// # Errors
-    /// Returns a fixed diagnostic for a malformed marker or a disagreement
-    /// between the recorded failure category and this capture's terminal state.
-    pub fn check_receipt_failure(
-        self,
-        failure_marker: Option<&serde_json::Value>,
-    ) -> Result<(), String> {
-        let receipt_failed = match failure_marker {
-            None => false,
-            Some(serde_json::Value::String(failure)) if !failure.is_empty() => true,
-            Some(_) => {
-                return Err("captured run receipt has an invalid execution failure".to_string());
-            }
-        };
-        if self.is_failure() != receipt_failed {
-            return Err(
-                "native replay terminal state does not match its authenticated run receipt"
-                    .to_string(),
-            );
-        }
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-#[path = "native_replay_receipt_tests.rs"]
-mod receipt_tests;
-
 /// Exact serialized execution inputs, bound into the signed run receipt.
 /// JSON retains private source, arguments and observed environment values.
 /// Debug must not expose them through containing records or diagnostics.
@@ -1316,14 +1271,11 @@ mod engine {
             orchestrator: &ExecutionOrchestrator,
             error: &OrchestratorError,
         ) -> Result<Self, String> {
-            // Preserve the exception-only library API. The native-session
-            // worker explicitly opts into additional finalized stop categories
-            // through from_finalized_failure; this method does not widen them.
-            if !matches!(error.primary_error(), OrchestratorError::Interpreter(
-                InterpreterError::UncaughtException { .. }
-            )) {
-                return Err("native failure replay supports only a certified uncaught guest exception".to_string());
-            }
+            // The finalized-failure encoder and replay/verifier schemas already
+            // distinguish uncaught guest exceptions from typed interpreter
+            // stops. Keep one capture boundary for all certified post-cell
+            // failures so run --capture-replay does not discard capability
+            // denials or instruction-budget exhaustion after cleanup succeeds.
             Self::from_finalized_failure(
                 package, orchestrator_config, runtime_config, ambient_authority,
                 process_argv, process_preparation, orchestrator, error,
@@ -2077,16 +2029,20 @@ mod engine {
 
         fn capture_stop(root: &Path, budget_stop: bool) -> NativeReplayCapture {
             let (package, config, runtime, orchestrator, error) = stopped_run(root, budget_stop);
-            // The exception-only compatibility API keeps its old contract,
-            // even though the CLI now uses from_finalized_failure explicitly.
-            assert!(NativeReplayCapture::from_failed_execution(
+            let capture = NativeReplayCapture::from_failed_execution(
                 &package, &config, &runtime, AmbientAuthorityGrant::DenyAll,
                 &[], None, &orchestrator, &error,
-            ).is_err());
-            NativeReplayCapture::from_finalized_failure(
+            ).expect("capture the finalized native stop through the run-facing entrypoint");
+            assert_eq!(
+                capture.terminal_state().expect("typed terminal state"),
+                NativeReplayTerminalState::EngineFailure,
+            );
+            let explicit = NativeReplayCapture::from_finalized_failure(
                 &package, &config, &runtime, AmbientAuthorityGrant::DenyAll,
                 &[], None, &orchestrator, &error,
-            ).expect("capture the finalized native stop")
+            ).expect("capture the same finalized native stop explicitly");
+            assert_eq!(capture, explicit);
+            capture
         }
 
         #[test]
