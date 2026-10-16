@@ -11215,6 +11215,7 @@ fn verify_native_replay_receipt_binding(
             let capture_failed = matches!(
                 terminal_state,
                 ops::native_replay::NativeReplayTerminalState::UncaughtException
+                    | ops::native_replay::NativeReplayTerminalState::EngineFailure
             );
             if capture_failed != receipt_failed {
                 anyhow::bail!(
