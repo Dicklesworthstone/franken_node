@@ -1,0 +1,114 @@
+{
+  "schema_version": "franken-node/project-compat-corpus/v1",
+  "description": "Complete byte-stream/BYOB packages consuming the canonical franken_engine Web stream owner, buffer transfer and text codec. Run with the existing project_compat_runner.py and real runtime binaries. Synthetic trusted fixture packages, not registry installs or native parity evidence. No alternate execution backend.",
+  "cases": [
+    {
+      "id": "byob-package-file-source-reuses-caller-storage",
+      "category": "byte-stream-integration",
+      "description": "An actual file-backed package producer fills caller-owned views; the consumer preserves a below-minimum final read before publishing the complete file.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const fs=require('node:fs'),opened=require('fixture-byte-file')('input.txt');\n(async function(){\n const reader=opened.stream.getReader({mode:'byob'}),decoder=new TextDecoder();\n let storage=new ArrayBuffer(20),text='',bytes=0,detached=true,partial=false;\n while(true){\n  const input=new Uint8Array(storage,4,8),pending=reader.read(input,{min:5});\n  detached=detached&&storage.byteLength===0;const result=await pending;\n  if(result.value){bytes+=result.value.byteLength;text+=decoder.decode(result.value,{stream:true});\n   storage=result.value.buffer;if(result.done&&result.value.byteLength)partial=true;}\n  if(result.done)break;\n }\n text+=decoder.decode();reader.releaseLock();\n fs.writeFileSync('copy.txt',text);\n fs.writeFileSync('receipt.json',JSON.stringify({bytes,detached,partial,closed:opened.closed(),locked:opened.stream.locked})+'\\n');\n console.log('FILE_BYOB',bytes,detached,partial,opened.closed());\n})();\n",
+        "input.txt": "alpha\nbeta\ngamma\nx\n",
+        "node_modules/fixture-byte-file/package.json": "{\"name\": \"fixture-byte-file\", \"version\": \"1.0.0\", \"main\": \"index.cjs\"}\n",
+        "node_modules/fixture-byte-file/index.cjs": "const fs=require('node:fs'),{ReadableStream}=require('node:stream/web');\nmodule.exports=function(path){\n const fd=fs.openSync(path,'r');let closed=false;\n function close(){if(!closed){closed=true;fs.closeSync(fd);}}\n const stream=new ReadableStream({type:'bytes',autoAllocateChunkSize:7,\n  pull(controller){const request=controller.byobRequest;\n   try{const size=fs.readSync(fd,request.view,0,request.view.byteLength,null);\n    if(size===0){close();controller.close();request.respond(0);}else request.respond(size);\n   }catch(error){close();throw error;}\n  },cancel(){close();}\n });return {stream,closed:()=>closed};\n};\n"
+      },
+      "expected": {
+        "stdout": "FILE_BYOB 19 true true true\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "copy.txt": "alpha\nbeta\ngamma\nx\n",
+          "receipt.json": "{\"bytes\":19,\"detached\":true,\"partial\":true,\"closed\":true,\"locked\":false}\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "byob-esm-typed-minimum-and-core-reexports",
+      "category": "byte-stream-integration",
+      "description": "A conditional ESM package fills a typed consumer through reexported core constructors, using transferred response views at nonzero offsets.",
+      "entry": "main.mjs",
+      "files": {
+        "main.mjs": "import fs from 'node:fs';\nimport {Reader,Controller,Request} from './streams.mjs';\nimport {open} from '@fixture/typed-source';\n(async function(){\n const source=open(),reader=new Reader(source.stream),rows=[];let storage=new ArrayBuffer(24),typed=true;\n while(true){const result=await reader.read(new Uint32Array(storage,8,4),{min:2});\n  if(result.value){typed=typed&&result.value instanceof Uint32Array&&result.value.byteOffset===8;\n   rows.push(...new Uint8Array(result.value.buffer,result.value.byteOffset,result.value.byteLength));storage=result.value.buffer;}\n  if(result.done)break;\n }\n reader.releaseLock();const info=source.inspect();\n const result={bytes:rows,typed,controller:info.controller instanceof Controller,request:info.request instanceof Request,retired:info.request.view===null};\n fs.writeFileSync('typed.json',JSON.stringify(result)+'\\n');console.log('TYPED_BYOB',rows.length,typed,result.controller,result.request,result.retired);\n})();\n",
+        "streams.mjs": "export {ReadableStreamBYOBReader as Reader,ReadableByteStreamController as Controller,ReadableStreamBYOBRequest as Request} from 'node:stream/web';\n",
+        "node_modules/@fixture/typed-source/package.json": "{\"name\": \"@fixture/typed-source\", \"version\": \"1.0.0\", \"type\": \"module\", \"exports\": {\".\": {\"import\": \"./index.mjs\", \"require\": \"./wrong.cjs\"}}}\n",
+        "node_modules/@fixture/typed-source/wrong.cjs": "throw Error('wrong package condition');\n",
+        "node_modules/@fixture/typed-source/index.mjs": "import {ReadableStream} from 'stream/web';\nexport function open(){let index=0,controller,request;\n const stream=new ReadableStream({type:'bytes',pull(c){controller=c;request=c.byobRequest;\n  if(index===12){c.close();request.respond(0);return;}\n  const old=request.view,offset=old.byteOffset,size=Math.min(3,old.byteLength,12-index),buffer=old.buffer.transfer();\n  const next=new Uint8Array(buffer,offset,size);for(let i=0;i<size;i++)next[i]=++index;\n  request.respondWithNewView(next);\n }});return {stream,inspect:()=>({controller,request})};\n}\n"
+      },
+      "expected": {
+        "stdout": "TYPED_BYOB 12 true true true true\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "typed.json": "{\"bytes\":[1,2,3,4,5,6,7,8,9,10,11,12],\"typed\":true,\"controller\":true,\"request\":true,\"retired\":true}\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "byob-tee-unicode-codec-and-binary-consumer",
+      "category": "byte-stream-integration",
+      "description": "One byte producer feeds a mutating BYOB binary consumer and the shared incremental text decoder without corrupting either output.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const fs=require('node:fs'),web=require('node:stream/web'),source=require('fixture-fragmented')();\n(async function(){\n const [binary,text]=source.tee();let decoded='';\n const done=text.pipeThrough(new web.TextDecoderStream()).pipeTo(new web.WritableStream({write(value){decoded+=value;}}));\n const reader=binary.getReader({mode:'byob'}),bytes=[];let storage=new ArrayBuffer(7);\n while(true){const result=await reader.read(new Uint8Array(storage),{min:3});\n  if(result.value){bytes.push(...result.value);storage=result.value.buffer;result.value.fill(0);}\n  if(result.done)break;\n }\n reader.releaseLock();await done;\n fs.writeFileSync('text.txt',decoded);fs.writeFileSync('bytes.txt',bytes.join(',')+'\\n');\n console.log('TEE_BYOB',bytes.length,source.locked,binary.locked,text.locked);\n})();\n",
+        "node_modules/fixture-fragmented/package.json": "{\"name\": \"fixture-fragmented\", \"version\": \"1.0.0\", \"main\": \"index.cjs\"}\n",
+        "node_modules/fixture-fragmented/index.cjs": "const {ReadableStream}=require('stream/web');\nmodule.exports=function(){const bytes=new TextEncoder().encode('A€𝄞Z\\n');let index=0;\n return new ReadableStream({type:'bytes',autoAllocateChunkSize:4,async pull(c){\n  await Promise.resolve();const q=c.byobRequest;\n  if(index===bytes.length){c.close();q.respond(0);return;}\n  q.view[0]=bytes[index++];q.respond(1);\n }});\n};\n"
+      },
+      "expected": {
+        "stdout": "TEE_BYOB 10 true false false\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "text.txt": "A€𝄞Z\n",
+          "bytes.txt": "65,226,130,172,240,157,132,158,90,10\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "byob-cancel-awaits-package-cleanup",
+      "category": "byte-stream-integration",
+      "description": "Cancelling an unfulfilled read releases the reader result but the operation waits for a package cleanup promise before publishing its receipt.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const fs=require('node:fs'),open=require('fixture-owned-bytes');\n(async function(){const item=open(),reader=item.stream.getReader({mode:'byob'});\n const waiting=reader.read(new Uint8Array(16));let completed=false;\n const closing=reader.cancel(false).then(()=>completed=true);const end=await waiting;\n const before=completed;item.finish();await closing;reader.releaseLock();\n fs.writeFileSync('cancel.json',JSON.stringify({done:end.done,noValue:end.value===undefined,before,completed,reason:item.reason(),locked:item.stream.locked})+'\\n');\n console.log('CANCEL_BYOB',end.done,before,completed,item.reason()===false);\n})();\n",
+        "node_modules/fixture-owned-bytes/package.json": "{\"name\": \"fixture-owned-bytes\", \"version\": \"1.0.0\", \"main\": \"index.cjs\"}\n",
+        "node_modules/fixture-owned-bytes/index.cjs": "const fs=require('node:fs'),{ReadableStream}=require('stream/web');\nmodule.exports=function(){let finish,reason;\n const stream=new ReadableStream({type:'bytes',cancel(value){reason=value;return new Promise(resolve=>{\n  finish=function(){fs.writeFileSync('cleanup.txt','released\\n');resolve();};\n });}});return {stream,finish:()=>finish(),reason:()=>reason};\n};\n"
+      },
+      "expected": {
+        "stdout": "CANCEL_BYOB true false true true\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "cleanup.txt": "released\n",
+          "cancel.json": "{\"done\":true,\"noValue\":true,\"before\":false,\"completed\":true,\"reason\":false,\"locked\":false}\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "byob-incomplete-record-preserves-published-output",
+      "category": "byte-stream-integration",
+      "description": "An incomplete multi-byte record fails the read and closed promise with the same error; a published file remains unchanged and a new valid source can still complete.",
+      "entry": "main.cjs",
+      "files": {
+        "main.cjs": "const fs=require('node:fs'),decode=require('fixture-records');\n(async function(){let error;\n try{const bytes=await decode([1,2,3]);fs.writeFileSync('published.txt',bytes.join(','));}\n catch(value){error=value;}\n const good=await decode([4,5,6,7]);fs.writeFileSync('recovered.txt',good.join(',')+'\\n');\n console.log('RECORD_BYOB',error.name,error.sameClosed,good.join(','));\n})();\n",
+        "published.txt": "previous\n",
+        "node_modules/fixture-records/package.json": "{\"name\": \"fixture-records\", \"version\": \"1.0.0\", \"main\": \"index.cjs\"}\n",
+        "node_modules/fixture-records/index.cjs": "const {ReadableStream}=require('node:stream/web');\nmodule.exports=async function(bytes){const stream=new ReadableStream({type:'bytes',start(c){c.enqueue(new Uint8Array(bytes));c.close();}});\n const r=stream.getReader({mode:'byob'}),closed=r.closed.catch(e=>e),out=[];\n try{while(true){const x=await r.read(new Uint16Array(2));if(x.value)out.push(...new Uint8Array(x.value.buffer,x.value.byteOffset,x.value.byteLength));if(x.done)break;}return out;}\n catch(error){error.sameClosed=(await closed)===error;throw error;}\n finally{r.releaseLock();}\n};\n"
+      },
+      "expected": {
+        "stdout": "RECORD_BYOB TypeError true 4,5,6,7\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "published.txt": "previous\n",
+          "recovered.txt": "4,5,6,7\n",
+          "unexpected.txt": null
+        }
+      }
+    }
+  ]
+}

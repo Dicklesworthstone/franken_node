@@ -104,5 +104,11 @@ class WindowsPathProjectTests(PipelineProjectTests):
     case_count = 5
 
 
+class ByteStreamProjectTests(PipelineProjectTests):
+    # Caller-owned buffers and byte tees use the same shared runtime owner.
+    corpus_path = ROOT / 'fixtures/compatibility/projects/stream-byob.corpus.json'
+    case_count = 5
+
+
 if __name__ == '__main__':
     unittest.main()
