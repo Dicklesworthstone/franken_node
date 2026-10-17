@@ -468,6 +468,10 @@ mod tests {
         initial["run_receipt_id"] = json!("run-1");
         initial["run_receipt_hash"] = json!("a".repeat(64));
         initial["trace_id"] = json!("trace-1");
+        initial["host_effect_chain_head"] = json!(crate::bundle::EFFECT_RECEIPT_CHAIN_GENESIS);
+        for field in ["effect_count", "allowed_count", "denied_count", "failed_count"] {
+            initial[field] = json!(0);
+        }
         if state != "completed" {
             initial["execution_failure"] = json!("original wrapper diagnostic");
         }
@@ -556,30 +560,22 @@ mod tests {
     }
 
     fn signed_bundle(initial: Value) -> Vec<u8> {
-        use ed25519_dalek::Signer;
-        use super::super::{incident_bundle_canonical_digest, incident_bundle_signature_payload};
-        // The original timeline/chunks and their deterministic identity remain
-        // the actual committed CLI fixture, not a synthetic replacement graph.
+        use super::super::structure::tests::{refresh_timeline_metadata, resign, set_chunks};
+        // Retain the CLI envelope, but construct a coherent zero-effect run:
+        // the captured terminal is its sole timeline event. These metadata
+        // fixtures still make no claim about executing valid engine IR.
         let mut bundle: Value = serde_json::from_slice(include_bytes!(
             "../tests/fixtures/cli_incident_bundle/INC-SDK-FIXTURE-1.fnbundle"
         )).unwrap();
+        let mut event = terminal_event(&initial, initial.get("execution_failure").is_some());
+        event["sequence_number"] = json!(1);
+        event["timestamp"] = bundle["timeline"][0]["timestamp"].clone();
+        event["causal_parent"] = Value::Null;
+        bundle["timeline"] = json!([event]);
         bundle["initial_state_snapshot"] = initial;
-        bundle["manifest"]["decision_sequence_hash"] = json!(incident_bundle_canonical_digest(&json!({
-            "timeline":bundle["timeline"], "initial_state_snapshot":bundle["initial_state_snapshot"],
-            "policy_version":bundle["policy_version"]
-        }), "$").unwrap());
-        let mut view = bundle.as_object().unwrap().clone();
-        view.remove("signature");
-        view.remove("integrity_hash");
-        let integrity = incident_bundle_canonical_digest(&Value::Object(view), "$").unwrap();
-        let signed = incident_bundle_signature_payload(&integrity);
-        let key = signing_key();
-        let signature = key.sign(&signed);
-        key.verifying_key().verify_strict(&signed, &signature).unwrap();
-        bundle["integrity_hash"] = json!(integrity);
-        bundle["signature"]["signature_hex"] = json!(hex::encode(signature.to_bytes()));
-        bundle["signature"]["signed_payload_sha256"] = json!(hex::encode(Sha256::digest(&signed)));
-        serde_json::to_vec(&bundle).unwrap()
+        refresh_timeline_metadata(&mut bundle);
+        set_chunks(&mut bundle, &[0..1]);
+        resign(&mut bundle)
     }
 
     #[test]
@@ -589,7 +585,7 @@ mod tests {
             let raw = signed_bundle(with_run_context(state));
             let verified = verify_incident_bundle(&raw, &signing_key().verifying_key()).unwrap();
             assert!(verified.native_capture.is_some());
-            assert_eq!(verified.event_count, 3);
+            assert_eq!(verified.event_count, 1);
             let stranger = ed25519_dalek::SigningKey::from_bytes(&[0x12; 32]);
             assert!(matches!(verify_incident_bundle(&raw, &stranger.verifying_key()), Err(IncidentBundleError::SignerNotTrusted)));
         }
@@ -620,4 +616,29 @@ mod tests {
                     if path.starts_with("$.initial_state_snapshot.native_replay")), "mutation {change}");
         }
     }
+    #[test]
+    fn zero_effect_native_run_cannot_claim_a_nonempty_ledger_or_drop_its_terminal() {
+        use super::super::verify_incident_bundle;
+        use super::super::structure::tests::{refresh_timeline_metadata, resign, set_chunks};
+        for state in ["completed", "uncaught_exception", "engine_failure"] {
+            let bytes = signed_bundle(with_run_context(state));
+            verify_incident_bundle(&bytes, &signing_key().verifying_key()).unwrap();
+            for field in ["effect_count", "allowed_count", "denied_count", "failed_count", "host_effect_chain_head"] {
+                let mut value: Value = serde_json::from_slice(&bytes).unwrap();
+                value["initial_state_snapshot"][field] = if field == "host_effect_chain_head" {
+                    json!(format!("sha256:{}", "f".repeat(64)))
+                } else { json!(1) };
+                let error = verify_incident_bundle(&resign(&mut value), &signing_key().verifying_key()).unwrap_err();
+                assert!(matches!(error, IncidentBundleError::Structure { path, .. }
+                    if path == format!("$.initial_state_snapshot.{field}")), "{state}: {field}");
+            }
+            let mut value: Value = serde_json::from_slice(&bytes).unwrap();
+            value["timeline"] = json!([]);
+            refresh_timeline_metadata(&mut value);
+            set_chunks(&mut value, &[0..0]);
+            assert!(matches!(verify_incident_bundle(&resign(&mut value), &signing_key().verifying_key()),
+                Err(IncidentBundleError::Structure { path, .. }) if path == "$.timeline"));
+        }
+    }
+
 }

@@ -68,7 +68,7 @@ const NON_EXFILTRATION_CLAIM_HASH_DOMAIN: &[u8] =
 const CAPABILITY_PROOF_HASH_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:capability-proof:v1:";
 const CAPABILITY_RECEIPT_HASH_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:capability-receipt:v1:";
 const CONTENT_HASH_PREFIX: &str = "sha256:";
-const EFFECT_RECEIPT_CHAIN_GENESIS: &str =
+pub(crate) const EFFECT_RECEIPT_CHAIN_GENESIS: &str =
     "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
 /// A deterministic replay bundle that external verifiers can serialize, hash,
@@ -2589,7 +2589,7 @@ fn constant_time_eq(left: &str, right: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
 
@@ -2609,8 +2609,7 @@ mod tests {
     /// franken_node's `build_host_effect_ledger` builds them (same canonical
     /// receipt/chain hashing), so a passing verify proves cross-format
     /// compatibility; tampering and an empty chain both fail closed.
-    #[test]
-    fn verify_effect_chain_entries_re_derives_run_ledger_offline_bd_5r99w_12() {
+    pub(crate) fn run_effect_chain_fixture() -> Vec<EffectReceiptChainEntry> {
         let empty =
             "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string();
         let build_entry = |index: u64, prev: &str, receipt: EffectReceipt| {
@@ -2691,7 +2690,12 @@ mod tests {
         let e0 = build_entry(0, EFFECT_RECEIPT_CHAIN_GENESIS, allowed);
         let e1 = build_entry(1, &e0.chain_hash, denied);
         let e2 = build_entry(2, &e1.chain_hash, failed);
-        let entries = vec![e0, e1, e2];
+        vec![e0, e1, e2]
+    }
+
+    #[test]
+    fn verify_effect_chain_entries_re_derives_run_ledger_offline_bd_5r99w_12() {
+        let entries = run_effect_chain_fixture();
 
         // Offline re-derivation of the bare run --json ledger succeeds.
         let report = verify_effect_chain_entries(&entries).expect("offline chain verifies");

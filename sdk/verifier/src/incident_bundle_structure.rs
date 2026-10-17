@@ -11,6 +11,11 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
+use crate::bundle::{
+    EFFECT_RECEIPT_CHAIN_GENESIS, EffectPolicyOutcome, EffectReceiptChainEntry,
+    verify_effect_chain_entries,
+};
+
 use super::{INCIDENT_BUNDLE_HASH_DOMAIN, IncidentBundleError, canonicalize, ct_str_eq};
 
 // Wire-format limits from the product replay-bundle contract, not allocations
@@ -196,6 +201,120 @@ fn expected_bundle_id(incident_id: &str, created_at: &str, timeline: &[Value]) -
     Ok(format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..]))
 }
 
+/// Reuse the independent receipt verifier on the actual product timeline.
+/// The bundle signature authenticates the collector's assertions; these
+/// checks establish their internal consistency, not the original run's
+/// detached ledger signature or the semantics of guest execution.
+fn verify_effect_receipts(initial: &Value, timeline: &[Value]) -> Result<()> {
+    let is_run = ["run_receipt_id", "run_receipt_hash", "host_effect_chain_head"]
+        .iter()
+        .any(|field| initial.get(field).is_some());
+    let mut entries = Vec::new();
+    for (index, event) in timeline.iter().enumerate() {
+        let Some(value) = event["payload"].get("effect_receipt_chain_entry") else {
+            continue;
+        };
+        let path = format!("$.timeline[{index}].payload.effect_receipt_chain_entry");
+        let entry: EffectReceiptChainEntry = serde_json::from_value(value.clone())
+            .map_err(|_| invalid(&path, "invalid effect receipt chain entry"))?;
+        // Nested enum variants otherwise accept and discard unknown members.
+        // No signed receipt field may disappear from independent verification.
+        let roundtrip = serde_json::to_value(&entry)
+            .map_err(|_| invalid(&path, "invalid effect receipt chain entry"))?;
+        if &roundtrip != value {
+            return Err(invalid(&path, "noncanonical effect receipt shape"));
+        }
+        if is_run {
+            if event["event_type"].as_str() != Some("policy_eval")
+                || event["payload"].as_object().map(Map::len) != Some(1)
+            {
+                return Err(invalid(format!("$.timeline[{index}]"), "run effect must be one policy-evaluation receipt"));
+            }
+            if entry.receipt.seq != entry.index || entry.receipt.trace_id.trim().is_empty()
+                || entries.first().is_some_and(|first: &EffectReceiptChainEntry| {
+                    first.receipt.trace_id != entry.receipt.trace_id
+                })
+            {
+                return Err(invalid(&path, "effect sequence or trace disagrees with captured run"));
+            }
+            let millis = i64::try_from(entry.receipt.recorded_at_millis)
+                .map_err(|_| invalid(&path, "effect timestamp is outside replay range"))?;
+            let timestamp = DateTime::from_timestamp_millis(millis)
+                .ok_or_else(|| invalid(&path, "effect timestamp is outside replay range"))?
+                .to_rfc3339_opts(SecondsFormat::Micros, true);
+            if event["timestamp"].as_str() != Some(timestamp.as_str()) {
+                return Err(invalid(format!("$.timeline[{index}].timestamp"), "timeline timestamp disagrees with effect receipt"));
+            }
+            let expected_parent = index.checked_sub(1).map(|parent| Value::from(parent + 1))
+                .unwrap_or(Value::Null);
+            if event["causal_parent"] != expected_parent {
+                return Err(invalid(format!("$.timeline[{index}].causal_parent"), "run effect must follow the previous receipt"));
+            }
+        }
+        entries.push(entry);
+    }
+    if !is_run && entries.is_empty() {
+        return Ok(());
+    }
+    let head = if entries.is_empty() {
+        EFFECT_RECEIPT_CHAIN_GENESIS.to_string()
+    } else {
+        verify_effect_chain_entries(&entries)
+            .map_err(|_| invalid("$.timeline", "effect receipt chain failed independent verification"))?
+            .head_chain_hash
+    };
+    let initial = initial.as_object()
+        .ok_or_else(|| invalid("$.initial_state_snapshot", "effect chain requires an initial state object"))?;
+    if is_run {
+        for field in ["run_receipt_id", "run_receipt_hash"] {
+            if text(initial, field, "$.initial_state_snapshot")?.trim().is_empty() {
+                return Err(invalid(format!("$.initial_state_snapshot.{field}"), "empty run binding"));
+            }
+        }
+        text(initial, "host_effect_chain_head", "$.initial_state_snapshot")?;
+        if entries.is_empty() {
+            // Native runs without host effects carry one terminal state event.
+            // Its capture digest and failure/completion binding are checked by
+            // incident_native_capture after all replay structure has passed.
+            if !initial.contains_key("native_replay") || timeline.len() != 1
+                || timeline[0]["payload"].as_object().map(Map::len) != Some(1)
+                || !(timeline[0]["payload"].get("native_execution_completed").is_some()
+                    || timeline[0]["payload"].get("native_execution_failed").is_some())
+            {
+                return Err(invalid("$.timeline", "zero-effect run requires its captured native terminal event"));
+            }
+        } else if entries.len() != timeline.len() {
+            return Err(invalid("$.timeline", "run timeline contains events outside its effect chain"));
+        }
+    }
+    // Authored evidence may carry a partial summary under chain_head_hash;
+    // check each supplied declaration without upgrading it to run provenance.
+    for field in ["host_effect_chain_head", "chain_head_hash"] {
+        if initial.contains_key(field)
+            && !ct_str_eq(text(initial, field, "$.initial_state_snapshot")?, &head)
+        {
+            return Err(invalid(format!("$.initial_state_snapshot.{field}"), "does not match verified effect chain head"));
+        }
+    }
+    let mut counts = [entries.len() as u64, 0, 0, 0];
+    for entry in &entries {
+        let outcome = match &entry.receipt.policy_outcome {
+            EffectPolicyOutcome::Allowed { .. } => 1,
+            EffectPolicyOutcome::Denied { .. } => 2,
+            EffectPolicyOutcome::Failed { .. } => 3,
+        };
+        counts[outcome] += 1;
+    }
+    for (field, count) in ["effect_count", "allowed_count", "denied_count", "failed_count"]
+        .into_iter().zip(counts)
+    {
+        if is_run || initial.contains_key(field) {
+            expect_uint(initial, field, "$.initial_state_snapshot", count)?;
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn verify_structure(bundle: &Map<String, Value>) -> Result<()> {
     let timeline = array(member(bundle, "timeline", "$")?, "$.timeline")?;
     let span = verify_timeline(timeline)?;
@@ -267,11 +386,11 @@ pub(super) fn verify_structure(bundle: &Map<String, Value>) -> Result<()> {
             return Err(invalid(format!("{path}.compressed_size_bytes"), "empty chunk must have zero size"));
         }
     }
-    Ok(())
+    verify_effect_receipts(member(bundle, "initial_state_snapshot", "$")?, timeline)
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
 
@@ -299,7 +418,7 @@ mod tests {
 
     /// Sign even inconsistent structures, so rejection cannot be credited to a
     /// stale outer digest, decision-sequence hash, or invalid Ed25519 signature.
-    fn resign(bundle: &mut Value) -> Vec<u8> {
+    pub(in crate::incident_bundle) fn resign(bundle: &mut Value) -> Vec<u8> {
         let sequence = serde_json::json!({
             "timeline": bundle["timeline"],
             "initial_state_snapshot": bundle["initial_state_snapshot"],
@@ -332,7 +451,7 @@ mod tests {
 
     /// Build explicit caller-selected partitions for conformance tests. Unlike
     /// the verifier, this helper does NOT choose or validate chunk boundaries.
-    fn set_chunks(bundle: &mut Value, ranges: &[Range<usize>]) {
+    pub(in crate::incident_bundle) fn set_chunks(bundle: &mut Value, ranges: &[Range<usize>]) {
         let timeline = bundle["timeline"].as_array().unwrap();
         let chunks: Vec<Value> = ranges.iter().enumerate().map(|(index, range)| {
             let events = Value::Array(timeline[range.clone()].to_vec());
@@ -354,7 +473,7 @@ mod tests {
         bundle["manifest"]["chunk_count"] = Value::from(ranges.len());
     }
 
-    fn refresh_timeline_metadata(bundle: &mut Value) {
+    pub(in crate::incident_bundle) fn refresh_timeline_metadata(bundle: &mut Value) {
         let timeline = bundle["timeline"].as_array().unwrap();
         let created = timeline.last().map_or(EMPTY_CREATED_AT, |event| event["timestamp"].as_str().unwrap());
         let id = expected_bundle_id(bundle["incident_id"].as_str().unwrap(), created, timeline).unwrap();
@@ -587,5 +706,163 @@ mod tests {
         assert!(verify_incident_bundle(&bytes, &fixture_key().verifying_key()).is_ok());
         bundle["chunks"].as_array_mut().unwrap().swap(0, 1);
         assert_structure_rejected(bundle, "$.chunks[0].chunk_index");
+    }
+
+    fn run_bundle() -> Value {
+        // Reuse the existing cross-format allowed/denied/failed run-ledger
+        // vector. It is sealed by the receipt implementation, not by the new
+        // incident-chain adapter being tested here.
+        let entries = crate::bundle::tests::run_effect_chain_fixture();
+        let mut bundle = fixture();
+        for (index, entry) in entries.iter().enumerate() {
+            bundle["timeline"][index]["event_type"] = "policy_eval".into();
+            bundle["timeline"][index]["timestamp"] =
+                "2023-11-14T22:13:20.000000Z".into();
+            bundle["timeline"][index]["payload"] =
+                serde_json::json!({"effect_receipt_chain_entry":entry});
+            bundle["timeline"][index]["causal_parent"] =
+                if index == 0 { Value::Null } else { index.into() };
+        }
+        bundle["initial_state_snapshot"] = serde_json::json!({
+            "run_receipt_id":"run-sdk-chain-1",
+            "run_receipt_hash":"a".repeat(64),
+            "host_effect_chain_head":entries.last().unwrap().chain_hash,
+            "effect_count":3,"allowed_count":1,"denied_count":1,"failed_count":1,
+        });
+        refresh_timeline_metadata(&mut bundle);
+        set_chunks(&mut bundle, &[0..3]);
+        bundle
+    }
+
+    fn refresh_single_chunk(bundle: &mut Value) {
+        refresh_timeline_metadata(bundle);
+        let count = bundle["timeline"].as_array().unwrap().len();
+        set_chunks(bundle, &[0..count]);
+    }
+
+    #[test]
+    fn incident_verification_consumes_complete_mixed_outcome_run_chain() {
+        let mut bundle = run_bundle();
+        let bytes = resign(&mut bundle);
+        let verified = verify_incident_bundle(&bytes, &fixture_key().verifying_key()).unwrap();
+        assert_eq!(verified.event_count, 3);
+        assert_eq!(verified.native_capture, None);
+
+        // Changing a denied effect into a host failure without the original
+        // receipt's matching hash is rejected even when the collector signs
+        // a fully consistent new bundle envelope and chunk representation.
+        bundle["timeline"][1]["payload"]["effect_receipt_chain_entry"]["receipt"]["policy_outcome"] =
+            serde_json::json!({"outcome":"failed","capability_ref":"fs_read","reason":"ENOENT"});
+        refresh_single_chunk(&mut bundle);
+        assert_structure_rejected(bundle, "$.timeline");
+    }
+
+    #[test]
+    fn run_chain_head_and_each_outcome_count_are_independently_bound() {
+        for (field, value) in [
+            ("host_effect_chain_head", Value::from(EFFECT_RECEIPT_CHAIN_GENESIS)),
+            ("effect_count", Value::from(2)),
+            ("allowed_count", Value::from(0)),
+            ("denied_count", Value::from(2)),
+            ("failed_count", Value::from(0)),
+        ] {
+            let mut bundle = run_bundle();
+            bundle["initial_state_snapshot"][field] = value;
+            assert_structure_rejected(bundle, &format!("$.initial_state_snapshot.{field}"));
+        }
+        // A stable total alone cannot conceal reclassification of a failure.
+        let mut bundle = run_bundle();
+        bundle["initial_state_snapshot"]["denied_count"] = 2.into();
+        bundle["initial_state_snapshot"]["failed_count"] = 0.into();
+        assert_structure_rejected(bundle, "$.initial_state_snapshot.denied_count");
+        for field in ["run_receipt_id", "run_receipt_hash", "host_effect_chain_head",
+            "effect_count", "allowed_count", "denied_count", "failed_count"]
+        {
+            let mut bundle = run_bundle();
+            bundle["initial_state_snapshot"].as_object_mut().unwrap().remove(field);
+            assert_structure_rejected(bundle, &format!("$.initial_state_snapshot.{field}"));
+        }
+    }
+
+    #[test]
+    fn resigned_incident_rejects_tampered_truncated_or_duplicated_run_effects() {
+        let mut changed = run_bundle();
+        changed["timeline"][0]["payload"]["effect_receipt_chain_entry"]["receipt"]["args_hash"] =
+            format!("sha256:{}", "f".repeat(64)).into();
+        refresh_single_chunk(&mut changed);
+        assert_structure_rejected(changed, "$.timeline");
+
+        let mut truncated = run_bundle();
+        truncated["timeline"].as_array_mut().unwrap().pop();
+        refresh_single_chunk(&mut truncated);
+        // A valid prefix is still incomplete relative to the captured head.
+        assert_structure_rejected(truncated, "$.initial_state_snapshot.host_effect_chain_head");
+
+        let mut duplicated = run_bundle();
+        duplicated["timeline"][2]["payload"] = duplicated["timeline"][1]["payload"].clone();
+        refresh_single_chunk(&mut duplicated);
+        assert_structure_rejected(duplicated, "$.timeline");
+
+        let mut hidden = run_bundle();
+        hidden["timeline"][2]["payload"] = serde_json::json!({"operator_annotation":"nothing happened"});
+        refresh_single_chunk(&mut hidden);
+        assert_structure_rejected(hidden, "$.timeline");
+    }
+
+    #[test]
+    fn run_events_cannot_relabel_receipt_time_sequence_trace_or_causality() {
+        for (pointer, value, path) in [
+            ("/timeline/1/event_type", Value::from("external_signal"), "$.timeline[1]"),
+            ("/timeline/1/causal_parent", Value::Null, "$.timeline[1].causal_parent"),
+            ("/timeline/1/payload/effect_receipt_chain_entry/receipt/seq", Value::from(9),
+                "$.timeline[1].payload.effect_receipt_chain_entry"),
+            ("/timeline/1/payload/effect_receipt_chain_entry/receipt/trace_id", Value::from("other-run"),
+                "$.timeline[1].payload.effect_receipt_chain_entry"),
+        ] {
+            let mut bundle = run_bundle();
+            *bundle.pointer_mut(pointer).unwrap() = value;
+            refresh_single_chunk(&mut bundle);
+            assert_structure_rejected(bundle, path);
+        }
+        let mut time = run_bundle();
+        for event in time["timeline"].as_array_mut().unwrap() {
+            event["timestamp"] = "2023-11-14T22:13:21.000000Z".into();
+        }
+        refresh_single_chunk(&mut time);
+        assert_structure_rejected(time, "$.timeline[0].timestamp");
+        let mut extra = run_bundle();
+        extra["timeline"][0]["payload"]["operator_annotation"] = "allow".into();
+        refresh_single_chunk(&mut extra);
+        assert_structure_rejected(extra, "$.timeline[0]");
+    }
+
+    #[test]
+    fn embedded_effect_receipts_cannot_discard_unknown_nested_outcome_fields() {
+        let mut bundle = run_bundle();
+        // serde would discard this nested enum member without changing the
+        // receipt hash. It must not survive as apparently verified evidence.
+        bundle["timeline"][1]["payload"]["effect_receipt_chain_entry"]["receipt"]["policy_outcome"]["executed"] = true.into();
+        refresh_single_chunk(&mut bundle);
+        assert_structure_rejected(bundle, "$.timeline[1].payload.effect_receipt_chain_entry");
+    }
+
+    #[test]
+    fn authored_timelines_can_verify_receipts_without_claiming_run_capture_bindings() {
+        let mut bundle = run_bundle();
+        let head = bundle["initial_state_snapshot"]["host_effect_chain_head"].clone();
+        // Match the authored clean-run TNR fixture: independently assembled
+        // times and auxiliary payloads, with a partial ledger summary.
+        bundle["initial_state_snapshot"] = serde_json::json!({
+            "chain_head_hash":head,"effect_count":3,"allowed_count":1,"denied_count":1,
+        });
+        for event in bundle["timeline"].as_array_mut().unwrap() {
+            event["timestamp"] = "2026-07-11T10:00:00.000000Z".into();
+            event["payload"]["chain_hash"] =
+                event["payload"]["effect_receipt_chain_entry"]["chain_hash"].clone();
+        }
+        refresh_single_chunk(&mut bundle);
+        verify_incident_bundle(&resign(&mut bundle), &fixture_key().verifying_key()).unwrap();
+        bundle["initial_state_snapshot"]["effect_count"] = 4.into();
+        assert_structure_rejected(bundle, "$.initial_state_snapshot.effect_count");
     }
 }

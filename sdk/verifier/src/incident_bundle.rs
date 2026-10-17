@@ -32,6 +32,9 @@
 //! Unknown top-level fields are rejected so no unsigned data can ride along.
 //! Gzip byte counts remain signed producer assertions: compression is optional
 //! in the product. This verifier checks replay structure, not guest execution.
+//! Embedded effect receipt chains are independently rehashed and checked against
+//! declared run counts, chain heads and timeline bindings. This does not verify
+//! the original run's detached signature, which the bundle does not carry.
 
 #[path = "incident_bundle_structure.rs"]
 mod structure;
