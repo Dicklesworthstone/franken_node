@@ -460,16 +460,17 @@ fn select_target(
             Ok(Resolved::Unmatched)
         }
         OrderedValue::Array(values) => {
-            // Node's PACKAGE_TARGET_RESOLVE treats an empty array as null and,
-            // critically, returns the first non-undefined result. Therefore a
-            // null (Blocked) branch terminates the fallback list immediately;
-            // only unmatched branches and ERR_INVALID_PACKAGE_TARGET continue.
-            // This matters for encapsulation: [null, "./private.js"] must stay
-            // blocked rather than exposing the later file.
+            // Node's executable resolvers continue past null array entries,
+            // remembering the last explicit null or invalid-target error if
+            // no file is selected. An unmatched condition changes neither.
+            // This differs from a null condition value, which terminates that
+            // condition object. The live import/require oracle covers both;
+            // do not infer array behavior from the documentation's abbreviated
+            // "first non-undefined" pseudocode.
             if values.is_empty() {
                 return Ok(Resolved::Blocked);
             }
-            let mut last_invalid = None;
+            let mut fallback = Ok(Resolved::Unmatched);
             for (index, value) in values.iter().enumerate() {
                 branch.push(BranchStep::ArrayIndex(index));
                 let result = select_target(value, pattern, kind, active, branch);
@@ -478,16 +479,13 @@ fn select_target(
                     Ok(Resolved::Target(target, kind, path)) => {
                         return Ok(Resolved::Target(target, kind, path));
                     }
-                    Ok(Resolved::Blocked) => return Ok(Resolved::Blocked),
+                    Ok(Resolved::Blocked) => fallback = Ok(Resolved::Blocked),
                     Ok(Resolved::Unmatched) => {}
-                    Err(e) if e.code == "ERR_INVALID_PACKAGE_TARGET" => last_invalid = Some(e),
+                    Err(e) if e.code == "ERR_INVALID_PACKAGE_TARGET" => fallback = Err(e),
                     Err(e) => return Err(e),
                 }
             }
-            match last_invalid {
-                Some(error) => Err(error),
-                None => Ok(Resolved::Unmatched),
-            }
+            fallback
         }
     }
 }
@@ -650,7 +648,7 @@ mod tests {
     }
 
     #[test]
-    fn arrays_skip_invalid_and_unmatched_targets_but_stop_at_null() {
+    fn arrays_continue_past_null_and_keep_the_last_fallback_outcome() {
         let result = select(
             r#"{"exports":["../invalid",{"browser":"./browser.js"},"./ok.js"]}"#,
             MapKind::Exports,
@@ -661,17 +659,20 @@ mod tests {
         assert_eq!(result.target, "./ok.js");
         assert_eq!(result.branch, [BranchStep::ArrayIndex(2)]);
 
-        for source in [
-            r#"{"exports":[null,"./private.js"]}"#,
-            r#"{"exports":["../bad",null,"./private.js"]}"#,
+        for (source, index) in [
+            (r#"{"exports":[null,"./ok.js"]}"#, 1),
+            (r#"{"exports":["../bad",null,"./ok.js"]}"#, 2),
+            (r#"{"exports":[[],"./ok.js"]}"#, 1),
         ] {
-            assert_eq!(
-                select(source, MapKind::Exports, ".", &[])
-                    .unwrap_err()
-                    .code,
-                "ERR_PACKAGE_PATH_NOT_EXPORTED",
-                "{source}"
-            );
+            let result = select(source, MapKind::Exports, ".", &[]).unwrap();
+            assert_eq!(result.target, "./ok.js", "{source}");
+            assert_eq!(result.branch, [BranchStep::ArrayIndex(index)], "{source}");
+        }
+        for (source, code) in [
+            (r#"{"exports":[null,"../bad"]}"#, "ERR_INVALID_PACKAGE_TARGET"),
+            (r#"{"exports":["../bad",null]}"#, "ERR_PACKAGE_PATH_NOT_EXPORTED"),
+        ] {
+            assert_eq!(select(source, MapKind::Exports, ".", &[]).unwrap_err().code, code, "{source}");
         }
         assert_eq!(
             select(

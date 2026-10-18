@@ -159,6 +159,46 @@ fn array_fallback_and_nested_condition_failures_match_node() {
 }
 
 #[test]
+fn null_array_fallbacks_match_node_for_exports_and_private_imports() {
+    let root = tempfile::tempdir().unwrap();
+    for (array, expected_error) in [
+        (r#"[null,"./node.cjs"]"#, None),
+        (r#"["../bad",null,{"browser":"./custom.cjs"},"./node.cjs"]"#, None),
+        (r#"[[],"./node.cjs"]"#, None),
+        (r#"[[null,{"browser":"./custom.cjs"}],"./node.cjs"]"#, None),
+        (r#"[null,"../bad"]"#, Some("ERR_INVALID_PACKAGE_TARGET")),
+        (r#"[null,{"0":"./custom.cjs"},"./node.cjs"]"#, Some("ERR_INVALID_PACKAGE_CONFIG")),
+    ] {
+        let pkg = package(root.path(), &format!(
+            r##"{{"name":"map-package","exports":{array},"imports":{{"#local":{array}}}}}"##,
+        ));
+        for (flag, request, reference_request, reference_root) in [
+            ("--resolve-export", ".", "map-package", root.path()),
+            ("--resolve-import", "#local", "#local", pkg.as_path()),
+        ] {
+            for esm in [false, true] {
+                let (code, report) = run(&pkg, &[flag, request, "--condition", "node",
+                    "--condition", if esm { "import" } else { "require" }]);
+                let reference = node(reference_root, reference_request, esm, &[]);
+                match expected_error {
+                    Some(error) => {
+                        assert_ne!(code, 0, "{array}: {report}");
+                        assert_eq!(report["error_code"], error);
+                        assert_eq!(reference["code"], error);
+                        assert!(report["selection"].is_null());
+                    }
+                    None => {
+                        assert_eq!(code, 0, "{array}: {report}");
+                        assert_eq!(report["selection"]["target"], "./node.cjs");
+                        assert_eq!(reference["target"], pkg.join("node.cjs").to_str().unwrap());
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn array_unmatched_null_and_error_provenance_agree_with_both_node_resolvers() {
     let root = tempfile::tempdir().unwrap();
     for (array, expected_error) in [
