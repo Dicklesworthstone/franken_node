@@ -1,6 +1,27 @@
 //! Real native CLI coverage of transitive queries, not a reimplemented graph.
 use super::*;
 
+#[cfg(target_os = "linux")]
+#[test]
+fn cli_bun_manifest_capture_bounds_include_root_before_parsing_more_workspaces() {
+    let root = tempfile::tempdir().unwrap();
+    put(root.path(), "package.json", json!({"workspaces":["packages/*"]}));
+    // Each workspace is within the per-file bound. The root makes this total
+    // exceed the aggregate bound; rejection must precede Bun lock projection.
+    let prefix = "{\"padding\":\"";
+    let suffix = "\"}";
+    let manifest = format!("{prefix}{}{suffix}", "x".repeat(512 * 1024 - prefix.len() - suffix.len()));
+    for index in 0..64 {
+        let directory = root.path().join(format!("packages/p{index:02}"));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("package.json"), &manifest).unwrap();
+    }
+    put(root.path(), "bun.lock", json!({}));
+    let (output, value) = invoke(root.path(), &["--transitive"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(value.to_string().contains("captured manifest bytes"), "{value}");
+}
+
 fn chain() -> TempDir {
     let root = fixture(json!({
         "node_modules/dep":{"version":"1", "dependencies":{"leaf":"*"}},
@@ -190,4 +211,131 @@ fn root_optional_override_and_optional_peer_flags_reach_the_existing_direct_api(
     assert_eq!(value["edges"][0]["requested_range"], "new");
     assert_eq!(value["edges"][0]["dependency_kind"], "optional");
     assert_eq!(selected(root.path(), "package.json", "host")["edges"][0]["optional"], true);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn cli_bun_text_lock_versions_preserve_nested_pins_and_hashes() {
+    for version in [1, 2] {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "package.json", json!({"dependencies":{"dep":"^1"}}));
+        let mut lock = json!({"lockfileVersion":version,
+            "workspaces":{"":{"dependencies":{"dep":"^1"}}},
+            "packages":{
+                "dep":["dep@1.2.3","",{"dependencies":{"leaf":"^2"}},"sha512-cGFyZW50"],
+                "dep/leaf":["leaf@2.3.4","",{},"sha512-c2VsZWN0ZWQ="],
+                "leaf":["leaf@9.0.0","",{},"sha512-dW5yZWFjaGVk"]
+            }});
+        let mut raw = lock.to_string();
+        assert_eq!(raw.pop(), Some('}'));
+        raw.push_str(",}");
+        fs::write(root.path().join("bun.lock"), format!("\u{feff}// Bun text lock\n{raw}")).unwrap();
+        let (output, topology) = invoke(root.path(), &["--transitive", "--require-resolved"]);
+        assert!(output.status.success(), "{topology}");
+        assert_eq!(topology["closure"]["reachable"], json!([
+            ".", "node_modules/dep", "node_modules/dep/node_modules/leaf"]));
+        let pin = topology["canonical_hash"].as_str().unwrap();
+        let (output, direct) = invoke(root.path(), &[]);
+        assert!(output.status.success(), "{direct}");
+        let nested = direct["graph"]["lockfile_pins"].as_array().unwrap().iter()
+            .find(|pin| pin["package_path"] == "node_modules/dep/node_modules/leaf").unwrap();
+        assert_eq!(nested["version"], "2.3.4");
+        assert_eq!(nested["integrity"], "sha512-c2VsZWN0ZWQ=");
+        assert_eq!(nested["resolved"], Value::Null, "empty Bun placeholders are not artifact identity");
+        assert!(invoke(root.path(), &["--transitive", "--expected-hash", pin]).0.status.success());
+        lock["packages"]["dep/leaf"][0] = json!("leaf@2.4.0");
+        put(root.path(), "bun.lock", lock);
+        let (output, changed) = invoke(root.path(), &["--transitive", "--expected-hash", pin]);
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(changed["verdict"], "HASH_MISMATCH");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn cli_bun_catalogs_bind_aliases_and_workspace_private_dependencies() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = json!({"name":"app", "version":"1.0.0",
+        "dependencies":{"private":"catalog:local", "alias":"catalog:"}});
+    put(root.path(), "package.json", json!({"name":"root",
+        "workspaces":{"packages":["packages/*"], "catalog":{"alias":"npm:@scope/real@^2"},
+            "catalogs":{"local":{"private":"^1"}}},
+        "dependencies":{"app":"workspace:*"}}));
+    put(root.path(), "packages/app/package.json", workspace.clone());
+    put(root.path(), "bun.lock", json!({"lockfileVersion":2,
+        "catalog":{"alias":"npm:@scope/real@^2"}, "catalogs":{"local":{"private":"^1"}},
+        "workspaces":{"":{"name":"root","dependencies":{"app":"workspace:*"}},
+            "packages/app":workspace},
+        "packages":{
+            "app":["app@workspace:packages/app"],
+            "app/private":["private@1.2.3","",{},""],
+            "private":["private@9.0.0","",{},""],
+            "alias":["@scope/real@2.4.0","",{"dependencies":{"leaf":"1"}},""],
+            "leaf":["leaf@1.0.0","",{},""]
+        }}));
+    let (output, value) = invoke(root.path(), &["--transitive", "--require-resolved"]);
+    assert!(output.status.success(), "{value}");
+    assert_eq!(value["closure"]["reachable"], json!([
+        ".", "node_modules/alias", "node_modules/app", "node_modules/leaf",
+        "packages/app", "packages/app/node_modules/private"]));
+    let alias = selected(root.path(), "packages/app/package.json", "alias");
+    assert_eq!(alias["edges"][0]["requested_range"], "npm:@scope/real@^2");
+    assert_eq!(alias["pins"][0]["package_name"], "@scope/real");
+    let private = selected(root.path(), "packages/app/package.json", "private");
+    assert_eq!(private["edges"][0]["requested_range"], "^1");
+    assert_eq!(private["pins"][0]["package_path"], "packages/app/node_modules/private");
+    assert_eq!(private["pins"][0]["version"], "1.2.3");
+
+    // Metadata changed after the captured lock was installed. It must not
+    // yield a successful graph that omits the new transitive requirement.
+    let mut stale = workspace;
+    stale["dependencies"]["hidden"] = json!("1");
+    put(root.path(), "packages/app/package.json", stale);
+    let (output, value) = invoke(root.path(), &["--transitive"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(value["verdict"], "ERROR");
+    assert!(value["error"].as_str().unwrap().contains("workspace dependencies differ"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn cli_bun_malformed_mixed_binary_and_oversized_locks_never_lose_their_graph() {
+    for case in ["duplicate", "duplicate-manifest", "mixed", "binary", "oversized", "workspace-type", "catalog-mismatch"] {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "package.json", json!({}));
+        let empty = json!({"lockfileVersion":2,"workspaces":{"":{}},"packages":{}});
+        match case {
+            "duplicate" => fs::write(root.path().join("bun.lock"),
+                "{\"lockfileVersion\":2,\"workspaces\":{\"\":{}},\"packages\":{},\"packages\":{}}").unwrap(),
+            "duplicate-manifest" => {
+                fs::write(root.path().join("package.json"), "{\"dependencies\":{},\"dependencies\":{}}").unwrap();
+                put(root.path(), "bun.lock", empty);
+            }
+            "mixed" => {
+                put(root.path(), "bun.lock", empty);
+                put(root.path(), "package-lock.json", json!({"lockfileVersion":3,"packages":{}}));
+            }
+            "binary" => fs::write(root.path().join("bun.lockb"), [0xff,0,1]).unwrap(),
+            "oversized" => std::fs::File::create(root.path().join("bun.lock")).unwrap()
+                .set_len(4 * 1024 * 1024 + 1).unwrap(),
+            "workspace-type" => {
+                put(root.path(), "package.json", json!({"workspaces":[42]}));
+                put(root.path(), "bun.lock", empty);
+            }
+            "catalog-mismatch" => {
+                put(root.path(), "package.json", json!({"catalog":{"alias":"npm:real@^1"},
+                    "dependencies":{"alias":"catalog:"}}));
+                put(root.path(), "bun.lock", json!({"lockfileVersion":2,
+                    "catalog":{"alias":"npm:other@^1"},
+                    "workspaces":{"":{"dependencies":{"alias":"catalog:"}}},
+                    "packages":{"alias":["other@1.0.0","",{},""]}}));
+            }
+            _ => unreachable!(),
+        }
+        let (output, value) = invoke(root.path(), &["--transitive"]);
+        assert_eq!(output.status.code(), Some(2), "{case}: {value}");
+        assert_eq!(value["scope"], "declared-dependency-topology");
+        assert_eq!(value["verdict"], "ERROR");
+        assert_eq!(value["execution_performed"], false);
+    }
 }

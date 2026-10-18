@@ -743,6 +743,51 @@ mod tests {
         assert_eq!(runtime, topology.trust_dependencies(".", false).unwrap());
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bun_trust_walk_expands_catalog_aliases_and_workspace_routes_without_dev_or_hoist_substitution() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "package.json", json!({
+            "version":"1.0.0", "workspaces":["packages/*"], "catalog":{"alias":"npm:real@^2"},
+            "dependencies":{"app":"workspace:*"}, "devDependencies":{"dev":"1"}
+        }));
+        let workspace = json!({"name":"app","version":"1.0.0",
+            "dependencies":{"alias":"catalog:","private":"1"}});
+        put(root.path(), "packages/app/package.json", workspace.clone());
+        let mut lock = json!({"lockfileVersion":2, "catalog":{"alias":"npm:real@^2"},
+            "workspaces":{"":{"dependencies":{"app":"workspace:*"},"devDependencies":{"dev":"1"}},
+                "packages/app":workspace},
+            "packages":{
+                "app":["app@workspace:packages/app"],
+                "app/private":["private@1.2.3","",{},"sha512-cHJpdmF0ZQ=="],
+                "private":["private@9.0.0","",{},"sha512-dW5yZWFjaGVk"],
+                "alias":["real@2.4.0","",{"dependencies":{"leaf":"1"}},"sha512-cmVhbA=="],
+                "leaf":["leaf@1.0.0","",{},""],
+                "dev":["dev@1.0.0","",{},""]
+            }});
+        put(root.path(), "bun.lock", lock.clone());
+        let topology = build(root.path()).unwrap();
+        let runtime = topology.trust_dependencies(".", false).unwrap();
+        let names: BTreeSet<_> = runtime.iter().map(|entry| entry.package_name.as_str()).collect();
+        assert_eq!(names, BTreeSet::from(["app", "leaf", "private", "real"]));
+        let private = runtime.iter().find(|entry| entry.package_name == "private").unwrap();
+        assert_eq!(private.target.as_deref(), Some("packages/app/node_modules/private"));
+        assert_eq!(private.pinned_version.as_deref(), Some("1.2.3"));
+        let alias = runtime.iter().find(|entry| entry.package_name == "real").unwrap();
+        assert_eq!(alias.dependency_name, "alias");
+        assert_eq!(alias.requested_range, "npm:real@^2");
+        assert_eq!(alias.pinned_version.as_deref(), Some("2.4.0"));
+        assert_eq!(runtime.iter().find(|entry| entry.package_name == "leaf").unwrap().integrity, None);
+        assert!(topology.trust_dependencies(".", true).unwrap().iter()
+            .any(|entry| entry.package_name == "dev"));
+
+        // A lock tuple cannot silently replace the catalog's registry identity.
+        lock["packages"]["alias"][0] = json!("other@2.4.0");
+        put(root.path(), "bun.lock", lock);
+        assert!(build(root.path()).unwrap().trust_dependencies(".", false).is_err());
+        assert_eq!(runtime, topology.trust_dependencies(".", false).unwrap());
+    }
+
     #[test]
     fn trust_aliases_keep_the_declared_target_and_refuse_conflicting_captured_names() {
         let root = fixture(json!({"node_modules/a":{"name":"@scope/actual", "version":"2.3.4"}}));

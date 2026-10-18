@@ -4,7 +4,8 @@
 //! full Node/Bun runtime resolution semantics. Runtime parity remains the job
 //! of the lockstep oracle; this graph gives admission and receipt layers stable
 //! bytes for package manifests, workspace edges, dependency ranges, conditional
-//! exports/imports, and npm package-lock pins.
+//! exports/imports, and npm/Bun lockfile pins. Bun text-lock normalization uses
+//! the same bounded parser and workspace/catalog binding as checked migration.
 //!
 //! Installed dependency lookup is importer-relative and bounded to the project:
 //! the closest recorded `node_modules` entry wins. It is not a semver solver,
@@ -28,6 +29,7 @@ pub mod package_targets;
 pub mod dependency_topology;
 
 const MAX_PACKAGE_JSON_BYTES: u64 = 512 * 1024;
+const MAX_CAPTURED_MANIFEST_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PACKAGE_MANIFESTS: usize = 256;
 const MAX_WORKSPACE_PATTERNS: usize = 128;
 const MAX_DEPENDENCY_EDGES: usize = 16_384;
@@ -199,6 +201,18 @@ struct ParsedManifest {
     dependencies: Vec<DependencySpec>,
 }
 
+struct CapturedLockfile {
+    path: PathBuf,
+    raw: String,
+    bun: bool,
+}
+
+#[derive(Default)]
+struct CapturedManifests {
+    values: BTreeMap<String, Value>,
+    bytes: usize,
+}
+
 #[derive(Debug, Clone)]
 struct DependencySpec {
     name: String,
@@ -350,15 +364,48 @@ fn build_graph_parts(
         });
     }
 
-    let root_manifest = parse_manifest(project_root, &root_manifest_path, false)?;
+    let captured_lockfile = capture_package_lock(project_root)?;
+    // npm needs only the compact graph projection. Retain original parsed
+    // manifests for Bun's raw declaration binding and catalog expansion only.
+    let mut captured_manifests = captured_lockfile
+        .as_ref()
+        .is_some_and(|lock| lock.bun)
+        .then(CapturedManifests::default);
+    let root_manifest = parse_manifest(
+        project_root,
+        &root_manifest_path,
+        false,
+        captured_manifests.as_mut(),
+    )?;
     let workspace_manifest_paths =
         collect_workspace_manifest_paths(project_root, &root_manifest.package.workspace_patterns)?;
 
     let mut manifests = Vec::new();
     manifests.push(root_manifest);
     for manifest_path in workspace_manifest_paths {
-        manifests.push(parse_manifest(project_root, &manifest_path, true)?);
+        manifests.push(parse_manifest(
+            project_root,
+            &manifest_path,
+            true,
+            captured_manifests.as_mut(),
+        )?);
         enforce_len("package manifests", manifests.len(), MAX_PACKAGE_MANIFESTS)?;
+    }
+
+    let Lockfile {
+        pins: lockfile_pins,
+        details,
+    } = read_package_lock(captured_lockfile, captured_manifests.as_mut())?;
+    if let Some(captured) = captured_manifests {
+        for manifest in &mut manifests {
+            let directory = manifest_directory(&manifest.relative_manifest_path);
+            let value = captured.values.get(directory).ok_or_else(|| {
+                ModuleResolutionGraphError::InvalidMetadata {
+                    detail: "Bun normalization lost a captured manifest".into(),
+                }
+            })?;
+            manifest.dependencies = effective_dependencies(value, true)?;
+        }
     }
 
     manifests.sort_by(|left, right| {
@@ -388,10 +435,6 @@ fn build_graph_parts(
         workspace_by_path.insert(manifest_directory(&package.relative_manifest_path), package);
     }
 
-    let Lockfile {
-        pins: lockfile_pins,
-        details,
-    } = read_package_lock(project_root)?;
     for (path, target) in &details.links {
         if !workspace_by_path.contains_key(target.as_str()) {
             return invalid_metadata(format!(
@@ -503,6 +546,7 @@ fn parse_manifest(
     project_root: &Path,
     manifest_path: &Path,
     workspace: bool,
+    mut captured: Option<&mut CapturedManifests>,
 ) -> ModuleResolutionGraphResult<ParsedManifest> {
     let relative_path = manifest_path.strip_prefix(project_root).map_err(|_| {
         ModuleResolutionGraphError::InvalidMetadata {
@@ -510,13 +554,31 @@ fn parse_manifest(
         }
     })?;
     let raw = read_project_metadata(project_root, relative_path, MAX_PACKAGE_JSON_BYTES)?;
-    let value: Value =
-        serde_json::from_str(raw.strip_prefix('\u{feff}').unwrap_or(&raw)).map_err(|source| {
+    if let Some(captured) = captured.as_mut() {
+        captured.bytes = captured.bytes.saturating_add(raw.len());
+        enforce_len(
+            "captured manifest bytes",
+            captured.bytes,
+            MAX_CAPTURED_MANIFEST_BYTES,
+        )?;
+    }
+    let text = raw.strip_prefix('\u{feff}').unwrap_or(&raw);
+    let value: Value = match captured.as_ref() {
+        #[cfg(target_os = "linux")]
+        Some(_) => crate::migration::dependency_admission::parse_unique(
+            text.as_bytes(),
+            std::time::Instant::now() + std::time::Duration::from_secs(15),
+        )
+        .map_err(|error| ModuleResolutionGraphError::InvalidMetadata {
+            detail: format!("{}: {error:#}", manifest_path.display()),
+        })?,
+        _ => serde_json::from_str(text).map_err(|source| {
             ModuleResolutionGraphError::Json {
                 path: manifest_path.to_path_buf(),
                 source,
             }
-        })?;
+        })?,
+    };
 
     if !value.is_object() {
         return invalid_metadata("package manifest must contain an object");
@@ -544,7 +606,7 @@ fn parse_manifest(
 
     let dependencies = effective_dependencies(&value, true)?;
 
-    Ok(ParsedManifest {
+    let manifest = ParsedManifest {
         relative_manifest_path: relative_manifest_path.clone(),
         package: PackageNode {
             package_id,
@@ -557,7 +619,14 @@ fn parse_manifest(
             imports: conditional_entries(value.get("imports"), false)?,
         },
         dependencies,
-    })
+    };
+    if let Some(captured) = captured {
+        captured.values.insert(
+            manifest_directory(&manifest.relative_manifest_path).to_owned(),
+            value,
+        );
+    }
+    Ok(manifest)
 }
 
 fn effective_dependencies(
@@ -677,25 +746,22 @@ fn workspace_patterns(manifest: &Value) -> ModuleResolutionGraphResult<Vec<Strin
     let Some(workspaces) = manifest.get("workspaces") else {
         return Ok(Vec::new());
     };
+    let items = match workspaces {
+        Value::Array(items) => items,
+        Value::Object(object) => object
+            .get("packages")
+            .and_then(Value::as_array)
+            .ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
+                detail: "workspace object requires a packages selector array".into(),
+            })?,
+        _ => return invalid_metadata("workspaces must be a selector array or a packages object"),
+    };
     let mut patterns = Vec::new();
-    match workspaces {
-        Value::Array(items) => {
-            for item in items {
-                if let Some(pattern) = item.as_str() {
-                    patterns.push(pattern.to_string());
-                }
-            }
-        }
-        Value::Object(object) => {
-            if let Some(Value::Array(items)) = object.get("packages") {
-                for item in items {
-                    if let Some(pattern) = item.as_str() {
-                        patterns.push(pattern.to_string());
-                    }
-                }
-            }
-        }
-        _ => {}
+    for item in items {
+        let pattern = item.as_str().ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
+            detail: "workspace selector must be a string".into(),
+        })?;
+        patterns.push(pattern.to_owned());
     }
     patterns.sort();
     patterns.dedup();
@@ -978,7 +1044,21 @@ fn optional_string(package: &Value, field: &str) -> ModuleResolutionGraphResult<
     }
 }
 
-fn read_package_lock(project_root: &Path) -> ModuleResolutionGraphResult<Lockfile> {
+fn capture_package_lock(
+    project_root: &Path,
+) -> ModuleResolutionGraphResult<Option<CapturedLockfile>> {
+    // A binary lock cannot silently turn a Bun project into a manifest-only
+    // trust inventory. Probe with a zero byte budget: no binary is allocated
+    // or decoded, and links/devices remain refused by the shared reader.
+    match read_project_metadata(project_root, Path::new("bun.lockb"), 0) {
+        Err(ModuleResolutionGraphError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound => {}
+        _ => {
+            return invalid_metadata(
+                "binary bun.lockb cannot supply dependency trust; select a reviewed bun.lock text lockfile",
+            );
+        }
+    }
     // npm's published lockfile contract gives shrinkwrap precedence. A
     // malformed or unreadable preferred file must not fall back to another
     // dependency tree that omits a revoked transitive package.
@@ -986,7 +1066,11 @@ fn read_package_lock(project_root: &Path) -> ModuleResolutionGraphResult<Lockfil
     for name in ["npm-shrinkwrap.json", "package-lock.json"] {
         match read_project_metadata(project_root, Path::new(name), MAX_LOCKFILE_BYTES) {
             Ok(raw) => {
-                captured = Some((project_root.join(name), raw));
+                captured = Some(CapturedLockfile {
+                    path: project_root.join(name),
+                    raw,
+                    bun: false,
+                });
                 break;
             }
             Err(ModuleResolutionGraphError::Io { source, .. })
@@ -994,14 +1078,65 @@ fn read_package_lock(project_root: &Path) -> ModuleResolutionGraphResult<Lockfil
             Err(error) => return Err(error),
         }
     }
-    let Some((lockfile_path, raw)) = captured else {
+    match read_project_metadata(project_root, Path::new("bun.lock"), MAX_LOCKFILE_BYTES) {
+        Ok(raw) => {
+            if captured.is_some() {
+                return invalid_metadata(
+                    "Bun and npm lockfiles are both present; select one dependency authority before trust admission",
+                );
+            }
+            captured = Some(CapturedLockfile {
+                path: project_root.join("bun.lock"),
+                raw,
+                bun: true,
+            });
+        }
+        Err(ModuleResolutionGraphError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    Ok(captured)
+}
+
+fn read_package_lock(
+    captured: Option<CapturedLockfile>,
+    captured_manifests: Option<&mut CapturedManifests>,
+) -> ModuleResolutionGraphResult<Lockfile> {
+    let Some(CapturedLockfile {
+        path: lockfile_path,
+        raw,
+        bun,
+    }) = captured else {
         return Ok(Lockfile::default());
     };
-    let value: Value =
+    let value: Value = if bun {
+        #[cfg(target_os = "linux")]
+        {
+            let captured_manifests = captured_manifests.ok_or_else(|| {
+                ModuleResolutionGraphError::InvalidMetadata {
+                    detail: "Bun lockfile requires captured project manifests".into(),
+                }
+            })?;
+            crate::migration::dependency_admission::project_bun_lock_for_topology(
+                raw.as_bytes(),
+                &mut captured_manifests.values,
+                std::time::Instant::now() + std::time::Duration::from_secs(15),
+            )
+            .map_err(|error| ModuleResolutionGraphError::InvalidMetadata {
+                detail: format!("{}: {error:#}", lockfile_path.display()),
+            })?
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = captured_manifests;
+            return invalid_metadata("Bun text-lock trust admission requires the native Linux metadata parser");
+        }
+    } else {
         serde_json::from_str(&raw).map_err(|source| ModuleResolutionGraphError::Json {
             path: lockfile_path.clone(),
             source,
-        })?;
+        })?
+    };
 
     if !value.is_object() {
         return invalid_metadata("npm lockfile must contain an object");
@@ -1069,8 +1204,11 @@ fn read_package_lock(project_root: &Path) -> ModuleResolutionGraphResult<Lockfil
                 package_path: package_path.clone(),
                 package_name,
                 version: optional_string(package, "version")?,
-                resolved,
-                integrity: optional_string(package, "integrity")?,
+                // Bun's tuple placeholders mean unavailable metadata, not
+                // an empty artifact identity that a trust card can match.
+                resolved: resolved.filter(|value| !bun || !value.is_empty()),
+                integrity: optional_string(package, "integrity")?
+                    .filter(|value| !bun || !value.is_empty()),
                 dependencies: lockfile_dependencies(package.get("dependencies"))?,
             });
             enforce_len(

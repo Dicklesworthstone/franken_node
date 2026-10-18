@@ -291,7 +291,7 @@ impl<'de> Visitor<'de> for JsonSeed<'_> {
     }
 }
 
-fn parse_unique(bytes: &[u8], deadline: Instant) -> Result<Value> {
+pub(crate) fn parse_unique(bytes: &[u8], deadline: Instant) -> Result<Value> {
     let mut input = serde_json::Deserializer::from_slice(bytes);
     let mut budget = JsonBudget { nodes: 0, deadline };
     let value = JsonSeed { budget: &mut budget, depth: 0 }.deserialize(&mut input)?;
@@ -486,6 +486,43 @@ pub fn inspect(project: &Path, deadline: Instant) -> Result<DependencyAdmission>
 /// source tree, a sandbox, or registry-content authentication.
 pub fn inspect_for_execution(project: &Path, deadline: Instant) -> Result<DependencyAdmission> {
     inspect_with_installation(project, deadline, true)
+}
+
+/// Project a captured Bun lock into the shared installation graph used by
+/// runtime trust admission. The caller owns the bounded, descriptor-relative
+/// capture of these manifests; this function never reopens the project.
+/// Bind every raw workspace declaration before expanding catalog references,
+/// so a stale lock cannot redirect aliases or hide a dependency from trust.
+pub(crate) fn project_bun_lock_for_topology(
+    bytes: &[u8],
+    manifests: &mut BTreeMap<String, Value>,
+    deadline: Instant,
+) -> Result<Value> {
+    let root = manifests.get("").context("Bun topology requires a captured root manifest")?;
+    let (lock, catalogs) = bun::project_lock(bun::parse(bytes, deadline)?, root, deadline)?;
+    let records = lock.get("packages").and_then(Value::as_object)
+        .context("Bun projected installation records missing")?;
+    let workspace_count = records.keys()
+        .filter(|path| !path.split('/').any(|part| part == "node_modules"))
+        .count();
+    ensure!(workspace_count == manifests.len(),
+        "Bun lock workspaces differ from the captured project selection");
+    for (path, manifest) in manifests.iter() {
+        time_remaining(deadline)?;
+        let recorded = records.get(path)
+            .context("Bun lock is missing a captured workspace manifest")?;
+        if !path.is_empty() {
+            ensure!(manifest.get("workspaces").is_none(),
+                "nested Bun workspace configuration requires separate assessment");
+            ensure!(manifest.get("name") == recorded.get("name")
+                && manifest.get("version") == recorded.get("version"),
+                "Bun workspace identity differs from its captured manifest");
+        }
+        ensure!(workspaces::dependency_metadata_matches(manifest, recorded),
+            "Bun workspace dependencies differ from their captured manifest");
+    }
+    catalogs.expand(manifests, deadline)?;
+    Ok(lock)
 }
 
 fn inspect_with_installation(project: &Path, deadline: Instant, check_installation: bool) -> Result<DependencyAdmission> {

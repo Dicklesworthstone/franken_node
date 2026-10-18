@@ -2,7 +2,8 @@
 
 `franken-module-graph` runs the product's actual Rust module-graph builder without
 linking the optional sibling execution engine. It reads root/workspace manifests
-and npm `package-lock.json`, emits deterministic graph evidence, and supports
+and npm `package-lock.json` / `npm-shrinkwrap.json` or Bun `bun.lock` metadata,
+emits deterministic graph evidence, and supports
 importer-specific dependency queries and independently pinned hash checks. It
 never installs dependencies or executes project JavaScript or lifecycle scripts.
 
@@ -34,7 +35,18 @@ not merged into them. npm v1's nested `dependencies` hierarchy is converted to
 explicit installation paths, with `requires` retained separately from nested
 installation records. Unknown lockfile versions and malformed locations, records,
 requirements, or link metadata fail rather than silently producing an empty
-successful graph. These are npm lockfile formats, not pnpm/yarn/Bun lock parsers.
+successful graph. `npm-shrinkwrap.json` takes precedence over `package-lock.json`.
+
+On Linux, text `bun.lock` v1/v2 JSONC uses the same bounded Bun parser as native
+migration admission. Captured root and workspace dependency declarations bind to
+the lock before catalog references expand. Nested pins, package aliases,
+workspace links, and optional/peer requirements remain in the graph and topology.
+The production `run` and `trust scan` dependency-trust walk consumes this topology.
+Bun manifest capture includes the root and is bounded to 32 MiB in total.
+
+A selected npm lock together with `bun.lock` is refused as ambiguous. Legacy
+`bun.lockb` is refused; regenerate the text lock with Bun. Text Bun parsing
+requires Linux. pnpm and Yarn lockfile parsing remains unsupported.
 
 An ordinary dependency range does not imply a same-named local workspace. A
 recorded workspace link binds through its exact captured target directory.
@@ -53,7 +65,7 @@ does not evaluate conditional exports; the target queries below do. Actual
 module-file loading and native runtime parity remain outside this command.
 A graph hash is content identity, not authentication;
 `--expected-hash` must come from an independently trusted source. No receipt or
-security approval is fabricated, and `franken-node run` is unchanged.
+security approval is fabricated, and this command executes no project code.
 
 ## Executed tests
 

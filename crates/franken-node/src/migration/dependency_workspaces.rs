@@ -213,7 +213,7 @@ fn workspace_finding(report: &mut DependencyAdmission, manifest: &Value, directo
     })
 }
 
-fn dependency_metadata_matches(manifest: &Value, recorded: &Value) -> bool {
+pub(super) fn dependency_metadata_matches(manifest: &Value, recorded: &Value) -> bool {
     // Missing and empty declaration maps are equivalent. Do not conflate null
     // or another type with an empty map, or silently discard peer metadata.
     SECTIONS.iter().copied().chain(["peerDependenciesMeta"]).all(|field| {

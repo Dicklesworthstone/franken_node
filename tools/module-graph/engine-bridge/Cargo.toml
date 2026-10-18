@@ -15,6 +15,7 @@ default = ["engine"]
 engine = []
 
 [dependencies]
+anyhow = "1.0"
 franken-module-graph = { path = ".." }
 frankenengine-engine = { path = "../../../../franken_engine/crates/franken-engine", default-features = false }
 serde = { version = "1", features = ["derive"] }

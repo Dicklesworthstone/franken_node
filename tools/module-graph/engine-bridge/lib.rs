@@ -5,6 +5,15 @@ use franken_module_graph_schema as schema_versions;
 #[path = "../../../crates/franken-node/src/supply_chain/module_resolution_graph.rs"]
 pub mod module_resolution_graph;
 
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+#[path = "../../../crates/franken-node/src/migration/dependency_admission.rs"]
+pub(crate) mod dependency_admission;
+#[cfg(target_os = "linux")]
+mod migration {
+    pub(crate) use crate::dependency_admission;
+}
+
 use std::io::{self, Read};
 use std::path::Path;
 
