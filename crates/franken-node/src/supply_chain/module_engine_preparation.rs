@@ -79,23 +79,29 @@ pub(super) struct SourcePreparer {
     prepared: PreparedSources,
     expected: Option<ExpectedRoutes>,
     parser: tree_sitter::Parser,
+    parser_options: ParserOptions,
     scan_budget: Budget,
     retained_bytes: usize,
 }
 
 impl Default for SourcePreparer {
     fn default() -> Self {
-        Self {
-            prepared: PreparedSources::default(),
-            expected: None,
-            parser: tree_sitter::Parser::new(),
-            scan_budget: Budget::default(),
-            retained_bytes: 0,
-        }
+        Self::with_parser_options(ParserOptions::default())
     }
 }
 
 impl SourcePreparer {
+    pub(super) fn with_parser_options(parser_options: ParserOptions) -> Self {
+        Self {
+            prepared: PreparedSources::default(),
+            expected: None,
+            parser: tree_sitter::Parser::new(),
+            parser_options,
+            scan_budget: Budget::default(),
+            retained_bytes: 0,
+        }
+    }
+
     pub(super) fn finish(self) -> PreparedSources {
         self.prepared
     }
@@ -201,7 +207,7 @@ impl SourcePreparer {
         if normalized.len() > MAX_PREPARED_SOURCE_BYTES {
             return Err(preparation_limit());
         }
-        let kind = detect_kind(&normalized, explicit)?;
+        let kind = detect_kind_with_options(&normalized, explicit, &self.parser_options)?;
         let routes = if normalized == source {
             expected.clone()
         } else {
@@ -396,6 +402,7 @@ fn request_style(kind: LoadKind) -> RequestStyle {
 /// standard wrapper parameters also expose lexical redeclaration conflicts.
 /// Only detection uses this wrapper; delivered source is never wrapped here.
 /// All grammar and early-error decisions belong to the actual engine parser.
+#[cfg(test)]
 fn detect_kind(source: &str, explicit: Option<ModuleKind>) -> Result<ModuleKind> {
     detect_kind_with_options(source, explicit, &ParserOptions::default())
 }

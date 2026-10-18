@@ -19,12 +19,15 @@ use frankenengine_engine::capability::RuntimeCapability;
 use frankenengine_engine::hash_tiers::ContentHash;
 use frankenengine_engine::module_compatibility_matrix::CompatibilityMode;
 use frankenengine_engine::module_resolver::{
-    ImportStyle, ModuleDependency, ModulePolicyHook, ModuleProvenance, ModuleRecord, ModuleRequest,
-    ModuleResolver, ModuleSourceKind, ModuleSyntax, ResolutionContext, ResolutionError,
-    ResolutionErrorCode, ResolutionEvent, ResolutionOutcome, ResolutionResult, ResolvedModule,
+    ExecutionModuleResolver, ImportStyle, ModuleDependency, ModulePolicyHook, ModuleProvenance,
+    ModuleRecord, ModuleRequest, ModuleResolver, ModuleSourceKind, ModuleSourceLocation, ModuleSyntax,
+    ResolutionContext, ResolutionError, ResolutionErrorCode, ResolutionEvent, ResolutionOutcome,
+    ResolutionResult, ResolvedModule,
 };
+use frankenengine_engine::parser::ParserOptions;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::OnceLock;
+use std::path::Path;
+use std::sync::{Arc, OnceLock};
 
 const MAX_CHAIN_SOURCE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_CONTEXT_BYTES: usize = 1024;
@@ -49,7 +52,17 @@ impl CapturedEngineResolver {
         graph: CapturedModuleGraph,
         independent_graph_pin: &str,
     ) -> Result<Self, CaptureError> {
-        let mut preparer = SourcePreparer::default();
+        Self::new_with_parser_options(graph, independent_graph_pin, ParserOptions::default())
+    }
+
+    /// Preserve the caller's parser limits during captured source preparation.
+    /// Neither these options nor preparation change the graph's load authority.
+    pub fn new_with_parser_options(
+        graph: CapturedModuleGraph,
+        independent_graph_pin: &str,
+        parser_options: ParserOptions,
+    ) -> Result<Self, CaptureError> {
+        let mut preparer = SourcePreparer::with_parser_options(parser_options);
         let registry = PinnedModuleRegistry::new_with_kind_resolver(
             graph,
             independent_graph_pin,
@@ -91,6 +104,42 @@ impl CapturedEngineResolver {
             engine_style(self.registry.entry_style()),
         )
         .with_compatibility_mode(CompatibilityMode::NodeCompat)
+    }
+
+    /// Install this immutable registry for native runtime loads. The absolute
+    /// root supplies guest-visible origins; constructing metadata opens no files.
+    /// Authorization remains a per-request decision, including cache hits.
+    pub fn execution_resolver(
+        self: &Arc<Self>,
+        project_root: &Path,
+        policy: Arc<dyn ModulePolicyHook + Send + Sync>,
+    ) -> Result<ExecutionModuleResolver, CaptureError> {
+        if !project_root.is_absolute() {
+            return Err(super::error(
+                "ERR_MODULE_ENGINE_SOURCE_LOCATION",
+                "native module origins require an absolute project root",
+            ));
+        }
+        let mut locations = BTreeMap::new();
+        for module in self.registry.modules() {
+            let filename = project_root.join(&module.origin().path);
+            let mut url = url::Url::from_file_path(&filename)
+                .map_err(|_| {
+                    super::error(
+                        "ERR_MODULE_ENGINE_SOURCE_LOCATION",
+                        "captured module origin cannot be represented as a file URL",
+                    )
+                })?
+                .to_string();
+            url.push_str(&module.origin().url_suffix);
+            locations.insert(module.id().to_owned(), ModuleSourceLocation { filename, url });
+        }
+        Ok(ExecutionModuleResolver::new(
+            self.registry.entrypoint(),
+            Arc::clone(self) as Arc<dyn ModuleResolver + Send + Sync>,
+            policy,
+        )
+        .with_source_locations(locations))
     }
 
     fn validate_request(
@@ -926,6 +975,28 @@ mod tests {
     }
 
     #[test]
+    fn configured_parser_options_admit_token_heavy_captured_source() {
+        let root = tempfile::tempdir().unwrap();
+        let source = format!("module.exports=[{}0];", "0,".repeat(40_000));
+        put(root.path(), "app.js", &source);
+        let graph = || capture(root.path(), "app.js", GraphOptions::default()).unwrap();
+        let pin = graph().report().input_hash.clone();
+        assert_eq!(
+            CapturedEngineResolver::new(graph(), &pin).err().unwrap().code,
+            "ERR_MODULE_ENGINE_PARSE_LIMIT"
+        );
+        let mut options = ParserOptions::default();
+        options.budget.max_token_count = 100_000;
+        let r = CapturedEngineResolver::new_with_parser_options(graph(), &pin, options)
+            .ok()
+            .unwrap();
+        let out = r.resolve(&r.entry_request(), &context(), &granted()).unwrap();
+        assert_eq!(out.module.record.source, source);
+        assert_eq!(out.module.record.syntax, ModuleSyntax::CommonJs);
+        assert_eq!(r.summary().graph_input_hash, pin);
+    }
+
+    #[test]
     fn explicit_typescript_formats_use_the_shared_engine_normalizer() {
         use frankenengine_engine::ts_normalization::prepare_source_entry_for_public_entrypoints;
         for (path, source, syntax) in [
@@ -1262,4 +1333,99 @@ mod tests {
             "ERR_MODULE_REGISTRY_INCOMPLETE"
         );
     }
+    fn execute_captured_graph_for_test(
+        root: &Path,
+        entrypoint: &str,
+        lane: frankenengine_engine::baseline_interpreter::LaneChoice,
+        after_capture: impl FnOnce(),
+    ) -> frankenengine_engine::execution_orchestrator::OrchestratorResult {
+        use frankenengine_engine::ast::ParseGoal;
+        use frankenengine_engine::execution_orchestrator::{
+            ExecutionOrchestrator, ExtensionPackage, OrchestratorConfig,
+        };
+
+        let graph = capture(root, entrypoint, GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        let resolver = Arc::new(CapturedEngineResolver::new(graph, &pin).ok().unwrap());
+        let policy = Arc::new(granted());
+        let entry = resolver
+            .resolve(&resolver.entry_request(), &context(), policy.as_ref())
+            .unwrap();
+        let installed = resolver.execution_resolver(root, policy).unwrap();
+        after_capture();
+        let commonjs = entry.module.record.syntax == ModuleSyntax::CommonJs;
+        let mut engine = ExecutionOrchestrator::try_new_lab_with_runtime_config(
+            OrchestratorConfig {
+                force_lane: Some(lane),
+                parse_goal: if commonjs { ParseGoal::Script } else { ParseGoal::Module },
+                commonjs_entry: commonjs,
+                ..OrchestratorConfig::default()
+            },
+            frankenengine_engine::runtime_config::RuntimeConfig::default(),
+        )
+        .unwrap();
+        let package = ExtensionPackage {
+            extension_id: "captured-product-graph-test".into(),
+            source: "throw new Error('uncaptured entry was executed');".into(),
+            source_file: Some("/unopened/captured-product-graph-test.js".into()),
+            module_root: None,
+            capabilities: vec!["module_load".into(), "builtin".into(), "timer".into()],
+            version: "1.0.0".into(),
+            metadata: BTreeMap::new(),
+        };
+        engine
+            .execute_resolved_entry_with_resolver(&package, &entry, installed)
+            .expect("the actual sibling runtime executes product-captured sources")
+    }
+
+    #[test]
+    fn native_commonjs_uses_captured_npm_json_sources_and_original_filenames() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let root = tempfile::tempdir().unwrap();
+            let root = root.path();
+            put(root, "app.cjs",
+                "const a=require('fixture'); const b=require('fixture'); console.log(a.answer, a===b); console.log(__filename); console.log(__dirname);");
+            put(root, "node_modules/fixture/package.json",
+                r#"{"exports":[null,"./index.cjs"]}"#);
+            put(root, "node_modules/fixture/index.cjs", "module.exports=require('./answer.json');");
+            put(root, "node_modules/fixture/answer.json", r#"{"answer":42}"#);
+            let result = execute_captured_graph_for_test(root, "app.cjs", lane, || {
+                put(root, "app.cjs", "throw new Error('changed entry');");
+                put(root, "node_modules/fixture/index.cjs", "throw new Error('changed dependency');");
+                put(root, "node_modules/fixture/answer.json", r#"{"answer":99}"#);
+            });
+            let lines = result.console_output.iter().map(|entry| entry.message.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(lines, vec![
+                "42 true".to_string(),
+                root.join("app.cjs").display().to_string(),
+                root.display().to_string(),
+            ]);
+        }
+    }
+
+    #[test]
+    fn native_esm_preserves_captured_query_origins_after_files_change() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let parent = tempfile::tempdir().unwrap();
+            let root = parent.path().join("project with spaces");
+            put(&root, "app.mjs",
+                "import { answer, origin } from './side.mjs?one#tag'; console.log(answer, origin.url); console.log(import.meta.url);");
+            put(&root, "side.mjs", "export const answer=42; export const origin=import.meta;");
+            let result = execute_captured_graph_for_test(&root, "app.mjs", lane, || {
+                put(&root, "side.mjs", "throw new Error('changed ESM dependency');");
+            });
+            let lines = result.console_output.iter().map(|entry| entry.message.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(lines, vec![
+                format!("42 {}?one#tag", url::Url::from_file_path(root.join("side.mjs")).unwrap()),
+                url::Url::from_file_path(root.join("app.mjs")).unwrap().to_string(),
+            ]);
+        }
+    }
+
 }

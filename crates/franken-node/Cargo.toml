@@ -119,7 +119,7 @@ http-client = ["dep:ureq", "dep:url"]
 external-commands = ["dep:which", "dep:ctrlc"]
 compression = ["dep:flate2"]
 cbor-serialization = ["dep:ciborium"]
-engine = ["dep:frankenengine-engine", "dep:frankenengine-extension-host"]
+engine = ["dep:frankenengine-engine", "dep:frankenengine-extension-host", "dep:url"]
 blake3 = ["dep:blake3"]
 # bd-98xo5.12.1: opt-in profiling feature pulling in the hdrhistogram
 # dependency for per-hot-path latency histograms. Production builds
