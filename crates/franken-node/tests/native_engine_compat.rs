@@ -76,6 +76,17 @@ fn invoke_product_supervisor(
     policy_mode: &str,
     engine_path: &Path,
 ) -> Result<ProductSupervisorOutput, String> {
+    invoke_product_supervisor_with_options(app_path, config, policy_mode, engine_path, &[])
+}
+
+#[cfg(feature = "engine")]
+fn invoke_product_supervisor_with_options(
+    app_path: &Path,
+    config: &Config,
+    policy_mode: &str,
+    engine_path: &Path,
+    run_options: &[&str],
+) -> Result<ProductSupervisorOutput, String> {
     let working_dir = app_path
         .parent()
         .ok_or_else(|| format!("application path has no parent: {}", app_path.display()))?;
@@ -115,6 +126,7 @@ fn invoke_product_supervisor(
         .arg("--engine-bin")
         .arg(engine_path)
         .arg("--json")
+        .args(run_options)
         .current_dir(working_dir)
         .stdin(Stdio::null())
         .output()
@@ -2295,4 +2307,85 @@ fn test_dispatcher_creation_and_fixture_configuration() {
     assert!(std::mem::size_of_val(&dispatcher1) > 0);
     assert!(std::mem::size_of_val(&dispatcher2) > 0);
     assert!(std::mem::size_of_val(&dispatcher3) > 0);
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn frozen_module_cli_runs_large_npm_source_with_configured_parser_limits() {
+    let workspace = TempDir::new().expect("frozen module workspace");
+    let package_dir = workspace.path().join("node_modules/frozen-fixture");
+    std::fs::create_dir_all(&package_dir).unwrap();
+    std::fs::write(
+        package_dir.join("package.json"),
+        r#"{"name":"frozen-fixture","version":"1.0.0","exports":[null,"./index.js"]}"#,
+    ).unwrap();
+    std::fs::write(
+        package_dir.join("index.js"),
+        format!("{}\nmodule.exports=42;\n", ";".repeat(70_000)),
+    ).unwrap();
+    let app = create_test_app(
+        workspace.path(), "app.cjs", "console.log(require('frozen-fixture'));\n",
+    );
+    let mut config = balanced_config();
+    let default = invoke_product_supervisor_with_options(
+        &app, &config, "balanced", Path::new(franken_node_bin()), &["--frozen-modules"],
+    ).unwrap();
+    assert!(!default.status.success(), "default token ceiling must still apply");
+    let diagnostics = format!("{}\n{}", default.stdout, default.stderr);
+    assert!(diagnostics.contains("ERR_MODULE_ENGINE_PARSE_LIMIT"), "{diagnostics}");
+
+    config.runtime.max_parse_tokens = Some(100_000);
+    let admitted = invoke_product_supervisor_with_options(
+        &app, &config, "balanced", Path::new(franken_node_bin()), &["--frozen-modules"],
+    ).unwrap();
+    assert!(admitted.status.success(), "stdout={} stderr={}", admitted.stdout, admitted.stderr);
+    let dispatch = parse_product_dispatch(&admitted).unwrap();
+    assert_eq!(dispatch.captured_output.stdout, "42\n");
+    let decision = dispatch.engine_decision.expect("native engine decision");
+    assert_eq!(decision.parser_budget.max_token_count, 100_000);
+    let graph = decision.frozen_modules.expect("executed captured graph");
+    assert_eq!(graph.modules, 2);
+    assert!(graph.routes > 0);
+    assert!(!graph.entrypoint.is_empty());
+    assert!(!graph.graph_input_hash.is_empty());
+
+    config.runtime.max_parse_source_bytes = Some(1_024);
+    let denied = invoke_product_supervisor_with_options(
+        &app, &config, "balanced", Path::new(franken_node_bin()), &["--frozen-modules"],
+    ).unwrap();
+    assert!(!denied.status.success(), "source-byte ceiling must remain independent");
+    let diagnostics = format!("{}\n{}", denied.stdout, denied.stderr);
+    assert!(diagnostics.contains("ERR_MODULE_ENGINE_PARSE_LIMIT"), "{diagnostics}");
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn frozen_module_config_refuses_computed_loads_before_guest_execution() {
+    let workspace = TempDir::new().unwrap();
+    let app = create_test_app(
+        workspace.path(), "app.cjs",
+        "console.log('FROZEN_GUEST_MUST_NOT_RUN'); const name='./side.cjs'; require(name);",
+    );
+    create_test_app(workspace.path(), "side.cjs", "module.exports=42;");
+    let mut config = balanced_config();
+    config.runtime.frozen_modules = Some(true);
+    let output = invoke_product_supervisor(
+        &app, &config, "balanced", Path::new(franken_node_bin()),
+    ).unwrap();
+    assert!(!output.status.success(), "uncaptured route must not execute");
+    let diagnostics = format!("{}\n{}", output.stdout, output.stderr);
+    assert!(diagnostics.contains("ERR_MODULE_REGISTRY_INCOMPLETE"), "{diagnostics}");
+    assert!(!diagnostics.contains("FROZEN_GUEST_MUST_NOT_RUN"), "{diagnostics}");
+}
+
+#[test]
+fn frozen_modules_and_replay_are_rejected_for_direct_dispatcher_callers() {
+    let mut config = balanced_config();
+    config.runtime.frozen_modules = Some(true);
+    let dispatcher = EngineDispatcher::new(None, PreferredRuntime::FrankenEngine)
+        .with_replay_capture(true);
+    let error = dispatcher.dispatch_run(
+        Path::new("frozen-replay-must-not-read.cjs"), &config, "balanced", &[], 0,
+    ).expect_err("replay cannot certify an omitted source graph");
+    assert!(error.to_string().contains("Frozen modules cannot be combined"), "{error:#}");
 }

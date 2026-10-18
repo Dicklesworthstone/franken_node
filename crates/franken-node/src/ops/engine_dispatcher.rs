@@ -279,6 +279,10 @@ struct NativeSessionRequest {
     app_args: Vec<String>,
     #[serde(default)]
     capture_replay: bool,
+    /// An older worker rejects this unknown top-level field before executing;
+    /// it must never silently ignore a requested frozen module graph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    frozen_modules: Option<bool>,
 }
 
 #[cfg(all(feature = "engine", target_os = "linux"))]
@@ -3727,6 +3731,20 @@ pub struct EngineContainmentDecision {
     /// actually handed to the engine. Absent in older serialized decisions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_limits: Option<EngineExecutionLimitsReport>,
+    /// Captured graph used by this completed native invocation. Counts describe
+    /// admitted source/routes, not how many modules the program evaluated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_modules: Option<NativeModuleGraphSummary>,
+}
+
+/// Source-free identity of the immutable graph supplied to native execution.
+/// The graph hash binds captured inputs; it does not authenticate a publisher.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeModuleGraphSummary {
+    pub graph_input_hash: String,
+    pub entrypoint: String,
+    pub modules: usize,
+    pub routes: usize,
 }
 
 /// Settings supplied to one native orchestrator invocation. The invocation can
@@ -5388,6 +5406,107 @@ fn run_exit_status(containment_exit_code: i32, program_exit_code: Option<i32>) -
     }
 }
 
+fn validate_native_frozen_modules(
+    config: &Config,
+    capture_replay: bool,
+) -> Result<(), ActionableError> {
+    if config.runtime.frozen_modules != Some(true) {
+        return Ok(());
+    }
+    if capture_replay {
+        return Err(ActionableError::new(
+            "Frozen modules cannot be combined with native replay capture: replay does not retain the module-source graph.",
+            "Use --frozen-modules without --capture-replay",
+        ));
+    }
+    if !cfg!(unix) {
+        return Err(ActionableError::new(
+            "Frozen module capture requires the Unix descriptor-relative source reader.",
+            "Run frozen modules on a supported Unix host",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "engine")]
+struct FrozenNativeModules {
+    entry: frankenengine_engine::module_resolver::ResolutionOutcome,
+    resolver: frankenengine_engine::module_resolver::ExecutionModuleResolver,
+    summary: NativeModuleGraphSummary,
+}
+
+/// Capture only after the worker's project, trust and fleet-policy rechecks.
+/// Construction drops live filesystem authority before native evaluation.
+#[cfg(feature = "engine")]
+fn prepare_native_frozen_modules(
+    project_paths: &RunProjectPaths,
+    parser_options: &frankenengine_engine::parser::ParserOptions,
+    capabilities: &[String],
+    policy_id: &str,
+) -> std::result::Result<FrozenNativeModules, String> {
+    #[cfg(not(unix))]
+    {
+        let _ = (project_paths, parser_options, capabilities, policy_id);
+        Err("Frozen module capture requires Unix".to_string())
+    }
+    #[cfg(unix)]
+    {
+        use crate::supply_chain::module_resolution_graph::file_resolution::source_graph::{
+            GraphOptions, capture, engine_resolver::CapturedEngineResolver,
+        };
+        use frankenengine_engine::capability::RuntimeCapability;
+        use frankenengine_engine::module_resolver::{
+            CapabilityPolicyHook, ModuleResolver, ResolutionContext,
+        };
+
+        let root = project_paths.project_root();
+        let entrypoint = project_paths
+            .entrypoint()
+            .strip_prefix(root)
+            .map_err(|_| "Frozen module entrypoint escapes the admitted project root".to_string())?
+            .to_str()
+            .ok_or_else(|| "Frozen module entrypoint is not valid UTF-8".to_string())?;
+        let graph = capture(root, entrypoint, GraphOptions::default())
+            .map_err(|error| format!("Frozen module graph capture failed: {error}"))?;
+        let pin = graph.report().input_hash.clone();
+        let resolver = Arc::new(
+            CapturedEngineResolver::new_with_parser_options(graph, &pin, parser_options.clone())
+                .map_err(|error| format!("Frozen module source admission failed: {error}"))?,
+        );
+        let policy = Arc::new(CapabilityPolicyHook::new(
+            capabilities
+                .iter()
+                .filter_map(|capability| RuntimeCapability::from_tag_str(capability))
+                .collect(),
+        ));
+        let entry = resolver
+            .resolve(
+                &resolver.entry_request(),
+                &ResolutionContext::new(
+                    "native-module-admission",
+                    "native-module-admission",
+                    policy_id,
+                ),
+                policy.as_ref(),
+            )
+            .map_err(|error| format!("Frozen entrypoint policy admission failed: {error}"))?;
+        let summary = NativeModuleGraphSummary {
+            graph_input_hash: resolver.summary().graph_input_hash.clone(),
+            entrypoint: resolver.summary().entrypoint.clone(),
+            modules: resolver.summary().modules,
+            routes: resolver.summary().routes,
+        };
+        let resolver = resolver
+            .execution_resolver(root, policy)
+            .map_err(|error| format!("Frozen module runtime installation failed: {error}"))?;
+        Ok(FrozenNativeModules {
+            entry,
+            resolver,
+            summary,
+        })
+    }
+}
+
 #[cfg(feature = "engine")]
 fn engine_containment_decision(
     result: &frankenengine_engine::execution_orchestrator::OrchestratorResult,
@@ -5421,6 +5540,7 @@ fn engine_containment_decision(
             ambient_authority_grant == AmbientAuthorityGrant::TrustedProcessShape,
         ),
         execution_limits: Some(execution_limits.with_selected_lane(result.lane)),
+        frozen_modules: None,
     }
 }
 
@@ -6105,6 +6225,7 @@ impl EngineDispatcher {
         // any execution-side effect.
         config.runtime.validate_execution_budget()?;
         config.runtime.validate_parse_budget()?;
+        validate_native_frozen_modules(config, self.capture_replay)?;
 
         // Environment authority is replayable through the same typed host-I/O
         // transcript as filesystem/network effects; no profile needs a replay
@@ -6803,6 +6924,12 @@ impl EngineDispatcher {
         request.trust_requirements.validate()?;
         request.config.runtime.validate_execution_budget()?;
         request.config.runtime.validate_parse_budget()?;
+        if request.frozen_modules
+            != request.config.runtime.frozen_modules.filter(|enabled| *enabled)
+        {
+            anyhow::bail!("native-session frozen module requirement does not match its configuration");
+        }
+        validate_native_frozen_modules(&request.config, request.capture_replay)?;
         if !crate::security::constant_time::ct_eq(
             &request.runtime_evidence_grant.capture.session_nonce,
             &request.nonce,
@@ -7663,6 +7790,7 @@ impl EngineDispatcher {
             runtime_evidence_grant,
             app_args: app_args.to_vec(),
             capture_replay,
+            frozen_modules: config.runtime.frozen_modules.filter(|enabled| *enabled),
         };
         let request_frame = Zeroizing::new(
             encode_native_session_frame(&request, NATIVE_SESSION_MAX_REQUEST_BYTES).map_err(
@@ -9275,6 +9403,9 @@ impl EngineDispatcher {
                     &mut telemetry_guard,
                 )
             })?;
+        validate_native_frozen_modules(config, capture_replay).map_err(|error| {
+            native_engine_spawn_error_with_telemetry_cleanup(error.to_string(), &mut telemetry_guard)
+        })?;
         let parser_budget = config.runtime.effective_parse_budget(config.profile);
 
         // Process and environment authority both have typed replay inputs:
@@ -9343,12 +9474,50 @@ impl EngineDispatcher {
             })?
             .to_owned();
 
-        let source_code =
+        let mut orchestrator_config =
+            Self::map_config_to_orchestrator_config_for_entrypoint(config, &project_paths);
+        orchestrator_config.policy_id =
+            Self::generate_opaque_policy_id(config.profile, Some(policy_mode));
+        let capabilities =
+            Self::resolve_capabilities_for_execution(config, process_spawn_admission.as_ref())
+                .map_err(|error| {
+                    native_engine_spawn_error_with_telemetry_cleanup(
+                        error.to_string(),
+                        &mut telemetry_guard,
+                    )
+                })?;
+        let frozen_modules = if config.runtime.frozen_modules == Some(true) {
+            Some(
+                prepare_native_frozen_modules(
+                    &project_paths,
+                    &orchestrator_config.parser_options,
+                    &capabilities,
+                    &orchestrator_config.policy_id,
+                )
+                .map_err(|error| {
+                    native_engine_spawn_error_with_telemetry_cleanup(error, &mut telemetry_guard)
+                })?,
+            )
+        } else {
+            None
+        };
+        let frozen_module_summary = frozen_modules.as_ref().map(|modules| modules.summary.clone());
+        let source_code = if let Some(modules) = &frozen_modules {
+            orchestrator_config.commonjs_entry = modules.entry.module.record.syntax
+                == frankenengine_engine::module_resolver::ModuleSyntax::CommonJs;
+            orchestrator_config.parse_goal = if orchestrator_config.commonjs_entry {
+                ParseGoal::Script
+            } else {
+                ParseGoal::Module
+            };
+            modules.entry.module.record.source.clone()
+        } else {
             read_native_entry_source(execution_app_path, parser_budget.max_source_bytes).map_err(
                 |error| {
                     native_engine_spawn_error_with_telemetry_cleanup(error, &mut telemetry_guard)
                 },
-            )?;
+            )?
+        };
 
         // Create extension package from source
         let package = ExtensionPackage {
@@ -9362,24 +9531,11 @@ impl EngineDispatcher {
             source: source_code,
             source_file: Some(execution_app_path.to_string_lossy().to_string()),
             module_root: Some(module_root),
-            capabilities: {
-                Self::resolve_capabilities_for_execution(config, process_spawn_admission.as_ref())
-                    .map_err(|error| {
-                    native_engine_spawn_error_with_telemetry_cleanup(
-                        error.to_string(),
-                        &mut telemetry_guard,
-                    )
-                })?
-            }, // Profile-based capability mapping
+            capabilities,
             version: env!("CARGO_PKG_VERSION").to_string(), // Extract from package metadata
             metadata: std::collections::BTreeMap::new(),
         };
 
-        // Configure orchestrator with policy settings
-        let mut orchestrator_config =
-            Self::map_config_to_orchestrator_config_for_entrypoint(config, &project_paths); // bd-wlkks/bd-ergy0
-        orchestrator_config.policy_id =
-            Self::generate_opaque_policy_id(config.profile, Some(policy_mode)); // bd-3rlp8: Opaque policy ID with policy_mode
         // bd-656a2: capture a stable trace label for the SSRF gate's audit records
         // before `orchestrator_config` is moved into the orchestrator below.
         let run_egress_trace = orchestrator_config.policy_id.clone();
@@ -9634,7 +9790,15 @@ impl EngineDispatcher {
             )
             .entered();
 
-            match orchestrator.execute(&package) {
+            let result = match frozen_modules {
+                Some(modules) => orchestrator.execute_resolved_entry_with_resolver(
+                    &package,
+                    &modules.entry,
+                    modules.resolver,
+                ),
+                None => orchestrator.execute(&package),
+            };
+            match result {
                 Ok(result) => result,
                 Err(error) => {
                     // bd-muy9u: an attempt that aborts still owes the operator
@@ -9841,12 +10005,13 @@ impl EngineDispatcher {
             stdout,
             stderr,
         };
-        let engine_decision = engine_containment_decision(
+        let mut engine_decision = engine_containment_decision(
             &execution_result,
             parser_budget,
             execution_limits,
             ambient_authority_grant,
         );
+        engine_decision.frozen_modules = frozen_module_summary;
 
         // Stop telemetry and return
         let telemetry_guard = telemetry_guard.take().ok_or_else(|| {
@@ -10965,6 +11130,7 @@ mod tests {
                 selected_lane: Some(EngineExecutionLane::Throughput),
                 ..settings.execution_limits
             }),
+            frozen_modules: None,
         }
     }
 
@@ -18303,6 +18469,7 @@ mod tests {
             runtime_evidence_grant: runtime_evidence_grant_for_test(&nonce, [0x21; 32], [0x42; 32]),
             app_args: vec!["alpha".to_string()],
             capture_replay: true,
+            frozen_modules: None,
         };
         let frame = encode_native_session_frame(&request, NATIVE_SESSION_MAX_REQUEST_BYTES)
             .expect("encode request frame");
@@ -18317,6 +18484,13 @@ mod tests {
         assert_eq!(decoded.fleet_policy, request.fleet_policy);
         assert_eq!(decoded.app_args, request.app_args);
         assert!(decoded.capture_replay);
+        assert_eq!(decoded.frozen_modules, None);
+        assert!(
+            serde_json::to_value(&request)
+                .unwrap()
+                .get("frozen_modules")
+                .is_none()
+        );
         assert_eq!(
             decoded.process_spawn_trust_key_hex,
             request.process_spawn_trust_key_hex

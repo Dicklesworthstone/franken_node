@@ -336,6 +336,12 @@ pub struct RunArgs {
     #[arg(long)]
     pub capture_replay: bool,
 
+    /// Freeze supported literal import/require routes and source bytes before
+    /// native execution. Builtins, computed loads and uncaptured routes are
+    /// refused. The current replay format cannot retain this source graph.
+    #[arg(long, conflicts_with = "capture_replay")]
+    pub frozen_modules: bool,
+
     /// Arguments for the program itself, after `--`
     /// (`franken-node run app.js -- a b`). They become `process.argv[2..]`
     /// where the policy lets the program read `process.argv` (bd-my9hk).

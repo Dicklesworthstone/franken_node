@@ -34465,6 +34465,7 @@ fn main() -> Result<()> {
                 engine_bin,
                 compat_preflight,
                 capture_replay,
+                frozen_modules,
                 app_args,
             } = args;
 
@@ -34491,6 +34492,19 @@ fn main() -> Result<()> {
             // profile. Use the resolved selection consistently for execution,
             // containment, receipts, and incident evidence.
             let policy = resolved.selected_profile.to_string();
+            if frozen_modules {
+                resolved.config.runtime.frozen_modules = Some(true);
+            }
+            if capture_replay && resolved.config.runtime.frozen_modules == Some(true) {
+                return named_cli_fail(
+                    "franken-node/run-error-cli/v1",
+                    "run",
+                    json,
+                    anyhow::anyhow!(
+                        "frozen modules cannot be combined with native replay capture; replay does not yet retain the module-source graph"
+                    ),
+                );
+            }
 
             // Resolve one canonical authority before consulting trust state.
             // The dispatcher and private worker revalidate these exact paths

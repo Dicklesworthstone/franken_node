@@ -39,6 +39,7 @@ fn runtime_config() -> RuntimeConfig {
         lanes,
         drain_timeout_ms: None,
         allow_process_shape: None,
+        frozen_modules: None,
         environment_allowlist: Default::default(),
         max_instructions: None,
         max_registers: None,

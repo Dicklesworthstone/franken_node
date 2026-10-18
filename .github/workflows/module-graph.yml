@@ -80,7 +80,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: Dicklesworthstone/franken_engine
-          ref: bff9a4da7059717335926b4bacdbb03d96408a7f
+          ref: 6b0ab59d5a5c52f1be46990f58908aae50731d40
           path: franken_engine
           persist-credentials: false
       - name: Test the product resolver against the actual engine contract
@@ -88,11 +88,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p bridge-evidence
-          rustup toolchain install stable --profile minimal
-          rustc +stable --version | tee bridge-evidence/rust-version.txt
+          rustup toolchain install nightly-2026-09-21 --profile minimal
+          rustc +nightly-2026-09-21 --version | tee bridge-evidence/rust-version.txt
           git -C franken_node rev-parse HEAD > bridge-evidence/product-revision.txt
           git -C franken_engine rev-parse HEAD > bridge-evidence/engine-revision.txt
-          cargo +stable test --manifest-path franken_node/tools/module-graph/engine-bridge/Cargo.toml --lib engine_resolver:: 2>&1 | tee bridge-evidence/native-tests.log
+          cargo +nightly-2026-09-21 test --manifest-path franken_node/tools/module-graph/engine-bridge/Cargo.toml --lib engine_resolver:: 2>&1 | tee bridge-evidence/native-tests.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:

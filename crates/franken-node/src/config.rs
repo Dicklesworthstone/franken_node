@@ -1429,6 +1429,14 @@ impl Config {
                     MAX_MERGE_DECISIONS,
                 );
             }
+            if let Some(value) = section.frozen_modules {
+                self.runtime.frozen_modules = Some(value);
+                push_bounded(
+                    decisions,
+                    MergeDecision::new(stage.clone(), "runtime.frozen_modules", value),
+                    MAX_MERGE_DECISIONS,
+                );
+            }
             if let Some(value) = &section.environment_allowlist {
                 self.runtime.environment_allowlist.clone_from(value);
                 push_bounded(
@@ -2096,6 +2104,15 @@ impl Config {
             push_bounded(
                 decisions,
                 MergeDecision::new(MergeStage::Env, "runtime.allow_process_shape", parsed),
+                MAX_MERGE_DECISIONS,
+            );
+        }
+        if let Some(raw) = env_lookup("FRANKEN_NODE_RUNTIME_FROZEN_MODULES") {
+            let parsed = parse_env_bool("FRANKEN_NODE_RUNTIME_FROZEN_MODULES", &raw)?;
+            self.runtime.frozen_modules = Some(parsed);
+            push_bounded(
+                decisions,
+                MergeDecision::new(MergeStage::Env, "runtime.frozen_modules", parsed),
                 MAX_MERGE_DECISIONS,
             );
         }
@@ -3289,6 +3306,7 @@ struct RuntimeOverrides {
     pub lanes: Option<BTreeMap<String, RuntimeLaneOverrides>>,
     pub drain_timeout_ms: Option<u64>,
     pub allow_process_shape: Option<bool>,
+    pub frozen_modules: Option<bool>,
     pub environment_allowlist: Option<BTreeSet<String>>,
     pub max_instructions: Option<u64>,
     pub max_registers: Option<u32>,
@@ -4046,6 +4064,11 @@ pub struct RuntimeConfig {
     /// Native replay capture cannot record this ambient process state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_process_shape: Option<bool>,
+    /// Capture supported literal import/require routes and source bytes before
+    /// native execution. Unknown routes, builtins and computed loads are
+    /// refused. This does not grant additional authority or retain replay data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_modules: Option<bool>,
     /// Exact host environment variable names that native `run` may expose
     /// through named `process.env.NAME` / `process.env["NAME"]` reads.
     /// Values are snapshotted once inside the authenticated worker, never
@@ -4311,6 +4334,7 @@ impl RuntimeConfig {
             ),
             drain_timeout_ms: None,
             allow_process_shape: None,
+            frozen_modules: None,
             environment_allowlist: BTreeSet::new(),
             max_instructions: None,
             max_registers: None,
@@ -4348,6 +4372,7 @@ impl RuntimeConfig {
             ),
             drain_timeout_ms: None,
             allow_process_shape: None,
+            frozen_modules: None,
             environment_allowlist: BTreeSet::new(),
             max_instructions: None,
             max_registers: None,
@@ -4385,6 +4410,7 @@ impl RuntimeConfig {
             ),
             drain_timeout_ms: None,
             allow_process_shape: None,
+            frozen_modules: None,
             environment_allowlist: BTreeSet::new(),
             max_instructions: None,
             max_registers: None,
