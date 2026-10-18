@@ -129,6 +129,56 @@ fn self_and_internal_external_imports_resolve_without_losing_map_witnesses() {
 }
 
 #[test]
+fn private_external_imports_use_exact_subpaths_and_keep_caller_conditions() {
+    let root = fixture();
+    put(root.path(), "package.json", br##"{"imports":{"#extension":"legacy/feature","#directory":"legacy/folder","#exact":"legacy/feature.js","#root":"legacy","#conditional":"dual"}}"##);
+    put(root.path(), "node_modules/legacy/package.json", br#"{"main":"index.js"}"#);
+    for path in ["node_modules/legacy/feature.js", "node_modules/legacy/folder/index.js", "node_modules/legacy/index.js"] {
+        source(root.path(), path);
+    }
+    put(root.path(), "node_modules/dual/package.json", br#"{"exports":{"require":"./require.cjs","import":"./import.mjs"}}"#);
+    source(root.path(), "node_modules/dual/require.cjs");
+    source(root.path(), "node_modules/dual/import.mjs");
+    for mode in ["require", "import"] {
+        for request in ["#exact", "#root", "#conditional"] {
+            let report = same_as_node(root.path(), "app.js", request, mode);
+            assert_eq!(report["resolution"]["mode"], mode);
+        }
+    }
+    for request in ["#extension", "#directory"] {
+        let (code, report) = run(root.path(), "app.js", request, "require", &[]);
+        assert_eq!(code, 1, "{report}");
+        assert_eq!(report["error_code"], "MODULE_NOT_FOUND");
+        assert_eq!(node(root.path(), "app.js", request, "require")["code"], report["error_code"]);
+        assert!(report["resolution"].is_null());
+    }
+    // Ordinary CommonJS package requests retain their extension/index search.
+    for request in ["legacy/feature", "legacy/folder"] {
+        same_as_node(root.path(), "app.js", request, "require");
+    }
+}
+
+#[test]
+fn private_external_targets_cannot_substitute_an_outer_version_or_standalone_file() {
+    let root = fixture();
+    source(root.path(), "packages/api/app.js");
+    put(root.path(), "packages/api/package.json", br##"{"imports":{"#nearest":"dep/feature.js","#file":"standalone"}}"##);
+    put(root.path(), "packages/api/node_modules/dep/package.json", b"{}");
+    source(root.path(), "node_modules/dep/feature.js");
+    source(root.path(), "packages/api/node_modules/standalone.js");
+    for request in ["#nearest", "#file"] {
+        let (code, report) = run(root.path(), "packages/api/app.js", request, "require", &[]);
+        assert_eq!(code, 1, "{report}");
+        assert_eq!(report["error_code"], "MODULE_NOT_FOUND");
+        assert_eq!(node(root.path(), "packages/api/app.js", request, "require")["code"], report["error_code"]);
+        assert!(report["resolution"].is_null());
+    }
+    for request in ["dep/feature.js", "standalone"] {
+        same_as_node(root.path(), "packages/api/app.js", request, "require");
+    }
+}
+
+#[test]
 fn exports_encapsulation_blocks_legacy_paths_and_outer_package_fallback() {
     let root = fixture(); source(root.path(), "packages/api/app.js");
     put(root.path(), "packages/api/node_modules/pkg/package.json", br#"{"exports":{".":"./entry.cjs","./private":null},"main":"private.js"}"#);

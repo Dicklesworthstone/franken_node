@@ -60,6 +60,14 @@ pub enum ResolutionMode {
     Require,
 }
 
+/// Private imports use PACKAGE_RESOLVE for external targets even when the
+/// caller is CommonJS. Caller conditions and package lookup are independent.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PackageLookup {
+    CommonJs,
+    PackageUrl,
+}
+
 /// Contained follows only bounded relative links, using captured link text and
 /// retained directory descriptors. It never delegates link following to open().
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -662,7 +670,11 @@ impl Resolver {
             })?;
             return self.mapping(&scope, &manifest, MapKind::Imports, request, mode, depth);
         }
-        self.package(directory, request, mode, depth)
+        let lookup = match mode {
+            ResolutionMode::Require => PackageLookup::CommonJs,
+            ResolutionMode::Import => PackageLookup::PackageUrl,
+        };
+        self.package(directory, request, mode, lookup, depth)
     }
 
     fn package(
@@ -670,6 +682,7 @@ impl Resolver {
         directory: &str,
         request: &str,
         mode: ResolutionMode,
+        lookup: PackageLookup,
         depth: usize,
     ) -> Result<(String, String)> {
         let (name, subpath) = package_parts(request)?;
@@ -696,7 +709,7 @@ impl Resolver {
                             depth,
                         );
                     }
-                    if mode == ResolutionMode::Import {
+                    if lookup == PackageLookup::PackageUrl {
                         if subpath == "." {
                             // Node's legacy package-root main/index search is
                             // distinct from strict ESM relative/subpath lookup.
@@ -715,7 +728,7 @@ impl Resolver {
                         return self.exact(&path, suffix, mode);
                     }
                 }
-                if mode == ResolutionMode::Require {
+                if lookup == PackageLookup::CommonJs {
                     let path = join(&join(ancestor, "node_modules"), request);
                     if let Some(found) = self.legacy(&path, mode)? {
                         return Ok((found, String::new()));
@@ -760,12 +773,12 @@ impl Resolver {
                 )
             }
             TargetKind::ExternalPackage => {
-                // Package-import targets recurse through ordinary package
-                // resolution while preserving HOW the # import was requested.
-                // In particular require('#alias') must retain CommonJS
-                // extension/directory search and require-conditional exports;
-                // forcing Import here made valid external targets such as
-                // "dep/feature" miss an existing "dep/feature.js".
+                // PACKAGE_TARGET_RESOLVE calls PACKAGE_RESOLVE for an external
+                // imports target. Select one nearest package and exact URL
+                // subpaths in both modes, while retaining the caller's active
+                // import/require conditions for any exports map. A missing
+                // target cannot select an inferred extension, directory index
+                // or a different installed version.
                 if bare_builtin(&selection.target) {
                     return Err(error(
                         "ERR_RUNTIME_MODULE_REQUIRED",
@@ -775,7 +788,13 @@ impl Resolver {
                 if depth + 1 >= MAX_DEPTH {
                     return Err(limit());
                 }
-                let result = self.package(directory, &selection.target, mode, depth + 1)?;
+                let result = self.package(
+                    directory,
+                    &selection.target,
+                    mode,
+                    PackageLookup::PackageUrl,
+                    depth + 1,
+                )?;
                 Ok((
                     result.0,
                     if mode == ResolutionMode::Import {
@@ -1247,7 +1266,7 @@ mod tests {
     }
 
     #[test]
-    fn require_package_import_external_target_preserves_commonjs_resolution_mode() {
+    fn private_external_targets_keep_require_conditions_but_use_exact_package_lookup() {
         let root = fixture();
         put(
             root.path(),
@@ -1255,7 +1274,7 @@ mod tests {
             br##"{
                 "name":"application",
                 "type":"commonjs",
-                "imports":{"#feature":"dep/feature"}
+                "imports":{"#feature":"dep/feature","#exact":"dep/feature.js"}
             }"##,
         );
         put(
@@ -1269,10 +1288,14 @@ mod tests {
             b"module.exports = 42;",
         );
 
+        assert_eq!(
+            rejected(root.path(), "app.js", "#feature", ResolutionMode::Require),
+            "MODULE_NOT_FOUND"
+        );
         let required = run(
             root.path(),
             "app.js",
-            "#feature",
+            "#exact",
             ResolutionMode::Require,
         );
         assert_eq!(required.report.path, "node_modules/dep/feature.js");
@@ -1280,8 +1303,12 @@ mod tests {
         assert_eq!(required.report.format_hint, "commonjs");
         assert_eq!(required.source_bytes(), b"module.exports = 42;");
 
-        // Static import remains strict: the package subpath is extensionless
-        // and ESM resolution must not borrow CommonJS extension searching.
+        // An ordinary bare CommonJS request still searches extensions. Only
+        // private-import external targets use PACKAGE_RESOLVE's exact subpath.
+        assert_eq!(
+            run(root.path(), "app.js", "dep/feature", ResolutionMode::Require).report.path,
+            "node_modules/dep/feature.js"
+        );
         assert_eq!(
             rejected(
                 root.path(),
