@@ -2389,3 +2389,56 @@ fn frozen_modules_and_replay_are_rejected_for_direct_dispatcher_callers() {
     ).expect_err("replay cannot certify an omitted source graph");
     assert!(error.to_string().contains("Frozen modules cannot be combined"), "{error:#}");
 }
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn frozen_module_cli_executes_native_core_objects_in_installed_packages() {
+    let workspace = TempDir::new().unwrap();
+    let package_dir = workspace.path().join("node_modules/frozen-core");
+    std::fs::create_dir_all(&package_dir).unwrap();
+    std::fs::write(
+        package_dir.join("package.json"),
+        r#"{"name":"frozen-core","version":"1.0.0","main":"index.cjs"}"#,
+    ).unwrap();
+    std::fs::write(
+        package_dir.join("index.cjs"),
+        "const Buffer=require('node:buffer').Buffer; const qs=require('querystring'); module.exports={Buffer:Buffer,answer:qs.stringify({answer:42})};",
+    ).unwrap();
+    let app = create_test_app(
+        workspace.path(), "app.cjs",
+        "const b=require('buffer'); const value=require('frozen-core'); console.log(value.Buffer===b.Buffer,value.answer);",
+    );
+    let config = balanced_config();
+    let output = invoke_product_supervisor_with_options(
+        &app, &config, "balanced", Path::new(franken_node_bin()), &["--frozen-modules"],
+    ).unwrap();
+    assert!(output.status.success(), "stdout={} stderr={}", output.stdout, output.stderr);
+    let dispatch = parse_product_dispatch(&output).unwrap();
+    assert_eq!(dispatch.captured_output.stdout, "true answer=42\n");
+    let graph = dispatch.engine_decision.unwrap().frozen_modules.unwrap();
+    assert_eq!(graph.modules, 4);
+    assert_eq!(graph.routes, 4);
+    assert!(!graph.graph_input_hash.is_empty());
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn frozen_module_cli_refuses_unsupported_native_builtin_routes_before_execution() {
+    for (filename, source) in [
+        ("app.cjs", "console.log('FROZEN_CORE_MUST_NOT_RUN'); require('fs');"),
+        ("app.mjs", "import 'node:buffer'; console.log('FROZEN_CORE_MUST_NOT_RUN');"),
+        ("app.cjs", "console.log('FROZEN_CORE_MUST_NOT_RUN'); import('node:buffer');"),
+    ] {
+        let workspace = TempDir::new().unwrap();
+        let app = create_test_app(workspace.path(), filename, source);
+        let mut config = balanced_config();
+        config.runtime.frozen_modules = Some(true);
+        let output = invoke_product_supervisor(
+            &app, &config, "balanced", Path::new(franken_node_bin()),
+        ).unwrap();
+        assert!(!output.status.success(), "unsupported route must not execute: {source}");
+        let diagnostics = format!("{}\n{}", output.stdout, output.stderr);
+        assert!(diagnostics.contains("ERR_MODULE_REGISTRY_INCOMPLETE"), "{diagnostics}");
+        assert!(!diagnostics.contains("FROZEN_CORE_MUST_NOT_RUN"), "{diagnostics}");
+    }
+}

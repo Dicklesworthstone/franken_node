@@ -4065,8 +4065,9 @@ pub struct RuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_process_shape: Option<bool>,
     /// Capture supported literal import/require routes and source bytes before
-    /// native execution. Unknown routes, builtins and computed loads are
-    /// refused. This does not grant additional authority or retain replay data.
+    /// native execution. Supported CommonJS builtin loads remain subject to
+    /// runtime policy. Unknown routes, unsupported builtin forms and computed
+    /// loads are refused. This does not grant authority or retain replay data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frozen_modules: Option<bool>,
     /// Exact host environment variable names that native `run` may expose

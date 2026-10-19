@@ -3,8 +3,9 @@
 //! This implements the real sibling engine trait, not a lookalike interface.
 //! Source selection is closed-world; the supplied engine policy runs on every
 //! resolve and every traversed edge, including cache hits and cycle back-edges.
-//! No builtin fallback, live I/O or evaluation happens here. Source requiring
-//! preparation uses the sibling engine front end before registry admission.
+//! Exact CommonJS requests for engine-supported native builtin objects become
+//! source-free terminal descriptors. No builtin fallback, live I/O or evaluation
+//! happens here. Source preparation uses the sibling engine front end.
 
 #[path = "module_engine_preparation.rs"]
 mod preparation;
@@ -21,8 +22,8 @@ use frankenengine_engine::module_compatibility_matrix::CompatibilityMode;
 use frankenengine_engine::module_resolver::{
     ExecutionModuleResolver, ImportStyle, ModuleDependency, ModulePolicyHook, ModuleProvenance,
     ModuleRecord, ModuleRequest, ModuleResolver, ModuleSourceKind, ModuleSourceLocation, ModuleSyntax,
-    ResolutionContext, ResolutionError, ResolutionErrorCode, ResolutionEvent, ResolutionOutcome,
-    ResolutionResult, ResolvedModule,
+    NativeBuiltinModule, ResolutionContext, ResolutionError, ResolutionErrorCode, ResolutionEvent,
+    ResolutionOutcome, ResolutionResult, ResolvedModule,
 };
 use frankenengine_engine::parser::ParserOptions;
 use std::collections::{BTreeMap, BTreeSet};
@@ -67,6 +68,8 @@ impl CapturedEngineResolver {
             graph,
             independent_graph_pin,
             |module, source, report| preparer.prepare(module, source, report),
+            |specifier| NativeBuiltinModule::from_specifier(specifier)
+                .map(NativeBuiltinModule::canonical_specifier),
         )?;
         let mut resolver = Self::from_registry(registry);
         resolver.prepared_sources = preparer.finish();
@@ -122,6 +125,9 @@ impl CapturedEngineResolver {
         }
         let mut locations = BTreeMap::new();
         for module in self.registry.modules() {
+            if module.kind() == ModuleKind::NativeBuiltin {
+                continue;
+            }
             let filename = project_root.join(&module.origin().path);
             let mut url = url::Url::from_file_path(&filename)
                 .map_err(|_| {
@@ -190,12 +196,18 @@ impl CapturedEngineResolver {
     }
 
     fn record(&self, module: &RegisteredModule) -> ModuleRecord {
+        let syntax = match module.kind() {
+            ModuleKind::EsModule => ModuleSyntax::EsModule,
+            ModuleKind::CommonJs => ModuleSyntax::CommonJs,
+            ModuleKind::NativeBuiltin => {
+                return NativeBuiltinModule::from_specifier(&module.origin().path)
+                    .expect("native terminal was admitted by the engine provider inventory")
+                    .record(module.id());
+            }
+        };
         ModuleRecord {
             id: module.id().to_owned(),
-            syntax: match module.kind() {
-                ModuleKind::EsModule => ModuleSyntax::EsModule,
-                ModuleKind::CommonJs => ModuleSyntax::CommonJs,
-            },
+            syntax,
             // The policy receives this candidate record, as required by the
             // engine contract. It is not returned to a caller before approval.
             source: self.prepared_sources.source(module).to_owned(),
@@ -445,6 +457,137 @@ mod tests {
     }
     fn granted() -> CapabilityPolicyHook {
         CapabilityPolicyHook::new(BTreeSet::from([RuntimeCapability::ModuleLoad]))
+    }
+
+    #[test]
+    fn native_builtin_terminals_keep_original_pin_and_exact_commonjs_routes() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.cjs",
+            "require('buffer'); require('node:buffer'); require('./side.cjs');");
+        put(root.path(), "side.cjs", "require('events');");
+        put(root.path(), "node_modules/buffer/index.js", "throw new Error('shadowed builtin');");
+        let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        assert!(!graph.report().fully_resolved);
+        assert!(graph.report().diagnostics.is_empty());
+        assert_eq!(graph.report().modules.len(), 2);
+        let resolver = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
+        assert_eq!(resolver.summary().graph_input_hash, pin);
+        assert_eq!(resolver.summary().modules, 4);
+        let policy = CapabilityPolicyHook::new(BTreeSet::from([
+            RuntimeCapability::ModuleLoad, RuntimeCapability::Builtin,
+        ]));
+        let entry = resolver.resolve(&resolver.entry_request(), &context(), &policy).unwrap();
+        let request = |name: &str, style| ModuleRequest::new(name, style)
+            .with_referrer(entry.module.record.id.clone())
+            .with_compatibility_mode(CompatibilityMode::NodeCompat);
+        let bare = resolver.resolve(&request("buffer", ImportStyle::Require), &context(), &policy).unwrap();
+        let prefixed = resolver.resolve(&request("node:buffer", ImportStyle::Require), &context(), &policy).unwrap();
+        assert_eq!(bare.module.record, prefixed.module.record);
+        assert_eq!(bare.module.content_hash, bare.module.record.canonical_hash());
+        assert_eq!(
+            NativeBuiltinModule::from_record(&bare.module.record),
+            Some(NativeBuiltinModule::Buffer)
+        );
+        assert!(bare.module.record.source.is_empty());
+        assert!(bare.module.record.dependencies.is_empty());
+        assert_eq!(
+            resolver.resolve(&request("buffer", ImportStyle::Import), &context(), &policy)
+                .unwrap_err().code,
+            ResolutionErrorCode::ModuleNotFound
+        );
+        assert_eq!(
+            resolver.resolve(&request("events", ImportStyle::Require), &context(), &policy)
+                .unwrap_err().code,
+            ResolutionErrorCode::ModuleNotFound
+        );
+        assert_eq!(
+            resolver.resolve(&request("buffer", ImportStyle::Require), &context(), &granted())
+                .unwrap_err().code,
+            ResolutionErrorCode::PolicyDenied
+        );
+        assert_eq!(resolver.resolve_chain(&resolver.entry_request(), &context(), &policy).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn native_builtin_hash_cache_does_not_retain_a_policy_grant() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.cjs", "require('buffer');");
+        let resolver = resolver_entry(root.path(), "app.cjs");
+        let policy = ChangingPolicy { allowed: Cell::new(true), calls: Cell::new(0) };
+        let entry = resolver.resolve(&resolver.entry_request(), &context(), &policy).unwrap();
+        let request = ModuleRequest::new("buffer", ImportStyle::Require)
+            .with_referrer(entry.module.record.id)
+            .with_compatibility_mode(CompatibilityMode::NodeCompat);
+        let first = resolver.resolve(&request, &context(), &policy).unwrap();
+        policy.allowed.set(false);
+        assert_eq!(
+            resolver.resolve(&request, &context(), &policy).unwrap_err().code,
+            ResolutionErrorCode::PolicyDenied
+        );
+        policy.allowed.set(true);
+        assert_eq!(
+            first.module.record,
+            resolver.resolve(&request, &context(), &policy).unwrap().module.record
+        );
+        assert_eq!(policy.calls.get(), 4);
+    }
+
+    #[test]
+    fn unsupported_builtin_load_styles_and_indirect_loaders_remain_refused() {
+        for (file, source) in [
+            ("app.cjs", "require('fs');"),
+            ("app.cjs", "require('node:unknown');"),
+            ("app.cjs", "const name='buffer'; require(name);"),
+            ("app.cjs", "require.resolve('buffer');"),
+            ("app.cjs", "require('#builtin');"),
+            ("app.mjs", "import 'buffer';"),
+            ("app.mjs", "import('node:buffer');"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            put(root.path(), "package.json", r#"{"imports":{"#builtin":"buffer"}}"#);
+            put(root.path(), file, source);
+            let graph = capture(root.path(), file, GraphOptions::default()).unwrap();
+            let pin = graph.report().input_hash.clone();
+            assert_eq!(
+                CapturedEngineResolver::new(graph, &pin).err().unwrap().code,
+                "ERR_MODULE_REGISTRY_INCOMPLETE",
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_terminal_admission_never_changes_the_generic_registry_contract() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.cjs", "require('buffer');");
+        let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        assert_eq!(
+            PinnedModuleRegistry::new(graph, &pin).err().unwrap().code,
+            "ERR_MODULE_REGISTRY_INCOMPLETE"
+        );
+    }
+
+    #[test]
+    fn native_builtin_routes_and_descriptors_survive_closed_capsule_replay() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.cjs", "require('buffer');");
+        let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        let encoded = capsule::encode(&graph).unwrap();
+        let live = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
+        put(root.path(), "app.cjs", "require('events');");
+        let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+        assert!(!replayed.report().fully_resolved);
+        let restored = CapturedEngineResolver::new(replayed, &pin).ok().unwrap();
+        let policy = CapabilityPolicyHook::new(BTreeSet::from([
+            RuntimeCapability::ModuleLoad, RuntimeCapability::Builtin,
+        ]));
+        assert_eq!(
+            live.resolve_chain(&live.entry_request(), &context(), &policy).unwrap(),
+            restored.resolve_chain(&restored.entry_request(), &context(), &policy).unwrap()
+        );
     }
 
     #[test]
@@ -1347,7 +1490,9 @@ mod tests {
         let graph = capture(root, entrypoint, GraphOptions::default()).unwrap();
         let pin = graph.report().input_hash.clone();
         let resolver = Arc::new(CapturedEngineResolver::new(graph, &pin).ok().unwrap());
-        let policy = Arc::new(granted());
+        let policy = Arc::new(CapabilityPolicyHook::new(BTreeSet::from([
+            RuntimeCapability::ModuleLoad, RuntimeCapability::Builtin, RuntimeCapability::Timer,
+        ])));
         let entry = resolver
             .resolve(&resolver.entry_request(), &context(), policy.as_ref())
             .unwrap();
@@ -1376,6 +1521,44 @@ mod tests {
         engine
             .execute_resolved_entry_with_resolver(&package, &entry, installed)
             .expect("the actual sibling runtime executes product-captured sources")
+    }
+
+    #[test]
+    fn native_commonjs_core_objects_execute_across_captured_package_boundaries() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let root = tempfile::tempdir().unwrap();
+            put(root.path(), "app.cjs", r#"
+                const b=require('buffer');
+                const again=require('node:buffer');
+                const events=require('events');
+                const qs=require('querystring');
+                const url=require('url');
+                const os=require('os');
+                const timers=require('timers');
+                const perf=require('perf_hooks');
+                const nested=require('fixture');
+                console.log(b===again,b.Buffer.from('ok').toString(),nested.same(b));
+                const emitter=new events.EventEmitter();
+                let total=0;
+                emitter.on('value',function(v){total+=v;});
+                emitter.emit('value',42);
+                console.log(total,qs.stringify({a:42}),new url.URL('https://example.com/a').pathname);
+                console.log(os.EOL==='\n',timers.setTimeout===setTimeout,perf.performance===performance);
+            "#);
+            put(root.path(), "node_modules/fixture/package.json", r#"{"main":"index.cjs"}"#);
+            put(root.path(), "node_modules/fixture/index.cjs",
+                "module.exports={same:function(value){return require('buffer')===value;}};");
+            let result = execute_captured_graph_for_test(root.path(), "app.cjs", lane, || {
+                put(root.path(), "node_modules/fixture/index.cjs",
+                    "throw new Error('uncaptured package was reopened');");
+            });
+            assert_eq!(
+                result.console_output.iter().map(|entry| entry.message.as_str()).collect::<Vec<_>>(),
+                vec!["true ok true", "42 a=42 /a", "true true true"]
+            );
+        }
     }
 
     #[test]

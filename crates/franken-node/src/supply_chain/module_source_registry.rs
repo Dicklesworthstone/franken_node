@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 type Result<T> = std::result::Result<T, ResolutionError>;
 const ID_DOMAIN: &[u8] = b"franken-node/sealed-module-id/v1\0";
+const BUILTIN_ID_DOMAIN: &[u8] = b"franken-node/sealed-native-builtin/v1\0";
 type ImporterRoutes = BTreeMap<RequestStyle, BTreeMap<String, String>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -40,13 +41,15 @@ impl RequestStyle {
 pub enum ModuleKind {
     EsModule,
     CommonJs,
+    /// Engine-owned terminal descriptor; it has no captured source file.
+    NativeBuiltin,
 }
 
 impl ModuleKind {
     pub fn entry_style(self) -> RequestStyle {
         match self {
             Self::EsModule => RequestStyle::Import,
-            Self::CommonJs => RequestStyle::Require,
+            Self::CommonJs | Self::NativeBuiltin => RequestStyle::Require,
         }
     }
 }
@@ -194,20 +197,25 @@ impl PinnedModuleRegistry {
                     ),
                 )),
             }
-        })
+        }, |_| None)
     }
 
     /// Engine-owned preparation may assign a runtime kind to captured source.
     /// The ordinary constructor remains transform-free. Crucially, pins and
     /// graph completeness are checked BEFORE the callback sees source bytes.
     /// The callback cannot rewrite identities, routes, source bytes or pins.
-    pub(super) fn new_with_kind_resolver<F>(
+    /// A separate engine callback may admit an exact captured CommonJS builtin
+    /// requirement as a source-free terminal. It never changes the report or
+    /// allows unknown, computed, import-style or uncaptured runtime requests.
+    pub(super) fn new_with_kind_resolver<F, B>(
         graph: CapturedModuleGraph,
         independent_graph_pin: &str,
         mut kind_of: F,
+        native_builtin: B,
     ) -> Result<Self>
     where
         F: FnMut(&super::SourceModule, &str, &super::SourceGraphReport) -> Result<ModuleKind>,
+        B: Fn(&str) -> Option<&'static str>,
     {
         let digest = independent_graph_pin.strip_prefix("sha256:").unwrap_or("");
         if digest.len() != 64
@@ -227,18 +235,37 @@ impl PinnedModuleRegistry {
             ));
         }
         let report = graph.report();
-        if !report.fully_resolved
-            || !report.diagnostics.is_empty()
-            || report.modules.iter().any(|m| !m.analyzed)
-            || report
-                .edges
-                .iter()
-                .any(|e| !matches!(e.state, EdgeState::Resolved | EdgeState::TypeOnly))
-        {
-            return Err(error(
-                "ERR_MODULE_REGISTRY_INCOMPLETE",
-                "source delivery requires a closed, analyzed graph",
-            ));
+        let mut builtin_targets = BTreeMap::<String, (String, &'static str)>::new();
+        let incomplete = || error(
+            "ERR_MODULE_REGISTRY_INCOMPLETE",
+            "source delivery requires a closed, analyzed graph with engine-approved terminal requirements",
+        );
+        if !report.diagnostics.is_empty() || report.modules.iter().any(|m| !m.analyzed) {
+            return Err(incomplete());
+        }
+        for edge in &report.edges {
+            match edge.state {
+                EdgeState::Resolved | EdgeState::TypeOnly => {}
+                EdgeState::RuntimeRequired
+                    if edge.kind == LoadKind::Require
+                        && edge.target.is_none()
+                        && edge.error.as_ref().is_some_and(|failure|
+                            failure.code == "ERR_RUNTIME_MODULE_REQUIRED") =>
+                {
+                    let request = edge.specifier.as_deref().ok_or_else(incomplete)?;
+                    let name = native_builtin(request).ok_or_else(incomplete)?;
+                    builtin_targets.insert(
+                        request.to_owned(),
+                        (native_builtin_id(&report.input_hash, name), name),
+                    );
+                }
+                _ => return Err(incomplete()),
+            }
+        }
+        // The captured report remains truthful: runtime requirements are not
+        // source files and never make its fully_resolved flag true.
+        if !report.fully_resolved && builtin_targets.is_empty() {
+            return Err(incomplete());
         }
         let identities: BTreeMap<_, _> = report
             .modules
@@ -282,6 +309,16 @@ impl PinnedModuleRegistry {
                 return Err(invalid_graph());
             }
         }
+        for (id, name) in builtin_targets.values() {
+            modules.entry(id.clone()).or_insert_with(|| RegisteredModule {
+                id: id.clone(),
+                origin: ModuleId { path: (*name).to_owned(), url_suffix: String::new() },
+                kind: ModuleKind::NativeBuiltin,
+                source: Arc::from(""),
+                source_sha256: hex::encode(Sha256::digest([])),
+                dependencies: Vec::new(),
+            });
+        }
         let mut routes = BTreeMap::<String, ImporterRoutes>::new();
         let mut route_count = 0;
         for edge in &report.edges {
@@ -289,10 +326,14 @@ impl PinnedModuleRegistry {
                 continue;
             }
             let importer = identities.get(&edge.importer).ok_or_else(invalid_graph)?;
-            let target = identities
-                .get(edge.target.as_ref().ok_or_else(invalid_graph)?)
-                .ok_or_else(invalid_graph)?;
             let specifier = edge.specifier.as_ref().ok_or_else(invalid_graph)?;
+            let target = if edge.state == EdgeState::RuntimeRequired {
+                &builtin_targets.get(specifier).ok_or_else(invalid_graph)?.0
+            } else {
+                identities
+                    .get(edge.target.as_ref().ok_or_else(invalid_graph)?)
+                    .ok_or_else(invalid_graph)?
+            };
             let style = RequestStyle::for_load(edge.kind);
             let by_specifier = routes
                 .entry(importer.clone())
@@ -463,6 +504,16 @@ fn invalid_graph() -> ResolutionError {
         "ERR_MODULE_REGISTRY_GRAPH",
         "captured source graph has inconsistent module identities or routes",
     )
+}
+
+fn native_builtin_id(graph_hash: &str, name: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(BUILTIN_ID_DOMAIN);
+    for part in [graph_hash, name] {
+        digest.update((part.len() as u64).to_le_bytes());
+        digest.update(part.as_bytes());
+    }
+    format!("franken-captured-builtin:{}", hex::encode(digest.finalize()))
 }
 
 fn canonical_id(graph_hash: &str, id: &ModuleId) -> String {
@@ -985,7 +1036,7 @@ mod tests {
             let result = PinnedModuleRegistry::new_with_kind_resolver(graph, &pin, |_, _, _| {
                 calls.set(calls.get() + 1);
                 Ok(ModuleKind::EsModule)
-            });
+            }, |_| None);
             assert_eq!(
                 result.err().unwrap().code,
                 if mismatch {
