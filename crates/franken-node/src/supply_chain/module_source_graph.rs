@@ -36,6 +36,10 @@ mod scan_cache;
 #[path = "module_engine_resolver.rs"]
 pub mod engine_resolver;
 
+#[cfg(test)]
+#[path = "module_require_resolve_tests.rs"]
+mod require_resolve_tests;
+
 const MAX_MODULES: usize = 256;
 const MAX_SITES: usize = 4096;
 const MAX_AST_NODES: usize = 262_144;
@@ -73,6 +77,8 @@ impl SourceSite {
 pub enum LoadKind {
     StaticImport,
     Reexport,
+    /// CommonJS-resolution requests, including direct require.resolve calls.
+    /// Capturing this route never asserts that the target will be evaluated.
     Require,
     DynamicImport,
 }
@@ -617,10 +623,13 @@ fn scan(
                     .map(|s| (LoadKind::Require, s))
             }
             "call_expression" => {
+                let resolve = node
+                    .child_by_field_name("function")
+                    .is_some_and(|f| is_require_resolve(f, text));
                 let kind = node.child_by_field_name("function").and_then(|f| {
                     if f.kind() == "import" {
                         Some(LoadKind::DynamicImport)
-                    } else if is_require(f, bytes) {
+                    } else if is_require(f, bytes) || resolve {
                         Some(LoadKind::Require)
                     } else {
                         None
@@ -631,7 +640,23 @@ fn scan(
                         .child_by_field_name("arguments")
                         .and_then(|a| {
                             let mut walk = a.walk();
-                            a.named_children(&mut walk).find(|n| n.kind() != "comment")
+                            let mut args = a
+                                .named_children(&mut walk)
+                                .filter(|n| n.kind() != "comment");
+                            let first = args.next();
+                            if resolve && args.next().is_some() {
+                                // `paths` changes the lookup origin. Do not
+                                // guess a route from just the first argument.
+                                if !erased {
+                                    issue = Some((
+                                        "REQUIRE_RESOLVE_OPTIONS",
+                                        "require.resolve options need a captured search-path contract",
+                                    ));
+                                }
+                                None
+                            } else {
+                                first
+                            }
                         })
                         .unwrap_or(node);
                     (kind, arg)
@@ -639,7 +664,7 @@ fn scan(
             }
             "identifier" if !erased => {
                 let spelling = node.utf8_text(bytes).unwrap_or("");
-                if spelling == "require" && !direct_callee(node) {
+                if spelling == "require" && !direct_callee(node, text) {
                     issue = Some((
                         "INDIRECT_REQUIRE",
                         "require is bound, passed or used indirectly; scope/alias analysis is not implemented",
@@ -652,7 +677,9 @@ fn scan(
                 }
                 None
             }
-            "member_expression" if !erased && is_require(node, bytes) && !direct_callee(node) => {
+            "member_expression"
+                if !erased && is_require(node, bytes) && !direct_callee(node, text) =>
+            {
                 issue = Some(("INDIRECT_REQUIRE", "module.require is used indirectly"));
                 None
             }
@@ -780,20 +807,54 @@ fn runtime_operand(mut node: Node<'_>) -> Node<'_> {
     node
 }
 
-fn direct_callee(mut node: Node<'_>) -> bool {
+fn direct_callee(mut node: Node<'_>, source: &str) -> bool {
     while let Some(p) = node.parent() {
         if p.kind() == "call_expression" {
             return p
                 .child_by_field_name("function")
                 .is_some_and(|f| f.id() == node.id());
         }
-        if wrapper_operand(p).is_some_and(|operand| operand.id() == node.id()) {
+        if wrapper_operand(p).is_some_and(|operand| operand.id() == node.id())
+            || (is_require_resolve(p, source)
+                && p.child_by_field_name("object")
+                    .is_some_and(|object| object.id() == node.id()))
+        {
             node = p;
         } else {
             return false;
         }
     }
     false
+}
+
+/// Recognize the actual CommonJS resolve member, not aliases, call/apply,
+/// user-provided loaders, or arbitrary computed property expressions. Reuse
+/// the ordinary require route/condition set: the engine already implements
+/// resolve-only execution and policy checks over that same route. Capturing
+/// the full source closure remains conservative (this is not asset discovery).
+fn is_require_resolve(node: Node<'_>, source: &str) -> bool {
+    let node = runtime_operand(node);
+    if !matches!(node.kind(), "member_expression" | "subscript_expression") {
+        return false;
+    }
+    if !node.child_by_field_name("object").is_some_and(|object| {
+        let object = runtime_operand(object);
+        object.kind() == "identifier" && object.utf8_text(source.as_bytes()) == Ok("require")
+    }) {
+        return false;
+    }
+    match node.kind() {
+        "member_expression" => node
+            .child_by_field_name("property")
+            .is_some_and(|property| property.utf8_text(source.as_bytes()) == Ok("resolve")),
+        "subscript_expression" => {
+            node.child_by_field_name("index")
+                .and_then(|index| literal(runtime_operand(index), source))
+                .as_deref()
+                == Some("resolve")
+        }
+        _ => false,
+    }
 }
 
 fn is_require(node: Node<'_>, bytes: &[u8]) -> bool {
@@ -1172,7 +1233,7 @@ mod tests {
             .unwrap();
         assert_eq!(first.id(), alias.id());
         assert_ne!(first.id(), distinct.id());
-        assert_eq!(first.source(), "export const state = {};");
+        assert_eq!(first.source(), "export const state = {};" );
         assert_eq!(registry.summary().modules, 3);
         assert_eq!(registry.summary().routes, 3);
     }
