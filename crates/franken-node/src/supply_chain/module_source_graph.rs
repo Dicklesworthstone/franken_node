@@ -23,8 +23,14 @@ use tree_sitter::{Node, Parser};
 #[path = "module_graph_capsule.rs"]
 pub mod capsule;
 
+#[path = "module_json_syntax.rs"]
+mod json_syntax;
+
 #[path = "module_source_registry.rs"]
 pub mod registry;
+
+#[path = "module_source_scan_cache.rs"]
+mod scan_cache;
 
 #[cfg(feature = "engine")]
 #[path = "module_engine_resolver.rs"]
@@ -298,6 +304,8 @@ fn build(
     let mut diagnostics = Vec::new();
     let mut budget = Budget::default();
     let mut parser = Parser::new();
+    let mut scan_cache = scan_cache::ScanCache::default();
+    scan_cache.observe_module(&first.path);
 
     while let Some(id) = pending.pop_front() {
         let source = Rc::clone(sources.get(&id).expect("queued source is captured"));
@@ -306,7 +314,13 @@ fn build(
         };
         let format_hint = resolver.format(&id.path)?;
         let source_language = SourceLanguage::for_module(&id.path, &format_hint);
-        let (loads, notices, analyzed) = scan(&mut parser, bytes, source_language, &mut budget)?;
+        let (loads, notices, analyzed) = scan_cache.scan(
+            &mut parser,
+            &id.path,
+            source.as_ref(),
+            source_language,
+            &mut budget,
+        )?;
         let module = SourceModule {
             id: id.clone(),
             content_sha256: sha256.clone(),
@@ -370,6 +384,7 @@ fn build(
                             if sources.len() >= MAX_MODULES {
                                 return Err(limit());
                             }
+                            scan_cache.observe_module(&target.path);
                             sources.insert(target.clone(), source);
                             pending.push_back(target.clone());
                         }
@@ -465,12 +480,14 @@ fn fatal(e: &ResolutionError) -> bool {
     )
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Load {
     site: SourceSite,
     kind: LoadKind,
     specifier: Option<String>,
     type_only: bool,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Notice {
     site: Option<SourceSite>,
     code: &'static str,
@@ -490,7 +507,7 @@ fn scan(
         message,
     };
     if language == SourceLanguage::Json {
-        return if serde_json::from_slice::<serde_json::Value>(bytes).is_ok() {
+        return if json_syntax::valid(bytes) {
             Ok((Vec::new(), Vec::new(), true))
         } else {
             budget.site()?;
