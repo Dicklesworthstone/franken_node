@@ -77,6 +77,47 @@
           "dictionary.txt": "Z_NEED_DICT\n"
         }
       }
+    },
+    {
+      "id": "zlib-package-streamed-crc32-manifest",
+      "entry": "app.cjs",
+      "files": {
+        "input.txt": "archive metadata: café 😀\n東京/package.json\n",
+        "node_modules/archive-checksum/package.json": "{\"name\": \"archive-checksum\", \"version\": \"1.0.0\", \"type\": \"commonjs\", \"exports\": \"./index.cjs\"}\n",
+        "node_modules/archive-checksum/index.cjs": "const {createReadStream}=require('node:fs');\nconst {crc32}=require('node:zlib');\nmodule.exports=async function describe(path){\n  let checksum=0,bytes=0;\n  for await(const chunk of createReadStream(path,{highWaterMark:3})){\n    checksum=crc32(chunk,checksum);bytes+=chunk.length;\n  }\n  return {bytes,checksum};\n};\n",
+        "app.cjs": "const fs=require('node:fs');const describe=require('archive-checksum');\n(async function(){const record=await describe('input.txt');\nfs.writeFileSync('manifest.json',JSON.stringify(record)+'\\n');\nconsole.log('CRC32_MANIFEST_COMPLETE',record.bytes,record.checksum);\n})().catch(error=>{console.error(error);process.exitCode=1;});\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "CRC32_MANIFEST_COMPLETE 49 3842877847\n",
+        "stderr": "",
+        "files": {
+          "input.txt": "archive metadata: café 😀\n東京/package.json\n",
+          "manifest.json": "{\"bytes\":49,\"checksum\":3842877847}\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "zlib-esm-checksum-refuses-corrupt-publication",
+      "entry": "app.mjs",
+      "files": {
+        "input.txt": "corrupted archive payload\n",
+        "published.txt": "previous release\n",
+        "node_modules/@archive/integrity/package.json": "{\"name\": \"@archive/integrity\", \"version\": \"1.0.0\", \"type\": \"module\", \"exports\": \"./index.mjs\"}\n",
+        "node_modules/@archive/integrity/index.mjs": "import {crc32} from 'node:zlib';\nimport {createReadStream} from 'node:fs';\nexport {crc32 as checksum} from 'node:zlib';\nexport async function verify(path,expected){\n  let actual=0;\n  for await(const bytes of createReadStream(path,{highWaterMark:2}))actual=crc32(bytes,actual);\n  if(actual!==expected){const error=new Error('Archive checksum mismatch');\n    error.code='ARCHIVE_CHECKSUM_MISMATCH';throw error;}\n}\n",
+        "app.mjs": "import fs from 'node:fs';import codecs from 'node:zlib';\nimport {verify,checksum} from '@archive/integrity';\nconst captured=checksum;\ncodecs.crc32=function(){throw Error('public replacement');};\ntry{\n  await verify('input.txt',2043393437);\n  fs.writeFileSync('published.txt','incorrect replacement\\n');\n  fs.writeFileSync('unexpected.txt','incorrect success\\n');\n}catch(error){\n  if(error.code!=='ARCHIVE_CHECKSUM_MISMATCH')throw error;\n  fs.writeFileSync('receipt.txt',error.code+'\\n');\n  console.log('CRC32_REFUSAL_COMPLETE',captured('123456789'));\n}\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "CRC32_REFUSAL_COMPLETE 3421780262\n",
+        "stderr": "",
+        "files": {
+          "published.txt": "previous release\n",
+          "receipt.txt": "ARCHIVE_CHECKSUM_MISMATCH\n",
+          "unexpected.txt": null
+        }
+      }
     }
   ]
 }
