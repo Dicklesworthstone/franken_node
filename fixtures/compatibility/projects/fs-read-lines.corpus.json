@@ -1,0 +1,86 @@
+{
+  "schema_version": "franken-node/project-compat-corpus/v1",
+  "cases": [
+    {
+      "id": "read-lines-cjs-jsonl-index",
+      "entry": "app.cjs",
+      "files": {
+        "package.json": "{\"name\":\"jsonl-index\",\"private\":true}\n",
+        "input.jsonl": "{\"id\":2,\"name\":\"β\"}\r\n{\"id\":1,\"name\":\"😀\"}\n",
+        "node_modules/line-index/package.json": "{\"name\":\"line-index\",\"main\":\"index.cjs\"}\n",
+        "node_modules/line-index/index.cjs": "const {open}=require('node:fs/promises');\nmodule.exports=async function(file){\n  const h=await open(file);const rl=h.readLines({highWaterMark:1});\n  const closed=new Promise(resolve=>rl.input.once('close',resolve));\n  const rows=[];try{for await(const line of rl)rows.push(JSON.parse(line));}\n  finally{rl.close();rl.input.destroy();await closed;await h.close();}\n  return {rows,closed:h.fd===-1};\n};\n",
+        "app.cjs": "const fs=require('fs');\n(async()=>{const result=await require('line-index')('input.jsonl');\n  result.rows.sort((a,b)=>a.id-b.id);\n  fs.writeFileSync('index.json',JSON.stringify(result.rows)+'\\n');\n  fs.writeFileSync('receipt.txt',String(result.closed)+'\\n');\n  console.log('JSONL_INDEX_COMPLETE');\n})().catch(error=>{console.error(error);process.exitCode=1;});\n"
+      },
+      "expected": {
+        "stdout": "JSONL_INDEX_COMPLETE\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "index.json": "[{\"id\":1,\"name\":\"😀\"},{\"id\":2,\"name\":\"β\"}]\n",
+          "receipt.txt": "true\n"
+        }
+      }
+    },
+    {
+      "id": "read-lines-esm-range",
+      "entry": "app.mjs",
+      "files": {
+        "package.json": "{\"name\":\"line-ranges\",\"type\":\"module\"}\n",
+        "node_modules/@fixture/line-range/package.json": "{\"name\":\"@fixture/line-range\",\"type\":\"module\",\"exports\":\"./index.mjs\"}\n",
+        "node_modules/@fixture/line-range/index.mjs": "import {open} from 'node:fs/promises';\nexport async function readRange(file){\n const h=await open(file);const rl=h.readLines({encoding:'utf16le',start:10,end:19,highWaterMark:1,autoClose:false});\n const result=[];for await(const line of rl)result.push(line);\n const retained=h.fd>=0;await h.close();return {result,retained,closed:h.fd===-1};\n}\n",
+        "app.mjs": "import {writeFileSync} from 'node:fs';\nimport {readRange} from '@fixture/line-range';\nwriteFileSync('input.bin',Buffer.from('skip\\nα\\r\\nβ\\ntail','utf16le'));\nconst report=await readRange('input.bin');\nwriteFileSync('range.json',JSON.stringify(report)+'\\n');\nconsole.log('ESM_RANGE_COMPLETE');\n"
+      },
+      "expected": {
+        "stdout": "ESM_RANGE_COMPLETE\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "range.json": "{\"result\":[\"α\",\"β\"],\"retained\":true,\"closed\":true}\n"
+        }
+      }
+    },
+    {
+      "id": "read-lines-package-failure-recovery",
+      "entry": "app.cjs",
+      "files": {
+        "package.json": "{\"name\":\"line-recovery\",\"private\":true}\n",
+        "published.json": "previous\n",
+        "broken.jsonl": "{\"id\":1}\nnot-json\n{\"id\":3}\n",
+        "valid.jsonl": "{\"id\":7}\n",
+        "node_modules/line-source/package.json": "{\"name\":\"line-source\",\"main\":\"index.cjs\"}\n",
+        "node_modules/line-source/index.cjs": "const {open}=require('fs/promises');\nmodule.exports=async function(file){const h=await open(file);const rl=h.readLines({highWaterMark:1});\n const closed=new Promise(resolve=>rl.input.once('close',resolve));const rows=[];\n try{for await(const line of rl)rows.push(JSON.parse(line));return rows;}\n finally{rl.close();rl.input.destroy();await closed;await h.close();}\n};\n",
+        "app.cjs": "const fs=require('fs'),load=require('line-source');\n(async()=>{let failed=false;\n try{const rows=await load('broken.jsonl');fs.writeFileSync('published.json',JSON.stringify(rows));fs.writeFileSync('unexpected.txt','success');}\n catch(error){if(error.name!=='SyntaxError')throw error;failed=true;}\n if(!failed)throw Error('missing parse failure');\n const rows=await load('valid.jsonl');fs.writeFileSync('recovered.json',JSON.stringify(rows)+'\\n');\n console.log('RECOVERY_COMPLETE');\n})().catch(error=>{console.error(error);process.exitCode=1;});\n"
+      },
+      "expected": {
+        "stdout": "RECOVERY_COMPLETE\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "published.json": "previous\n",
+          "recovered.json": "[{\"id\":7}]\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "read-lines-shared-file-pipeline",
+      "entry": "app.cjs",
+      "files": {
+        "package.json": "{\"name\":\"line-pipeline\",\"private\":true}\n",
+        "input.txt": "hello\r\né\nlast",
+        "node_modules/upper-lines/package.json": "{\"name\":\"upper-lines\",\"main\":\"index.cjs\"}\n",
+        "node_modules/upper-lines/index.cjs": "const {Transform}=require('node:stream');\nmodule.exports=()=>new Transform({transform(chunk,encoding,done){done(null,chunk.toString().toUpperCase()+'\\n');}});\n",
+        "app.cjs": "const fs=require('fs');const {Readable}=require('stream');const {pipeline}=require('stream/promises');\n(async()=>{const h=await fs.promises.open('input.txt');const lines=h.readLines({highWaterMark:1});\n const closed=new Promise(resolve=>lines.input.once('close',resolve));\n const sink=fs.createWriteStream('output.txt');\n await pipeline(Readable.from(lines),require('upper-lines')(),sink);await closed;\n fs.writeFileSync('receipt.json',JSON.stringify({closed:h.fd===-1,finished:sink.writableFinished})+'\\n');\n console.log('LINE_PIPELINE_COMPLETE');\n})().catch(error=>{console.error(error);process.exitCode=1;});\n"
+      },
+      "expected": {
+        "stdout": "LINE_PIPELINE_COMPLETE\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "output.txt": "HELLO\nÉ\nLAST\n",
+          "receipt.json": "{\"closed\":true,\"finished\":true}\n"
+        }
+      }
+    }
+  ]
+}

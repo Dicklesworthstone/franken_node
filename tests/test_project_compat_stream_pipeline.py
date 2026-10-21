@@ -110,5 +110,17 @@ class ByteStreamProjectTests(PipelineProjectTests):
     case_count = 5
 
 
+class ConstructorSignalProjectTests(PipelineProjectTests):
+    # Constructor signals must cancel pipelines and complete owned cleanup.
+    corpus_path = ROOT / 'fixtures/compatibility/projects/stream-constructor-signals.corpus.json'
+    case_count = 5
+
+
+class ReadLinesProjectTests(PipelineProjectTests):
+    # File lines use the shared descriptor, stream, decoder and readline owners.
+    corpus_path = ROOT / 'fixtures/compatibility/projects/fs-read-lines.corpus.json'
+    case_count = 4
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -1,0 +1,105 @@
+{
+  "schema_version": "franken-node/project-compat-corpus/v1",
+  "cases": [
+    {
+      "id": "constructor-signal-cjs-prefix",
+      "entry": "app.cjs",
+      "files": {
+        "package.json": "{\"name\":\"cancelled-export\",\"private\":true}\n",
+        "node_modules/source-feed/package.json": "{\"name\":\"source-feed\",\"main\":\"index.cjs\"}\n",
+        "node_modules/source-feed/index.cjs": "const {Readable}=require('node:stream');\nconst fs=require('node:fs');\nmodule.exports=signal=>{\n  let sent=false;\n  return new Readable({signal,read(){if(!sent){sent=true;this.push('accepted\\n');}},\n    destroy(error,callback){fs.writeFileSync('source-cleanup.txt','closed\\n');callback(error);}});\n};\n",
+        "app.cjs": "const fs=require('node:fs');const {Writable,promises}=require('stream');\nconst feed=require('source-feed');\n(async()=>{\n  const controller=new AbortController();let accepted;\n  const ready=new Promise(resolve=>accepted=resolve);\n  fs.writeFileSync('output.txt','');\n  const source=feed(controller.signal);\n  const sink=new Writable({write(chunk,encoding,callback){\n    fs.appendFileSync('output.txt',chunk);callback();accepted();\n  },final(callback){fs.writeFileSync('unexpected.txt','published');callback();}});\n  const completion=promises.pipeline(source,sink).then(()=>null,error=>error);\n  await ready;controller.abort(null);const error=await completion;\n  if(!error||error.code!=='ABORT_ERR'||error.cause!==null)throw new Error('lost cancellation');\n  fs.writeFileSync('receipt.json',JSON.stringify({code:error.code,source:source.destroyed,sink:sink.destroyed})+'\\n');\n  console.log('CANCELLED_EXPORT_COMPLETE');\n})().catch(error=>{console.error(error);process.exitCode=1;});\n"
+      },
+      "expected": {
+        "stdout": "CANCELLED_EXPORT_COMPLETE\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "output.txt": "accepted\n",
+          "source-cleanup.txt": "closed\n",
+          "receipt.json": "{\"code\":\"ABORT_ERR\",\"source\":true,\"sink\":true}\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "constructor-signal-esm-transform",
+      "entry": "app.mjs",
+      "files": {
+        "package.json": "{\"name\":\"cancel-transform\",\"type\":\"module\"}\n",
+        "node_modules/@fixture/transform/package.json": "{\"name\":\"@fixture/transform\",\"type\":\"module\",\"exports\":\"./index.mjs\"}\n",
+        "node_modules/@fixture/transform/index.mjs": "import {Transform} from 'node:stream';\nimport {writeFileSync} from 'node:fs';\nexport function create(signal,control){\n  return new Transform({signal,\n    transform(chunk,encoding,callback){control.late=callback;control.entered();},\n    flush(callback){writeFileSync('unexpected.txt','flushed');callback();},\n    destroy(error,callback){control.release=()=>{writeFileSync('teardown.txt','released\\n');callback(error);};}\n  });\n}\n",
+        "app.mjs": "import {Readable,Writable} from 'node:stream';\nimport {pipeline} from 'node:stream/promises';\nimport {writeFileSync,appendFileSync} from 'node:fs';\nimport {create} from '@fixture/transform';\nconst controller=new AbortController();const control={};\nconst entered=new Promise(resolve=>control.entered=resolve);\nlet settled=false;writeFileSync('output.txt','');\nconst source=Readable.from(['payload']);const transform=create(controller.signal,control);\nconst sink=new Writable({write(chunk,encoding,callback){appendFileSync('output.txt',chunk);callback();}});\nconst completion=pipeline(source,transform,sink).then(()=>{settled=true;return null;},error=>{settled=true;return error;});\nawait entered;controller.abort('cancel-transform');await new Promise(setImmediate);\nif(settled||typeof control.release!=='function')throw new Error('premature pipeline completion');\ncontrol.release();const error=await completion;\nif(!error||error.code!=='ABORT_ERR'||error.cause!=='cancel-transform')throw new Error('lost failure');\ncontrol.late(null,'late payload');await new Promise(setImmediate);\nwriteFileSync('receipt.json',JSON.stringify({code:error.code,closed:source.destroyed&&transform.destroyed&&sink.destroyed})+'\\n');\nconsole.log('ESM_TRANSFORM_CANCEL_COMPLETE');\n"
+      },
+      "expected": {
+        "stdout": "ESM_TRANSFORM_CANCEL_COMPLETE\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "output.txt": "",
+          "teardown.txt": "released\n",
+          "unexpected.txt": null,
+          "receipt.json": "{\"code\":\"ABORT_ERR\",\"closed\":true}\n"
+        }
+      }
+    },
+    {
+      "id": "constructor-signal-iterable-owner",
+      "entry": "app.cjs",
+      "files": {
+        "package.json": "{\"name\":\"cancel-iterable\",\"private\":true}\n",
+        "node_modules/record-feed/package.json": "{\"name\":\"record-feed\",\"main\":\"index.cjs\"}\n",
+        "node_modules/record-feed/index.cjs": "const {Readable}=require('stream');const fs=require('fs');\nmodule.exports=signal=>{\n  let count=0;let pending;\n  const iterator={ [Symbol.asyncIterator](){return this;},\n    next(){if(count++===0)return Promise.resolve({value:'record\\n',done:false});\n      return new Promise(resolve=>pending=resolve);},\n    async return(){if(pending)pending({done:true});await Promise.resolve();\n      fs.writeFileSync('iterator-cleanup.txt','returned\\n');return {done:true};}\n  };\n  return Readable.from(iterator,{signal});\n};\n",
+        "app.cjs": "const fs=require('fs');const {Writable,promises}=require('node:stream');\n(async()=>{const controller=new AbortController();let accept;const ready=new Promise(resolve=>accept=resolve);\n  fs.writeFileSync('records.txt','');const source=require('record-feed')(controller.signal);\n  const sink=new Writable({write(chunk,encoding,callback){fs.appendFileSync('records.txt',chunk);callback();accept();},\n    final(callback){fs.writeFileSync('unexpected.txt','finished');callback();}});\n  const completion=promises.pipeline(source,sink).then(()=>null,error=>error);\n  await ready;controller.abort(false);const error=await completion;\n  if(!error||error.code!=='ABORT_ERR'||error.cause!==false)throw new Error('missing iterable cancellation');\n  console.log('ITERATOR_CANCEL_COMPLETE');\n})().catch(error=>{console.error(error);process.exitCode=1;});\n"
+      },
+      "expected": {
+        "stdout": "ITERATOR_CANCEL_COMPLETE\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "records.txt": "record\n",
+          "iterator-cleanup.txt": "returned\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "constructor-signal-delayed-resource",
+      "entry": "app.cjs",
+      "files": {
+        "package.json": "{\"name\":\"cancel-owned-descriptor\",\"private\":true}\n",
+        "node_modules/resource-sink/package.json": "{\"name\":\"resource-sink\",\"main\":\"index.cjs\"}\n",
+        "node_modules/resource-sink/index.cjs": "const fs=require('fs');const {Writable}=require('node:stream');\nmodule.exports=(signal,control)=>{let fd;\n  return new Writable({signal,\n    construct(callback){fd=fs.openSync('target.txt','w');control.fd=fd;\n      fs.writeFileSync('lifecycle.txt','construct\\n');control.finish=callback;control.started();},\n    write(chunk,encoding,callback){fs.writeSync(fd,chunk);callback();},\n    destroy(error,callback){fs.closeSync(fd);fs.appendFileSync('lifecycle.txt','destroy\\n');queueMicrotask(()=>callback(error));}\n  });\n};\n",
+        "app.cjs": "const fs=require('fs');\n(async()=>{const controller=new AbortController();const control={};\n  const ready=new Promise(resolve=>control.started=resolve);const stream=require('resource-sink')(controller.signal,control);\n  let failure;stream.on('error',error=>failure=error);const closed=new Promise(resolve=>stream.once('close',resolve));\n  stream.write('not-written',()=>{});await ready;controller.abort('resource');\n  if(!stream.destroyed)throw new Error('still writable after cancellation');\n  if(fs.readFileSync('lifecycle.txt','utf8')!=='construct\\n')throw new Error('premature destructor');\n  control.finish();await closed;\n  if(!failure||failure.code!=='ABORT_ERR'||failure.cause!=='resource')throw new Error('lost failure');\n  try{fs.writeSync(control.fd,'late');throw new Error('leaked descriptor');}catch(error){if(error.code!=='EBADF')throw error;}\n  console.log('RESOURCE_CANCEL_COMPLETE');\n})().catch(error=>{console.error(error);process.exitCode=1;});\n"
+      },
+      "expected": {
+        "stdout": "RESOURCE_CANCEL_COMPLETE\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "target.txt": "",
+          "lifecycle.txt": "construct\ndestroy\n"
+        }
+      }
+    },
+    {
+      "id": "constructor-signal-completed-sink",
+      "entry": "app.mjs",
+      "files": {
+        "package.json": "{\"name\":\"completed-sink\",\"type\":\"module\"}\n",
+        "node_modules/@fixture/sink/package.json": "{\"name\":\"@fixture/sink\",\"type\":\"module\",\"exports\":\"./index.mjs\"}\n",
+        "node_modules/@fixture/sink/index.mjs": "import {Writable} from 'node:stream';import {appendFileSync} from 'node:fs';\nexport function sink(signal){return new Writable({signal,autoDestroy:false,\n  write(chunk,encoding,callback){appendFileSync('output.txt',chunk);callback();}});}\n",
+        "app.mjs": "import {writeFileSync} from 'node:fs';import {sink} from '@fixture/sink';\nconst controller=new AbortController();writeFileSync('output.txt','');const output=sink(controller.signal);\nconst errors=[];output.on('error',error=>errors.push(error));\nconst finished=new Promise(resolve=>output.once('finish',resolve));output.end('complete\\n');await finished;\ncontroller.abort('too-late');await new Promise(setImmediate);\nif(output.destroyed||errors.length)throw new Error('completed stream became cancelled');\nwriteFileSync('receipt.json',JSON.stringify({finished:output.writableFinished,destroyed:output.destroyed,errors:errors.length})+'\\n');\noutput.destroy();console.log('COMPLETED_SINK_RETAINED');\n"
+      },
+      "expected": {
+        "stdout": "COMPLETED_SINK_RETAINED\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "output.txt": "complete\n",
+          "receipt.json": "{\"finished\":true,\"destroyed\":false,\"errors\":0}\n"
+        }
+      }
+    }
+  ]
+}
