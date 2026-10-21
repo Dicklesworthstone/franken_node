@@ -152,8 +152,10 @@ fn resolve_requests_keep_missing_target_path_safety_and_resource_failures() {
     assert!(!captured.report().fully_resolved);
     assert_eq!(captured.report().edges[0].state, EdgeState::Unresolved);
     let pin = captured.report().input_hash.clone();
-    assert_eq!(PinnedModuleRegistry::new(captured, &pin).err().unwrap().code,
-        "ERR_MODULE_REGISTRY_INCOMPLETE");
+    let registry = PinnedModuleRegistry::new(captured, &pin).unwrap();
+    assert_eq!(registry.summary().missing_routes, 1);
+    assert_eq!(registry.lookup(Some(registry.entrypoint()), "./missing.cjs", RequestStyle::Require)
+        .err().unwrap().code, "MODULE_NOT_FOUND");
     put(root.path(), "app.cjs", "require.resolve('../outside.cjs');");
     assert_eq!(capture(root.path(), "app.cjs", GraphOptions::default()).err().unwrap().code,
         "ERR_MODULE_OUTSIDE_PROJECT");
@@ -287,7 +289,133 @@ module.exports = { answer: 42 };
         }
     }
 
+    #[test]
+    fn native_optional_package_fallbacks_match_node_and_keep_captured_absence() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        put(root, "app.cjs", r#"
+const fixture = require('fallback-fixture');
+console.log('value', fixture.value, fixture.lookup, fixture.resolved);
+if (false) { require('unused-missing'); }
+console.log('done');
+"#);
+        put(root, "node_modules/fallback-fixture/package.json", r#"{"main":"index.cjs"}"#);
+        put(root, "node_modules/fallback-fixture/index.cjs", r#"
+let value;
+let lookup;
+let resolved;
+try { value = require('optional-addon'); }
+catch (error) {
+    if (error.code !== 'MODULE_NOT_FOUND') { throw error; }
+    lookup = error.code;
+    value = require('./fallback.cjs');
+}
+try { require.resolve('optional-addon'); }
+catch (error) { resolved = error.code; }
+module.exports = { value: value, lookup: lookup, resolved: resolved };
+"#);
+        put(root, "node_modules/fallback-fixture/fallback.cjs", "module.exports = 42;");
+        let reference = std::process::Command::new("node").arg("app.cjs").current_dir(root)
+            .output().expect("Node supplies the optional-package reference result");
+        assert!(reference.status.success(), "{}", String::from_utf8_lossy(&reference.stderr));
+        assert_eq!(reference.stdout, b"value 42 MODULE_NOT_FOUND MODULE_NOT_FOUND\ndone\n");
+        let captured = capture(root, "app.cjs", GraphOptions::default()).unwrap();
+        assert!(!captured.report().fully_resolved);
+        assert!(captured.report().diagnostics.is_empty());
+        let pin = captured.report().input_hash.clone();
+        let encoded = capsule::encode(&captured).unwrap();
+        // Neither a later install nor a changed fallback can alter a replay.
+        put(root, "node_modules/optional-addon/package.json", r#"{"main":"index.cjs"}"#);
+        put(root, "node_modules/optional-addon/index.cjs", "module.exports = 999;");
+        put(root, "node_modules/fallback-fixture/fallback.cjs", "throw new Error('live fallback reopened');");
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+            assert_eq!(replayed.report(), captured.report());
+            let resolver = Arc::new(CapturedEngineResolver::new(replayed, &pin).ok().unwrap());
+            assert_eq!(resolver.summary().missing_routes, 2);
+            let policy = Arc::new(policy());
+            let entry = resolver.resolve(&resolver.entry_request(), &context(), policy.as_ref()).unwrap();
+            let installed = resolver.execution_resolver(root, policy).unwrap();
+            let result = engine(lane).execute_resolved_entry_with_resolver(&package(), &entry, installed)
+                .expect("optional package lookup is ordinary CommonJS control flow");
+            let output = result.console_output.iter().map(|line| line.message.as_str())
+                .collect::<Vec<_>>().join("\n") + "\n";
+            assert_eq!(output.as_bytes(), reference.stdout, "{lane:?}");
+        }
+    }
+
+    #[test]
+    fn native_uncaught_missing_require_and_resolve_still_fail_execution() {
+        for source in ["require('missing-package');", "require.resolve('missing-package');"] {
+            let root = tempfile::tempdir().unwrap();
+            put(root.path(), "app.cjs", source);
+            let captured = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+            let pin = captured.report().input_hash.clone();
+            let encoded = capsule::encode(&captured).unwrap();
+            for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+                let graph = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+                let resolver = Arc::new(CapturedEngineResolver::new(graph, &pin).ok().unwrap());
+                let policy = Arc::new(policy());
+                let entry = resolver.resolve(&resolver.entry_request(), &context(), policy.as_ref()).unwrap();
+                let installed = resolver.execution_resolver(root.path(), policy).unwrap();
+                let failure = engine(lane)
+                    .execute_resolved_entry_with_resolver(&package(), &entry, installed)
+                    .expect_err("admitting a known absence does not turn an uncaught load into success");
+                assert!(failure.to_string().contains("Cannot find module 'missing-package'"),
+                    "{lane:?}: {failure}");
+            }
+        }
+    }
+
     struct RevokeSecondResolve(AtomicUsize);
+
+    struct MissingCodePolicy;
+
+    impl ModulePolicyHook for MissingCodePolicy {
+        fn authorize(&self, request: &ModuleRequest, record: &ModuleRecord,
+            context: &ResolutionContext) -> ResolutionResult<()> {
+            let mut policy = policy();
+            if request.specifier == "./dep.cjs" {
+                policy.denied_specifiers.insert(request.specifier.clone());
+                let mut denial = policy.authorize(request, record, context).unwrap_err();
+                denial.code = frankenengine_engine::module_resolver::ResolutionErrorCode::ModuleNotFound;
+                return Err(denial);
+            }
+            policy.authorize(request, record, context)
+        }
+    }
+
+    #[test]
+    fn native_policy_denial_cannot_masquerade_as_an_optional_dependency_miss() {
+        for source in [
+            "try { require('./dep.cjs'); } catch (error) { console.log('policy bypass'); }",
+            "try { require.resolve('./dep.cjs'); } catch (error) { console.log('policy bypass'); }",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            put(root.path(), "app.cjs", source);
+            put(root.path(), "dep.cjs", "module.exports=42;");
+            let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+            let pin = graph.report().input_hash.clone();
+            let resolver = Arc::new(CapturedEngineResolver::new(graph, &pin).ok().unwrap());
+            let request = ModuleRequest::new("./dep.cjs",
+                frankenengine_engine::module_resolver::ImportStyle::Require)
+                .with_referrer(resolver.entry_request().specifier)
+                .with_compatibility_mode(
+                    frankenengine_engine::module_compatibility_matrix::CompatibilityMode::NodeCompat);
+            assert_eq!(resolver.resolve(&request, &context(), &MissingCodePolicy).unwrap_err().code,
+                frankenengine_engine::module_resolver::ResolutionErrorCode::PolicyDenied);
+            for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+                let entry = resolver.resolve(&resolver.entry_request(), &context(), &policy()).unwrap();
+                let installed = resolver.execution_resolver(root.path(), Arc::new(MissingCodePolicy)).unwrap();
+                let mut engine = engine(lane);
+                let failure = engine.execute_resolved_entry_with_resolver(&package(), &entry, installed)
+                    .expect_err("policy refusal remains outside guest exception handling");
+                assert!(failure.to_string().contains("closed-world module resolution refused"),
+                    "{lane:?}: {failure}");
+                assert!(engine.last_failed_console_output().is_empty());
+            }
+        }
+    }
 
     impl ModulePolicyHook for RevokeSecondResolve {
         fn authorize(&self, request: &ModuleRequest, record: &ModuleRecord,

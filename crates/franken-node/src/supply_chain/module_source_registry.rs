@@ -17,7 +17,7 @@ use std::sync::Arc;
 type Result<T> = std::result::Result<T, ResolutionError>;
 const ID_DOMAIN: &[u8] = b"franken-node/sealed-module-id/v1\0";
 const BUILTIN_ID_DOMAIN: &[u8] = b"franken-node/sealed-native-builtin/v1\0";
-type ImporterRoutes = BTreeMap<RequestStyle, BTreeMap<String, String>>;
+type ImporterRoutes = BTreeMap<RequestStyle, BTreeMap<String, RegisteredTarget>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -55,10 +55,19 @@ impl ModuleKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RegisteredTarget {
+    Module { id: String },
+    /// A captured CommonJS lookup that deterministically found no module.
+    /// This is a terminal failure, never an invitation to probe the live host.
+    Missing { error: ResolutionError },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RegisteredDependency {
     pub specifier: String,
     pub style: RequestStyle,
-    pub target: String,
+    pub target: RegisteredTarget,
 }
 
 /// Immutable registered source. Debug and serialization intentionally omit
@@ -100,6 +109,7 @@ pub struct RegistrySummary {
     pub entrypoint: String,
     pub modules: usize,
     pub routes: usize,
+    pub missing_routes: usize,
     pub execution_performed: bool,
     pub policy_admission_performed: bool,
 }
@@ -151,7 +161,17 @@ impl<'a> Iterator for ReachableRequests<'a> {
                 self.failed = true;
                 return Some(Err(error));
             }
-            let Some(module) = self.registry.modules.get(&dependency.target) else {
+            let target = match &dependency.target {
+                RegisteredTarget::Module { id } => id,
+                RegisteredTarget::Missing { error } => {
+                    // A complete eager walk cannot deliver an absent module.
+                    // Runtime require evaluates this route only if reached,
+                    // where the engine can expose its catchable missing error.
+                    self.failed = true;
+                    return Some(Err(error.clone()));
+                }
+            };
+            let Some(module) = self.registry.modules.get(target) else {
                 // Admission normally makes this impossible. Do not turn an
                 // inconsistent graph into a truncated successful traversal.
                 self.failed = true;
@@ -236,6 +256,7 @@ impl PinnedModuleRegistry {
         }
         let report = graph.report();
         let mut builtin_targets = BTreeMap::<String, (String, &'static str)>::new();
+        let mut has_missing_routes = false;
         let incomplete = || error(
             "ERR_MODULE_REGISTRY_INCOMPLETE",
             "source delivery requires a closed, analyzed graph with engine-approved terminal requirements",
@@ -259,12 +280,25 @@ impl PinnedModuleRegistry {
                         (native_builtin_id(&report.input_hash, name), name),
                     );
                 }
+                EdgeState::Unresolved
+                    if edge.kind == LoadKind::Require
+                        && edge.target.is_none()
+                        && edge.specifier.is_some()
+                        && edge.error.as_ref().is_some_and(|failure|
+                            failure.code == "MODULE_NOT_FOUND") =>
+                {
+                    // Optional dependencies and require.resolve probes are
+                    // ordinary CommonJS control flow. Capture has sealed the
+                    // negative probes too; preserve this exact missing result
+                    // without pretending it resolves or predicting a catch.
+                    has_missing_routes = true;
+                }
                 _ => return Err(incomplete()),
             }
         }
         // The captured report remains truthful: runtime requirements are not
         // source files and never make its fully_resolved flag true.
-        if !report.fully_resolved && builtin_targets.is_empty() {
+        if !report.fully_resolved && builtin_targets.is_empty() && !has_missing_routes {
             return Err(incomplete());
         }
         let identities: BTreeMap<_, _> = report
@@ -321,18 +355,26 @@ impl PinnedModuleRegistry {
         }
         let mut routes = BTreeMap::<String, ImporterRoutes>::new();
         let mut route_count = 0;
+        let mut missing_routes = 0;
         for edge in &report.edges {
             if edge.state == EdgeState::TypeOnly {
                 continue;
             }
             let importer = identities.get(&edge.importer).ok_or_else(invalid_graph)?;
             let specifier = edge.specifier.as_ref().ok_or_else(invalid_graph)?;
-            let target = if edge.state == EdgeState::RuntimeRequired {
-                &builtin_targets.get(specifier).ok_or_else(invalid_graph)?.0
-            } else {
-                identities
-                    .get(edge.target.as_ref().ok_or_else(invalid_graph)?)
-                    .ok_or_else(invalid_graph)?
+            let target = match edge.state {
+                EdgeState::RuntimeRequired => RegisteredTarget::Module {
+                    id: builtin_targets.get(specifier).ok_or_else(invalid_graph)?.0.clone(),
+                },
+                EdgeState::Unresolved => RegisteredTarget::Missing {
+                    error: edge.error.clone().ok_or_else(invalid_graph)?,
+                },
+                _ => RegisteredTarget::Module {
+                    id: identities
+                        .get(edge.target.as_ref().ok_or_else(invalid_graph)?)
+                        .ok_or_else(invalid_graph)?
+                        .clone(),
+                },
             };
             let style = RequestStyle::for_load(edge.kind);
             let by_specifier = routes
@@ -341,13 +383,14 @@ impl PinnedModuleRegistry {
                 .entry(style)
                 .or_default();
             if let Some(previous) = by_specifier.get(specifier) {
-                if previous != target {
+                if previous != &target {
                     return Err(invalid_graph());
                 }
                 continue;
             }
             by_specifier.insert(specifier.clone(), target.clone());
             route_count += 1;
+            missing_routes += usize::from(matches!(target, RegisteredTarget::Missing { .. }));
             modules
                 .get_mut(importer)
                 .ok_or_else(invalid_graph)?
@@ -355,7 +398,7 @@ impl PinnedModuleRegistry {
                 .push(RegisteredDependency {
                     specifier: specifier.clone(),
                     style,
-                    target: target.clone(),
+                    target,
                 });
         }
         let entrypoint = identities
@@ -363,11 +406,12 @@ impl PinnedModuleRegistry {
             .ok_or_else(invalid_graph)?
             .clone();
         let summary = RegistrySummary {
-            schema_version: "franken-node/sealed-module-registry/v1",
+            schema_version: "franken-node/sealed-module-registry/v2",
             graph_input_hash: report.input_hash.clone(),
             entrypoint,
             modules: modules.len(),
             routes: route_count,
+            missing_routes,
             execution_performed: false,
             policy_admission_performed: false,
         };
@@ -422,17 +466,20 @@ impl PinnedModuleRegistry {
                         "referrer does not belong to this sealed graph",
                     ));
                 }
-                self.routes
+                let target = self.routes
                     .get(importer)
                     .and_then(|styles| styles.get(&style))
                     .and_then(|specifiers| specifiers.get(specifier))
-                    .map(String::as_str)
                     .ok_or_else(|| {
                         error(
                             "ERR_MODULE_REGISTRY_ROUTE",
                             "module request was not captured for this importer and load style",
                         )
-                    })?
+                    })?;
+                match target {
+                    RegisteredTarget::Module { id } => id.as_str(),
+                    RegisteredTarget::Missing { error } => return Err(error.clone()),
+                }
             }
         };
         self.modules.get(id).ok_or_else(invalid_graph)
@@ -585,6 +632,116 @@ mod tests {
             assert_eq!(
                 PinnedModuleRegistry::new(graph, &pin).err().unwrap().code,
                 "ERR_MODULE_REGISTRY_INCOMPLETE"
+            );
+        }
+    }
+
+    #[test]
+    fn captured_missing_require_routes_are_terminal_without_invented_modules() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.cjs", r#"
+            try { module.exports = require('optional-addon'); }
+            catch (error) { module.exports = require('./fallback.cjs'); }
+            try { require.resolve('optional-addon'); } catch (error) {}
+        "#);
+        put(root.path(), "fallback.cjs", "module.exports = 42;");
+        let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        assert!(!graph.report().fully_resolved);
+        assert!(graph.report().diagnostics.is_empty());
+        let pin = graph.report().input_hash.clone();
+        let r = PinnedModuleRegistry::new(graph, &pin).ok().unwrap();
+        assert_eq!(r.summary().graph_input_hash, pin);
+        assert_eq!(r.summary().modules, 2);
+        assert_eq!(r.summary().routes, 2);
+        assert_eq!(r.summary().missing_routes, 1);
+        assert_eq!(entry(&r).dependencies().len(), 2);
+        assert!(matches!(
+            entry(&r).dependencies()[0].target,
+            RegisteredTarget::Missing { .. }
+        ));
+        for _ in 0..2 {
+            let missing = r.lookup(Some(r.entrypoint()), "optional-addon", RequestStyle::Require)
+                .err().unwrap();
+            assert_eq!(missing.code, "MODULE_NOT_FOUND");
+        }
+        assert_eq!(
+            r.lookup(Some(r.entrypoint()), "./fallback.cjs", RequestStyle::Require)
+                .ok().unwrap().source(),
+            "module.exports = 42;"
+        );
+        for (specifier, style) in [
+            ("optional-addon", RequestStyle::Import),
+            ("different-addon", RequestStyle::Require),
+            ("././fallback.cjs", RequestStyle::Require),
+        ] {
+            assert_eq!(
+                r.lookup(Some(r.entrypoint()), specifier, style).err().unwrap().code,
+                "ERR_MODULE_REGISTRY_ROUTE"
+            );
+        }
+        let fallback = r.lookup(Some(r.entrypoint()), "./fallback.cjs", RequestStyle::Require)
+            .ok().unwrap();
+        assert_eq!(
+            r.lookup(Some(fallback.id()), "optional-addon", RequestStyle::Require)
+                .err().unwrap().code,
+            "ERR_MODULE_REGISTRY_ROUTE"
+        );
+        let mut walk = r.walk_requests(None, r.entrypoint(), r.entry_style()).unwrap();
+        assert!(walk.next().unwrap().is_ok());
+        assert_eq!(walk.next().unwrap().err().unwrap().code, "MODULE_NOT_FOUND");
+        assert!(walk.next().is_none());
+        assert!(walk.next().is_none());
+    }
+
+    #[test]
+    fn replayed_missing_require_stays_absent_after_an_install_or_source_change() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.cjs", "require('./optional.cjs');");
+        let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        let graph_pin = graph.report().input_hash.clone();
+        let encoded = capsule::encode(&graph).unwrap();
+        put(root.path(), "optional.cjs", "module.exports = 99;");
+        put(root.path(), "app.cjs", "require('./new.cjs');");
+        let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+        assert!(!replayed.report().fully_resolved);
+        let r = PinnedModuleRegistry::new(replayed, &graph_pin).ok().unwrap();
+        assert_eq!(entry(&r).source(), "require('./optional.cjs');");
+        assert_eq!(
+            r.lookup(Some(r.entrypoint()), "./optional.cjs", RequestStyle::Require)
+                .err().unwrap().code,
+            "MODULE_NOT_FOUND"
+        );
+        assert_eq!(
+            r.lookup(Some(r.entrypoint()), "./new.cjs", RequestStyle::Require)
+                .err().unwrap().code,
+            "ERR_MODULE_REGISTRY_ROUTE"
+        );
+        let current = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        assert_ne!(current.report().input_hash, graph_pin);
+    }
+
+    #[test]
+    fn only_commonjs_module_not_found_is_an_admissible_negative_route() {
+        for source in [
+            "import './absent.mjs';",
+            "import('./absent.mjs');",
+            "require('pkg/private');",
+            "require('broken');",
+            "require('node:unknown');",
+            "require(variable);",
+            "require('./optional.cjs'); import './absent.mjs';",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            put(root.path(), "app.cjs", source);
+            put(root.path(), "node_modules/pkg/package.json", r#"{"exports":{".":"./index.cjs"}}"#);
+            put(root.path(), "node_modules/broken/package.json", "{invalid");
+            let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+            let pin = graph.report().input_hash.clone();
+            assert_eq!(
+                PinnedModuleRegistry::new(graph, &pin).err()
+                    .unwrap_or_else(|| panic!("unexpectedly admitted {source}")).code,
+                "ERR_MODULE_REGISTRY_INCOMPLETE",
+                "{source}"
             );
         }
     }
@@ -1007,7 +1164,8 @@ mod tests {
         put(root.path(), "dep.mjs", "export const value=1;");
         let mut r = registry(root.path(), "app.mjs");
         let entry_id = r.entrypoint().to_owned();
-        r.modules.get_mut(&entry_id).unwrap().dependencies[0].target = "missing".into();
+        r.modules.get_mut(&entry_id).unwrap().dependencies[0].target =
+            RegisteredTarget::Module { id: "missing".into() };
         let mut walk = r
             .walk_requests(None, r.entrypoint(), r.entry_style())
             .unwrap();

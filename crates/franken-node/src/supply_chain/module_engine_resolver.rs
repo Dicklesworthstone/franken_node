@@ -2,7 +2,7 @@
 //!
 //! This implements the real sibling engine trait, not a lookalike interface.
 //! Source selection is closed-world; the supplied engine policy runs on every
-//! resolve and every traversed edge, including cache hits and cycle back-edges.
+//! delivered candidate, including cache hits and traversed cycle back-edges.
 //! Exact CommonJS requests for engine-supported native builtin objects become
 //! source-free terminal descriptors. No builtin fallback, live I/O or evaluation
 //! happens here. Source preparation uses the sibling engine front end.
@@ -238,8 +238,12 @@ impl CapturedEngineResolver {
     ) -> ResolutionResult<()> {
         policy.authorize(request, record, context).map_err(|error| {
             denied(
-                error.code,
-                &error.message,
+                // A policy refusal never means a captured file was absent.
+                // Hooks may use any resolver error code; normalize the origin
+                // here so a misleading ModuleNotFound cannot become a guest
+                // catch and optional-dependency fallback in the interpreter.
+                ResolutionErrorCode::PolicyDenied,
+                &format!("{}: {}", error.code.stable_code(), error.message),
                 request,
                 context,
                 Some(&record.id),
@@ -419,7 +423,11 @@ fn registry_error(
 ) -> Box<ResolutionError> {
     let code = match error.code {
         "ERR_MODULE_REGISTRY_REFERRER" => ResolutionErrorCode::InvalidReferrer,
-        "ERR_MODULE_REGISTRY_ROUTE" => ResolutionErrorCode::ModuleNotFound,
+        // Only a captured negative CommonJS lookup is a guest-catchable
+        // absence. An unknown route is a closed-world authority violation;
+        // it must not be disguised as an optional dependency being absent.
+        "MODULE_NOT_FOUND" => ResolutionErrorCode::ModuleNotFound,
+        "ERR_MODULE_REGISTRY_ROUTE" => ResolutionErrorCode::UnsupportedSpecifier,
         "ERR_MODULE_REGISTRY_REQUEST" if request.specifier.is_empty() => {
             ResolutionErrorCode::EmptySpecifier
         }
@@ -494,12 +502,12 @@ mod tests {
         assert_eq!(
             resolver.resolve(&request("buffer", ImportStyle::Import), &context(), &policy)
                 .unwrap_err().code,
-            ResolutionErrorCode::ModuleNotFound
+            ResolutionErrorCode::UnsupportedSpecifier
         );
         assert_eq!(
             resolver.resolve(&request("events", ImportStyle::Require), &context(), &policy)
                 .unwrap_err().code,
-            ResolutionErrorCode::ModuleNotFound
+            ResolutionErrorCode::UnsupportedSpecifier
         );
         assert_eq!(
             resolver.resolve(&request("buffer", ImportStyle::Require), &context(), &granted())
@@ -539,7 +547,7 @@ mod tests {
             ("app.cjs", "require('fs');"),
             ("app.cjs", "require('node:unknown');"),
             ("app.cjs", "const name='buffer'; require(name);"),
-            ("app.cjs", "require.resolve('buffer');"),
+            ("app.cjs", "require.resolve('buffer', {paths: ['/tmp']});"),
             ("app.cjs", "require('#builtin');"),
             ("app.mjs", "import 'buffer';"),
             ("app.mjs", "import('node:buffer');"),
@@ -738,7 +746,7 @@ mod tests {
                 r.resolve(&request, &context(), &AllowAllPolicy)
                     .unwrap_err()
                     .code,
-                ResolutionErrorCode::ModuleNotFound
+                ResolutionErrorCode::UnsupportedSpecifier
             );
         }
     }
@@ -1193,7 +1201,7 @@ mod tests {
             .with_compatibility_mode(CompatibilityMode::NodeCompat);
         assert_eq!(
             r.resolve(&request, &context(), &granted()).unwrap_err().code,
-            ResolutionErrorCode::ModuleNotFound
+            ResolutionErrorCode::UnsupportedSpecifier
         );
     }
 
@@ -1448,7 +1456,7 @@ mod tests {
             .with_compatibility_mode(CompatibilityMode::NodeCompat);
         assert_eq!(
             r.resolve(&request, &context(), &granted()).unwrap_err().code,
-            ResolutionErrorCode::ModuleNotFound
+            ResolutionErrorCode::UnsupportedSpecifier
         );
     }
 

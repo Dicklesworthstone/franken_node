@@ -442,7 +442,26 @@ mod tests {
             assert!(!report.requires_review(), "isolated={isolated}: {report:?}");
             assert!(report.installation_checked);
             assert_eq!(report.packages_scanned, 3);
-            assert_eq!(report.installed_packages_scanned, 3);
+            // Hoisted: one workspace link and two registry directories.
+            // Isolated: those registry positions are aliases, with two
+            // additional physical store positions; no manifest is reread
+            // through either alias.
+            assert_eq!(report.installed_packages_scanned, if isolated { 5 } else { 3 });
+            assert_eq!(report.manifests_scanned, 4);
+            for (slot, version) in [("a", "1.2.3"), ("tool", "2.0.1")] {
+                let position = format!("node_modules/{slot}");
+                let manifest_path = if isolated {
+                    let target = format!(".bun/{slot}@{version}/node_modules/{slot}");
+                    let link = report.inputs.iter().find(|input| input.path == position).unwrap();
+                    assert_eq!(link.bytes, target.len());
+                    assert_eq!(link.sha256, hex::encode(Sha256::digest(target.as_bytes())));
+                    assert!(!report.inputs.iter().any(|input| input.path == format!("{position}/package.json")));
+                    format!("node_modules/{target}/package.json")
+                } else { format!("{position}/package.json") };
+                let input = report.inputs.iter().find(|input| input.path == manifest_path).unwrap();
+                let bytes = fs::read(root.path().join(&manifest_path)).unwrap();
+                assert_eq!(input.sha256, hex::encode(Sha256::digest(&bytes)));
+            }
             assert!(report.scope.contains("catalog"));
             for (path, raw) in [("package.json", serde_json::to_vec(&manifest).unwrap()),
                 ("bun.lock", serde_json::to_vec(&lock).unwrap()), ("packages/app/package.json", raw_member)] {

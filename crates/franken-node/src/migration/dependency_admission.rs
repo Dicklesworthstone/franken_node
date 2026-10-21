@@ -79,6 +79,9 @@ pub struct DependencyAdmission {
     /// or authentication against registry artifacts. Findings still block use.
     #[serde(default)]
     pub installation_checked: bool,
+    /// Installation positions inspected, including workspace links and Bun
+    /// registry aliases. Shared physical manifests are counted once by
+    /// `manifests_scanned`, even when multiple positions select them.
     #[serde(default)]
     pub installed_packages_scanned: usize,
     pub inputs: Vec<MetadataInput>,
