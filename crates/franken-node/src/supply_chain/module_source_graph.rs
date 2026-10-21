@@ -664,7 +664,10 @@ fn scan(
             }
             "identifier" if !erased => {
                 let spelling = node.utf8_text(bytes).unwrap_or("");
-                if spelling == "require" && !direct_callee(node, text) {
+                if spelling == "require"
+                    && !direct_callee(node, text)
+                    && !loader_typeof_probe(node)
+                {
                     issue = Some((
                         "INDIRECT_REQUIRE",
                         "require is bound, passed or used indirectly; scope/alias analysis is not implemented",
@@ -678,7 +681,10 @@ fn scan(
                 None
             }
             "member_expression"
-                if !erased && is_require(node, bytes) && !direct_callee(node, text) =>
+                if !erased
+                    && is_require(node, bytes)
+                    && !direct_callee(node, text)
+                    && !loader_typeof_probe(node) =>
             {
                 issue = Some(("INDIRECT_REQUIRE", "module.require is used indirectly"));
                 None
@@ -820,6 +826,30 @@ fn direct_callee(mut node: Node<'_>, source: &str) -> bool {
                     .is_some_and(|object| object.id() == node.id()))
         {
             node = p;
+        } else {
+            return false;
+        }
+    }
+    false
+}
+
+/// UMD packages commonly inspect `typeof require` before a literal load.
+/// `typeof` returns only a type-name string; it cannot return, store or invoke
+/// the loader. Recognize only that immediate observation through transparent
+/// wrappers. In particular, do not unwrap sequences, assignments, conditionals,
+/// property accesses or calls: their operands may escape the loader or perform
+/// a load. The normal AST walk still visits every binding, mutation and load in
+/// the enclosing expression, regardless of the guard's possible outcome.
+fn loader_typeof_probe(mut node: Node<'_>) -> bool {
+    while let Some(parent) = node.parent() {
+        if parent.kind() == "unary_expression" {
+            return keyword(parent, "typeof")
+                && parent
+                    .child_by_field_name("argument")
+                    .is_some_and(|argument| argument.id() == node.id());
+        }
+        if wrapper_operand(parent).is_some_and(|operand| operand.id() == node.id()) {
+            node = parent;
         } else {
             return false;
         }
@@ -1079,6 +1109,300 @@ mod tests {
                 .any(|d| d.code == "DYNAMIC_CODE_OR_LOADER")
         );
         assert!(!g.report.fully_resolved);
+    }
+
+    #[test]
+    fn loader_typeof_probes_are_observations_without_lookup_authority() {
+        for (language, source) in [
+            (SourceLanguage::JavaScript, "typeof require;"),
+            (SourceLanguage::JavaScript, "typeof (((require)));"),
+            (
+                SourceLanguage::JavaScript,
+                "typeof (/* before */ require /* after */);",
+            ),
+            (SourceLanguage::JavaScript, "typeof module.require;"),
+            (SourceLanguage::JavaScript, "typeof ((module).require);"),
+            (SourceLanguage::TypeScript, "typeof (require as Loader);"),
+            (
+                SourceLanguage::TypeScript,
+                "typeof (require satisfies Loader);",
+            ),
+            (SourceLanguage::TypeScript, "typeof require!;"),
+            (
+                SourceLanguage::TypeScript,
+                "typeof ((module as Module).require as Loader);",
+            ),
+        ] {
+            let (loads, notices, analyzed) = scan(
+                &mut Parser::new(),
+                source.as_bytes(),
+                language,
+                &mut Budget::default(),
+            )
+            .unwrap();
+            assert!(analyzed, "{source}");
+            assert!(loads.is_empty(), "{source}: {loads:?}");
+            assert!(notices.is_empty(), "{source}: {notices:?}");
+        }
+    }
+
+    #[test]
+    fn loader_typeof_probes_do_not_hide_bindings_mutation_or_loader_escape() {
+        for source in [
+            "typeof (require = replacement);",
+            "typeof (other, require);",
+            "typeof (condition ? require : other);",
+            "typeof (() => require);",
+            "typeof save(require);",
+            "typeof require.call(null, './hidden.cjs');",
+            "typeof (module.require = replacement);",
+            "typeof (0, module.require);",
+            "typeof save(module.require);",
+            "function guarded(require) { return typeof require; }",
+            "const require = replacement; typeof require;",
+            "function require() {} typeof require;",
+            "try {} catch (require) { typeof require; }",
+            "const load = require as Loader; typeof require; load('./hidden.cjs');",
+            "const load = typeof require === 'function' ? require : fallback;",
+        ] {
+            let (_, notices, analyzed) = scan(
+                &mut Parser::new(),
+                source.as_bytes(),
+                SourceLanguage::TypeScript,
+                &mut Budget::default(),
+            )
+            .unwrap();
+            assert!(analyzed, "{source}");
+            assert!(
+                notices
+                    .iter()
+                    .any(|notice| notice.code == "INDIRECT_REQUIRE"),
+                "a type probe cannot establish loader identity for {source}: {notices:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn loader_typeof_probes_preserve_guarded_literal_and_computed_requests() {
+        let root = tempfile::tempdir().unwrap();
+        put(
+            root.path(),
+            "app.cjs",
+            r#"
+if (typeof require === 'function') { require('./live.cjs'); }
+if (typeof require === 'undefined') { require('./other.cjs'); }
+const loadedType = typeof require('./live.cjs');
+if (typeof module.require === 'function') { module.require('./other.cjs'); }
+"#,
+        );
+        put(root.path(), "live.cjs", "module.exports = 1;");
+        put(root.path(), "other.cjs", "module.exports = 2;");
+        let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        assert!(
+            graph.report().fully_resolved,
+            "{:?}",
+            graph.report().diagnostics
+        );
+        assert_eq!(graph.report().edges.len(), 4);
+        assert!(
+            graph
+                .report()
+                .edges
+                .iter()
+                .all(|edge| edge.kind == LoadKind::Require && edge.state == EdgeState::Resolved)
+        );
+        assert_eq!(paths(&graph), ["app.cjs", "live.cjs", "other.cjs"]);
+
+        // A guard is not branch evaluation or permission to infer a name.
+        put(
+            root.path(),
+            "app.cjs",
+            "if (typeof require === 'function') require(name);",
+        );
+        let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        assert!(!graph.report().fully_resolved);
+        assert_eq!(graph.report().edges.len(), 1);
+        assert_eq!(graph.report().edges[0].state, EdgeState::NonLiteral);
+        put(
+            root.path(),
+            "app.cjs",
+            "if (typeof require === 'undefined') require('./absent.cjs');",
+        );
+        let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        assert!(!graph.report().fully_resolved);
+        assert_eq!(graph.report().edges[0].state, EdgeState::Unresolved);
+    }
+
+    // A UMD-style npm wrapper tests the host loader before using a literal
+    // dependency. The wrapper itself is ordinary guest code, never rewritten
+    // or evaluated by source capture.
+    const UMD_PACKAGE: &str = r#"
+(function(factory) {
+  if (typeof module === 'object' && typeof module.exports === 'object'
+      && typeof (require) === 'function') {
+    module.exports = factory(require('./value.cjs'));
+  } else {
+    throw new Error('CommonJS loader is unavailable');
+  }
+})(function(value) { return { answer: value + 2 }; });
+"#;
+
+    fn put_umd_package(root: &Path) {
+        put(
+            root,
+            "app.cjs",
+            "console.log('umd', require('guarded-package').answer);",
+        );
+        put(
+            root,
+            "node_modules/guarded-package/package.json",
+            r#"{"main":"index.cjs"}"#,
+        );
+        put(root, "node_modules/guarded-package/index.cjs", UMD_PACKAGE);
+        put(
+            root,
+            "node_modules/guarded-package/value.cjs",
+            "module.exports = 40;",
+        );
+    }
+
+    #[test]
+    fn umd_loader_probes_preserve_exact_pinned_sources_and_capsule_routes() {
+        use super::registry::{PinnedModuleRegistry, RequestStyle};
+        let root = tempfile::tempdir().unwrap();
+        put_umd_package(root.path());
+        let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        assert!(
+            graph.report().fully_resolved,
+            "{:?}",
+            graph.report().diagnostics
+        );
+        assert!(!graph.report().execution_performed);
+        assert_eq!(graph.report().edges.len(), 2);
+        assert_eq!(graph.report().modules.len(), 3);
+        let pin = graph.report().input_hash.clone();
+        let capsule = super::capsule::encode(&graph).unwrap();
+        put(
+            root.path(),
+            "node_modules/guarded-package/value.cjs",
+            "module.exports = -1;",
+        );
+        let restored = super::capsule::replay(capsule.bytes(), capsule.digest()).unwrap();
+        assert_eq!(restored.report(), graph.report());
+        let registry = PinnedModuleRegistry::new(restored, &pin).unwrap();
+        let package = registry
+            .lookup(
+                Some(registry.entrypoint()),
+                "guarded-package",
+                RequestStyle::Require,
+            )
+            .unwrap();
+        assert_eq!(package.source(), UMD_PACKAGE);
+        let value = registry
+            .lookup(Some(package.id()), "./value.cjs", RequestStyle::Require)
+            .unwrap();
+        assert_eq!(value.source(), "module.exports = 40;");
+        assert_eq!(
+            registry
+                .lookup(
+                    Some(package.id()),
+                    "./not-captured.cjs",
+                    RequestStyle::Require
+                )
+                .err()
+                .unwrap()
+                .code,
+            "ERR_MODULE_REGISTRY_ROUTE"
+        );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn umd_loader_probes_execute_frozen_npm_packages_in_both_native_lanes() {
+        use super::engine_resolver::CapturedEngineResolver;
+        use frankenengine_engine::ast::ParseGoal;
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+        use frankenengine_engine::capability::RuntimeCapability;
+        use frankenengine_engine::execution_orchestrator::{
+            ExecutionOrchestrator, ExtensionPackage, OrchestratorConfig,
+        };
+        use frankenengine_engine::module_resolver::{
+            CapabilityPolicyHook, ModuleResolver, ResolutionContext,
+        };
+        use frankenengine_engine::runtime_config::RuntimeConfig;
+        use std::collections::BTreeSet;
+        use std::sync::Arc;
+
+        let root = tempfile::tempdir().unwrap();
+        put_umd_package(root.path());
+        let reference = std::process::Command::new("node")
+            .arg("app.cjs")
+            .current_dir(root.path())
+            .output()
+            .expect("Node is required as the native UMD package test's reference runtime");
+        assert!(
+            reference.status.success(),
+            "{}",
+            String::from_utf8_lossy(&reference.stderr)
+        );
+        assert_eq!(reference.stdout, b"umd 42\n");
+        let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        let capsule = super::capsule::encode(&graph).unwrap();
+        put(
+            root.path(),
+            "node_modules/guarded-package/index.cjs",
+            "throw new Error('live package source must not be opened');",
+        );
+        put(
+            root.path(),
+            "node_modules/guarded-package/value.cjs",
+            "module.exports = -1;",
+        );
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let restored = super::capsule::replay(capsule.bytes(), capsule.digest()).unwrap();
+            let resolver = Arc::new(CapturedEngineResolver::new(restored, &pin).ok().unwrap());
+            let policy = Arc::new(CapabilityPolicyHook::new(BTreeSet::from([
+                RuntimeCapability::ModuleLoad,
+                RuntimeCapability::Builtin,
+            ])));
+            let context = ResolutionContext::new("umd-trace", "umd-decision", "umd-policy");
+            let entry = resolver
+                .resolve(&resolver.entry_request(), &context, policy.as_ref())
+                .unwrap();
+            let installed = resolver.execution_resolver(root.path(), policy).unwrap();
+            let mut engine = ExecutionOrchestrator::try_new_lab_with_runtime_config(
+                OrchestratorConfig {
+                    force_lane: Some(lane),
+                    parse_goal: ParseGoal::Script,
+                    commonjs_entry: true,
+                    ..OrchestratorConfig::default()
+                },
+                RuntimeConfig::default(),
+            )
+            .unwrap();
+            let package = ExtensionPackage {
+                extension_id: "captured-umd-package".into(),
+                source: "throw new Error('uncaptured source must not execute');".into(),
+                source_file: Some(root.path().join("app.cjs").display().to_string()),
+                module_root: None,
+                capabilities: vec!["module_load".into(), "builtin".into()],
+                version: "1.0.0".into(),
+                metadata: BTreeMap::new(),
+            };
+            let result = engine
+                .execute_resolved_entry_with_resolver(&package, &entry, installed)
+                .expect("a loader type probe must not prevent a frozen UMD package from executing");
+            let output = result
+                .console_output
+                .iter()
+                .map(|line| line.message.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
+            assert_eq!(output.as_bytes(), reference.stdout, "{lane:?}");
+        }
     }
 
     #[test]
