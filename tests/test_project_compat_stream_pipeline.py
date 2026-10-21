@@ -122,5 +122,11 @@ class ReadLinesProjectTests(PipelineProjectTests):
     case_count = 6
 
 
+class IterableStreamProjectTests(PipelineProjectTests):
+    # Cursor records must be read exactly once through shared stream pipelines.
+    corpus_path = ROOT / 'fixtures/compatibility/projects/stream-iterables.corpus.json'
+    case_count = 3
+
+
 if __name__ == '__main__':
     unittest.main()
