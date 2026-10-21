@@ -134,5 +134,11 @@ class WebAdoptionProjectTests(PipelineProjectTests):
     case_count = 6
 
 
+class ZlibExportProjectTests(PipelineProjectTests):
+    # Package helpers pass native codec functions as values and promisify them.
+    corpus_path = ROOT / 'fixtures/compatibility/projects/zlib-exports.corpus.json'
+    case_count = 4
+
+
 if __name__ == '__main__':
     unittest.main()

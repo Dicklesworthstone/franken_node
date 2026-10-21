@@ -1,0 +1,82 @@
+{
+  "schema_version": "franken-node/project-compat-corpus/v1",
+  "cases": [
+    {
+      "id": "zlib-package-promisified-archive",
+      "entry": "app.cjs",
+      "files": {
+        "input.txt": "archive: café 😀\n",
+        "node_modules/archive-kit/package.json": "{\"name\": \"archive-kit\", \"version\": \"1.0.0\", \"type\": \"commonjs\", \"exports\": \"./index.cjs\"}\n",
+        "node_modules/archive-kit/index.cjs": "const {promisify}=require('node:util');\nconst codecs=require('node:zlib');\nmodule.exports={pack:promisify(codecs.gzip),unpack:promisify(codecs.gunzip)};\n",
+        "app.cjs": "const fs=require('node:fs');const archive=require('archive-kit');\n(async function(){const input=fs.readFileSync('input.txt');\nconst packed=await archive.pack(input,{level:9});\nif(packed[0]!==31||packed[1]!==139)throw Error('not gzip');\nconst output=await archive.unpack(packed);if(!output.equals(input))throw Error('lost bytes');\nfs.writeFileSync('restored.txt',output);fs.writeFileSync('receipt.txt','gzip:roundtrip:complete\\n');\nconsole.log('ZLIB_ARCHIVE_COMPLETE');\n})().catch(error=>{console.error(error);process.exitCode=1;});\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "ZLIB_ARCHIVE_COMPLETE\n",
+        "stderr": "",
+        "files": {
+          "input.txt": "archive: café 😀\n",
+          "restored.txt": "archive: café 😀\n",
+          "receipt.txt": "gzip:roundtrip:complete\n"
+        }
+      }
+    },
+    {
+      "id": "zlib-esm-package-reexports",
+      "entry": "app.mjs",
+      "files": {
+        "node_modules/@fixture/codec/package.json": "{\"name\": \"@fixture/codec\", \"version\": \"1.0.0\", \"type\": \"module\", \"exports\": \"./index.mjs\"}\n",
+        "node_modules/@fixture/codec/index.mjs": "import codecs from 'node:zlib';\nexport {deflateSync as pack,inflateSync as unpack} from 'node:zlib';\nexport default codecs;\n",
+        "app.mjs": "import {writeFileSync} from 'node:fs';\nimport codec,{pack,unpack} from '@fixture/codec';\nconst bytes=Buffer.from('!scoped café!');const view=bytes.subarray(1,bytes.length-1);\nconst detached=[pack,unpack];const output=detached[1](detached[0](view,{level:6}));\nwriteFileSync('output.txt',output);\nwriteFileSync('receipt.txt',String(codec.inflateSync(codec.deflateSync('namespace')).toString())+'\\n');\nconst original=codec.deflateSync;\ntry {\n  codec.deflateSync=function(){throw Error('replacement must not redirect named import');};\n  writeFileSync('snapshot.txt',unpack(pack('captured named export')).toString());\n} finally { codec.deflateSync=original; }\nconsole.log('ZLIB_ESM_COMPLETE');\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "ZLIB_ESM_COMPLETE\n",
+        "stderr": "",
+        "files": {
+          "output.txt": "scoped café",
+          "receipt.txt": "namespace\n",
+          "snapshot.txt": "captured named export"
+        }
+      }
+    },
+    {
+      "id": "zlib-package-corruption-preserves-publication",
+      "entry": "app.cjs",
+      "files": {
+        "published.txt": "previous release\n",
+        "node_modules/archive-reader/package.json": "{\"name\": \"archive-reader\", \"version\": \"1.0.0\", \"type\": \"commonjs\", \"exports\": \"./index.cjs\"}\n",
+        "node_modules/archive-reader/index.cjs": "const {promisify}=require('util');\nconst {gunzip}=require('zlib');module.exports=promisify(gunzip);\n",
+        "app.cjs": "const fs=require('fs');const unpack=require('archive-reader');\n(async function(){let failed=false;try{\nconst decoded=await unpack(Buffer.from('invalid gzip payload'));\nfs.writeFileSync('published.txt',decoded);fs.writeFileSync('unexpected.txt','success');\n}catch(error){if(error.code!=='Z_DATA_ERROR')throw error;failed=true;\nfs.writeFileSync('error.txt',error.code+':'+String(error instanceof Error)+'\\n');}\nif(!failed)throw Error('corrupt archive accepted');console.log('ZLIB_CORRUPTION_COMPLETE');\n})().catch(error=>{console.error(error);process.exitCode=1;});\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "ZLIB_CORRUPTION_COMPLETE\n",
+        "stderr": "",
+        "files": {
+          "published.txt": "previous release\n",
+          "error.txt": "Z_DATA_ERROR:true\n",
+          "unexpected.txt": null
+        }
+      }
+    },
+    {
+      "id": "zlib-package-codec-registry-and-dictionary",
+      "entry": "app.cjs",
+      "files": {
+        "node_modules/codec-registry/package.json": "{\"name\": \"codec-registry\", \"version\": \"1.0.0\", \"type\": \"commonjs\", \"exports\": \"./index.cjs\"}\n",
+        "node_modules/codec-registry/index.cjs": "const z=require('zlib');\nmodule.exports={\n gzip:[z['gzipSync'],z['gunzipSync']],\n raw:[z.deflateRawSync,z.inflateRawSync],\n brotli:[z.brotliCompressSync,z.brotliDecompressSync],\n dictionary:[z.deflateSync,z.inflateSync]\n};\n",
+        "app.cjs": "const fs=require('fs');const registry=require('codec-registry');\nconst input=Buffer.from('package café\\n');const dictionary=Buffer.from('package café');\nlet text='';for(const name of ['gzip','raw','brotli','dictionary']){\nconst pair=registry[name];const opts=name==='dictionary'?{dictionary}:undefined;\nconst compressed=pair[0].call(null,input,opts);const output=pair[1].call(null,compressed,opts);\nif(!output.equals(input))throw Error('codec mismatch');text+=name+':'+output.toString();\nif(name==='dictionary'){\ntry{pair[1](compressed);throw Error('missing dictionary accepted');}\ncatch(error){if(error.code!=='Z_NEED_DICT')throw error;fs.writeFileSync('dictionary.txt',error.code+'\\n');}\n}}\nfs.writeFileSync('output.txt',text);console.log('ZLIB_REGISTRY_COMPLETE');\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "ZLIB_REGISTRY_COMPLETE\n",
+        "stderr": "",
+        "files": {
+          "output.txt": "gzip:package café\nraw:package café\nbrotli:package café\ndictionary:package café\n",
+          "dictionary.txt": "Z_NEED_DICT\n"
+        }
+      }
+    }
+  ]
+}
