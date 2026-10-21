@@ -128,5 +128,11 @@ class IterableStreamProjectTests(PipelineProjectTests):
     case_count = 3
 
 
+class WebAdoptionProjectTests(PipelineProjectTests):
+    # Web endpoint resources must be released before an aborted adapter closes.
+    corpus_path = ROOT / 'fixtures/compatibility/projects/stream-web-adoption.corpus.json'
+    case_count = 6
+
+
 if __name__ == '__main__':
     unittest.main()

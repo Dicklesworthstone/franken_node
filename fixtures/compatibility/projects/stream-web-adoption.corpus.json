@@ -1,0 +1,133 @@
+{
+  "schema_version": "franken-node/project-compat-corpus/v1",
+  "cases": [
+    {
+      "id": "web-preaborted-reader-releases-file",
+      "entry": "app.cjs",
+      "files": {
+        "package.json": "{\"name\":\"web-adoption-workflow\",\"version\":\"1.0.0\",\"private\":true}\n",
+        "input.txt": "keep\n",
+        "node_modules/file-source/package.json": "{\"name\":\"file-source\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/file-source/index.cjs": "const fs=require('node:fs');const {ReadableStream}=require('node:stream/web');\nexports.open=async function(){const handle=await fs.promises.open('input.txt','r');let calls=0;\n const stream=new ReadableStream({pull(){throw Error('read after cancellation');},\n  async cancel(reason){calls++;await handle.close();fs.writeFileSync('cancel.txt',reason.code+':'+reason.cause+':closed\\n');}\n },{highWaterMark:0});return {stream,handle,calls:()=>calls};};\n",
+        "app.cjs": "const fs=require('fs');const {Readable,Writable,promises}=require('node:stream');\n(async function(){const owned=await require('file-source').open();const c=new AbortController();c.abort(false);\n const input=Readable.fromWeb(owned.stream,{signal:c.signal});\n const output=new Writable({write(x,e,cb){fs.writeFileSync('unexpected-write.txt',x);cb();},\n  final(cb){fs.writeFileSync('published.txt','success');cb();}});\n let error;try{await promises.pipeline(input,output);}catch(e){error=e;}\n fs.writeFileSync('receipt.txt',[error.code,error.cause===false,owned.handle.fd,input.closed,output.destroyed,owned.calls()].join(':')+'\\n');\n console.log('READER_CANCELLED');\n})().catch(e=>{console.error(e);process.exitCode=1;});\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "READER_CANCELLED\n",
+        "stderr": "",
+        "files": {
+          "input.txt": "keep\n",
+          "cancel.txt": "ABORT_ERR:false:closed\n",
+          "receipt.txt": "ABORT_ERR:true:-1:true:true:1\n",
+          "published.txt": null,
+          "unexpected-write.txt": null
+        }
+      }
+    },
+    {
+      "id": "web-preaborted-esm-sink-aborts-file",
+      "entry": "app.mjs",
+      "files": {
+        "package.json": "{\"name\":\"web-adoption-workflow\",\"version\":\"1.0.0\",\"private\":true}\n",
+        "node_modules/@fixture/file-sink/package.json": "{\"name\":\"@fixture/file-sink\",\"version\":\"1.0.0\",\"type\":\"module\",\"exports\":\"./index.mjs\"}\n",
+        "node_modules/@fixture/file-sink/index.mjs": "import fs from 'node:fs';import {WritableStream} from 'node:stream/web';\nexport async function open(){const handle=await fs.promises.open('staged.txt','w');let calls=0;\n const stream=new WritableStream({async write(x){await handle.writeFile(x);},\n  async close(){await handle.close();fs.writeFileSync('published.txt','wrong');},\n  async abort(reason){calls++;await new Promise(resolve=>queueMicrotask(resolve));await handle.close();\n   fs.writeFileSync('abort.txt',reason.code+':'+String(reason.cause)+':closed\\n');}});\n return {stream,handle,calls:()=>calls};}\n",
+        "app.mjs": "import fs from 'node:fs';import {Readable,Writable} from 'node:stream';\nimport {pipeline} from 'node:stream/promises';import {open} from '@fixture/file-sink';\n(async function(){const owned=await open();const c=new AbortController();c.abort(null);\n const sink=Writable.fromWeb(owned.stream,{signal:c.signal});let error;\n try{await pipeline(Readable.from(['must-not-publish']),sink);}catch(e){error=e;}\n fs.writeFileSync('receipt.txt',[error.code,error.cause===null,owned.handle.fd,sink.closed,owned.calls()].join(':')+'\\n');\n console.log('SINK_ABORTED');\n})().catch(e=>{console.error(e);process.exitCode=1;});\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "SINK_ABORTED\n",
+        "stderr": "",
+        "files": {
+          "staged.txt": "",
+          "abort.txt": "ABORT_ERR:null:closed\n",
+          "receipt.txt": "ABORT_ERR:true:-1:true:1\n",
+          "published.txt": null
+        }
+      }
+    },
+    {
+      "id": "web-preaborted-duplex-cleans-both-resources",
+      "entry": "app.cjs",
+      "files": {
+        "package.json": "{\"name\":\"web-adoption-workflow\",\"version\":\"1.0.0\",\"private\":true}\n",
+        "source.txt": "source\n",
+        "node_modules/duplex-resource/package.json": "{\"name\":\"duplex-resource\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/duplex-resource/index.cjs": "const fs=require('fs');const web=require('stream/web');\nexports.open=async function(){const input=await fs.promises.open('source.txt','r');\n const output=await fs.promises.open('stage.txt','w');let leftReady,rightReady;\n const left=new Promise(resolve=>leftReady=resolve),right=new Promise(resolve=>rightReady=resolve);\n const readable=new web.ReadableStream({async cancel(e){leftReady();await right;await input.close();\n  fs.writeFileSync('read-release.txt',e.code+':'+e.cause+'\\n');}},{highWaterMark:0});\n const writable=new web.WritableStream({write(x){return output.writeFile(x);},\n  async abort(e){rightReady();await left;await output.close();fs.writeFileSync('write-release.txt',e.code+':'+e.cause+'\\n');},\n  close(){fs.writeFileSync('published.txt','wrong');}});\n return {readable,writable,input,output};};\n",
+        "app.cjs": "const fs=require('node:fs');const {Duplex}=require('node:stream');\n(async function(){const owned=await require('duplex-resource').open();const c=new AbortController();c.abort('stopped');\n const d=Duplex.fromWeb(owned,{signal:c.signal});let error;d.on('error',e=>error=e);\n await new Promise(resolve=>d.once('close',resolve));\n fs.writeFileSync('receipt.txt',[error.code,error.cause,d.closed,owned.input.fd,owned.output.fd].join(':')+'\\n');\n console.log('DUPLEX_RELEASED');\n})().catch(e=>{console.error(e);process.exitCode=1;});\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "DUPLEX_RELEASED\n",
+        "stderr": "",
+        "files": {
+          "source.txt": "source\n",
+          "stage.txt": "",
+          "read-release.txt": "ABORT_ERR:stopped\n",
+          "write-release.txt": "ABORT_ERR:stopped\n",
+          "receipt.txt": "ABORT_ERR:stopped:true:-1:-1\n",
+          "published.txt": null
+        }
+      }
+    },
+    {
+      "id": "web-live-signal-export-finishes-normally",
+      "entry": "app.cjs",
+      "files": {
+        "package.json": "{\"name\":\"web-adoption-workflow\",\"version\":\"1.0.0\",\"private\":true}\n",
+        "node_modules/record-source/package.json": "{\"name\":\"record-source\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/record-source/index.cjs": "const {ReadableStream}=require('node:stream/web');\nmodule.exports=function(){const rows=['café','𝄞','end'];let count=0;\n const stream=new ReadableStream({pull(c){if(count===rows.length)c.close();\n  else {c.enqueue({number:count+1,text:rows[count]});count++;}}},{highWaterMark:0});\n return {stream,count:()=>count};};\n",
+        "app.cjs": "const fs=require('fs');const s=require('node:stream');const {WritableStream}=require('stream/web');\n(async function(){const owned=require('record-source')();const handle=await fs.promises.open('export.txt','w');\n const c=new AbortController();let written=0;\n const sink=new WritableStream({async write(text){await handle.writeFile(text);written++;},\n  close(){return handle.close();},abort(){fs.writeFileSync('unexpected-abort.txt','wrong');return handle.close();}});\n const input=s.Readable.fromWeb(owned.stream,{signal:c.signal,objectMode:true});\n const transform=new s.Transform({objectMode:true,transform(row,e,cb){cb(null,row.number+':'+row.text.toUpperCase()+'\\n');}});\n const output=s.Writable.fromWeb(sink,{signal:c.signal,objectMode:true,decodeStrings:false});\n await s.promises.pipeline(input,transform,output);c.abort('after-success');await Promise.resolve();\n fs.writeFileSync('receipt.txt',[owned.count(),handle.fd,written].join(':')+'\\n');console.log('EXPORT_FINISHED');\n})().catch(e=>{console.error(e);process.exitCode=1;});\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "EXPORT_FINISHED\n",
+        "stderr": "",
+        "files": {
+          "export.txt": "1:CAFÉ\n2:𝄞\n3:END\n",
+          "receipt.txt": "3:-1:3\n",
+          "unexpected-abort.txt": null
+        }
+      }
+    },
+    {
+      "id": "web-pipeline-keeps-accepted-byte-prefix",
+      "entry": "app.cjs",
+      "files": {
+        "package.json": "{\"name\":\"accepted-byte-export\",\"version\":\"1.0.0\",\"private\":true}\n",
+        "node_modules/record-feed/package.json": "{\"name\":\"record-feed\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
+        "node_modules/record-feed/index.cjs": "const {ReadableStream}=require('node:stream/web');\nexports.open=async function(){const error=new Error('upstream failed');error.code='FEED_FAILED';\n const source=new ReadableStream({pull(c){c.enqueue(Buffer.from('accepted: café\\n'));c.error(error);}},{highWaterMark:0});\n return {source,error};};\n",
+        "app.cjs": "const fs=require('node:fs');const {Writable}=require('stream');const {pipeline}=require('stream/promises');\n(async function(){const {source,error:original}=await require('record-feed').open();\n const fd=fs.openSync('partial.txt','w');let writes=0,closes=0;\n const output=new Writable({write(chunk,encoding,done){fs.writeSync(fd,chunk);writes++;done();},\n  final(done){fs.writeFileSync('published.txt','wrong');done();},\n  destroy(error,done){fs.closeSync(fd);closes++;done(error);}});\n let failure;try{await pipeline(source,output);}catch(error){failure=error;}\n fs.writeFileSync('receipt.txt',[failure===original,failure.code,writes,closes,output.closed].join(':')+'\\n');\n console.log('PARTIAL_EXPORT_REJECTED');\n})().catch(error=>{console.error(error);process.exitCode=1;});\n"
+      },
+      "expected": {
+        "stdout": "PARTIAL_EXPORT_REJECTED\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "partial.txt": "accepted: café\n",
+          "receipt.txt": "true:FEED_FAILED:1:1:true\n",
+          "published.txt": null
+        }
+      }
+    },
+    {
+      "id": "web-pipeline-keeps-scoped-object-record",
+      "entry": "app.mjs",
+      "files": {
+        "package.json": "{\"name\":\"accepted-object-export\",\"version\":\"1.0.0\",\"private\":true,\"type\":\"module\"}\n",
+        "node_modules/@fixture/record-feed/package.json": "{\"name\":\"@fixture/record-feed\",\"version\":\"1.0.0\",\"type\":\"module\",\"exports\":\"./index.mjs\"}\n",
+        "node_modules/@fixture/record-feed/index.mjs": "import {ReadableStream} from 'node:stream/web';\nexport function open(){const error=new Error('cursor failure'),record={id:7,text:'𝄞 café'};error.code='CURSOR_FAILED';\n const source=new ReadableStream({pull(c){c.enqueue(record);c.error(error);}},{highWaterMark:0});return {source,error,record};}\n",
+        "app.mjs": "import fs from 'node:fs';import {Writable} from 'node:stream';import {pipeline} from 'node:stream/promises';\nimport {open} from '@fixture/record-feed';\n(async function(){const owned=open();let same=false,records=0;fs.writeFileSync('partial.jsonl','');\n const sink=new Writable({objectMode:true,write(record,encoding,done){same=record===owned.record;records++;\n  fs.appendFileSync('partial.jsonl',JSON.stringify(record)+'\\n');done();},\n  final(done){fs.writeFileSync('published.txt','wrong');done();}});\n let failure;try{await pipeline(owned.source,sink);}catch(error){failure=error;}\n fs.writeFileSync('receipt.txt',[failure===owned.error,failure.code,same,records,sink.closed].join(':')+'\\n');\n console.log('OBJECT_EXPORT_REJECTED');\n})().catch(error=>{console.error(error);process.exitCode=1;});\n"
+      },
+      "expected": {
+        "stdout": "OBJECT_EXPORT_REJECTED\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "partial.jsonl": "{\"id\":7,\"text\":\"𝄞 café\"}\n",
+          "receipt.txt": "true:CURSOR_FAILED:true:1:true\n",
+          "published.txt": null
+        }
+      }
+    }
+  ]
+}
