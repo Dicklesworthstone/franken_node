@@ -119,7 +119,7 @@ class ConstructorSignalProjectTests(PipelineProjectTests):
 class ReadLinesProjectTests(PipelineProjectTests):
     # File lines use the shared descriptor, stream, decoder and readline owners.
     corpus_path = ROOT / 'fixtures/compatibility/projects/fs-read-lines.corpus.json'
-    case_count = 4
+    case_count = 6
 
 
 if __name__ == '__main__':

@@ -81,6 +81,46 @@
           "receipt.json": "{\"closed\":true,\"finished\":true}\n"
         }
       }
+    },
+    {
+      "id": "read-lines-cancelled-package-export",
+      "entry": "app.cjs",
+      "files": {
+        "package.json": "{\"name\":\"cancel-file-lines\",\"private\":true}\n",
+        "input.txt": "first\nsecond\nthird\n",
+        "node_modules/file-lines/package.json": "{\"name\":\"file-lines\",\"main\":\"index.cjs\"}\n",
+        "node_modules/file-lines/index.cjs": "const {open}=require('node:fs/promises');\nmodule.exports=async function(file,signal){\n const handle=await open(file);\n const lines=handle.readLines({signal,highWaterMark:1});\n const closed=new Promise(resolve=>lines.input.once('close',resolve));\n return {handle,lines,closed};\n};\n",
+        "app.cjs": "const fs=require('fs'),{Readable,Writable}=require('stream');\nconst {pipeline}=require('stream/promises');\n(async()=>{\n const control=new AbortController();\n control.signal.addEventListener('abort',event=>event.stopImmediatePropagation());\n const run=await require('file-lines')('input.txt',control.signal);\n fs.writeFileSync('export.txt','');\n const source=Readable.from((async function*(){for await(const line of run.lines)yield line;})());\n const sink=new Writable({write(chunk,encoding,callback){\n   fs.appendFileSync('export.txt',chunk+'\\n');control.abort(false);callback();\n },final(callback){fs.writeFileSync('unexpected.txt','published');callback();}});\n let failure;\n try{await pipeline(source,sink);}catch(error){failure=error;}\n finally{run.lines.close();run.lines.input.destroy();await run.closed;await run.handle.close();}\n if(!failure||failure.code!=='ABORT_ERR'||failure.cause!==false)throw Error('missing file cancellation');\n fs.writeFileSync('receipt.json',JSON.stringify({code:failure.code,closed:run.handle.fd===-1,input:run.lines.input.destroyed,sink:sink.destroyed})+'\\n');\n console.log('FILE_EXPORT_CANCELLED');\n})().catch(error=>{console.error(error);process.exitCode=1;});\n"
+      },
+      "expected": {
+        "stdout": "FILE_EXPORT_CANCELLED\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "export.txt": "first\n",
+          "unexpected.txt": null,
+          "receipt.json": "{\"code\":\"ABORT_ERR\",\"closed\":true,\"input\":true,\"sink\":true}\n"
+        }
+      }
+    },
+    {
+      "id": "file-stream-completed-owner",
+      "entry": "app.mjs",
+      "files": {
+        "package.json": "{\"name\":\"completed-file-owner\",\"type\":\"module\"}\n",
+        "node_modules/@fixture/file-sink/package.json": "{\"name\":\"@fixture/file-sink\",\"type\":\"module\",\"exports\":\"./index.mjs\"}\n",
+        "node_modules/@fixture/file-sink/index.mjs": "import {open} from 'node:fs/promises';\nexport async function create(signal){\n const handle=await open('output.txt','w');\n return {handle,stream:handle.createWriteStream({signal,autoClose:false})};\n}\n",
+        "app.mjs": "import {writeFileSync} from 'node:fs';\nimport {create} from '@fixture/file-sink';\nconst control=new AbortController();const {handle,stream}=await create(control.signal);\nconst errors=[];stream.on('error',error=>errors.push(error));\nconst finished=new Promise(resolve=>stream.once('finish',resolve));\nstream.end('complete\\n');await finished;control.abort('after-completion');await new Promise(setImmediate);\nconst report={finished:stream.writableFinished,destroyed:stream.destroyed,errors:errors.length,retained:handle.fd>=0};\nif(!stream.destroyed){const closed=new Promise(resolve=>stream.once('close',resolve));stream.destroy();await closed;}\nawait handle.close();report.closed=handle.fd===-1;\nwriteFileSync('receipt.json',JSON.stringify(report)+'\\n');\nconsole.log('FILE_OWNER_RETAINED');\n"
+      },
+      "expected": {
+        "stdout": "FILE_OWNER_RETAINED\n",
+        "stderr": "",
+        "exit_code": 0,
+        "files": {
+          "output.txt": "complete\n",
+          "receipt.json": "{\"finished\":true,\"destroyed\":false,\"errors\":0,\"retained\":true,\"closed\":true}\n"
+        }
+      }
     }
   ]
 }
