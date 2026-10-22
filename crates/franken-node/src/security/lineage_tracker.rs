@@ -813,6 +813,18 @@ pub fn label_set_commitment(labels: &BTreeSet<String>) -> Result<String, Lineage
 /// produces a false "clean" verdict.
 pub const SECRET_FILE_LABEL: &str = "ifl-src:secret-file";
 
+/// Explicit environment snapshots are a different sensitive source from files.
+pub const SECRET_ENVIRONMENT_LABEL: &str = "ifl-src:secret-environment";
+
+/// Commitment an offline verifier can name when checking environment flows.
+#[must_use]
+pub fn secret_environment_label_set_commitment() -> String {
+    let labels = BTreeSet::from([SECRET_ENVIRONMENT_LABEL.to_string()]);
+    let bare = label_set_commitment(&labels)
+        .expect("the environment-source label set is non-empty");
+    format!("sha256:{bare}")
+}
+
 /// The `sha256:`-prefixed label-set commitment for the single-label secret
 /// set `{SECRET_FILE_LABEL}`. This is the exact value the run-path ledger
 /// writes into a secret-carrying effect's `label_set_commitment`, and the
