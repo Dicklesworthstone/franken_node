@@ -166,7 +166,7 @@ else:
 
     def test_real_node_multifile_reference_and_candidate_command(self):
         report = self.run_cases(case())
-        self.assertEqual(report["verdict"], "PASS")
+        self.assertEqual(report["verdict"], "PASS", report)
         self.assertEqual(report["passing_cases"], 1)
         self.assertEqual(report["candidate"], runner.fingerprint(self.native))
         snapshot = runner.load_corpus(self.root / "artifacts/corpus.json")
@@ -177,7 +177,8 @@ else:
         self.assertTrue(receipt["output_complete"])
         version = report["runtime_versions"]["reference"]
         self.assertTrue(version["valid"])
-        self.assertEqual(version["stdout"].encode(), subprocess.check_output([str(self.node), "--version"]))
+        self.assertEqual(version["stdout"].encode(),
+                         subprocess.check_output([str(self.node), "--version"], timeout=5))
         version_receipt = json.loads(Path(version["receipt_path"]).read_text())
         self.assertEqual(version_receipt["command"], [str(self.node), "--version"])
         self.assertEqual(report["provenance_errors"], [])
@@ -274,7 +275,8 @@ else:
         value = case(entry="exit.js")
         value["files"]["exit.js"] = "process.stderr.write('expected failure\\n'); process.exit(7);\n"
         value["expected"] = {"stdout": "", "stderr": "expected failure\n", "exit_code": 7}
-        self.assertEqual(self.run_cases(value)["verdict"], "PASS")
+        report = self.run_cases(value)
+        self.assertEqual(report["verdict"], "PASS", report)
 
     def test_timeout_is_not_an_expected_exit(self):
         report = self.run_cases(case(entry="hang.js"), wall_time_ms=1500)
@@ -492,7 +494,7 @@ else:
         accepted = runner.run_corpus(corpus(), self.native, self.node, self.root / "accepted",
                                      bun=self.bun, baseline_report=baseline,
                                      reference_change="Intentional reference replacement under review")
-        self.assertEqual(accepted["verdict"], "PASS")
+        self.assertEqual(accepted["verdict"], "PASS", accepted)
         self.assertEqual(accepted["reference_baseline"]["drift"], drift)
         self.assertIn("under review", accepted["reference_baseline"]["reference_change"])
         self.assertEqual(baseline.read_bytes(), before)
