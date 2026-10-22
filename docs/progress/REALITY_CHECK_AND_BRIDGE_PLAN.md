@@ -25,6 +25,19 @@ Consumer: the operator explicitly requested a detailed TODO while implementing t
 - [ ] R2T/R3/R3T/R5: current-engine compilation, native project/replay verification, module replay and installed-asset qualification. Local build admission remains critical. On 2026-10-22 the operator explicitly allowed strictly remote RCH builds despite that check; normal worker/toolchain/source admission still applies, with no local Cargo or deletion authorized.
 - [ ] Existing later owners: current per-profile >=95% corpus, >=3x durable migration, live substrate/advanced-surface integration, performance, independent replication and production adoption. These remain open until their own positive acceptance evidence exists.
 
+### Executed native regressions — 2026-10-22 23:20 UTC
+
+- [x] Execute enabled inline tests with `--cfg franken_node_inline_tests`, `extended-surfaces,test-support`, pinned nightly and locked dependencies: **633 passed / 13 failed / zero ignored**, Cargo exit 101 on `hz4`. Exact source: node `681842777` plus 18 overlays, fingerprint `c399fa8781cbe93d20dbd566818c879300157fe4bb288490dbfd2c74ed4d8fbe`; engine `10b88fb2c`. This is a failing suite, not full native qualification.
+- [x] Observe all three strengthened anti-entropy/transport/role tests pass. Also observe rewrite transactions **92/92**, dependency admission **136/136**, trust cards **139/139**, environment ledger **1/1**, native replay **22/31**, and module graph **239/243**. The direct npm-range filter selected no tests; its execution remains open.
+- [x] Diagnose the 13 actual failures: nine replay failures and four module-graph failures. Keep the existing fail-closed evidence, module-authority, canonical-input, reflection and reference-runtime assertions intact.
+- [x] Review and correct three misleading fixture paths: duplicate JSON now duplicates a complete valid package, the ambient environment probe no longer first invokes a Secret-to-console flow, and an invented uncaptured module route expects its existing `ERR_MODULE_REGISTRY_ROUTE` refusal while preserving policy-call and preparation-state assertions. Expose the original process-execution error when replay capture refuses. These corrections have not yet executed.
+- [ ] Re-execute the corrected fixtures and all failing replay/module tests; include the actual nested npm-range tests using a matching filter. Retain every remaining failure and the original denominator.
+- [ ] Correct engine producer defects at their owner: denial evidence remains uncommitted after successful cell close; native ESM namespace prototype differs from the real Node oracle; the CommonJS-wrapper parser accepts conflicting lexical declarations. Do not weaken replay certification, replace Node observations or add a parallel product grammar to hide these failures.
+- [ ] Diagnose the original process-execution failure using the improved error context; retain the exact shell-preparation denial requirement until the actual failing phase is established.
+- [ ] Complete default native CLI integration and all-target clippy/check/format on the final source. Existing running requests qualify only the earlier 18-overlay source above. Broad formatting/static/merge-contract failures and independent verification remain open.
+
+Primary executed log: `/var/folders/vt/n2xyn_s51b97_j3yh2qbqcnc0000gn/T/franken-npm-specimens-20261022-ci9g4pcu/inline-eighteen-replay-and-regressions-2246.log`. Its RCH terminal acknowledgement and source release were observed; setup failures from separate prebuilt and Unicode-baseline attempts executed no tests and earn no credit.
+
 ### Offline npm and native-build execution — 2026-10-22
 
 - [x] Recheck live work, priorities and disk: 6.86% free / 274 GB; local builds remain prohibited. Obtain the explicit operator exception **"Allow strictly remote RCH builds"** before attempting remote Rust verification. Preserve all peer work and delete nothing.

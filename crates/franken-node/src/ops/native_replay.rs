@@ -663,16 +663,13 @@ mod engine {
             &self,
             request: &ProcessSpawnRequest,
         ) -> Result<(), ProcessSpawnError> {
-            match self
-                .preparation
-                .iter()
-                .find_map(|entry| match entry {
-                    CapturedProcessPreparation::Preflight {
-                        request: expected,
-                        outcome,
-                    } if expected == request => Some(outcome.clone()),
-                    _ => None,
-                }) {
+            match self.preparation.iter().find_map(|entry| match entry {
+                CapturedProcessPreparation::Preflight {
+                    request: expected,
+                    outcome,
+                } if expected == request => Some(outcome.clone()),
+                _ => None,
+            }) {
                 Some(outcome) => outcome,
                 None => Err(self.refuse()),
             }
@@ -682,16 +679,13 @@ mod engine {
             &self,
             request: &ProcessSpawnRequest,
         ) -> Result<ProcessSpawnRequest, ProcessSpawnError> {
-            match self
-                .preparation
-                .iter()
-                .find_map(|entry| match entry {
-                    CapturedProcessPreparation::Prepare {
-                        request: expected,
-                        outcome,
-                    } if expected == request => Some(outcome.clone()),
-                    _ => None,
-                }) {
+            match self.preparation.iter().find_map(|entry| match entry {
+                CapturedProcessPreparation::Prepare {
+                    request: expected,
+                    outcome,
+                } if expected == request => Some(outcome.clone()),
+                _ => None,
+            }) {
                 Some(outcome) => outcome,
                 None => Err(self.refuse()),
             }
@@ -2585,7 +2579,12 @@ mod engine {
                     None,
                     &orchestrator,
                     &error,
-                ),
+                )
+                .map_err(|capture_error| {
+                    format!(
+                        "native process execution failed: {error}; replay capture refused: {capture_error}"
+                    )
+                }),
             }
             .expect("capture real process execution")
         }
@@ -2957,7 +2956,7 @@ mod engine {
                 assert!(!outcome.console_match);
 
                 for source in [
-                    "console.log(process.env.PATH);",
+                    "void process.env.PATH;",
                     "const raw = process; console.log(raw.argv);",
                     "console.log(process['argv']);",
                 ] {
@@ -3214,6 +3213,8 @@ mod engine {
                 .expect("module that must not be loaded");
                 let mut payload: NativeReplayPayload =
                     serde_json::from_str(&capture.payload_json).expect("captured input");
+                let original_package =
+                    serde_json::to_string(&payload.package).expect("original captured package");
                 payload.package.source =
                     "const loader = require; loader('./private.cjs');".to_string();
                 let injected =
@@ -3222,7 +3223,9 @@ mod engine {
                 assert!(error.contains("module_load"), "{error}");
 
                 let mut duplicate = capture;
-                duplicate.payload_json.insert_str(1, "\"package\":{},");
+                duplicate
+                    .payload_json
+                    .insert_str(1, &format!("\"package\":{original_package},"));
                 duplicate.payload_sha256 =
                     hex::encode(Sha256::digest(duplicate.payload_json.as_bytes()));
                 let error = reexecute(&duplicate).expect_err("duplicate input rejected");

@@ -428,6 +428,7 @@ pub fn detect_kind_with_options(
                 if matches!(
                     failure.code,
                     ParseErrorCode::InvalidGoal
+                        | ParseErrorCode::InvalidSyntax
                         | ParseErrorCode::UnsupportedSyntax
                         | ParseErrorCode::StrictModeWithStatement
                         | ParseErrorCode::AwaitOutsideAsync
