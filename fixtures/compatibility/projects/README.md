@@ -1,11 +1,13 @@
 # Executable multi-file project corpus
 
-The collection contains 153 fixture cases in 22 manifests. They exercise CommonJS/ESM module graphs,
+The collection contains 161 fixture cases in 24 manifests. They exercise CommonJS/ESM module graphs,
 node_modules packages, scoped and conditional exports, nested dependency
 precedence, package imports/self-reference, builtins through dependencies, and
 filesystem effects. Every case is a complete captured project; execution never
-runs an install command or downloads packages. These are package-shaped fixtures,
-not third-party npm packages or npm compatibility certification.
+runs an install command or downloads packages. Most cases use hand-authored
+package-shaped fixtures. `npm-packages.corpus.json` adds unchanged runtime
+specimens from three real npm releases; this small band is not npm compatibility
+certification or a representative top-N package sample.
 
 ## Run against a native build
 
@@ -124,6 +126,28 @@ never edited. The baseline pins references only, not the corpus, policy or host
 environment, and its previous native verdict is never a new pass oracle.
 
 ## Test the harness and the reference expectations
+
+The npm band pins `is-number@7.0.0`, `isarray@2.0.5` and
+`escape-string-regexp@4.0.0`. Each project's lockfile records the official npm
+archive URL and SHA-512 integrity value. The runtime `index.js`, original
+`package.json` and original MIT license match those verified archives
+byte-for-byte. Readmes, development dependencies and type declarations are not
+included. Original package scripts remain inert metadata; execution uses the
+already captured `node_modules` files. No install script or package manager runs.
+
+Tests pin all nine upstream file hashes and verify lock/source identity before
+executing actual package API calls on real Node. Drivers include finite-value
+and coercion boundaries, arrays versus array-like/prototype shapes, literal
+Unicode regex construction, empty strings and exact type-error behavior.
+For this reference band alone:
+
+    python3 tests/test_project_compat_corpus.py \
+      CorpusTests.test_pinned_npm_publication_bytes_and_lock_identity \
+      CorpusTests.test_pinned_npm_specimens_match_exact_reference_observations -v
+
+Run the same manifest through `project_compat_runner.py --corpus` to measure
+real Node/Bun/native agreement. A source-integrity or reference-test pass does
+not establish native compatibility.
 
     python3 -m unittest discover -s tests -p 'test_project_compat*.py' -v
 

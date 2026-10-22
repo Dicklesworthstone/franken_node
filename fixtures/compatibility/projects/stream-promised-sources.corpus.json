@@ -3,6 +3,7 @@
   "cases": [
     {
       "id": "promised-source-package-asset",
+      "category": "stream-integration",
       "entry": "app.cjs",
       "files": {
         "app.cjs": "const fs=require('node:fs');const {pipeline}=require('node:stream/promises');\nconst asset=require('package-asset');\n(async()=>{const sink=fs.createWriteStream('asset.txt');await pipeline(asset(),sink);\nif(!sink.closed)throw new Error('file not closed');fs.writeFileSync('complete.txt','closed\\n');console.log('PROMISED_ASSET_COMPLETE');})().catch(e=>{console.error(e);process.exitCode=1;});\n",
@@ -21,6 +22,7 @@
     },
     {
       "id": "promised-source-esm-record-transform",
+      "category": "stream-integration",
       "entry": "app.mjs",
       "files": {
         "app.mjs": "import {createWriteStream,writeFileSync} from 'node:fs';\nimport {pipeline} from 'node:stream/promises';import {load,encode} from '@records/export';\nawait pipeline(load(),encode,createWriteStream('rows.jsonl'));\nwriteFileSync('complete.txt','identity preserved\\n');console.log('PROMISED_RECORD_COMPLETE');\n",
@@ -39,6 +41,7 @@
     },
     {
       "id": "promised-source-rejection-closes-descriptor",
+      "category": "stream-integration",
       "entry": "app.cjs",
       "files": {
         "app.cjs": "const fs=require('node:fs');const {pipeline}=require('node:stream/promises');const make=require('owned-export');\n(async()=>{const {source,sink,reason}=make();let failure;\ntry{await pipeline(source,sink);}catch(e){failure=e;}\nif(failure!==reason||!sink.closed)throw new Error('original failure or cleanup missing');\nfs.writeFileSync('failure.txt',failure.code+'\\n');console.log('PROMISED_FAILURE_COMPLETE');})().catch(e=>{console.error(e);process.exitCode=1;});\n",
@@ -61,6 +64,7 @@
     },
     {
       "id": "promised-source-callback-return-and-completion",
+      "category": "stream-integration",
       "entry": "app.cjs",
       "files": {
         "app.cjs": "const fs=require('node:fs');const {pipeline}=require('node:stream');const source=require('callback-asset');\nconst sink=fs.createWriteStream('callback.txt');let calls=0;\nconst returned=pipeline(source(),sink,error=>{calls++;if(error){console.error(error);process.exitCode=1;return;}\nif(calls!==1||returned!==sink||!sink.closed)throw new Error('callback lifetime');\nfs.writeFileSync('receipt.txt','same sink; closed; callback once\\n');console.log('PROMISED_CALLBACK_COMPLETE');});\n",
@@ -79,6 +83,7 @@
     },
     {
       "id": "promised-source-ordinary-stream-control",
+      "category": "stream-integration",
       "entry": "app.cjs",
       "files": {
         "app.cjs": "const fs=require('node:fs');const {pipeline}=require('node:stream/promises');const source=require('ordinary-asset');\n(async()=>{await pipeline(source(),fs.createWriteStream('ordinary.txt'));console.log('ORDINARY_CONTROL_COMPLETE');})().catch(e=>{console.error(e);process.exitCode=1;});\n",

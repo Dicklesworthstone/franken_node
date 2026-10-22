@@ -1,8 +1,10 @@
-"""Verify hand-authored project expectations against a real Node reference.
+"""Verify project expectations and pinned npm specimens against a real Node reference.
 
 These tests deliberately do not claim that franken-engine passes these cases.
 Run project_compat_runner.py with a built native binary for that measurement.
 """
+import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -14,6 +16,31 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from scripts import project_compat_runner as runner
+
+NPM_CORPUS = ROOT / "fixtures/compatibility/projects/npm-packages.corpus.json"
+# Frozen hashes are from SHA512-verified official npm tarballs, not generated
+# from the fixture under test. This prevents changing vendored code or license
+# text while retaining the original package/version/integrity claim.
+NPM_PINS = {
+    "npm-is-number-7-finite-coercion": (
+        "is-number", "7.0.0",
+        "sha512-41Cifkg6e8TylSpdtTpeLVMqvSBEVzTttHvERD741+pnZ8ANv0004MRL43QKPDlK9cGvNp6NZWZUBlbGXYxxng==",
+        {"index.js": "04255e482e181687823a95b207802ddd32e746c65dce4c95a5176fc192735960",
+         "package.json": "51c133f4e41df982aef69027249ff9d7262645029f437d079adc7c83328fb620",
+         "LICENSE": "35bdd8a44339719441900fb50fbefc5e2dca1ca662cbaed7a687de842c8b70f2"}),
+    "npm-isarray-2-native-and-prototype-shapes": (
+        "isarray", "2.0.5",
+        "sha512-xHjhDr3cNBK0BzdUJSPXZntQUx/mwMS5Rw4A7lPJ90XGAO6ISP/ePDNuo0vhqOZU+UD5JoodwCAAoZQd3FeAKw==",
+        {"index.js": "9b8c691372802da788c9c5f4e1ca2f1ed0b88ab8722176c2aea15e38ec86d249",
+         "package.json": "b0802c09bce6bf067d3e5f52390ea26972e11c88bb6ae38991316ac83ca14127",
+         "LICENSE": "68f12f6e2c33688699249c01d8f9623c534da20aa71989c57b061b7bc1676d14"}),
+    "npm-escape-string-regexp-4-unicode-and-errors": (
+        "escape-string-regexp", "4.0.0",
+        "sha512-TtpcNJ3XAzx3Gq8sWRzJaVajRs0uVxA2YAkdb1jm2YkPz4G6egUFAyA3n5vtEIZefPk5Wa4UXbKuS5fKkJWdgA==",
+        {"index.js": "d7170b45e3faf26da2fcb2b4a2fac19af142b44d2ec5ae7760700896749a5886",
+         "package.json": "63763f28aefa6c49e6e6599e44b7c9aa5afd6518ae04bcfa534ff3759ad428e8",
+         "license": "5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3"}),
+}
 
 
 class CorpusTests(unittest.TestCase):
@@ -31,6 +58,46 @@ class CorpusTests(unittest.TestCase):
         self.assertTrue(all(len(case["files"]) > 1 for case in corpus["cases"]))
         categories = {case["category"] for case in corpus["cases"]}
         self.assertTrue({"commonjs", "esm", "package-resolution", "filesystem-integration"} <= categories)
+
+    def test_pinned_npm_publication_bytes_and_lock_identity(self):
+        cases = runner.load_corpus(NPM_CORPUS)["cases"]
+        self.assertEqual({case["id"] for case in cases}, set(NPM_PINS))
+        for case in cases:
+            with self.subTest(case=case["id"]):
+                name, version, integrity, files = NPM_PINS[case["id"]]
+                prefix = "node_modules/" + name + "/"
+                manifest = json.loads(case["files"][prefix + "package.json"])
+                self.assertEqual((manifest["name"], manifest["version"], manifest["license"]),
+                                 (name, version, "MIT"))
+                self.assertFalse(manifest.get("dependencies"))
+                project = json.loads(case["files"]["package.json"])
+                self.assertEqual(project["dependencies"], {name: version})
+                lock = json.loads(case["files"]["package-lock.json"])
+                self.assertEqual(lock["lockfileVersion"], 3)
+                self.assertEqual(lock["packages"][""]["dependencies"], {name: version})
+                self.assertEqual(lock["packages"][prefix[:-1]], {
+                    "version": version, "license": "MIT", "integrity": integrity,
+                    "resolved": f"https://registry.npmjs.org/{name}/-/{name}-{version}.tgz"})
+                self.assertEqual({path[len(prefix):] for path in case["files"] if path.startswith(prefix)},
+                                 set(files))
+                for path, expected_hash in files.items():
+                    self.assertEqual(hashlib.sha256(case["files"][prefix + path].encode()).hexdigest(),
+                                     expected_hash, path)
+
+    @unittest.skipUnless(os.name == "posix" and shutil.which("node"), "requires POSIX and Node reference")
+    def test_pinned_npm_specimens_match_exact_reference_observations(self):
+        runner.reject_runtime_overrides()
+        node = runner.executable("node")
+        with tempfile.TemporaryDirectory() as tmp:
+            for case in runner.load_corpus(NPM_CORPUS)["cases"]:
+                with self.subTest(case=case["id"]):
+                    base = Path(tmp) / case["id"]
+                    runner.stage(case, base / "project")
+                    receipt = runner.supervise([str(node), "./" + case["entry"]],
+                                               base / "execution", cwd=base / "project",
+                                               wall_time_ms=10000, max_output_bytes=1024 * 1024)
+                    self.assertEqual(runner.differences(receipt, case["expected"]), [],
+                                     Path(receipt["stderr_path"]).read_text(errors="replace"))
 
     def test_runtime_overrides_rejected_without_disclosing_values(self):
         for name in ("NODE_OPTIONS", "NODE_PATH", "FRANKEN_NODE_CONFIG", "LD_PRELOAD"):

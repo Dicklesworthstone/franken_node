@@ -8,6 +8,7 @@ on:
       - 'scripts/runtime_invoke_watchdog.py'
       - 'scripts/project_compat_runner.py'
       - 'tests/test_project_compat_runner.py'
+      - 'tests/test_project_compat_corpus.py'
       - 'fixtures/compatibility/projects/*.json'
       - 'tests/test_runtime*watchdog*.py'
       - 'tests/runtime_watchdog_cli_probe.rs'
@@ -37,6 +38,14 @@ jobs:
           # Candidate and Bun adapters in this suite are explicitly synthetic.
           # These tests qualify orchestration, never native compatibility.
           python3 -W error::ResourceWarning -m unittest discover -s tests -p 'test_project_compat_runner.py' -v 2>&1 | tee evidence/project-runner-tests.log
+      - name: Verify pinned npm bytes and execute offline package drivers on real Node
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum fixtures/compatibility/projects/npm-packages.corpus.json tests/test_project_compat_corpus.py > evidence/npm-source-sha256.txt
+          # This focused band is reference evidence for three pinned packages.
+          # The whole collection and current native compatibility remain separate.
+          python3 -W error::ResourceWarning tests/test_project_compat_corpus.py CorpusTests.test_pinned_npm_publication_bytes_and_lock_identity CorpusTests.test_pinned_npm_specimens_match_exact_reference_observations -v 2>&1 | tee evidence/npm-reference-tests.log
       - name: Retain project runner regression evidence
         if: always()
         uses: actions/upload-artifact@v4
