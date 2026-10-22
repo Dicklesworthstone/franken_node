@@ -4187,9 +4187,10 @@ impl RuntimeConfig {
                 || name.contains('=')
                 || name.starts_with("FRANKEN_NODE_INTERNAL_")
             {
-                return Err(ConfigError::ValidationFailed(format!(
+                return Err(ConfigError::ValidationFailed(
                     "runtime.environment_allowlist contains an invalid or reserved name"
-                )));
+                        .to_owned(),
+                ));
             }
         }
         Ok(())

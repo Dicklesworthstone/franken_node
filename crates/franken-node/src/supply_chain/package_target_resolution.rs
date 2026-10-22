@@ -243,7 +243,7 @@ impl PackageMapIndex {
         // offsets slice UTF-8, while precedence follows Node's UTF-16 lengths.
         index
             .patterns
-            .sort_by(|a, b| b.specificity.cmp(&a.specificity));
+            .sort_by_key(|pattern| std::cmp::Reverse(pattern.specificity));
         index
     }
 

@@ -105,13 +105,11 @@ impl Admission<'_> {
                     "invalid_peer_placement",
                     "Peer dependency is shadowed inside its consumer instead of being provided at or above the consumer's installation level",
                 )
-            } else if let Some(issue) = version_issue {
-                issue
             } else {
-                (
+                version_issue.unwrap_or((
                     "unresolved_transitive_dependency",
                     "Transitive declaration has no matching complete nearest lockfile identity; version satisfaction is not established",
-                )
+                ))
             };
             self.report.finding(DependencyFinding {
                 code: code.into(),

@@ -139,14 +139,14 @@ struct Comparator { op: Op, version: Version }
 
 impl Comparator {
     fn accepts(&self, candidate: &Version) -> bool {
-        match (self.op, candidate.cmp(&self.version)) {
+        matches!(
+            (self.op, candidate.cmp(&self.version)),
             (Op::Eq, Ordering::Equal)
-            | (Op::Lt, Ordering::Less)
-            | (Op::Le, Ordering::Less | Ordering::Equal)
-            | (Op::Gt, Ordering::Greater)
-            | (Op::Ge, Ordering::Greater | Ordering::Equal) => true,
-            _ => false,
-        }
+                | (Op::Lt, Ordering::Less)
+                | (Op::Le, Ordering::Less | Ordering::Equal)
+                | (Op::Gt, Ordering::Greater)
+                | (Op::Ge, Ordering::Greater | Ordering::Equal)
+        )
     }
 }
 

@@ -118,10 +118,11 @@ impl SourcePreparer {
             .strip_prefix('\u{feff}')
             .unwrap_or(source)
             .starts_with("#!");
-        if module.source_language == SourceLanguage::JavaScript && !has_hashbang {
-            if let Some(kind) = explicit {
-                return Ok(kind);
-            }
+        if module.source_language == SourceLanguage::JavaScript
+            && !has_hashbang
+            && let Some(kind) = explicit
+        {
+            return Ok(kind);
         }
 
         if self.expected.is_none() {
