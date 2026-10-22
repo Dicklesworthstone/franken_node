@@ -19,6 +19,25 @@ fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
 }
 
 #[test]
+fn frozen_module_symlink_flag_preserves_configuration_unless_explicit() {
+    for (extra, expected) in [
+        (None, None),
+        (Some("--frozen-module-symlinks"), Some(true)),
+        (Some("--frozen-module-symlinks=false"), Some(false)),
+    ] {
+        let mut args = vec!["franken-node", "run", "app.cjs"];
+        args.extend(extra);
+        let Command::Run(run) = parse(&args).unwrap().command else {
+            panic!("expected run command");
+        };
+        assert_eq!(run.frozen_module_symlinks, expected);
+    }
+    assert!(parse(&[
+        "franken-node", "run", "app.cjs", "--frozen-module-symlinks=outside",
+    ]).is_err());
+}
+
+#[test]
 fn migrate_audit_rejects_sarif_to_json_output() {
     let err = parse(&[
         "franken-node",

@@ -344,6 +344,13 @@ pub struct RunArgs {
     #[arg(long, conflicts_with = "capture_replay")]
     pub frozen_modules: bool,
 
+    /// Allow project-contained relative symlinks, including npm/Bun workspace
+    /// links, when frozen modules are enabled by flag or configuration. Absolute
+    /// links, paths outside the project and link cycles remain refused. Pass
+    /// --frozen-module-symlinks=false to override an enabled configuration.
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    pub frozen_module_symlinks: Option<bool>,
+
     /// Arguments for the program itself, after `--`
     /// (`franken-node run app.js -- a b`). They become `process.argv[2..]`
     /// where the policy lets the program read `process.argv` (bd-my9hk).

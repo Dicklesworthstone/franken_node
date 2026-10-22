@@ -3618,8 +3618,8 @@ fn run_commonjs_entry_requires_a_sibling_module() {
 }
 
 /// bd-reality-20260923-26n9r.4 deliverable 2: a `.js` entry in a
-/// `"type": "module"` package is ESM, as in Node; without the type field the
-/// same source is a script, where `export` is a syntax error.
+/// `"type": "module"` package is ESM, as in Node; an explicit CommonJS
+/// scope must still refuse the same source rather than silently changing goal.
 #[test]
 fn run_type_module_package_executes_js_entry_as_esm() {
     const ESM_SOURCE: &str =
@@ -3641,7 +3641,7 @@ fn run_type_module_package_executes_js_entry_as_esm() {
         &[
             (
                 "pkg/package.json",
-                r#"{"name":"pkg","version":"1.0.0","main":"main.js"}"#,
+                r#"{"name":"pkg","version":"1.0.0","type":"commonjs","main":"main.js"}"#,
             ),
             ("pkg/main.js", ESM_SOURCE),
         ],
@@ -3650,8 +3650,100 @@ fn run_type_module_package_executes_js_entry_as_esm() {
     assert_ne!(
         script.exit_code,
         Some(0),
-        "without \"type\": \"module\" the entry must parse as a script; stdout:\n{}",
+        "an explicit CommonJS entry must parse as a script; stdout:\n{}",
         script.stdout
+    );
+}
+
+/// Node's ambiguous-entry detection also applies to packages with no type.
+/// Exercise the native worker, including original TypeScript/hashbang bytes,
+/// rather than asking the graph resolver to choose a format for the test.
+#[test]
+fn run_ambiguous_entry_detects_module_syntax() {
+    for (entry, source) in [
+        (
+            "main.js",
+            "export const value = 42;\nconsole.log(String(value));\n",
+        ),
+        (
+            "entry",
+            "#!/usr/bin/env node\nexport const value = 42;\nconsole.log(String(value));\n",
+        ),
+        (
+            "main.ts",
+            "export const value: number = 42;\nconsole.log(String(value));\n",
+        ),
+    ] {
+        for metadata in [None, Some("{}"), Some(r#"{"type":"unrecognized"}"#)] {
+            let mut files = vec![(entry, source)];
+            if let Some(metadata) = metadata {
+                files.push(("package.json", metadata));
+            }
+            let outcome = run_directory_target(&files, entry);
+            assert_eq!(
+                outcome.exit_code,
+                Some(0),
+                "{entry}, {metadata:?}: stderr:\n{}",
+                outcome.stderr
+            );
+            assert_eq!(outcome.stdout, "42\n", "{entry}, {metadata:?}");
+        }
+    }
+}
+
+#[test]
+fn run_ambiguous_directory_entry_imports_a_relative_module() {
+    let outcome = run_directory_target(
+        &[
+            ("pkg/package.json", r#"{"main":"main.js"}"#),
+            (
+                "pkg/main.js",
+                "import { answer } from './answer.mjs';\nconsole.log(String(answer));\n",
+            ),
+            ("pkg/answer.mjs", "export const answer = 42;\n"),
+        ],
+        "pkg",
+    );
+    assert_eq!(outcome.exit_code, Some(0), "stderr:\n{}", outcome.stderr);
+    assert_eq!(outcome.stdout, "42\n");
+}
+
+#[test]
+fn run_ambiguous_commonjs_does_not_infer_modules_from_comments_or_strings() {
+    let outcome = run_directory_target(
+        &[
+            ("package.json", "{}"),
+            (
+                "main.js",
+                "// import value from './absent.mjs'; export default value;\n\
+                 const text = 'import.meta and export are text';\n\
+                 module.exports = text;\nconsole.log(module.exports);\n",
+            ),
+        ],
+        "main.js",
+    );
+    assert_eq!(outcome.exit_code, Some(0), "stderr:\n{}", outcome.stderr);
+    assert_eq!(outcome.stdout, "import.meta and export are text\n");
+}
+
+#[test]
+fn run_ambiguous_entry_preserves_token_budget_failure_and_no_guest_effects() {
+    let outcome = run_project_target_with_setup(
+        &[(
+            "main.js",
+            "console.log('must-not-execute');\nexport const value = 42;\n",
+        )],
+        "main.js",
+        |_, command| {
+            command.env("FRANKEN_NODE_RUNTIME_MAX_PARSE_TOKENS", "1");
+        },
+    );
+    assert_ne!(outcome.exit_code, Some(0));
+    assert!(!outcome.stdout.contains("must-not-execute"));
+    assert!(
+        outcome.stderr.contains("runtime.max_parse_tokens=1"),
+        "{}",
+        outcome.stderr
     );
 }
 

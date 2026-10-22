@@ -46,6 +46,7 @@ fn runtime_config(max_concurrent: usize) -> RuntimeConfig {
         drain_timeout_ms: None,
         allow_process_shape: None,
         frozen_modules: None,
+        frozen_module_symlinks: None,
         environment_allowlist: Default::default(),
         max_instructions: None,
         max_registers: None,

@@ -1437,6 +1437,14 @@ impl Config {
                     MAX_MERGE_DECISIONS,
                 );
             }
+            if let Some(value) = section.frozen_module_symlinks {
+                self.runtime.frozen_module_symlinks = Some(value);
+                push_bounded(
+                    decisions,
+                    MergeDecision::new(stage.clone(), "runtime.frozen_module_symlinks", value),
+                    MAX_MERGE_DECISIONS,
+                );
+            }
             if let Some(value) = &section.environment_allowlist {
                 self.runtime.environment_allowlist.clone_from(value);
                 push_bounded(
@@ -2113,6 +2121,15 @@ impl Config {
             push_bounded(
                 decisions,
                 MergeDecision::new(MergeStage::Env, "runtime.frozen_modules", parsed),
+                MAX_MERGE_DECISIONS,
+            );
+        }
+        if let Some(raw) = env_lookup("FRANKEN_NODE_RUNTIME_FROZEN_MODULE_SYMLINKS") {
+            let parsed = parse_env_bool("FRANKEN_NODE_RUNTIME_FROZEN_MODULE_SYMLINKS", &raw)?;
+            self.runtime.frozen_module_symlinks = Some(parsed);
+            push_bounded(
+                decisions,
+                MergeDecision::new(MergeStage::Env, "runtime.frozen_module_symlinks", parsed),
                 MAX_MERGE_DECISIONS,
             );
         }
@@ -3307,6 +3324,7 @@ struct RuntimeOverrides {
     pub drain_timeout_ms: Option<u64>,
     pub allow_process_shape: Option<bool>,
     pub frozen_modules: Option<bool>,
+    pub frozen_module_symlinks: Option<bool>,
     pub environment_allowlist: Option<BTreeSet<String>>,
     pub max_instructions: Option<u64>,
     pub max_registers: Option<u32>,
@@ -4070,6 +4088,13 @@ pub struct RuntimeConfig {
     /// loads are refused. This does not grant authority or retain replay data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frozen_modules: Option<bool>,
+    /// Opt into relative symlinks contained within the admitted project while
+    /// capturing frozen modules, including npm/Bun workspace links. Every path
+    /// component is resolved through the descriptor-relative bounded reader;
+    /// absolute links, escapes and cycles remain errors. Requires frozen modules.
+    /// Omitted or false values retain the default rejection of all symlinks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_module_symlinks: Option<bool>,
     /// Exact host environment variable names that native `run` may expose
     /// through named `process.env.NAME` / `process.env["NAME"]` reads.
     /// Values are snapshotted once inside the authenticated worker, never
@@ -4336,6 +4361,7 @@ impl RuntimeConfig {
             drain_timeout_ms: None,
             allow_process_shape: None,
             frozen_modules: None,
+            frozen_module_symlinks: None,
             environment_allowlist: BTreeSet::new(),
             max_instructions: None,
             max_registers: None,
@@ -4374,6 +4400,7 @@ impl RuntimeConfig {
             drain_timeout_ms: None,
             allow_process_shape: None,
             frozen_modules: None,
+            frozen_module_symlinks: None,
             environment_allowlist: BTreeSet::new(),
             max_instructions: None,
             max_registers: None,
@@ -4412,6 +4439,7 @@ impl RuntimeConfig {
             drain_timeout_ms: None,
             allow_process_shape: None,
             frozen_modules: None,
+            frozen_module_symlinks: None,
             environment_allowlist: BTreeSet::new(),
             max_instructions: None,
             max_registers: None,
@@ -6590,6 +6618,52 @@ registry_signing_key = "x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c="
                 assert_eq!(decoded.allows_process_shape(profile), allowed);
             }
         }
+    }
+
+    #[test]
+    fn frozen_module_symlinks_preserve_defaults_and_merge_explicit_policy() {
+        for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+            let config = Config::for_profile(profile);
+            assert_eq!(config.runtime.frozen_module_symlinks, None);
+            let serialized = serde_json::to_value(&config.runtime).unwrap();
+            assert!(serialized.get("frozen_module_symlinks").is_none());
+            let historical: RuntimeConfig = serde_json::from_value(serialized).unwrap();
+            assert_eq!(historical.frozen_module_symlinks, None);
+        }
+
+        let (_dir, path) = security_baseline_file();
+        let baseline = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, format!(
+            "{baseline}\n[runtime]\nfrozen_modules = true\nfrozen_module_symlinks = false\n\
+             [profiles.balanced.runtime]\nfrozen_module_symlinks = true\n",
+        )).unwrap();
+        let profile = Config::resolve_with_env(
+            Some(&path), CliOverrides::default(), &map_lookup(BTreeMap::new()),
+        ).unwrap();
+        assert_eq!(profile.config.runtime.frozen_module_symlinks, Some(true));
+        assert!(profile.decisions.iter().any(|decision| {
+            decision.field == "runtime.frozen_module_symlinks"
+                && decision.stage == MergeStage::Profile
+        }));
+        let tightened = Config::resolve_with_env(
+            Some(&path), CliOverrides::default(), &map_lookup(BTreeMap::from([
+                ("FRANKEN_NODE_RUNTIME_FROZEN_MODULE_SYMLINKS".into(), "false".into()),
+            ])),
+        ).unwrap();
+        assert_eq!(tightened.config.runtime.frozen_module_symlinks, Some(false));
+        assert!(tightened.decisions.iter().any(|decision| {
+            decision.field == "runtime.frozen_module_symlinks"
+                && decision.stage == MergeStage::Env
+        }));
+        let decoded: Config = serde_json::from_str(
+            &serde_json::to_string(&tightened.config).unwrap(),
+        ).unwrap();
+        assert_eq!(decoded.runtime.frozen_module_symlinks, Some(false));
+        assert!(Config::resolve_with_env(
+            Some(&path), CliOverrides::default(), &map_lookup(BTreeMap::from([
+                ("FRANKEN_NODE_RUNTIME_FROZEN_MODULE_SYMLINKS".into(), "outside".into()),
+            ])),
+        ).is_err());
     }
 
     #[test]

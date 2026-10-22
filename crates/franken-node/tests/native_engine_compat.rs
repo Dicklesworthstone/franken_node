@@ -2391,6 +2391,89 @@ fn frozen_modules_and_replay_are_rejected_for_direct_dispatcher_callers() {
 }
 
 #[test]
+fn frozen_module_symlinks_require_frozen_execution_for_direct_callers() {
+    let mut config = balanced_config();
+    config.runtime.frozen_module_symlinks = Some(true);
+    let dispatcher = EngineDispatcher::new(None, PreferredRuntime::FrankenEngine);
+    let error = dispatcher.dispatch_run(
+        Path::new("workspace-link-must-not-read.cjs"), &config, "balanced", &[], 0,
+    ).expect_err("a frozen-only policy must not silently enable the live loader");
+    assert!(error.to_string().contains("symlinks require frozen modules"), "{error:#}");
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn frozen_module_cli_executes_contained_workspace_links_only_after_opt_in() {
+    use std::os::unix::fs::symlink;
+
+    let workspace = TempDir::new().unwrap();
+    let package = workspace.path().join("packages/shared");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::create_dir_all(workspace.path().join("node_modules")).unwrap();
+    std::fs::write(package.join("package.json"),
+        r#"{"name":"shared","version":"1.0.0","main":"index.cjs"}"#).unwrap();
+    std::fs::write(package.join("index.cjs"),
+        "module.exports=require('./answer.cjs');").unwrap();
+    std::fs::write(package.join("answer.cjs"), "module.exports=42;").unwrap();
+    symlink("../packages/shared", workspace.path().join("node_modules/shared")).unwrap();
+    let app = create_test_app(workspace.path(), "app.cjs",
+        "console.log('workspace',require('shared'));");
+    let mut config = balanced_config();
+    config.runtime.frozen_modules = Some(true);
+    let rejected = invoke_product_supervisor(
+        &app, &config, "balanced", Path::new(franken_node_bin()),
+    ).unwrap();
+    assert!(!rejected.status.success(), "links must be opt-in");
+    assert!(!rejected.stdout.contains("workspace 42"));
+
+    let accepted = invoke_product_supervisor_with_options(
+        &app, &config, "balanced", Path::new(franken_node_bin()),
+        &["--frozen-module-symlinks"],
+    ).unwrap();
+    assert!(accepted.status.success(), "stdout={} stderr={}", accepted.stdout, accepted.stderr);
+    let dispatch = parse_product_dispatch(&accepted).unwrap();
+    assert_eq!(dispatch.captured_output.stdout, "workspace 42\n");
+    let graph = dispatch.engine_decision.unwrap().frozen_modules.unwrap();
+    assert!(graph.contained_symlinks);
+    assert_eq!(graph.modules, 3);
+
+    config.runtime.frozen_module_symlinks = Some(true);
+    let accepted_from_config = invoke_product_supervisor(
+        &app, &config, "balanced", Path::new(franken_node_bin()),
+    ).unwrap();
+    assert!(accepted_from_config.status.success(), "{}", accepted_from_config.stderr);
+    let tightened = invoke_product_supervisor_with_options(
+        &app, &config, "balanced", Path::new(franken_node_bin()),
+        &["--frozen-module-symlinks=false"],
+    ).unwrap();
+    assert!(!tightened.status.success(), "CLI false must override configured true");
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn frozen_module_symlink_opt_in_never_grants_external_or_cyclic_source_access() {
+    use std::os::unix::fs::symlink;
+
+    for target in ["../../outside.cjs", "/etc/passwd", "escape"] {
+        let workspace = TempDir::new().unwrap();
+        std::fs::create_dir_all(workspace.path().join("node_modules")).unwrap();
+        symlink(target, workspace.path().join("node_modules/escape")).unwrap();
+        let app = create_test_app(workspace.path(), "app.cjs",
+            "console.log('WORKSPACE_ESCAPE_MUST_NOT_RUN'); require('escape');");
+        let mut config = balanced_config();
+        config.runtime.frozen_modules = Some(true);
+        config.runtime.frozen_module_symlinks = Some(true);
+        let output = invoke_product_supervisor(
+            &app, &config, "balanced", Path::new(franken_node_bin()),
+        ).unwrap();
+        assert!(!output.status.success(), "unsafe target admitted: {target}");
+        let diagnostics = format!("{}\n{}", output.stdout, output.stderr);
+        assert!(diagnostics.contains("Frozen module graph capture failed"), "{diagnostics}");
+        assert!(!diagnostics.contains("WORKSPACE_ESCAPE_MUST_NOT_RUN"), "{diagnostics}");
+    }
+}
+
+#[test]
 #[cfg(all(feature = "engine", unix))]
 fn frozen_module_cli_executes_native_core_objects_in_installed_packages() {
     let workspace = TempDir::new().unwrap();

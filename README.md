@@ -3759,9 +3759,14 @@ one pass.
   the instruction count; human output prints the same as a `why:` line under
   the containment note. A program that throws still prints what it printed
   before the throw, then exits non-zero, as under Node (`run --json` does not
-  yet carry that output). An entry runs as an ES module when it is `.mjs`, or
-  `.js` whose nearest `package.json` declares `"type": "module"` (Node's
-  package-scope rule); anything else runs as a CommonJS module, so it has
+  yet carry that output). An entry runs as an ES module when it is `.mjs`/`.mts`,
+  or its nearest package scope declares `"type": "module"`. Untyped `.js`,
+  `.ts`, and extensionless entries use the engine's syntax detection after
+  the worker admits and reads their source; for example, an `export` declaration
+  selects an ES module without requiring a package type. Explicit `.cjs`/`.cts`
+  and `"type": "commonjs"` keep CommonJS semantics. Detection honors the configured
+  parser budget and keeps the original TypeScript/hashbang ingestion evidence.
+  Explicit formats avoid the additional detection parse. A CommonJS entry has
   `require`, `module`, `exports`, `__filename` and `__dirname` and can
   `require('./lib/x')` files inside the project directory, while
   `require('fs')`, `require('path')` and the other supported builtins keep
@@ -3775,6 +3780,12 @@ one pass.
   information-flow check, and builtins exist only as recognized call patterns
   such as `fs.readFileSync(...)`, not as runtime objects a package can pass
   around (bd-reality-20260923-26n9r.4).
+  Frozen module execution can admit contained workspace links with
+  `run app.cjs --frozen-modules --frozen-module-symlinks`, or with both
+  `runtime.frozen_modules = true` and `runtime.frozen_module_symlinks = true`
+  in configuration. Capture rejects links that escape the project, absolute
+  targets, and cycles; the default continues to reject module symlinks.
+
   The broader host-effect
   "runtime-of-record" — the full Node/Bun host-API surface with
   capability-metered effects — is still in active development under the

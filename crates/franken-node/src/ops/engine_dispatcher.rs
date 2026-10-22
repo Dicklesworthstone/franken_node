@@ -2666,6 +2666,9 @@ const MAX_RUN_PACKAGE_MANIFEST_BYTES: u64 = 1 << 20;
 enum RunEntrypointFormat {
     CommonJs,
     EsModule,
+    /// Package metadata did not choose a format. The authenticated worker
+    /// detects module syntax from the exact source bytes it will execute.
+    Ambiguous,
 }
 
 /// Only metadata actually used to select the entrypoint or its format is
@@ -2897,14 +2900,14 @@ fn resolve_run_entrypoint_format(
             return Ok(RunEntrypointFormat::CommonJs);
         }
         if let Some(manifest) = read_run_package_manifest(project_root, directory, manifests)? {
-            return Ok(if manifest.package_type.as_deref() == Some("module") {
-                RunEntrypointFormat::EsModule
-            } else {
-                RunEntrypointFormat::CommonJs
+            return Ok(match manifest.package_type.as_deref() {
+                Some("module") => RunEntrypointFormat::EsModule,
+                Some("commonjs") => RunEntrypointFormat::CommonJs,
+                _ => RunEntrypointFormat::Ambiguous,
             });
         }
         if directory == project_root {
-            return Ok(RunEntrypointFormat::CommonJs);
+            return Ok(RunEntrypointFormat::Ambiguous);
         }
         directory = directory
             .parent()
@@ -3745,6 +3748,10 @@ pub struct NativeModuleGraphSummary {
     pub entrypoint: String,
     pub modules: usize,
     pub routes: usize,
+    /// Whether capture followed bounded relative links within the project.
+    /// Historical summaries used the rejecting policy.
+    #[serde(default)]
+    pub contained_symlinks: bool,
 }
 
 /// Settings supplied to one native orchestrator invocation. The invocation can
@@ -5411,6 +5418,12 @@ fn validate_native_frozen_modules(
     capture_replay: bool,
 ) -> Result<(), ActionableError> {
     if config.runtime.frozen_modules != Some(true) {
+        if config.runtime.frozen_module_symlinks == Some(true) {
+            return Err(ActionableError::new(
+                "Contained module symlinks require frozen modules.",
+                "Enable --frozen-modules or set runtime.frozen_modules = true",
+            ));
+        }
         return Ok(());
     }
     if capture_replay {
@@ -5443,10 +5456,11 @@ fn prepare_native_frozen_modules(
     parser_options: &frankenengine_engine::parser::ParserOptions,
     capabilities: &[String],
     policy_id: &str,
+    contained_symlinks: bool,
 ) -> std::result::Result<FrozenNativeModules, String> {
     #[cfg(not(unix))]
     {
-        let _ = (project_paths, parser_options, capabilities, policy_id);
+        let _ = (project_paths, parser_options, capabilities, policy_id, contained_symlinks);
         Err("Frozen module capture requires Unix".to_string())
     }
     #[cfg(unix)]
@@ -5454,6 +5468,7 @@ fn prepare_native_frozen_modules(
         use crate::supply_chain::module_resolution_graph::file_resolution::source_graph::{
             GraphOptions, capture, engine_resolver::CapturedEngineResolver,
         };
+        use crate::supply_chain::module_resolution_graph::file_resolution::SymlinkPolicy;
         use frankenengine_engine::capability::RuntimeCapability;
         use frankenengine_engine::module_resolver::{
             CapabilityPolicyHook, ModuleResolver, ResolutionContext,
@@ -5466,7 +5481,15 @@ fn prepare_native_frozen_modules(
             .map_err(|_| "Frozen module entrypoint escapes the admitted project root".to_string())?
             .to_str()
             .ok_or_else(|| "Frozen module entrypoint is not valid UTF-8".to_string())?;
-        let graph = capture(root, entrypoint, GraphOptions::default())
+        let options = GraphOptions {
+            symlink_policy: if contained_symlinks {
+                SymlinkPolicy::Contained
+            } else {
+                SymlinkPolicy::Reject
+            },
+            ..GraphOptions::default()
+        };
+        let graph = capture(root, entrypoint, options)
             .map_err(|error| format!("Frozen module graph capture failed: {error}"))?;
         let pin = graph.report().input_hash.clone();
         let resolver = Arc::new(
@@ -5495,6 +5518,7 @@ fn prepare_native_frozen_modules(
             entrypoint: resolver.summary().entrypoint.clone(),
             modules: resolver.summary().modules,
             routes: resolver.summary().routes,
+            contained_symlinks,
         };
         let resolver = resolver
             .execution_resolver(root, policy)
@@ -9493,6 +9517,7 @@ impl EngineDispatcher {
                     &orchestrator_config.parser_options,
                     &capabilities,
                     &orchestrator_config.policy_id,
+                    config.runtime.frozen_module_symlinks == Some(true),
                 )
                 .map_err(|error| {
                     native_engine_spawn_error_with_telemetry_cleanup(error, &mut telemetry_guard)
@@ -9518,6 +9543,13 @@ impl EngineDispatcher {
                 },
             )?
         };
+        if frozen_modules.is_none() {
+            Self::detect_native_entry_format(
+                &project_paths,
+                &source_code,
+                &mut orchestrator_config,
+            );
+        }
 
         // Create extension package from source
         let package = ExtensionPackage {
@@ -10781,13 +10813,64 @@ impl EngineDispatcher {
         // the authenticated worker. No ambient package-scope read happens here.
         orchestrator_config.parse_goal = match project_paths.entrypoint_format {
             RunEntrypointFormat::EsModule => ParseGoal::Module,
-            RunEntrypointFormat::CommonJs => ParseGoal::Script,
+            RunEntrypointFormat::CommonJs | RunEntrypointFormat::Ambiguous => ParseGoal::Script,
         };
         // bd-rff5g: as in Node, an entry that is not an ES module is a
         // CommonJS module, so it gets require/module/exports/__filename/
         // __dirname and can require files beside it (inside the module root).
         orchestrator_config.commonjs_entry = orchestrator_config.parse_goal == ParseGoal::Script;
         orchestrator_config
+    }
+
+    /// Syntax detection is source-dependent, so it runs only in the admitted
+    /// worker after its bounded, descriptor-relative read. Package metadata
+    /// remains bound to preflight; this never reopens the entry or its scope.
+    /// Explicit formats retain their original fast path and error behavior.
+    #[cfg(feature = "engine")]
+    fn detect_native_entry_format(
+        project_paths: &RunProjectPaths,
+        source: &str,
+        orchestrator_config: &mut OrchestratorConfig,
+    ) {
+        use crate::supply_chain::module_resolution_graph::file_resolution::source_graph::{
+            engine_resolver::detect_kind_with_options, registry::ModuleKind,
+        };
+        use frankenengine_engine::ts_normalization::prepare_source_entry_for_public_entrypoints;
+
+        if project_paths.entrypoint_format != RunEntrypointFormat::Ambiguous {
+            return;
+        }
+        let Some(source_label) = project_paths.entrypoint().to_str() else {
+            return;
+        };
+        let Ok(prepared) = prepare_source_entry_for_public_entrypoints(
+            source,
+            source_label,
+            "native-entry-format",
+            "native-entry-format",
+            &orchestrator_config.policy_id,
+        ) else {
+            // The normal engine ingestion path reports its typed failure,
+            // together with the execution settings and evidence it owns.
+            return;
+        };
+        if matches!(
+            detect_kind_with_options(
+                &prepared.prepared_source,
+                None,
+                &orchestrator_config.parser_options,
+            ),
+            Ok(ModuleKind::EsModule)
+        ) {
+            orchestrator_config.parse_goal = ParseGoal::Module;
+            orchestrator_config.commonjs_entry = false;
+        }
+        // A failed probe is never evidence of ESM. Keep the Script goal so
+        // normal execution reports the original parser/normalization error.
+        // In particular, a detection wrapper exhausting its budget must not
+        // change format, widen quotas, or reject an otherwise in-budget CJS
+        // entry. Execution still ingests the original bytes, retaining TS and
+        // hashbang provenance rather than substituting this prepared copy.
     }
 
     /// Test helper: expose the exact entrypoint-aware orchestrator mapping used by `run`.
@@ -11268,6 +11351,69 @@ mod tests {
             telemetry_error,
             EngineProcessError::TelemetryDrain(message) if message == "drain failed"
         ));
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn native_entry_detection_uses_admitted_source_and_preserves_explicit_formats() {
+        let directory = tempfile::tempdir().expect("entry format directory");
+        let config = Config::for_profile(Profile::Balanced);
+        for (entry, metadata, expected) in [
+            ("entry.js", "{}", ParseGoal::Module),
+            ("entry", "{}", ParseGoal::Module),
+            ("entry.js", r#"{"type":"unrecognized"}"#, ParseGoal::Module),
+            ("entry.js", r#"{"type":"commonjs"}"#, ParseGoal::Script),
+            ("entry.cjs", "{}", ParseGoal::Script),
+            ("entry.mjs", r#"{"type":"commonjs"}"#, ParseGoal::Module),
+        ] {
+            std::fs::write(directory.path().join("package.json"), metadata)
+                .expect("format metadata");
+            // The detector must use the supplied source read by the worker,
+            // not reopen this different file or repeat package discovery.
+            std::fs::write(directory.path().join(entry), "module.exports = 1;")
+                .expect("entrypoint path");
+            let paths = RunProjectPaths::resolve(Path::new(entry), directory.path())
+                .expect("selected entrypoint");
+            let mut mapped =
+                EngineDispatcher::map_config_to_orchestrator_config_for_entrypoint(&config, &paths);
+            let budget = mapped.parser_options.budget.clone();
+            EngineDispatcher::detect_native_entry_format(
+                &paths,
+                "export const answer = 42;",
+                &mut mapped,
+            );
+            assert_eq!(mapped.parse_goal, expected, "{entry}: {metadata}");
+            assert_eq!(mapped.commonjs_entry, expected == ParseGoal::Script);
+            assert_eq!(mapped.parser_options.budget, budget);
+        }
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn native_entry_detection_keeps_probe_failures_in_the_normal_engine_path() {
+        let directory = tempfile::tempdir().expect("entry failure directory");
+        std::fs::write(directory.path().join("entry.js"), "console.log('entry');")
+            .expect("entrypoint");
+        let paths = RunProjectPaths::resolve(Path::new("entry.js"), directory.path())
+            .expect("selected entrypoint");
+        for (source, max_source_bytes, max_token_count) in [
+            // A detection wrapper is larger than the original program; its
+            // own resource failure must not make this valid CJS fail early.
+            ("console.log(42);", 16, 65_536),
+            ("export const value = 42;", 1024, 1),
+            ("export const = ;", 1024, 65_536),
+        ] {
+            let mut config = Config::for_profile(Profile::Balanced);
+            config.runtime.max_parse_source_bytes = Some(max_source_bytes);
+            config.runtime.max_parse_tokens = Some(max_token_count);
+            let mut mapped =
+                EngineDispatcher::map_config_to_orchestrator_config_for_entrypoint(&config, &paths);
+            let budget = mapped.parser_options.budget.clone();
+            EngineDispatcher::detect_native_entry_format(&paths, source, &mut mapped);
+            assert_eq!(mapped.parse_goal, ParseGoal::Script, "{source}");
+            assert!(mapped.commonjs_entry);
+            assert_eq!(mapped.parser_options.budget, budget);
+        }
     }
 
     #[cfg(feature = "engine")]

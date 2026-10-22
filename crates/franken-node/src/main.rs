@@ -34466,6 +34466,7 @@ fn main() -> Result<()> {
                 compat_preflight,
                 capture_replay,
                 frozen_modules,
+                frozen_module_symlinks,
                 app_args,
             } = args;
 
@@ -34494,6 +34495,21 @@ fn main() -> Result<()> {
             let policy = resolved.selected_profile.to_string();
             if frozen_modules {
                 resolved.config.runtime.frozen_modules = Some(true);
+            }
+            if let Some(allowed) = frozen_module_symlinks {
+                resolved.config.runtime.frozen_module_symlinks = Some(allowed);
+            }
+            if resolved.config.runtime.frozen_module_symlinks == Some(true)
+                && resolved.config.runtime.frozen_modules != Some(true)
+            {
+                return named_cli_fail(
+                    "franken-node/run-error-cli/v1",
+                    "run",
+                    json,
+                    anyhow::anyhow!(
+                        "contained module symlinks require frozen modules; enable --frozen-modules or set runtime.frozen_modules = true"
+                    ),
+                );
             }
             if capture_replay && resolved.config.runtime.frozen_modules == Some(true) {
                 return named_cli_fail(
