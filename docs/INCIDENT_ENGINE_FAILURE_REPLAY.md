@@ -46,9 +46,14 @@ and retains a typed reason plus the exact primary interpreter diagnostic:
 ```
 
 The budget must belong to one of the captured execution profiles. The denied
-capability must be recognized. Replay still removes module-loading authority;
-it therefore refuses a claimed module denial if the original package was
-granted module loading. Module-source capture is not implemented by this API.
+capability must be recognized. Without an authenticated module-source capsule,
+replay removes module-loading authority and refuses a claimed module denial
+if the original package was granted module loading. Explicit frozen-module
+capture can now supply its source capsule to this API. In that case replay
+validates the capsule and prepared entry binding, then restores only its
+closed-world resolver and the original capabilities. No live module reads are
+authorized. Native qualification of that new path is still pending in
+[the execution TODO](progress/REALITY_CHECK_AND_BRIDGE_PLAN.md#offline-npm-and-native-build-execution--2026-10-22).
 
 ## What a match establishes
 
@@ -68,9 +73,11 @@ follows from reproducing this prefix.
 The enclosing signed record or bundle must be authenticated against an
 independent trust anchor before re-execution. Rehashing a modified payload is
 not authentication. Serialized captures may contain private data; the redacted
-`Debug` view does not encrypt their contents. Existing completed and guest-
-exception v2 payload encodings remain unchanged; older readers reject the new
-terminal-state variant rather than treating it as successful execution.
+`Debug` view does not encrypt their contents. The current capture envelope is
+`franken-node/native-replay-capture/v3`; historical v2 captures are refused.
+The outcome schema remains `franken-node/native-replay-outcome/v2`, with
+unavailable comparisons still represented as `null`. A historical signature
+does not attest to the new module-source fields.
 
 ## Native regression tests
 

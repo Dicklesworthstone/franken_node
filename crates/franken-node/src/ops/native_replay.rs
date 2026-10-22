@@ -146,7 +146,9 @@ pub fn reexecute(capture: &NativeReplayCapture) -> Result<NativeReplayOutcome, S
 }
 
 #[cfg(feature = "engine")]
-pub use engine::{CapturedModuleSources, CapturingProcessSpawnProvider, ProcessReplayCaptureHostIo};
+pub use engine::{
+    CapturedModuleSources, CapturingProcessSpawnProvider, ProcessReplayCaptureHostIo,
+};
 
 #[cfg(feature = "engine")]
 mod engine {
@@ -155,6 +157,9 @@ mod engine {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
+    use crate::supply_chain::module_resolution_graph::file_resolution::source_graph::{
+        CapturedModuleGraph, capsule, engine_resolver::CapturedEngineResolver,
+    };
     use frankenengine_engine::ast::ParseGoal;
     use frankenengine_engine::baseline_interpreter::{ConsoleEntry, InterpreterError, LaneChoice};
     use frankenengine_engine::capability::RuntimeCapability;
@@ -166,6 +171,10 @@ mod engine {
     };
     use frankenengine_engine::ir_contract::{ExecutionOutcome, Ir4Module};
     use frankenengine_engine::lowering_pipeline::AmbientAuthorityGrant;
+    use frankenengine_engine::module_resolver::{
+        CapabilityPolicyHook, ExecutionModuleResolver, ModuleResolver, ModuleSyntax,
+        ResolutionContext, ResolutionOutcome,
+    };
     use frankenengine_engine::parser::ParserOptions;
     use frankenengine_engine::runtime_config::RuntimeConfig;
     use frankenengine_engine::security_epoch::SecurityEpoch;
@@ -179,13 +188,6 @@ mod engine {
     use frankenengine_extension_host::process_spawn::{
         ProcessSpawnCapability, ProcessSpawnControl, ProcessSpawnError, ProcessSpawnOutcome,
         ProcessSpawnProvider, ProcessSpawnRequest,
-    };
-    use crate::supply_chain::module_resolution_graph::file_resolution::source_graph::{
-        CapturedModuleGraph, capsule, engine_resolver::CapturedEngineResolver,
-    };
-    use frankenengine_engine::module_resolver::{
-        CapabilityPolicyHook, ExecutionModuleResolver, ModuleResolver, ModuleSyntax,
-        ResolutionContext, ResolutionOutcome,
     };
 
     use super::*;
@@ -244,37 +246,60 @@ mod engine {
             }
             let graph = capsule::replay(&bytes, &self.capsule_digest)
                 .map_err(|_| "invalid frozen replay module capsule".to_string())?;
-            let root = package.module_root.as_deref().map(std::path::Path::new)
+            let root = package
+                .module_root
+                .as_deref()
+                .map(std::path::Path::new)
                 .filter(|root| root.is_absolute())
-                .ok_or_else(|| "frozen replay requires its original absolute module origin".to_string())?;
-            if package.source_file.as_deref()
-                != root.join(&graph.report().entrypoint).to_str()
-            {
+                .ok_or_else(|| {
+                    "frozen replay requires its original absolute module origin".to_string()
+                })?;
+            if package.source_file.as_deref() != root.join(&graph.report().entrypoint).to_str() {
                 return Err("frozen replay entrypoint differs from the captured package".into());
             }
-            let resolver = Arc::new(CapturedEngineResolver::new_with_parser_options(
-                graph, &self.graph_input_hash, settings.parser_options.clone(),
-            ).map_err(|_| "invalid frozen replay source graph".to_string())?);
+            let resolver = Arc::new(
+                CapturedEngineResolver::new_with_parser_options(
+                    graph,
+                    &self.graph_input_hash,
+                    settings.parser_options.clone(),
+                )
+                .map_err(|_| "invalid frozen replay source graph".to_string())?,
+            );
             let policy = Arc::new(CapabilityPolicyHook::new(
-                package.capabilities.iter()
+                package
+                    .capabilities
+                    .iter()
                     .filter_map(|capability| RuntimeCapability::from_tag_str(capability))
                     .collect(),
             ));
-            let entry = resolver.resolve(
-                &resolver.entry_request(),
-                &ResolutionContext::new(
-                    "native-module-admission", "native-module-admission", &settings.policy_id,
-                ),
-                policy.as_ref(),
-            ).map_err(|_| "frozen replay entrypoint policy admission failed".to_string())?;
+            let entry = resolver
+                .resolve(
+                    &resolver.entry_request(),
+                    &ResolutionContext::new(
+                        "native-module-admission",
+                        "native-module-admission",
+                        &settings.policy_id,
+                    ),
+                    policy.as_ref(),
+                )
+                .map_err(|_| "frozen replay entrypoint policy admission failed".to_string())?;
             let commonjs = entry.module.record.syntax == ModuleSyntax::CommonJs;
-            let goal = if commonjs { ParseGoal::Script } else { ParseGoal::Module };
+            let goal = if commonjs {
+                ParseGoal::Script
+            } else {
+                ParseGoal::Module
+            };
             if entry.module.record.source != package.source
-                || commonjs != settings.commonjs_entry || goal != settings.parse_goal
+                || commonjs != settings.commonjs_entry
+                || goal != settings.parse_goal
             {
-                return Err("frozen replay prepared source or syntax differs from the captured execution".into());
+                return Err(
+                    "frozen replay prepared source or syntax differs from the captured execution"
+                        .into(),
+                );
             }
-            let runtime = resolver.execution_resolver(root, policy)
+            let runtime = resolver
+                .execution_resolver(root, policy)
                 .map_err(|_| "cannot restore frozen replay module resolver".to_string())?;
             Ok((entry, runtime))
         }
@@ -823,7 +848,8 @@ mod engine {
                     })?;
                     // Replay strips ModuleLoad. That artificial restriction
                     // cannot stand in for an original denial of a granted cap.
-                    if payload.module_sources.is_none() && denied == RuntimeCapability::ModuleLoad
+                    if payload.module_sources.is_none()
+                        && denied == RuntimeCapability::ModuleLoad
                         && payload.package.capabilities.iter().any(|capability| {
                             RuntimeCapability::from_tag_str(capability).as_ref() == Some(&denied)
                         })
@@ -1012,14 +1038,15 @@ mod engine {
                                 .to_string(),
                         );
                     }
-                    if self.module_sources.is_none() && expected
-                        .ir4_witness
-                        .hostcall_decisions
-                        .iter()
-                        .any(|decision| {
-                            RuntimeCapability::from_tag_str(&decision.capability.0)
-                                == Some(RuntimeCapability::ModuleLoad)
-                        })
+                    if self.module_sources.is_none()
+                        && expected
+                            .ir4_witness
+                            .hostcall_decisions
+                            .iter()
+                            .any(|decision| {
+                                RuntimeCapability::from_tag_str(&decision.capability.0)
+                                    == Some(RuntimeCapability::ModuleLoad)
+                            })
                     {
                         return Err(
                             "native replay does not support runtime module loading; module source capture is required"
@@ -1686,12 +1713,16 @@ mod engine {
         if canonical.payload_json != capture.payload_json {
             return Err("native replay payload is not the complete canonical capture".to_string());
         }
-        payload.validate()?;
         std::thread::Builder::new()
             .name("native-incident-replay".to_string())
             .stack_size(REPLAY_STACK_BYTES)
             .spawn(move || {
-                let modules = payload.module_sources.as_ref()
+                // Source preparation may use the original admitted parser
+                // depth. Keep it on the same large stack as native evaluation.
+                payload.validate()?;
+                let modules = payload
+                    .module_sources
+                    .as_ref()
                     .map(|sources| sources.restore(&payload.package, &payload.orchestrator))
                     .transpose()?;
                 let mut package = payload.package.clone();

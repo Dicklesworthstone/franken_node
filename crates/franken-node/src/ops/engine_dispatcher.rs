@@ -10126,7 +10126,8 @@ impl EngineDispatcher {
             EffectKind, EffectLineageFields, EffectReceipt, EffectReceiptChain, FlowPolicyVerdict,
         };
         use crate::security::lineage_tracker::{
-            classify_sensitive_source_path, secret_file_label_set_commitment,
+            SECRET_ENVIRONMENT_LABEL, SECRET_FILE_LABEL, classify_sensitive_source_path,
+            label_set_commitment, secret_file_label_set_commitment,
         };
         use crate::storage::cas::content_hash;
         use frankenengine_extension_host::host_io::{
@@ -10166,20 +10167,41 @@ impl EngineDispatcher {
                     .any(|window| window == needle)
         }
 
+        type ReceiptSecretSample = (Vec<u8>, &'static str);
+
+        fn source_commitment(labels: &std::collections::BTreeSet<String>) -> Result<String> {
+            label_set_commitment(labels)
+                .map(|hash| format!("sha256:{hash}"))
+                .map_err(anyhow::Error::from)
+        }
+
+        fn blocked_source_commitment(labels: &std::collections::BTreeSet<String>) -> Result<String> {
+            if labels.is_empty() {
+                // Preserve the existing conservative marker for a flow block
+                // whose source is unavailable in the recorded transcript.
+                Ok(secret_file_label_set_commitment())
+            } else {
+                source_commitment(labels)
+            }
+        }
+
         fn process_request_carries_secret(
             request: &frankenengine_extension_host::process_spawn::ProcessSpawnRequest,
-            samples: &[Vec<u8>],
+            samples: &[ReceiptSecretSample],
             fixed_env: Option<&std::collections::BTreeMap<String, String>>,
         ) -> bool {
             use frankenengine_extension_host::process_spawn::{ProcessLaunch, ProcessSpawnRequest};
 
-            fn field_carries_secret(field: &[u8], samples: &[Vec<u8>]) -> bool {
-                !field.is_empty() && samples.iter().any(|sample| slice_contains(field, sample))
+            fn field_carries_secret(field: &[u8], samples: &[ReceiptSecretSample]) -> bool {
+                !field.is_empty()
+                    && samples
+                        .iter()
+                        .any(|(sample, _)| slice_contains(field, sample))
             }
 
             fn launch_carries_secret(
                 launch: &ProcessLaunch,
-                samples: &[Vec<u8>],
+                samples: &[ReceiptSecretSample],
                 fixed_env: Option<&std::collections::BTreeMap<String, String>>,
             ) -> bool {
                 field_carries_secret(launch.executable.as_bytes(), samples)
@@ -10226,12 +10248,15 @@ impl EngineDispatcher {
 
         fn process_response_carries_secret(
             response: &frankenengine_extension_host::process_spawn::ProcessSpawnResponse,
-            samples: &[Vec<u8>],
+            samples: &[ReceiptSecretSample],
         ) -> bool {
             use frankenengine_extension_host::process_spawn::ProcessSpawnResponse;
 
             let field_carries_secret = |field: &[u8]| {
-                !field.is_empty() && samples.iter().any(|sample| slice_contains(field, sample))
+                !field.is_empty()
+                    && samples
+                        .iter()
+                        .any(|(sample, _)| slice_contains(field, sample))
             };
             match response {
                 ProcessSpawnResponse::Run { stdout, stderr, .. }
@@ -10256,7 +10281,8 @@ impl EngineDispatcher {
         let mut failed_count = 0usize;
 
         // bd-plhag: run-scoped information-flow labeling by CONTENT CONTAINMENT.
-        // Bytes read from recognized secret-bearing files are retained here; a
+        // Bytes read from secret-bearing files or explicit environment snapshots
+        // are retained with their source labels here; a
         // later effect whose OUTBOUND bytes CONTAIN one of these samples is
         // recorded as carrying the secret label. Containment (not exact hash) is
         // required because an http egress payload is the *framed* request
@@ -10270,7 +10296,8 @@ impl EngineDispatcher {
         const MIN_SECRET_SAMPLE_LEN: usize = 8;
         const MAX_SECRET_SAMPLE_LEN: usize = 64 * 1024;
         const MAX_SECRET_SAMPLES: usize = 16;
-        let mut secret_samples: Vec<Vec<u8>> = Vec::new();
+        let mut secret_samples: Vec<ReceiptSecretSample> = Vec::new();
+        let mut observed_sources = std::collections::BTreeSet::new();
 
         for (index, entry) in journal.iter().enumerate() {
             let seq = u64::try_from(index).unwrap_or(u64::MAX);
@@ -10316,27 +10343,44 @@ impl EngineDispatcher {
                         admission.token_id(),
                         admission.policy_subject()
                     );
-                    let carries_secret = process_request_carries_secret(
-                        request,
-                        &secret_samples,
-                        process_execution_policy.map(|policy| &policy.fixed_env),
-                    );
+                    let request_labels: std::collections::BTreeSet<String> = secret_samples
+                        .iter()
+                        .filter(|sample| {
+                            process_request_carries_secret(
+                                request,
+                                std::slice::from_ref(*sample),
+                                process_execution_policy.map(|policy| &policy.fixed_env),
+                            )
+                        })
+                        .map(|sample| sample.1.to_owned())
+                        .collect();
+                    let carries_secret = !request_labels.is_empty();
                     let lineage = match outcome {
                         Ok(response) => {
                             allowed_count = allowed_count.saturating_add(1);
                             let produced = serde_json::to_vec(response).unwrap_or_else(|_| {
                                 b"process-response-serialization-error".to_vec()
                             });
-                            let lineage = if carries_secret
-                                || process_response_carries_secret(response, &secret_samples)
-                            {
+                            let mut labels = request_labels.clone();
+                            labels.extend(
+                                secret_samples
+                                    .iter()
+                                    .filter(|sample| {
+                                        process_response_carries_secret(
+                                            response,
+                                            std::slice::from_ref(*sample),
+                                        )
+                                    })
+                                    .map(|sample| sample.1.to_owned()),
+                            );
+                            let lineage = if !labels.is_empty() {
                                 EffectLineageFields {
                                     input_lineage_hash: EFFECT_RECEIPT_EMPTY_LINEAGE_HASH
                                         .to_string(),
                                     output_lineage_hash: Some(
                                         EFFECT_RECEIPT_EMPTY_LINEAGE_HASH.to_string(),
                                     ),
-                                    label_set_commitment: secret_file_label_set_commitment(),
+                                    label_set_commitment: source_commitment(&labels)?,
                                     declassification_ref: None,
                                     flow_policy_verdict: FlowPolicyVerdict::LabelClean,
                                 }
@@ -10373,7 +10417,7 @@ impl EngineDispatcher {
                                 input_lineage_hash: EFFECT_RECEIPT_EMPTY_LINEAGE_HASH.to_string(),
                                 output_lineage_hash: None,
                                 label_set_commitment: if carries_secret {
-                                    secret_file_label_set_commitment()
+                                    source_commitment(&request_labels)?
                                 } else {
                                     EFFECT_RECEIPT_EMPTY_LABEL_SET_COMMITMENT.to_string()
                                 },
@@ -10402,7 +10446,11 @@ impl EngineDispatcher {
                             {
                                 EffectLineageFields::blocked(
                                     EFFECT_RECEIPT_EMPTY_LINEAGE_HASH.to_string(),
-                                    secret_file_label_set_commitment(),
+                                    if carries_secret {
+                                        source_commitment(&request_labels)?
+                                    } else {
+                                        blocked_source_commitment(&observed_sources)?
+                                    },
                                 )
                             } else {
                                 EffectLineageFields::label_clean_denied()
@@ -10435,10 +10483,16 @@ impl EngineDispatcher {
             // A read of a recognized secret file is a sensitive information-flow
             // source; its bytes' content hash is registered (below) so later
             // effects that re-emit those exact bytes inherit the label.
-            let sensitive_read = matches!(request, HostIoRequest::EnvRead { .. }) || matches!(
-                request,
-                HostIoRequest::FsRead { path } if classify_sensitive_source_path(path).is_some()
-            );
+            let source_label = match request {
+                HostIoRequest::EnvRead { .. } => Some(SECRET_ENVIRONMENT_LABEL),
+                HostIoRequest::FsRead { path } if classify_sensitive_source_path(path).is_some() => {
+                    Some(SECRET_FILE_LABEL)
+                }
+                _ => None,
+            };
+            if let Some(label) = source_label {
+                observed_sources.insert(label.to_owned());
+            }
 
             // Effect kind + the operation's target (args) and the bytes it would
             // consume as input, derived from the real request.
@@ -10518,13 +10572,21 @@ impl EngineDispatcher {
             // CONTAIN a previously-registered secret sample. The `sha256:`-
             // prefixed commitment matches the effect-receipt lineage-field
             // convention and the value an offline verifier discloses as forbidden.
-            let carries_secret = sensitive_read
-                || (!input_bytes.is_empty()
-                    && secret_samples
+            let mut labels = std::collections::BTreeSet::new();
+            if let Some(label) = source_label {
+                labels.insert(label.to_owned());
+            }
+            if !input_bytes.is_empty() {
+                labels.extend(
+                    secret_samples
                         .iter()
-                        .any(|sample| slice_contains(&input_bytes, sample)));
-            let taint_commitment: Option<String> =
-                carries_secret.then(secret_file_label_set_commitment);
+                        .filter(|(sample, _)| slice_contains(&input_bytes, sample))
+                        .map(|(_, label)| (*label).to_owned()),
+                );
+            }
+            let taint_commitment = (!labels.is_empty())
+                .then(|| source_commitment(&labels))
+                .transpose()?;
 
             let receipt = match outcome {
                 Ok(response) => {
@@ -10576,12 +10638,12 @@ impl EngineDispatcher {
                         HostIoResponse::EnvRead { value } => value.as_deref().map(str::as_bytes),
                         _ => None,
                     };
-                    if sensitive_read
+                    if let Some(label) = source_label
                         && secret_samples.len() < MAX_SECRET_SAMPLES
                         && let Some(sample) = secret_sample
                         && (MIN_SECRET_SAMPLE_LEN..=MAX_SECRET_SAMPLE_LEN).contains(&sample.len())
                     {
-                        secret_samples.push(sample.to_vec());
+                        secret_samples.push((sample.to_vec(), label));
                     }
                     allowed_count = allowed_count.saturating_add(1);
                     // An ALLOWED effect that carries the secret is recorded
@@ -18018,25 +18080,72 @@ mod tests {
     fn environment_ledger_distinguishes_absence_empty_and_secret_without_rendering_them() {
         use crate::runtime::effect_receipt::EffectKind;
         use frankenengine_extension_host::host_io::{HostIoRequest, HostIoResponse};
-        let transcript = [None, Some(""), Some("PRIVATE-ENV-VALUE")].map(|value| (
-            HostIoRequest::EnvRead { name: "PRIVATE_ENV_NAME".into() },
-            Ok(HostIoResponse::EnvRead { value: value.map(str::to_owned) }),
-        ));
+        let mut transcript = [None, Some(""), Some("PRIVATE-ENV-VALUE")]
+            .map(|value| {
+                (
+                    HostIoRequest::EnvRead {
+                        name: "PRIVATE_ENV_NAME".into(),
+                    },
+                    Ok(HostIoResponse::EnvRead {
+                        value: value.map(str::to_owned),
+                    }),
+                )
+            })
+            .to_vec();
+        for data in [
+            b"prefix PRIVATE-ENV-VALUE suffix".to_vec(),
+            b"unrelated public output".to_vec(),
+        ] {
+            transcript.push((
+                HostIoRequest::FsWrite {
+                    path: "output.txt".into(),
+                    data: data.clone(),
+                },
+                Ok(HostIoResponse::FsWrite {
+                    bytes_written: u64::try_from(data.len()).unwrap(),
+                }),
+            ));
+        }
         let authority = host_effect_ledger_authority_for_test();
         let ledger = EngineDispatcher::build_host_effect_ledger(
-            "trace-environment-read", &transcript, &authority,
+            "trace-environment-read",
+            &transcript,
+            &authority,
             SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH),
-        ).expect("sign all three typed environment outcomes");
-        assert_eq!(ledger.effect_count, 3);
-        assert_eq!(ledger.allowed_count, 3);
-        let results: std::collections::BTreeSet<_> = ledger.entries.iter().map(|entry| {
-            let receipt = &entry.receipt;
-            assert_eq!(receipt.effect_kind, EffectKind::EnvRead);
-            assert_eq!(receipt.label_set_commitment,
-                crate::security::lineage_tracker::secret_file_label_set_commitment());
-            receipt.result_hash.clone().unwrap()
-        }).collect();
-        assert_eq!(results.len(), 3, "absence and empty values have distinct commitments");
+        )
+        .expect("sign typed environment outcomes and following writes");
+        assert_eq!(ledger.effect_count, 5);
+        assert_eq!(ledger.allowed_count, 5);
+        let environment_label =
+            crate::security::lineage_tracker::secret_environment_label_set_commitment();
+        let results: std::collections::BTreeSet<_> = ledger
+            .entries
+            .iter()
+            .take(3)
+            .map(|entry| {
+                let receipt = &entry.receipt;
+                assert_eq!(receipt.effect_kind, EffectKind::EnvRead);
+                assert_eq!(receipt.label_set_commitment, environment_label);
+                receipt.result_hash.clone().unwrap()
+            })
+            .collect();
+        assert_eq!(
+            results.len(),
+            3,
+            "absence and empty values have distinct commitments",
+        );
+        assert_eq!(
+            ledger.entries[3].receipt.label_set_commitment,
+            environment_label,
+        );
+        assert_ne!(
+            environment_label,
+            crate::security::lineage_tracker::secret_file_label_set_commitment(),
+        );
+        assert_eq!(
+            ledger.entries[4].receipt.label_set_commitment,
+            crate::runtime::effect_receipt::EFFECT_RECEIPT_EMPTY_LABEL_SET_COMMITMENT,
+        );
         let json = serde_json::to_string(&ledger).unwrap();
         assert!(!json.contains("PRIVATE_ENV_NAME") && !json.contains("PRIVATE-ENV-VALUE"));
         validate_host_effect_ledger(&ledger, &authority.verification_identity()).unwrap();

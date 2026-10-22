@@ -30,7 +30,23 @@ Environment-derived values retain the engine's Secret information-flow floor.
 Replay does not add declassification receipts, relax sink checks, grant raw
 `process` or `process.env` object access, or authorize environment mutation.
 Runtime module loading is still disabled because module sources are not part
-of this capture. Interrupted or unfinalized execution remains unsupported.
+of an entry-only capture. An explicitly frozen-module capture can now include
+the bounded source capsule and its resolution pins. Replay restores that
+closed-world resolver with the original capabilities, without opening the
+original project or installing a live module provider. This new source path
+is awaiting native qualification in
+[the execution TODO](progress/REALITY_CHECK_AND_BRIDGE_PLAN.md#offline-npm-and-native-build-execution--2026-10-22).
+Interrupted or unfinalized execution remains unsupported.
+
+The product receipt kind is `env_read` (stable binary tag 8). Receipts commit
+to the name and typed result without rendering either private string. The
+result commitment distinguishes absence from a present empty value. Explicit
+environment reads use the distinct `ifl-src:secret-environment` source label;
+they are not relabeled as secret-file reads. The existing bounded receipt
+byte-containment tracking is not a complete per-value information-flow proof.
+SDK non-exfiltration claims match exact label-set commitments. A policy that
+forbids mixed file/environment flows must also disclose the canonical combined
+label-set commitment; a single-source commitment does not cover another set.
 
 ## Privacy and authentication
 
@@ -44,7 +60,11 @@ data. An integrity digest or signature does not encrypt it.
 The envelope digest is not a trust anchor. Authenticate the containing run
 record or incident bundle against an independent trusted key before calling
 `reexecute`. Execution comparison cannot establish who supplied a self-hashed
-capture. Existing v2 serialization and canonical-payload checks are unchanged.
+capture. The current envelope requires
+`franken-node/native-replay-capture/v3`; historical v2 captures are refused,
+not reinterpreted as having authenticated newly added module-source fields.
+Canonical-payload checks remain mandatory. SDK inspection authenticates and
+checks metadata; it does not decode, resolve or execute the module capsule.
 
 ## Focused regression coverage
 
@@ -82,4 +102,9 @@ existing completed, exception and engine-stop replay tests. Discovery and
 execution still require the normal disk and remote-worker admission checks.
 
 These are implementation tests, not a claim of arbitrary Node compatibility,
-complete ambient-environment replay, or multi-file incident replay.
+complete ambient-environment replay, or qualified multi-file incident replay.
+The separate CLI regression
+`native_incident_replay_preserves_explicit_environment_reads_and_private_receipts`
+uses Cargo's exact built product executable and actual `init`/capture/bundle/
+replay commands. Its execution status, and the frozen CJS/ESM regression
+status, are tracked in the execution TODO above; their presence is not a pass.

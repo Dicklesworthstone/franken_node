@@ -608,19 +608,24 @@ Process capture uses the engine's conservative `Unknown` exception provenance
 in the original execution as well as replay. This can restrict flows that an
 ordinary run would allow; it keeps the actual original and replay witnesses
 comparable without making replay data more trusted or waiving any comparison.
-The optional process inputs preserve existing capture envelopes without
-changing previously signed payload bytes. Preparation is limited to 4,096
+Preparation is limited to 4,096
 unique entries and 2 MiB within the overall 4 MiB capture limit.
 
-Runtime module loading is disabled during replay; source capture for loaded
-modules is not available. A certified exception prefix involving runtime module
-loading can be captured, but `--execute` will refuse that module access.
+Entry-only captures disable runtime module loading during replay. Source now
+implements `--frozen-modules --capture-replay`: it retains the existing bounded
+source capsule, graph pins and original prepared entry binding. Replay restores
+only that captured resolver, retaining the original capability restrictions
+without reading or extracting the original project. Native qualification of
+this new multi-file path is still pending; see the
+[execution TODO](docs/progress/REALITY_CHECK_AND_BRIDGE_PLAN.md#offline-npm-and-native-build-execution--2026-10-22).
+The capture envelope is now `franken-node/native-replay-capture/v3`; historical v2 captures
+are refused rather than treated as authenticating newly added fields.
 Ambient environment authority, timeouts, interrupted sessions, and uncertified
 engine failures remain outside this replay scope. For completed runs,
-`decisions_match` is informational:
-withholding module authority changes the capability population used by Bayesian
-policy evaluation, so the guest verdict does not certify identical policy
-decisions. `--execute` requires a build with the `engine` feature.
+`decisions_match` remains informational. Without frozen sources, withholding
+module authority changes the capability population used by Bayesian policy
+evaluation; neither path's guest verdict certifies original policy decisions.
+`--execute` requires a build with the `engine` feature.
 
 ### Day 22 — Release
 
@@ -3432,9 +3437,10 @@ balanced profiles. It retains the supplied `process.argv` strings and restores
 them during offline execution, together with the original grant. The engine's
 fixed `platform` and synthetic `pid` do not depend on the replay host. Captured
 arguments may contain secrets, just like captured source and I/O. This does not
-extend capture to environment reads, child processes, runtime module loading,
-or the legacy-risky profile. Statically lowered builtin facades can still use
-their recorded I/O transcript.
+grant environment reads, child processes or module loading. Those require
+their separate explicit capability and capture paths described in
+[native replay](#re-execute-captured-native-javascript). Statically lowered
+builtin facades can still use their recorded I/O transcript.
 
 ---
 
@@ -3777,9 +3783,13 @@ one pass.
   routing through the capability-gated host calls. `require('pkg')` resolves
   installed packages the way Node does (the `node_modules` walk-up inside the
   project directory, package.json `exports` with the `require` condition,
-  `main`, and `.json` modules), but real npm packages do not run yet: of six
-  probed (lodash, ms/semver, dayjs, uuid, commander, minimist), none matches
-  Node. Large files exceed the per-file parse budget, some syntax still fails to
+  `main`, and `.json` modules). Retained probes of six larger packages
+  (lodash, ms/semver, dayjs, uuid, commander, minimist) did not match Node.
+  Three pinned tiny packages (`is-number`, `isarray`, `escape-string-regexp`)
+  now have offline upstream-source specimens and match published v0.2.0,
+  Node and Bun in all three profiles; that is release evidence, not current-
+  source or representative ecosystem qualification. Large files can exceed
+  the per-file parse budget, some syntax still fails to
   parse, string literals mentioning "token" or "password" are refused by the
   information-flow check, and builtins exist only as recognized call patterns
   such as `fs.readFileSync(...)`, not as runtime objects a package can pass
@@ -3806,8 +3816,10 @@ one pass.
   `--execute` re-executes source and host-I/O captured with `run --capture-replay`.
   Completed guests and certified uncaught-exception prefixes have distinct
   verification scopes; a failed prefix has no completed IR4 witness or final
-  instruction-count/nondeterminism comparison. Runtime module source capture,
-  ambient environment replay, and interrupted execution remain unsupported.
+  instruction-count/nondeterminism comparison. Explicit frozen-module source
+  capture is implemented but awaiting current-source native qualification;
+  entry-only captures still disable runtime module loading. Ambient environment
+  replay and interrupted execution remain unsupported.
   Admitted process replay preserves captured preparation and global effect order
   while refusing live process dispatch.
   Original policy decisions are not certified by the guest replay verdict.

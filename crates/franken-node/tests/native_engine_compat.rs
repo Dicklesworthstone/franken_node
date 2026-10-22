@@ -2363,19 +2363,33 @@ fn frozen_module_cli_runs_large_npm_source_with_configured_parser_limits() {
 fn frozen_module_config_refuses_computed_loads_before_guest_execution() {
     let workspace = TempDir::new().unwrap();
     let app = create_test_app(
-        workspace.path(), "app.cjs",
+        workspace.path(),
+        "app.cjs",
         "console.log('FROZEN_GUEST_MUST_NOT_RUN'); const name='./side.cjs'; require(name);",
     );
     create_test_app(workspace.path(), "side.cjs", "module.exports=42;");
     let mut config = balanced_config();
     config.runtime.frozen_modules = Some(true);
-    let output = invoke_product_supervisor(
-        &app, &config, "balanced", Path::new(franken_node_bin()),
-    ).unwrap();
-    assert!(!output.status.success(), "uncaptured route must not execute");
-    let diagnostics = format!("{}\n{}", output.stdout, output.stderr);
-    assert!(diagnostics.contains("ERR_MODULE_REGISTRY_INCOMPLETE"), "{diagnostics}");
-    assert!(!diagnostics.contains("FROZEN_GUEST_MUST_NOT_RUN"), "{diagnostics}");
+    for options in [&[][..], &["--capture-replay"][..]] {
+        let output = invoke_product_supervisor_with_options(
+            &app,
+            &config,
+            "balanced",
+            Path::new(franken_node_bin()),
+            options,
+        )
+        .unwrap();
+        assert!(!output.status.success(), "uncaptured route must not execute");
+        let diagnostics = format!("{}\n{}", output.stdout, output.stderr);
+        assert!(
+            diagnostics.contains("ERR_MODULE_REGISTRY_INCOMPLETE"),
+            "{diagnostics}",
+        );
+        assert!(
+            !diagnostics.contains("FROZEN_GUEST_MUST_NOT_RUN"),
+            "{diagnostics}",
+        );
+    }
 }
 
 #[test]
@@ -2387,23 +2401,47 @@ fn frozen_modules_capture_and_replay_nested_commonjs_without_live_sources() {
     let workspace = TempDir::new().unwrap();
     let package = workspace.path().join("node_modules/captured-nested");
     std::fs::create_dir_all(&package).unwrap();
-    std::fs::write(package.join("package.json"),
-        r#"{"name":"captured-nested","version":"1.0.0","main":"index.cjs"}"#).unwrap();
-    std::fs::write(package.join("index.cjs"), "module.exports=require('./leaf.cjs')+2;").unwrap();
+    std::fs::write(
+        package.join("package.json"),
+        r#"{"name":"captured-nested","version":"1.0.0","main":"index.cjs"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("index.cjs"),
+        "module.exports=require('./leaf.cjs')+2;",
+    )
+    .unwrap();
     std::fs::write(package.join("leaf.cjs"), "module.exports=40;").unwrap();
-    let app = create_test_app(workspace.path(), "app.cjs", "console.log(require('captured-nested'));\n");
+    let app = create_test_app(
+        workspace.path(),
+        "app.cjs",
+        "console.log(require('captured-nested'));\n",
+    );
     let initialized = Command::new(franken_node_bin())
         .current_dir(workspace.path())
         .args(["init", "--profile", "balanced", "--out-dir", ".", "--json"])
-        .output().unwrap();
+        .output()
+        .unwrap();
     assert!(initialized.status.success(), "{initialized:?}");
-    let mut config = balanced_config();
+    let mut config: Config = toml::from_str(
+        &std::fs::read_to_string(workspace.path().join("franken_node.toml")).unwrap(),
+    )
+    .unwrap();
     config.runtime.frozen_modules = Some(true);
     let output = invoke_product_supervisor_with_options(
-        &app, &config, "balanced", Path::new(franken_node_bin()),
+        &app,
+        &config,
+        "balanced",
+        Path::new(franken_node_bin()),
         &["--frozen-modules", "--capture-replay"],
-    ).unwrap();
-    assert!(output.status.success(), "stdout={} stderr={}", output.stdout, output.stderr);
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        output.stdout,
+        output.stderr,
+    );
     let report = parse_product_dispatch(&output).unwrap();
     assert_eq!(report.captured_output.stdout, "42\n");
     let capture = report.native_replay.expect("actual native source capture");
@@ -2417,23 +2455,102 @@ fn frozen_modules_capture_and_replay_nested_commonjs_without_live_sources() {
     assert!(!replay.module_load_disabled);
     assert!(replay.console_match && replay.host_effects_match);
     assert_eq!(replay.ir4_witness_match, Some(true));
-    assert!(!app.exists() && !package.exists(), "replay must not extract source files");
+    assert!(
+        !app.exists() && !package.exists(),
+        "replay must not extract source files",
+    );
 
-    // Recompute the envelope digest, so these exercise typed source validation
-    // rather than only the outer checksum. This is not signature verification.
-    for mutation in 0..5 {
-        let mut payload = payload.clone();
-        match mutation {
-            0 => { payload.as_object_mut().unwrap().remove("module_sources"); }
-            1 => payload["module_sources"]["capsule_digest"] = serde_json::json!("sha256:wrong"),
-            2 => payload["module_sources"]["graph_input_hash"] = serde_json::json!("sha256:wrong"),
-            3 => payload["package"]["source"] = serde_json::json!("console.log('changed');"),
-            _ => payload["module_sources"]["capsule_base64"] = serde_json::json!("A".repeat(4 * 1024 * 1024)),
-        }
+    // Keep the original struct field order, so each probe reaches its intended
+    // source validator rather than only the canonical-JSON guard. Recomputing
+    // the envelope digest does not authenticate these adversarial captures.
+    let raw = &capture.payload_json;
+    let replace_field = |field: &str, old: &serde_json::Value, new: &serde_json::Value| {
+        let key = serde_json::to_string(field).unwrap();
+        let needle = format!("{key}:{}", serde_json::to_string(old).unwrap());
+        assert_eq!(raw.matches(&needle).count(), 1, "unique {field} probe");
+        raw.replacen(
+            &needle,
+            &format!("{key}:{}", serde_json::to_string(new).unwrap()),
+            1,
+        )
+    };
+    let wrong_pin = serde_json::json!(format!("sha256:{}", "0".repeat(64)));
+    for mutation in 0..7 {
+        let (payload_json, expected_error) = match mutation {
+            0 => {
+                let sources = serde_json::to_string(&payload["module_sources"]).unwrap();
+                let needle = format!(",\"module_sources\":{sources}");
+                assert_eq!(raw.matches(&needle).count(), 1);
+                (
+                    raw.replacen(&needle, "", 1),
+                    "module source capture is required",
+                )
+            }
+            1 => (
+                replace_field(
+                    "capsule_digest",
+                    &payload["module_sources"]["capsule_digest"],
+                    &wrong_pin,
+                ),
+                "invalid frozen replay module capsule",
+            ),
+            2 => (
+                replace_field(
+                    "graph_input_hash",
+                    &payload["module_sources"]["graph_input_hash"],
+                    &wrong_pin,
+                ),
+                "invalid frozen replay source graph",
+            ),
+            3 => (
+                replace_field(
+                    "source",
+                    &payload["package"]["source"],
+                    &serde_json::json!("console.log('changed');"),
+                ),
+                "frozen replay prepared source or syntax differs",
+            ),
+            4 => {
+                let bytes = payload["module_sources"]["capsule_base64"].as_str().unwrap();
+                let altered = format!(
+                    "{}{}",
+                    if bytes.starts_with('A') { "B" } else { "A" },
+                    &bytes[1..],
+                );
+                (
+                    replace_field(
+                        "capsule_base64",
+                        &payload["module_sources"]["capsule_base64"],
+                        &serde_json::json!(altered),
+                    ),
+                    "invalid frozen replay module capsule",
+                )
+            }
+            5 => (
+                replace_field(
+                    "source_file",
+                    &payload["package"]["source_file"],
+                    &serde_json::json!("changed-origin.cjs"),
+                ),
+                "frozen replay entrypoint differs",
+            ),
+            _ => (
+                replace_field(
+                    "capsule_base64",
+                    &payload["module_sources"]["capsule_base64"],
+                    &serde_json::json!("A".repeat(4 * 1024 * 1024)),
+                ),
+                "native replay payload must contain",
+            ),
+        };
         let mut changed = capture.clone();
-        changed.payload_json = serde_json::to_string(&payload).unwrap();
+        changed.payload_json = payload_json;
         changed.payload_sha256 = hex::encode(Sha256::digest(changed.payload_json.as_bytes()));
-        assert!(reexecute(&changed).is_err(), "source mutation {mutation}");
+        let error = reexecute(&changed).expect_err("source mutation must fail");
+        assert!(
+            error.contains(expected_error),
+            "source mutation {mutation}: expected {expected_error:?}, got {error:?}",
+        );
     }
 }
 
