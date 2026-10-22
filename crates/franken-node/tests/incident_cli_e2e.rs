@@ -11,19 +11,10 @@ use frankenengine_node::tools::replay_bundle::{
 };
 use serde_json::json;
 
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .expect("workspace root")
-        .to_path_buf()
-}
-
 fn resolve_binary_path() -> PathBuf {
-    if let Some(exe) = std::env::var_os("CARGO_BIN_EXE_franken-node") {
-        return PathBuf::from(exe);
-    }
-    repo_root().join("target/debug/franken-node")
+    // Cargo's compile-time path also identifies this exact build when RCH
+    // relocates the target directory. Never pick an unrelated target/debug.
+    PathBuf::from(env!("CARGO_BIN_EXE_franken-node"))
 }
 
 fn run_cli_in_workspace(workspace: &Path, args: &[&str]) -> Output {
@@ -2541,6 +2532,134 @@ fn write_authenticated_native_candidate(
         &signing_key.verifying_key(),
     )
     .expect("independent SDK accepts structure and signature before guest execution is tested");
+}
+
+#[cfg(feature = "engine")]
+#[test]
+fn native_incident_replay_preserves_explicit_environment_reads_and_private_receipts() {
+    let workspace = tempfile::tempdir().unwrap();
+    fs::write(workspace.path().join("app.js"), "process.env.FNODE_CAPTURED_ENV;\n").unwrap();
+    let initialized = run_cli_in_workspace(workspace.path(),
+        &["init", "--profile", "balanced", "--out-dir", ".", "--json"]);
+    assert!(initialized.status.success(), "{initialized:?}");
+    let config_path = workspace.path().join("franken_node.toml");
+    let mut config: frankenengine_node::config::Config =
+        toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    config.runtime.environment_allowlist = vec!["FNODE_CAPTURED_ENV".into()];
+    fs::write(config_path, config.to_toml().unwrap()).unwrap();
+    let mut commitments = std::collections::BTreeSet::new();
+    for value in [None, Some(""), Some("PRIVATE-ENV-βeta")] {
+        let mut command = Command::new(resolve_binary_path());
+        command.current_dir(workspace.path())
+            .args(["run", "app.js", "--capture-replay", "--json"])
+            .env("FNODE_UNUSED_PRIVATE", "UNREAD-PRIVATE-SENTINEL");
+        if let Some(value) = value {
+            command.env("FNODE_CAPTURED_ENV", value);
+        } else {
+            command.env_remove("FNODE_CAPTURED_ENV");
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let run: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let ledger = &run["dispatch"]["host_effect_ledger"];
+        assert_eq!(ledger["effect_count"], 1, "{run}");
+        let receipt = &ledger["entries"][0]["receipt"];
+        assert_eq!(receipt["effect_kind"], "env_read");
+        commitments.insert(receipt["result_hash"].as_str().unwrap().to_owned());
+        let rendered = serde_json::to_string(ledger).unwrap();
+        assert!(!rendered.contains("FNODE_CAPTURED_ENV") && !rendered.contains("PRIVATE-ENV-βeta"));
+        let capture = &run["dispatch"]["native_replay"];
+        assert!(!capture["payload_json"].as_str().unwrap().contains("UNREAD-PRIVATE-SENTINEL"));
+        let (bundle, _) = capture_native_run_bundle(workspace.path(),
+            run["receipt"]["receipt_id"].as_str().unwrap());
+        let replay = execute_native_replay_with(&bundle, |args| {
+            Command::new(resolve_binary_path()).current_dir(workspace.path())
+                .args(args).env("FNODE_CAPTURED_ENV", "CHANGED-REPLAY-HOST").output().unwrap()
+        });
+        assert!(replay.status.success(), "{replay:?}");
+        let replay: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
+        assert_eq!(replay["execution_result"]["matched"], true, "{replay}");
+        assert_eq!(replay["execution_result"]["host_effects_match"], true);
+        assert_eq!(replay["execution_result"]["execution_value_match"], true);
+    }
+    assert_eq!(commitments.len(), 3, "absent, empty and present stay distinct");
+}
+
+#[cfg(feature = "engine")]
+#[test]
+#[cfg(unix)]
+fn native_incident_replay_restores_frozen_esm_after_the_original_project_is_moved() {
+    for throws in [false, true] {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("original-project");
+        let package = root.join("node_modules/replay-nested");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(package.join("package.json"),
+            r#"{"name":"replay-nested","version":"1.0.0","exports":{"import":"./index.cjs","require":"./index.cjs"}}"#).unwrap();
+        fs::write(package.join("leaf.cjs"), "module.exports=40;").unwrap();
+        fs::write(package.join("index.cjs"),
+            "const {writeFileSync}=require('fs'); writeFileSync('side-effect.txt','ONCE'); module.exports=require('./leaf.cjs')+2;").unwrap();
+        fs::write(root.join("app.mjs"), format!(
+            "import answer from 'replay-nested'; console.log(answer); {}\n",
+            if throws { "throw 'CAPTURED_MODULE_EXCEPTION';" } else { "" },
+        )).unwrap();
+        let initialized = run_cli_in_workspace(&root,
+            &["init", "--profile", "legacy-risky", "--out-dir", ".", "--json"]);
+        assert!(initialized.status.success(), "{initialized:?}");
+        let run = run_cli_in_workspace(&root,
+            &["run", "app.mjs", "--frozen-modules", "--capture-replay", "--json"]);
+        assert_eq!(run.status.success(), !throws, "{run:?}");
+        let run: serde_json::Value = serde_json::from_slice(&run.stdout).unwrap();
+        assert_eq!(run["dispatch"]["captured_output"]["stdout"], "42\n");
+        assert_eq!(fs::read_to_string(root.join("side-effect.txt")).unwrap(), "ONCE");
+        let receipt = run["receipt"]["receipt_id"].as_str().unwrap();
+        let (name, bundle) = capture_native_run_bundle(&root, receipt);
+        let capture = &bundle["initial_state_snapshot"]["native_replay"];
+        assert_eq!(*capture, run["dispatch"]["native_replay"]);
+        assert_eq!(capture["schema_version"], "franken-node/native-replay-capture/v3");
+        let raw = capture["payload_json"].as_str().unwrap();
+        let payload: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let digest = payload["module_sources"]["capsule_digest"].as_str().unwrap();
+        let altered = raw.replacen(&format!("\"capsule_digest\":\"{digest}\""),
+            "\"capsule_digest\":\"sha256:wrong\"", 1);
+        assert_ne!(altered, raw);
+        write_authenticated_native_candidate(&root, &bundle, "wrong-capsule.fnbundle", altered);
+
+        let replay_root = parent.path().join("replay-operator");
+        fs::create_dir_all(replay_root.join(".franken-node/keys")).unwrap();
+        fs::write(replay_root.join("franken_node.toml"), FAIL_CLOSED_BASE_CONFIG).unwrap();
+        fs::copy(root.join(".franken-node/keys/receipt-signing.pub"),
+            replay_root.join(".franken-node/keys/receipt-signing.pub")).unwrap();
+        for file in [name.as_str(), "wrong-capsule.fnbundle"] {
+            fs::copy(root.join(file), replay_root.join(file)).unwrap();
+        }
+        let saved = parent.path().join("saved-original-project");
+        fs::rename(&root, &saved).unwrap();
+        assert!(!root.exists(), "the entire original origin is unavailable");
+
+        let replay = execute_native_replay(&replay_root, &name);
+        assert!(replay.status.success(), "{replay:?}");
+        let replay: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
+        let result = &replay["execution_result"];
+        assert_eq!(result["matched"], true, "{replay}");
+        assert_eq!(result["module_load_disabled"], false);
+        assert_eq!(result["console_match"], true);
+        assert_eq!(result["host_effects_match"], true);
+        assert_eq!(result["replay_terminal_state"], if throws { "uncaught_exception" } else { "completed" });
+        if throws {
+            assert!(result["ir4_witness_match"].is_null());
+            assert_eq!(result["exception_value_match"], true);
+        } else {
+            assert_eq!(result["ir4_witness_match"], true);
+            assert_eq!(result["nondeterminism_trace_match"], true);
+        }
+        let rejected = execute_native_replay(&replay_root, "wrong-capsule.fnbundle");
+        assert!(!rejected.status.success(), "authenticated wrong pin must not execute: {rejected:?}");
+        assert!(!replay_root.join("side-effect.txt").exists(), "replay repeated a live filesystem effect");
+        assert!(!replay_root.join("node_modules").exists(), "replay extracted the module capsule");
+        assert!(!root.exists(), "replay recreated the original source root");
+        assert_eq!(fs::read_to_string(saved.join("side-effect.txt")).unwrap(), "ONCE");
+    }
 }
 
 #[cfg(feature = "engine")]

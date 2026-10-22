@@ -117,6 +117,7 @@ mod dns_pinning {
                 HostIoRequest::RandomRead { byte_len } => HostIoResponse::RandomRead {
                     bytes: vec![7; usize::try_from(*byte_len).unwrap()],
                 },
+                HostIoRequest::EnvRead { .. } => HostIoResponse::EnvRead { value: None },
                 other => panic!("unexpected fixture request: {other:?}"),
             })
         }

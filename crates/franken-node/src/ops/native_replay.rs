@@ -18,14 +18,14 @@
 //! never the replay host environment. Environment values retain their Secret
 //! IFC floor; serialized captures may contain private values and need private
 //! storage even though their Debug view is redacted.
-//! Runtime module loading is refused because the engine's module loader does
-//! not yet consume the host-I/O transcript. Statically lowered builtin facades
-//! remain usable, including their recorded filesystem and network effects.
+//! Frozen module captures retain the source graph's portable capsule. Replay
+//! reconstructs its closed-world resolver without opening the original project.
+//! Captures without that capsule still disable runtime module loading.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const NATIVE_REPLAY_CAPTURE_SCHEMA: &str = "franken-node/native-replay-capture/v2";
+pub const NATIVE_REPLAY_CAPTURE_SCHEMA: &str = "franken-node/native-replay-capture/v3";
 pub const NATIVE_REPLAY_OUTCOME_SCHEMA: &str = "franken-node/native-replay-outcome/v2";
 pub const MAX_NATIVE_REPLAY_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 
@@ -132,7 +132,7 @@ pub struct NativeReplayOutcome {
     pub lane_match: Option<bool>,
     pub exit_code_match: Option<bool>,
     pub exception_value_match: Option<bool>,
-    /// Informational: withholding ModuleLoad changes the declared capability
+    /// Informational: without frozen sources, withholding ModuleLoad changes the declared capability
     /// population the engine uses for Bayesian evidence. This is not included
     /// in the guest execution verdict.
     pub decisions_match: Option<bool>,
@@ -146,10 +146,11 @@ pub fn reexecute(capture: &NativeReplayCapture) -> Result<NativeReplayOutcome, S
 }
 
 #[cfg(feature = "engine")]
-pub use engine::{CapturingProcessSpawnProvider, ProcessReplayCaptureHostIo};
+pub use engine::{CapturedModuleSources, CapturingProcessSpawnProvider, ProcessReplayCaptureHostIo};
 
 #[cfg(feature = "engine")]
 mod engine {
+    use base64::Engine as _;
     use std::io::Write;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -179,12 +180,105 @@ mod engine {
         ProcessSpawnCapability, ProcessSpawnControl, ProcessSpawnError, ProcessSpawnOutcome,
         ProcessSpawnProvider, ProcessSpawnRequest,
     };
+    use crate::supply_chain::module_resolution_graph::file_resolution::source_graph::{
+        CapturedModuleGraph, capsule, engine_resolver::CapturedEngineResolver,
+    };
+    use frankenengine_engine::module_resolver::{
+        CapabilityPolicyHook, ExecutionModuleResolver, ModuleResolver, ModuleSyntax,
+        ResolutionContext, ResolutionOutcome,
+    };
 
     use super::*;
 
     const REPLAY_STACK_BYTES: usize = 64 * 1024 * 1024;
     const MAX_PROCESS_PREPARATION_ENTRIES: usize = 4096;
     const MAX_PROCESS_PREPARATION_BYTES: usize = MAX_NATIVE_REPLAY_PAYLOAD_BYTES / 2;
+
+    /// Exact observations retained before the original frozen graph is consumed.
+    /// Its pins gain authority only through the containing authenticated capture.
+    #[derive(Clone, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct CapturedModuleSources {
+        capsule_base64: String,
+        capsule_digest: String,
+        graph_input_hash: String,
+    }
+
+    impl std::fmt::Debug for CapturedModuleSources {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("CapturedModuleSources")
+                .field("sources", &"[redacted]")
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl CapturedModuleSources {
+        pub(crate) fn capture(graph: &CapturedModuleGraph) -> Result<Self, String> {
+            let encoded = capsule::encode(graph)
+                .map_err(|_| "cannot encode frozen replay module sources".to_string())?;
+            // Bound expansion before allocating base64. The complete payload,
+            // including the entry source and settings, has its own tighter cap.
+            if encoded.bytes().len() > MAX_NATIVE_REPLAY_PAYLOAD_BYTES / 4 * 3 {
+                return Err("frozen replay module sources exceed the capture byte budget".into());
+            }
+            Ok(Self {
+                capsule_base64: base64::engine::general_purpose::STANDARD.encode(encoded.bytes()),
+                capsule_digest: encoded.digest().to_owned(),
+                graph_input_hash: graph.report().input_hash.clone(),
+            })
+        }
+
+        fn restore(
+            &self,
+            package: &ExtensionPackage,
+            settings: &CapturedOrchestratorSettings,
+        ) -> Result<(ResolutionOutcome, ExecutionModuleResolver), String> {
+            if self.capsule_base64.len() > MAX_NATIVE_REPLAY_PAYLOAD_BYTES {
+                return Err("frozen replay module sources exceed the capture byte budget".into());
+            }
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&self.capsule_base64)
+                .map_err(|_| "invalid frozen replay module encoding".to_string())?;
+            if base64::engine::general_purpose::STANDARD.encode(&bytes) != self.capsule_base64 {
+                return Err("noncanonical frozen replay module encoding".into());
+            }
+            let graph = capsule::replay(&bytes, &self.capsule_digest)
+                .map_err(|_| "invalid frozen replay module capsule".to_string())?;
+            let root = package.module_root.as_deref().map(std::path::Path::new)
+                .filter(|root| root.is_absolute())
+                .ok_or_else(|| "frozen replay requires its original absolute module origin".to_string())?;
+            if package.source_file.as_deref()
+                != root.join(&graph.report().entrypoint).to_str()
+            {
+                return Err("frozen replay entrypoint differs from the captured package".into());
+            }
+            let resolver = Arc::new(CapturedEngineResolver::new_with_parser_options(
+                graph, &self.graph_input_hash, settings.parser_options.clone(),
+            ).map_err(|_| "invalid frozen replay source graph".to_string())?);
+            let policy = Arc::new(CapabilityPolicyHook::new(
+                package.capabilities.iter()
+                    .filter_map(|capability| RuntimeCapability::from_tag_str(capability))
+                    .collect(),
+            ));
+            let entry = resolver.resolve(
+                &resolver.entry_request(),
+                &ResolutionContext::new(
+                    "native-module-admission", "native-module-admission", &settings.policy_id,
+                ),
+                policy.as_ref(),
+            ).map_err(|_| "frozen replay entrypoint policy admission failed".to_string())?;
+            let commonjs = entry.module.record.syntax == ModuleSyntax::CommonJs;
+            let goal = if commonjs { ParseGoal::Script } else { ParseGoal::Module };
+            if entry.module.record.source != package.source
+                || commonjs != settings.commonjs_entry || goal != settings.parse_goal
+            {
+                return Err("frozen replay prepared source or syntax differs from the captured execution".into());
+            }
+            let runtime = resolver.execution_resolver(root, policy)
+                .map_err(|_| "cannot restore frozen replay module resolver".to_string())?;
+            Ok((entry, runtime))
+        }
+    }
 
     /// Apply the ordered replay journal's conservative exception floor during
     /// the original capture execution, before the engine constructs its IR.
@@ -729,7 +823,7 @@ mod engine {
                     })?;
                     // Replay strips ModuleLoad. That artificial restriction
                     // cannot stand in for an original denial of a granted cap.
-                    if denied == RuntimeCapability::ModuleLoad
+                    if payload.module_sources.is_none() && denied == RuntimeCapability::ModuleLoad
                         && payload.package.capabilities.iter().any(|capability| {
                             RuntimeCapability::from_tag_str(capability).as_ref() == Some(&denied)
                         })
@@ -781,6 +875,8 @@ mod engine {
         host_effect_transcript: Vec<(HostIoRequest, HostIoOutcome)>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         process: Option<CapturedProcessReplay>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        module_sources: Option<CapturedModuleSources>,
         expected: CapturedAttempt,
     }
 
@@ -884,6 +980,9 @@ mod engine {
                     None => return Err(format!("unrecognized captured capability {capability}")),
                 }
             }
+            if let Some(sources) = &self.module_sources {
+                sources.restore(&self.package, &self.orchestrator)?;
+            }
             validate_environment_transcript(
                 &self.host_effect_transcript,
                 &self.package.capabilities,
@@ -913,7 +1012,7 @@ mod engine {
                                 .to_string(),
                         );
                     }
-                    if expected
+                    if self.module_sources.is_none() && expected
                         .ir4_witness
                         .hostcall_decisions
                         .iter()
@@ -1198,6 +1297,7 @@ mod engine {
         /// conservative exception floor.
         /// A process-shape grant supplies only captured arguments and the
         /// engine's deterministic metadata shape.
+        #[allow(clippy::too_many_arguments)]
         pub fn from_execution(
             package: &ExtensionPackage,
             orchestrator_config: &OrchestratorConfig,
@@ -1205,6 +1305,7 @@ mod engine {
             ambient_authority: AmbientAuthorityGrant,
             process_argv: &[String],
             process_preparation: Option<&CapturingProcessSpawnProvider>,
+            module_sources: Option<&CapturedModuleSources>,
             result: &OrchestratorResult,
         ) -> Result<Self, String> {
             if process_preparation.is_none() && !result.host_effect_journal.is_empty() {
@@ -1234,6 +1335,7 @@ mod engine {
                     process_preparation,
                     &result.host_effect_journal,
                 )?,
+                module_sources: module_sources.cloned(),
                 expected: CapturedAttempt::Completed(CapturedExecution {
                     trace_id: result.trace_id.clone(),
                     ir4_witness: result.ir4_witness.clone(),
@@ -1268,6 +1370,7 @@ mod engine {
             ambient_authority: AmbientAuthorityGrant,
             process_argv: &[String],
             process_preparation: Option<&CapturingProcessSpawnProvider>,
+            module_sources: Option<&CapturedModuleSources>,
             orchestrator: &ExecutionOrchestrator,
             error: &OrchestratorError,
         ) -> Result<Self, String> {
@@ -1278,7 +1381,7 @@ mod engine {
             // denials or instruction-budget exhaustion after cleanup succeeds.
             Self::from_finalized_failure(
                 package, orchestrator_config, runtime_config, ambient_authority,
-                process_argv, process_preparation, orchestrator, error,
+                process_argv, process_preparation, module_sources, orchestrator, error,
             )
         }
 
@@ -1295,6 +1398,7 @@ mod engine {
             ambient_authority: AmbientAuthorityGrant,
             process_argv: &[String],
             process_preparation: Option<&CapturingProcessSpawnProvider>,
+            module_sources: Option<&CapturedModuleSources>,
             orchestrator: &ExecutionOrchestrator,
             error: &OrchestratorError,
         ) -> Result<Self, String> {
@@ -1314,6 +1418,7 @@ mod engine {
                 process_argv: process_argv.to_vec(),
                 host_effect_transcript,
                 process: CapturedProcessReplay::capture(process_preparation, &journal)?,
+                module_sources: module_sources.cloned(),
                 expected,
             };
             payload.validate()?;
@@ -1321,8 +1426,12 @@ mod engine {
         }
     }
 
-    fn replay_policy_comparison_note(process_replay: bool) -> String {
-        let mut note = "Replay disables runtime module loading. Its changed declared-capability population can change Bayesian and containment decisions; decisions_match is informational and is excluded from the guest execution verdict.".to_string();
+    fn replay_policy_comparison_note(process_replay: bool, frozen_modules: bool) -> String {
+        let mut note = if frozen_modules {
+            "Replay retains the original declared capabilities and resolves modules only from authenticated frozen observations. decisions_match remains informational; matching execution is not an independent original-policy certificate."
+        } else {
+            "Replay disables runtime module loading. Its changed declared-capability population can change Bayesian and containment decisions; decisions_match is informational and is excluded from the guest execution verdict."
+        }.to_string();
         if process_replay {
             note.push_str(" The original process-capture run and ordered replay journal both use the engine's conservative Unknown exception floor. Capture mode can deny flows the ordinary live provider permits. IR, execution, and effect comparisons remain exact; no captured witness or replay outcome is relabeled to obtain a match.");
         }
@@ -1340,7 +1449,7 @@ mod engine {
             schema_version: NATIVE_REPLAY_OUTCOME_SCHEMA.to_string(),
             replay_kind: "native_reexecution".to_string(),
             verification_scope: "guest_execution".to_string(),
-            module_load_disabled: true,
+            module_load_disabled: payload.module_sources.is_none(),
             matched: false,
             divergences: Vec::new(),
             captured_trace_id: expected.trace_id.clone(),
@@ -1369,7 +1478,9 @@ mod engine {
             exit_code_match: Some(expected.exit_code == replayed.exit_code),
             exception_value_match: None,
             decisions_match: Some(expected.decisions == execution_decisions(replayed)?),
-            policy_comparison_note: replay_policy_comparison_note(payload.process.is_some()),
+            policy_comparison_note: replay_policy_comparison_note(
+                payload.process.is_some(), payload.module_sources.is_some(),
+            ),
         };
         for (matches, subject) in [
             (outcome.ir3_hash_match == Some(true), "executed IR3"),
@@ -1468,6 +1579,7 @@ mod engine {
         expected: &CapturedAttempt,
         expected_effects: &[(HostIoRequest, HostIoOutcome)],
         expected_journal: Option<&[HostEffectJournalEntry]>,
+        frozen_modules: bool,
         replayed: &TerminalObservation,
     ) -> Result<NativeReplayOutcome, String> {
         let (trace_id, console_output, terminal_state, scope, note) = match expected {
@@ -1476,14 +1588,14 @@ mod engine {
                 &failure.console_output,
                 NativeReplayTerminalState::UncaughtException,
                 "guest_failure_prefix",
-                "This verdict verifies an uncaught guest exception, captured console, and finalized host-effect prefix. The failed run has no completed IR4 witness, finalized nondeterminism trace, total instruction count, or completed runtime decision to compare. Runtime module loading remains disabled.",
+                "This verdict verifies an uncaught guest exception, captured console, and finalized host-effect prefix. The failed run has no completed IR4 witness, finalized nondeterminism trace, total instruction count, or completed runtime decision to compare.",
             ),
             CapturedAttempt::EngineFailure(failure) => (
                 &failure.trace_id,
                 &failure.console_output,
                 NativeReplayTerminalState::EngineFailure,
                 "engine_failure_prefix",
-                "This verdict verifies the typed interpreter stopping reason, exact native diagnostic, captured console, and finalized host-effect prefix. It does not replay a supervisor timeout, cancellation, or panic, and does not manufacture a completed IR4 witness, finalized nondeterminism trace, or total instruction count. Runtime module loading remains disabled.",
+                "This verdict verifies the typed interpreter stopping reason, exact native diagnostic, captured console, and finalized host-effect prefix. It does not replay a supervisor timeout, cancellation, or panic, and does not manufacture a completed IR4 witness, finalized nondeterminism trace, or total instruction count.",
             ),
             CapturedAttempt::Completed(_) => {
                 return Err("failure comparison requires a captured failed attempt".to_string());
@@ -1493,7 +1605,7 @@ mod engine {
             schema_version: NATIVE_REPLAY_OUTCOME_SCHEMA.to_string(),
             replay_kind: "native_reexecution".to_string(),
             verification_scope: scope.to_string(),
-            module_load_disabled: true,
+            module_load_disabled: !frozen_modules,
             matched: false,
             divergences: Vec::new(),
             captured_trace_id: trace_id.clone(),
@@ -1518,7 +1630,9 @@ mod engine {
                 _ => None,
             },
             decisions_match: None,
-            policy_comparison_note: note.to_string(),
+            policy_comparison_note: format!("{note} {}", replay_policy_comparison_note(
+                expected_journal.is_some(), frozen_modules,
+            )),
         };
         if expected_journal.is_some() {
             outcome.policy_comparison_note.push_str(" Process outcomes are consumed in global journal order without live dispatch; the engine's Unknown filesystem exception provenance remains in force.");
@@ -1577,16 +1691,19 @@ mod engine {
             .name("native-incident-replay".to_string())
             .stack_size(REPLAY_STACK_BYTES)
             .spawn(move || {
+                let modules = payload.module_sources.as_ref()
+                    .map(|sources| sources.restore(&payload.package, &payload.orchestrator))
+                    .transpose()?;
                 let mut package = payload.package.clone();
-                package.capabilities.retain(|capability| {
-                    RuntimeCapability::from_tag_str(capability)
-                        != Some(RuntimeCapability::ModuleLoad)
-                });
-                // Keep the exact diagnostic/source label for IR identity, but
-                // remove the old project-root dependency. The engine may inspect
-                // parent-directory metadata; denied ModuleLoad prevents source,
-                // package.json, and dependency reads through every runtime form.
-                package.module_root = None;
+                if modules.is_none() {
+                    package.capabilities.retain(|capability| {
+                        RuntimeCapability::from_tag_str(capability)
+                            != Some(RuntimeCapability::ModuleLoad)
+                    });
+                    // Without a captured resolver no runtime source read is
+                    // authorized, including through old project-root metadata.
+                    package.module_root = None;
+                }
                 let authority = RuntimeEvidenceAuthority::generate_runtime_owned(
                     "franken-node.incident-replay",
                     payload.orchestrator.epoch,
@@ -1628,7 +1745,12 @@ mod engine {
                         ProcessSpawnAttemptAuthority::expiring_at_unix_ms(0),
                     );
                 }
-                let result = orchestrator.execute(&package);
+                let result = match modules {
+                    Some((entry, resolver)) => orchestrator.execute_resolved_entry_with_resolver(
+                        &package, &entry, resolver,
+                    ),
+                    None => orchestrator.execute(&package),
+                };
                 if let Some(provider) = replay_process_provider {
                     // A caught preparation mismatch cannot turn into a valid
                     // replay merely because the guest suppressed its exception.
@@ -1655,6 +1777,7 @@ mod engine {
                                 .process
                                 .as_ref()
                                 .map(|process| process.journal.as_slice()),
+                            payload.module_sources.is_some(),
                             &replayed,
                         )
                     }
@@ -1667,6 +1790,7 @@ mod engine {
                                 .process
                                 .as_ref()
                                 .map(|process| process.journal.as_slice()),
+                            payload.module_sources.is_some(),
                             &replayed,
                         )
                     }
@@ -1755,6 +1879,7 @@ mod engine {
                     AmbientAuthorityGrant::DenyAll,
                     &[],
                     None,
+                    None,
                     &result,
                 ),
                 Err(error) => NativeReplayCapture::from_failed_execution(
@@ -1763,6 +1888,7 @@ mod engine {
                     &runtime,
                     AmbientAuthorityGrant::DenyAll,
                     &[],
+                    None,
                     None,
                     &orchestrator,
                     &error,
@@ -2031,7 +2157,7 @@ mod engine {
             let (package, config, runtime, orchestrator, error) = stopped_run(root, budget_stop);
             let capture = NativeReplayCapture::from_failed_execution(
                 &package, &config, &runtime, AmbientAuthorityGrant::DenyAll,
-                &[], None, &orchestrator, &error,
+                &[], None, None, &orchestrator, &error,
             ).expect("capture the finalized native stop through the run-facing entrypoint");
             assert_eq!(
                 capture.terminal_state().expect("typed terminal state"),
@@ -2039,7 +2165,7 @@ mod engine {
             );
             let explicit = NativeReplayCapture::from_finalized_failure(
                 &package, &config, &runtime, AmbientAuthorityGrant::DenyAll,
-                &[], None, &orchestrator, &error,
+                &[], None, None, &orchestrator, &error,
             ).expect("capture the same finalized native stop explicitly");
             assert_eq!(capture, explicit);
             capture
@@ -2163,7 +2289,7 @@ mod engine {
                     }
                     assert!(NativeReplayCapture::from_finalized_failure(
                         &package, &config, &runtime, AmbientAuthorityGrant::DenyAll,
-                        &[], None, &orchestrator, &error,
+                        &[], None, None, &orchestrator, &error,
                     ).is_err());
                 }
             });
@@ -2187,7 +2313,7 @@ mod engine {
                 ] {
                     assert!(NativeReplayCapture::from_finalized_failure(
                         &package, &config, &runtime, AmbientAuthorityGrant::DenyAll,
-                        &[], None, &orchestrator, &error,
+                        &[], None, None, &orchestrator, &error,
                     ).is_err(), "a previous finalized attempt does not certify an unrelated error");
                 }
             });
@@ -2271,6 +2397,7 @@ mod engine {
                     ambient_authority,
                     process_argv,
                     None,
+                    None,
                     &result,
                 ),
                 Err(error) => NativeReplayCapture::from_failed_execution(
@@ -2279,6 +2406,7 @@ mod engine {
                     &runtime,
                     ambient_authority,
                     process_argv,
+                    None,
                     None,
                     &orchestrator,
                     &error,
@@ -2382,6 +2510,7 @@ mod engine {
                     AmbientAuthorityGrant::DenyAll,
                     &[],
                     Some(provider.as_ref()),
+                    None,
                     &result,
                 ),
                 Err(error) => NativeReplayCapture::from_failed_execution(
@@ -2391,6 +2520,7 @@ mod engine {
                     AmbientAuthorityGrant::DenyAll,
                     &[],
                     Some(provider.as_ref()),
+                    None,
                     &orchestrator,
                     &error,
                 ),
@@ -2826,7 +2956,7 @@ mod engine {
                 })
                 .expect("original v2 serialization");
                 let original = NativeReplayCapture {
-                    schema_version: "franken-node/native-replay-capture/v2".to_string(),
+                    schema_version: NATIVE_REPLAY_CAPTURE_SCHEMA.to_string(),
                     payload_sha256: hex::encode(Sha256::digest(original_payload_json.as_bytes())),
                     payload_json: original_payload_json,
                 };
@@ -3093,9 +3223,12 @@ mod tests {
                 .expect_err("changed source")
                 .contains("SHA-256")
         );
-        changed = capture;
+        changed = capture.clone();
         changed.schema_version.push_str("/unknown");
         assert!(changed.validate().expect_err("schema").contains("schema"));
+        changed = capture;
+        changed.schema_version = "franken-node/native-replay-capture/v2".to_string();
+        assert!(changed.validate().expect_err("historical capture").contains("schema"));
     }
 
     #[test]

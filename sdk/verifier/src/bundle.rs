@@ -146,6 +146,7 @@ pub enum EffectKind {
     Spawn,
     ModuleResolve,
     RandomRead,
+    EnvRead,
 }
 
 impl EffectKind {
@@ -158,6 +159,7 @@ impl EffectKind {
             Self::Spawn => 5,
             Self::ModuleResolve => 6,
             Self::RandomRead => 7,
+            Self::EnvRead => 8,
         }
     }
 
@@ -170,6 +172,7 @@ impl EffectKind {
             Self::Spawn => "spawn",
             Self::ModuleResolve => "module_resolve",
             Self::RandomRead => "random_read",
+            Self::EnvRead => "env_read",
         }
     }
 }
@@ -2601,6 +2604,20 @@ pub(crate) mod tests {
             serde_json::to_string(&EffectKind::RandomRead).expect("serialize effect kind"),
             "\"random_read\""
         );
+    }
+
+    #[test]
+    fn environment_read_receipt_identity_is_distinct_and_committed() {
+        assert_eq!(EffectKind::EnvRead.tag(), 8);
+        assert_eq!(EffectKind::EnvRead.label(), "env_read");
+        assert_eq!(serde_json::to_string(&EffectKind::EnvRead).unwrap(), "\"env_read\"");
+        let mut receipt = run_effect_chain_fixture()[0].receipt.clone();
+        let original = effect_receipt_hash(&receipt);
+        receipt.effect_kind = EffectKind::EnvRead;
+        assert_ne!(original, effect_receipt_hash(&receipt));
+        let encoded = serde_json::to_vec(&receipt).unwrap();
+        let decoded: EffectReceipt = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.effect_kind, EffectKind::EnvRead);
     }
 
     /// bd-5r99w.12: the verifier SDK re-derives a bare effect-receipt chain — the

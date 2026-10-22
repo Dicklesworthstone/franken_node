@@ -90,7 +90,7 @@ If any later section mentions legacy `dcg` paths like `src/main.rs` at repo root
 
 We only use **Cargo** in this project, NEVER any other package manager.
 
-- **Edition:** Rust 2024, with Rust 1.99.0 pinned in `rust-toolchain.toml`; use the same pinned compiler for local tooling and remote RCH verification.
+- **Edition:** Rust 2024, with `nightly-2026-09-21` pinned in `rust-toolchain.toml`; use the same compiler for local tooling and remote RCH verification. The current published `fsqlite-pager 0.4.1` dependency enables `core_intrinsics` on x86_64; Rust 1.99 stable rejects it with E0554. Do not use `RUSTC_BOOTSTRAP` to bypass that requirement.
 - **Dependency versions:** Explicit versions for stability
 - **Configuration:** Workspace at root `Cargo.toml`, with primary crate under `crates/franken-node/`
 - **Unsafe code:** Forbidden (`#![forbid(unsafe_code)]`)

@@ -5415,7 +5415,6 @@ fn run_exit_status(containment_exit_code: i32, program_exit_code: Option<i32>) -
 
 fn validate_native_frozen_modules(
     config: &Config,
-    capture_replay: bool,
 ) -> Result<(), ActionableError> {
     if config.runtime.frozen_modules != Some(true) {
         if config.runtime.frozen_module_symlinks == Some(true) {
@@ -5425,12 +5424,6 @@ fn validate_native_frozen_modules(
             ));
         }
         return Ok(());
-    }
-    if capture_replay {
-        return Err(ActionableError::new(
-            "Frozen modules cannot be combined with native replay capture: replay does not retain the module-source graph.",
-            "Use --frozen-modules without --capture-replay",
-        ));
     }
     if !cfg!(unix) {
         return Err(ActionableError::new(
@@ -5446,6 +5439,7 @@ struct FrozenNativeModules {
     entry: frankenengine_engine::module_resolver::ResolutionOutcome,
     resolver: frankenengine_engine::module_resolver::ExecutionModuleResolver,
     summary: NativeModuleGraphSummary,
+    replay_sources: Option<crate::ops::native_replay::CapturedModuleSources>,
 }
 
 /// Capture only after the worker's project, trust and fleet-policy rechecks.
@@ -5457,10 +5451,11 @@ fn prepare_native_frozen_modules(
     capabilities: &[String],
     policy_id: &str,
     contained_symlinks: bool,
+    capture_replay: bool,
 ) -> std::result::Result<FrozenNativeModules, String> {
     #[cfg(not(unix))]
     {
-        let _ = (project_paths, parser_options, capabilities, policy_id, contained_symlinks);
+        let _ = (project_paths, parser_options, capabilities, policy_id, contained_symlinks, capture_replay);
         Err("Frozen module capture requires Unix".to_string())
     }
     #[cfg(unix)]
@@ -5491,6 +5486,11 @@ fn prepare_native_frozen_modules(
         };
         let graph = capture(root, entrypoint, options)
             .map_err(|error| format!("Frozen module graph capture failed: {error}"))?;
+        let replay_sources = if capture_replay {
+            Some(crate::ops::native_replay::CapturedModuleSources::capture(&graph)?)
+        } else {
+            None
+        };
         let pin = graph.report().input_hash.clone();
         let resolver = Arc::new(
             CapturedEngineResolver::new_with_parser_options(graph, &pin, parser_options.clone())
@@ -5527,6 +5527,7 @@ fn prepare_native_frozen_modules(
             entry,
             resolver,
             summary,
+            replay_sources,
         })
     }
 }
@@ -6249,7 +6250,7 @@ impl EngineDispatcher {
         // any execution-side effect.
         config.runtime.validate_execution_budget()?;
         config.runtime.validate_parse_budget()?;
-        validate_native_frozen_modules(config, self.capture_replay)?;
+        validate_native_frozen_modules(config)?;
 
         // Environment authority is replayable through the same typed host-I/O
         // transcript as filesystem/network effects; no profile needs a replay
@@ -6953,7 +6954,7 @@ impl EngineDispatcher {
         {
             anyhow::bail!("native-session frozen module requirement does not match its configuration");
         }
-        validate_native_frozen_modules(&request.config, request.capture_replay)?;
+        validate_native_frozen_modules(&request.config)?;
         if !crate::security::constant_time::ct_eq(
             &request.runtime_evidence_grant.capture.session_nonce,
             &request.nonce,
@@ -9427,7 +9428,7 @@ impl EngineDispatcher {
                     &mut telemetry_guard,
                 )
             })?;
-        validate_native_frozen_modules(config, capture_replay).map_err(|error| {
+        validate_native_frozen_modules(config).map_err(|error| {
             native_engine_spawn_error_with_telemetry_cleanup(error.to_string(), &mut telemetry_guard)
         })?;
         let parser_budget = config.runtime.effective_parse_budget(config.profile);
@@ -9518,6 +9519,7 @@ impl EngineDispatcher {
                     &capabilities,
                     &orchestrator_config.policy_id,
                     config.runtime.frozen_module_symlinks == Some(true),
+                    capture_replay,
                 )
                 .map_err(|error| {
                     native_engine_spawn_error_with_telemetry_cleanup(error, &mut telemetry_guard)
@@ -9527,6 +9529,8 @@ impl EngineDispatcher {
             None
         };
         let frozen_module_summary = frozen_modules.as_ref().map(|modules| modules.summary.clone());
+        let replay_module_sources = frozen_modules.as_ref()
+            .and_then(|modules| modules.replay_sources.clone());
         let source_code = if let Some(modules) = &frozen_modules {
             orchestrator_config.commonjs_entry = modules.entry.module.record.syntax
                 == frankenengine_engine::module_resolver::ModuleSyntax::CommonJs;
@@ -9892,6 +9896,7 @@ impl EngineDispatcher {
                                 ambient_authority_grant,
                                 process_argv,
                                 replay_process_provider.as_deref(),
+                                replay_module_sources.as_ref(),
                                 &orchestrator,
                                 &error,
                             ) {
@@ -9995,6 +10000,7 @@ impl EngineDispatcher {
                     ambient_authority_grant,
                     &process_argv,
                     replay_process_provider.as_deref(),
+                    replay_module_sources.as_ref(),
                     &execution_result,
                 ) {
                     Ok(capture) => Some(capture),
@@ -10429,7 +10435,7 @@ impl EngineDispatcher {
             // A read of a recognized secret file is a sensitive information-flow
             // source; its bytes' content hash is registered (below) so later
             // effects that re-emit those exact bytes inherit the label.
-            let sensitive_read = matches!(
+            let sensitive_read = matches!(request, HostIoRequest::EnvRead { .. }) || matches!(
                 request,
                 HostIoRequest::FsRead { path } if classify_sensitive_source_path(path).is_some()
             );
@@ -10439,6 +10445,9 @@ impl EngineDispatcher {
             let (effect_kind, args_bytes, input_bytes) = match request {
                 HostIoRequest::FsRead { path } => {
                     (EffectKind::FsRead, path.as_bytes().to_vec(), Vec::new())
+                }
+                HostIoRequest::EnvRead { name } => {
+                    (EffectKind::EnvRead, name.as_bytes().to_vec(), Vec::new())
                 }
                 HostIoRequest::FsWrite { path, data } => {
                     (EffectKind::FsWrite, path.as_bytes().to_vec(), data.clone())
@@ -10459,6 +10468,7 @@ impl EngineDispatcher {
                         HostIoCapability::NetworkSend => EffectKind::HttpRequest,
                         HostIoCapability::NetworkRecv => EffectKind::HttpRequest,
                         HostIoCapability::RandomRead => EffectKind::RandomRead,
+                        HostIoCapability::EnvRead => EffectKind::EnvRead,
                     };
                     (
                         effect_kind,
@@ -10526,6 +10536,15 @@ impl EngineDispatcher {
                         // the response the peer sent back.
                         | HostIoResponse::NetworkRequest { response: bytes }
                         | HostIoResponse::RandomRead { bytes } => bytes.clone(),
+                        HostIoResponse::EnvRead { value } => {
+                            // Preserve absent versus present-empty values in
+                            // the commitment without persisting private text.
+                            let mut encoded = vec![u8::from(value.is_some())];
+                            if let Some(value) = value {
+                                encoded.extend_from_slice(value.as_bytes());
+                            }
+                            encoded
+                        }
                         HostIoResponse::FsWrite { .. } | HostIoResponse::NetworkSend { .. } => {
                             input_bytes.clone()
                         }
@@ -10545,18 +10564,24 @@ impl EngineDispatcher {
                     // for other effects the consumed input is the request payload.
                     let pre_bytes = match response {
                         HostIoResponse::FsRead { bytes } => bytes.clone(),
+                        HostIoResponse::EnvRead { .. } => produced.clone(),
                         _ => input_bytes.clone(),
                     };
                     // Register a sensitive read's bytes so a later effect that
                     // re-emits them inherits the secret label by containment.
                     // Bounded: skip trivially short reads (coincidental-substring
                     // false positives) and oversized/over-many samples.
+                    let secret_sample = match response {
+                        HostIoResponse::FsRead { bytes } => Some(bytes.as_slice()),
+                        HostIoResponse::EnvRead { value } => value.as_deref().map(str::as_bytes),
+                        _ => None,
+                    };
                     if sensitive_read
                         && secret_samples.len() < MAX_SECRET_SAMPLES
-                        && (MIN_SECRET_SAMPLE_LEN..=MAX_SECRET_SAMPLE_LEN)
-                            .contains(&pre_bytes.len())
+                        && let Some(sample) = secret_sample
+                        && (MIN_SECRET_SAMPLE_LEN..=MAX_SECRET_SAMPLE_LEN).contains(&sample.len())
                     {
-                        secret_samples.push(pre_bytes.clone());
+                        secret_samples.push(sample.to_vec());
                     }
                     allowed_count = allowed_count.saturating_add(1);
                     // An ALLOWED effect that carries the secret is recorded
@@ -17985,6 +18010,36 @@ mod tests {
         .expect("random-read receipt chain integrity");
         validate_host_effect_ledger(&ledger, &trusted_identity)
             .expect("random-read receipt signature verifies");
+        assert_ledger_sdk_verifiable(&ledger);
+    }
+
+    #[test]
+    #[cfg(feature = "engine")]
+    fn environment_ledger_distinguishes_absence_empty_and_secret_without_rendering_them() {
+        use crate::runtime::effect_receipt::EffectKind;
+        use frankenengine_extension_host::host_io::{HostIoRequest, HostIoResponse};
+        let transcript = [None, Some(""), Some("PRIVATE-ENV-VALUE")].map(|value| (
+            HostIoRequest::EnvRead { name: "PRIVATE_ENV_NAME".into() },
+            Ok(HostIoResponse::EnvRead { value: value.map(str::to_owned) }),
+        ));
+        let authority = host_effect_ledger_authority_for_test();
+        let ledger = EngineDispatcher::build_host_effect_ledger(
+            "trace-environment-read", &transcript, &authority,
+            SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH),
+        ).expect("sign all three typed environment outcomes");
+        assert_eq!(ledger.effect_count, 3);
+        assert_eq!(ledger.allowed_count, 3);
+        let results: std::collections::BTreeSet<_> = ledger.entries.iter().map(|entry| {
+            let receipt = &entry.receipt;
+            assert_eq!(receipt.effect_kind, EffectKind::EnvRead);
+            assert_eq!(receipt.label_set_commitment,
+                crate::security::lineage_tracker::secret_file_label_set_commitment());
+            receipt.result_hash.clone().unwrap()
+        }).collect();
+        assert_eq!(results.len(), 3, "absence and empty values have distinct commitments");
+        let json = serde_json::to_string(&ledger).unwrap();
+        assert!(!json.contains("PRIVATE_ENV_NAME") && !json.contains("PRIVATE-ENV-VALUE"));
+        validate_host_effect_ledger(&ledger, &authority.verification_identity()).unwrap();
         assert_ledger_sdk_verifiable(&ledger);
     }
 

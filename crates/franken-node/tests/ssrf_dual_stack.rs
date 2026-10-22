@@ -815,6 +815,7 @@ mod operation_control {
             Ok(match request {
                 HostIoRequest::FsRead { .. } => HostIoResponse::FsRead { bytes: vec![1, 2] },
                 HostIoRequest::RandomRead { .. } => HostIoResponse::RandomRead { bytes: vec![3, 4] },
+                HostIoRequest::EnvRead { .. } => HostIoResponse::EnvRead { value: Some("captured".into()) },
                 _ => panic!("unexpected non-network fixture"),
             })
         }
@@ -830,6 +831,7 @@ mod operation_control {
         for (request, expected) in [
             (HostIoRequest::FsRead { path: "input.txt".into() }, HostIoResponse::FsRead { bytes: vec![1, 2] }),
             (HostIoRequest::RandomRead { byte_len: 2 }, HostIoResponse::RandomRead { bytes: vec![3, 4] }),
+            (HostIoRequest::EnvRead { name: "EXPLICIT_FIXTURE".into() }, HostIoResponse::EnvRead { value: Some("captured".into()) }),
         ] {
             assert_eq!(gate.perform_controlled(&request, &[request.required_capability()], control.clone()), Ok(expected));
         }

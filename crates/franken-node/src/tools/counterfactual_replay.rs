@@ -566,6 +566,7 @@ fn required_capability(receipt: &EffectReceipt) -> &'static str {
                 "fs_read" => "fs_read",
                 "fs_write" => "fs_write",
                 "random_read" => "random_read",
+                "env_read" => "env_read",
                 // network_send / network_recv are both the profile's egress grant.
                 _ => "network_egress",
             };
@@ -578,6 +579,7 @@ fn required_capability(receipt: &EffectReceipt) -> &'static str {
         EffectKind::Spawn => "process_spawn",
         EffectKind::ModuleResolve => "module_load",
         EffectKind::RandomRead => "random_read",
+        EffectKind::EnvRead => "env_read",
     }
 }
 
@@ -593,7 +595,7 @@ fn production_effect_loss(receipt: &EffectReceipt, decision: &str) -> u64 {
         EffectKind::Spawn => 30,
         EffectKind::HttpRequest | EffectKind::NetConnect => 20,
         EffectKind::FsWrite => 10,
-        EffectKind::FsRead => 2,
+        EffectKind::FsRead | EffectKind::EnvRead => 2,
         EffectKind::ModuleResolve => 1,
         EffectKind::RandomRead => 0,
     };

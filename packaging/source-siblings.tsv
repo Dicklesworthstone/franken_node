@@ -1,5 +1,5 @@
 # Supporting Cargo path dependencies. Engine selection is explicit at bootstrap.
 # Immutable source selections, not a claim that a release campaign has passed.
-frankentui	cd0fb5f28ae54ae9120e687a3bd3c159ec53aac7
-fastapi_rust	d90732aa4f5cc0278eca85dc613422406e2a4af2
-sqlmodel_rust	9294825673edcc3341896a5e40371d186ac9be43
+frankentui	bb8c49f105fd223deee12e2101468a5f08c805b3
+fastapi_rust	08f7251c96e8b5c42cb3d036cc57865da0cc4ad9
+sqlmodel_rust	7f432ff690260ef85aca5227e2372b2eb63230c9

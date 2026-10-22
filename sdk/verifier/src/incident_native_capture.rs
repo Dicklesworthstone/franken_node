@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 use super::{IncidentBundleError, UnambiguousJson, ct_str_eq};
 
-const CAPTURE_SCHEMA: &str = "franken-node/native-replay-capture/v2";
+const CAPTURE_SCHEMA: &str = "franken-node/native-replay-capture/v3";
 const MAX_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 const ENVELOPE_FIELDS: &[&str] = &["schema_version", "payload_json", "payload_sha256"];
 const PAYLOAD_FIELDS: &[&str] = &[
@@ -275,7 +275,17 @@ pub(super) fn verify(initial: &Value) -> Result<Option<VerifiedNativeCaptureMeta
     // authenticated digest. The inner parser rejects ambiguity independently.
     let UnambiguousJson(payload) = serde_json::from_str(raw)
         .map_err(|_| invalid(".payload_json", "native payload must be unambiguous JSON"))?;
-    exact(&payload, ".payload", PAYLOAD_FIELDS, &["process"])?;
+    exact(&payload, ".payload", PAYLOAD_FIELDS, &["process", "module_sources"])?;
+    if let Some(sources) = payload.get("module_sources") {
+        // Inspect authenticated metadata only. The product must decode the
+        // capsule, verify its independent pin, rebuild resolution and execute;
+        // this SDK never claims those native semantics from a signed string.
+        let sources = exact(sources, ".payload.module_sources",
+            &["capsule_base64", "capsule_digest", "graph_input_hash"], &[])?;
+        for field in ["capsule_base64", "capsule_digest", "graph_input_hash"] {
+            nonblank(&sources[field], ".payload.module_sources.identity")?;
+        }
+    }
     for field in ["package", "orchestrator", "runtime"] {
         object(&payload[field], ".payload.settings")?;
     }
@@ -375,6 +385,39 @@ mod tests {
             assert_eq!(metadata.payload_sha256, capture["native_replay"]["payload_sha256"]);
             assert_eq!(metadata.host_io_exchange_count, 0);
         }
+    }
+
+    #[test]
+    fn frozen_source_metadata_is_authenticated_but_does_not_certify_a_capsule() {
+        let mut value = payload("completed");
+        // Deliberately metadata-only: these bytes are not an executable source
+        // graph. Successful inspection must never be presented as replay proof.
+        value["module_sources"] = json!({
+            "capsule_base64":"PRIVATE-SOURCE-SENTINEL",
+            "capsule_digest":"sha256:claimed-capsule",
+            "graph_input_hash":"sha256:claimed-graph"
+        });
+        let original = captured(&value);
+        let metadata = verify(&original).unwrap().unwrap();
+        assert!(!format!("{metadata:?}").contains("PRIVATE-SOURCE-SENTINEL"));
+        let mut changed = original.clone();
+        let mut altered = value.clone();
+        altered["module_sources"]["capsule_base64"] = json!("changed");
+        changed["native_replay"]["payload_json"] = json!(serde_json::to_string(&altered).unwrap());
+        assert!(verify(&changed).is_err(), "new source bytes require a new authenticated digest");
+        for field in ["capsule_base64", "capsule_digest", "graph_input_hash"] {
+            let mut invalid = value.clone();
+            invalid["module_sources"].as_object_mut().unwrap().remove(field);
+            assert!(verify(&captured(&invalid)).is_err(), "missing {field}");
+        }
+        let mut invalid = value.clone();
+        invalid["module_sources"]["extra"] = json!(true);
+        assert!(verify(&captured(&invalid)).is_err());
+        invalid["module_sources"] = Value::Null;
+        assert!(verify(&captured(&invalid)).is_err());
+        let mut historical = original;
+        historical["native_replay"]["schema_version"] = json!("franken-node/native-replay-capture/v2");
+        assert!(verify(&historical).is_err(), "historical signatures do not attest the new schema");
     }
 
     #[test]

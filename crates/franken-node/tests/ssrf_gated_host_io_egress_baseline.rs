@@ -58,6 +58,7 @@ impl HostIoProvider for RecordingInner {
             HostIoRequest::RandomRead { byte_len } => HostIoResponse::RandomRead {
                 bytes: vec![0; usize::try_from(*byte_len).expect("bounded test request")],
             },
+            HostIoRequest::EnvRead { .. } => HostIoResponse::EnvRead { value: None },
         })
     }
 }

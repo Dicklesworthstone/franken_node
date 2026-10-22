@@ -310,6 +310,7 @@ fn effect_kind_label(kind: EffectKind) -> &'static str {
         EffectKind::Spawn => "spawn",
         EffectKind::ModuleResolve => "module_resolve",
         EffectKind::RandomRead => "random_read",
+        EffectKind::EnvRead => "env_read",
     }
 }
 

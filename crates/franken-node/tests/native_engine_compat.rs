@@ -2379,15 +2379,62 @@ fn frozen_module_config_refuses_computed_loads_before_guest_execution() {
 }
 
 #[test]
-fn frozen_modules_and_replay_are_rejected_for_direct_dispatcher_callers() {
+#[cfg(all(feature = "engine", unix))]
+fn frozen_modules_capture_and_replay_nested_commonjs_without_live_sources() {
+    use frankenengine_node::ops::native_replay::reexecute;
+    use sha2::{Digest, Sha256};
+
+    let workspace = TempDir::new().unwrap();
+    let package = workspace.path().join("node_modules/captured-nested");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.json"),
+        r#"{"name":"captured-nested","version":"1.0.0","main":"index.cjs"}"#).unwrap();
+    std::fs::write(package.join("index.cjs"), "module.exports=require('./leaf.cjs')+2;").unwrap();
+    std::fs::write(package.join("leaf.cjs"), "module.exports=40;").unwrap();
+    let app = create_test_app(workspace.path(), "app.cjs", "console.log(require('captured-nested'));\n");
+    let initialized = Command::new(franken_node_bin())
+        .current_dir(workspace.path())
+        .args(["init", "--profile", "balanced", "--out-dir", ".", "--json"])
+        .output().unwrap();
+    assert!(initialized.status.success(), "{initialized:?}");
     let mut config = balanced_config();
     config.runtime.frozen_modules = Some(true);
-    let dispatcher = EngineDispatcher::new(None, PreferredRuntime::FrankenEngine)
-        .with_replay_capture(true);
-    let error = dispatcher.dispatch_run(
-        Path::new("frozen-replay-must-not-read.cjs"), &config, "balanced", &[], 0,
-    ).expect_err("replay cannot certify an omitted source graph");
-    assert!(error.to_string().contains("Frozen modules cannot be combined"), "{error:#}");
+    let output = invoke_product_supervisor_with_options(
+        &app, &config, "balanced", Path::new(franken_node_bin()),
+        &["--frozen-modules", "--capture-replay"],
+    ).unwrap();
+    assert!(output.status.success(), "stdout={} stderr={}", output.stdout, output.stderr);
+    let report = parse_product_dispatch(&output).unwrap();
+    assert_eq!(report.captured_output.stdout, "42\n");
+    let capture = report.native_replay.expect("actual native source capture");
+    let payload: serde_json::Value = serde_json::from_str(&capture.payload_json).unwrap();
+    assert!(payload["module_sources"].is_object());
+
+    std::fs::rename(&package, workspace.path().join("saved-package")).unwrap();
+    std::fs::rename(&app, workspace.path().join("saved-app.cjs")).unwrap();
+    let replay = reexecute(&capture).expect("offline nested CJS replay");
+    assert!(replay.matched, "{replay:?}");
+    assert!(!replay.module_load_disabled);
+    assert!(replay.console_match && replay.host_effects_match);
+    assert_eq!(replay.ir4_witness_match, Some(true));
+    assert!(!app.exists() && !package.exists(), "replay must not extract source files");
+
+    // Recompute the envelope digest, so these exercise typed source validation
+    // rather than only the outer checksum. This is not signature verification.
+    for mutation in 0..5 {
+        let mut payload = payload.clone();
+        match mutation {
+            0 => { payload.as_object_mut().unwrap().remove("module_sources"); }
+            1 => payload["module_sources"]["capsule_digest"] = serde_json::json!("sha256:wrong"),
+            2 => payload["module_sources"]["graph_input_hash"] = serde_json::json!("sha256:wrong"),
+            3 => payload["package"]["source"] = serde_json::json!("console.log('changed');"),
+            _ => payload["module_sources"]["capsule_base64"] = serde_json::json!("A".repeat(4 * 1024 * 1024)),
+        }
+        let mut changed = capture.clone();
+        changed.payload_json = serde_json::to_string(&payload).unwrap();
+        changed.payload_sha256 = hex::encode(Sha256::digest(changed.payload_json.as_bytes()));
+        assert!(reexecute(&changed).is_err(), "source mutation {mutation}");
+    }
 }
 
 #[test]

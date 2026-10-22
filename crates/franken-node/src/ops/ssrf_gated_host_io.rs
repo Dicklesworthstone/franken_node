@@ -869,6 +869,7 @@ impl<P: HostIoProvider, R: EndpointResolver> HostIoProvider for SsrfGatedHostIo<
             HostIoRequest::FsRead { .. }
             | HostIoRequest::FsWrite { .. }
             | HostIoRequest::FsMeta { .. }
+            | HostIoRequest::EnvRead { .. }
             | HostIoRequest::RandomRead { .. } => return self.inner.perform(request, granted),
         };
         let (addresses, deadline) = self.gate_endpoint(
@@ -896,6 +897,7 @@ impl<P: HostIoProvider, R: EndpointResolver> HostIoProvider for SsrfGatedHostIo<
             HostIoRequest::FsRead { .. }
             | HostIoRequest::FsWrite { .. }
             | HostIoRequest::FsMeta { .. }
+            | HostIoRequest::EnvRead { .. }
             | HostIoRequest::RandomRead { .. } => {
                 return self.inner.perform_controlled(request, granted, control);
             }

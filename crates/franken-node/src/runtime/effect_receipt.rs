@@ -68,6 +68,7 @@ pub enum EffectKind {
     Spawn,
     ModuleResolve,
     RandomRead,
+    EnvRead,
 }
 
 impl EffectKind {
@@ -81,6 +82,7 @@ impl EffectKind {
             EffectKind::Spawn => 5,
             EffectKind::ModuleResolve => 6,
             EffectKind::RandomRead => 7,
+            EffectKind::EnvRead => 8,
         }
     }
 
@@ -94,6 +96,7 @@ impl EffectKind {
             EffectKind::Spawn => "spawn",
             EffectKind::ModuleResolve => "module_resolve",
             EffectKind::RandomRead => "random_read",
+            EffectKind::EnvRead => "env_read",
         }
     }
 
@@ -111,7 +114,8 @@ impl EffectKind {
             EffectKind::NetConnect
             | EffectKind::Spawn
             | EffectKind::ModuleResolve
-            | EffectKind::RandomRead => None,
+            | EffectKind::RandomRead
+            | EffectKind::EnvRead => None,
         }
     }
 }
@@ -890,6 +894,18 @@ mod tests {
             serde_json::to_string(&EffectKind::RandomRead).expect("serialize effect kind"),
             "\"random_read\""
         );
+    }
+
+    #[test]
+    fn environment_read_has_a_distinct_stable_receipt_identity() {
+        assert_eq!(EffectKind::EnvRead.tag(), 8);
+        assert_eq!(EffectKind::EnvRead.label(), "env_read");
+        assert_eq!(EffectKind::EnvRead.l1_acceptance_subject(), None);
+        assert_eq!(serde_json::to_string(&EffectKind::EnvRead).unwrap(), "\"env_read\"");
+        let original = allowed(0);
+        let mut environment = original.clone();
+        environment.effect_kind = EffectKind::EnvRead;
+        assert_ne!(original.receipt_hash(), environment.receipt_hash());
     }
 
     #[test]

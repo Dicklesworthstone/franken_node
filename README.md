@@ -375,8 +375,12 @@ clean and match the requested commits; the bootstrap refuses to reset or replace
 them. The receipt records source inputs, not a successful build or qualification.
 
 The Cargo workspace package is named `frankenengine-node`; the produced
-binary is named `franken-node`. Rust 2024 edition; no unsafe code is
-permitted by lint forbidance.
+binary is named `franken-node`. `rust-toolchain.toml` selects
+`nightly-2026-09-21` with clippy and rustfmt. The current published
+`fsqlite-pager 0.4.1` dependency requires nightly intrinsics on x86_64;
+Rust 1.99 stable fails with E0554. This is a compiler requirement, not a
+completed source-build qualification. The workspace uses Rust 2024 and
+forbids unsafe code.
 
 ### Option 3: Verify a release archive
 
