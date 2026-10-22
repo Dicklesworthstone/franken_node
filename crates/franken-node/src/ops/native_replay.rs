@@ -3259,7 +3259,12 @@ mod tests {
         assert!(changed.validate().expect_err("schema").contains("schema"));
         changed = capture;
         changed.schema_version = "franken-node/native-replay-capture/v2".to_string();
-        assert!(changed.validate().expect_err("historical capture").contains("schema"));
+        assert!(
+            changed
+                .validate()
+                .expect_err("historical capture")
+                .contains("schema")
+        );
     }
 
     #[test]

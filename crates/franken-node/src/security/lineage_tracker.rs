@@ -820,8 +820,8 @@ pub const SECRET_ENVIRONMENT_LABEL: &str = "ifl-src:secret-environment";
 #[must_use]
 pub fn secret_environment_label_set_commitment() -> String {
     let labels = BTreeSet::from([SECRET_ENVIRONMENT_LABEL.to_string()]);
-    let bare = label_set_commitment(&labels)
-        .expect("the environment-source label set is non-empty");
+    let bare =
+        label_set_commitment(&labels).expect("the environment-source label set is non-empty");
     format!("sha256:{bare}")
 }
 

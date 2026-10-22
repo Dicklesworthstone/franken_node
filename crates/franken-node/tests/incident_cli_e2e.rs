@@ -2537,6 +2537,8 @@ fn write_authenticated_native_candidate(
 #[cfg(feature = "engine")]
 #[test]
 fn native_incident_replay_preserves_explicit_environment_reads_and_private_receipts() {
+    use frankenengine_node::security::lineage_tracker::secret_environment_label_set_commitment;
+
     let workspace = tempfile::tempdir().unwrap();
     fs::write(
         workspace.path().join("app.js"),
@@ -2575,15 +2577,11 @@ fn native_incident_replay_preserves_explicit_environment_reads_and_private_recei
         assert_eq!(ledger["effect_count"], 1, "{run}");
         let receipt = &ledger["entries"][0]["receipt"];
         assert_eq!(receipt["effect_kind"], "env_read");
-        assert_eq!(
-            receipt["label_set_commitment"],
-            frankenengine_node::security::lineage_tracker::secret_environment_label_set_commitment(),
-        );
+        let expected_labels = secret_environment_label_set_commitment();
+        assert_eq!(receipt["label_set_commitment"], expected_labels);
         commitments.insert(receipt["result_hash"].as_str().unwrap().to_owned());
         let rendered = serde_json::to_string(ledger).unwrap();
-        assert!(
-            !rendered.contains("FNODE_CAPTURED_ENV") && !rendered.contains("PRIVATE-ENV-βeta"),
-        );
+        assert!(!rendered.contains("FNODE_CAPTURED_ENV") && !rendered.contains("PRIVATE-ENV-βeta"));
         let capture = &run["dispatch"]["native_replay"];
         assert!(
             !capture["payload_json"]
@@ -2650,7 +2648,14 @@ fn native_incident_replay_restores_frozen_esm_after_the_original_project_is_move
         .unwrap();
         let initialized = run_cli_in_workspace(
             &root,
-            &["init", "--profile", "legacy-risky", "--out-dir", ".", "--json"],
+            &[
+                "init",
+                "--profile",
+                "legacy-risky",
+                "--out-dir",
+                ".",
+                "--json",
+            ],
         );
         assert!(initialized.status.success(), "{initialized:?}");
         let config_path = root.join("franken_node.toml");
@@ -2663,7 +2668,13 @@ fn native_incident_replay_restores_frozen_esm_after_the_original_project_is_move
         fs::write(config_path, config.to_toml().unwrap()).unwrap();
         let run = Command::new(resolve_binary_path())
             .current_dir(&root)
-            .args(["run", "app.mjs", "--frozen-modules", "--capture-replay", "--json"])
+            .args([
+                "run",
+                "app.mjs",
+                "--frozen-modules",
+                "--capture-replay",
+                "--json",
+            ])
             .env("FNODE_MODULE_CAPTURE", "ORIGINAL-MODULE-ENVIRONMENT")
             .output()
             .unwrap();
@@ -2686,7 +2697,9 @@ fn native_incident_replay_restores_frozen_esm_after_the_original_project_is_move
                 "kind":"env_read", "name":"FNODE_MODULE_CAPTURE"
             }, {"Ok":{"kind":"env_read", "value":"ORIGINAL-MODULE-ENVIRONMENT"}}]]),
         );
-        let digest = payload["module_sources"]["capsule_digest"].as_str().unwrap();
+        let digest = payload["module_sources"]["capsule_digest"]
+            .as_str()
+            .unwrap();
         let wrong_digest = format!("sha256:{}", "0".repeat(64));
         let altered = raw.replacen(
             &format!("\"capsule_digest\":\"{digest}\""),
@@ -2698,7 +2711,11 @@ fn native_incident_replay_restores_frozen_esm_after_the_original_project_is_move
 
         let replay_root = parent.path().join("replay-operator");
         fs::create_dir_all(replay_root.join(".franken-node/keys")).unwrap();
-        fs::write(replay_root.join("franken_node.toml"), FAIL_CLOSED_BASE_CONFIG).unwrap();
+        fs::write(
+            replay_root.join("franken_node.toml"),
+            FAIL_CLOSED_BASE_CONFIG,
+        )
+        .unwrap();
         fs::copy(
             root.join(".franken-node/keys/receipt-signing.pub"),
             replay_root.join(".franken-node/keys/receipt-signing.pub"),

@@ -2379,7 +2379,10 @@ fn frozen_module_config_refuses_computed_loads_before_guest_execution() {
             options,
         )
         .unwrap();
-        assert!(!output.status.success(), "uncaptured route must not execute");
+        assert!(
+            !output.status.success(),
+            "uncaptured route must not execute"
+        );
         let diagnostics = format!("{}\n{}", output.stdout, output.stderr);
         assert!(
             diagnostics.contains("ERR_MODULE_REGISTRY_INCOMPLETE"),
@@ -2511,7 +2514,9 @@ fn frozen_modules_capture_and_replay_nested_commonjs_without_live_sources() {
                 "frozen replay prepared source or syntax differs",
             ),
             4 => {
-                let bytes = payload["module_sources"]["capsule_base64"].as_str().unwrap();
+                let bytes = payload["module_sources"]["capsule_base64"]
+                    .as_str()
+                    .unwrap();
                 let altered = format!(
                     "{}{}",
                     if bytes.starts_with('A') { "B" } else { "A" },
