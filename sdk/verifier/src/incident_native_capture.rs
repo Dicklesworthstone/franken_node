@@ -122,10 +122,14 @@ fn terminal(payload: &Value) -> Result<CapturedNativeTerminalState> {
             if expected["instructions_executed"].as_u64().is_none() {
                 return Err(invalid(".payload.expected.instructions_executed", "expected unsigned integer"));
             }
-            if let Some(exit) = expected.get("exit_code") {
-                if !exit.is_null() && !exit.as_i64().is_some_and(|code| i32::try_from(code).is_ok()) {
-                    return Err(invalid(".payload.expected.exit_code", "expected null or i32 exit code"));
-                }
+            if let Some(exit) = expected.get("exit_code")
+                && !exit.is_null()
+                && !exit.as_i64().is_some_and(|code| i32::try_from(code).is_ok())
+            {
+                return Err(invalid(
+                    ".payload.expected.exit_code",
+                    "expected null or i32 exit code",
+                ));
             }
             CapturedNativeTerminalState::Completed
         }
@@ -200,10 +204,14 @@ fn bind_run_context(initial: &Value, payload: &Value, state: CapturedNativeTermi
     {
         return Err(invalid(".binding.execution_failure", "run context disagrees with captured terminal state"));
     }
-    if let Some(trace) = initial.get("trace_id") {
-        if nonblank(trace, ".binding.trace_id")? != payload["expected"]["trace_id"].as_str().unwrap_or_default() {
-            return Err(invalid(".binding.trace_id", "run context names a different execution trace"));
-        }
+    if let Some(trace) = initial.get("trace_id")
+        && nonblank(trace, ".binding.trace_id")?
+            != payload["expected"]["trace_id"].as_str().unwrap_or_default()
+    {
+        return Err(invalid(
+            ".binding.trace_id",
+            "run context names a different execution trace",
+        ));
     }
     Ok(())
 }
@@ -244,14 +252,20 @@ pub(super) fn verify_terminal_events(
             }
         }
     }
-    if capture.is_some() && run_context(initial)?.is_some() {
-        if let Some(count) = initial.get("effect_count") {
-            let count = count.as_u64().ok_or_else(|| invalid(".binding.effect_count", "expected unsigned effect count"))?;
-            // The product represents a run with no host effects using one
-            // state event. It must not silently vanish or become a fake effect.
-            if count == 0 && terminals != 1 {
-                return Err(invalid(".binding.terminal_event", "zero-effect run requires one native terminal event"));
-            }
+    if capture.is_some()
+        && run_context(initial)?.is_some()
+        && let Some(count) = initial.get("effect_count")
+    {
+        let count = count
+            .as_u64()
+            .ok_or_else(|| invalid(".binding.effect_count", "expected unsigned effect count"))?;
+        // The product represents a run with no host effects using one
+        // state event. It must not silently vanish or become a fake effect.
+        if count == 0 && terminals != 1 {
+            return Err(invalid(
+                ".binding.terminal_event",
+                "zero-effect run requires one native terminal event",
+            ));
         }
     }
     Ok(())
