@@ -3780,6 +3780,13 @@ one pass.
   information-flow check, and builtins exist only as recognized call patterns
   such as `fs.readFileSync(...)`, not as runtime objects a package can pass
   around (bd-reality-20260923-26n9r.4).
+  With `--frozen-modules`, captured packages can use literal `require`, ESM
+  `import`, reexports and `import()` for the engine's native `buffer`, `events`,
+  `os`, `querystring`, `url`, `timers`, `perf_hooks`, `path`, `path/posix` and
+  `path/win32` providers, including `node:` aliases. ESM default exports share
+  the CommonJS objects, and named exports come from the same native providers.
+  Each route retains its policy and information-flow checks, including cached
+  loads. This does not provide the complete Node/Bun builtin API inventory.
   Frozen module execution can admit contained workspace links with
   `run app.cjs --frozen-modules --frozen-module-symlinks`, or with both
   `runtime.frozen_modules = true` and `runtime.frozen_module_symlinks = true`
