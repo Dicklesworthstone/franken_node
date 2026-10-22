@@ -124,7 +124,9 @@ fn terminal(payload: &Value) -> Result<CapturedNativeTerminalState> {
             }
             if let Some(exit) = expected.get("exit_code")
                 && !exit.is_null()
-                && !exit.as_i64().is_some_and(|code| i32::try_from(code).is_ok())
+                && !exit
+                    .as_i64()
+                    .is_some_and(|code| i32::try_from(code).is_ok())
             {
                 return Err(invalid(
                     ".payload.expected.exit_code",
@@ -289,13 +291,22 @@ pub(super) fn verify(initial: &Value) -> Result<Option<VerifiedNativeCaptureMeta
     // authenticated digest. The inner parser rejects ambiguity independently.
     let UnambiguousJson(payload) = serde_json::from_str(raw)
         .map_err(|_| invalid(".payload_json", "native payload must be unambiguous JSON"))?;
-    exact(&payload, ".payload", PAYLOAD_FIELDS, &["process", "module_sources"])?;
+    exact(
+        &payload,
+        ".payload",
+        PAYLOAD_FIELDS,
+        &["process", "module_sources"],
+    )?;
     if let Some(sources) = payload.get("module_sources") {
         // Inspect authenticated metadata only. The product must decode the
         // capsule, verify its independent pin, rebuild resolution and execute;
         // this SDK never claims those native semantics from a signed string.
-        let sources = exact(sources, ".payload.module_sources",
-            &["capsule_base64", "capsule_digest", "graph_input_hash"], &[])?;
+        let sources = exact(
+            sources,
+            ".payload.module_sources",
+            &["capsule_base64", "capsule_digest", "graph_input_hash"],
+            &[],
+        )?;
         for field in ["capsule_base64", "capsule_digest", "graph_input_hash"] {
             nonblank(&sources[field], ".payload.module_sources.identity")?;
         }
@@ -418,10 +429,16 @@ mod tests {
         let mut altered = value.clone();
         altered["module_sources"]["capsule_base64"] = json!("changed");
         changed["native_replay"]["payload_json"] = json!(serde_json::to_string(&altered).unwrap());
-        assert!(verify(&changed).is_err(), "new source bytes require a new authenticated digest");
+        assert!(
+            verify(&changed).is_err(),
+            "new source bytes require a new authenticated digest"
+        );
         for field in ["capsule_base64", "capsule_digest", "graph_input_hash"] {
             let mut invalid = value.clone();
-            invalid["module_sources"].as_object_mut().unwrap().remove(field);
+            invalid["module_sources"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
             assert!(verify(&captured(&invalid)).is_err(), "missing {field}");
         }
         let mut invalid = value.clone();
@@ -430,8 +447,12 @@ mod tests {
         invalid["module_sources"] = Value::Null;
         assert!(verify(&captured(&invalid)).is_err());
         let mut historical = original;
-        historical["native_replay"]["schema_version"] = json!("franken-node/native-replay-capture/v2");
-        assert!(verify(&historical).is_err(), "historical signatures do not attest the new schema");
+        historical["native_replay"]["schema_version"] =
+            json!("franken-node/native-replay-capture/v2");
+        assert!(
+            verify(&historical).is_err(),
+            "historical signatures do not attest the new schema"
+        );
     }
 
     #[test]
@@ -579,10 +600,13 @@ mod tests {
             initial["effect_count"] = json!(0);
             let metadata = verify(&initial).unwrap().unwrap();
             let event = terminal_event(&initial, state != "completed");
-            assert!(verify_terminal_events(&initial, &[event.clone()], Some(&metadata)).is_ok());
+            assert!(
+                verify_terminal_events(&initial, std::slice::from_ref(&event), Some(&metadata))
+                    .is_ok()
+            );
             assert!(verify_terminal_events(&initial, &[], Some(&metadata)).is_err());
             assert!(verify_terminal_events(&initial, &[event.clone(), event.clone()], Some(&metadata)).is_err());
-            assert!(verify_terminal_events(&initial, &[event.clone()], None).is_err());
+            assert!(verify_terminal_events(&initial, std::slice::from_ref(&event), None).is_err());
             let field = if state == "completed" { "native_execution_completed" } else { "native_execution_failed" };
             for key in ["run_receipt_id", "run_receipt_hash", "payload_sha256"] {
                 let mut wrong = event.clone();
@@ -631,7 +655,7 @@ mod tests {
         bundle["timeline"] = json!([event]);
         bundle["initial_state_snapshot"] = initial;
         refresh_timeline_metadata(&mut bundle);
-        set_chunks(&mut bundle, &[0..1]);
+        set_chunks(&mut bundle, std::slice::from_ref(&(0..1)));
         resign(&mut bundle)
     }
 
@@ -692,7 +716,7 @@ mod tests {
             let mut value: Value = serde_json::from_slice(&bytes).unwrap();
             value["timeline"] = json!([]);
             refresh_timeline_metadata(&mut value);
-            set_chunks(&mut value, &[0..0]);
+            set_chunks(&mut value, std::slice::from_ref(&(0..0)));
             assert!(matches!(verify_incident_bundle(&resign(&mut value), &signing_key().verifying_key()),
                 Err(IncidentBundleError::Structure { path, .. }) if path == "$.timeline"));
         }

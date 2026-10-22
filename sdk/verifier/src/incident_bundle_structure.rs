@@ -680,7 +680,7 @@ pub(super) mod tests {
         let mut bundle = fixture();
         bundle["timeline"] = serde_json::json!([]);
         refresh_timeline_metadata(&mut bundle);
-        set_chunks(&mut bundle, &[0..0]);
+        set_chunks(&mut bundle, std::slice::from_ref(&(0..0)));
         let bytes = resign(&mut bundle);
         let verified = verify_incident_bundle(&bytes, &fixture_key().verifying_key()).unwrap();
         assert_eq!(verified.event_count, 0);
@@ -730,14 +730,14 @@ pub(super) mod tests {
             "effect_count":3,"allowed_count":1,"denied_count":1,"failed_count":1,
         });
         refresh_timeline_metadata(&mut bundle);
-        set_chunks(&mut bundle, &[0..3]);
+        set_chunks(&mut bundle, std::slice::from_ref(&(0..3)));
         bundle
     }
 
     fn refresh_single_chunk(bundle: &mut Value) {
         refresh_timeline_metadata(bundle);
         let count = bundle["timeline"].as_array().unwrap().len();
-        set_chunks(bundle, &[0..count]);
+        set_chunks(bundle, std::slice::from_ref(&(0..count)));
     }
 
     #[test]
