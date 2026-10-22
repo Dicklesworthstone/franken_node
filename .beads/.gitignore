@@ -1,7 +1,10 @@
 # Database
 *.db
 *.db-shm
-*.db-wal
+*.db-wal*
+*.db-journal
+*.vacuum-wal-cert*
+*.fsqlite-migration-state
 beads.db.bad_*
 beads.db.rebuild_*
 
@@ -12,6 +15,9 @@ beads.db.rebuild_*
 last-touched
 *.tmp
 recovery_*/
+.br-wal-index-*/
+.br_recovery/
+.br_history/
 .write.lock
 
 # br fsqlite-ns VFS sidecars — per-machine runtime state, like -wal/-shm.
