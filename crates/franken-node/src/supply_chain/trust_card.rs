@@ -1254,7 +1254,7 @@ impl OsvRiskBaseline {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum OsvRiskRefreshOutcome {
-    Updated(TrustCard),
+    Updated(Box<TrustCard>),
     /// An active contribution requires a complete authenticated clean answer,
     /// including when another source currently masks its aggregate risk level.
     ClearanceRefused,
@@ -1263,6 +1263,13 @@ pub enum OsvRiskRefreshOutcome {
 enum RiskUpdateOrigin {
     Generic,
     Osv(Option<OsvRiskBaseline>),
+}
+
+/// Source authority and audit attribution for one signed card update.
+struct TrustCardUpdateProvenance {
+    source_change: Option<(QuarantineSource, bool)>,
+    audit_detail: Option<String>,
+    risk_origin: RiskUpdateOrigin,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -2294,9 +2301,11 @@ impl TrustCardRegistry {
         self.update_with_quarantine_source(
             extension_id,
             mutation,
-            None,
-            None,
-            RiskUpdateOrigin::Generic,
+            TrustCardUpdateProvenance {
+                source_change: None,
+                audit_detail: None,
+                risk_origin: RiskUpdateOrigin::Generic,
+            },
             now_secs,
             trace_id,
         )
@@ -2447,13 +2456,15 @@ impl TrustCardRegistry {
                 last_verified_timestamp: Some(timestamp_from_secs(now_secs)),
                 evidence_refs: None,
             },
-            None,
-            Some(detail.to_owned()),
-            RiskUpdateOrigin::Osv(baseline),
+            TrustCardUpdateProvenance {
+                source_change: None,
+                audit_detail: Some(detail.to_owned()),
+                risk_origin: RiskUpdateOrigin::Osv(baseline),
+            },
             now_secs,
             trace_id,
         )
-        .map(OsvRiskRefreshOutcome::Updated)
+        .map(|card| OsvRiskRefreshOutcome::Updated(Box::new(card)))
     }
 
     /// Add or release one signed containment source, preserving all others.
@@ -2486,9 +2497,11 @@ impl TrustCardRegistry {
                 last_verified_timestamp: Some(timestamp_from_secs(now_secs)),
                 evidence_refs: None,
             },
-            Some((source, active)),
-            None,
-            RiskUpdateOrigin::Generic,
+            TrustCardUpdateProvenance {
+                source_change: Some((source, active)),
+                audit_detail: None,
+                risk_origin: RiskUpdateOrigin::Generic,
+            },
             now_secs,
             trace_id,
         )
@@ -2539,11 +2552,13 @@ impl TrustCardRegistry {
                 last_verified_timestamp: Some(timestamp_from_secs(now_secs)),
                 evidence_refs: None,
             },
-            Some((QuarantineSource::Local, false)),
-            Some(format!(
-                "local quarantine released by {operator_id}: {reason}"
-            )),
-            RiskUpdateOrigin::Generic,
+            TrustCardUpdateProvenance {
+                source_change: Some((QuarantineSource::Local, false)),
+                audit_detail: Some(format!(
+                    "local quarantine released by {operator_id}: {reason}"
+                )),
+                risk_origin: RiskUpdateOrigin::Generic,
+            },
             now_secs,
             trace_id,
         )
@@ -2553,12 +2568,15 @@ impl TrustCardRegistry {
         &mut self,
         extension_id: &str,
         mutation: TrustCardMutation,
-        source_change: Option<(QuarantineSource, bool)>,
-        audit_detail: Option<String>,
-        risk_origin: RiskUpdateOrigin,
+        provenance: TrustCardUpdateProvenance,
         now_secs: u64,
         trace_id: &str,
     ) -> Result<TrustCard, TrustCardError> {
+        let TrustCardUpdateProvenance {
+            source_change,
+            audit_detail,
+            risk_origin,
+        } = provenance;
         validate_extension_id(extension_id)?;
         let latest = self
             .latest_verified_card(extension_id)?
@@ -4543,7 +4561,7 @@ mod tests {
             )
             .expect("valid source-specific OSV refresh")
         {
-            OsvRiskRefreshOutcome::Updated(card) => card,
+            OsvRiskRefreshOutcome::Updated(card) => *card,
             OsvRiskRefreshOutcome::ClearanceRefused => panic!("unexpected clearance refusal"),
         }
     }

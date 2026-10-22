@@ -21166,7 +21166,7 @@ fn run_trust_scan(
                 match outcome {
                     supply_chain::trust_card::OsvRiskRefreshOutcome::Updated(card) => {
                         refreshed_cards = refreshed_cards.saturating_add(1);
-                        (card, TrustScanItemStatus::Refreshed)
+                        (*card, TrustScanItemStatus::Refreshed)
                     }
                     supply_chain::trust_card::OsvRiskRefreshOutcome::ClearanceRefused => {
                         warnings.push(format!(
@@ -21220,7 +21220,7 @@ fn run_trust_scan(
                         )
                         .map_err(|err| anyhow::anyhow!(err.to_string()))?
                     {
-                        supply_chain::trust_card::OsvRiskRefreshOutcome::Updated(card) => card,
+                        supply_chain::trust_card::OsvRiskRefreshOutcome::Updated(card) => *card,
                         supply_chain::trust_card::OsvRiskRefreshOutcome::ClearanceRefused => {
                             anyhow::bail!("authenticated same-artifact OSV clearance was refused")
                         }
@@ -21282,7 +21282,7 @@ fn run_trust_scan(
                     )
                     .map_err(|err| anyhow::anyhow!(err.to_string()))?;
                 card = match outcome {
-                    supply_chain::trust_card::OsvRiskRefreshOutcome::Updated(card) => card,
+                    supply_chain::trust_card::OsvRiskRefreshOutcome::Updated(card) => *card,
                     supply_chain::trust_card::OsvRiskRefreshOutcome::ClearanceRefused => {
                         anyhow::bail!("nonempty OSV findings unexpectedly requested clearance")
                     }
