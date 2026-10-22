@@ -663,7 +663,8 @@ mod engine {
             &self,
             request: &ProcessSpawnRequest,
         ) -> Result<(), ProcessSpawnError> {
-            self.preparation
+            match self
+                .preparation
                 .iter()
                 .find_map(|entry| match entry {
                     CapturedProcessPreparation::Preflight {
@@ -671,15 +672,18 @@ mod engine {
                         outcome,
                     } if expected == request => Some(outcome.clone()),
                     _ => None,
-                })
-                .unwrap_or_else(|| Err(self.refuse()))
+                }) {
+                Some(outcome) => outcome,
+                None => Err(self.refuse()),
+            }
         }
 
         fn prepare_request(
             &self,
             request: &ProcessSpawnRequest,
         ) -> Result<ProcessSpawnRequest, ProcessSpawnError> {
-            self.preparation
+            match self
+                .preparation
                 .iter()
                 .find_map(|entry| match entry {
                     CapturedProcessPreparation::Prepare {
@@ -687,8 +691,10 @@ mod engine {
                         outcome,
                     } if expected == request => Some(outcome.clone()),
                     _ => None,
-                })
-                .unwrap_or_else(|| Err(self.refuse()))
+                }) {
+                Some(outcome) => outcome,
+                None => Err(self.refuse()),
+            }
         }
 
         fn perform(
@@ -872,7 +878,7 @@ mod engine {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(tag = "terminal_state", rename_all = "snake_case")]
     enum CapturedAttempt {
-        Completed(CapturedExecution),
+        Completed(Box<CapturedExecution>),
         UncaughtException(CapturedGuestException),
         EngineFailure(CapturedEngineFailure),
     }
@@ -1363,7 +1369,7 @@ mod engine {
                     &result.host_effect_journal,
                 )?,
                 module_sources: module_sources.cloned(),
-                expected: CapturedAttempt::Completed(CapturedExecution {
+                expected: CapturedAttempt::Completed(Box::new(CapturedExecution {
                     trace_id: result.trace_id.clone(),
                     ir4_witness: result.ir4_witness.clone(),
                     execution_value: result.execution_value.clone(),
@@ -1373,7 +1379,7 @@ mod engine {
                     lane: result.lane,
                     exit_code: result.exit_code,
                     decisions: execution_decisions(result)?,
-                }),
+                })),
             };
             payload.validate()?;
             encode_capture(&payload)
@@ -1506,7 +1512,8 @@ mod engine {
             exception_value_match: None,
             decisions_match: Some(expected.decisions == execution_decisions(replayed)?),
             policy_comparison_note: replay_policy_comparison_note(
-                payload.process.is_some(), payload.module_sources.is_some(),
+                payload.process.is_some(),
+                payload.module_sources.is_some(),
             ),
         };
         for (matches, subject) in [
@@ -1657,9 +1664,10 @@ mod engine {
                 _ => None,
             },
             decisions_match: None,
-            policy_comparison_note: format!("{note} {}", replay_policy_comparison_note(
-                expected_journal.is_some(), frozen_modules,
-            )),
+            policy_comparison_note: format!(
+                "{note} {}",
+                replay_policy_comparison_note(expected_journal.is_some(), frozen_modules)
+            ),
         };
         if expected_journal.is_some() {
             outcome.policy_comparison_note.push_str(" Process outcomes are consumed in global journal order without live dispatch; the engine's Unknown filesystem exception provenance remains in force.");
@@ -1777,9 +1785,8 @@ mod engine {
                     );
                 }
                 let result = match modules {
-                    Some((entry, resolver)) => orchestrator.execute_resolved_entry_with_resolver(
-                        &package, &entry, resolver,
-                    ),
+                    Some((entry, resolver)) => orchestrator
+                        .execute_resolved_entry_with_resolver(&package, &entry, resolver),
                     None => orchestrator.execute(&package),
                 };
                 if let Some(provider) = replay_process_provider {
@@ -1794,7 +1801,11 @@ mod engine {
                     (CapturedAttempt::Completed(_), Err(error)) => {
                         Err(format!("native re-execution failed: {error}"))
                     }
-                    (expected @ (CapturedAttempt::UncaughtException(_) | CapturedAttempt::EngineFailure(_)), Err(error)) => {
+                    (
+                        expected @ (CapturedAttempt::UncaughtException(_)
+                        | CapturedAttempt::EngineFailure(_)),
+                        Err(error),
+                    ) => {
                         let observed = observe_failure(&orchestrator, &error).map_err(|reason| {
                             format!(
                                 "native failure re-execution is not certified: {reason}; {error}"
@@ -1812,7 +1823,11 @@ mod engine {
                             &replayed,
                         )
                     }
-                    (expected @ (CapturedAttempt::UncaughtException(_) | CapturedAttempt::EngineFailure(_)), Ok(replayed)) => {
+                    (
+                        expected @ (CapturedAttempt::UncaughtException(_)
+                        | CapturedAttempt::EngineFailure(_)),
+                        Ok(replayed),
+                    ) => {
                         let replayed = TerminalObservation::completed(replayed);
                         compare_failure_observation(
                             expected,
@@ -2187,17 +2202,33 @@ mod engine {
         fn capture_stop(root: &Path, budget_stop: bool) -> NativeReplayCapture {
             let (package, config, runtime, orchestrator, error) = stopped_run(root, budget_stop);
             let capture = NativeReplayCapture::from_failed_execution(
-                &package, &config, &runtime, AmbientAuthorityGrant::DenyAll,
-                &[], None, None, &orchestrator, &error,
-            ).expect("capture the finalized native stop through the run-facing entrypoint");
+                &package,
+                &config,
+                &runtime,
+                AmbientAuthorityGrant::DenyAll,
+                &[],
+                None,
+                None,
+                &orchestrator,
+                &error,
+            )
+            .expect("capture the finalized native stop through the run-facing entrypoint");
             assert_eq!(
                 capture.terminal_state().expect("typed terminal state"),
                 NativeReplayTerminalState::EngineFailure,
             );
             let explicit = NativeReplayCapture::from_finalized_failure(
-                &package, &config, &runtime, AmbientAuthorityGrant::DenyAll,
-                &[], None, None, &orchestrator, &error,
-            ).expect("capture the same finalized native stop explicitly");
+                &package,
+                &config,
+                &runtime,
+                AmbientAuthorityGrant::DenyAll,
+                &[],
+                None,
+                None,
+                &orchestrator,
+                &error,
+            )
+            .expect("capture the same finalized native stop explicitly");
             assert_eq!(capture, explicit);
             capture
         }
