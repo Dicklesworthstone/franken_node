@@ -1,0 +1,78 @@
+{
+  "schema_version": "franken-node/project-compat-corpus/v1",
+  "cases": [
+    {
+      "id": "buffer-validation-rejects-decoy-window",
+      "entry": "app.cjs",
+      "files": {
+        "app.cjs": "const fs=require('node:fs');const check=require('content-check');const bytes=Buffer.from([192,175]);const decoy=Buffer.from('OK');Object.defineProperty(bytes,'buffer',{value:decoy.buffer});Object.defineProperty(bytes,'byteOffset',{value:decoy.byteOffset});Object.defineProperty(bytes,'byteLength',{value:2});if(check(bytes)){fs.writeFileSync('published.txt',bytes);fs.writeFileSync('success.txt','published\\n');}else{fs.writeFileSync('validation.txt','INVALID_UTF8\\n');}console.log('CONTENT_CHECK_COMPLETE');\n",
+        "node_modules/content-check/package.json": "{\"name\":\"content-check\",\"main\":\"index.cjs\"}\n",
+        "node_modules/content-check/index.cjs": "const {isUtf8}=require('node:buffer');module.exports=bytes=>isUtf8(bytes);\n",
+        "published.txt": "previous release\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "CONTENT_CHECK_COMPLETE\n",
+        "stderr": "",
+        "files": {
+          "published.txt": "previous release\n",
+          "validation.txt": "INVALID_UTF8\n",
+          "success.txt": null
+        }
+      }
+    },
+    {
+      "id": "buffer-validation-esm-unicode-window",
+      "entry": "app.mjs",
+      "files": {
+        "app.mjs": "import fs from 'node:fs';import {inspect} from '@sample/text-inspect';const raw=Buffer.from('!café 😀!');const bytes=new Uint8Array(raw.buffer,raw.byteOffset+1,raw.length-2);for(const name of ['buffer','byteOffset','byteLength'])Object.defineProperty(bytes,name,{get(){throw new Error('public metadata read');}});const result=inspect(bytes);fs.writeFileSync('inspection.json',JSON.stringify(result)+'\\n');if(result.utf8)fs.writeFileSync('published.txt',Buffer.from(bytes));console.log('ESM_INSPECTION_COMPLETE');\n",
+        "node_modules/@sample/text-inspect/package.json": "{\"name\":\"@sample/text-inspect\",\"type\":\"module\",\"exports\":\"./index.mjs\"}\n",
+        "node_modules/@sample/text-inspect/index.mjs": "import {isUtf8,isAscii} from 'node:buffer';export const inspect=bytes=>({utf8:isUtf8(bytes),ascii:isAscii(bytes)});\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "ESM_INSPECTION_COMPLETE\n",
+        "stderr": "",
+        "files": {
+          "inspection.json": "{\"utf8\":true,\"ascii\":false}\n",
+          "published.txt": "café 😀"
+        }
+      }
+    },
+    {
+      "id": "buffer-validation-does-not-use-replaced-decoder",
+      "entry": "app.cjs",
+      "files": {
+        "app.cjs": "const fs=require('node:fs');const check=require('./lib/check.cjs');const original=TextDecoder.prototype.decode;let decoderCalls=0;TextDecoder.prototype.decode=function(){decoderCalls++;return 'normalized';};let accepted;try{accepted=check(Buffer.from([255]));}finally{TextDecoder.prototype.decode=original;}if(accepted)fs.writeFileSync('success.txt','published\\n');fs.writeFileSync('receipt.json',JSON.stringify({accepted,decoderCalls})+'\\n');console.log('DECODER_ISOLATION_COMPLETE');\n",
+        "lib/check.cjs": "const {isUtf8}=require('node:buffer');module.exports=bytes=>isUtf8(bytes);\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "DECODER_ISOLATION_COMPLETE\n",
+        "stderr": "",
+        "files": {
+          "receipt.json": "{\"accepted\":false,\"decoderCalls\":0}\n",
+          "success.txt": null
+        }
+      }
+    },
+    {
+      "id": "buffer-validation-file-manifest",
+      "entry": "app.cjs",
+      "files": {
+        "app.cjs": "const fs=require('node:fs');const inspect=require('./lib/inspect.cjs');const names=['ascii.txt','unicode.txt','invalid.bin'];fs.writeFileSync('invalid.bin',Buffer.from([237,160,128]));const rows=names.map(name=>({name,...inspect(fs.readFileSync(name))}));fs.writeFileSync('manifest.json',JSON.stringify(rows)+'\\n');console.log('BINARY_MANIFEST_COMPLETE');\n",
+        "lib/inspect.cjs": "const {isUtf8,isAscii}=require('buffer');module.exports=bytes=>({utf8:isUtf8(bytes),ascii:isAscii(bytes),bytes:bytes.length});\n",
+        "ascii.txt": "package data\n",
+        "unicode.txt": "café 😀\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "BINARY_MANIFEST_COMPLETE\n",
+        "stderr": "",
+        "files": {
+          "manifest.json": "[{\"name\":\"ascii.txt\",\"utf8\":true,\"ascii\":true,\"bytes\":13},{\"name\":\"unicode.txt\",\"utf8\":true,\"ascii\":false,\"bytes\":11},{\"name\":\"invalid.bin\",\"utf8\":false,\"ascii\":false,\"bytes\":3}]\n"
+        }
+      }
+    }
+  ]
+}

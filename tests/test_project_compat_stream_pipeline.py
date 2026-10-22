@@ -146,5 +146,11 @@ class MIMEProjectTests(PipelineProjectTests):
     case_count = 4
 
 
+class BufferValidationProjectTests(PipelineProjectTests):
+    # Validate actual package byte windows before publishing text outputs.
+    corpus_path = ROOT / 'fixtures/compatibility/projects/buffer-validation.corpus.json'
+    case_count = 4
+
+
 if __name__ == '__main__':
     unittest.main()
