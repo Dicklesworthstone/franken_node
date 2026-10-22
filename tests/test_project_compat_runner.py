@@ -441,7 +441,8 @@ else:
         self.assertEqual(report["results"], [])
 
     def test_unchanged_baseline_allows_new_candidate_without_reference_drift(self):
-        self.run_triad(case())
+        original = self.run_triad(case())
+        self.assertEqual(original["verdict"], "PASS", original)
         baseline = self.root / "artifacts/report.json"
         before = baseline.read_bytes()
         with self.native.open("a") as target:
