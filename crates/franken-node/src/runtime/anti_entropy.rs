@@ -4849,15 +4849,19 @@ mod tests {
             "Root domain should be versioned"
         );
 
-        // Test length-prefixed input resistance to collision
-        let state = TrustState::new(1);
+        // Compare actual recomputed state digests with the domain-separated preimages.
+        let mut state = TrustState::new(1);
         let root_digest_empty = root_digest_with_domain(&[], ROOT_DIGEST_DOMAIN);
-        let root_digest_single = root_digest_with_domain(&[record1], ROOT_DIGEST_DOMAIN);
+        state.recompute_root_digest();
+        assert_digest_eq(state.root_digest(), &root_digest_empty);
 
-        assert_digest_ne(&root_digest_empty, &root_digest_single);
+        let root_digest_single =
+            root_digest_with_domain(std::slice::from_ref(&record1), ROOT_DIGEST_DOMAIN);
+        assert!(state.insert(record1));
+        assert_eq!(state.len(), 1);
+        assert_digest_eq(state.root_digest(), &root_digest_single);
 
-        // The current implementation correctly uses domain separators and length-prefixing
-        // This prevents common hash collision attacks
+        assert_digest_ne(&root_digest_empty, state.root_digest());
     }
 
     #[cfg(any())]

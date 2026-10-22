@@ -1978,7 +1978,7 @@ mod testing_module_negative_tests {
     #[test]
     fn negative_edge_case_node_role_transport_integration() {
         // Test edge cases in node role handling across scenario and transport modules
-        use super::scenario_builder::{NodeRole, ScenarioBuilder};
+        use super::scenario_builder::{NodeRole, Scenario, ScenarioBuilder};
         use super::virtual_transport::{LinkFaultConfig, VirtualTransportLayer};
 
         let node_role_edge_cases = vec![
@@ -2013,7 +2013,7 @@ mod testing_module_negative_tests {
                 NodeRole::Participant,
                 "observer_to_participant",
             ),
-            // Self-connections
+            // Same-role connections between distinct nodes
             (
                 NodeRole::Coordinator,
                 NodeRole::Coordinator,
@@ -2032,22 +2032,34 @@ mod testing_module_negative_tests {
         ];
 
         for (source_role, target_role, test_name) in node_role_edge_cases {
-            let role_test_result = std::panic::catch_unwind(|| {
-                // Create scenario with specific role combination
-                let scenario = ScenarioBuilder::new(&format!("role_test_{}", test_name))
-                    .seed(99999)
-                    .add_node("source_node", "Source", source_role)?
-                    .add_node("target_node", "Target", target_role)?
-                    .add_link("role_link", "source_node", "target_node", true)?
-                    .build()?;
+            let scenario = ScenarioBuilder::new(&format!("role_test_{}", test_name))
+                .seed(99999)
+                .add_node("source_node", "Source", source_role)
+                .expect("valid source role should be accepted")
+                .add_node("target_node", "Target", target_role)
+                .expect("valid target role should be accepted")
+                .add_link("role_link", "source_node", "target_node", true)
+                .expect("role fixture link should be accepted")
+                .build()
+                .expect("valid role fixture should build");
+            let source = scenario
+                .nodes
+                .iter()
+                .find(|node| node.id == "source_node")
+                .expect("source node should remain in the scenario");
+            let target = scenario
+                .nodes
+                .iter()
+                .find(|node| node.id == "target_node")
+                .expect("target node should remain in the scenario");
+            assert_eq!(source.role, source_role, "source role: {test_name}");
+            assert_eq!(target.role, target_role, "target role: {test_name}");
 
-                // Test transport integration with role-based nodes
-                let mut transport = VirtualTransportLayer::new(12121);
-
-                // Create transport link using scenario node information
-                let create_result = transport.create_link(
-                    "source_node",
-                    "target_node",
+            let mut transport = VirtualTransportLayer::new(12121);
+            let link_id = transport
+                .create_link(
+                    &source.id,
+                    &target.id,
                     LinkFaultConfig {
                         drop_probability: 0.1,
                         reorder_depth: 5,
@@ -2055,83 +2067,109 @@ mod testing_module_negative_tests {
                         delay_ticks: 10,
                         partition: false,
                     },
-                );
+                )
+                .expect("valid role fixture link should be created");
+            assert_eq!(link_id, "source_node->target_node");
 
-                match create_result {
-                    Ok(_) => {
-                        // Test role-specific message patterns
-                        let role_specific_messages = match (source_role, target_role) {
-                            (NodeRole::Coordinator, _) => vec![
-                                b"coordinator_command".to_vec(),
-                                b"coordination_update".to_vec(),
-                            ],
-                            (NodeRole::Participant, _) => {
-                                vec![b"participant_data".to_vec(), b"participant_status".to_vec()]
-                            }
-                            (NodeRole::Observer, _) => {
-                                vec![b"observation_report".to_vec(), b"observer_query".to_vec()]
-                            }
-                        };
-
-                        for (i, message) in role_specific_messages.into_iter().enumerate() {
-                            let send_result =
-                                transport.send_message("source_node", "target_node", message);
-
-                            match send_result {
-                                Ok(message_id) => {
-                                    assert!(
-                                        message_id > 0,
-                                        "Message ID should be valid for role test: {}",
-                                        test_name
-                                    );
-                                }
-                                Err(_) => {
-                                    // Message sending may fail due to fault injection - acceptable
-                                }
-                            }
-
-                            // Periodically check transport state
-                            if i % 2 == 0 {
-                                let stats = transport.stats();
-                                assert!(
-                                    stats.total_messages < u64::MAX,
-                                    "Stats should not overflow: {}",
-                                    test_name
-                                );
-                            }
-                        }
-
-                        // Verify transport still functions after role-specific operations
-                        let final_stats = transport.stats();
-                        assert!(
-                            final_stats.total_messages >= 0,
-                            "Message count should be non-negative: {}",
-                            test_name
-                        );
-                    }
-                    Err(_) => {
-                        // Transport creation may fail - acceptable
-                    }
+            let role_specific_messages = match source.role {
+                NodeRole::Coordinator => vec![
+                    b"coordinator_command".to_vec(),
+                    b"coordination_update".to_vec(),
+                ],
+                NodeRole::Participant => {
+                    vec![b"participant_data".to_vec(), b"participant_status".to_vec()]
                 }
-
-                // Test scenario serialization preserves roles correctly
-                let json = scenario.to_json()?;
+                NodeRole::Observer => {
+                    vec![b"observation_report".to_vec(), b"observer_query".to_vec()]
+                }
+            };
+            let mut sent = Vec::new();
+            for message in role_specific_messages {
+                // Injected drops are successful sends with a recorded outcome,
+                // not transport errors that this valid fixture may ignore.
+                let message_id = transport
+                    .send_message(&source.id, &target.id, message.clone())
+                    .expect("valid role message should enter the fault pipeline");
+                assert!(message_id > 0, "valid message identity: {test_name}");
                 assert!(
-                    json.contains("Coordinator")
-                        || json.contains("Participant")
-                        || json.contains("Observer"),
-                    "JSON should contain role information: {}",
-                    test_name
+                    sent.iter().all(|(id, _)| *id != message_id),
+                    "role messages must receive distinct identities: {test_name}"
                 );
+                sent.push((message_id, message));
+                assert!(
+                    transport.stats().total_messages < u64::MAX,
+                    "Stats should not overflow: {test_name}"
+                );
+            }
 
-                Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
-            });
-
+            let buffered = transport
+                .buffered_count(&link_id)
+                .expect("role fixture link should remain present");
+            transport.advance_tick(9);
             assert!(
-                role_test_result.is_ok(),
-                "Role integration test should not panic: {}",
-                test_name
+                transport
+                    .deliver_next(&link_id)
+                    .expect("role fixture delivery should be valid")
+                    .is_none(),
+                "configured delay must prevent early delivery: {test_name}"
             );
+            transport.advance_tick(1);
+            let delivered = transport
+                .deliver_all(&link_id)
+                .expect("eligible role messages should be delivered");
+            assert_eq!(
+                delivered.len(),
+                buffered,
+                "all buffered messages: {test_name}"
+            );
+            let mut delivered_ids = std::collections::BTreeSet::new();
+            for message in &delivered {
+                assert!(
+                    delivered_ids.insert(message.id),
+                    "each role message must be delivered at most once: {test_name}"
+                );
+                let original = &sent
+                    .iter()
+                    .find(|(id, _)| *id == message.id)
+                    .expect("delivered identity must belong to a sent role message")
+                    .1;
+                assert_eq!(message.source, source.id, "source binding: {test_name}");
+                assert_eq!(message.target, target.id, "target binding: {test_name}");
+                assert_eq!(message.tick_created, 0, "creation tick: {test_name}");
+                assert_eq!(
+                    message.tick_delivered,
+                    Some(10),
+                    "delivery tick: {test_name}"
+                );
+                assert_eq!(message.payload.len(), original.len());
+                let flipped_bits: u32 = message
+                    .payload
+                    .iter()
+                    .zip(original)
+                    .map(|(actual, expected)| (actual ^ expected).count_ones())
+                    .sum();
+                assert_eq!(flipped_bits, 1, "configured corruption: {test_name}");
+            }
+            let delivered_count = u64::try_from(delivered.len()).expect("two-message fixture count");
+            let final_stats = transport.stats();
+            assert_eq!(final_stats.total_messages, 2, "both sends: {test_name}");
+            assert_eq!(
+                delivered_count + final_stats.dropped_messages,
+                final_stats.total_messages,
+                "every role message must be delivered or dropped: {test_name}"
+            );
+            assert_eq!(final_stats.corrupted_messages, delivered_count);
+            assert_eq!(final_stats.active_links, 1);
+            assert_eq!(
+                transport
+                    .buffered_count(&link_id)
+                    .expect("delivered role fixture link should remain present"),
+                0
+            );
+
+            let json = scenario.to_json().expect("role fixture should serialize");
+            let roundtrip = Scenario::from_json(&json).expect("role fixture should deserialize");
+            assert_eq!(roundtrip, scenario, "exact role roundtrip: {test_name}");
         }
     }
 

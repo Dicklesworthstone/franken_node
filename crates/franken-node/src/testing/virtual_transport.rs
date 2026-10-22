@@ -2654,7 +2654,8 @@ mod virtual_transport_boundary_negative_tests {
     #[test]
     fn negative_send_message_with_massive_payload_handles_memory_efficiently() {
         let mut vt = VirtualTransportLayer::new(42);
-        vt.create_link("node-a", "node-b", LinkFaultConfig::no_faults())
+        let link_id = vt
+            .create_link("node-a", "node-b", LinkFaultConfig::no_faults())
             .expect("link creation should succeed");
 
         // Create a very large message payload (1MB of pattern data)
@@ -2664,24 +2665,41 @@ mod virtual_transport_boundary_negative_tests {
         let result = vt.send_message("node-a", "node-b", large_payload.clone());
         let duration = start_time.elapsed();
 
-        // Should handle large payloads without excessive delay
-        match result {
-            Ok(_) => {
-                // If accepted, should complete within reasonable time (2 seconds)
-                assert!(
-                    duration < std::time::Duration::from_secs(2),
-                    "Large payload processing took too long: {:?}",
-                    duration
-                );
-            }
-            Err(_) => {
-                // Implementation may reject large payloads for safety
-            }
-        }
+        let message_id = result.expect("a fault-free link should accept the 1 MB payload");
+        assert_eq!(message_id, 1);
+        assert!(
+            duration < std::time::Duration::from_secs(2),
+            "Large payload processing took too long: {:?}",
+            duration
+        );
 
-        // Verify memory is not excessively consumed
+        // The accepted payload must remain queued until explicitly delivered.
+        assert_eq!(vt.buffered_count(&link_id).unwrap(), 1);
+        let queued_stats = vt.stats();
+        assert_eq!(queued_stats.total_messages, 1);
+        assert_eq!(queued_stats.delivered_messages, 0);
+
+        let delivered = vt
+            .deliver_next(&link_id)
+            .expect("the fault-free link should remain deliverable")
+            .expect("the queued payload should be available without delay");
+        assert_eq!(delivered.id, message_id);
+        assert_eq!(delivered.source, "node-a");
+        assert_eq!(delivered.target, "node-b");
+        assert_eq!(delivered.payload, large_payload);
+        assert_eq!(delivered.tick_created, 0);
+        assert_eq!(delivered.tick_delivered, Some(0));
+        assert_eq!(vt.buffered_count(&link_id).unwrap(), 0);
+        assert!(vt.deliver_next(&link_id).unwrap().is_none());
+
         let stats = vt.stats();
-        assert!(stats.total_messages >= 0); // Basic sanity check
+        assert_eq!(stats.total_messages, 1);
+        assert_eq!(stats.delivered_messages, 1);
+        assert_eq!(stats.dropped_messages, 0);
+        assert_eq!(stats.reordered_messages, 0);
+        assert_eq!(stats.corrupted_messages, 0);
+        assert_eq!(stats.active_links, 1);
+        assert_eq!(stats.partitioned_links, 0);
     }
 
     #[test]
