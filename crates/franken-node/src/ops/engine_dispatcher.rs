@@ -10175,7 +10175,9 @@ impl EngineDispatcher {
                 .map_err(anyhow::Error::from)
         }
 
-        fn blocked_source_commitment(labels: &std::collections::BTreeSet<String>) -> Result<String> {
+        fn blocked_source_commitment(
+            labels: &std::collections::BTreeSet<String>,
+        ) -> Result<String> {
             if labels.is_empty() {
                 // Preserve the existing conservative marker for a flow block
                 // whose source is unavailable in the recorded transcript.
@@ -10485,7 +10487,9 @@ impl EngineDispatcher {
             // effects that re-emit those exact bytes inherit the label.
             let source_label = match request {
                 HostIoRequest::EnvRead { .. } => Some(SECRET_ENVIRONMENT_LABEL),
-                HostIoRequest::FsRead { path } if classify_sensitive_source_path(path).is_some() => {
+                HostIoRequest::FsRead { path }
+                    if classify_sensitive_source_path(path).is_some() =>
+                {
                     Some(SECRET_FILE_LABEL)
                 }
                 _ => None,

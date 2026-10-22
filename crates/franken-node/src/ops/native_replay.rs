@@ -2953,13 +2953,13 @@ mod engine {
         }
 
         #[test]
-        fn native_reexecution_preserves_existing_v2_canonical_capture_bytes() {
+        fn native_reexecution_preserves_canonical_shape_without_optional_captures() {
             on_native_stack(|| {
-                // Freeze the original v2 field order and shape independently
-                // of the newly optional process capture field. Already signed
-                // payloads must retain both their bytes and their digest.
+                // Freeze the v3 field order without optional process/module
+                // captures. This checks canonical omission; historical v2
+                // envelopes remain unsupported.
                 #[derive(Serialize)]
-                struct OriginalV2Payload<'a> {
+                struct MinimalPayload<'a> {
                     package: &'a ExtensionPackage,
                     orchestrator: &'a CapturedOrchestratorSettings,
                     runtime: &'a RuntimeConfig,
@@ -2970,12 +2970,13 @@ mod engine {
                     expected: &'a CapturedAttempt,
                 }
 
-                let root = tempfile::tempdir().expect("existing v2 capture");
+                let root = tempfile::tempdir().expect("minimal capture");
                 let capture = record(root.path(), "console.log('existing-v2-capture');");
                 let payload: NativeReplayPayload =
-                    serde_json::from_str(&capture.payload_json).expect("v2 inputs");
+                    serde_json::from_str(&capture.payload_json).expect("current capture inputs");
                 assert!(payload.process.is_none());
-                let original_payload_json = serde_json::to_string(&OriginalV2Payload {
+                assert!(payload.module_sources.is_none());
+                let original_payload_json = serde_json::to_string(&MinimalPayload {
                     package: &payload.package,
                     orchestrator: &payload.orchestrator,
                     runtime: &payload.runtime,
@@ -2985,14 +2986,14 @@ mod engine {
                     host_effect_transcript: &payload.host_effect_transcript,
                     expected: &payload.expected,
                 })
-                .expect("original v2 serialization");
+                .expect("minimal canonical serialization");
                 let original = NativeReplayCapture {
                     schema_version: NATIVE_REPLAY_CAPTURE_SCHEMA.to_string(),
                     payload_sha256: hex::encode(Sha256::digest(original_payload_json.as_bytes())),
                     payload_json: original_payload_json,
                 };
                 assert_eq!(capture, original);
-                let outcome = reexecute(&original).expect("accept already signed v2 shape");
+                let outcome = reexecute(&original).expect("accept current canonical shape");
                 assert!(outcome.matched, "{outcome:?}");
             });
         }
