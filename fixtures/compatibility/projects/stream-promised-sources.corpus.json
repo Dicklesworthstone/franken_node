@@ -1,0 +1,98 @@
+{
+  "schema_version": "franken-node/project-compat-corpus/v1",
+  "cases": [
+    {
+      "id": "promised-source-package-asset",
+      "entry": "app.cjs",
+      "files": {
+        "app.cjs": "const fs=require('node:fs');const {pipeline}=require('node:stream/promises');\nconst asset=require('package-asset');\n(async()=>{const sink=fs.createWriteStream('asset.txt');await pipeline(asset(),sink);\nif(!sink.closed)throw new Error('file not closed');fs.writeFileSync('complete.txt','closed\\n');console.log('PROMISED_ASSET_COMPLETE');})().catch(e=>{console.error(e);process.exitCode=1;});\n",
+        "node_modules/package-asset/package.json": "{\"name\":\"package-asset\",\"main\":\"index.cjs\"}\n",
+        "node_modules/package-asset/index.cjs": "module.exports=async()=>Buffer.from('café: promised package bytes\\n');\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "PROMISED_ASSET_COMPLETE\n",
+        "stderr": "",
+        "files": {
+          "asset.txt": "café: promised package bytes\n",
+          "complete.txt": "closed\n"
+        }
+      }
+    },
+    {
+      "id": "promised-source-esm-record-transform",
+      "entry": "app.mjs",
+      "files": {
+        "app.mjs": "import {createWriteStream,writeFileSync} from 'node:fs';\nimport {pipeline} from 'node:stream/promises';import {load,encode} from '@records/export';\nawait pipeline(load(),encode,createWriteStream('rows.jsonl'));\nwriteFileSync('complete.txt','identity preserved\\n');console.log('PROMISED_RECORD_COMPLETE');\n",
+        "node_modules/@records/export/package.json": "{\"name\":\"@records/export\",\"type\":\"module\",\"exports\":\"./index.mjs\"}\n",
+        "node_modules/@records/export/index.mjs": "import {TransformStream} from 'node:stream/web';\nconst record={names:['café','東京','notes']};\nexport function load(){return Promise.resolve(record);}\nexport const encode=new TransformStream({transform(value,controller){\nif(value!==record)throw new Error('record identity lost');\nfor(let i=0;i<value.names.length;i++)controller.enqueue(JSON.stringify({index:i,name:value.names[i]})+'\\n');}});\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "PROMISED_RECORD_COMPLETE\n",
+        "stderr": "",
+        "files": {
+          "rows.jsonl": "{\"index\":0,\"name\":\"café\"}\n{\"index\":1,\"name\":\"東京\"}\n{\"index\":2,\"name\":\"notes\"}\n",
+          "complete.txt": "identity preserved\n"
+        }
+      }
+    },
+    {
+      "id": "promised-source-rejection-closes-descriptor",
+      "entry": "app.cjs",
+      "files": {
+        "app.cjs": "const fs=require('node:fs');const {pipeline}=require('node:stream/promises');const make=require('owned-export');\n(async()=>{const {source,sink,reason}=make();let failure;\ntry{await pipeline(source,sink);}catch(e){failure=e;}\nif(failure!==reason||!sink.closed)throw new Error('original failure or cleanup missing');\nfs.writeFileSync('failure.txt',failure.code+'\\n');console.log('PROMISED_FAILURE_COMPLETE');})().catch(e=>{console.error(e);process.exitCode=1;});\n",
+        "node_modules/owned-export/package.json": "{\"name\":\"owned-export\",\"main\":\"index.cjs\"}\n",
+        "node_modules/owned-export/index.cjs": "const fs=require('node:fs');const {Writable}=require('node:stream');\nmodule.exports=function(){const fd=fs.openSync('staged.txt','w');const reason=new Error('asset lookup failed');reason.code='ASSET_MISSING';\nconst sink=new Writable({write(bytes,encoding,done){fs.writeSync(fd,bytes);done();},\nfinal(done){fs.writeFileSync('success.txt','must not publish\\n');done();},\ndestroy(error,done){process.nextTick(()=>{fs.closeSync(fd);fs.writeFileSync('cleanup.txt','descriptor closed\\n');done(error);});}});\nreturn {source:Promise.reject(reason),sink,reason};};\n",
+        "published.txt": "previous release\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "PROMISED_FAILURE_COMPLETE\n",
+        "stderr": "",
+        "files": {
+          "published.txt": "previous release\n",
+          "staged.txt": "",
+          "cleanup.txt": "descriptor closed\n",
+          "failure.txt": "ASSET_MISSING\n",
+          "success.txt": null
+        }
+      }
+    },
+    {
+      "id": "promised-source-callback-return-and-completion",
+      "entry": "app.cjs",
+      "files": {
+        "app.cjs": "const fs=require('node:fs');const {pipeline}=require('node:stream');const source=require('callback-asset');\nconst sink=fs.createWriteStream('callback.txt');let calls=0;\nconst returned=pipeline(source(),sink,error=>{calls++;if(error){console.error(error);process.exitCode=1;return;}\nif(calls!==1||returned!==sink||!sink.closed)throw new Error('callback lifetime');\nfs.writeFileSync('receipt.txt','same sink; closed; callback once\\n');console.log('PROMISED_CALLBACK_COMPLETE');});\n",
+        "node_modules/callback-asset/package.json": "{\"name\":\"callback-asset\",\"main\":\"index.cjs\"}\n",
+        "node_modules/callback-asset/index.cjs": "module.exports=()=>new Promise(resolve=>queueMicrotask(()=>resolve(Buffer.from('callback package\\n'))));\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "PROMISED_CALLBACK_COMPLETE\n",
+        "stderr": "",
+        "files": {
+          "callback.txt": "callback package\n",
+          "receipt.txt": "same sink; closed; callback once\n"
+        }
+      }
+    },
+    {
+      "id": "promised-source-ordinary-stream-control",
+      "entry": "app.cjs",
+      "files": {
+        "app.cjs": "const fs=require('node:fs');const {pipeline}=require('node:stream/promises');const source=require('ordinary-asset');\n(async()=>{await pipeline(source(),fs.createWriteStream('ordinary.txt'));console.log('ORDINARY_CONTROL_COMPLETE');})().catch(e=>{console.error(e);process.exitCode=1;});\n",
+        "node_modules/ordinary-asset/package.json": "{\"name\":\"ordinary-asset\",\"main\":\"index.cjs\"}\n",
+        "node_modules/ordinary-asset/index.cjs": "const {Readable}=require('node:stream');module.exports=()=>Readable.from(['ordinary ','unchanged\\n']);\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "ORDINARY_CONTROL_COMPLETE\n",
+        "stderr": "",
+        "files": {
+          "ordinary.txt": "ordinary unchanged\n"
+        }
+      }
+    }
+  ]
+}

@@ -152,5 +152,11 @@ class BufferValidationProjectTests(PipelineProjectTests):
     case_count = 4
 
 
+class PromisedSourceProjectTests(PipelineProjectTests):
+    # Promised package data uses the existing shared stream converter/owner.
+    corpus_path = ROOT / 'fixtures/compatibility/projects/stream-promised-sources.corpus.json'
+    case_count = 5
+
+
 if __name__ == '__main__':
     unittest.main()
