@@ -164,5 +164,11 @@ class DuplexPairProjectTests(PipelineProjectTests):
     case_count = 4
 
 
+class TimerSchedulerProjectTests(PipelineProjectTests):
+    # Package backoff and yielding share the canonical native timer operations.
+    corpus_path = ROOT / 'fixtures/compatibility/projects/timer-scheduler.corpus.json'
+    case_count = 5
+
+
 if __name__ == '__main__':
     unittest.main()
