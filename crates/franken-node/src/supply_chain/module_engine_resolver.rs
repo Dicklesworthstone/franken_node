@@ -553,7 +553,7 @@ mod tests {
             ("app.mjs", "import('node:buffer');"),
         ] {
             let root = tempfile::tempdir().unwrap();
-            put(root.path(), "package.json", r#"{"imports":{"#builtin":"buffer"}}"#);
+            put(root.path(), "package.json", r##"{"imports":{"#builtin":"buffer"}}"##);
             put(root.path(), file, source);
             let graph = capture(root.path(), file, GraphOptions::default()).unwrap();
             let pin = graph.report().input_hash.clone();
@@ -1570,6 +1570,64 @@ mod tests {
     }
 
     #[test]
+    fn captured_path_namespaces_preserve_native_identity_and_complete_windows_methods() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let root = tempfile::tempdir().unwrap();
+            put(
+                root.path(),
+                "app.cjs",
+                r#"
+const path = require('path/posix');
+const child = require('path-user');
+const windows = require('node:path/win32');
+console.log(child.path === path, windows.posix === path, path.win32 === windows);
+console.log(child.make('file.txt'), windows.resolve('C:\\base', '..', 'out'));
+path.join = function() { return 'shared mutation'; };
+console.log(child.make('ignored'), require('node:path').join('ignored'));
+"#,
+            );
+            put(
+                root.path(),
+                "node_modules/path-user/package.json",
+                r#"{"name":"path-user","main":"index.cjs"}"#,
+            );
+            put(
+                root.path(),
+                "node_modules/path-user/index.cjs",
+                r#"
+const path = require('node:path');
+module.exports = { path: path, make: function(value) { return path.join('root', value); } };
+"#,
+            );
+            let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+            let pin = graph.report().input_hash.clone();
+            let captured = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
+            assert_eq!(captured.summary().modules, 4);
+            let result = execute_captured_graph_for_test(root.path(), "app.cjs", lane, || {
+                put(
+                    root.path(),
+                    "node_modules/path-user/index.cjs",
+                    "throw new Error('uncaptured path consumer was reopened');",
+                );
+            });
+            assert_eq!(
+                result
+                    .console_output
+                    .iter()
+                    .map(|entry| entry.message.as_str())
+                    .collect::<Vec<_>>(),
+                [
+                    "true true true",
+                    "root/file.txt C:\\out",
+                    "shared mutation shared mutation",
+                ]
+            );
+        }
+    }
+
+    #[test]
     fn native_commonjs_uses_captured_npm_json_sources_and_original_filenames() {
         use frankenengine_engine::baseline_interpreter::LaneChoice;
 
@@ -1620,3 +1678,4 @@ mod tests {
     }
 
 }
+

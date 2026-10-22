@@ -2423,6 +2423,62 @@ fn frozen_module_cli_executes_native_core_objects_in_installed_packages() {
 
 #[test]
 #[cfg(all(feature = "engine", unix))]
+fn frozen_module_cli_executes_path_namespaces_shared_with_installed_packages() {
+    let workspace = TempDir::new().unwrap();
+    let package_dir = workspace.path().join("node_modules/frozen-path");
+    std::fs::create_dir_all(&package_dir).unwrap();
+    std::fs::write(
+        package_dir.join("package.json"),
+        r#"{"name":"frozen-path","version":"1.0.0","main":"index.cjs"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        package_dir.join("index.cjs"),
+        r#"
+const path = require('node:path');
+module.exports = { path: path, make: function(value) { return path.join('root', value); } };
+"#,
+    )
+    .unwrap();
+    let app = create_test_app(
+        workspace.path(),
+        "app.cjs",
+        r#"
+const path = require('path/posix');
+const child = require('frozen-path');
+const windows = require('node:path/win32');
+console.log(child.path === path, path.win32 === windows, windows.posix === path);
+console.log(child.make('file.txt'), windows.resolve('C:\\base', '..', 'out'));
+path.join = function() { return 'shared mutation'; };
+console.log(child.make('ignored'));
+"#,
+    );
+    let config = balanced_config();
+    let output = invoke_product_supervisor_with_options(
+        &app,
+        &config,
+        "balanced",
+        Path::new(franken_node_bin()),
+        &["--frozen-modules"],
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        output.stdout,
+        output.stderr
+    );
+    let dispatch = parse_product_dispatch(&output).unwrap();
+    assert_eq!(
+        dispatch.captured_output.stdout,
+        "true true true\nroot/file.txt C:\\out\nshared mutation\n"
+    );
+    let graph = dispatch.engine_decision.unwrap().frozen_modules.unwrap();
+    assert_eq!(graph.modules, 4);
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
 fn frozen_module_cli_refuses_unsupported_native_builtin_routes_before_execution() {
     for (filename, source) in [
         ("app.cjs", "console.log('FROZEN_CORE_MUST_NOT_RUN'); require('fs');"),
@@ -2442,3 +2498,4 @@ fn frozen_module_cli_refuses_unsupported_native_builtin_routes_before_execution(
         assert!(!diagnostics.contains("FROZEN_CORE_MUST_NOT_RUN"), "{diagnostics}");
     }
 }
+
