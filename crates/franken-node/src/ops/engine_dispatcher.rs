@@ -5455,7 +5455,14 @@ fn prepare_native_frozen_modules(
 ) -> std::result::Result<FrozenNativeModules, String> {
     #[cfg(not(unix))]
     {
-        let _ = (project_paths, parser_options, capabilities, policy_id, contained_symlinks, capture_replay);
+        let _ = (
+            project_paths,
+            parser_options,
+            capabilities,
+            policy_id,
+            contained_symlinks,
+            capture_replay,
+        );
         Err("Frozen module capture requires Unix".to_string())
     }
     #[cfg(unix)]
@@ -5487,7 +5494,9 @@ fn prepare_native_frozen_modules(
         let graph = capture(root, entrypoint, options)
             .map_err(|error| format!("Frozen module graph capture failed: {error}"))?;
         let replay_sources = if capture_replay {
-            Some(crate::ops::native_replay::CapturedModuleSources::capture(&graph)?)
+            Some(crate::ops::native_replay::CapturedModuleSources::capture(
+                &graph,
+            )?)
         } else {
             None
         };
@@ -6008,32 +6017,31 @@ impl EngineDispatcher {
         dir: &Path,
         manifests: &mut Vec<RunPackageManifest>,
     ) -> std::result::Result<PathBuf, String> {
-        if let Some(manifest) = read_run_package_manifest(dir, dir, manifests)? {
-            if let Some(main) = manifest
+        if let Some(manifest) = read_run_package_manifest(dir, dir, manifests)?
+            && let Some(main) = manifest
                 .main
                 .as_deref()
                 .map(str::trim)
                 .filter(|main| !main.is_empty())
-            {
-                let main_path = Path::new(main);
-                if main_path.components().any(|component| {
-                    !matches!(
-                        component,
-                        std::path::Component::Normal(_) | std::path::Component::CurDir
-                    )
-                }) {
-                    return Err(format!(
-                        "package.json `main` {main:?} must be a relative path inside {}",
-                        dir.display()
-                    ));
-                }
-                let base = dir.join(main_path);
-                let mut with_js = base.clone().into_os_string();
-                with_js.push(".js");
-                for candidate in [base.clone(), PathBuf::from(with_js), base.join("index.js")] {
-                    if candidate.is_file() {
-                        return Ok(candidate);
-                    }
+        {
+            let main_path = Path::new(main);
+            if main_path.components().any(|component| {
+                !matches!(
+                    component,
+                    std::path::Component::Normal(_) | std::path::Component::CurDir
+                )
+            }) {
+                return Err(format!(
+                    "package.json `main` {main:?} must be a relative path inside {}",
+                    dir.display()
+                ));
+            }
+            let base = dir.join(main_path);
+            let mut with_js = base.clone().into_os_string();
+            with_js.push(".js");
+            for candidate in [base.clone(), PathBuf::from(with_js), base.join("index.js")] {
+                if candidate.is_file() {
+                    return Ok(candidate);
                 }
             }
         }
@@ -9429,7 +9437,10 @@ impl EngineDispatcher {
                 )
             })?;
         validate_native_frozen_modules(config).map_err(|error| {
-            native_engine_spawn_error_with_telemetry_cleanup(error.to_string(), &mut telemetry_guard)
+            native_engine_spawn_error_with_telemetry_cleanup(
+                error.to_string(),
+                &mut telemetry_guard,
+            )
         })?;
         let parser_budget = config.runtime.effective_parse_budget(config.profile);
 
