@@ -337,9 +337,10 @@ pub struct RunArgs {
     pub capture_replay: bool,
 
     /// Freeze supported literal import/require routes and source bytes before
-    /// native execution. Supports CommonJS requires of buffer, events, os,
-    /// querystring, url, timers and perf_hooks. Computed loads, other builtin
-    /// forms and uncaptured routes are refused. The current replay format
+    /// native execution. Supports require, import, reexport and import() of
+    /// buffer, events, os, querystring, url, timers, perf_hooks and path
+    /// (including path/posix and path/win32). Computed loads, unsupported
+    /// builtins and uncaptured routes are refused. The current replay format
     /// cannot retain this source graph.
     #[arg(long, conflicts_with = "capture_replay")]
     pub frozen_modules: bool,

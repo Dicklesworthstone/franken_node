@@ -53,6 +53,23 @@ and rejects the import promise with `ERR_MODULE_NOT_FOUND`. Missing static
 imports, invalid metadata, denied exports and unknown routes remain refusals.
 Eager `resolve_chain` fails on any missing target.
 
+Literal `require`, static `import`, reexport and dynamic `import()` routes can
+deliver the engine's native `buffer`, `events`, `os`, `querystring`, `url`,
+`timers`, `perf_hooks`, `path`, `path/posix` and `path/win32` providers, including
+their `node:` spellings. The registry admits only names in the engine's canonical
+provider inventory. These are source-free terminal descriptors, not captured
+files; the capture report continues to identify them as runtime requirements.
+Every load needs `ModuleLoad` and `Builtin`; `timers` additionally needs `Timer`.
+
+The engine owns evaluation and caches the CommonJS object and ESM namespace in
+the execution realm. ESM exposes the provider's named exports and a `default`
+equal to its CommonJS value. Bare and `node:` spellings share their namespace;
+`path` and `path/posix` have distinct namespaces with the same POSIX default
+object. Importing a cached provider still performs the current request's policy
+and descriptor-integrity checks. The engine also checks the bounded-import
+information-flow contract before exposing a namespace. Computed loads and
+unsupported providers do not gain a fallback to host I/O.
+
 Only analyzed closed graphs are admitted. The engine-independent
 `PinnedModuleRegistry::new` remains transform-free and requires explicit
 JavaScript ESM/CommonJS formats. The engine-backed constructor additionally
@@ -88,7 +105,7 @@ goal that could misclassify a CommonJS source as ESM just because the unwrapped
 source fits a smaller budget. The temporary CommonJS wrapper is moved into the
 engine's owned-input API without another source-buffer copy.
 
-JSX, native addons, Wasm and builtins need separate contracts/providers. Typed
+JSX, native addons, Wasm and other builtins need separate contracts/providers. Typed
 capability-intent annotations are rejected rather than erased without their
 engine obligation metadata. Implicit reclassification of JavaScript as
 TypeScript is likewise rejected. These are admission errors, not empty module
@@ -173,9 +190,11 @@ The source scanner still does not prove arbitrary runtime dependency completenes
 Unknown computed loads fail at this adapter instead of gaining ambient fallback.
 Import/export binding validation, CommonJS cache initialization, execution cells,
 effect authority and cyclic evaluation are not implemented by this adapter.
-`ExecutionOrchestrator`'s current single-package execution path does not accept a
-resolver injection, so `franken-node run` is not changed here. Embedding consumers
-that accept the public engine trait can use it directly.
+The product's `franken-node run --frozen-modules` path captures and prepares the
+graph, then passes this resolver to the sibling engine's
+`execute_resolved_entry_with_resolver`. The engine performs linking, evaluation,
+native-provider delivery and per-load checks. Embedding consumers can use the
+same public contract directly.
 
 The engine-independent registry unit tests run in the regular native module-graph
 suite. This separate focused host compiles the same production modules against
@@ -188,7 +207,7 @@ of unsupported ESM and partial-budget cases. With sibling checkouts adjacent:
 
 ```sh
 cargo test --manifest-path tools/module-graph/engine-bridge/Cargo.toml \
-  --lib engine_resolver::
+  --lib source_graph::
 ```
 
 The CI job pins the engine revision used for contract verification and reports

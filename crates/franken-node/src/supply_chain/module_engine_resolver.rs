@@ -3,10 +3,9 @@
 //! This implements the real sibling engine trait, not a lookalike interface.
 //! Source selection is closed-world; the supplied engine policy runs on every
 //! delivered candidate, including cache hits and traversed cycle back-edges.
-//! Exact CommonJS requests for engine-supported native builtin objects and
-//! Path-family imports become source-free terminal descriptors. No builtin
-//! fallback, live I/O or evaluation happens here. Source preparation uses the
-//! sibling engine front end.
+//! Exact captured requests for engine-supported native builtin objects become
+//! source-free terminal descriptors. No builtin fallback, live I/O or evaluation
+//! happens here. Source preparation uses the sibling engine front end.
 
 #[path = "module_engine_preparation.rs"]
 mod preparation;
@@ -70,21 +69,8 @@ impl CapturedEngineResolver {
             graph,
             independent_graph_pin,
             |module, source, report| preparer.prepare(module, source, report),
-            |specifier, style| {
-                let native = NativeBuiltinModule::from_specifier(specifier)?;
-                if style == RequestStyle::Require
-                    || matches!(
-                        native,
-                        NativeBuiltinModule::Path
-                            | NativeBuiltinModule::PathPosix
-                            | NativeBuiltinModule::PathWin32
-                    )
-                {
-                    Some(native.canonical_specifier())
-                } else {
-                    None
-                }
-            },
+            |specifier, _| NativeBuiltinModule::from_specifier(specifier)
+                .map(NativeBuiltinModule::canonical_specifier),
         )?;
         let mut resolver = Self::from_registry(registry);
         resolver.prepared_sources = preparer.finish();
@@ -639,15 +625,95 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_builtin_load_styles_and_indirect_loaders_remain_refused() {
+    fn native_builtin_esm_terminals_preserve_pins_and_exact_import_routes() {
+        let root = tempfile::tempdir().unwrap();
+        put(
+            root.path(),
+            "app.mjs",
+            r#"
+            import 'buffer';
+            export { join } from 'node:path';
+            import('node:events');
+        "#,
+        );
+        let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        assert!(!graph.report().fully_resolved);
+        assert!(graph.report().diagnostics.is_empty());
+        assert_eq!(graph.report().modules.len(), 1);
+        let resolver = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
+        assert_eq!(resolver.summary().graph_input_hash, pin);
+        assert_eq!(resolver.summary().modules, 4);
+        let policy = CapabilityPolicyHook::new(BTreeSet::from([
+            RuntimeCapability::ModuleLoad,
+            RuntimeCapability::Builtin,
+        ]));
+        let entry = resolver
+            .resolve(&resolver.entry_request(), &context(), &policy)
+            .unwrap();
+        let request = |name: &str, style| {
+            ModuleRequest::new(name, style)
+                .with_referrer(entry.module.record.id.clone())
+                .with_compatibility_mode(CompatibilityMode::NodeCompat)
+        };
+        for (name, native) in [
+            ("buffer", NativeBuiltinModule::Buffer),
+            ("node:path", NativeBuiltinModule::Path),
+            ("node:events", NativeBuiltinModule::Events),
+        ] {
+            let delivered = resolver
+                .resolve(&request(name, ImportStyle::Import), &context(), &policy)
+                .unwrap();
+            assert_eq!(
+                NativeBuiltinModule::from_record(&delivered.module.record),
+                Some(native)
+            );
+            assert_eq!(
+                delivered.module.content_hash,
+                delivered.module.record.canonical_hash()
+            );
+            assert!(delivered.module.record.source.is_empty());
+            assert!(delivered.module.record.dependencies.is_empty());
+        }
+        // A supported provider is not authority to invent another route or
+        // load style, even when an alias selects the same cached descriptor.
+        for (name, style) in [
+            ("buffer", ImportStyle::Require),
+            ("node:buffer", ImportStyle::Import),
+            ("events", ImportStyle::Import),
+        ] {
+            assert_eq!(
+                resolver
+                    .resolve(&request(name, style), &context(), &policy)
+                    .unwrap_err()
+                    .code,
+                ResolutionErrorCode::UnsupportedSpecifier
+            );
+        }
+        assert_eq!(
+            resolver
+                .resolve(
+                    &request("buffer", ImportStyle::Import),
+                    &context(),
+                    &granted()
+                )
+                .unwrap_err()
+                .code,
+            ResolutionErrorCode::PolicyDenied
+        );
+    }
+
+    #[test]
+    fn unsupported_builtin_providers_and_indirect_loaders_remain_refused() {
         for (file, source) in [
             ("app.cjs", "require('fs');"),
             ("app.cjs", "require('node:unknown');"),
             ("app.cjs", "const name='buffer'; require(name);"),
             ("app.cjs", "require.resolve('buffer', {paths: ['/tmp']});"),
             ("app.cjs", "require('#builtin');"),
-            ("app.mjs", "import 'buffer';"),
-            ("app.mjs", "import('node:buffer');"),
+            ("app.mjs", "import 'node:fs';"),
+            ("app.mjs", "import('node:unknown');"),
+            ("app.mjs", "const name='buffer'; import(name);"),
             ("app.mjs", "const name = 'node:path'; import(name);"),
             ("app.mjs", "import '#path';"),
         ] {
@@ -1628,6 +1694,30 @@ mod tests {
         lane: frankenengine_engine::baseline_interpreter::LaneChoice,
         after_capture: impl FnOnce(),
     ) -> frankenengine_engine::execution_orchestrator::OrchestratorResult {
+        execute_captured_graph_with_policy_for_test(
+            root,
+            entrypoint,
+            lane,
+            Arc::new(CapabilityPolicyHook::new(BTreeSet::from([
+                RuntimeCapability::ModuleLoad,
+                RuntimeCapability::Builtin,
+                RuntimeCapability::Timer,
+            ]))),
+            after_capture,
+        )
+        .expect("the actual sibling runtime executes product-captured sources")
+    }
+
+    fn execute_captured_graph_with_policy_for_test(
+        root: &Path,
+        entrypoint: &str,
+        lane: frankenengine_engine::baseline_interpreter::LaneChoice,
+        policy: Arc<dyn ModulePolicyHook + Send + Sync>,
+        after_capture: impl FnOnce(),
+    ) -> Result<
+        frankenengine_engine::execution_orchestrator::OrchestratorResult,
+        frankenengine_engine::execution_orchestrator::OrchestratorError,
+    > {
         use frankenengine_engine::ast::ParseGoal;
         use frankenengine_engine::execution_orchestrator::{
             ExecutionOrchestrator, ExtensionPackage, OrchestratorConfig,
@@ -1636,9 +1726,6 @@ mod tests {
         let graph = capture(root, entrypoint, GraphOptions::default()).unwrap();
         let pin = graph.report().input_hash.clone();
         let resolver = Arc::new(CapturedEngineResolver::new(graph, &pin).ok().unwrap());
-        let policy = Arc::new(CapabilityPolicyHook::new(BTreeSet::from([
-            RuntimeCapability::ModuleLoad, RuntimeCapability::Builtin, RuntimeCapability::Timer,
-        ])));
         let entry = resolver
             .resolve(&resolver.entry_request(), &context(), policy.as_ref())
             .unwrap();
@@ -1666,7 +1753,19 @@ mod tests {
         };
         engine
             .execute_resolved_entry_with_resolver(&package, &entry, installed)
-            .expect("the actual sibling runtime executes product-captured sources")
+    }
+
+    fn node_reference_output(root: &Path, entrypoint: &str) -> String {
+        let reference = std::process::Command::new("node")
+            .arg(root.join(entrypoint))
+            .current_dir(root)
+            .env_remove("NODE_OPTIONS")
+            .env_remove("NODE_PATH")
+            .output()
+            .expect("Node is required for the independent runtime oracle");
+        assert!(reference.status.success(), "{reference:?}");
+        assert!(reference.stderr.is_empty(), "{reference:?}");
+        String::from_utf8(reference.stdout).unwrap()
     }
 
     #[test]
@@ -1834,6 +1933,358 @@ import('path').then(function(again) {
     }
 
     #[test]
+    fn native_esm_core_objects_execute_across_captured_npm_package_boundaries() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let root = tempfile::tempdir().unwrap();
+            put(
+                root.path(),
+                "app.mjs",
+                r#"
+import buffer, { Buffer } from 'node:buffer';
+import * as namespace from 'buffer';
+import { encoded, emit, packageBuffer, PackageBuffer, packagePath, join } from 'esm-core-user';
+console.log(encoded('ok'), packageBuffer === buffer, PackageBuffer === Buffer);
+console.log(emit(42), Object.prototype.toString.call(namespace), namespace.default === buffer);
+console.log(join('root', 'file.txt'), packagePath.join === join);
+import('node:buffer').then(loaded => {
+    console.log(loaded === namespace, loaded.default === packageBuffer, loaded.Buffer === Buffer);
+});
+"#,
+            );
+            put(
+                root.path(),
+                "node_modules/esm-core-user/package.json",
+                r#"{"name":"esm-core-user","type":"module","exports":"./index.mjs"}"#,
+            );
+            put(
+                root.path(),
+                "node_modules/esm-core-user/index.mjs",
+                r#"
+import { Buffer } from 'buffer';
+import EventEmitter from 'node:events';
+export { default as packageBuffer, Buffer as PackageBuffer } from 'node:buffer';
+export * from './path-exports.mjs';
+export function encoded(text) { return Buffer.from(text).toString('hex'); }
+export function emit(value) {
+    const emitter = new EventEmitter();
+    let result = 0;
+    emitter.on('value', function(item) { result = item; });
+    emitter.emit('value', value);
+    return result;
+}
+"#,
+            );
+            put(
+                root.path(),
+                "node_modules/esm-core-user/path-exports.mjs",
+                r#"
+export { default as packagePath, join } from 'node:path';
+"#,
+            );
+            let reference = node_reference_output(root.path(), "app.mjs");
+            assert_eq!(
+                reference,
+                "6f6b true true\n42 [object Module] true\nroot/file.txt true\ntrue true true\n"
+            );
+            let result = execute_captured_graph_for_test(root.path(), "app.mjs", lane, || {
+                put(
+                    root.path(),
+                    "node_modules/esm-core-user/index.mjs",
+                    "throw new Error('uncaptured ESM package was reopened');",
+                );
+                put(
+                    root.path(),
+                    "node_modules/esm-core-user/path-exports.mjs",
+                    "throw new Error('uncaptured reexport was reopened');",
+                );
+            });
+            let actual = result
+                .console_output
+                .iter()
+                .map(|entry| entry.message.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, reference.lines().collect::<Vec<_>>(), "{lane:?}");
+        }
+    }
+
+    #[test]
+    fn captured_esm_native_utility_exports_match_node_across_commonjs_packages() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let root = tempfile::tempdir().unwrap();
+            put(
+                root.path(),
+                "app.mjs",
+                r#"
+import querystring, { stringify, parse } from 'node:querystring';
+import url, { URL, URLSearchParams } from 'url';
+import os, { platform, EOL } from 'node:os';
+import timers, { setTimeout as schedule, clearTimeout as cancel } from 'timers';
+import hooks, { performance as clock } from 'node:perf_hooks';
+import common from 'utility-core-user';
+console.log(querystring === common.querystring, url === common.url,
+    os === common.os, timers === common.timers, hooks === common.hooks);
+console.log(stringify({space: 'a b', count: 2}), parse('a=42&b=x%20y').b);
+console.log(new URL('https://example.test/a?x=1').pathname, new URLSearchParams('x=a+b').get('x'));
+console.log(typeof platform(), EOL === '\n' || EOL === '\r\n', os.platform === platform);
+const pending = schedule(function() { throw new Error('cancelled timer ran'); }, 10000);
+cancel(pending);
+console.log(timers.setTimeout === schedule, cancel === clearTimeout,
+    hooks.performance === clock, typeof clock.now(), Number.isFinite(clock.now()));
+"#,
+            );
+            put(
+                root.path(),
+                "node_modules/utility-core-user/package.json",
+                r#"{"name":"utility-core-user","main":"index.cjs"}"#,
+            );
+            put(
+                root.path(),
+                "node_modules/utility-core-user/index.cjs",
+                r#"
+module.exports = {
+    querystring: require('querystring'),
+    url: require('node:url'),
+    os: require('os'),
+    timers: require('node:timers'),
+    hooks: require('perf_hooks')
+};
+"#,
+            );
+            let reference = node_reference_output(root.path(), "app.mjs");
+            assert_eq!(
+                reference,
+                "true true true true true\nspace=a%20b&count=2 x y\n/a a b\nstring true true\ntrue true true number true\n"
+            );
+            let result = execute_captured_graph_for_test(root.path(), "app.mjs", lane, || {
+                put(
+                    root.path(),
+                    "node_modules/utility-core-user/index.cjs",
+                    "throw new Error('uncaptured builtin consumer was reopened');",
+                );
+            });
+            let actual = result
+                .console_output
+                .iter()
+                .map(|entry| entry.message.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, reference.lines().collect::<Vec<_>>(), "{lane:?}");
+        }
+    }
+
+    #[test]
+    fn captured_mixed_builtin_imports_share_defaults_and_distinct_path_namespaces() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let root = tempfile::tempdir().unwrap();
+            put(
+                root.path(),
+                "app.mjs",
+                r#"
+import * as path from 'path';
+import * as pathAlias from 'node:path';
+import * as posix from 'node:path/posix';
+import * as windows from 'path/win32';
+import buffer from 'node:buffer';
+import events from 'events';
+import common from 'mixed-core-user';
+console.log(path === pathAlias, path !== posix, path.default === posix.default);
+console.log(common.path === path.default, common.posix === posix.default, common.windows === windows.default);
+console.log(path.default.win32 === windows.default, windows.default.posix === posix.default);
+console.log(common.buffer === buffer, common.events === events, events === events.EventEmitter);
+"#,
+            );
+            put(
+                root.path(),
+                "node_modules/mixed-core-user/package.json",
+                r#"{"name":"mixed-core-user","main":"index.cjs"}"#,
+            );
+            put(
+                root.path(),
+                "node_modules/mixed-core-user/index.cjs",
+                r#"
+module.exports = {
+    path: require('node:path'),
+    posix: require('path/posix'),
+    windows: require('node:path/win32'),
+    buffer: require('buffer'),
+    events: require('node:events')
+};
+"#,
+            );
+            let reference = node_reference_output(root.path(), "app.mjs");
+            assert_eq!(
+                reference,
+                "true true true\ntrue true true\ntrue true\ntrue true true\n"
+            );
+            let result = execute_captured_graph_for_test(root.path(), "app.mjs", lane, || {
+                put(
+                    root.path(),
+                    "node_modules/mixed-core-user/index.cjs",
+                    "throw new Error('uncaptured CommonJS package was reopened');",
+                );
+            });
+            let actual = result
+                .console_output
+                .iter()
+                .map(|entry| entry.message.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, reference.lines().collect::<Vec<_>>(), "{lane:?}");
+        }
+    }
+
+    #[test]
+    fn captured_builtin_namespaces_preserve_declared_exports_after_commonjs_mutation() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let root = tempfile::tempdir().unwrap();
+            put(
+                root.path(),
+                "app.cjs",
+                r#"
+const path = require('path');
+path.captureOnly = 'package extension';
+import('node:path').then(namespace => {
+    const join = namespace.join;
+    console.log(Object.prototype.hasOwnProperty.call(namespace, 'captureOnly'),
+        namespace.default === path, namespace.default.captureOnly);
+    path.join = function() { return 'changed'; };
+    return import('path').then(alias => {
+        console.log(alias === namespace, alias.join === join,
+            alias.join('a', 'b'), path.join('a', 'b'));
+    });
+});
+"#,
+            );
+            let reference = node_reference_output(root.path(), "app.cjs");
+            assert_eq!(
+                reference,
+                "false true package extension\ntrue true a/b changed\n"
+            );
+            let result = execute_captured_graph_for_test(root.path(), "app.cjs", lane, || {});
+            let actual = result
+                .console_output
+                .iter()
+                .map(|entry| entry.message.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, reference.lines().collect::<Vec<_>>(), "{lane:?}");
+        }
+    }
+
+    #[test]
+    fn captured_native_namespaces_match_node_write_and_reflection_semantics() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let root = tempfile::tempdir().unwrap();
+            put(
+                root.path(),
+                "app.mjs",
+                r#"
+import * as namespace from 'node:buffer';
+const original = namespace.Buffer;
+const descriptor = Object.getOwnPropertyDescriptor(namespace, 'Buffer');
+function failure(action) {
+    try { action(); return 'no error'; } catch (error) { return error.name; }
+}
+console.log(Object.getPrototypeOf(namespace) === null, Object.isExtensible(namespace),
+    Object.isSealed(namespace), Object.isFrozen(namespace));
+console.log(descriptor.value === original, descriptor.writable,
+    descriptor.enumerable, descriptor.configurable);
+console.log(Reflect.set(namespace, 'Buffer', original),
+    Reflect.set(namespace, 'newExport', 1), namespace.Buffer === original);
+console.log(failure(function() { namespace.Buffer = 7; }),
+    Reflect.defineProperty(namespace, 'Buffer', {value: original}),
+    Reflect.defineProperty(namespace, 'Buffer', {
+        value: original, writable: true, enumerable: true, configurable: false
+    }), Object.defineProperty(namespace, 'Buffer', {value: original}) === namespace);
+console.log(Reflect.defineProperty(namespace, 'Buffer', {value: 7}),
+    Reflect.defineProperty(namespace, 'Buffer', {writable: false}),
+    Reflect.defineProperty(namespace, 'Buffer', {get: function() { return original; }}),
+    Reflect.defineProperty(namespace, 'Buffer', {enumerable: false}),
+    Reflect.defineProperty(namespace, 'Buffer', {configurable: true}));
+console.log(failure(function() { Object.defineProperty(namespace, 'Buffer', {value: 7}); }),
+    Reflect.deleteProperty(namespace, 'Buffer'), Reflect.deleteProperty(namespace, 'missing'));
+const receiver = {};
+const inherited = Object.create(namespace);
+const proxy = new Proxy(namespace, {});
+console.log(Reflect.set(namespace, 'Buffer', 7, receiver),
+    Reflect.set(namespace, 'missing', 7, receiver), Object.keys(receiver).length);
+console.log(Reflect.set(inherited, 'Buffer', 7), Reflect.set(inherited, 'missing', 7),
+    inherited.Buffer === original, Object.keys(inherited).length);
+Object.defineProperty(inherited, 'Buffer', {value: 7, writable: true});
+console.log(Reflect.set(inherited, 'Buffer', 8), inherited.Buffer, namespace.Buffer === original);
+console.log(Reflect.set(proxy, 'Buffer', original), Reflect.set({}, 'Buffer', original, proxy),
+    Reflect.set({}, 'Buffer', original, namespace));
+console.log(Reflect.set(proxy, 'Buffer', 7),
+    Reflect.defineProperty(proxy, 'Buffer', {value: original}),
+    Reflect.defineProperty(proxy, 'Buffer', {value: 7}),
+    Reflect.deleteProperty(proxy, 'Buffer'), Reflect.deleteProperty(proxy, 'missing'));
+"#,
+            );
+            let reference = node_reference_output(root.path(), "app.mjs");
+            assert_eq!(
+                reference,
+                "true false true false\ntrue true true false\nfalse false true\nTypeError true true true\nfalse false false false false\nTypeError false true\ntrue true 2\ntrue true false 2\ntrue 8 true\ntrue true false\nfalse true false false true\n"
+            );
+            let result = execute_captured_graph_for_test(root.path(), "app.mjs", lane, || {});
+            let actual = result
+                .console_output
+                .iter()
+                .map(|entry| entry.message.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, reference.lines().collect::<Vec<_>>(), "{lane:?}");
+        }
+    }
+
+    #[test]
+    fn captured_builtin_cached_default_cannot_bypass_import_policy() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let root = tempfile::tempdir().unwrap();
+            put(
+                root.path(),
+                "app.cjs",
+                r#"
+const buffer = require('buffer');
+console.log(buffer.Buffer.from('cached').toString());
+import('node:buffer').then(
+    function() { console.log('forbidden alias was loaded'); },
+    function() { console.log('policy refusal became a guest exception'); }
+);
+"#,
+            );
+            let mut policy = CapabilityPolicyHook::new(BTreeSet::from([
+                RuntimeCapability::ModuleLoad,
+                RuntimeCapability::Builtin,
+                RuntimeCapability::Timer,
+            ]));
+            policy.denied_specifiers.insert("node:buffer".into());
+            let error = execute_captured_graph_with_policy_for_test(
+                root.path(),
+                "app.cjs",
+                lane,
+                Arc::new(policy),
+                || {},
+            )
+            .expect_err("cached native objects never retain an import authorization");
+            let message = error.to_string();
+            assert!(
+                message.contains("closed-world module resolution refused"),
+                "{lane:?}: {message}"
+            );
+            assert!(message.contains("node:buffer"), "{lane:?}: {message}");
+            assert!(message.contains("policy"), "{lane:?}: {message}");
+        }
+    }
+
+    #[test]
     fn native_commonjs_uses_captured_npm_json_sources_and_original_filenames() {
         use frankenengine_engine::baseline_interpreter::LaneChoice;
 
@@ -1918,6 +2369,4 @@ import('path').then(function(again) {
             ]);
         }
     }
-
 }
-

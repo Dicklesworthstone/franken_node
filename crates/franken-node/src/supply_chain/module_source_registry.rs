@@ -224,9 +224,10 @@ impl PinnedModuleRegistry {
     /// The ordinary constructor remains transform-free. Crucially, pins and
     /// graph completeness are checked BEFORE the callback sees source bytes.
     /// The callback cannot rewrite identities, routes, source bytes or pins.
-    /// A separate engine callback may admit an exact captured builtin request
-    /// for its captured load style as a source-free terminal. It never changes
-    /// the report or allows unknown, computed or uncaptured runtime requests.
+    /// A separate engine callback may admit an exact captured builtin load as
+    /// a source-free terminal. Static imports, reexports, dynamic imports and
+    /// CommonJS requires retain their captured importer and request style.
+    /// This never changes the report or admits unknown/computed runtime loads.
     pub(super) fn new_with_kind_resolver<F, B>(
         graph: CapturedModuleGraph,
         independent_graph_pin: &str,
@@ -640,6 +641,158 @@ mod tests {
                 PinnedModuleRegistry::new(graph, &pin).err().unwrap().code,
                 "ERR_MODULE_REGISTRY_INCOMPLETE"
             );
+        }
+    }
+
+    #[test]
+    fn approved_builtin_imports_reexports_and_requires_keep_exact_routes() {
+        let root = tempfile::tempdir().unwrap();
+        put(
+            root.path(),
+            "app.mjs",
+            r#"
+            import { join } from 'node:path';
+            export { basename } from 'path/posix';
+            import('node:path/win32');
+            import { encode } from 'node:querystring';
+            import './consumer.cjs';
+        "#,
+        );
+        put(
+            root.path(),
+            "consumer.cjs",
+            "module.exports = require('path');",
+        );
+        let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
+        assert!(!graph.report().fully_resolved);
+        assert!(graph.report().diagnostics.is_empty());
+        let pin = graph.report().input_hash.clone();
+        let registry = PinnedModuleRegistry::new_with_kind_resolver(
+            graph,
+            &pin,
+            |module, _, _| {
+                Ok(if module.id.path.ends_with(".cjs") {
+                    ModuleKind::CommonJs
+                } else {
+                    ModuleKind::EsModule
+                })
+            },
+            |specifier, _| match specifier {
+                "path" | "node:path" => Some("node:path"),
+                "path/posix" => Some("node:path/posix"),
+                "node:path/win32" => Some("node:path/win32"),
+                "node:querystring" => Some("node:querystring"),
+                _ => None,
+            },
+        )
+        .ok()
+        .unwrap();
+        assert_eq!(registry.summary().modules, 6);
+        assert_eq!(registry.summary().routes, 6);
+        assert_eq!(registry.summary().missing_routes, 0);
+        let path = registry
+            .lookup(
+                Some(registry.entrypoint()),
+                "node:path",
+                RequestStyle::Import,
+            )
+            .ok()
+            .unwrap();
+        let consumer = registry
+            .lookup(
+                Some(registry.entrypoint()),
+                "./consumer.cjs",
+                RequestStyle::Import,
+            )
+            .ok()
+            .unwrap();
+        let required = registry
+            .lookup(Some(consumer.id()), "path", RequestStyle::Require)
+            .ok()
+            .unwrap();
+        assert_eq!(path.id(), required.id());
+        let posix = registry
+            .lookup(
+                Some(registry.entrypoint()),
+                "path/posix",
+                RequestStyle::Import,
+            )
+            .ok()
+            .unwrap();
+        let win32 = registry
+            .lookup(
+                Some(registry.entrypoint()),
+                "node:path/win32",
+                RequestStyle::Import,
+            )
+            .ok()
+            .unwrap();
+        assert_ne!(path.id(), posix.id());
+        assert_ne!(path.id(), win32.id());
+        assert_ne!(posix.id(), win32.id());
+        for module in [path, posix, win32] {
+            assert_eq!(module.kind(), ModuleKind::NativeBuiltin);
+            assert!(module.source().is_empty());
+            assert!(module.dependencies().is_empty());
+        }
+        for (referrer, specifier, style) in [
+            (registry.entrypoint(), "node:path", RequestStyle::Require),
+            (registry.entrypoint(), "path", RequestStyle::Import),
+            (
+                registry.entrypoint(),
+                "node:path/posix",
+                RequestStyle::Import,
+            ),
+            (consumer.id(), "path", RequestStyle::Import),
+            (consumer.id(), "node:path", RequestStyle::Require),
+        ] {
+            assert_eq!(
+                registry
+                    .lookup(Some(referrer), specifier, style)
+                    .err()
+                    .unwrap()
+                    .code,
+                "ERR_MODULE_REGISTRY_ROUTE",
+                "{referrer} {specifier} {style:?}"
+            );
+        }
+        let requests = registry
+            .reachable_requests(None, registry.entrypoint(), RequestStyle::Import)
+            .unwrap();
+        assert_eq!(requests.len(), 7);
+    }
+
+    #[test]
+    fn builtin_import_admission_still_rejects_unapproved_and_computed_loads() {
+        use std::cell::Cell;
+        for source in [
+            "import 'node:fs';",
+            "export * from 'node:fs';",
+            "import('node:fs');",
+            "import(variable);",
+            "import 'node:path'; import(variable);",
+            "require('node:path'); require(variable);",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            put(root.path(), "app.mjs", source);
+            let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
+            let pin = graph.report().input_hash.clone();
+            let prepared = Cell::new(false);
+            let result = PinnedModuleRegistry::new_with_kind_resolver(
+                graph,
+                &pin,
+                |_, _, _| {
+                    prepared.set(true);
+                    Ok(ModuleKind::EsModule)
+                },
+                |specifier, _| (specifier == "node:path").then_some("node:path"),
+            );
+            assert_eq!(
+                result.err().unwrap().code,
+                "ERR_MODULE_REGISTRY_INCOMPLETE",
+                "{source}"
+            );
+            assert!(!prepared.get(), "source preparation ran for {source}");
         }
     }
 
