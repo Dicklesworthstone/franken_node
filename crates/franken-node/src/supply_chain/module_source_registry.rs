@@ -58,7 +58,7 @@ impl ModuleKind {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum RegisteredTarget {
     Module { id: String },
-    /// A captured CommonJS lookup that deterministically found no module.
+    /// A captured require or dynamic import that deterministically found no module.
     /// This is a terminal failure, never an invitation to probe the live host.
     Missing { error: ResolutionError },
 }
@@ -165,8 +165,8 @@ impl<'a> Iterator for ReachableRequests<'a> {
                 RegisteredTarget::Module { id } => id,
                 RegisteredTarget::Missing { error } => {
                     // A complete eager walk cannot deliver an absent module.
-                    // Runtime require evaluates this route only if reached,
-                    // where the engine can expose its catchable missing error.
+                    // Runtime require/import() evaluates this route only if
+                    // reached, where the engine exposes its catchable failure.
                     self.failed = true;
                     return Some(Err(error.clone()));
                 }
@@ -281,16 +281,19 @@ impl PinnedModuleRegistry {
                     );
                 }
                 EdgeState::Unresolved
-                    if edge.kind == LoadKind::Require
-                        && edge.target.is_none()
+                    if edge.target.is_none()
                         && edge.specifier.is_some()
-                        && edge.error.as_ref().is_some_and(|failure|
-                            failure.code == "MODULE_NOT_FOUND") =>
+                        && matches!(
+                            (edge.kind, edge.error.as_ref().map(|failure| failure.code)),
+                            (LoadKind::Require, Some("MODULE_NOT_FOUND"))
+                                | (LoadKind::DynamicImport, Some("ERR_MODULE_NOT_FOUND"))
+                        ) =>
                 {
-                    // Optional dependencies and require.resolve probes are
-                    // ordinary CommonJS control flow. Capture has sealed the
-                    // negative probes too; preserve this exact missing result
-                    // without pretending it resolves or predicting a catch.
+                    // Optional require/import() dependencies are ordinary
+                    // control flow. Capture has sealed the negative probes
+                    // too; preserve the exact missing result without claiming
+                    // resolution or predicting a catch. Static imports and
+                    // reexports still require a real target during admission.
                     has_missing_routes = true;
                 }
                 _ => return Err(incomplete()),
@@ -721,10 +724,85 @@ mod tests {
     }
 
     #[test]
-    fn only_commonjs_module_not_found_is_an_admissible_negative_route() {
+    fn captured_missing_dynamic_imports_keep_importer_and_load_style_boundaries() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mjs", "import('./optional.mjs'); import './nested/app.mjs';");
+        put(root.path(), "nested/app.mjs", "import('./optional.mjs');");
+        put(root.path(), "nested/optional.mjs", "export const answer = 42;");
+        let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        assert!(!graph.report().fully_resolved);
+        assert!(graph.report().diagnostics.is_empty());
+        let registry = PinnedModuleRegistry::new(graph, &pin).ok().unwrap();
+        assert_eq!(registry.summary().modules, 3);
+        assert_eq!(registry.summary().routes, 3);
+        assert_eq!(registry.summary().missing_routes, 1);
+        assert_eq!(
+            registry.lookup(Some(registry.entrypoint()), "./optional.mjs", RequestStyle::Import)
+                .err().unwrap().code,
+            "ERR_MODULE_NOT_FOUND"
+        );
+        let nested = registry
+            .lookup(Some(registry.entrypoint()), "./nested/app.mjs", RequestStyle::Import)
+            .ok().unwrap();
+        assert_eq!(
+            registry.lookup(Some(nested.id()), "./optional.mjs", RequestStyle::Import)
+                .ok().unwrap().source(),
+            "export const answer = 42;"
+        );
+        for (request, style) in [
+            ("./optional.mjs", RequestStyle::Require),
+            ("./uncaptured.mjs", RequestStyle::Import),
+        ] {
+            assert_eq!(
+                registry.lookup(Some(registry.entrypoint()), request, style)
+                    .err().unwrap().code,
+                "ERR_MODULE_REGISTRY_ROUTE"
+            );
+        }
+        let mut walk = registry
+            .walk_requests(None, registry.entrypoint(), RequestStyle::Import).unwrap();
+        assert!(walk.next().unwrap().is_ok());
+        assert_eq!(walk.next().unwrap().err().unwrap().code, "ERR_MODULE_NOT_FOUND");
+        assert!(walk.next().is_none());
+    }
+
+    #[test]
+    fn replayed_dynamic_import_absence_cannot_reopen_an_installed_dependency() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mjs", "import('optional-package');");
+        let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        let encoded = capsule::encode(&graph).unwrap();
+        put(root.path(), "node_modules/optional-package/package.json", r#"{"main":"index.mjs"}"#);
+        put(root.path(), "node_modules/optional-package/index.mjs", "export const answer = 99;");
+        let live = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
+        assert!(live.report().fully_resolved);
+        assert_ne!(live.report().input_hash, pin);
+        let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+        assert!(!replayed.report().fully_resolved);
+        let registry = PinnedModuleRegistry::new(replayed, &pin).ok().unwrap();
+        assert_eq!(registry.summary().modules, 1);
+        assert_eq!(registry.summary().missing_routes, 1);
+        for _ in 0..2 {
+            assert_eq!(
+                registry.lookup(Some(registry.entrypoint()), "optional-package", RequestStyle::Import)
+                    .err().unwrap().code,
+                "ERR_MODULE_NOT_FOUND"
+            );
+        }
+    }
+
+    #[test]
+    fn only_observed_lazy_module_not_found_is_an_admissible_negative_route() {
         for source in [
             "import './absent.mjs';",
-            "import('./absent.mjs');",
+            "export * from './absent.mjs';",
+            "import('./absent.mjs'); import './absent.mjs';",
+            "import('pkg/private');",
+            "import('broken');",
+            "import('node:unknown');",
+            "import(variable);",
             "require('pkg/private');",
             "require('broken');",
             "require('node:unknown');",
