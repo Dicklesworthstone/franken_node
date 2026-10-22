@@ -829,8 +829,15 @@ mod tests {
             let invented = ModuleRequest::new("./not-captured.json", ImportStyle::Require)
                 .with_referrer(resolver.entry_request().specifier)
                 .with_compatibility_mode(CompatibilityMode::NodeCompat);
-            assert_eq!(resolver.resolve(&invented, &now, &granted()).unwrap_err().code,
-                ResolutionErrorCode::ModuleNotFound);
+            let preparations_before = resolver.preparation_reports().cloned().collect::<Vec<_>>();
+            let failure = resolver.resolve(&invented, &now, &policy).unwrap_err();
+            assert_eq!(failure.code, ResolutionErrorCode::UnsupportedSpecifier);
+            assert!(failure.message.starts_with("ERR_MODULE_REGISTRY_ROUTE:"));
+            assert_eq!(policy.calls.get(), 9);
+            assert_eq!(
+                resolver.preparation_reports().cloned().collect::<Vec<_>>(),
+                preparations_before
+            );
         }
 
         #[test]
