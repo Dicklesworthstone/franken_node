@@ -140,5 +140,11 @@ class ZlibExportProjectTests(PipelineProjectTests):
     case_count = 6
 
 
+class MIMEProjectTests(PipelineProjectTests):
+    # HTTP-facing packages share the canonical util MIME records and parameters.
+    corpus_path = ROOT / 'fixtures/compatibility/projects/util-mime.corpus.json'
+    case_count = 4
+
+
 if __name__ == '__main__':
     unittest.main()

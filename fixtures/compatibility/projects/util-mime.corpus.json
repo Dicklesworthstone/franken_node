@@ -1,0 +1,82 @@
+{
+  "schema_version": "franken-node/project-compat-corpus/v1",
+  "cases": [
+    {
+      "id": "mime-commonjs-content-manifest",
+      "entry": "app.cjs",
+      "files": {
+        "package.json": "{\"name\":\"mime-content-manifest\",\"private\":true}",
+        "node_modules/header-record/package.json": "{\"name\":\"header-record\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}",
+        "node_modules/header-record/index.cjs": "const {MIMEType}=require('node:util');\nexports.describe=function(header){const type=new MIMEType(header);return {\n essence:type.essence,charset:type.params.get('charset'),\n json:type.subtype==='json'||type.subtype.endsWith('+json'),header:type.toString()};};\n",
+        "input.json": "[\"Application/Problem+JSON; Charset=\\\"UTF-8\\\"; charset=ignored\", \"Text/Plain; note=\\\"a;b\\\"; invalid name=ignored\"]",
+        "app.cjs": "const fs=require('node:fs');const {describe}=require('header-record');\nconst records=JSON.parse(fs.readFileSync('input.json','utf8')).map(describe);\nfs.writeFileSync('manifest.json',JSON.stringify(records)+'\\n');\nconsole.log('MIME_MANIFEST_COMPLETE',records.length);\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "MIME_MANIFEST_COMPLETE 2\n",
+        "stderr": "",
+        "files": {
+          "manifest.json": "[{\"essence\":\"application/problem+json\",\"charset\":\"UTF-8\",\"json\":true,\"header\":\"application/problem+json;charset=UTF-8\"},{\"essence\":\"text/plain\",\"charset\":null,\"json\":false,\"header\":\"text/plain;note=\\\"a;b\\\"\"}]\n"
+        }
+      }
+    },
+    {
+      "id": "mime-esm-captured-class-and-quoted-profile",
+      "entry": "app.mjs",
+      "files": {
+        "package.json": "{\"name\":\"mime-esm-profile\",\"type\":\"module\",\"private\":true}",
+        "node_modules/@fixture/mime/package.json": "{\"name\":\"@fixture/mime\",\"version\":\"1.0.0\",\"type\":\"module\",\"exports\":\"./index.mjs\"}",
+        "node_modules/@fixture/mime/index.mjs": "export {MIMEType as ContentType,MIMEParams} from 'node:util';\n",
+        "app.mjs": "import fs from 'node:fs';\nimport util from 'node:util';\nimport {ContentType,MIMEParams} from '@fixture/mime';\nconst original=util.MIMEType;\nutil.MIMEType=function(){throw new Error('public replacement');};\ntry {\n const mime=new ContentType('TEXT/PLAIN; charset=utf-8');\n mime.type='APPLICATION';mime.subtype='Vnd.example+JSON';\n mime.params.set('profile','urn:example;a=\"b\"');\n fs.writeFileSync('headers.txt','Content-Type: '+mime.toString()+'\\n');\n fs.writeFileSync('receipt.json',JSON.stringify({instance:mime.params instanceof MIMEParams,json:JSON.stringify(mime)})+'\\n');\n console.log('MIME_ESM_COMPLETE');\n} finally { util.MIMEType=original; }\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "MIME_ESM_COMPLETE\n",
+        "stderr": "",
+        "files": {
+          "headers.txt": "Content-Type: application/vnd.example+json;charset=utf-8;profile=\"urn:example;a=\\\"b\\\"\"\n",
+          "receipt.json": "{\"instance\":true,\"json\":\"\\\"application/vnd.example+json;charset=utf-8;profile=\\\\\\\"urn:example;a=\\\\\\\\\\\\\\\"b\\\\\\\\\\\\\\\"\\\\\\\"\\\"\"}\n"
+        }
+      }
+    },
+    {
+      "id": "mime-parameter-rejection-preserves-publication",
+      "entry": "app.cjs",
+      "files": {
+        "package.json": "{\"name\":\"mime-guarded-publication\",\"private\":true}",
+        "node_modules/header-publisher/package.json": "{\"name\":\"header-publisher\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}",
+        "node_modules/header-publisher/index.cjs": "const fs=require('fs');const {MIMEType}=require('util');\nexports.publish=function(value){const mime=new MIMEType('text/plain;charset=utf-8');\n mime.params.set('filename',value);\n fs.writeFileSync('published.txt',mime.toString()+'\\n');\n fs.writeFileSync('unexpected-success.txt','published');};\n",
+        "published.txt": "previous release\n",
+        "app.cjs": "const fs=require('fs');const {publish}=require('header-publisher');\ntry {publish('report.txt\\r\\nInjected: yes');throw new Error('accepted injection');}\ncatch(error){if(error.code!=='ERR_INVALID_MIME_SYNTAX')throw error;\n fs.writeFileSync('rejection.txt',error.code+'\\n');console.log('MIME_REJECT_COMPLETE',error.code);}\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "MIME_REJECT_COMPLETE ERR_INVALID_MIME_SYNTAX\n",
+        "stderr": "",
+        "files": {
+          "published.txt": "previous release\n",
+          "rejection.txt": "ERR_INVALID_MIME_SYNTAX\n",
+          "unexpected-success.txt": null
+        }
+      }
+    },
+    {
+      "id": "mime-live-parameter-registry",
+      "entry": "app.cjs",
+      "files": {
+        "package.json": "{\"name\":\"mime-live-registry\",\"private\":true}",
+        "node_modules/parameter-registry/package.json": "{\"name\":\"parameter-registry\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}",
+        "node_modules/parameter-registry/index.cjs": "const {MIMEParams}=require('node:util');\nexports.collect=function(){const p=new MIMEParams();p.set('__proto__','ordinary');p.set('drop','old');\n const cursor=p.entries();const rows=[cursor.next().value];\n p.delete('drop');p.set('boundary','part; \"two\"');p.set('charset','utf-8');\n for(const row of cursor)rows.push(row);\n return {rows,text:p.toString(),missing:p.get('absent')};};\n",
+        "app.cjs": "const fs=require('fs');const {collect}=require('parameter-registry');\nconst result=collect();fs.writeFileSync('parameters.json',JSON.stringify(result)+'\\n');\nconsole.log('MIME_REGISTRY_COMPLETE',result.rows.length);\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "MIME_REGISTRY_COMPLETE 3\n",
+        "stderr": "",
+        "files": {
+          "parameters.json": "{\"rows\":[[\"__proto__\",\"ordinary\"],[\"boundary\",\"part; \\\"two\\\"\"],[\"charset\",\"utf-8\"]],\"text\":\"__proto__=ordinary;boundary=\\\"part; \\\\\\\"two\\\\\\\"\\\";charset=utf-8\",\"missing\":null}\n"
+        }
+      }
+    }
+  ]
+}
