@@ -1,0 +1,87 @@
+{
+  "schema_version": "franken-node/project-compat-corpus/v1",
+  "cases": [
+    {
+      "id": "mixed-pair-cjs-protocol",
+      "entry": "app.cjs",
+      "files": {
+        "app.cjs": "const fs=require('node:fs');const S=require('node:stream');const connect=require('paired-protocol');\n(async()=>{const transport=S.Duplex.from(connect());const output=fs.createWriteStream('reply.txt');\nawait S.promises.pipeline(S.Readable.from(['hello',' café\\n']),transport,output);\nif(!output.closed)throw new Error('output not closed');fs.writeFileSync('complete.txt','closed\\n');console.log('PAIR_PROTOCOL_COMPLETE');\n})().catch(e=>{console.error(e);process.exitCode=1;});\n",
+        "node_modules/paired-protocol/package.json": "{\"name\":\"paired-protocol\",\"main\":\"index.cjs\"}\n",
+        "node_modules/paired-protocol/index.cjs": "const {Readable}=require('node:stream');const {WritableStream}=require('node:stream/web');\nmodule.exports=function(){const readable=new Readable({read(){}});\nconst writable=new WritableStream({write(value){readable.push(Buffer.from(value.toString().toUpperCase()));},close(){readable.push(null);}});\nreturn {readable,writable};};\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "PAIR_PROTOCOL_COMPLETE\n",
+        "stderr": "",
+        "files": {
+          "reply.txt": "HELLO CAFÉ\n",
+          "complete.txt": "closed\n"
+        }
+      },
+      "category": "stream-integration"
+    },
+    {
+      "id": "mixed-pair-scoped-esm",
+      "entry": "app.mjs",
+      "files": {
+        "package.json": "{\"type\":\"module\"}\n",
+        "app.mjs": "import fs from 'node:fs';import S from 'node:stream';import {connect} from '@records/transport';\nconst pair=S.Duplex.from(connect());const writer=fs.createWriteStream('records.txt');\nawait S.promises.pipeline(S.Readable.from([{id:7,name:'café'},{id:9,name:'東京'}]),pair,writer);\nif(pair.readableObjectMode!==false||pair.writableObjectMode!==true||!writer.closed)throw new Error('mode or lifecycle');\nfs.writeFileSync('receipt.json',JSON.stringify({readableObjectMode:pair.readableObjectMode,writableObjectMode:pair.writableObjectMode,closed:writer.closed})+'\\n');\nconsole.log('PAIR_ESM_COMPLETE');\n",
+        "node_modules/@records/transport/package.json": "{\"name\":\"@records/transport\",\"type\":\"module\",\"exports\":\"./index.mjs\"}\n",
+        "node_modules/@records/transport/index.mjs": "import {Writable} from 'node:stream';import {ReadableStream} from 'node:stream/web';\nexport function connect(){let output;const readable=new ReadableStream({start(controller){output=controller;}});\nconst writable=new Writable({objectMode:true,write(value,encoding,done){output.enqueue(Buffer.from(value.id+':'+value.name+'\\n'));done();},final(done){output.close();done();}});\nreturn {readable,writable};}\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "PAIR_ESM_COMPLETE\n",
+        "stderr": "",
+        "files": {
+          "records.txt": "7:café\n9:東京\n",
+          "receipt.json": "{\"readableObjectMode\":false,\"writableObjectMode\":true,\"closed\":true}\n"
+        }
+      },
+      "category": "stream-integration"
+    },
+    {
+      "id": "mixed-pair-nested-blob",
+      "entry": "app.cjs",
+      "files": {
+        "app.cjs": "const fs=require('node:fs');const S=require('node:stream');const open=require('archive-pair');\n(async()=>{const channel=S.Duplex.from(open());let records=0;\nconst bytes=new S.Transform({objectMode:true,transform(value,encoding,done){if(!(value instanceof ArrayBuffer))return done(new Error('record type'));records++;done(null,Buffer.from(value));}});\nawait S.promises.pipeline(S.Readable.from(['verify\\n']),channel,bytes,fs.createWriteStream('archive.txt'));\nfs.writeFileSync('receipt.txt',records+' records\\n');console.log('PAIR_ARCHIVE_COMPLETE');})().catch(e=>{console.error(e);process.exitCode=1;});\n",
+        "node_modules/archive-pair/package.json": "{\"name\":\"archive-pair\",\"main\":\"index.cjs\"}\n",
+        "node_modules/archive-pair/index.cjs": "const fs=require('node:fs');const {Blob}=require('node:buffer');const {WritableStream}=require('node:stream/web');\nmodule.exports=function(){let command='';return {readable:{readable:new Blob(['archived café\\n'])},writable:new WritableStream({write(value){command+=value.toString();},close(){fs.writeFileSync('command.txt',command);}})};};\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "PAIR_ARCHIVE_COMPLETE\n",
+        "stderr": "",
+        "files": {
+          "archive.txt": "archived café\n",
+          "command.txt": "verify\n",
+          "receipt.txt": "1 records\n"
+        }
+      },
+      "category": "stream-integration"
+    },
+    {
+      "id": "mixed-pair-rejection-cleanup",
+      "entry": "app.cjs",
+      "files": {
+        "app.cjs": "const fs=require('node:fs');const S=require('node:stream');const open=require('failing-pair');\n(async()=>{const resource=open();const channel=S.Duplex.from(resource.pair);\nconst sink=new S.Writable({write(value,encoding,done){fs.writeFileSync('accepted.txt',value);const error=new Error('export denied');error.code='EXPORT_DENIED';done(error);},final(done){fs.writeFileSync('published.txt','incorrect\\n');done();}});\ntry{await S.promises.pipeline(S.Readable.from(['request']),channel,sink);throw new Error('false success');}\ncatch(error){if(error.code!=='EXPORT_DENIED')throw error;await resource.released;if(resource.closed()!==2)throw new Error('unfinished cleanup');\nfs.writeFileSync('cleanup.json',JSON.stringify({code:error.code,closed:resource.closed()})+'\\n');console.log('PAIR_REJECTED');}})().catch(e=>{console.error(e);process.exitCode=1;});\n",
+        "published.txt": "previous release\n",
+        "node_modules/failing-pair/package.json": "{\"name\":\"failing-pair\",\"main\":\"index.cjs\"}\n",
+        "node_modules/failing-pair/index.cjs": "const fs=require('node:fs');const {Readable}=require('node:stream');const {WritableStream}=require('node:stream/web');\nmodule.exports=function(){let closed=0,release;const released=new Promise(resolve=>release=resolve);function retired(){closed++;if(closed===2)release();}const readFd=fs.openSync('read-resource.txt','w'),writeFd=fs.openSync('write-resource.txt','w');\nconst readable=new Readable({read(){},destroy(error,done){setImmediate(()=>{fs.closeSync(readFd);retired();done(error);});}});\nconst writable=new WritableStream({write(value){readable.push(Buffer.from('accepted café\\n'));},abort(){return new Promise(resolve=>setImmediate(()=>{fs.closeSync(writeFd);retired();resolve();}));},close(){fs.closeSync(writeFd);retired();}});\nreturn {pair:{readable,writable},closed:()=>closed,released};};\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "PAIR_REJECTED\n",
+        "stderr": "",
+        "files": {
+          "published.txt": "previous release\n",
+          "accepted.txt": "accepted café\n",
+          "cleanup.json": "{\"code\":\"EXPORT_DENIED\",\"closed\":2}\n",
+          "read-resource.txt": "",
+          "write-resource.txt": ""
+        }
+      },
+      "category": "stream-integration"
+    }
+  ]
+}

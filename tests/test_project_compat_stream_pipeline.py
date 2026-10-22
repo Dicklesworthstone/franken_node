@@ -158,5 +158,11 @@ class PromisedSourceProjectTests(PipelineProjectTests):
     case_count = 5
 
 
+class DuplexPairProjectTests(PipelineProjectTests):
+    # Package transports normalize endpoints through the shared stream bridge.
+    corpus_path = ROOT / 'fixtures/compatibility/projects/stream-duplex-pairs.corpus.json'
+    case_count = 4
+
+
 if __name__ == '__main__':
     unittest.main()
