@@ -10,6 +10,7 @@
 #[path = "module_engine_preparation.rs"]
 mod preparation;
 pub use preparation::ModulePreparationSummary;
+pub use preparation::detect_kind_with_options;
 use preparation::{PreparedSources, SourcePreparer};
 
 use super::registry::{
@@ -423,10 +424,11 @@ fn registry_error(
 ) -> Box<ResolutionError> {
     let code = match error.code {
         "ERR_MODULE_REGISTRY_REFERRER" => ResolutionErrorCode::InvalidReferrer,
-        // Only a captured negative CommonJS lookup is a guest-catchable
-        // absence. An unknown route is a closed-world authority violation;
-        // it must not be disguised as an optional dependency being absent.
-        "MODULE_NOT_FOUND" => ResolutionErrorCode::ModuleNotFound,
+        // Only a captured negative require or import() lookup is a
+        // guest-catchable absence. The engine retains the distinction between
+        // a CommonJS throw and a rejected dynamic-import promise. Unknown
+        // routes and policy denials never become optional-dependency absence.
+        "MODULE_NOT_FOUND" | "ERR_MODULE_NOT_FOUND" => ResolutionErrorCode::ModuleNotFound,
         "ERR_MODULE_REGISTRY_ROUTE" => ResolutionErrorCode::UnsupportedSpecifier,
         "ERR_MODULE_REGISTRY_REQUEST" if request.specifier.is_empty() => {
             ResolutionErrorCode::EmptySpecifier
@@ -646,6 +648,45 @@ mod tests {
             .is_err()
         );
         assert!(r.resolve(&request, &context(), &granted()).is_ok());
+    }
+
+    #[test]
+    fn missing_dynamic_imports_remain_distinct_from_unknown_or_denied_routes() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mjs", "import('./optional.mjs'); import('./present.mjs');");
+        put(root.path(), "present.mjs", "export const answer = 42;");
+        let resolver = resolver(root.path());
+        let request = |specifier: &str, style| ModuleRequest::new(specifier, style)
+            .with_referrer(resolver.entry_request().specifier)
+            .with_compatibility_mode(CompatibilityMode::NodeCompat);
+        for _ in 0..2 {
+            let missing = resolver.resolve(
+                &request("./optional.mjs", ImportStyle::Import), &context(), &granted(),
+            ).unwrap_err();
+            assert_eq!(missing.code, ResolutionErrorCode::ModuleNotFound);
+            assert!(missing.message.starts_with("ERR_MODULE_NOT_FOUND:"));
+        }
+        for route in [
+            request("./optional.mjs", ImportStyle::Require),
+            request("./uncaptured.mjs", ImportStyle::Import),
+        ] {
+            assert_eq!(
+                resolver.resolve(&route, &context(), &granted()).unwrap_err().code,
+                ResolutionErrorCode::UnsupportedSpecifier
+            );
+        }
+        let present = request("./present.mjs", ImportStyle::Import);
+        assert!(resolver.resolve(&present, &context(), &granted()).is_ok());
+        assert_eq!(
+            resolver.resolve(&present, &context(), &granted().deny_specifier("./present.mjs"))
+                .unwrap_err().code,
+            ResolutionErrorCode::PolicyDenied
+        );
+        assert_eq!(
+            resolver.resolve_chain(&resolver.entry_request(), &context(), &granted())
+                .unwrap_err().code,
+            ResolutionErrorCode::ModuleNotFound
+        );
     }
 
     struct ChangingPolicy {
@@ -1652,6 +1693,42 @@ module.exports = { path: path, make: function(value) { return path.join('root', 
                 root.join("app.cjs").display().to_string(),
                 root.display().to_string(),
             ]);
+        }
+    }
+
+    #[test]
+    fn native_optional_dynamic_import_rejection_matches_node_after_installation_changes() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let root = tempfile::tempdir().unwrap();
+            put(root.path(), "app.mjs", r#"
+                console.log('start');
+                if (false) import('never-installed');
+                import('optional-package').catch(error => {
+                    console.log(error.code);
+                    return import('./fallback.mjs');
+                }).then(fallback => console.log(fallback.answer));
+            "#);
+            put(root.path(), "fallback.mjs", "export const answer = 42;");
+            let reference = std::process::Command::new("node")
+                .arg(root.path().join("app.mjs"))
+                .current_dir(root.path())
+                .env_remove("NODE_OPTIONS")
+                .env_remove("NODE_PATH")
+                .output().expect("Node is required for the independent runtime oracle");
+            assert!(reference.status.success(), "{reference:?}");
+            let reference_output = String::from_utf8(reference.stdout).unwrap();
+            assert_eq!(reference_output, "start\nERR_MODULE_NOT_FOUND\n42\n");
+            let result = execute_captured_graph_for_test(root.path(), "app.mjs", lane, || {
+                put(root.path(), "node_modules/optional-package/package.json",
+                    r#"{"main":"index.mjs"}"#);
+                put(root.path(), "node_modules/optional-package/index.mjs",
+                    "throw new Error('uncaptured installation was loaded');");
+                put(root.path(), "fallback.mjs", "export const answer = 99;");
+            });
+            let actual = result.console_output.iter()
+                .map(|entry| entry.message.as_str()).collect::<Vec<_>>();
+            assert_eq!(actual, reference_output.lines().collect::<Vec<_>>(), "{lane:?}");
         }
     }
 

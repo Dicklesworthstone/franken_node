@@ -47,6 +47,12 @@ ambient machine. Unknown requests fail rather than falling back to another
 resolver. Engine requests must use `NodeCompat`; the helper entry request does
 this explicitly. These captured choices cannot be relabelled Native or Bun.
 
+Captured `require` and dynamic `import()` absences remain terminal after later
+installation or capsule replay. The engine throws `MODULE_NOT_FOUND` for require
+and rejects the import promise with `ERR_MODULE_NOT_FOUND`. Missing static
+imports, invalid metadata, denied exports and unknown routes remain refusals.
+Eager `resolve_chain` fails on any missing target.
+
 Only analyzed closed graphs are admitted. The engine-independent
 `PinnedModuleRegistry::new` remains transform-free and requires explicit
 JavaScript ESM/CommonJS formats. The engine-backed constructor additionally

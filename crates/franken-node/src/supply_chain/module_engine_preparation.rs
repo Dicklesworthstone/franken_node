@@ -407,7 +407,9 @@ fn detect_kind(source: &str, explicit: Option<ModuleKind>) -> Result<ModuleKind>
     detect_kind_with_options(source, explicit, &ParserOptions::default())
 }
 
-fn detect_kind_with_options(
+/// Share the captured-module parser's bounded format detection with native
+/// entrypoint execution. Callers retain the original source for ingestion.
+pub fn detect_kind_with_options(
     source: &str,
     explicit: Option<ModuleKind>,
     options: &ParserOptions,
