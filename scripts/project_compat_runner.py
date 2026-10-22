@@ -20,11 +20,13 @@ all completed runtime observations and do not stop later cases.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import hmac
 import json
 import os
 from pathlib import Path, PurePosixPath
+import platform
 import re
 import shutil
 import stat
@@ -152,14 +154,16 @@ def validate_corpus(corpus: Any) -> dict[str, Any]:
     return corpus
 
 
+def unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
 def load_corpus(path: Path) -> dict[str, Any]:
-    def unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError(f"duplicate JSON key: {key}")
-            result[key] = value
-        return result
     with path.open("rb") as source:
         data = source.read(MAX_MANIFEST_BYTES + 1)
     if len(data) > MAX_MANIFEST_BYTES:
@@ -198,6 +202,60 @@ def fingerprint(path: Path) -> dict[str, str]:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             hasher.update(block)
     return {"path": str(path), "sha256": "sha256:" + hasher.hexdigest()}
+
+
+def load_reference_baseline(path: Path, bun: bool) -> dict[str, Any]:
+    """Read only reference identity; a baseline is never a native pass oracle."""
+    with path.open("rb") as source:
+        data = source.read(MAX_MANIFEST_BYTES + 1)
+    if len(data) > MAX_MANIFEST_BYTES:
+        raise ValueError("baseline report exceeds size limit")
+    report = json.loads(data, object_pairs_hook=unique_pairs)
+    if not isinstance(report, dict) or report.get("schema_version") != REPORT_SCHEMA:
+        raise ValueError("baseline must be a project compatibility report")
+    oracle = "node-bun-native" if bun else "node-native"
+    if report.get("oracle") != oracle:
+        raise ValueError("baseline must use the same reference roles")
+    versions = report.get("runtime_versions", {})
+    if not isinstance(versions, dict):
+        raise ValueError("baseline is missing runtime version evidence")
+    references = {}
+    for role, field in (("reference", "reference"), ("bun", "bun_reference")):
+        if role == "bun" and not bun:
+            continue
+        identity, version = report.get(field), versions.get(role)
+        if (not isinstance(identity, dict)
+                or not isinstance(identity.get("sha256"), str)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", identity["sha256"]) is None
+                or not isinstance(version, dict) or version.get("valid") is not True
+                or not isinstance(version.get("stdout"), str)
+                or not isinstance(version.get("stderr"), str)
+                or not (version["stdout"].strip() or version["stderr"].strip())):
+            raise ValueError(f"baseline is missing valid {role} identity/version evidence")
+        references[role] = {"sha256": identity["sha256"],
+                            "stdout": version["stdout"], "stderr": version["stderr"]}
+    return {"path": str(path.resolve()), "sha256": digest(data), "references": references}
+
+
+def runtime_version(binary: Path, directory: Path, limits: dict[str, Any]) -> dict[str, Any]:
+    """Observe --version under the same process owner, separately from fixtures."""
+    directory.mkdir(parents=True)
+    receipt = supervise([str(binary), "--version"], directory / "execution", cwd=directory,
+                        wall_time_ms=min(limits["wall_time_ms"], 5000),
+                        max_output_bytes=min(limits["max_output_bytes"], 8192),
+                        cancellation=limits["cancellation"])
+    result = observation(receipt)
+    try:
+        result["stdout"] = Path(receipt["stdout_path"]).read_bytes().decode("utf-8")
+        result["stderr"] = Path(receipt["stderr_path"]).read_bytes().decode("utf-8")
+    except UnicodeError:
+        result["valid"] = False
+        result["detail"] = "version output is not UTF-8"
+        return result
+    result["valid"] = (receipt["outcome"] == "completed" and receipt["output_complete"]
+                       and receipt["stdin_delivery_complete"]
+                       and bool(result["stdout"].strip() or result["stderr"].strip()))
+    return result
 
 
 def stage(case: dict[str, Any], workspace: Path) -> None:
@@ -398,7 +456,9 @@ def run_corpus(corpus: dict[str, Any], binary: Path, node: Path, artifacts: Path
                bun: Path | None = None, policy: str = "balanced", selected: Sequence[str] = (),
                wall_time_ms: int = 10000, max_output_bytes: int = 1024 * 1024,
                cancellation: Cancellation | None = None,
-               expected_corpus_sha256: str | None = None) -> dict[str, Any]:
+               expected_corpus_sha256: str | None = None,
+               baseline_report: Path | None = None,
+               reference_change: str | None = None) -> dict[str, Any]:
     validate_corpus(corpus)
     reject_runtime_overrides()
     corpus_sha256 = digest(encoded(corpus))
@@ -412,6 +472,11 @@ def run_corpus(corpus: dict[str, Any], binary: Path, node: Path, artifacts: Path
         raise ValueError("invalid policy")
     positive_ms(str(wall_time_ms))
     positive_bytes(str(max_output_bytes))
+    if reference_change is not None:
+        _text(reference_change, "reference change reason", 4096)
+        if not reference_change.strip() or baseline_report is None:
+            raise ValueError("--reference-change needs a baseline and a nonempty reason")
+    baseline = load_reference_baseline(baseline_report, bun is not None) if baseline_report else None
     native_identity, reference_identity = fingerprint(binary), fingerprint(node)
     if native_identity["sha256"] == reference_identity["sha256"]:
         raise ValueError("candidate and Node reference must be different runtime binaries")
@@ -432,6 +497,13 @@ def run_corpus(corpus: dict[str, Any], binary: Path, node: Path, artifacts: Path
         "selected_case_count": len(cases), "candidate": native_identity,
         "reference": reference_identity, "results": [],
         "runner": fingerprint(Path(__file__)),
+        "watchdog": fingerprint(Path(supervise.__code__.co_filename)),
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "host": {"system": platform.system(), "release": platform.release(),
+                 "machine": platform.machine(), "python": platform.python_version(),
+                 "cpu_count": os.cpu_count(), "load_average": list(os.getloadavg())},
+        "candidate_source_binding": "not_established_by_this_runner",
+        "runtime_versions": {}, "provenance_errors": [],
         "limits": {"wall_time_ms": wall_time_ms, "max_output_bytes_per_stream": max_output_bytes},
         "environment_scope": "inherited; loader overrides rejected; not a hermetic environment replay",
         "claim_scope": "selected project cases only; not the micro-corpus compatibility score",
@@ -443,8 +515,42 @@ def run_corpus(corpus: dict[str, Any], binary: Path, node: Path, artifacts: Path
               "cancellation": cancellation}
     report_path = artifacts / "report.json"
     publish_report(report_path, report)
-    for current_case in cases:
+    identities = {"reference": reference_identity, "candidate": native_identity}
+    if bun_identity is not None:
+        identities["bun"] = bun_identity
+    for role, identity in identities.items():
         if cancellation.signum is not None:
+            break
+        try:
+            version = runtime_version(Path(identity["path"]), artifacts / "versions" / role, limits)
+        except (OSError, ValueError) as error:
+            version = {"valid": False, "detail": f"{type(error).__name__}: {error}"}
+        report["runtime_versions"][role] = version
+        if not version["valid"]:
+            report["provenance_errors"].append(f"{role} version probe failed")
+        publish_report(report_path, report)
+    if baseline is not None:
+        drift = []
+        for role, previous in baseline["references"].items():
+            version = report["runtime_versions"].get(role, {})
+            current = {"sha256": identities[role]["sha256"],
+                       "stdout": version.get("stdout"), "stderr": version.get("stderr")}
+            if current != previous:
+                drift.append({"role": role, "previous": previous, "current": current})
+        report["reference_baseline"] = {**baseline, "drift": drift,
+                                        "reference_change": reference_change}
+        if drift and reference_change is None:
+            report["provenance_errors"].append("reference drift requires --reference-change")
+    # A failed or changed identity cannot be promoted into compatibility proof.
+    for role, identity in identities.items():
+        try:
+            if fingerprint(Path(identity["path"])) != identity:
+                report["provenance_errors"].append(f"{role} binary changed during version probe")
+        except OSError as error:
+            report["provenance_errors"].append(f"{role} binary unavailable: {error}")
+    publish_report(report_path, report)
+    for current_case in cases:
+        if cancellation.signum is not None or report["provenance_errors"]:
             break
         try:
             result = run_case(current_case, binary, node, bun,
@@ -466,11 +572,18 @@ def run_corpus(corpus: dict[str, Any], binary: Path, node: Path, artifacts: Path
         row["verdict"] == "INCONCLUSIVE" for row in report["results"])
     report["failing_cases"] = sum(
         row["verdict"] in ("FAIL", "REFERENCE_FAILED", "ERROR") for row in report["results"])
+    for role, identity in identities.items():
+        try:
+            if fingerprint(Path(identity["path"])) != identity:
+                report["provenance_errors"].append(f"{role} binary changed during campaign")
+        except OSError as error:
+            report["provenance_errors"].append(f"{role} binary unavailable after campaign: {error}")
+    report["finished_at"] = datetime.now(timezone.utc).isoformat()
     # Definite measured failures outrank uncertainty. Otherwise one unrelated
     # reference disagreement could hide a known native or oracle failure.
     report["verdict"] = (
         "CANCELLED" if cancellation.signum is not None else
-        "FAIL" if report["failing_cases"] else
+        "FAIL" if report["failing_cases"] or report["provenance_errors"] else
         "INCONCLUSIVE" if report["inconclusive_cases"] else
         "PASS" if report["passing_cases"] == len(cases) else "FAIL")
     publish_report(report_path, report)
@@ -487,6 +600,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--node", default="node")
     parser.add_argument("--bun", help="optional second reference; disagreements make the case inconclusive")
     parser.add_argument("--expect-corpus-sha256", help="require this digest when rerunning a retained corpus")
+    parser.add_argument("--baseline-report", type=Path, help="require unchanged reference hashes and versions")
+    parser.add_argument("--reference-change", help="explicit reason for accepting reference drift from the baseline")
     parser.add_argument("--artifacts-dir", required=True, type=Path)
     parser.add_argument("--policy", default="balanced", choices=["strict", "balanced", "legacy-risky"])
     parser.add_argument("--case", action="append", default=[], dest="selected")
@@ -502,7 +617,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 bun=executable(args.bun) if args.bun else None,
                 policy=args.policy, selected=args.selected, wall_time_ms=args.wall_time_ms,
                 max_output_bytes=args.max_output_bytes, cancellation=cancellation,
-                expected_corpus_sha256=args.expect_corpus_sha256)
+                expected_corpus_sha256=args.expect_corpus_sha256,
+                baseline_report=args.baseline_report, reference_change=args.reference_change)
     except (OSError, ValueError) as error:
         print(json.dumps({"schema_version": REPORT_SCHEMA, "verdict": "ERROR", "detail": str(error)}))
         return 2

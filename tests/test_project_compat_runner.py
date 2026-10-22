@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -119,6 +120,9 @@ class ExecutionTests(unittest.TestCase):
         # its PASS results test the harness, not franken-engine compatibility.
         self.native.write_text(f"#!{sys.executable}\n" + '''
 import pathlib, sys, time
+if sys.argv[1:] == ['--version']:
+    print('candidate-test-double 1')
+    raise SystemExit(0)
 if sys.argv[1] == 'init':
     assert sys.argv[2:] == ['--profile', 'balanced', '--out-dir', '.']
     raise SystemExit(0)
@@ -171,6 +175,16 @@ else:
         receipt = json.loads((self.root / "artifacts/answer/candidate/execution/watchdog.json").read_text())
         self.assertIn("franken-engine", receipt["command"])
         self.assertTrue(receipt["output_complete"])
+        version = report["runtime_versions"]["reference"]
+        self.assertTrue(version["valid"])
+        self.assertEqual(version["stdout"].encode(), subprocess.check_output([str(self.node), "--version"]))
+        version_receipt = json.loads(Path(version["receipt_path"]).read_text())
+        self.assertEqual(version_receipt["command"], [str(self.node), "--version"])
+        self.assertEqual(report["provenance_errors"], [])
+        self.assertEqual(report["watchdog"], runner.fingerprint(ROOT / "scripts/runtime_invoke_watchdog.py"))
+        self.assertLessEqual(report["started_at"], report["finished_at"])
+        self.assertTrue(report["host"]["system"])
+        self.assertEqual(report["candidate_source_binding"], "not_established_by_this_runner")
 
     def test_three_runtime_reference_agreement_is_recorded(self):
         report = self.run_triad(case())
@@ -358,7 +372,10 @@ else:
         self.assertEqual(result["bun"]["differences"], ["file:result.txt"])
 
     def test_setup_failure_is_not_a_comparison_pass(self):
-        self.native.write_text(f"#!{sys.executable}\nraise SystemExit(7)\n")
+        self.native.write_text(f"#!{sys.executable}\nimport sys\n"
+                               "if sys.argv[1:] == ['--version']:\n"
+                               "    print('setup-failure-test-double'); raise SystemExit(0)\n"
+                               "raise SystemExit(7)\n")
         report = self.run_cases(case())
         result = report["results"][0]
         self.assertEqual(result["verdict"], "ERROR")
@@ -367,7 +384,10 @@ else:
 
     def test_setup_cannot_replace_fixture_source(self):
         self.native.write_text(f"#!{sys.executable}\n" +
-                               "from pathlib import Path\nPath('main.js').write_text('changed')\n")
+                               "import sys\nfrom pathlib import Path\n"
+                               "if sys.argv[1:] == ['--version']:\n"
+                               "    print('setup-mutation-test-double'); raise SystemExit(0)\n"
+                               "Path('main.js').write_text('changed')\n")
         result = self.run_cases(case())["results"][0]
         self.assertEqual(result["verdict"], "ERROR")
         self.assertIn("changed fixture input", result["detail"])
@@ -413,6 +433,164 @@ else:
         report = self.run_cases(case(), cancellation=cancellation)
         self.assertEqual(report["verdict"], "CANCELLED")
         self.assertEqual(report["results"], [])
+
+    def test_unchanged_baseline_allows_new_candidate_without_reference_drift(self):
+        self.run_triad(case())
+        baseline = self.root / "artifacts/report.json"
+        before = baseline.read_bytes()
+        with self.native.open("a") as target:
+            target.write("\n# different candidate build\n")
+        report = runner.run_corpus(corpus(), self.native, self.node, self.root / "rerun",
+                                   bun=self.bun, baseline_report=baseline)
+        self.assertEqual(report["verdict"], "PASS")
+        self.assertEqual(report["reference_baseline"]["drift"], [])
+        self.assertEqual(report["reference_baseline"]["sha256"], runner.digest(before))
+        self.assertEqual(baseline.read_bytes(), before)
+
+    def test_cli_baseline_flags_retain_the_explicit_change_record(self):
+        self.run_triad(case())
+        manifest = self.root / "manifest.json"
+        manifest.write_bytes(runner.encoded(corpus()))
+        baseline = self.root / "artifacts/report.json"
+        with self.bun.open("a") as target:
+            target.write("\n# reference replacement\n")
+        arguments = ["--corpus", str(manifest), "--bin", str(self.native),
+                     "--node", str(self.node), "--bun", str(self.bun),
+                     "--baseline-report", str(baseline)]
+        with patch("sys.stdout"):
+            self.assertEqual(runner.main(arguments + ["--artifacts-dir", str(self.root / "denied")]), 1)
+            self.assertEqual(runner.main(arguments + ["--artifacts-dir", str(self.root / "accepted"),
+                                                     "--reference-change", "Intentional CLI reference update"]), 0)
+        denied = json.loads((self.root / "denied/report.json").read_text())
+        accepted = json.loads((self.root / "accepted/report.json").read_text())
+        self.assertEqual(denied["results"], [])
+        self.assertEqual(accepted["reference_baseline"]["reference_change"], "Intentional CLI reference update")
+        self.assertEqual([row["verdict"] for row in accepted["results"]], ["PASS"])
+
+    def test_reference_binary_drift_refuses_before_cases_and_requires_explicit_reason(self):
+        self.run_triad(case())
+        baseline = self.root / "artifacts/report.json"
+        before = baseline.read_bytes()
+        with self.bun.open("a") as target:
+            target.write("\n# changed reference bytes, same version\n")
+        denied = runner.run_corpus(corpus(), self.native, self.node, self.root / "denied",
+                                   bun=self.bun, baseline_report=baseline)
+        self.assertEqual(denied["verdict"], "FAIL")
+        self.assertEqual(denied["results"], [])
+        self.assertFalse((self.root / "denied/answer").exists())
+        drift = denied["reference_baseline"]["drift"]
+        self.assertEqual([row["role"] for row in drift], ["bun"])
+        self.assertEqual(drift[0]["previous"]["stdout"], drift[0]["current"]["stdout"])
+        self.assertNotEqual(drift[0]["previous"]["sha256"], drift[0]["current"]["sha256"])
+        accepted = runner.run_corpus(corpus(), self.native, self.node, self.root / "accepted",
+                                     bun=self.bun, baseline_report=baseline,
+                                     reference_change="Intentional reference replacement under review")
+        self.assertEqual(accepted["verdict"], "PASS")
+        self.assertEqual(accepted["reference_baseline"]["drift"], drift)
+        self.assertIn("under review", accepted["reference_baseline"]["reference_change"])
+        self.assertEqual(baseline.read_bytes(), before)
+
+    def test_version_drift_with_identical_reference_bytes_is_refused(self):
+        state = self.root / "version-state"
+        state.write_text("reference-version-1")
+        self.bun.write_text(f"#!{sys.executable}\nimport os, pathlib, sys\n"
+                            "if sys.argv[1:] == ['--version']:\n"
+                            f"    print(pathlib.Path({str(state)!r}).read_text()); raise SystemExit(0)\n"
+                            f"os.execv({str(self.node)!r}, [{str(self.node)!r}, *sys.argv[1:]])\n")
+        self.run_triad(case())
+        state.write_text("reference-version-2")
+        report = runner.run_corpus(corpus(), self.native, self.node, self.root / "rerun",
+                                   bun=self.bun, baseline_report=self.root / "artifacts/report.json")
+        self.assertEqual(report["verdict"], "FAIL")
+        drift = report["reference_baseline"]["drift"][0]
+        self.assertEqual(drift["previous"]["sha256"], drift["current"]["sha256"])
+        self.assertNotEqual(drift["previous"]["stdout"], drift["current"]["stdout"])
+        self.assertEqual(report["results"], [])
+
+    def test_invalid_baseline_and_role_downgrade_are_rejected_before_execution(self):
+        self.run_triad(case())
+        with self.assertRaisesRegex(ValueError, "same reference roles"):
+            runner.run_corpus(corpus(), self.native, self.node, self.root / "rerun",
+                              baseline_report=self.root / "artifacts/report.json")
+        self.assertFalse((self.root / "rerun").exists())
+        for value in ([], {}, {"schema_version": runner.REPORT_SCHEMA, "oracle": "node-native"},
+                      {"schema_version": runner.REPORT_SCHEMA, "oracle": "node-native", "runtime_versions": []}):
+            baseline = self.root / "invalid-report.json"
+            baseline.write_bytes(runner.encoded(value))
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                runner.run_corpus(corpus(), self.native, self.node, self.root / "rerun",
+                                  baseline_report=baseline)
+            self.assertFalse((self.root / "rerun").exists())
+        baseline.write_text('{"schema_version":"duplicate","schema_version":"duplicate"}')
+        with self.assertRaisesRegex(ValueError, "duplicate JSON key"):
+            runner.run_corpus(corpus(), self.native, self.node, self.root / "rerun",
+                              baseline_report=baseline)
+        self.assertFalse((self.root / "rerun").exists())
+
+    def test_change_reason_cannot_bypass_failed_probe_or_case_mismatch(self):
+        self.run_cases(case())
+        baseline = self.root / "artifacts/report.json"
+        bad_case = runner.run_corpus(corpus(case(entry="wrong.js")), self.native, self.node,
+                                     self.root / "bad-case", baseline_report=baseline,
+                                     reference_change="Explicit change cannot approve a mismatch")
+        self.assertEqual(bad_case["verdict"], "FAIL")
+        self.assertEqual(bad_case["results"][0]["verdict"], "FAIL")
+        self.native.write_text(f"#!{sys.executable}\nraise SystemExit(7)\n")
+        bad_probe = runner.run_corpus(corpus(), self.native, self.node, self.root / "bad-probe",
+                                      baseline_report=baseline, reference_change="Still fails closed")
+        self.assertEqual(bad_probe["verdict"], "FAIL")
+        self.assertEqual(bad_probe["results"], [])
+        self.assertFalse(bad_probe["runtime_versions"]["candidate"]["valid"])
+
+    def test_empty_or_unanchored_change_reason_is_rejected(self):
+        for reason in ("", "   ", "no baseline"):
+            with self.subTest(reason=reason), self.assertRaisesRegex(ValueError, "baseline"):
+                self.run_cases(case(), reference_change=reason)
+            self.assertFalse((self.root / "artifacts").exists())
+
+    def test_invalid_utf8_or_empty_version_output_never_passes(self):
+        for name, body in (("empty", "pass"),
+                           ("invalid-utf8", "import sys; sys.stdout.buffer.write(bytes([255]))")):
+            self.native.write_text(f"#!{sys.executable}\n{body}\n")
+            report = runner.run_corpus(corpus(), self.native, self.node, self.root / name)
+            self.assertEqual(report["verdict"], "FAIL")
+            self.assertEqual(report["results"], [])
+            self.assertFalse(report["runtime_versions"]["candidate"]["valid"])
+            self.assertTrue(Path(report["runtime_versions"]["candidate"]["receipt_path"]).is_file())
+
+    def test_version_probe_cannot_change_the_binary_being_measured(self):
+        self.native.write_text(f"#!{sys.executable}\nimport pathlib\n"
+                               "with pathlib.Path(__file__).open('a') as target:\n"
+                               "    target.write('\\n# changed during probe\\n')\n"
+                               "print('mutating-version-test-double')\n")
+        report = self.run_cases(case())
+        self.assertEqual(report["verdict"], "FAIL")
+        self.assertEqual(report["results"], [])
+        self.assertIn("candidate binary changed during version probe", report["provenance_errors"])
+
+    def test_version_probes_retain_deadline_and_quota_failures(self):
+        for name, body, limits in (
+                ("deadline", "import time; time.sleep(20)", {"wall_time_ms": 1500}),
+                ("quota", "print('x' * 8192)", {"max_output_bytes": 64})):
+            self.native.write_text(f"#!{sys.executable}\n{body}\n")
+            report = runner.run_corpus(corpus(), self.native, self.node, self.root / name, **limits)
+            self.assertEqual(report["verdict"], "FAIL")
+            self.assertEqual(report["results"], [])
+            version = report["runtime_versions"]["candidate"]
+            self.assertFalse(version["valid"])
+            self.assertEqual(version["outcome"], "wrapper_timeout" if name == "deadline" else "output_limit_exceeded")
+
+    def test_binary_changed_during_campaign_cannot_pass(self):
+        self.native.write_text(f"#!{sys.executable}\nimport pathlib, sys\n"
+                               "if sys.argv[1] == 'init':\n"
+                               "    with pathlib.Path(__file__).open('a') as target:\n"
+                               "        target.write('\\n# changed after version probe\\n')\n"
+                               "    raise SystemExit(0)\n"
+                               "print(42)\n")
+        report = self.run_cases(case())
+        self.assertEqual(report["results"][0]["verdict"], "PASS")
+        self.assertEqual(report["verdict"], "FAIL")
+        self.assertIn("candidate binary changed during campaign", report["provenance_errors"])
 
 
 if __name__ == "__main__":

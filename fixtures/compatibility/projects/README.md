@@ -1,6 +1,6 @@
 # Executable multi-file project corpus
 
-These 19 hand-authored programs exercise real CommonJS/ESM module graphs,
+The collection contains 153 fixture cases in 22 manifests. They exercise CommonJS/ESM module graphs,
 node_modules packages, scoped and conditional exports, nested dependency
 precedence, package imports/self-reference, builtins through dependencies, and
 filesystem effects. Every case is a complete captured project; execution never
@@ -12,6 +12,7 @@ not third-party npm packages or npm compatibility certification.
 Two-runtime comparison remains available:
 
     python3 scripts/project_compat_runner.py \
+      --corpus-dir fixtures/compatibility/projects \
       --bin target/release/franken-node \
       --node node \
       --artifacts-dir /tmp/franken-project-compat-001
@@ -19,6 +20,7 @@ Two-runtime comparison remains available:
 For the plan's L1 product oracle, add a separately selected Bun reference:
 
     python3 scripts/project_compat_runner.py \
+      --corpus-dir fixtures/compatibility/projects \
       --bin target/release/franken-node \
       --node node \
       --bun bun \
@@ -29,10 +31,14 @@ balanced, then franken-node run <entry> --policy balanced --runtime franken-engi
 --console-only. --policy strict selects strict for both initialization and run;
 no capability grants, degraded-runtime overrides, or policy downgrades are added.
 A denial under the chosen profile remains a failed case, not a skipped case.
+Omitting both corpus flags selects only the 42-case `corpus.json` manifest;
+`--corpus <file>` selects one manifest. Directory mode validates the complete
+collection and rejects duplicate case IDs before executing any runtime.
 
 The selected artifacts directory must not exist. --case <id> is repeatable;
 unknown IDs are errors. --wall-time-ms and --max-output-bytes apply separately
-to every supervised initialization/execution. POSIX process groups are required.
+to every supervised initialization/execution. Each `--version` probe has the
+smaller of those limits and 5 seconds / 8 KiB per stream. POSIX process groups are required.
 Unset NODE_OPTIONS, NODE_PATH, BUN_OPTIONS, preload hooks, and FRANKEN_NODE_*
 overrides (other than the supported FRANKEN_NODE_BIN binary selector) before
 running.
@@ -74,18 +80,27 @@ cannot seed another with cached results or written files.
 report.json is atomically checkpointed after each case and records per-category
 counts, runtime/runner hashes, corpus/case hashes, selected/full case counts,
 limits, mismatch fields, and paths to raw watchdog receipts and stdout/stderr.
+It also records UTC start/end, host OS/architecture/load, Python version, the
+watchdog hash, and each executable's actual `--version` output and receipt.
+Failed, empty, invalid UTF-8, incomplete, or over-budget version probes fail the
+campaign before project execution. Binary hashes are checked again after the
+probes and after the campaign; a detected change prevents PASS.
 Three-runtime reports also record oracle=node-bun-native, bun_reference,
 inconclusive_cases, and per-case reference_disagreements. corpus.json, each
 case.json, and every staged project directory are retained.
 
 The report is separate from the legacy micro-corpus score: a selected subset
 passing is not a claim of overall Node compatibility.
+`candidate_source_binding` is explicitly `not_established_by_this_runner`.
+A version string or nearby Git checkout does not prove which engine source
+was linked into the selected binary.
 
 A frozen input can be rerun without the original source tree:
 
     python3 scripts/project_compat_runner.py \
       --corpus /tmp/franken-project-compat-001/corpus.json \
       --expect-corpus-sha256 'sha256:<64 hexadecimal characters from the prior report>' \
+      --baseline-report /tmp/franken-project-compat-001/report.json \
       --case commonjs-cycle-partial-exports \
       --bin target/release/franken-node \
       --bun bun \
@@ -96,6 +111,17 @@ project inputs; it is not native host-I/O replay or a hermetic environment
 replay. Other environment variables are inherited. Only run trusted fixtures:
 the references are ordinary local processes, not sandboxes, and can perform
 filesystem/network operations allowed to their user.
+
+`--baseline-report` pins the reference roles, executable hashes and exact
+version stdout/stderr from a prior report. A changed Node or Bun reference
+retains a failed report with the old/new identities and runs no project cases.
+For an intentional reference update, supply `--reference-change 'reason'` with
+the baseline. The reason and every drift remain in the new report. This cannot
+approve failed version probes or case mismatches. Candidate builds may change
+without changing reference pins. Baselines without valid version evidence and
+two-reference-to-one-reference downgrades are rejected; the original report is
+never edited. The baseline pins references only, not the corpus, policy or host
+environment, and its previous native verdict is never a new pass oracle.
 
 ## Test the harness and the reference expectations
 

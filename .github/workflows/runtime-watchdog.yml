@@ -6,6 +6,9 @@ on:
     paths:
       - '.github/workflows/runtime-watchdog.yml'
       - 'scripts/runtime_invoke_watchdog.py'
+      - 'scripts/project_compat_runner.py'
+      - 'tests/test_project_compat_runner.py'
+      - 'fixtures/compatibility/projects/*.json'
       - 'tests/test_runtime*watchdog*.py'
       - 'tests/runtime_watchdog_cli_probe.rs'
       - 'crates/franken-node/src/cli.rs'
@@ -15,6 +18,34 @@ permissions:
   contents: read
 
 jobs:
+  project-runner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Exercise project capture, reference drift and failure retention
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          node --version | tee evidence/node-version.txt
+          python3 --version | tee evidence/python-version.txt
+          git rev-parse HEAD > evidence/revision.txt
+          sha256sum scripts/project_compat_runner.py scripts/runtime_invoke_watchdog.py tests/test_project_compat_runner.py > evidence/executed-source-sha256.txt
+          # Candidate and Bun adapters in this suite are explicitly synthetic.
+          # These tests qualify orchestration, never native compatibility.
+          python3 -W error::ResourceWarning -m unittest discover -s tests -p 'test_project_compat_runner.py' -v 2>&1 | tee evidence/project-runner-tests.log
+      - name: Retain project runner regression evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: project-runner-orchestration-evidence
+          retention-days: 7
+          if-no-files-found: error
+          path: evidence/
+
   native-cli-contract:
     runs-on: ubuntu-latest
     timeout-minutes: 10
