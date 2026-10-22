@@ -8,6 +8,10 @@ candidate. Fixtures are trusted programs, not sandboxed by this runner.
     python3 scripts/project_compat_runner.py --bin target/release/franken-node \
         --bun bun --artifacts-dir /tmp/project-compat-001
 
+Use --corpus-dir fixtures/compatibility/projects to execute the full project
+collection. Every case keeps its original id and expected outputs; duplicate
+ids or an invalid manifest reject the collection before any runtime starts.
+
 The artifact directory must be new. Exit 0 means every selected case passed;
 1 means a case/setup/reference failure or inconclusive reference disagreement;
 2 means invalid input or missing prerequisites. Individual case failures retain
@@ -17,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -167,6 +172,24 @@ def executable(name: str) -> Path:
     if resolved is None:
         raise ValueError(f"executable not found: {name!r}")
     return Path(resolved).resolve(strict=True)
+
+
+def load_corpus_directory(directory: Path) -> dict[str, Any]:
+    if not directory.is_dir():
+        raise ValueError(f"project corpus directory not found: {directory}")
+    paths = sorted(directory.glob("*.json"))
+    if not paths or len(paths) > MAX_CASES:
+        raise ValueError(f"project collection needs 1..{MAX_CASES} JSON manifests")
+    combined: dict[str, Any] = {
+        "schema_version": SCHEMA,
+        "description": "Project collection: " + ", ".join(path.name for path in paths),
+        "cases": [],
+    }
+    for path in paths:
+        combined["cases"].extend(load_corpus(path)["cases"])
+        if len(combined["cases"]) > MAX_CASES:
+            raise ValueError(f"project collection exceeds {MAX_CASES} cases")
+    return validate_corpus(combined)
 
 
 def fingerprint(path: Path) -> dict[str, str]:
@@ -379,7 +402,8 @@ def run_corpus(corpus: dict[str, Any], binary: Path, node: Path, artifacts: Path
     validate_corpus(corpus)
     reject_runtime_overrides()
     corpus_sha256 = digest(encoded(corpus))
-    if expected_corpus_sha256 is not None and expected_corpus_sha256 != corpus_sha256:
+    if expected_corpus_sha256 is not None and not hmac.compare_digest(
+            expected_corpus_sha256.encode("utf-8"), corpus_sha256.encode("ascii")):
         raise ValueError("corpus digest does not match --expect-corpus-sha256")
     unknown = set(selected) - {case["id"] for case in corpus["cases"]}
     if unknown:
@@ -455,7 +479,9 @@ def run_corpus(corpus: dict[str, Any], binary: Path, node: Path, artifacts: Path
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
+    inputs = parser.add_mutually_exclusive_group()
+    inputs.add_argument("--corpus", type=Path, help="one project manifest (the default corpus when omitted)")
+    inputs.add_argument("--corpus-dir", type=Path, help="all JSON project manifests in this directory")
     parser.add_argument("--bin", default=os.environ.get(
         "FRANKEN_NODE_BIN", str(ROOT / "target/release/franken-node")))
     parser.add_argument("--node", default="node")
@@ -468,7 +494,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--max-output-bytes", type=positive_bytes, default=1024 * 1024)
     args = parser.parse_args(argv)
     try:
-        corpus_value = load_corpus(args.corpus)
+        corpus_value = (load_corpus_directory(args.corpus_dir) if args.corpus_dir is not None
+                        else load_corpus(args.corpus or DEFAULT_CORPUS))
         with cancellation_signals() as cancellation:
             report = run_corpus(
                 corpus_value, executable(args.bin), executable(args.node), args.artifacts_dir,

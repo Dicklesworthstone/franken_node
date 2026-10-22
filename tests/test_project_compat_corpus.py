@@ -44,7 +44,7 @@ class CorpusTests(unittest.TestCase):
     def test_every_reference_matches_exact_expectations(self):
         runner.reject_runtime_overrides()
         node = runner.executable("node")
-        corpus = runner.load_corpus(runner.DEFAULT_CORPUS)
+        corpus = runner.load_corpus_directory(ROOT / "fixtures/compatibility/projects")
         with tempfile.TemporaryDirectory() as tmp:
             for case in corpus["cases"]:
                 with self.subTest(case=case["id"]):
@@ -53,7 +53,8 @@ class CorpusTests(unittest.TestCase):
                     runner.stage(case, workspace)
                     receipt = runner.supervise([str(node), "./" + case["entry"], *case.get("args", [])],
                                                base / "execution", cwd=workspace, wall_time_ms=10000,
-                                               max_output_bytes=1024 * 1024)
+                                               max_output_bytes=1024 * 1024,
+                                               stdin_data=case["stdin"].encode("utf-8") if "stdin" in case else None)
                     self.assertEqual(runner.differences(receipt, case["expected"]), [],
                                      Path(receipt["stderr_path"]).read_text(errors="replace"))
                     for name, expected in case["expected"].get("files", {}).items():

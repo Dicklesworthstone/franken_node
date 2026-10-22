@@ -57,15 +57,29 @@ changed values, authority and Secret-flow restrictions. The
 shape checks, engine limits and private-data-free validation diagnostics. The
 `replay_capture_debug_` test checks that debug redaction does not alter JSON.
 
-Run in a complete supported workspace with the engine feature enabled:
+These tests are inline library tests. A default `cargo test` filters them out
+at the library gate. Use the dedicated inline configuration from
+`.github/workflows/inline-lib-tests-gate.yml` in a complete supported workspace;
+the default features include the engine. First require nonzero discovery:
 
 ```bash
-rch exec -- cargo test -p frankenengine-node native_environment_
-rch exec -- cargo test -p frankenengine-node environment_transcript_
-rch exec -- cargo test -p frankenengine-node malformed_environment_
-rch exec -- cargo test -p frankenengine-node replay_capture_debug_
-rch exec -- cargo test -p frankenengine-node native_replay::
+set -o pipefail
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 RUSTFLAGS="--cfg franken_node_inline_tests" \
+  cargo test -p frankenengine-node --lib --features extended-surfaces,test-support \
+  ops::native_replay:: -- --list | tee /tmp/franken-node-native-replay.list
+python3 scripts/check_inline_lib_tests.py /tmp/franken-node-native-replay.list --min-tests 1 --json
+
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 RUSTFLAGS="--cfg franken_node_inline_tests" \
+  cargo test -p frankenengine-node --lib --features extended-surfaces,test-support \
+  ops::native_replay::
 ```
+
+Inspect the list for the named environment, transcript, malformed-capture and
+debug tests above, and retain the execution summary with nonzero executed tests
+and no failures. A passing preflight, an empty filter or skipped-only output
+does not verify this behavior. The broader module filter also exercises the
+existing completed, exception and engine-stop replay tests. Discovery and
+execution still require the normal disk and remote-worker admission checks.
 
 These are implementation tests, not a claim of arbitrary Node compatibility,
 complete ambient-environment replay, or multi-file incident replay.

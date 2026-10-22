@@ -2,6 +2,53 @@
 
 ## Current assessment — 2026-10-21
 
+### Execution TODO — started 2026-10-21 after the assessment
+
+Consumer: the operator explicitly requested a detailed TODO while implementing the bridge. This checklist tracks execution and retires into the canonical Beads when guarded tracker writes work again. It gives no capability credit by itself.
+
+- [x] Recheck HEAD, dirty paths, required disk admission, and guarded Beads claiming. Tree initially clean; disk still critical; `.12` claim refused by database-family authority.
+- [x] R1: reproduce the initial reference failures, inspect Node contracts, and preserve all expected outputs and case identities.
+- [x] R1: exercise pinned Node 22.14.0 and available Node 24.20.0/26.8.1; retain version-specific failures. Full qualification remains open below.
+- [x] R1: await the asynchronous closed-directory rejection and use a synchronous closed-descriptor probe where required; retain cleanup assertions.
+- [x] R1: replace the hand-built diagnostic store with the required AsyncLocalStorage instance.
+- [x] R1: capture the pre-aborted sink's actual stream error and await close before observing resource cleanup; retain Node 24's internal Web-stream failures as non-pass.
+- [x] R1: await `writer.closed` in the sink-error bridge program. Exact original error identity and all original cleanup/file assertions pass on Node 22/24/26 and Bun.
+- [x] Make the existing project collection runnable: add 34 missing categories in seven manifests, add `--corpus-dir`, reject duplicate IDs/invalid/oversized collections, retain all cases after a failure, and make the existing reference test execute every manifest.
+- [x] R4: repair the explicitly synthetic triad fixture's missing file mutation; retain the intentional file-mismatch negative. This supplies orchestration proof only.
+- [x] Execute the complete 153-case triad on real published v0.2.0, Node 26.8.1 and Bun 1.4.0, retaining binary hashes, versions, corpus digest, streams, files and watchdog receipts. This is release evidence, not current-source evidence.
+- [x] Execute focused Python suites; classify native skips, remaining reference-version differences and denied host signal cleanup explicitly.
+- [x] R2 instructions: publish the actual inline override/features, nonzero discovery check and module execution command in both replay documents. Parser tests and preflight pass; Rust discovery/execution remain unverified.
+- [x] Correct user-facing release/source-bootstrap/architecture/feature instructions from current release metadata and code. Existing source-bootstrap tests pass 27/27; this is onboarding maintenance, not runtime capability credit.
+- [x] Review changes from a fresh verification pass against the original expectations, re-execute the real full collection, compile touched Python sources, inspect UBS warnings, and pass `git diff --check`. Publication is recorded by the implementation commit and final operator response, not a pre-checked push claim.
+- [ ] R1/R1T: independently qualify all 153 frozen expectations and execute the current source candidate. Node 22 has unsupported/crashing Web-file-stream cases, Node 24 has Blob and pre-abort differences, Node 26 has Blob/dotenv differences, and Bun disagrees on 14 cases. No golden or threshold was changed to force agreement.
+- [ ] R0: restore safe Beads write admission, claim/comment the existing owners, import the prepared tasks and sync. **Blocked:** owning database WAL may contain committed frames; do not delete, replace, truncate or rebuild it from JSONL.
+- [ ] R2T/R3/R3T/R5: current-engine compilation, native project/replay verification, module replay and installed-asset qualification. **Blocked for compilation:** required disk admission is critical; source/backend prerequisites remain explicit.
+- [ ] Existing later owners: current per-profile >=95% corpus, >=3x durable migration, live substrate/advanced-surface integration, performance, independent replication and production adoption. These remain open until their own positive acceptance evidence exists.
+
+### Implementation and re-execution — 2026-10-21
+
+The runner can now execute all **153 cases in 22 project manifests** with one `--corpus-dir` invocation. Previously the default command selected only the 42-case `corpus.json`, and 34 cases in seven other manifests were rejected for missing mandatory category metadata. Directory mode retains original case IDs and exact expectations, rejects an invalid member or duplicate ID before execution, retains a canonical combined corpus, and continues after individual failures. Tests include a positive two-manifest execution and a planted candidate mismatch that keeps the overall result failed while the following case still executes. Default single-manifest behavior and the historical compatibility-score denominator are unchanged.
+
+Five fixture programs were corrected: diagnostic channel binding now uses AsyncLocalStorage; two directory probes now observe the actual closed-read operation; the pre-aborted sink waits for its actual error and close; and the Web sink bridge waits for terminal error propagation. **Every original `expected` object and all 153 IDs are unchanged**, verified against the committed pre-state. Six delegated manifests were independently checked to differ only by category additions; the root agent re-executed the checks rather than accepting agent agreement as proof.
+
+The final real triad run used balanced policy, isolated per-runtime workspaces and isolated release XDG state. It retained all 153 results and exited 1: **11 PASS / 128 FAIL / 14 INCONCLUSIVE**, with no ERROR, cancellation or missing case. All three legs actually executed. This qualifies neither current `main` nor the historical 560-case headline. The published candidate was `franken-node 0.2.0`, binary SHA-256 `cd938fd67c8f506a0a49fd7347b8c736ff4a74035eaca47dcbab345eb5a06438`. The combined corpus digest was `sha256:9463c147651d184338913c90083eaeb05d4dbeec4d1e09d27b42b8688e308814`. Final evidence is outside the checkout at `/var/folders/vt/n2xyn_s51b97_j3yh2qbqcnc0000gn/T/franken-node-execute-20261021-8xqtdo7w/release-v0.2.0-projects-final/`; its `report.json`, retained corpus and each runtime's `execution/` receipts/streams are the primary evidence. These temporary files are not durable release qualification artifacts.
+
+Reference identity matters: Node 26.8.1 matched 151/153 frozen cases; `blob-iterable-part-snapshots` produced `67,67,68` instead of `65,66,68`, and Node's newer dotenv result used a null prototype and retained `__proto__`. Both original goldens were reproduced unchanged on official, checksum-verified Node 22.14.0. Node 24.20.0 reproduced the Blob difference and two internal pre-aborted Web-stream `closeCache.reject` failures. Bun 1.4.0 disagreed with Node on 14 cases; its installed Cellar directory is labelled 1.3.8, so the observed executable version, not the directory name, is recorded. No one reference version is qualified for the whole collection. The repaired sink bridge matched its original streams/status/files on all four real reference binaries.
+
+| Post-change check | Observed result | Boundary |
+|---|---|---|
+| Pipeline/reference suite, Node 26.8.1 | 45 tests: 30 pass, 15 native tests skipped | All reference assertions pass; skipped native execution earns no credit. |
+| Whole-collection reference test, Node 26.8.1 | 153 cases executed; 151 match, two retained version mismatches; suite exits 1 | Expands actual coverage to every manifest without regenerating goldens. |
+| Project runner suite | 36 tests: 34 pass, two fail | Timeout/quota cleanup still hits denied `os.killpg` on this host; isolation fix and new collection/Unicode-digest tests pass. No expected failure was weakened. |
+| Stream bridge suite, Node 26.8.1 | 3 tests: two pass, one native test skipped | Exact terminal error and file assertions pass. |
+| Inline gate parser and preflight | 20 tests pass; preflight passes | Parser negatives reject zero tests. No Rust test discovery or execution ran. |
+| Source-bootstrap suite | 27 tests pass | Local Git-fixture materialization/preservation behavior, not current-source compilation. |
+| UBS on three touched Python files | Exit 0; zero critical, eight warnings | Descriptor lifetime and JSON parsing warnings were inspected; no blanket suppression, tolerance or no-scan override was added. Public digest comparison now uses `compare_digest`; wrong and Unicode pins still refuse before execution. |
+
+Current-source Rust/native verification remains blocked: the latest `sbh check --need 20G` returned critical at 6.52% free, and a required-remote Python job failed every worker's preflight with exit 103. Guarded Beads claiming was retried and again refused with `SYNC_CONFLICT` because WAL-index recovery admission is unavailable. No issue was marked claimed, completed or closed through a bypass. The 51 unfinished canonical records remain unfinished.
+
+The final self-review found no changed golden, relaxed assertion, new skip, hidden case drop or unsupported closure. The synthetic isolation adapter remains explicitly orchestration-only. This is self-verification; no independent verifier reviewed the complete implementation, and no current-native capability completion is claimed. The requested TODO/report is process tracking and earns no runtime capability credit.
+
 This section supersedes the dated assessments below. Historical measurements are retained as history, not silently promoted to current results.
 
 **Verdict:** substantial native runtime and trust infrastructure exists, and the source has advanced materially since the September assessment. The charter is not fulfilled. More fundamentally, there is no current, source-bound body of executed evidence that establishes how close it is. The installed-release experience, current source, and retained KPI artifacts describe three different states.
@@ -75,7 +122,7 @@ The source is not merely an external Node wrapper: these native executions and t
 | Source reproducibility and packaging | `scripts/bootstrap_source.sh`, `packaging/source-siblings.tsv`, `install.sh:446`; pinned release workflow inputs | **PARTIAL**, improved significantly. Bootstrap handles frankentui/fastapi/sqlmodel siblings and records source inputs. The README's two-checkout build layout is incomplete for the present Cargo graph. A path dependency alone pins nothing. | `.11`, `.12`, `bd-tenx3.4` |
 | Public claims and doc consistency | Root README, claims registry, honesty census and executable gates | **PARTIAL**. README still says v0.1.0 is the only release, describes fastapi as dev-only in its diagram, and has old no-camouflage/no-crash-caller language alongside newer implementations. Later sections also correctly explain many boundaries. Fix from source/release evidence, not by reducing the charter. | `.15`, `.16`, `bd-tenx3` |
 
-### Fresh verification results and their limits
+### Assessment-time verification results (before implementation above)
 
 | Check | Result | What it proves |
 |---|---|---|

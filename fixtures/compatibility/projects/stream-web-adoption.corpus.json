@@ -3,6 +3,7 @@
   "cases": [
     {
       "id": "web-preaborted-reader-releases-file",
+      "category": "stream-integration",
       "entry": "app.cjs",
       "files": {
         "package.json": "{\"name\":\"web-adoption-workflow\",\"version\":\"1.0.0\",\"private\":true}\n",
@@ -26,12 +27,13 @@
     },
     {
       "id": "web-preaborted-esm-sink-aborts-file",
+      "category": "stream-integration",
       "entry": "app.mjs",
       "files": {
         "package.json": "{\"name\":\"web-adoption-workflow\",\"version\":\"1.0.0\",\"private\":true}\n",
         "node_modules/@fixture/file-sink/package.json": "{\"name\":\"@fixture/file-sink\",\"version\":\"1.0.0\",\"type\":\"module\",\"exports\":\"./index.mjs\"}\n",
         "node_modules/@fixture/file-sink/index.mjs": "import fs from 'node:fs';import {WritableStream} from 'node:stream/web';\nexport async function open(){const handle=await fs.promises.open('staged.txt','w');let calls=0;\n const stream=new WritableStream({async write(x){await handle.writeFile(x);},\n  async close(){await handle.close();fs.writeFileSync('published.txt','wrong');},\n  async abort(reason){calls++;await new Promise(resolve=>queueMicrotask(resolve));await handle.close();\n   fs.writeFileSync('abort.txt',reason.code+':'+String(reason.cause)+':closed\\n');}});\n return {stream,handle,calls:()=>calls};}\n",
-        "app.mjs": "import fs from 'node:fs';import {Readable,Writable} from 'node:stream';\nimport {pipeline} from 'node:stream/promises';import {open} from '@fixture/file-sink';\n(async function(){const owned=await open();const c=new AbortController();c.abort(null);\n const sink=Writable.fromWeb(owned.stream,{signal:c.signal});let error;\n try{await pipeline(Readable.from(['must-not-publish']),sink);}catch(e){error=e;}\n fs.writeFileSync('receipt.txt',[error.code,error.cause===null,owned.handle.fd,sink.closed,owned.calls()].join(':')+'\\n');\n console.log('SINK_ABORTED');\n})().catch(e=>{console.error(e);process.exitCode=1;});\n"
+        "app.mjs": "import fs from 'node:fs';import {Readable,Writable} from 'node:stream';\nimport {pipeline} from 'node:stream/promises';import {open} from '@fixture/file-sink';\n(async function(){const owned=await open();const c=new AbortController();c.abort(null);\n const sink=Writable.fromWeb(owned.stream,{signal:c.signal});let error;sink.on('error',e=>error=e);\n const closed=new Promise(resolve=>sink.once('close',resolve));let pipelineError;\n try{await pipeline(Readable.from(['must-not-publish']),sink);}catch(e){pipelineError=e;}\n await closed;if(!pipelineError)throw Error('pre-aborted pipeline unexpectedly succeeded');\n fs.writeFileSync('receipt.txt',[error.code,error.cause===null,owned.handle.fd,sink.closed,owned.calls()].join(':')+'\\n');\n console.log('SINK_ABORTED');\n})().catch(e=>{console.error(e);process.exitCode=1;});\n"
       },
       "expected": {
         "exit_code": 0,
@@ -47,6 +49,7 @@
     },
     {
       "id": "web-preaborted-duplex-cleans-both-resources",
+      "category": "stream-integration",
       "entry": "app.cjs",
       "files": {
         "package.json": "{\"name\":\"web-adoption-workflow\",\"version\":\"1.0.0\",\"private\":true}\n",
@@ -71,6 +74,7 @@
     },
     {
       "id": "web-live-signal-export-finishes-normally",
+      "category": "stream-integration",
       "entry": "app.cjs",
       "files": {
         "package.json": "{\"name\":\"web-adoption-workflow\",\"version\":\"1.0.0\",\"private\":true}\n",
@@ -91,6 +95,7 @@
     },
     {
       "id": "web-pipeline-keeps-accepted-byte-prefix",
+      "category": "stream-integration",
       "entry": "app.cjs",
       "files": {
         "package.json": "{\"name\":\"accepted-byte-export\",\"version\":\"1.0.0\",\"private\":true}\n",
@@ -111,6 +116,7 @@
     },
     {
       "id": "web-pipeline-keeps-scoped-object-record",
+      "category": "stream-integration",
       "entry": "app.mjs",
       "files": {
         "package.json": "{\"name\":\"accepted-object-export\",\"version\":\"1.0.0\",\"private\":true,\"type\":\"module\"}\n",

@@ -68,6 +68,39 @@ class ValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "executable not found"):
             runner.executable("/definitely-not-installed/franken-node")
 
+    def test_committed_project_collection_is_executable(self):
+        directory = ROOT / "fixtures/compatibility/projects"
+        combined = runner.load_corpus_directory(directory)
+        manifests = [runner.load_corpus(path) for path in sorted(directory.glob("*.json"))]
+        self.assertEqual(combined["cases"], [case for value in manifests for case in value["cases"]])
+        self.assertGreater(len(combined["cases"]), len(runner.load_corpus(runner.DEFAULT_CORPUS)["cases"]))
+
+    def test_directory_keeps_manifest_order_and_rejects_duplicate_cases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "b.json").write_bytes(runner.encoded(corpus(case("second"))))
+            (root / "a.json").write_bytes(runner.encoded(corpus(case("first"))))
+            combined = runner.load_corpus_directory(root)
+            self.assertEqual([value["id"] for value in combined["cases"]], ["first", "second"])
+            self.assertEqual(combined["cases"][0]["expected"], case("first")["expected"])
+            (root / "b.json").write_bytes(runner.encoded(corpus(case("first"))))
+            with self.assertRaisesRegex(ValueError, "duplicate case id"):
+                runner.load_corpus_directory(root)
+
+    def test_directory_refuses_empty_invalid_or_oversized_collection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(ValueError, "JSON manifests"):
+                runner.load_corpus_directory(root)
+            path = root / "invalid.json"
+            path.write_text("{}")
+            with self.assertRaisesRegex(ValueError, "missing"):
+                runner.load_corpus_directory(root)
+            path.write_bytes(runner.encoded(corpus(case("first"), case("second"))))
+            with patch.object(runner, "MAX_CASES", 1):
+                with self.assertRaisesRegex(ValueError, "cases"):
+                    runner.load_corpus_directory(root)
+
 
 @unittest.skipUnless(os.name == "posix" and shutil.which("node"), "requires POSIX and Node reference")
 class ExecutionTests(unittest.TestCase):
@@ -103,6 +136,9 @@ elif entry == 'exit.js':
     raise SystemExit(7)
 elif entry == 'isolated.js':
     print(0 if pathlib.Path('reference-created.txt').exists() else 42)
+elif entry == 'triad-isolated.js':
+    print(0 if pathlib.Path('other-runtime.txt').exists() else 42)
+    pathlib.Path('other-runtime.txt').write_text('created')
 else:
     print(42)
 ''')
@@ -198,6 +234,21 @@ else:
         self.assertEqual([row["verdict"] for row in report["results"]], ["FAIL", "PASS"])
         self.assertEqual(report["results"][0]["candidate"]["differences"], ["stdout"])
 
+    def test_directory_cli_executes_every_manifest_and_keeps_failure(self):
+        manifests = self.root / "manifests"
+        manifests.mkdir()
+        (manifests / "a.json").write_bytes(runner.encoded(corpus(case("bad", "wrong.js"))))
+        (manifests / "b.json").write_bytes(runner.encoded(corpus(case("good"))))
+        artifacts = self.root / "collection-results"
+        with patch("sys.stdout"):
+            status = runner.main(["--corpus-dir", str(manifests), "--bin", str(self.native),
+                                  "--node", str(self.node), "--artifacts-dir", str(artifacts)])
+        report = json.loads((artifacts / "report.json").read_text())
+        self.assertEqual(status, 1)
+        self.assertEqual(report["corpus_case_count"], 2)
+        self.assertEqual([row["verdict"] for row in report["results"]], ["FAIL", "PASS"])
+        self.assertEqual(len(runner.load_corpus(artifacts / "corpus.json")["cases"]), 2)
+
     def test_reference_must_match_golden_not_only_candidate(self):
         value = case()
         value["expected"]["stdout"] = "incorrect golden\n"
@@ -235,8 +286,8 @@ else:
         self.assertFalse((base / "candidate/project/reference-created.txt").exists())
 
     def test_three_runtime_workspaces_are_mutation_isolated(self):
-        value = case()
-        value["files"]["main.js"] = (
+        value = case(entry="triad-isolated.js")
+        value["files"]["triad-isolated.js"] = (
             "const fs=require('fs');"
             "console.log(fs.existsSync('other-runtime.txt')?0:42);"
             "fs.writeFileSync('other-runtime.txt','created');\n")
@@ -322,9 +373,10 @@ else:
         self.assertIn("changed fixture input", result["detail"])
 
     def test_digest_pin_rejects_changed_inputs_before_execution(self):
-        with self.assertRaisesRegex(ValueError, "corpus digest does not match"):
-            self.run_cases(case(), expected_corpus_sha256="sha256:" + "0" * 64)
-        self.assertFalse((self.root / "artifacts").exists())
+        for pin in ("sha256:" + "0" * 64, "sha256:invalid-\u2603"):
+            with self.subTest(pin=pin), self.assertRaisesRegex(ValueError, "corpus digest does not match"):
+                self.run_cases(case(), expected_corpus_sha256=pin)
+            self.assertFalse((self.root / "artifacts").exists())
 
     def test_frozen_corpus_can_be_rerun_with_its_digest(self):
         first = self.run_cases(case())

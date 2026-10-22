@@ -46,7 +46,7 @@
       "entry": "main.cjs",
       "files": {
         "main.cjs": "const fs=require('node:fs'),dc=require('node:diagnostics_channel'),store=require('./scope.cjs');const trace=dc.tracingChannel('fixture.callback'),events=[];trace.asyncStart.bindStore(store,c=>c.result);for(const name of ['start','end','asyncStart','asyncEnd'])trace[name].subscribe(()=>events.push(name+':'+store.current()));let ticket;new Promise((resolve,reject)=>{ticket=require('fixture-callback')(21,function(error,value,extra){if(error){reject(error);return;}fs.writeFileSync('answer.txt',value+':'+this.tag+':'+store.current()+':'+extra+'\\n');resolve(value);});}).then(value=>{trace.asyncStart.unbindStore(store);fs.writeFileSync('events.json',JSON.stringify(events)+'\\n');console.log('CALLBACK_DIAGNOSTICS',ticket,value,store.current());});\n",
-        "scope.cjs": "let current='outside';exports.current=()=>current;exports.run=function(value,fn){const old=current;current=value;try{return fn();}finally{current=old;}};\n",
+        "scope.cjs": "const {AsyncLocalStorage}=require('node:async_hooks');const store=new AsyncLocalStorage();store.current=()=>store.getStore()??'outside';module.exports=store;\n",
         "node_modules/fixture-callback/package.json": "{\"name\":\"fixture-callback\",\"version\":\"1.0.0\",\"main\":\"index.cjs\"}\n",
         "node_modules/fixture-callback/index.cjs": "const trace=require('diagnostics_channel').tracingChannel('fixture.callback');module.exports=function(value,callback){return trace.traceCallback(function(n,done){Promise.resolve().then(()=>done.call({tag:'worker'},null,n*2,'ok'));return 'ticket';},-1,{id:'call'},undefined,value,callback);};\n"
       },

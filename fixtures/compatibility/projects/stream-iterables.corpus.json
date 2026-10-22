@@ -3,6 +3,7 @@
   "cases": [
     {
       "id": "lazy-cursor-record-export",
+      "category": "stream-integration",
       "entry": "main.cjs",
       "files": {
         "package.json": "{\"name\":\"cursor-export\",\"version\":\"1.0.0\"}",
@@ -22,6 +23,7 @@
     },
     {
       "id": "esm-cursor-byte-view-export",
+      "category": "stream-integration",
       "entry": "main.mjs",
       "files": {
         "package.json": "{\"name\":\"view-export\",\"version\":\"1.0.0\",\"type\":\"module\"}",
@@ -41,6 +43,7 @@
     },
     {
       "id": "mixed-promises-package-build",
+      "category": "stream-integration",
       "entry": "main.cjs",
       "files": {
         "package.json": "{\"name\":\"mixed-build\",\"version\":\"1.0.0\"}",

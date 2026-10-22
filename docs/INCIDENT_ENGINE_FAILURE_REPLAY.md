@@ -81,9 +81,11 @@ comparison, a changed terminal state, transcript corruption, incomplete cleanup,
 wrong traces, unsupported errors and preflight limits. They do not substitute a
 Node process for the native engine.
 
-```bash
-rch exec -- cargo test -p frankenengine-node engine_failure_
-rch exec -- cargo test -p frankenengine-node native_replay::
-```
-
-These commands require the supported Rust toolchain and sibling engine checkout.
+These are inline library tests, excluded by the default library test gate.
+Use the dedicated discovery and execution commands in
+[the environment replay regression instructions](INCIDENT_ENVIRONMENT_REPLAY.md#focused-regression-coverage),
+including `--lib`, the inline `RUSTFLAGS` override, full feature selection and
+nonzero discovery check. The `ops::native_replay::` filter includes these tests;
+confirm the `engine_failure_` names are listed and actually executed. A zero-test
+success is not replay proof. This requires the supported Rust toolchain, sibling
+engine checkout, disk admission and an available remote worker.

@@ -301,22 +301,21 @@ curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/franken_node/main
 irm https://raw.githubusercontent.com/Dicklesworthstone/franken_node/main/install.ps1 | iex
 ```
 
-The installer tries the latest GitHub **release tag** first. That tag can lag
-`main` by hundreds of commits (as of 2026-08-20, Latest was `v0.1.0` while
-`main` was `v0.1.0-709`). Prebuilt `v0.1.0` does **not** include `ltv` and
-cannot `run` guest JS without a degraded Node/Bun fallback. For current
-`main` behavior:
+The installer tries the latest GitHub **release tag** first. As of 2026-10-21,
+Latest is [v0.2.0](https://github.com/Dicklesworthstone/franken_node/releases/tag/v0.2.0),
+published 2026-10-04 with Linux x86_64, macOS arm64 and Windows x86_64 assets.
+Its macOS binary executes native guest JavaScript, but it predates newer
+commands such as `run --capture-replay` and `fleet serve`. A release tag can lag
+`main` substantially. For current source behavior:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/franken_node/main/install.sh | bash -s -- --method source --node-ref main --engine-ref main
 ```
 
 A checksum-verified release asset is used when you pass `--method release` or
-`--version vX.Y.Z`. The only published release is **v0.1.0** (2026-05-29),
-over 1,100 commits behind `main`, so none of the behavior described in this
-README since then is in it; build from source for current behavior. The
-release installer targets Linux x86_64, macOS Apple Silicon (arm64) and
-Windows x86_64, but no current build of those assets exists. Pass `--help` (bash) / `-EasyMode`
+`--version vX.Y.Z`. Asset availability does not establish that the release
+implements every current README surface. Check the installed `--version` and
+command help before relying on newer behavior. Pass `--help` (bash) / `-EasyMode`
 (PowerShell adds the dir to PATH) for options.
 
 Child-process spawning is not enabled by any runtime profile. Profile-governed
@@ -347,11 +346,12 @@ probe Bubblewrap and are unaffected.
 ### Option 2: Build from source (split-repo layout required)
 
 ```bash
-# Side-by-side checkout
-git clone https://github.com/Dicklesworthstone/franken_engine.git
+# Start in a fresh parent directory; the bootstrap preserves existing checkouts.
 git clone https://github.com/Dicklesworthstone/franken_node.git
 
 cd franken_node
+bash scripts/bootstrap_source.sh --workspace "$PWD" --engine-ref main \
+  --receipt ../franken-node-source-inputs.tsv
 cargo build --release -p frankenengine-node
 ./target/release/franken-node --version
 ```
@@ -362,7 +362,17 @@ Expected local layout:
 <parent>/
   franken_engine/
   franken_node/
+  frankentui/
+  fastapi_rust/
+  sqlmodel_rust/
 ```
+
+The bootstrap materializes all four sibling path dependencies. Supporting
+revisions come from `packaging/source-siblings.tsv`; `--engine-ref` selects the
+engine and the new receipt records its resolved commit. Supply an immutable
+engine commit for a reproducible source selection. Existing siblings must be
+clean and match the requested commits; the bootstrap refuses to reset or replace
+them. The receipt records source inputs, not a successful build or qualification.
 
 The Cargo workspace package is named `frankenengine-node`; the produced
 binary is named `franken-node`. Rust 2024 edition; no unsafe code is
@@ -1241,13 +1251,15 @@ configuration with profile overlays applied.
 ## Crate Features
 
 The `frankenengine-node` crate ships a granular feature surface. Defaults
-keep the binary small; product surfaces opt in explicitly.
+include native execution, HTTP/process helpers and the fleet HTTP server;
+additional product surfaces opt in explicitly.
 
 | Feature | Default | Purpose |
 |---|---|---|
 | `engine` | ✅ | Links the sibling `frankenengine-engine` and `frankenengine-extension-host` crates. |
 | `http-client` | ✅ | Outbound HTTP client support (`ureq`, `url`). |
 | `external-commands` | ✅ | External command/process helpers (`which`, `ctrlc`). |
+| `fleet-control-plane-server` | ✅ | Live `fleet serve` HTTP coordinator on fastapi_rust/asupersync over the durable fleet store; implies `http-client`. |
 | `extended-surfaces` | opt-in | Legacy umbrella over the granular product features below. |
 | `control-plane` | opt-in | API middleware, fleet operations, control-plane functionality. |
 | `policy-engine` | opt-in | Security policies, guardrail monitors, hardening state machines. |
@@ -1256,10 +1268,12 @@ keep the binary small; product surfaces opt in explicitly.
 | `verifier-tools` | opt-in | Verifier-specific tooling, economy, and SDK surfaces. |
 | `advanced-features` | opt-in | Claims, conformance, encoding, extensions, federation, performance, and repair surfaces. |
 | `test-support` | opt-in | Shared test helpers (enables `control-plane` and `admin-tools`). |
+| `loom-models` | opt-in | Library-level `#[cfg(loom)]` helpers for explicit Loom invocations. |
 | `asupersync-transport` | opt-in | Direct asupersync transport integration. |
 | `compression` | opt-in | Gzip/deflate support via `flate2`. |
 | `cbor-serialization` | opt-in | CBOR encoding support via `ciborium`. |
 | `blake3` | opt-in | Optional BLAKE3 hashing support. |
+| `profiling` | opt-in | Per-hot-path latency histograms via `hdrhistogram`; absent from default builds. |
 
 ```bash
 # Enable everything except packaging extras
@@ -1275,19 +1289,18 @@ cargo build --release -p frankenengine-node --no-default-features --features eng
 
 ```mermaid
 flowchart TB
-    fn["<b>franken_node</b><br/>compatibility, migration, trust UX, ops<br/>verifier SDK, file-transport fleet log,<br/>recorded incident bundles"]
-    asu["<b>asupersync</b><br/>opt-in transport feature<br/>default is file JSONL"]
+    fn["<b>franken_node</b><br/>compatibility, migration, trust UX, ops<br/>verifier SDK, fleet control,<br/>recorded incident bundles"]
+    asu["<b>asupersync</b><br/>runtime for the default fleet server<br/>additional transport integration is opt-in"]
     ftui["<b>frankentui</b><br/>Buffer echo of<br/>preformatted doctor/fleet lines"]
-    fapi["<b>fastapi_rust</b><br/>dev-dep in-process catalog<br/>does not bind a socket"]
+    fapi["<b>fastapi_rust</b><br/>default fleet HTTP listener<br/>authenticated durable-store routes"]
     feng["<b>franken_engine</b><br/>native JS / TS runtime<br/>+ extension host"]
-    fsql["<b>frankensqlite</b><br/>in-memory adapter model<br/>not the live durable store"]
+    fsql["<b>frankensqlite</b><br/>published fsqlite dependency<br/>durable trust, fleet and evidence stores"]
 
-    fn --> asu
     fn --> ftui
     fn --> fapi
-    asu --> feng
-    fapi --> feng
-    feng --> fsql
+    fn --> feng
+    fn --> fsql
+    fapi --> asu
 
     classDef product fill:#1f6feb,color:#fff,stroke:#0a3b91,stroke-width:1px;
     classDef plane fill:#5b3cc4,color:#fff,stroke:#3a2780,stroke-width:1px;
@@ -3042,6 +3055,27 @@ For the verifier SDK in isolation:
 ```bash
 cargo test -p frankenengine-verifier-sdk
 ```
+
+For the complete multi-file compatibility project collection:
+
+```bash
+python3 -m unittest discover -s tests -p test_project_compat_corpus.py
+python3 scripts/project_compat_runner.py --corpus-dir fixtures/compatibility/projects \
+  --bin ./target/release/franken-node --node /path/to/node --bun /path/to/bun \
+  --artifacts-dir /tmp/franken-node-project-results
+```
+
+The artifact directory must be new. Omitting both `--corpus-dir` and `--corpus`
+selects only `projects/corpus.json`; it does not run the other project manifests.
+The full collection currently contains 153 cases in 22 manifests. The first
+command checks real Node against every frozen expectation. The runner executes
+distinct Node, Bun and native binaries with separate workspaces, retaining their
+hashes, exact streams, statuses and expected file observations. Reference-version
+differences remain non-pass outcomes. In particular, Node 24/26 differ from the
+pinned Node 22.14.0 on some Blob, dotenv and Web stream cases; no one version is
+currently qualified for the whole collection. These project results are separate
+from the historical 560-case compatibility score. A test double or a reference-only
+run supplies no native compatibility proof.
 
 ---
 

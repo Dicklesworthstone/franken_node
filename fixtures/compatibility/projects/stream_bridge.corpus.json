@@ -52,7 +52,7 @@
       "files": {
         "main.cjs": "require('fixture-bridge-error')().then(same=>console.log('BRIDGE_FAILURE_COMPLETE',same));\n",
         "node_modules/fixture-bridge-error/package.json": "{\"name\": \"fixture-bridge-error\", \"version\": \"1.0.0\", \"main\": \"index.cjs\"}\n",
-        "node_modules/fixture-bridge-error/index.cjs": "const s=require('stream'),fs=require('fs');module.exports=async function(){const error=Error('sink refused');let writes=0;const target=new s.Writable({write(bytes,encoding,done){if(++writes===1){fs.appendFileSync('accepted.txt',bytes);done();}else done(error);},destroy(reason,done){fs.writeFileSync('cleanup.txt','destroyed\\n');done(reason);},final(done){fs.writeFileSync('unexpected.txt','incorrect completion');done();}});const writer=s.Writable.toWeb(target).getWriter();await writer.write('accepted\\n');try{await writer.write('rejected\\n');return false;}catch(reason){return reason===error;}};\n"
+        "node_modules/fixture-bridge-error/index.cjs": "const s=require('stream'),fs=require('fs');module.exports=async function(){const error=Error('sink refused');let writes=0;const target=new s.Writable({write(bytes,encoding,done){if(++writes===1){fs.appendFileSync('accepted.txt',bytes);done();}else done(error);},destroy(reason,done){fs.writeFileSync('cleanup.txt','destroyed\\n');done(reason);},final(done){fs.writeFileSync('unexpected.txt','incorrect completion');done();}});const writer=s.Writable.toWeb(target).getWriter();await writer.write('accepted\\n');try{await writer.write('rejected\\n');await writer.closed;return false;}catch(reason){return reason===error;}};\n"
       },
       "expected": {
         "stdout": "BRIDGE_FAILURE_COMPLETE true\n",

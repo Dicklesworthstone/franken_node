@@ -3,6 +3,7 @@
   "cases": [
     {
       "id": "constructor-signal-cjs-prefix",
+      "category": "stream-integration",
       "entry": "app.cjs",
       "files": {
         "package.json": "{\"name\":\"cancelled-export\",\"private\":true}\n",
@@ -24,6 +25,7 @@
     },
     {
       "id": "constructor-signal-esm-transform",
+      "category": "stream-integration",
       "entry": "app.mjs",
       "files": {
         "package.json": "{\"name\":\"cancel-transform\",\"type\":\"module\"}\n",
@@ -45,6 +47,7 @@
     },
     {
       "id": "constructor-signal-iterable-owner",
+      "category": "stream-integration",
       "entry": "app.cjs",
       "files": {
         "package.json": "{\"name\":\"cancel-iterable\",\"private\":true}\n",
@@ -65,6 +68,7 @@
     },
     {
       "id": "constructor-signal-delayed-resource",
+      "category": "stream-integration",
       "entry": "app.cjs",
       "files": {
         "package.json": "{\"name\":\"cancel-owned-descriptor\",\"private\":true}\n",
@@ -84,6 +88,7 @@
     },
     {
       "id": "constructor-signal-completed-sink",
+      "category": "stream-integration",
       "entry": "app.mjs",
       "files": {
         "package.json": "{\"name\":\"completed-sink\",\"type\":\"module\"}\n",

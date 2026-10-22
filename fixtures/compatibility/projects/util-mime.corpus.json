@@ -3,6 +3,7 @@
   "cases": [
     {
       "id": "mime-commonjs-content-manifest",
+      "category": "mime-integration",
       "entry": "app.cjs",
       "files": {
         "package.json": "{\"name\":\"mime-content-manifest\",\"private\":true}",
@@ -22,6 +23,7 @@
     },
     {
       "id": "mime-esm-captured-class-and-quoted-profile",
+      "category": "mime-integration",
       "entry": "app.mjs",
       "files": {
         "package.json": "{\"name\":\"mime-esm-profile\",\"type\":\"module\",\"private\":true}",
@@ -41,6 +43,7 @@
     },
     {
       "id": "mime-parameter-rejection-preserves-publication",
+      "category": "mime-integration",
       "entry": "app.cjs",
       "files": {
         "package.json": "{\"name\":\"mime-guarded-publication\",\"private\":true}",
@@ -62,6 +65,7 @@
     },
     {
       "id": "mime-live-parameter-registry",
+      "category": "mime-integration",
       "entry": "app.cjs",
       "files": {
         "package.json": "{\"name\":\"mime-live-registry\",\"private\":true}",

@@ -3,6 +3,7 @@
   "cases": [
     {
       "id": "read-lines-cjs-jsonl-index",
+      "category": "filesystem-integration",
       "entry": "app.cjs",
       "files": {
         "package.json": "{\"name\":\"jsonl-index\",\"private\":true}\n",
@@ -23,6 +24,7 @@
     },
     {
       "id": "read-lines-esm-range",
+      "category": "filesystem-integration",
       "entry": "app.mjs",
       "files": {
         "package.json": "{\"name\":\"line-ranges\",\"type\":\"module\"}\n",
@@ -41,6 +43,7 @@
     },
     {
       "id": "read-lines-package-failure-recovery",
+      "category": "filesystem-integration",
       "entry": "app.cjs",
       "files": {
         "package.json": "{\"name\":\"line-recovery\",\"private\":true}\n",
@@ -64,6 +67,7 @@
     },
     {
       "id": "read-lines-shared-file-pipeline",
+      "category": "filesystem-integration",
       "entry": "app.cjs",
       "files": {
         "package.json": "{\"name\":\"line-pipeline\",\"private\":true}\n",
@@ -84,6 +88,7 @@
     },
     {
       "id": "read-lines-cancelled-package-export",
+      "category": "filesystem-integration",
       "entry": "app.cjs",
       "files": {
         "package.json": "{\"name\":\"cancel-file-lines\",\"private\":true}\n",
@@ -105,6 +110,7 @@
     },
     {
       "id": "file-stream-completed-owner",
+      "category": "filesystem-integration",
       "entry": "app.mjs",
       "files": {
         "package.json": "{\"name\":\"completed-file-owner\",\"type\":\"module\"}\n",

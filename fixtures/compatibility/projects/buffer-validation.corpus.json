@@ -3,6 +3,7 @@
   "cases": [
     {
       "id": "buffer-validation-rejects-decoy-window",
+      "category": "buffer-validation-integration",
       "entry": "app.cjs",
       "files": {
         "app.cjs": "const fs=require('node:fs');const check=require('content-check');const bytes=Buffer.from([192,175]);const decoy=Buffer.from('OK');Object.defineProperty(bytes,'buffer',{value:decoy.buffer});Object.defineProperty(bytes,'byteOffset',{value:decoy.byteOffset});Object.defineProperty(bytes,'byteLength',{value:2});if(check(bytes)){fs.writeFileSync('published.txt',bytes);fs.writeFileSync('success.txt','published\\n');}else{fs.writeFileSync('validation.txt','INVALID_UTF8\\n');}console.log('CONTENT_CHECK_COMPLETE');\n",
@@ -23,6 +24,7 @@
     },
     {
       "id": "buffer-validation-esm-unicode-window",
+      "category": "buffer-validation-integration",
       "entry": "app.mjs",
       "files": {
         "app.mjs": "import fs from 'node:fs';import {inspect} from '@sample/text-inspect';const raw=Buffer.from('!café 😀!');const bytes=new Uint8Array(raw.buffer,raw.byteOffset+1,raw.length-2);for(const name of ['buffer','byteOffset','byteLength'])Object.defineProperty(bytes,name,{get(){throw new Error('public metadata read');}});const result=inspect(bytes);fs.writeFileSync('inspection.json',JSON.stringify(result)+'\\n');if(result.utf8)fs.writeFileSync('published.txt',Buffer.from(bytes));console.log('ESM_INSPECTION_COMPLETE');\n",
@@ -41,6 +43,7 @@
     },
     {
       "id": "buffer-validation-does-not-use-replaced-decoder",
+      "category": "buffer-validation-integration",
       "entry": "app.cjs",
       "files": {
         "app.cjs": "const fs=require('node:fs');const check=require('./lib/check.cjs');const original=TextDecoder.prototype.decode;let decoderCalls=0;TextDecoder.prototype.decode=function(){decoderCalls++;return 'normalized';};let accepted;try{accepted=check(Buffer.from([255]));}finally{TextDecoder.prototype.decode=original;}if(accepted)fs.writeFileSync('success.txt','published\\n');fs.writeFileSync('receipt.json',JSON.stringify({accepted,decoderCalls})+'\\n');console.log('DECODER_ISOLATION_COMPLETE');\n",
@@ -58,6 +61,7 @@
     },
     {
       "id": "buffer-validation-file-manifest",
+      "category": "buffer-validation-integration",
       "entry": "app.cjs",
       "files": {
         "app.cjs": "const fs=require('node:fs');const inspect=require('./lib/inspect.cjs');const names=['ascii.txt','unicode.txt','invalid.bin'];fs.writeFileSync('invalid.bin',Buffer.from([237,160,128]));const rows=names.map(name=>({name,...inspect(fs.readFileSync(name))}));fs.writeFileSync('manifest.json',JSON.stringify(rows)+'\\n');console.log('BINARY_MANIFEST_COMPLETE');\n",

@@ -3,6 +3,7 @@
   "cases": [
     {
       "id": "zlib-package-promisified-archive",
+      "category": "compression-integration",
       "entry": "app.cjs",
       "files": {
         "input.txt": "archive: café 😀\n",
@@ -23,6 +24,7 @@
     },
     {
       "id": "zlib-esm-package-reexports",
+      "category": "compression-integration",
       "entry": "app.mjs",
       "files": {
         "node_modules/@fixture/codec/package.json": "{\"name\": \"@fixture/codec\", \"version\": \"1.0.0\", \"type\": \"module\", \"exports\": \"./index.mjs\"}\n",
@@ -42,6 +44,7 @@
     },
     {
       "id": "zlib-package-corruption-preserves-publication",
+      "category": "compression-integration",
       "entry": "app.cjs",
       "files": {
         "published.txt": "previous release\n",
@@ -62,6 +65,7 @@
     },
     {
       "id": "zlib-package-codec-registry-and-dictionary",
+      "category": "compression-integration",
       "entry": "app.cjs",
       "files": {
         "node_modules/codec-registry/package.json": "{\"name\": \"codec-registry\", \"version\": \"1.0.0\", \"type\": \"commonjs\", \"exports\": \"./index.cjs\"}\n",
@@ -80,6 +84,7 @@
     },
     {
       "id": "zlib-package-streamed-crc32-manifest",
+      "category": "compression-integration",
       "entry": "app.cjs",
       "files": {
         "input.txt": "archive metadata: café 😀\n東京/package.json\n",
@@ -100,6 +105,7 @@
     },
     {
       "id": "zlib-esm-checksum-refuses-corrupt-publication",
+      "category": "compression-integration",
       "entry": "app.mjs",
       "files": {
         "input.txt": "corrupted archive payload\n",
