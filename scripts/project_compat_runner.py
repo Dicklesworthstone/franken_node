@@ -522,7 +522,7 @@ def run_corpus(corpus: dict[str, Any], binary: Path, node: Path, artifacts: Path
         if cancellation.signum is not None:
             break
         try:
-            version = runtime_version(Path(identity["path"]), artifacts / "versions" / role, limits)
+            version = runtime_version(Path(identity["path"]), artifacts / ".runtime-versions" / role, limits)
         except (OSError, ValueError) as error:
             version = {"valid": False, "detail": f"{type(error).__name__}: {error}"}
         report["runtime_versions"][role] = version

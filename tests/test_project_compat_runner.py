@@ -343,6 +343,12 @@ else:
         self.assertEqual(report["selected_case_count"], 1)
         self.assertEqual([row["id"] for row in report["results"]], ["second"])
 
+    def test_runtime_metadata_cannot_collide_with_a_valid_case_id(self):
+        report = self.run_cases(case("versions"))
+        self.assertEqual(report["verdict"], "PASS")
+        self.assertTrue((self.root / "artifacts/versions/case.json").is_file())
+        self.assertTrue((self.root / "artifacts/.runtime-versions/reference/execution/watchdog.json").is_file())
+
     def test_file_mismatch_fails_even_when_console_matches(self):
         value = case()
         value["files"]["main.js"] = (

@@ -25,6 +25,22 @@ Consumer: the operator explicitly requested a detailed TODO while implementing t
 - [ ] R2T/R3/R3T/R5: current-engine compilation, native project/replay verification, module replay and installed-asset qualification. **Blocked for compilation:** required disk admission is critical; source/backend prerequisites remain explicit.
 - [ ] Existing later owners: current per-profile >=95% corpus, >=3x durable migration, live substrate/advanced-surface integration, performance, independent replication and production adoption. These remain open until their own positive acceptance evidence exists.
 
+### Reference reproducibility execution — 2026-10-22
+
+This implements another bounded part of `bd-reality-20260923-26n9r.12`; it does not establish engine-source binding or improve native compatibility.
+
+- [x] Recheck the live work graph, current source and disk admission. Only the generated migration marker was initially dirty; `sbh` still returned critical at 6.99% free. No Cargo invocation was started.
+- [x] Record the actual candidate/Node/Bun `--version` output through bounded watchdog probes, with retained streams/receipts, UTC start/end, host/load/Python details and watchdog SHA-256. Failed, empty, invalid-UTF-8, incomplete and over-budget probes prevent project execution and PASS.
+- [x] Implement optional `--baseline-report` reference hash/version pins. Changed references stop before fixtures; `--reference-change` requires an explicit nonempty reason and retains old/new identities. Neither a reason nor a previous verdict can approve a failed probe or case mismatch. Preserve the baseline bytes.
+- [x] Detect binary changes after version probing and after the campaign. Keep `candidate_source_binding=not_established_by_this_runner`; a version string or adjacent source checkout is insufficient proof.
+- [x] Preserve all original fixture IDs/expectations and denominators. Isolate probe artifacts under `.runtime-versions` so valid case names cannot collide with metadata.
+- [x] Connect the project-runner regression suite to the existing watchdog CI workflow and its relevant path triggers. The job explicitly labels synthetic candidate/Bun adapters as orchestration evidence; actual GitHub job execution is unverified.
+- [x] Exercise real published v0.2.0 / Node 26.8.1 / Bun 1.4.0: selected CommonJS and ESM cases pass, the selected buffer-validation failure remains FAIL. Node 24.20.0 replacement without a reason executes zero project cases; with a reason it executes all three and retains the same native failure. Full/selected counts remain 153/3 and the frozen corpus digest is unchanged.
+- [ ] Complete final 48-test Linux qualification with exact source hashes, inspect UBS findings, verify workflow YAML/diff/Beads, and publish the coherent change. The preceding 47-test cut passed without skips; the final extra test covers the metadata-name collision.
+- [ ] Remaining `.12` acceptance stays open: current-source native execution, full reference qualification, engine revision binding, default-profile score publication and scheduled native freshness. No task closure is supported by this tooling work alone.
+
+Real-executable evidence is retained locally at `/var/folders/vt/n2xyn_s51b97_j3yh2qbqcnc0000gn/T/franken-project-provenance-20261022-in3jcvx5/`. It is published-release evidence, not current-source capability evidence or independent certification. The final-code reruns retain a mixed native result and a refused reference change; the earlier explicit-change run demonstrates that accepting reference drift does not approve the native failure.
+
 ### Follow-through execution — 2026-10-21
 
 This pass resolves the earlier Beads and supported-host Python verification blockers. It does not resolve the required local Rust-build disk admission.
