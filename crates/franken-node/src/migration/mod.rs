@@ -37,8 +37,12 @@ pub mod validation_suite;
 #[cfg(target_os = "linux")]
 pub mod dependency_admission;
 
+/// Linux recoverable installation primitives shared with the standalone migration
+/// operator. Callers own candidate validation and explicit installation approval;
+/// a transaction receipt records local recovery history, not validation evidence.
+/// The public request type also supports [`rollback::inspect_request`].
 #[cfg(target_os = "linux")]
-mod rewrite_transaction;
+pub mod rewrite_transaction;
 
 #[cfg(target_os = "linux")]
 pub use rewrite_transaction::rollback;
