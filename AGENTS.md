@@ -90,7 +90,7 @@ If any later section mentions legacy `dcg` paths like `src/main.rs` at repo root
 
 We only use **Cargo** in this project, NEVER any other package manager.
 
-- **Edition:** Rust 2024 (the current tree does not pin a `rust-toolchain.toml`; use a compatible stable toolchain unless a specific task proves otherwise)
+- **Edition:** Rust 2024, with Rust 1.99.0 pinned in `rust-toolchain.toml`; use the same pinned compiler for local tooling and remote RCH verification.
 - **Dependency versions:** Explicit versions for stability
 - **Configuration:** Workspace at root `Cargo.toml`, with primary crate under `crates/franken-node/`
 - **Unsafe code:** Forbidden (`#![forbid(unsafe_code)]`)
