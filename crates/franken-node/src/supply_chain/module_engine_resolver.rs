@@ -3,9 +3,10 @@
 //! This implements the real sibling engine trait, not a lookalike interface.
 //! Source selection is closed-world; the supplied engine policy runs on every
 //! delivered candidate, including cache hits and traversed cycle back-edges.
-//! Exact CommonJS requests for engine-supported native builtin objects become
-//! source-free terminal descriptors. No builtin fallback, live I/O or evaluation
-//! happens here. Source preparation uses the sibling engine front end.
+//! Exact CommonJS requests for engine-supported native builtin objects and
+//! Path-family imports become source-free terminal descriptors. No builtin
+//! fallback, live I/O or evaluation happens here. Source preparation uses the
+//! sibling engine front end.
 
 #[path = "module_engine_preparation.rs"]
 mod preparation;
@@ -69,8 +70,21 @@ impl CapturedEngineResolver {
             graph,
             independent_graph_pin,
             |module, source, report| preparer.prepare(module, source, report),
-            |specifier| NativeBuiltinModule::from_specifier(specifier)
-                .map(NativeBuiltinModule::canonical_specifier),
+            |specifier, style| {
+                let native = NativeBuiltinModule::from_specifier(specifier)?;
+                if style == RequestStyle::Require
+                    || matches!(
+                        native,
+                        NativeBuiltinModule::Path
+                            | NativeBuiltinModule::PathPosix
+                            | NativeBuiltinModule::PathWin32
+                    )
+                {
+                    Some(native.canonical_specifier())
+                } else {
+                    None
+                }
+            },
         )?;
         let mut resolver = Self::from_registry(registry);
         resolver.prepared_sources = preparer.finish();
@@ -544,6 +558,87 @@ mod tests {
     }
 
     #[test]
+    fn path_esm_terminals_keep_distinct_facades_and_per_request_policy() {
+        let root = tempfile::tempdir().unwrap();
+        put(
+            root.path(),
+            "app.mjs",
+            "import 'node:path'; import 'path/posix'; import('node:path/win32');",
+        );
+        let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        assert!(!graph.report().fully_resolved);
+        let resolver = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
+        assert_eq!(resolver.summary().graph_input_hash, pin);
+        assert_eq!(resolver.summary().modules, 4);
+        let policy = ChangingPolicy {
+            allowed: Cell::new(true),
+            calls: Cell::new(0),
+        };
+        let entry = resolver
+            .resolve(&resolver.entry_request(), &context(), &policy)
+            .unwrap();
+        let request = |specifier: &str, style| {
+            ModuleRequest::new(specifier, style)
+                .with_referrer(entry.module.record.id.clone())
+                .with_compatibility_mode(CompatibilityMode::NodeCompat)
+        };
+        let path_request = request("node:path", ImportStyle::Import);
+        let path = resolver
+            .resolve(&path_request, &context(), &policy)
+            .unwrap();
+        policy.allowed.set(false);
+        assert_eq!(
+            resolver
+                .resolve(&path_request, &context(), &policy)
+                .unwrap_err()
+                .code,
+            ResolutionErrorCode::PolicyDenied
+        );
+        policy.allowed.set(true);
+        assert_eq!(
+            resolver
+                .resolve(&path_request, &context(), &policy)
+                .unwrap()
+                .module
+                .record,
+            path.module.record
+        );
+        for (specifier, native) in [
+            ("path/posix", NativeBuiltinModule::PathPosix),
+            ("node:path/win32", NativeBuiltinModule::PathWin32),
+        ] {
+            let delivered = resolver
+                .resolve(
+                    &request(specifier, ImportStyle::Import),
+                    &context(),
+                    &policy,
+                )
+                .unwrap();
+            assert_eq!(
+                NativeBuiltinModule::from_record(&delivered.module.record),
+                Some(native)
+            );
+            assert_ne!(delivered.module.record.id, path.module.record.id);
+            assert!(delivered.module.record.source.is_empty());
+        }
+        for (specifier, style) in [
+            ("node:path", ImportStyle::Require),
+            ("path", ImportStyle::Import),
+            ("node:path/posix", ImportStyle::Import),
+        ] {
+            assert_eq!(
+                resolver
+                    .resolve(&request(specifier, style), &context(), &policy)
+                    .unwrap_err()
+                    .code,
+                ResolutionErrorCode::UnsupportedSpecifier
+            );
+        }
+        assert_eq!(policy.calls.get(), 6);
+    }
+
+    #[test]
     fn unsupported_builtin_load_styles_and_indirect_loaders_remain_refused() {
         for (file, source) in [
             ("app.cjs", "require('fs');"),
@@ -553,9 +648,11 @@ mod tests {
             ("app.cjs", "require('#builtin');"),
             ("app.mjs", "import 'buffer';"),
             ("app.mjs", "import('node:buffer');"),
+            ("app.mjs", "const name = 'node:path'; import(name);"),
+            ("app.mjs", "import '#path';"),
         ] {
             let root = tempfile::tempdir().unwrap();
-            put(root.path(), "package.json", r##"{"imports":{"#builtin":"buffer"}}"##);
+            put(root.path(), "package.json", r##"{"imports":{"#builtin":"buffer","#path":"node:path"}}"##);
             put(root.path(), file, source);
             let graph = capture(root.path(), file, GraphOptions::default()).unwrap();
             let pin = graph.report().input_hash.clone();
@@ -1645,7 +1742,7 @@ module.exports = { path: path, make: function(value) { return path.join('root', 
             let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
             let pin = graph.report().input_hash.clone();
             let captured = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
-            assert_eq!(captured.summary().modules, 4);
+            assert_eq!(captured.summary().modules, 5);
             let result = execute_captured_graph_for_test(root.path(), "app.cjs", lane, || {
                 put(
                     root.path(),
@@ -1663,6 +1760,74 @@ module.exports = { path: path, make: function(value) { return path.join('root', 
                     "true true true",
                     "root/file.txt C:\\out",
                     "shared mutation shared mutation",
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn captured_path_esm_facades_share_commonjs_objects_across_packages() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let root = tempfile::tempdir().unwrap();
+            put(
+                root.path(),
+                "app.mjs",
+                r#"
+import path, { join, win32 } from 'node:path';
+import * as namespace from 'path';
+import windows, { posix, join as windowsJoin } from 'path/win32';
+import * as canonical from 'path/posix';
+import * as prefixed from 'node:path/posix';
+import consumer from 'path-user';
+console.log(path === consumer.path, windows === consumer.windows,
+    path.win32 === windows, windows.posix === path,
+    canonical === prefixed, canonical !== namespace);
+console.log(join('root', 'file.txt'), windowsJoin('C:\\root', '..', 'out'));
+console.log(win32 === windows, posix === path,
+    Object.getPrototypeOf(canonical) === null, Object.isExtensible(canonical));
+path.join = function() { return 'shared mutation'; };
+console.log(join('one', 'two'), path.join('ignored'), consumer.path.join('ignored'));
+import('path').then(function(again) {
+    console.log(again === namespace, again.default === path,
+        again.join === join, again !== canonical);
+});
+"#,
+            );
+            put(
+                root.path(),
+                "node_modules/path-user/package.json",
+                r#"{"name":"path-user","main":"index.cjs"}"#,
+            );
+            put(
+                root.path(),
+                "node_modules/path-user/index.cjs",
+                "module.exports = { path: require('path'), windows: require('node:path/win32') };",
+            );
+            let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
+            let pin = graph.report().input_hash.clone();
+            let captured = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
+            assert_eq!(captured.summary().modules, 5);
+            let result = execute_captured_graph_for_test(root.path(), "app.mjs", lane, || {
+                put(
+                    root.path(),
+                    "node_modules/path-user/index.cjs",
+                    "throw new Error('uncaptured path consumer was reopened');",
+                );
+            });
+            assert_eq!(
+                result
+                    .console_output
+                    .iter()
+                    .map(|entry| entry.message.as_str())
+                    .collect::<Vec<_>>(),
+                [
+                    "true true true true true true",
+                    "root/file.txt C:\\out",
+                    "true true true false",
+                    "one/two shared mutation shared mutation",
+                    "true true true true",
                 ]
             );
         }

@@ -2557,7 +2557,66 @@ console.log(child.make('ignored'));
         "true true true\nroot/file.txt C:\\out\nshared mutation\n"
     );
     let graph = dispatch.engine_decision.unwrap().frozen_modules.unwrap();
-    assert_eq!(graph.modules, 4);
+    assert_eq!(graph.modules, 5);
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn frozen_module_cli_executes_path_esm_exports_with_captured_commonjs_packages() {
+    let workspace = TempDir::new().unwrap();
+    let package_dir = workspace.path().join("node_modules/frozen-path");
+    std::fs::create_dir_all(&package_dir).unwrap();
+    std::fs::write(
+        package_dir.join("package.json"),
+        r#"{"name":"frozen-path","version":"1.0.0","main":"index.cjs"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        package_dir.join("index.cjs"),
+        "module.exports = { path: require('path'), windows: require('node:path/win32') };",
+    )
+    .unwrap();
+    let app = create_test_app(
+        workspace.path(),
+        "app.mjs",
+        r#"
+import path, { join } from 'node:path';
+import * as namespace from 'path';
+import * as canonical from 'node:path/posix';
+import windows from 'path/win32';
+import consumer from 'frozen-path';
+console.log(path === consumer.path, windows === consumer.windows,
+    canonical.default === path, canonical !== namespace);
+console.log(join('root', 'file.txt'), windows.resolve('C:\\base', '..', 'out'));
+path.join = function() { return 'shared mutation'; };
+console.log(join('one', 'two'), consumer.path.join('ignored'));
+import('path/posix').then(function(again) {
+    console.log(again === canonical, again.default === path);
+});
+"#,
+    );
+    let config = balanced_config();
+    let output = invoke_product_supervisor_with_options(
+        &app,
+        &config,
+        "balanced",
+        Path::new(franken_node_bin()),
+        &["--frozen-modules"],
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        output.stdout,
+        output.stderr
+    );
+    let dispatch = parse_product_dispatch(&output).unwrap();
+    assert_eq!(
+        dispatch.captured_output.stdout,
+        "true true true true\nroot/file.txt C:\\out\none/two shared mutation\ntrue true\n"
+    );
+    let graph = dispatch.engine_decision.unwrap().frozen_modules.unwrap();
+    assert_eq!(graph.modules, 5);
 }
 
 #[test]

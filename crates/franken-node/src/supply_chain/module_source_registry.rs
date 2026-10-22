@@ -217,16 +217,16 @@ impl PinnedModuleRegistry {
                     ),
                 )),
             }
-        }, |_| None)
+        }, |_, _| None)
     }
 
     /// Engine-owned preparation may assign a runtime kind to captured source.
     /// The ordinary constructor remains transform-free. Crucially, pins and
     /// graph completeness are checked BEFORE the callback sees source bytes.
     /// The callback cannot rewrite identities, routes, source bytes or pins.
-    /// A separate engine callback may admit an exact captured CommonJS builtin
-    /// requirement as a source-free terminal. It never changes the report or
-    /// allows unknown, computed, import-style or uncaptured runtime requests.
+    /// A separate engine callback may admit an exact captured builtin request
+    /// for its captured load style as a source-free terminal. It never changes
+    /// the report or allows unknown, computed or uncaptured runtime requests.
     pub(super) fn new_with_kind_resolver<F, B>(
         graph: CapturedModuleGraph,
         independent_graph_pin: &str,
@@ -235,7 +235,7 @@ impl PinnedModuleRegistry {
     ) -> Result<Self>
     where
         F: FnMut(&super::SourceModule, &str, &super::SourceGraphReport) -> Result<ModuleKind>,
-        B: Fn(&str) -> Option<&'static str>,
+        B: Fn(&str, RequestStyle) -> Option<&'static str>,
     {
         let digest = independent_graph_pin.strip_prefix("sha256:").unwrap_or("");
         if digest.len() != 64
@@ -255,7 +255,7 @@ impl PinnedModuleRegistry {
             ));
         }
         let report = graph.report();
-        let mut builtin_targets = BTreeMap::<String, (String, &'static str)>::new();
+        let mut builtin_targets = BTreeMap::<(RequestStyle, String), (String, &'static str)>::new();
         let mut has_missing_routes = false;
         let incomplete = || error(
             "ERR_MODULE_REGISTRY_INCOMPLETE",
@@ -268,15 +268,15 @@ impl PinnedModuleRegistry {
             match edge.state {
                 EdgeState::Resolved | EdgeState::TypeOnly => {}
                 EdgeState::RuntimeRequired
-                    if edge.kind == LoadKind::Require
-                        && edge.target.is_none()
+                    if edge.target.is_none()
                         && edge.error.as_ref().is_some_and(|failure|
                             failure.code == "ERR_RUNTIME_MODULE_REQUIRED") =>
                 {
                     let request = edge.specifier.as_deref().ok_or_else(incomplete)?;
-                    let name = native_builtin(request).ok_or_else(incomplete)?;
+                    let style = RequestStyle::for_load(edge.kind);
+                    let name = native_builtin(request, style).ok_or_else(incomplete)?;
                     builtin_targets.insert(
-                        request.to_owned(),
+                        (style, request.to_owned()),
                         (native_builtin_id(&report.input_hash, name), name),
                     );
                 }
@@ -365,9 +365,14 @@ impl PinnedModuleRegistry {
             }
             let importer = identities.get(&edge.importer).ok_or_else(invalid_graph)?;
             let specifier = edge.specifier.as_ref().ok_or_else(invalid_graph)?;
+            let style = RequestStyle::for_load(edge.kind);
             let target = match edge.state {
                 EdgeState::RuntimeRequired => RegisteredTarget::Module {
-                    id: builtin_targets.get(specifier).ok_or_else(invalid_graph)?.0.clone(),
+                    id: builtin_targets
+                        .get(&(style, specifier.clone()))
+                        .ok_or_else(invalid_graph)?
+                        .0
+                        .clone(),
                 },
                 EdgeState::Unresolved => RegisteredTarget::Missing {
                     error: edge.error.clone().ok_or_else(invalid_graph)?,
@@ -379,7 +384,6 @@ impl PinnedModuleRegistry {
                         .clone(),
                 },
             };
-            let style = RequestStyle::for_load(edge.kind);
             let by_specifier = routes
                 .entry(importer.clone())
                 .or_default()
@@ -1257,6 +1261,60 @@ mod tests {
     }
 
     #[test]
+    fn native_terminal_admission_is_explicit_for_every_captured_load_style() {
+        use std::cell::Cell;
+
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.cjs", "require('path'); import('path');");
+        for admit_import in [false, true] {
+            let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+            let pin = graph.report().input_hash.clone();
+            let prepared = Cell::new(0);
+            let result = PinnedModuleRegistry::new_with_kind_resolver(
+                graph,
+                &pin,
+                |_, _, _| {
+                    prepared.set(prepared.get() + 1);
+                    Ok(ModuleKind::CommonJs)
+                },
+                |specifier, style| {
+                    (specifier == "path" && (style == RequestStyle::Require || admit_import))
+                        .then_some("node:path")
+                },
+            );
+            if !admit_import {
+                assert_eq!(result.err().unwrap().code, "ERR_MODULE_REGISTRY_INCOMPLETE");
+                assert_eq!(prepared.get(), 0);
+                continue;
+            }
+            let registry = result.ok().unwrap();
+            assert_eq!(prepared.get(), 1);
+            assert_eq!(registry.summary().modules, 2);
+            assert_eq!(registry.summary().routes, 2);
+            let required = registry
+                .lookup(Some(registry.entrypoint()), "path", RequestStyle::Require)
+                .unwrap();
+            let imported = registry
+                .lookup(Some(registry.entrypoint()), "path", RequestStyle::Import)
+                .unwrap();
+            assert_eq!(required.id(), imported.id());
+            assert_eq!(required.kind(), ModuleKind::NativeBuiltin);
+            assert_eq!(
+                registry
+                    .lookup(
+                        Some(registry.entrypoint()),
+                        "node:path",
+                        RequestStyle::Import
+                    )
+                    .err()
+                    .unwrap()
+                    .code,
+                "ERR_MODULE_REGISTRY_ROUTE"
+            );
+        }
+    }
+
+    #[test]
     fn engine_preparation_cannot_run_before_pin_and_closed_graph_admission() {
         use std::cell::Cell;
         let root = tempfile::tempdir().unwrap();
@@ -1272,7 +1330,7 @@ mod tests {
             let result = PinnedModuleRegistry::new_with_kind_resolver(graph, &pin, |_, _, _| {
                 calls.set(calls.get() + 1);
                 Ok(ModuleKind::EsModule)
-            }, |_| None);
+            }, |_, _| None);
             assert_eq!(
                 result.err().unwrap().code,
                 if mismatch {
