@@ -173,7 +173,111 @@ impl<'de> Deserialize<'de> for OrderedValue {
 pub struct PackageMap {
     exports: Option<OrderedValue>,
     imports: Option<OrderedValue>,
+    exports_index: PackageMapIndex,
+    imports_index: PackageMapIndex,
     input_hash: String,
+}
+
+#[derive(Clone, Copy, Default)]
+enum ObjectShape {
+    #[default]
+    Conditions,
+    Subpaths,
+    Mixed,
+}
+
+#[derive(Clone)]
+struct IndexedPattern {
+    member: usize,
+    prefix_bytes: usize,
+    suffix_bytes: usize,
+    specificity: (usize, usize),
+}
+
+/// Positions into the original ordered object, never reordered target values.
+/// Capture pays for key classification and pattern precedence once; every
+/// dependency edge then uses a logarithmic exact lookup or ranked patterns.
+#[derive(Clone, Default)]
+struct PackageMapIndex {
+    shape: ObjectShape,
+    exact: Vec<usize>,
+    patterns: Vec<IndexedPattern>,
+}
+
+impl PackageMapIndex {
+    fn new(value: Option<&OrderedValue>) -> Self {
+        let Some(OrderedValue::Object(members)) = value else {
+            return Self::default();
+        };
+        let mut index = Self::default();
+        let mut subpaths = 0;
+        for (member, (key, _)) in members.iter().enumerate() {
+            subpaths += usize::from(key.starts_with('.'));
+            if let Some((prefix, suffix)) = key.split_once('*') {
+                if !suffix.contains('*') {
+                    index.patterns.push(IndexedPattern {
+                        member,
+                        prefix_bytes: prefix.len(),
+                        suffix_bytes: suffix.len(),
+                        specificity: (
+                            prefix.encode_utf16().count() + 1,
+                            key.encode_utf16().count(),
+                        ),
+                    });
+                }
+            } else if !key.ends_with('/') {
+                index.exact.push(member);
+            }
+        }
+        index.shape = if subpaths == 0 {
+            ObjectShape::Conditions
+        } else if subpaths == members.len() {
+            ObjectShape::Subpaths
+        } else {
+            ObjectShape::Mixed
+        };
+        index
+            .exact
+            .sort_unstable_by(|a, b| members[*a].0.cmp(&members[*b].0));
+        // Stable sorting preserves source order when specificity ties. Byte
+        // offsets slice UTF-8, while precedence follows Node's UTF-16 lengths.
+        index
+            .patterns
+            .sort_by(|a, b| b.specificity.cmp(&a.specificity));
+        index
+    }
+
+    fn match_request<'a>(
+        &self,
+        members: &'a [(String, OrderedValue)],
+        request: &'a str,
+    ) -> Option<(&'a str, &'a OrderedValue, Option<&'a str>)> {
+        if !request.contains('*')
+            && !request.ends_with('/')
+            && let Ok(position) = self
+                .exact
+                .binary_search_by(|&member| members[member].0.as_str().cmp(request))
+        {
+            let (key, target) = &members[self.exact[position]];
+            return Some((key, target, None));
+        }
+        for pattern in &self.patterns {
+            let (key, target) = &members[pattern.member];
+            let prefix = &key[..pattern.prefix_bytes];
+            let suffix = &key[key.len() - pattern.suffix_bytes..];
+            if request.len() > pattern.prefix_bytes + pattern.suffix_bytes
+                && request.starts_with(prefix)
+                && request.ends_with(suffix)
+            {
+                return Some((
+                    key,
+                    target,
+                    Some(&request[pattern.prefix_bytes..request.len() - pattern.suffix_bytes]),
+                ));
+            }
+        }
+        None
+    }
 }
 
 impl fmt::Debug for PackageMap {
@@ -224,9 +328,13 @@ impl PackageMap {
         hash.update(INPUT_DOMAIN);
         hash.update((source.len() as u64).to_le_bytes());
         hash.update(source.as_bytes());
+        let exports_index = PackageMapIndex::new(exports.as_ref());
+        let imports_index = PackageMapIndex::new(imports.as_ref());
         Ok(Self {
             exports,
             imports,
+            exports_index,
+            imports_index,
             input_hash: format!("sha256:{}", hex::encode(hash.finalize())),
         })
     }
@@ -285,26 +393,22 @@ impl PackageMap {
                     Some(value) => value,
                 };
                 match exports {
-                    OrderedValue::Object(members) => {
-                        let paths = members
-                            .iter()
-                            .filter(|(key, _)| key.starts_with('.'))
-                            .count();
-                        if paths != 0 && paths != members.len() {
+                    OrderedValue::Object(members) => match self.exports_index.shape {
+                        ObjectShape::Mixed => {
                             return Err(config("exports cannot mix condition and subpath keys"));
                         }
-                        if paths == 0 && specifier == "." {
-                            (".", exports, None)
-                        } else if paths != 0 {
-                            match_map(members, specifier)
-                                .ok_or_else(|| error(missing, "subpath has no export mapping"))?
-                        } else {
+                        ObjectShape::Conditions if specifier == "." => (".", exports, None),
+                        ObjectShape::Subpaths => self
+                            .exports_index
+                            .match_request(members, specifier)
+                            .ok_or_else(|| error(missing, "subpath has no export mapping"))?,
+                        ObjectShape::Conditions => {
                             return Err(error(
                                 missing,
                                 "main-only exports do not expose this subpath",
                             ));
                         }
-                    }
+                    },
                     OrderedValue::String(_) | OrderedValue::Array(_) if specifier == "." => {
                         (".", exports, None)
                     }
@@ -321,7 +425,8 @@ impl PackageMap {
                 let Some(OrderedValue::Object(members)) = &self.imports else {
                     return Err(error(missing, "no imports mapping for this request"));
                 };
-                match_map(members, specifier)
+                self.imports_index
+                    .match_request(members, specifier)
                     .ok_or_else(|| error(missing, "request has no import mapping"))?
             }
         };
@@ -342,6 +447,9 @@ impl PackageMap {
     }
 }
 
+// Keep the original linear selector as a test-only differential reference.
+// Production lookups use the capture-local index and never scan exact keys.
+#[cfg(test)]
 fn match_map<'a>(
     members: &'a [(String, OrderedValue)],
     request: &'a str,
@@ -568,6 +676,116 @@ mod tests {
                 .map(|s| (*s).to_owned())
                 .collect::<Vec<_>>(),
         )
+    }
+
+    #[test]
+    fn indexed_lookup_matches_linear_selection_across_key_orders_and_unicode() {
+        let keys = [
+            "./z", "./a", "./a/", "./*", "./a*", "./a*.js", "./a/*",
+            "./a/*.js", "./a**b", "./é*", "./é*.js", "./😀*", "./😀*.js",
+        ];
+        let requests = [
+            "./z", "./a", "./a/", "./", "./abc", "./abc.js", "./a/b.js",
+            "./a/*.js", "./a**b", "./é", "./éclair.js", "./😀value.js",
+            "./😀", "./unknown", "./unknown/", "./../private",
+        ];
+        for reversed in [false, true] {
+            for rotation in 0..keys.len() {
+                let mut members: Vec<_> = keys
+                    .iter()
+                    .cycle()
+                    .skip(rotation)
+                    .take(keys.len())
+                    .enumerate()
+                    .map(|(position, key)| {
+                        ((*key).to_owned(), OrderedValue::String(format!("./target-{position}.js")))
+                    })
+                    .collect();
+                if reversed {
+                    members.reverse();
+                }
+                let value = OrderedValue::Object(members);
+                let index = PackageMapIndex::new(Some(&value));
+                let OrderedValue::Object(members) = &value else {
+                    unreachable!();
+                };
+                for request in requests {
+                    let expected = match_map(members, request);
+                    let actual = index.match_request(members, request);
+                    assert_eq!(
+                        actual.as_ref().map(|(key, _, matched)| (*key, *matched)),
+                        expected.as_ref().map(|(key, _, matched)| (*key, *matched)),
+                        "rotation={rotation} reversed={reversed} request={request}"
+                    );
+                    if let (Some((_, actual, _)), Some((_, expected, _))) = (actual, expected) {
+                        assert!(std::ptr::eq(actual, expected), "selected target changed");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn large_indexes_preserve_targets_condition_order_and_clone_identity() {
+        let exports = (0..1024)
+            .rev()
+            .map(|i| format!(
+                r#""./item-{i}":{{"default":"./default-{i}.js","node":"./node-{i}.js"}}"#
+            ))
+            .collect::<Vec<_>>()
+            .join(",");
+        let imports = (0..1024)
+            .rev()
+            .map(|i| format!(r##""#item-{i}":"./private-{i}.js""##))
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!(r#"{{"exports":{{{exports}}},"imports":{{{imports}}}}}"#);
+        let map = PackageMap::parse(&source).unwrap();
+        let cloned = map.clone();
+        assert_eq!(map.input_hash(), cloned.input_hash());
+        for map in [&map, &cloned] {
+            for i in 0..1024 {
+                let selected = map.select(MapKind::Exports, &format!("./item-{i}"), &["node".into()]).unwrap();
+                assert_eq!(selected.target, format!("./default-{i}.js"));
+                assert_eq!(selected.matched_key, format!("./item-{i}"));
+                assert_eq!(selected.branch, [BranchStep::Condition("default".into())]);
+                let selected = map.select(MapKind::Imports, &format!("#item-{i}"), &[]).unwrap();
+                assert_eq!(selected.target, format!("./private-{i}.js"));
+                assert_eq!(selected.matched_key, format!("#item-{i}"));
+            }
+        }
+    }
+
+    #[test]
+    fn indexing_preserves_query_local_errors_and_does_not_validate_inactive_targets() {
+        let source = r##"{
+            "exports": {".": "./main.js", "node": "../invalid.js"},
+            "imports": {
+                "#ok": {"default": "./ok.js", "node": {"0": "../invalid.js"}},
+                "#bad": {"0": "./bad.js"}
+            }
+        }"##;
+        let map = PackageMap::parse(source).unwrap();
+        assert_eq!(
+            map.select(MapKind::Imports, "#ok", &["node".into()]).unwrap().target,
+            "./ok.js"
+        );
+        assert_eq!(
+            map.select(MapKind::Imports, "#bad", &[]).unwrap_err(),
+            config("numeric condition keys are not permitted")
+        );
+        assert_eq!(
+            map.select(MapKind::Exports, ".", &[]).unwrap_err(),
+            config("exports cannot mix condition and subpath keys")
+        );
+        assert_eq!(
+            map.select(MapKind::Exports, "invalid", &[]).unwrap_err().code,
+            "ERR_INVALID_MODULE_SPECIFIER"
+        );
+        assert_eq!(
+            map.select(MapKind::Exports, ".", &["".into()]).unwrap_err().code,
+            "ERR_INVALID_PACKAGE_CONDITIONS"
+        );
     }
 
     #[test]

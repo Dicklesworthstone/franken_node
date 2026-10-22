@@ -341,3 +341,56 @@ fn conflicting_query_modes_and_orphaned_options_are_rejected_by_clap() {
         assert!(result.stdout.is_empty());
     }
 }
+
+#[test]
+fn large_indexed_export_and_import_maps_match_both_node_resolvers() {
+    let root = tempfile::tempdir().unwrap();
+    let exports = (0..1024)
+        .rev()
+        .map(|i| {
+            let target = if i % 2 == 0 { "node.cjs" } else { "default.cjs" };
+            format!(r#""./item-{i}":{{"default":"./{target}","node":"./custom.cjs"}}"#)
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let imports = (0..1024)
+        .rev()
+        .map(|i| {
+            let target = if i % 2 == 0 { "node.cjs" } else { "default.cjs" };
+            format!(r##""#item-{i}":"./{target}""##)
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let manifest = format!(
+        r#"{{"name":"map-package","exports":{{{exports}}},"imports":{{{imports}}}}}"#
+    );
+    let pkg = package(root.path(), &manifest);
+    for i in [0, 17, 511, 1023] {
+        let target = if i % 2 == 0 { "node.cjs" } else { "default.cjs" };
+        let export = format!("./item-{i}");
+        let import = format!("#item-{i}");
+        for (esm, condition) in [(true, "import"), (false, "require")] {
+            let selected_export = selected(&pkg, &[
+                "--resolve-export", &export, "--condition", "node", "--condition", condition,
+            ]);
+            assert_eq!(selected_export["selection"]["target"], format!("./{target}"));
+            assert_eq!(selected_export["selection"]["matched_key"], export);
+            assert_eq!(selected_export["selection"]["branch"], json!([
+                {"kind": "condition", "value": "default"},
+            ]));
+            assert_eq!(
+                node(root.path(), &format!("map-package/item-{i}"), esm, &[])["target"],
+                pkg.join(target).to_str().unwrap()
+            );
+            let selected_import = selected(&pkg, &[
+                "--resolve-import", &import, "--condition", "node", "--condition", condition,
+            ]);
+            assert_eq!(selected_import["selection"]["target"], format!("./{target}"));
+            assert_eq!(selected_import["selection"]["matched_key"], import);
+            assert_eq!(
+                node(&pkg, &import, esm, &[])["target"],
+                pkg.join(target).to_str().unwrap()
+            );
+        }
+    }
+}
