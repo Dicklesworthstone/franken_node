@@ -1,0 +1,102 @@
+{
+  "schema_version": "franken-node/project-compat-corpus/v1",
+  "cases": [
+    {
+      "id": "timers-promisified-package-retry",
+      "category": "timers-integration",
+      "entry": "app.cjs",
+      "files": {
+        "app.cjs": "const fs=require('node:fs'); const retry=require('retry-export');\n(async()=>{const record={name:'café',attempts:0};const rows=[];\nconst result=await retry(record,rows);if(result!==record)throw new Error('identity lost');\nfs.writeFileSync('export.json',JSON.stringify(result)+'\\n');\nfs.writeFileSync('attempts.txt',rows.join(',')+'\\n');console.log('RETRY_EXPORT_COMPLETE');\n})().catch(e=>{console.error(e);process.exitCode=1;});\n",
+        "node_modules/retry-export/package.json": "{\"name\":\"retry-export\",\"main\":\"index.cjs\"}\n",
+        "node_modules/retry-export/index.cjs": "const {promisify}=require('node:util');const timers=require('node:timers');\nconst sleep=promisify(timers.setTimeout), next=promisify(timers.setImmediate);\nmodule.exports=async(record,rows)=>{for(let attempt=1;attempt<=3;attempt++){\nrecord.attempts=attempt;rows.push('attempt:'+attempt);\nif(attempt<3){if(await sleep(1,record)!==record)throw new Error('backoff payload lost');rows.push('backoff');}\nelse {if(await next(record)!==record)throw new Error('completion payload lost');return record;}}\nthrow new Error('retry exhausted');};\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "RETRY_EXPORT_COMPLETE\n",
+        "stderr": "",
+        "files": {
+          "export.json": "{\"name\":\"café\",\"attempts\":3}\n",
+          "attempts.txt": "attempt:1,backoff,attempt:2,backoff,attempt:3\n"
+        }
+      }
+    },
+    {
+      "id": "timers-esm-cooperative-batches",
+      "category": "timers-integration",
+      "entry": "app.mjs",
+      "files": {
+        "app.mjs": "import {writeFileSync} from 'node:fs';\nimport {run,scheduler} from '@batches/export';import promises from 'node:timers/promises';\nif(scheduler!==promises.scheduler)throw new Error('scheduler identity');\nconst result=await run(['café','東京','notes']);\nwriteFileSync('rows.jsonl',result.rows.join(''));writeFileSync('progress.txt',result.progress.join(',')+'\\n');\nconsole.log('BATCH_EXPORT_COMPLETE');\n",
+        "node_modules/@batches/export/package.json": "{\"name\":\"@batches/export\",\"type\":\"module\",\"exports\":\"./index.mjs\"}\n",
+        "node_modules/@batches/export/index.mjs": "import {scheduler} from 'node:timers/promises';import {setImmediate} from 'node:timers';\nexport {scheduler};export async function run(names){const rows=[],progress=[];\nfor(let i=0;i<names.length;i++){progress.push('batch:'+i);setImmediate(()=>progress.push('peer:'+i));\nawait scheduler.yield();rows.push(JSON.stringify({index:i,name:names[i]})+'\\n');progress.push('resume:'+i);}\nawait scheduler.wait(1);return {rows,progress};}\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "BATCH_EXPORT_COMPLETE\n",
+        "stderr": "",
+        "files": {
+          "rows.jsonl": "{\"index\":0,\"name\":\"café\"}\n{\"index\":1,\"name\":\"東京\"}\n{\"index\":2,\"name\":\"notes\"}\n",
+          "progress.txt": "batch:0,peer:0,resume:0,batch:1,peer:1,resume:1,batch:2,peer:2,resume:2\n"
+        }
+      }
+    },
+    {
+      "id": "timers-cancelled-backoff-preserves-publication",
+      "category": "timers-integration",
+      "entry": "app.cjs",
+      "files": {
+        "app.cjs": "const fs=require('node:fs');const execute=require('owned-backoff');\n(async()=>{const controller=new AbortController(),reason={code:'STOP_BATCH'};\nconst task=execute(controller.signal);queueMicrotask(()=>controller.abort(reason));\nlet failure;try{await task;}catch(e){failure=e;}\nif(!failure||failure.code!=='ABORT_ERR'||failure.cause!==reason)throw new Error('lost cancellation');\nfs.writeFileSync('failure.txt',failure.code+'\\n');console.log('CANCELLED_BACKOFF_COMPLETE');\n})().catch(e=>{console.error(e);process.exitCode=1;});\n",
+        "node_modules/owned-backoff/package.json": "{\"name\":\"owned-backoff\",\"main\":\"index.cjs\"}\n",
+        "node_modules/owned-backoff/index.cjs": "const fs=require('node:fs');const {scheduler}=require('node:timers/promises');\nmodule.exports=async function(signal){const fd=fs.openSync('staged.txt','w');\ntry{fs.writeSync(fd,Buffer.from('accepted café\\n'));await scheduler.wait(60000,{signal});\nfs.writeFileSync('success.txt','must not publish\\n');fs.writeFileSync('published.txt','replaced\\n');}\nfinally{fs.closeSync(fd);fs.writeFileSync('cleanup.txt','descriptor closed\\n');}};\n",
+        "published.txt": "previous release\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "CANCELLED_BACKOFF_COMPLETE\n",
+        "stderr": "",
+        "files": {
+          "staged.txt": "accepted café\n",
+          "published.txt": "previous release\n",
+          "failure.txt": "ABORT_ERR\n",
+          "cleanup.txt": "descriptor closed\n",
+          "success.txt": null
+        }
+      }
+    },
+    {
+      "id": "timers-unref-package-does-not-pin-exit",
+      "category": "timers-integration",
+      "entry": "app.cjs",
+      "files": {
+        "app.cjs": "const schedule=require('optional-delay');schedule();console.log('UNREF_SCHEDULED');\n",
+        "node_modules/optional-delay/package.json": "{\"name\":\"optional-delay\",\"main\":\"index.cjs\"}\n",
+        "node_modules/optional-delay/index.cjs": "const fs=require('node:fs');const {scheduler}=require('node:timers/promises');\nmodule.exports=()=>{scheduler.wait(60000,{ref:false}).then(()=>fs.writeFileSync('late.txt','unexpected\\n'));};\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "UNREF_SCHEDULED\n",
+        "stderr": "",
+        "files": {
+          "late.txt": null
+        }
+      }
+    },
+    {
+      "id": "timers-callback-control",
+      "category": "timers-integration",
+      "entry": "app.cjs",
+      "files": {
+        "app.cjs": "const fs=require('node:fs');const run=require('callback-control');\nrun((first,second)=>{fs.writeFileSync('result.txt',first+':'+second+'\\n');console.log('CALLBACK_CONTROL_COMPLETE');});\n",
+        "node_modules/callback-control/package.json": "{\"name\":\"callback-control\",\"main\":\"index.cjs\"}\n",
+        "node_modules/callback-control/index.cjs": "const {setImmediate,setTimeout,clearTimeout}=require('node:timers');\nmodule.exports=cb=>{const pending=setTimeout(()=>{throw new Error('cancelled callback');},60000);\nclearTimeout(pending);setImmediate(cb,'existing',42);};\n"
+      },
+      "expected": {
+        "exit_code": 0,
+        "stdout": "CALLBACK_CONTROL_COMPLETE\n",
+        "stderr": "",
+        "files": {
+          "result.txt": "existing:42\n"
+        }
+      }
+    }
+  ]
+}
