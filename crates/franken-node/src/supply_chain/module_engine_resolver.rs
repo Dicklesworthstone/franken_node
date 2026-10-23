@@ -765,6 +765,134 @@ mod tests {
     }
 
     #[test]
+    fn create_require_routes_keep_native_factory_conditions_and_frozen_origins() {
+        let root = tempfile::tempdir().unwrap();
+        put(
+            root.path(),
+            "app.mjs",
+            "import { value } from './bridge.mjs?revision=1#captured'; export { value };",
+        );
+        let bridge_source = "import { createRequire } from 'node:module'; \
+            const localRequire = createRequire(import.meta.url); \
+            export const value = localRequire('dual'); localRequire.resolve('dual');";
+        put(root.path(), "bridge.mjs", bridge_source);
+        put(
+            root.path(),
+            "node_modules/dual/package.json",
+            r#"{"exports":{"require":"./required.cjs","import":"./imported.mjs"}}"#,
+        );
+        put(
+            root.path(),
+            "node_modules/dual/required.cjs",
+            "module.exports = 42;",
+        );
+        put(
+            root.path(),
+            "node_modules/dual/imported.mjs",
+            "export default 'wrong branch';",
+        );
+        let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
+        assert!(graph.report().diagnostics.is_empty());
+        let pin = graph.report().input_hash.clone();
+        let encoded = capsule::encode(&graph).unwrap();
+        put(root.path(), "bridge.mjs", "throw new Error('live bridge');");
+        put(
+            root.path(),
+            "node_modules/dual/required.cjs",
+            "throw new Error('live package');",
+        );
+        put(
+            root.path(),
+            "node_modules/dual/package.json",
+            r#"{"exports":{}}"#,
+        );
+        let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+        let resolver = Arc::new(CapturedEngineResolver::new(replayed, &pin).ok().unwrap());
+        let policy = CapabilityPolicyHook::new(BTreeSet::from([
+            RuntimeCapability::ModuleLoad,
+            RuntimeCapability::Builtin,
+        ]));
+        let entry = resolver
+            .resolve(&resolver.entry_request(), &context(), &policy)
+            .unwrap();
+        let bridge = resolver
+            .resolve(
+                &ModuleRequest::new("./bridge.mjs?revision=1#captured", ImportStyle::Import)
+                    .with_referrer(entry.module.record.id.clone())
+                    .with_compatibility_mode(CompatibilityMode::NodeCompat),
+                &context(),
+                &policy,
+            )
+            .unwrap();
+        assert_eq!(bridge.module.record.source, bridge_source);
+        let request = |specifier: &str, style| {
+            ModuleRequest::new(specifier, style)
+                .with_referrer(bridge.module.record.id.clone())
+                .with_compatibility_mode(CompatibilityMode::NodeCompat)
+        };
+        let factory = resolver
+            .resolve(
+                &request("node:module", ImportStyle::Import),
+                &context(),
+                &policy,
+            )
+            .unwrap();
+        assert_eq!(
+            NativeBuiltinModule::from_record(&factory.module.record),
+            Some(NativeBuiltinModule::Module)
+        );
+        assert!(factory.module.record.source.is_empty());
+        let required = resolver
+            .resolve(&request("dual", ImportStyle::Require), &context(), &policy)
+            .unwrap();
+        assert_eq!(required.module.record.syntax, ModuleSyntax::CommonJs);
+        assert_eq!(required.module.record.source, "module.exports = 42;");
+        for (name, style) in [
+            ("dual", ImportStyle::Import),
+            ("module", ImportStyle::Import),
+            ("node:module", ImportStyle::Require),
+        ] {
+            assert_eq!(
+                resolver
+                    .resolve(&request(name, style), &context(), &policy)
+                    .unwrap_err()
+                    .code,
+                ResolutionErrorCode::UnsupportedSpecifier
+            );
+        }
+        let installed = resolver
+            .execution_resolver(root.path(), Arc::new(policy))
+            .unwrap();
+        let origin = installed.source_location(&bridge.module.record.id).unwrap();
+        assert_eq!(origin.filename, root.path().join("bridge.mjs"));
+        assert!(origin.url.ends_with("/bridge.mjs?revision=1#captured"));
+        let changing = ChangingPolicy {
+            allowed: Cell::new(true),
+            calls: Cell::new(0),
+        };
+        resolver
+            .resolve(
+                &request("dual", ImportStyle::Require),
+                &context(),
+                &changing,
+            )
+            .unwrap();
+        changing.allowed.set(false);
+        assert_eq!(
+            resolver
+                .resolve(
+                    &request("dual", ImportStyle::Require),
+                    &context(),
+                    &changing
+                )
+                .unwrap_err()
+                .code,
+            ResolutionErrorCode::PolicyDenied
+        );
+        assert_eq!(changing.calls.get(), 2);
+    }
+
+    #[test]
     fn real_engine_trait_returns_exact_sources_and_engine_canonical_hashes() {
         let root = tempfile::tempdir().unwrap();
         put(root.path(), "app.mjs", "export const answer=42;");
