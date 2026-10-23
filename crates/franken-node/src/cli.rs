@@ -342,7 +342,7 @@ pub struct RunArgs {
     /// (including path/posix and path/win32). Computed loads, unsupported
     /// builtins and uncaptured routes are refused. The current replay format
     /// cannot retain this source graph.
-    #[arg(long, conflicts_with = "capture_replay")]
+    #[arg(long)]
     pub frozen_modules: bool,
 
     /// Allow project-contained relative symlinks, including npm/Bun workspace
