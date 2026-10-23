@@ -2792,21 +2792,205 @@ import('path/posix').then(function(again) {
 #[cfg(all(feature = "engine", unix))]
 fn frozen_module_cli_refuses_unsupported_native_builtin_routes_before_execution() {
     for (filename, source) in [
-        ("app.cjs", "console.log('FROZEN_CORE_MUST_NOT_RUN'); require('fs');"),
-        ("app.mjs", "import 'node:buffer'; console.log('FROZEN_CORE_MUST_NOT_RUN');"),
-        ("app.cjs", "console.log('FROZEN_CORE_MUST_NOT_RUN'); import('node:buffer');"),
+        (
+            "app.cjs",
+            "console.log('FROZEN_CORE_MUST_NOT_RUN'); require('fs');",
+        ),
+        (
+            "app.mjs",
+            "import 'node:vm'; console.log('FROZEN_CORE_MUST_NOT_RUN');",
+        ),
+        (
+            "app.cjs",
+            "console.log('FROZEN_CORE_MUST_NOT_RUN'); import('node:vm');",
+        ),
     ] {
         let workspace = TempDir::new().unwrap();
         let app = create_test_app(workspace.path(), filename, source);
         let mut config = balanced_config();
         config.runtime.frozen_modules = Some(true);
-        let output = invoke_product_supervisor(
-            &app, &config, "balanced", Path::new(franken_node_bin()),
-        ).unwrap();
-        assert!(!output.status.success(), "unsupported route must not execute: {source}");
+        let output =
+            invoke_product_supervisor(&app, &config, "balanced", Path::new(franken_node_bin()))
+                .unwrap();
+        assert!(
+            !output.status.success(),
+            "unsupported route must not execute: {source}"
+        );
         let diagnostics = format!("{}\n{}", output.stdout, output.stderr);
-        assert!(diagnostics.contains("ERR_MODULE_REGISTRY_INCOMPLETE"), "{diagnostics}");
-        assert!(!diagnostics.contains("FROZEN_CORE_MUST_NOT_RUN"), "{diagnostics}");
+        assert!(
+            diagnostics.contains("ERR_MODULE_REGISTRY_INCOMPLETE"),
+            "{diagnostics}"
+        );
+        assert!(
+            !diagnostics.contains("FROZEN_CORE_MUST_NOT_RUN"),
+            "{diagnostics}"
+        );
+    }
+
+    // Buffer is an implemented native provider. Keep the original static and
+    // dynamic routes as positive controls rather than classifying them as
+    // unsupported or removing them from coverage.
+    for (filename, source) in [
+        (
+            "app.mjs",
+            "import { Buffer } from 'node:buffer'; console.log(Buffer.from('native').toString());",
+        ),
+        (
+            "app.cjs",
+            "import('node:buffer').then(({ Buffer }) => console.log(Buffer.from('native').toString()));",
+        ),
+    ] {
+        let workspace = TempDir::new().unwrap();
+        let app = create_test_app(workspace.path(), filename, source);
+        let mut config = balanced_config();
+        config.runtime.frozen_modules = Some(true);
+        let output =
+            invoke_product_supervisor(&app, &config, "balanced", Path::new(franken_node_bin()))
+                .unwrap();
+        assert!(
+            output.status.success(),
+            "{source}: stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
+        let dispatch = parse_product_dispatch(&output).unwrap();
+        assert_eq!(dispatch.captured_output.stdout, "native\n");
     }
 }
 
+/// Explicit release acceptance: real Cargo binary, full corpus, real references.
+/// Select with `--ignored --exact full_project_compatibility_corpus --nocapture`.
+/// References default to Node and Bun on PATH; the two environment overrides
+/// select installed executable paths, whose identities the runner records.
+#[test]
+#[cfg(all(feature = "engine", target_os = "linux"))]
+#[ignore = "Full native project corpus requires Python, Node and Bun; run explicitly"]
+fn full_project_compatibility_corpus() {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    const CORPUS_SHA256: &str =
+        "sha256:6b82043e070ddb5ef146214ded6e892145811db65b617b165f55d18d5208487e";
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    // Keep private raw observations outside RCH's ephemeral source tree, on
+    // failure as well as success. No signing keys are printed or published.
+    let retained = tempfile::Builder::new()
+        .prefix("franken-node-project-corpus-")
+        .tempdir_in("/tmp")
+        .expect("create private corpus evidence directory")
+        .keep();
+    eprintln!("full project corpus artifacts: {}", retained.display());
+    let node =
+        std::env::var("FRANKEN_NODE_PROJECT_CORPUS_NODE").unwrap_or_else(|_| "node".to_string());
+    let bun =
+        std::env::var("FRANKEN_NODE_PROJECT_CORPUS_BUN").unwrap_or_else(|_| "bun".to_string());
+    let command = |directory: &Path, corpus_digest: &str| {
+        let mut command = Command::new("python3");
+        command.current_dir(&root).args([
+            "-B",
+            "scripts/project_compat_runner.py",
+            "--corpus-dir",
+            "fixtures/compatibility/projects",
+            "--bin",
+            franken_node_bin(),
+            "--node",
+            &node,
+            "--bun",
+            &bun,
+            "--policy",
+            "balanced",
+            "--expect-corpus-sha256",
+            corpus_digest,
+            "--artifacts-dir",
+        ]);
+        command.arg(directory);
+        command
+    };
+
+    // A different corpus must fail before starting runtimes or creating a
+    // case directory. This negative uses the same real runner and inputs.
+    let refused_directory = retained.join("wrong-corpus");
+    let refused = command(
+        &refused_directory,
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    )
+    .output()
+    .expect("execute the wrong-corpus negative control");
+    std::fs::write(retained.join("negative.stdout"), &refused.stdout).unwrap();
+    std::fs::write(retained.join("negative.stderr"), &refused.stderr).unwrap();
+    assert_eq!(refused.status.code(), Some(2));
+    let refusal: serde_json::Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!(refusal["verdict"], "ERROR");
+    assert!(
+        refusal["detail"]
+            .as_str()
+            .unwrap()
+            .contains("corpus digest does not match")
+    );
+    assert!(!refused_directory.exists());
+
+    let native_hash = || {
+        let mut binary = std::fs::File::open(franken_node_bin()).unwrap();
+        let mut hasher = Sha256::new();
+        let mut bytes = [0_u8; 65_536];
+        loop {
+            let count = binary.read(&mut bytes).unwrap();
+            if count == 0 {
+                break;
+            }
+            hasher.update(&bytes[..count]);
+        }
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    };
+    let expected_native = native_hash();
+    let cases = retained.join("cases");
+    let status = command(&cases, CORPUS_SHA256)
+        .stdout(std::fs::File::create_new(retained.join("runner.stdout")).unwrap())
+        .stderr(std::fs::File::create_new(retained.join("runner.stderr")).unwrap())
+        .status()
+        .expect("execute all project cases with the real Cargo-built binary");
+    assert_eq!(native_hash(), expected_native, "native binary changed");
+    let report_path = cases.join("report.json");
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&report_path).unwrap_or_else(|error| {
+            panic!(
+                "no corpus report ({error}); retained evidence: {}",
+                retained.display()
+            )
+        }))
+        .expect("read the actual complete compatibility report");
+    assert_eq!(report["candidate"]["sha256"], expected_native);
+    assert_ne!(report["reference"]["sha256"], report["candidate"]["sha256"]);
+    assert_ne!(
+        report["bun_reference"]["sha256"],
+        report["candidate"]["sha256"]
+    );
+    assert_ne!(
+        report["bun_reference"]["sha256"],
+        report["reference"]["sha256"]
+    );
+    assert_eq!(report["corpus_sha256"], CORPUS_SHA256);
+    assert_eq!(report["corpus_case_count"], 170);
+    assert_eq!(report["selected_case_count"], 170);
+    assert_eq!(report["results"].as_array().unwrap().len(), 170);
+    assert_eq!(report["policy"], "balanced");
+    assert_eq!(report["limits"]["wall_time_ms"], 10_000);
+    assert_eq!(report["limits"]["max_output_bytes_per_stream"], 1_048_576);
+    eprintln!(
+        "full project corpus: passed={} failed={} inconclusive={} verdict={}; artifacts={}",
+        report["passing_cases"],
+        report["failing_cases"],
+        report["inconclusive_cases"],
+        report["verdict"],
+        retained.display()
+    );
+    assert!(
+        status.success(),
+        "native corpus failed; see {}",
+        retained.display()
+    );
+    assert_eq!(report["verdict"], "PASS");
+    assert_eq!(report["passing_cases"], 170);
+    assert_eq!(report["failing_cases"], 0);
+    assert_eq!(report["inconclusive_cases"], 0);
+}
