@@ -81,7 +81,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: Dicklesworthstone/franken_engine
-          ref: 10b88fb2c70041ae7a0036a83b4c8e2cfead29f9
+          ref: ecb54a9ee7bcffcf2126d59bd8aababa2d967152
           path: franken_engine
           persist-credentials: false
       - name: Test the product resolver against the actual engine contract
@@ -95,6 +95,7 @@ jobs:
           git -C franken_node rev-parse HEAD > bridge-evidence/product-revision.txt
           git -C franken_engine rev-parse HEAD > bridge-evidence/engine-revision.txt
           cargo +nightly-2026-09-21 test --manifest-path franken_node/tools/module-graph/engine-bridge/Cargo.toml --lib source_graph:: 2>&1 | tee bridge-evidence/native-tests.log
+          cargo +nightly-2026-09-21 test --manifest-path franken_node/tools/module-graph/engine-bridge/Cargo.toml --lib native_builtin_execution:: -- --test-threads=1 2>&1 | tee bridge-evidence/native-builtins.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:

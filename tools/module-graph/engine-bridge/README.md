@@ -55,7 +55,8 @@ Eager `resolve_chain` fails on any missing target.
 
 Literal `require`, static `import`, reexport and dynamic `import()` routes can
 deliver the engine's native `buffer`, `events`, `os`, `querystring`, `url`,
-`timers`, `perf_hooks`, `path`, `path/posix` and `path/win32` providers, including
+`timers`, `perf_hooks`, `path`, `path/posix`, `path/win32`, `util`, `util/types`,
+`assert`, `assert/strict` and `string_decoder` providers, including
 their `node:` spellings. The registry admits only names in the engine's canonical
 provider inventory. These are source-free terminal descriptors, not captured
 files; the capture report continues to identify them as runtime requirements.
@@ -69,6 +70,13 @@ object. Importing a cached provider still performs the current request's policy
 and descriptor-integrity checks. The engine also checks the bounded-import
 information-flow contract before exposing a namespace. Computed loads and
 unsupported providers do not gain a fallback to host I/O.
+
+The `util`, `assert` and `string_decoder` providers execute the engine's existing
+module factories as retained native modules. Extracted methods and functions
+exported by npm packages keep their defining module context. `util/types` shares
+the parent's `types` object, and `assert/strict` shares the parent's `strict`
+function. No builtin implementation is copied into the product or captured
+capsule; capsule replay uses the installed engine's authenticated provider.
 
 Only analyzed closed graphs are admitted. The engine-independent
 `PinnedModuleRegistry::new` remains transform-free and requires explicit
