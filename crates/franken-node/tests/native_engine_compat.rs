@@ -2862,9 +2862,11 @@ fn frozen_module_cli_refuses_unsupported_native_builtin_routes_before_execution(
 /// Select with `--ignored --exact full_project_compatibility_corpus --nocapture`.
 /// References default to Node and Bun on PATH; the two environment overrides
 /// select installed executable paths, whose identities the runner records.
+/// Declare their exact `--version` output with the corresponding `_VERSION`
+/// environment variables before executing the campaign.
 #[test]
 #[cfg(all(feature = "engine", target_os = "linux"))]
-#[ignore = "Full native project corpus requires Python, Node and Bun; run explicitly"]
+#[ignore = "Full native corpus requires Python, Node, Bun and declared reference versions"]
 fn full_project_compatibility_corpus() {
     use sha2::{Digest, Sha256};
     use std::io::Read;
@@ -2884,6 +2886,10 @@ fn full_project_compatibility_corpus() {
         std::env::var("FRANKEN_NODE_PROJECT_CORPUS_NODE").unwrap_or_else(|_| "node".to_string());
     let bun =
         std::env::var("FRANKEN_NODE_PROJECT_CORPUS_BUN").unwrap_or_else(|_| "bun".to_string());
+    let node_version = std::env::var("FRANKEN_NODE_PROJECT_CORPUS_NODE_VERSION")
+        .expect("declare the Node reference version before running the corpus");
+    let bun_version = std::env::var("FRANKEN_NODE_PROJECT_CORPUS_BUN_VERSION")
+        .expect("declare the Bun reference version before running the corpus");
     let command = |directory: &Path, corpus_digest: &str| {
         let mut command = Command::new("python3");
         command.current_dir(&root).args([
@@ -2960,6 +2966,11 @@ fn full_project_compatibility_corpus() {
         }))
         .expect("read the actual complete compatibility report");
     assert_eq!(report["candidate"]["sha256"], expected_native);
+    for (role, expected) in [("reference", node_version), ("bun", bun_version)] {
+        let version = &report["runtime_versions"][role];
+        assert_eq!(version["valid"], true, "{role}: {version}");
+        assert_eq!(version["stdout"].as_str().unwrap().trim(), expected);
+    }
     assert_ne!(report["reference"]["sha256"], report["candidate"]["sha256"]);
     assert_ne!(
         report["bun_reference"]["sha256"],
