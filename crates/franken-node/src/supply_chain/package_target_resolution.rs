@@ -178,6 +178,15 @@ pub struct PackageMap {
     input_hash: String,
 }
 
+/// Resolver metadata from the same bounded, duplicate-checked document as its
+/// ordered maps. Keep it separate so map-only consumers retain no extra fields.
+pub(super) struct PackageMetadata {
+    pub(super) name: Option<String>,
+    pub(super) main: Option<String>,
+    pub(super) package_type: Option<String>,
+    pub(super) exports: bool,
+}
+
 #[derive(Clone, Copy, Default)]
 enum ObjectShape {
     #[default]
@@ -290,6 +299,34 @@ impl fmt::Debug for PackageMap {
 
 impl PackageMap {
     pub fn parse(source: &str) -> Result<Self> {
+        Ok(Self::from_document(source, Self::document(source)?))
+    }
+
+    /// Capture maps and resolver metadata with one JSON parse. Map-only callers
+    /// deliberately keep their existing semantics for unrelated field types.
+    pub(super) fn parse_manifest(source: &str) -> Result<(Self, PackageMetadata)> {
+        let members = Self::document(source)?;
+        let field = |key: &str| -> Result<Option<String>> {
+            match members.iter().find(|(name, _)| name == key).map(|(_, v)| v) {
+                None | Some(OrderedValue::Null) => Ok(None),
+                Some(OrderedValue::String(value)) => Ok(Some(value.clone())),
+                _ => Err(config(format!("{key} must be a string"))),
+            }
+        };
+        // Preserve the resolver's error precedence regardless of source key
+        // order. Full-document syntax and resource checks have already run.
+        let metadata = PackageMetadata {
+            name: field("name")?,
+            main: field("main")?,
+            package_type: field("type")?,
+            exports: members
+                .iter()
+                .any(|(key, value)| key == "exports" && !matches!(value, OrderedValue::Null)),
+        };
+        Ok((Self::from_document(source, members), metadata))
+    }
+
+    fn document(source: &str) -> Result<Vec<(String, OrderedValue)>> {
         if source.len() > MAX_MANIFEST_BYTES {
             return Err(bound());
         }
@@ -315,6 +352,10 @@ impl PackageMap {
         let OrderedValue::Object(members) = document else {
             return Err(config("manifest must be an object"));
         };
+        Ok(members)
+    }
+
+    fn from_document(source: &str, members: Vec<(String, OrderedValue)>) -> Self {
         let mut exports = None;
         let mut imports = None;
         for (key, value) in members {
@@ -330,13 +371,13 @@ impl PackageMap {
         hash.update(source.as_bytes());
         let exports_index = PackageMapIndex::new(exports.as_ref());
         let imports_index = PackageMapIndex::new(imports.as_ref());
-        Ok(Self {
+        Self {
             exports,
             imports,
             exports_index,
             imports_index,
             input_hash: format!("sha256:{}", hex::encode(hash.finalize())),
-        })
+        }
     }
 
     /// Exact manifest-input identity, NOT the older lossy graph projection hash.
@@ -1150,6 +1191,145 @@ mod tests {
                 .code,
             "ERR_INVALID_PACKAGE_CONDITIONS"
         );
+    }
+
+    #[test]
+    fn manifest_metadata_and_maps_share_the_original_ordered_capture() {
+        let mut source = r##"{
+            "na\u006de":"@scope/fixture",
+            "main":"./entry\u002ecjs",
+            "type":"commonjs",
+            "exports":{
+                ".":{"require":"./entry.cjs","default":"./entry.mjs"},
+                "./feature/*":"./lib/*.mjs"
+            },
+            "imports":{"#private":{"node":"./private.mjs","default":"./wrong.mjs"}},
+            "unrelated":{"description":"private metadata","values":[true,1,null]}
+        }"##
+        .to_owned();
+        let standalone = PackageMap::parse(&source).unwrap();
+        let (map, metadata) = PackageMap::parse_manifest(&source).unwrap();
+        assert_eq!(map.input_hash(), standalone.input_hash());
+        assert_eq!(metadata.name.as_deref(), Some("@scope/fixture"));
+        assert_eq!(metadata.main.as_deref(), Some("./entry.cjs"));
+        assert_eq!(metadata.package_type.as_deref(), Some("commonjs"));
+        assert!(metadata.exports);
+        for (kind, request, conditions, target) in [
+            (
+                MapKind::Exports,
+                ".",
+                &["require", "node"][..],
+                "./entry.cjs",
+            ),
+            (
+                MapKind::Exports,
+                ".",
+                &["import", "node"][..],
+                "./entry.mjs",
+            ),
+            (
+                MapKind::Exports,
+                "./feature/item",
+                &[][..],
+                "./lib/item.mjs",
+            ),
+            (MapKind::Imports, "#private", &["node"][..], "./private.mjs"),
+        ] {
+            let conditions: Vec<_> = conditions.iter().map(|value| (*value).to_owned()).collect();
+            let selected = map.select(kind, request, &conditions).unwrap();
+            assert_eq!(selected.target, target);
+            assert_eq!(
+                selected,
+                standalone.select(kind, request, &conditions).unwrap()
+            );
+        }
+        source.push(' ');
+        assert_ne!(
+            map.input_hash(),
+            PackageMap::parse_manifest(&source).unwrap().0.input_hash()
+        );
+        source.clear();
+        assert_eq!(metadata.name.as_deref(), Some("@scope/fixture"));
+        assert_eq!(
+            map.select(MapKind::Exports, ".", &[]).unwrap().target,
+            "./entry.mjs"
+        );
+    }
+
+    #[test]
+    fn manifest_metadata_keeps_strict_types_and_resolver_error_precedence() {
+        for (source, first_invalid_field) in [
+            (r#"{"name":false}"#, "name"),
+            (r#"{"main":42}"#, "main"),
+            (r#"{"type":[]}"#, "type"),
+            (r#"{"type":true,"main":[],"name":{}}"#, "name"),
+            (r#"{"type":true,"main":[],"name":null}"#, "main"),
+            (r#"{"type":true,"main":null,"name":"fixture"}"#, "type"),
+        ] {
+            // The public map selector still ignores metadata field types.
+            assert!(PackageMap::parse(source).is_ok(), "{source}");
+            let failure = PackageMap::parse_manifest(source).err().unwrap();
+            assert_eq!(failure.code, "ERR_INVALID_PACKAGE_CONFIG");
+            assert_eq!(
+                failure.detail,
+                format!("{first_invalid_field} must be a string")
+            );
+        }
+        for source in ["{}", r#"{"name":null,"main":null,"type":null}"#] {
+            let (_, metadata) = PackageMap::parse_manifest(source).unwrap();
+            assert!(metadata.name.is_none());
+            assert!(metadata.main.is_none());
+            assert!(metadata.package_type.is_none());
+        }
+    }
+
+    #[test]
+    fn manifest_exports_presence_does_not_add_eager_target_validation() {
+        for (source, exports) in [
+            (r#"{"main":"./legacy.cjs"}"#, false),
+            (r#"{"exports":null,"main":"./legacy.cjs"}"#, false),
+            (r#"{"exports":false}"#, true),
+            (r#"{"exports":42}"#, true),
+            (r#"{"exports":[]}"#, true),
+            (
+                r#"{"exports":{".":"./entry.cjs","default":"./other.cjs"}}"#,
+                true,
+            ),
+        ] {
+            let standalone = PackageMap::parse(source).unwrap();
+            let (map, metadata) = PackageMap::parse_manifest(source).unwrap();
+            assert_eq!(metadata.exports, exports, "{source}");
+            assert_eq!(map.input_hash(), standalone.input_hash());
+            assert_eq!(
+                map.select(MapKind::Exports, ".", &[]),
+                standalone.select(MapKind::Exports, ".", &[]),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_document_failures_precede_metadata_type_errors() {
+        let sources = [
+            r#"{"name":false,"unrelated":{"x":1,"x":2}}"#.to_owned(),
+            r#"{"name":false,"na\u006de":"duplicate"}"#.to_owned(),
+            r#"{"name":false} trailing"#.to_owned(),
+            format!(
+                "{{\"name\":false,\"unrelated\":{}null{}}}",
+                "[".repeat(MAX_DEPTH + 1),
+                "]".repeat(MAX_DEPTH + 1)
+            ),
+            format!(
+                "{{\"name\":false,\"unrelated\":\"{}\"}}",
+                "x".repeat(MAX_MANIFEST_BYTES)
+            ),
+        ];
+        for source in sources {
+            let expected = PackageMap::parse(&source).err().unwrap();
+            let actual = PackageMap::parse_manifest(&source).err().unwrap();
+            assert_eq!(actual, expected);
+            assert_ne!(actual.detail, "name must be a string");
+        }
     }
 
     #[test]

@@ -581,25 +581,13 @@ impl Resolver {
             Entry::File { bytes, .. } => {
                 let text = std::str::from_utf8(bytes)
                     .map_err(|e| error("ERR_INVALID_PACKAGE_CONFIG", e.to_string()))?;
-                let maps = PackageMap::parse(text)?; // Also rejects ambiguous duplicate JSON keys.
-                let value: serde_json::Value = serde_json::from_str(text)
-                    .map_err(|e| error("ERR_INVALID_PACKAGE_CONFIG", e.to_string()))?;
-                let field = |key: &str| -> Result<Option<String>> {
-                    match value.get(key) {
-                        None | Some(serde_json::Value::Null) => Ok(None),
-                        Some(serde_json::Value::String(s)) => Ok(Some(s.clone())),
-                        _ => Err(error(
-                            "ERR_INVALID_PACKAGE_CONFIG",
-                            format!("{key} must be a string"),
-                        )),
-                    }
-                };
+                let (maps, metadata) = PackageMap::parse_manifest(text)?;
                 Some(Rc::new(Manifest {
                     maps,
-                    name: field("name")?,
-                    main: field("main")?,
-                    package_type: field("type")?,
-                    exports: value.get("exports").is_some_and(|v| !v.is_null()),
+                    name: metadata.name,
+                    main: metadata.main,
+                    package_type: metadata.package_type,
+                    exports: metadata.exports,
                 }))
             }
         };
@@ -1372,6 +1360,95 @@ mod tests {
         assert!(!Rc::ptr_eq(&first, &changed));
         assert_eq!(changed.package_type.as_deref(), Some("commonjs"));
         assert_ne!(first.maps.input_hash(), changed.maps.input_hash());
+    }
+
+    #[test]
+    fn single_parse_metadata_controls_package_routes_formats_and_frozen_replay() {
+        use source_graph::registry::{PinnedModuleRegistry, RequestStyle};
+        use source_graph::{GraphOptions, capsule, capture};
+
+        let root = fixture();
+        put(
+            root.path(),
+            "package.json",
+            br##"{"name":"application","type":"module","exports":{"./self":"./self.mjs"},"imports":{"#legacy":"legacy"}}"##,
+        );
+        put(
+            root.path(),
+            "app.mjs",
+            b"import 'application/self'; import '#legacy';",
+        );
+        put(root.path(), "self.mjs", b"export const value = 1;");
+        put(
+            root.path(),
+            "node_modules/legacy/package.json",
+            br#"{"name":"legacy","main":"start.cjs","type":"commonjs","exports":null}"#,
+        );
+        put(
+            root.path(),
+            "node_modules/legacy/start.cjs",
+            b"module.exports = require('./feature');",
+        );
+        put(
+            root.path(),
+            "node_modules/legacy/feature.js",
+            b"module.exports = 42;",
+        );
+        let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
+        assert!(graph.report().fully_resolved);
+        assert_eq!(graph.report().modules.len(), 4);
+        assert_eq!(graph.report().edges.len(), 3);
+        assert!(graph.report().modules.iter().any(|module| {
+            module.id.path == "node_modules/legacy/feature.js" && module.format_hint == "commonjs"
+        }));
+        let pin = graph.report().input_hash.clone();
+        let encoded = capsule::encode(&graph).unwrap();
+
+        put(
+            root.path(),
+            "package.json",
+            br#"{"name":"changed","type":"commonjs"}"#,
+        );
+        put(
+            root.path(),
+            "node_modules/legacy/package.json",
+            br#"{"main":"missing.cjs","type":"module","exports":false}"#,
+        );
+        put(
+            root.path(),
+            "node_modules/legacy/feature.js",
+            b"throw new Error('live bytes');",
+        );
+        let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+        assert_eq!(replayed.report(), graph.report());
+        let registry = PinnedModuleRegistry::new(replayed, &pin).unwrap();
+        let legacy = registry
+            .lookup(Some(registry.entrypoint()), "#legacy", RequestStyle::Import)
+            .unwrap();
+        let feature = registry
+            .lookup(Some(legacy.id()), "./feature", RequestStyle::Require)
+            .unwrap();
+        assert_eq!(feature.source(), "module.exports = 42;");
+        assert_eq!(feature.origin().path, "node_modules/legacy/feature.js");
+        assert_eq!(
+            registry
+                .lookup(
+                    Some(registry.entrypoint()),
+                    "./self.mjs",
+                    RequestStyle::Import
+                )
+                .err()
+                .unwrap()
+                .code,
+            "ERR_MODULE_REGISTRY_ROUTE"
+        );
+        assert_ne!(
+            capture(root.path(), "app.mjs", GraphOptions::default())
+                .unwrap()
+                .report()
+                .input_hash,
+            pin
+        );
     }
 
     #[test]
