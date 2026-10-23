@@ -26085,7 +26085,7 @@ impl FleetTransportKind {
 /// The transport a fleet command talks to. Both arms implement the same
 /// [`PersistedFleetTransport`] contract, so every fleet code path is shared.
 enum FleetTransportHandle {
-    Durable(fleet_transport_durable::DurableFleetTransport),
+    Durable(Box<fleet_transport_durable::DurableFleetTransport>),
     #[cfg(feature = "http-client")]
     Http(control_plane::fleet_transport_http::HttpFleetTransport),
 }
@@ -26248,7 +26248,7 @@ fn open_fleet_transport(project_root: &Path) -> Result<(u64, PathBuf, FleetTrans
     Ok((
         resolved.config.fleet.convergence_timeout_seconds,
         state_dir,
-        FleetTransportHandle::Durable(transport),
+        FleetTransportHandle::Durable(Box::new(transport)),
     ))
 }
 
