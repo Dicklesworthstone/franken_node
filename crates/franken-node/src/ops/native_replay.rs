@@ -2733,6 +2733,19 @@ mod engine {
                         },
                     );
                     let capture = record_process(root.path(), &source);
+                    let original = reexecute(&capture)
+                        .expect("untampered process preparation must replay");
+                    assert!(original.matched, "{original:?}");
+                    assert!(original.host_effects_match);
+                    assert!(original.console_match);
+                    assert_eq!(
+                        original.captured_terminal_state,
+                        if throws {
+                            NativeReplayTerminalState::UncaughtException
+                        } else {
+                            NativeReplayTerminalState::Completed
+                        }
+                    );
                     for missing_preflight in [false, true] {
                         let mut payload: NativeReplayPayload =
                             serde_json::from_str(&capture.payload_json).unwrap();
@@ -2979,17 +2992,17 @@ mod engine {
                         "const raw = process; console.log(raw.argv);",
                         "ambient authority violation",
                     ),
-                    ("console.log(process['argv']);", "ambient authority violation"),
+                    (
+                        "console.log(process['argv']);",
+                        "ambient authority violation",
+                    ),
                 ] {
                     let mut changed = original.clone();
                     changed.package.source = source.to_string();
                     let changed = encode_capture(&changed).expect("encode authority probe");
                     let error =
                         reexecute(&changed).expect_err("shape grant stays narrow in replay");
-                    assert!(
-                        error.contains(expected_denial),
-                        "{source}: {error}"
-                    );
+                    assert!(error.contains(expected_denial), "{source}: {error}");
                 }
                 let mut oversized = original;
                 oversized.process_argv = vec!["x".repeat(MAX_NATIVE_REPLAY_PAYLOAD_BYTES + 1)];
