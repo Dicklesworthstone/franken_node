@@ -340,8 +340,8 @@ pub struct RunArgs {
     /// native execution. Supports require, import, reexport and import() of
     /// buffer, events, os, querystring, url, timers, perf_hooks and path
     /// (including path/posix and path/win32). Computed loads, unsupported
-    /// builtins and uncaptured routes are refused. The current replay format
-    /// cannot retain this source graph.
+    /// builtins and uncaptured routes are refused. With --capture-replay, the
+    /// authenticated source graph is retained for closed-world offline replay.
     #[arg(long)]
     pub frozen_modules: bool,
 
@@ -3452,6 +3452,20 @@ mod parser_contract_extra_tests {
         };
         assert!(args.capture_replay);
         assert!(args.json);
+
+        let cli = parse(&[
+            "franken-node",
+            "run",
+            "app.js",
+            "--frozen-modules",
+            "--capture-replay",
+        ])
+        .map_err(|error| error.to_string())?;
+        let Command::Run(args) = cli.command else {
+            return Err("expected replay-capturing frozen-module run command".to_string());
+        };
+        assert!(args.frozen_modules);
+        assert!(args.capture_replay);
 
         let cli = parse(&[
             "franken-node",
