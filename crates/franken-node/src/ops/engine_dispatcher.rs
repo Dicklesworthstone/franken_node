@@ -9184,15 +9184,19 @@ impl EngineDispatcher {
         execution.max_total_memory_bytes = config.runtime.max_total_memory_bytes;
         execution.max_console_entries = config.runtime.max_console_entries;
 
-        // Map observability settings to governance config
+        // Observability can raise the coverage requirement, but supremacy
+        // coverage must always meet the engine's parity floor. Basic audit
+        // mode must not produce runtime settings that capture cannot validate.
+        let governance_defaults = GovernanceConfig::default();
+        let observability_coverage: u64 = if config.observability.emit_structured_audit_events {
+            850_000
+        } else {
+            750_000
+        };
         let governance = GovernanceConfig {
-            min_supremacy_coverage_millionths: if config.observability.emit_structured_audit_events
-            {
-                850_000 // 85% coverage when structured events enabled
-            } else {
-                750_000 // 75% coverage for basic observability
-            },
-            ..GovernanceConfig::default()
+            min_supremacy_coverage_millionths: observability_coverage
+                .max(governance_defaults.min_parity_coverage_millionths),
+            ..governance_defaults
         };
 
         // Map profile to guardplane (security policy) settings
@@ -11094,6 +11098,41 @@ impl EngineDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn runtime_config_projection_validates_all_profiles_and_audit_modes() {
+        use frankenengine_engine::runtime_config::GovernanceConfig;
+
+        for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+            for structured_audit in [false, true] {
+                let mut config = Config::for_profile(profile);
+                config.observability.emit_structured_audit_events = structured_audit;
+                let runtime = EngineDispatcher::map_config_to_runtime_config(&config);
+                runtime
+                    .validate()
+                    .expect("projected runtime settings must be valid for replay capture");
+                let defaults = GovernanceConfig::default();
+                assert_eq!(
+                    runtime.governance.min_parity_coverage_millionths,
+                    defaults.min_parity_coverage_millionths,
+                    "{profile}, structured audit {structured_audit}: preserve parity floor"
+                );
+                assert_eq!(
+                    runtime.governance.min_supremacy_coverage_millionths,
+                    if structured_audit { 850_000 } else { 800_000 },
+                    "{profile}, structured audit {structured_audit}"
+                );
+
+                // A malformed producer still fails the original validator;
+                // fixing the projection must not admit supremacy below parity.
+                let mut invalid = runtime;
+                invalid.governance.min_supremacy_coverage_millionths =
+                    invalid.governance.min_parity_coverage_millionths - 1;
+                assert!(invalid.validate().is_err());
+            }
+        }
+    }
 
     #[cfg(unix)]
     #[test]
