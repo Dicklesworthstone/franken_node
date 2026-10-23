@@ -5381,6 +5381,42 @@ fn captured_output_from(output: Output) -> CapturedProcessOutput {
     }
 }
 
+const TELEMETRY_SOCKET_FILE_NAME: &str = "telemetry.sock";
+
+fn create_telemetry_socket_directory(preferred_root: &Path) -> Result<tempfile::TempDir> {
+    const PREFIX: &str = "franken_telemetry_";
+    const RANDOM_BYTES: usize = 12;
+    #[cfg(unix)]
+    let preferred_root = {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        // Keep the pathname below both Linux and macOS sockaddr_un limits,
+        // including the terminating NUL. RCH and macOS can supply a TMPDIR
+        // whose directory prefix alone exceeds that limit.
+        let socket_path_bytes = preferred_root
+            .as_os_str()
+            .as_bytes()
+            .len()
+            .saturating_add(PREFIX.len() + RANDOM_BYTES + TELEMETRY_SOCKET_FILE_NAME.len() + 2);
+        if preferred_root.is_absolute() && socket_path_bytes < 104 {
+            preferred_root
+        } else {
+            Path::new("/tmp")
+        }
+    };
+
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(PREFIX).rand_bytes(RANDOM_BYTES);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    builder
+        .tempdir_in(preferred_root)
+        .context("Failed to create secure temporary directory for telemetry socket")
+}
+
 /// Construct a process `ExitStatus` carrying the given exit code.
 ///
 /// Native franken-engine execution runs in-process and never forks a child OS
@@ -6617,13 +6653,10 @@ impl EngineDispatcher {
         }
 
         let serialized_config = config.to_toml()?;
-        let temp_dir = tempfile::Builder::new()
-            .prefix("franken_telemetry_")
-            .tempdir()
-            .context("Failed to create secure temporary directory for telemetry socket")?;
+        let temp_dir = create_telemetry_socket_directory(&std::env::temp_dir())?;
         let socket_path = temp_dir
             .path()
-            .join("telemetry.sock")
+            .join(TELEMETRY_SOCKET_FILE_NAME)
             .to_string_lossy()
             .into_owned();
 
@@ -11068,6 +11101,48 @@ impl EngineDispatcher {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn telemetry_socket_directory_binds_with_long_tmpdir_and_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::net::UnixListener;
+
+        let root = tempfile::Builder::new()
+            .prefix("fn-socket-test-")
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in("/tmp")
+            .expect("create short test root");
+        let long_root = root.path().join("long-temporary-root-".repeat(8));
+        std::fs::create_dir(&long_root).expect("create long preferred temporary root");
+
+        for preferred_root in [root.path(), long_root.as_path()] {
+            let directory = create_telemetry_socket_directory(preferred_root)
+                .expect("create private telemetry directory");
+            let expected_parent = if preferred_root == root.path() {
+                preferred_root
+            } else {
+                Path::new("/tmp")
+            };
+            assert_eq!(directory.path().parent(), Some(expected_parent));
+            assert_eq!(
+                directory
+                    .path()
+                    .metadata()
+                    .expect("inspect telemetry directory")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+            let socket_path = directory.path().join(TELEMETRY_SOCKET_FILE_NAME);
+            let _listener = UnixListener::bind(&socket_path)
+                .expect("a real Unix socket must bind even with a long preferred TMPDIR");
+            let other_directory = create_telemetry_socket_directory(preferred_root)
+                .expect("create a second isolated telemetry directory");
+            assert_ne!(directory.path(), other_directory.path());
+        }
+    }
+
     #[cfg(feature = "engine")]
     #[test]
     fn explicit_environment_allowlist_adds_only_env_read_capability() {
@@ -13390,8 +13465,9 @@ mod tests {
     fn bd_45ck9_panic_path_stops_and_joins_telemetry_workers() {
         use std::time::Duration;
 
-        let temp_dir = tempfile::tempdir().expect("create telemetry tempdir");
-        let socket_path = temp_dir.path().join("panic-cleanup.sock");
+        let temp_dir = create_telemetry_socket_directory(&std::env::temp_dir())
+            .expect("create telemetry tempdir");
+        let socket_path = temp_dir.path().join(TELEMETRY_SOCKET_FILE_NAME);
         let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
         let bridge = TelemetryBridge::new(socket_path.to_str().expect("utf8 socket path"), adapter);
         let telemetry_guard = NativeTelemetryGuard::new(
@@ -13424,9 +13500,10 @@ mod tests {
     #[cfg(feature = "engine")]
     #[test]
     fn bd_45ck9_ordinary_error_reports_completed_telemetry_cleanup() {
-        let temp_dir = tempfile::tempdir().expect("create telemetry error tempdir");
+        let temp_dir = create_telemetry_socket_directory(&std::env::temp_dir())
+            .expect("create telemetry error tempdir");
         let app_path = temp_dir.path().join("missing-entrypoint.js");
-        let socket_path = temp_dir.path().join("error-cleanup.sock");
+        let socket_path = temp_dir.path().join(TELEMETRY_SOCKET_FILE_NAME);
         let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
         let telemetry_handle =
             TelemetryBridge::new(socket_path.to_str().expect("utf8 socket path"), adapter)
