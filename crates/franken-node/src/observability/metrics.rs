@@ -369,7 +369,10 @@ fn escape_prometheus_label_value(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{MetricKind, MetricSnapshot, MetricValidationError, MetricsRegistry};
+    use super::{
+        MAX_METRICS_PER_REGISTRY, MetricKind, MetricSnapshot, MetricValidationError,
+        MetricsRegistry,
+    };
 
     #[test]
     fn renders_prometheus_snapshot_with_escaped_labels() {
@@ -818,8 +821,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn metric_snapshot_determinism_property_tests() {
+    mod metric_snapshot_determinism_property_tests {
+        use super::{MetricKind, MetricSnapshot, MetricsRegistry};
+
         // Property-based tests for metric snapshot determinism and invariants
         // Ensures consistent behavior across different input combinations
         use proptest::prelude::*;
