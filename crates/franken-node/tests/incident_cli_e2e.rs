@@ -1983,12 +1983,13 @@ fn native_replay_workspace_with_outcome(
     source: &str,
     expect_success: bool,
 ) -> (tempfile::TempDir, serde_json::Value) {
-    native_replay_workspace_with_arguments(source, expect_success, false, &[])
+    native_replay_workspace_with_arguments(source, "balanced", expect_success, false, &[])
 }
 
 #[cfg(feature = "engine")]
 fn native_replay_workspace_with_arguments(
     source: &str,
+    profile: &str,
     expect_success: bool,
     allow_process_shape: bool,
     app_args: &[&str],
@@ -1998,7 +1999,7 @@ fn native_replay_workspace_with_arguments(
     fs::write(workspace.path().join("input.txt"), "ORIGINAL").expect("write live guest input");
     let initialized = run_cli_in_workspace(
         workspace.path(),
-        &["init", "--profile", "balanced", "--out-dir", ".", "--json"],
+        &["init", "--profile", profile, "--out-dir", ".", "--json"],
     );
     assert!(
         initialized.status.success(),
@@ -2795,6 +2796,9 @@ fn native_incident_replay_restores_process_arguments_for_completed_and_failed_ru
         );
         let (workspace, run) = native_replay_workspace_with_arguments(
             &source,
+            // This positive case writes output.txt. The operator must select
+            // the existing write-capable profile; balanced stays read-only.
+            "legacy-risky",
             expect_success,
             true,
             &["argument with spaces", "βeta"],
@@ -2804,6 +2808,7 @@ fn native_incident_replay_restores_process_arguments_for_completed_and_failed_ru
             "argument with spaces|βeta\ntrue\nlinux\n1\n"
         );
         assert_eq!(run["receipt"]["process_shape_read_allowed"], true);
+        assert_eq!(run["receipt"]["profile"], "legacy-risky");
         let receipt_id = run["receipt"]["receipt_id"].as_str().expect("receipt id");
         let (bundle_name, bundle) = capture_native_run_bundle(workspace.path(), receipt_id);
         assert_eq!(
@@ -3326,15 +3331,24 @@ fn native_replay_capture_preserves_unsupported_failure_without_certifying_it() {
     let denied: serde_json::Value =
         serde_json::from_slice(&denied.stdout).expect("original unsupported failure JSON");
     assert_eq!(denied["success"], false);
+    let capture = &denied["dispatch"]["native_replay"];
     assert!(
-        denied["dispatch"]["native_replay"].is_null(),
-        "uncertified error must not acquire replay inputs: {denied}"
+        capture.is_object(),
+        "typed capability denial is replayable: {denied}"
     );
-    assert!(
-        denied["receipt"]
-            .get("native_replay_payload_sha256")
-            .is_none()
+    assert_eq!(
+        denied["receipt"]["native_replay_payload_sha256"],
+        capture["payload_sha256"]
     );
+    let payload: serde_json::Value = serde_json::from_str(
+        capture["payload_json"]
+            .as_str()
+            .expect("certified denial payload"),
+    )
+    .expect("denial payload JSON");
+    assert_eq!(payload["expected"]["terminal_state"], "engine_failure");
+    assert_eq!(payload["expected"]["reason"]["kind"], "capability_denied");
+    assert_eq!(payload["expected"]["reason"]["capability"], "fs:write");
     assert!(
         denied["error"]
             .as_str()
@@ -3350,5 +3364,78 @@ fn native_replay_capture_preserves_unsupported_failure_without_certifying_it() {
         "{denied}"
     );
     assert_eq!(denied["captured_output"]["stdout"], "before-denial\n");
+    assert!(!workspace.path().join("forbidden.txt").exists());
+
+    let receipt_id = denied["receipt"]["receipt_id"]
+        .as_str()
+        .expect("denial receipt");
+    let (bundle_name, _) = capture_native_run_bundle(workspace.path(), receipt_id);
+    fs::rename(
+        workspace.path().join("denied.js"),
+        workspace.path().join("saved-denied.js"),
+    )
+    .expect("preserve original denied source away from its execution path");
+    let replay = execute_native_replay(workspace.path(), &bundle_name);
+    assert!(replay.status.success(), "{replay:?}");
+    let replay: serde_json::Value =
+        serde_json::from_slice(&replay.stdout).expect("denial replay JSON");
+    let execution = &replay["execution_result"];
+    assert_eq!(execution["matched"], true, "{replay}");
+    assert_eq!(execution["console_match"], true);
+    assert_eq!(execution["host_effects_match"], true);
+    assert_eq!(execution["captured_terminal_state"], "engine_failure");
+    assert_eq!(execution["replay_terminal_state"], "engine_failure");
+    assert!(!workspace.path().join("forbidden.txt").exists());
+
+    // Stack overflow is outside the certified failure variants. Preserve a
+    // real post-console runtime failure that must not acquire replay inputs.
+    let config_path = workspace.path().join("franken_node.toml");
+    let mut config: frankenengine_node::config::Config =
+        toml::from_str(&fs::read_to_string(&config_path).expect("read runtime config"))
+            .expect("parse runtime config");
+    config.runtime.max_call_depth = Some(8);
+    fs::write(
+        config_path,
+        config.to_toml().expect("serialize bounded call depth"),
+    )
+    .expect("set a finite small recursion limit");
+    fs::write(
+        workspace.path().join("unsupported.js"),
+        "console.log('before-unsupported'); function recurse() { return recurse(); } recurse();\n",
+    )
+    .expect("write unsupported runtime failure fixture");
+    let unsupported = run_cli_in_workspace(
+        workspace.path(),
+        &["run", "unsupported.js", "--capture-replay", "--json"],
+    );
+    assert_eq!(unsupported.status.code(), Some(1));
+    let unsupported: serde_json::Value =
+        serde_json::from_slice(&unsupported.stdout).expect("original unsupported failure JSON");
+    assert_eq!(unsupported["success"], false);
+    assert!(
+        unsupported["dispatch"]["native_replay"].is_null(),
+        "{unsupported}"
+    );
+    assert!(
+        unsupported["receipt"]
+            .get("native_replay_payload_sha256")
+            .is_none()
+    );
+    for diagnostic in [
+        &unsupported["error"],
+        &unsupported["receipt"]["execution_failure"],
+    ] {
+        assert!(
+            diagnostic
+                .as_str()
+                .expect("original stack overflow diagnostic")
+                .contains("call stack overflow"),
+            "{unsupported}"
+        );
+    }
+    assert_eq!(
+        unsupported["captured_output"]["stdout"],
+        "before-unsupported\n"
+    );
     assert!(!workspace.path().join("forbidden.txt").exists());
 }
