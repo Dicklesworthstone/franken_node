@@ -24,7 +24,6 @@ use frankenengine_node::supply_chain::trust_card_registry_store::{
     TrustCardRegistryStore, registry_snapshot_path,
 };
 use fsqlite::SqliteValue;
-use fsqlite::compat::TransactionExt;
 use tempfile::TempDir;
 
 const NOW: u64 = 2_000;

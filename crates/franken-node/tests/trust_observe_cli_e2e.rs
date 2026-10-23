@@ -8,16 +8,24 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use ed25519_dalek::SigningKey;
+use frankenengine_node::config::timeouts::TRUST_CARD_CACHE_TTL_SECS;
 use frankenengine_node::supply_chain::behavioral_observation::{
     BehavioralObservation, SignedBehavioralObservation,
 };
-use frankenengine_node::supply_chain::trust_card::fixture_registry;
+use frankenengine_node::supply_chain::certification::{EvidenceType, VerifiedEvidenceRef};
+use frankenengine_node::supply_chain::trust_card::{
+    BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
+    DependencyTrustStatus, ExtensionIdentity, ProvenanceSummary, PublisherIdentity,
+    ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, TrustCardInput,
+    TrustCardRegistry,
+};
 use frankenengine_node::supply_chain::trust_card_registry_store::{
     TrustCardRegistryStore, registry_snapshot_path,
 };
 use serde_json::Value;
 
 const EXTENSION: &str = "npm:@acme/auth-guard";
+const REGISTRY_KEY: &[u8] = b"franken-node-trust-card-registry-key-v1";
 
 fn run(root: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_franken-node"))
@@ -37,14 +45,92 @@ fn json(output: &Output) -> Value {
     })
 }
 
+fn auth_guard_registry(now: u64) -> TrustCardRegistry {
+    // Keep the original auth-guard fixture's inputs, using the public registry
+    // API so this default-feature CLI test needs no test-support-only export.
+    // The collector measurements below are explicitly synthetic test inputs.
+    let mut registry = TrustCardRegistry::new(TRUST_CARD_CACHE_TTL_SECS, REGISTRY_KEY);
+    registry
+        .create(
+            TrustCardInput {
+                extension: ExtensionIdentity {
+                    extension_id: EXTENSION.to_string(),
+                    version: "1.4.2".to_string(),
+                },
+                publisher: PublisherIdentity {
+                    publisher_id: "pub-acme".to_string(),
+                    display_name: "Acme Security".to_string(),
+                },
+                certification_level: CertificationLevel::Gold,
+                capability_declarations: vec![
+                    CapabilityDeclaration {
+                        name: "auth.validate-token".to_string(),
+                        description: "Validate JWT and attach identity context".to_string(),
+                        risk: CapabilityRisk::Medium,
+                    },
+                    CapabilityDeclaration {
+                        name: "auth.revoke-session".to_string(),
+                        description: "Invalidate compromised sessions".to_string(),
+                        risk: CapabilityRisk::High,
+                    },
+                ],
+                behavioral_profile: BehavioralProfile {
+                    network_access: true,
+                    filesystem_access: false,
+                    subprocess_access: false,
+                    profile_summary: "Network-only auth checks with bounded side effects"
+                        .to_string(),
+                },
+                revocation_status: RevocationStatus::Active,
+                provenance_summary: ProvenanceSummary {
+                    attestation_level: "slsa-l3".to_string(),
+                    source_uri: "fixture://trust-card/acme/auth-guard".to_string(),
+                    artifact_hashes: vec![format!("sha256:deadbeef{}", "a".repeat(56))],
+                    verified_at: "2026-02-20T12:00:00Z".to_string(),
+                },
+                reputation_score_basis_points: 920,
+                reputation_trend: ReputationTrend::Improving,
+                active_quarantine: false,
+                dependency_trust_summary: vec![DependencyTrustStatus {
+                    dependency_id: "npm:jsonwebtoken@9".to_string(),
+                    trust_level: "verified".to_string(),
+                }],
+                last_verified_timestamp: "2026-02-20T12:00:00Z".to_string(),
+                user_facing_risk_assessment: RiskAssessment {
+                    level: RiskLevel::Low,
+                    summary:
+                        "Token validation extension with strong provenance and no local disk access"
+                            .to_string(),
+                },
+                evidence_refs: vec![
+                    VerifiedEvidenceRef {
+                        evidence_id: "ev-fixture-prov-001".to_string(),
+                        evidence_type: EvidenceType::ProvenanceChain,
+                        verified_at_epoch: 1000,
+                        verification_receipt_hash: "a".repeat(64),
+                    },
+                    VerifiedEvidenceRef {
+                        evidence_id: "ev-fixture-rep-001".to_string(),
+                        evidence_type: EvidenceType::ReputationSignal,
+                        verified_at_epoch: 1000,
+                        verification_receipt_hash: "b".repeat(64),
+                    },
+                ],
+            },
+            now,
+            "trace-fixture-registry",
+        )
+        .expect("create the original auth-guard fixture through the public registry");
+    registry
+}
+
 fn workspace() -> (tempfile::TempDir, SigningKey, u64) {
     let root = tempfile::tempdir().expect("trust observation workspace");
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("test clock")
         .as_secs();
-    let registry_key = base64::engine::general_purpose::STANDARD
-        .encode(b"franken-node-trust-card-registry-key-v1");
+    let registry_key = base64::engine::general_purpose::STANDARD.encode(REGISTRY_KEY);
     std::fs::write(
         root.path().join("franken_node.toml"),
         format!(
@@ -53,8 +139,8 @@ fn workspace() -> (tempfile::TempDir, SigningKey, u64) {
         ),
     )
     .expect("explicit fixture signing config");
-    fixture_registry(now)
-        .expect("fixture registry")
+    let registry = auth_guard_registry(now);
+    registry
         .persist_authoritative_state(&registry_snapshot_path(root.path()))
         .expect("seed actual durable store");
     let collector = SigningKey::from_bytes(&[91; 32]);

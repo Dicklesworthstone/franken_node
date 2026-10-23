@@ -14955,7 +14955,7 @@ fn build_doctor_report_with_cwd_and_policy_input(
             let declares_dependencies = collect_run_package_dependencies(&root)
                 .ok()
                 .flatten()
-                .is_some_and(|dependencies| !dependencies.is_empty());
+                .is_some_and(|(dependencies, _)| !dependencies.is_empty());
             checks.push(evaluate_doctor_check(
                 "DR-TRUST-021",
                 "DOC-021",
