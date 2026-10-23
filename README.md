@@ -3076,7 +3076,7 @@ python3 scripts/project_compat_runner.py --corpus-dir fixtures/compatibility/pro
 
 The artifact directory must be new. Omitting both `--corpus-dir` and `--corpus`
 selects only `projects/corpus.json`; it does not run the other project manifests.
-The full collection currently contains 153 cases in 22 manifests. The first
+The full collection currently contains 170 cases in 26 manifests. The first
 command checks real Node against every frozen expectation. The runner executes
 distinct Node, Bun and native binaries with separate workspaces, retaining their
 hashes, exact streams, statuses and expected file observations. Reference-version
