@@ -195,6 +195,7 @@ FrankenNode uses granular feature flags for compile-time optimization and option
 - **`engine`** - franken_engine integration (default: enabled)
 - **`http-client`** - HTTP client functionality (default: enabled)
 - **`external-commands`** - External process execution (default: enabled)
+- **`fleet-control-plane-server`** - Live HTTP fleet coordinator over durable fleet state; enables `franken-node fleet serve` (default: enabled)
 
 ### Product Surface Features
 - **`extended-surfaces`** - Legacy umbrella for `control-plane`, `policy-engine`, `remote-ops`, `admin-tools`, `verifier-tools`, and `advanced-features`
