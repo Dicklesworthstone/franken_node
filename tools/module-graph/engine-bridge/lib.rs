@@ -163,6 +163,55 @@ console.log(require('assert').strict === require('assert/strict'));
     }
 
     #[test]
+    fn frozen_create_require_executes_the_creating_packages_commonjs_dependencies() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join("packages/bridge/node_modules/where");
+        let outer = root.path().join("node_modules/where");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&outer).unwrap();
+        std::fs::write(
+            nested.join("package.json"),
+            r#"{"name":"where","main":"index.cjs"}"#,
+        )
+        .unwrap();
+        std::fs::write(nested.join("index.cjs"), "module.exports = {value: 42};").unwrap();
+        std::fs::write(outer.join("index.js"), "module.exports = {value: 9000};").unwrap();
+        let bridge = root.path().join("packages/bridge/bridge.mjs");
+        std::fs::write(
+            &bridge,
+            r#"
+import {createRequire as makeRequire} from 'node:module';
+const localRequire = makeRequire(import.meta.url);
+export function readFromBridge() {
+    return localRequire('where').value + ':' + localRequire.resolve('where').endsWith('/packages/bridge/node_modules/where/index.cjs');
+}
+"#,
+        )
+        .unwrap();
+        let app = root.path().join("app.mjs");
+        std::fs::write(
+            &app,
+            "import {readFromBridge} from './packages/bridge/bridge.mjs?revision=1#captured'; console.log(readFromBridge());",
+        )
+        .unwrap();
+        let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        let sealed = capsule::encode(&graph).unwrap();
+        for path in [
+            &app,
+            &bridge,
+            &nested.join("index.cjs"),
+            &outer.join("index.js"),
+        ] {
+            std::fs::write(path, "throw new Error('live code must not run');").unwrap();
+        }
+        std::fs::write(nested.join("package.json"), r#"{"main":"missing.cjs"}"#).unwrap();
+        let replayed = capsule::replay(sealed.bytes(), sealed.digest()).unwrap();
+        let resolver = Arc::new(CapturedEngineResolver::new(replayed, &pin).ok().unwrap());
+        assert_eq!(execute(resolver, root.path(), false), ["42:true"]);
+    }
+
+    #[test]
     fn frozen_esm_gets_callable_assert_and_named_util_decoder_exports() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(
