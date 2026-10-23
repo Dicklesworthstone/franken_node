@@ -780,6 +780,16 @@ impl Resolver {
                 // target cannot select an inferred extension, directory index
                 // or a different installed version.
                 if bare_builtin(&selection.target) {
+                    if mode == ResolutionMode::Require {
+                        // CommonJS finalizes package imports through a file
+                        // URL. Node rejects a builtin URL here, unlike ESM's
+                        // PACKAGE_RESOLVE terminal. Do not turn an alias into
+                        // authority that the reference loader does not grant.
+                        return Err(error(
+                            "ERR_INVALID_URL_SCHEME",
+                            "CommonJS package imports require a file URL, not a builtin target",
+                        ));
+                    }
                     return Err(error(
                         "ERR_RUNTIME_MODULE_REQUIRED",
                         "internal import selects a runtime builtin",
@@ -2120,6 +2130,43 @@ mod tests {
             "ERR_MODULE_RESOLUTION_LIMIT"
         );
         assert!(package_parts("pkg/../other").is_err());
+    }
+
+    #[test]
+    fn package_import_builtin_targets_preserve_node_loader_boundaries() {
+        let root = fixture();
+        put(
+            root.path(),
+            "package.json",
+            br##"{"imports":{"#path":"path","#conditional":{"import":"path/posix","require":"path/win32"},"#prefixed":"node:path","#blocked":null}}"##,
+        );
+        put(
+            root.path(),
+            "node_modules/path/index.js",
+            b"must not shadow a builtin",
+        );
+        for specifier in ["#path", "#conditional"] {
+            assert_eq!(
+                rejected(root.path(), "app.js", specifier, ResolutionMode::Import),
+                "ERR_RUNTIME_MODULE_REQUIRED"
+            );
+            assert_eq!(
+                rejected(root.path(), "app.js", specifier, ResolutionMode::Require),
+                "ERR_INVALID_URL_SCHEME"
+            );
+        }
+        // PACKAGE_TARGET_RESOLVE rejects URL targets, including node: URLs.
+        // The supported spelling inside imports is the bare builtin name.
+        for mode in [ResolutionMode::Import, ResolutionMode::Require] {
+            assert_eq!(
+                rejected(root.path(), "app.js", "#prefixed", mode),
+                "ERR_INVALID_PACKAGE_TARGET"
+            );
+            assert_eq!(
+                rejected(root.path(), "app.js", "#blocked", mode),
+                "ERR_PACKAGE_IMPORT_NOT_DEFINED"
+            );
+        }
     }
 
     #[test]
