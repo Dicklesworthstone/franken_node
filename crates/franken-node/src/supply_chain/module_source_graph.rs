@@ -1,9 +1,10 @@
-//! Entrypoint-wide capture of static and literal JavaScript/TypeScript requests.
+//! Entrypoint-wide capture of static and exact-string JavaScript/TypeScript requests.
 //!
 //! One resolver owns every source, manifest, link and negative probe for the
 //! whole graph. This is a conservative source graph, not execution or proof of
 //! all runtime dependencies: literal deferred loads are included even in dead
-//! branches; computed/indirect loaders and unsupported syntax stay explicit.
+//! branches; exact string concatenations and templates add no runtime lookup
+//! authority. Dynamic/indirect loaders and unsupported syntax stay explicit.
 //! TypeScript follows explicit runtime syntax, not tsconfig-dependent emit.
 //! Whole-declaration type imports and import types are recorded but never read;
 //! inline type specifiers retain their declaration's side-effect dependency.
@@ -44,6 +45,9 @@ const MAX_MODULES: usize = 256;
 const MAX_SITES: usize = 4096;
 const MAX_AST_NODES: usize = 262_144;
 const MAX_EVIDENCE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_STRING_EXPRESSION_DEPTH: usize = 64;
+const MAX_STRING_EXPRESSION_NODES: usize = 4096;
+const MAX_STRING_EXPRESSION_BYTES: usize = 16 * super::MAX_PATH;
 const HASH_DOMAIN: &[u8] = b"franken-node/module-source-graph/v2\0";
 type Result<T> = std::result::Result<T, ResolutionError>;
 
@@ -899,35 +903,160 @@ fn is_require(node: Node<'_>, bytes: &[u8]) -> bool {
                 .is_some_and(|n| n.utf8_text(bytes) == Ok("require")))
 }
 
-/// Decode JS literal spelling, never run JavaScript or guess computed strings.
-/// UTF-16 accumulation handles surrogate pairs. Legacy octal and lone surrogate
-/// escapes remain opaque, rather than selecting the wrong filesystem path.
+/// Evaluate only exact strings, without executing code, coercing a value or
+/// consulting bindings. Every accepted operand is a string, so concatenation
+/// and untagged template substitution cannot invoke user-defined behavior.
+/// Keep UTF-16 until the complete value is assembled: surrogate halves may
+/// join across operands, while a final lone surrogate is not a host path.
 fn literal(node: Node<'_>, source: &str) -> Option<String> {
-    if !matches!(node.kind(), "string" | "template_string") {
-        return None;
-    }
-    if node.kind() == "template_string" {
-        let mut walk = node.walk();
-        if node
-            .named_children(&mut walk)
-            .any(|n| n.kind() == "template_substitution")
-        {
-            return None;
-        }
-    }
-    decode_literal(source.get(node.byte_range())?)
+    let mut units = Vec::new();
+    let mut budget = StringExpressionBudget::default();
+    append_exact_string(node, source, &mut units, &mut budget, 0)?;
+    let value = String::from_utf16(&units).ok()?;
+    (value.len() <= super::MAX_PATH).then_some(value)
 }
 
+struct StringExpressionBudget {
+    nodes: usize,
+    bytes: usize,
+}
+
+impl Default for StringExpressionBudget {
+    fn default() -> Self {
+        Self {
+            nodes: MAX_STRING_EXPRESSION_NODES,
+            bytes: MAX_STRING_EXPRESSION_BYTES,
+        }
+    }
+}
+
+fn append_exact_string(
+    node: Node<'_>,
+    source: &str,
+    units: &mut Vec<u16>,
+    budget: &mut StringExpressionBudget,
+    depth: usize,
+) -> Option<()> {
+    if depth > MAX_STRING_EXPRESSION_DEPTH {
+        return None;
+    }
+    budget.nodes = budget.nodes.checked_sub(1)?;
+    match node.kind() {
+        "parenthesized_expression"
+        | "as_expression"
+        | "satisfies_expression"
+        | "non_null_expression" => {
+            append_exact_string(wrapper_operand(node)?, source, units, budget, depth + 1)
+        }
+        "binary_expression"
+            if node
+                .child_by_field_name("operator")
+                .is_some_and(|op| op.kind() == "+") =>
+        {
+            append_exact_string(
+                node.child_by_field_name("left")?,
+                source,
+                units,
+                budget,
+                depth + 1,
+            )?;
+            append_exact_string(
+                node.child_by_field_name("right")?,
+                source,
+                units,
+                budget,
+                depth + 1,
+            )
+        }
+        "string" => {
+            let spelling = source.get(node.byte_range())?;
+            let quote = spelling.chars().next()?;
+            if !matches!(quote, '\'' | '"') || !spelling.ends_with(quote) || spelling.len() < 2 {
+                return None;
+            }
+            append_string_segment(&spelling[1..spelling.len() - 1], false, units, budget)
+        }
+        "template_string" => {
+            let spelling = source.get(node.byte_range())?;
+            if !spelling.starts_with('`') || !spelling.ends_with('`') || spelling.len() < 2 {
+                return None;
+            }
+            let mut start = node.start_byte() + 1;
+            let mut cursor = node.walk();
+            for part in node.named_children(&mut cursor) {
+                budget.nodes = budget.nodes.checked_sub(1)?;
+                match part.kind() {
+                    "string_fragment" | "escape_sequence" => {}
+                    "template_substitution" => {
+                        append_string_segment(
+                            source.get(start..part.start_byte())?,
+                            true,
+                            units,
+                            budget,
+                        )?;
+                        let mut children = part.walk();
+                        let mut expression = None;
+                        for child in part.named_children(&mut children) {
+                            budget.nodes = budget.nodes.checked_sub(1)?;
+                            if child.kind() != "comment" && expression.replace(child).is_some() {
+                                return None;
+                            }
+                        }
+                        append_exact_string(expression?, source, units, budget, depth + 1)?;
+                        start = part.end_byte();
+                    }
+                    _ => return None,
+                }
+            }
+            append_string_segment(source.get(start..node.end_byte() - 1)?, true, units, budget)
+        }
+        _ => None,
+    }
+}
+
+// A small decoder fixture used below; production assembles all expression
+// fragments before requiring a valid Unicode path.
+#[cfg(test)]
 fn decode_literal(text: &str) -> Option<String> {
     let quote = text.chars().next()?;
     if !matches!(quote, '\'' | '"' | '`') || !text.ends_with(quote) || text.len() < 2 {
         return None;
     }
-    let mut chars = text[1..text.len() - 1].chars().peekable();
     let mut units = Vec::new();
+    append_string_segment(
+        &text[1..text.len() - 1],
+        quote == '`',
+        &mut units,
+        &mut StringExpressionBudget::default(),
+    )?;
+    let value = String::from_utf16(&units).ok()?;
+    (value.len() <= super::MAX_PATH).then_some(value)
+}
+
+/// Decode a cooked string/template fragment with bounded work and storage.
+/// Template CR and CRLF normalize to LF; escape-produced CR does not. Legacy
+/// octal remains opaque. Code-point escapes may contain leading zeroes and
+/// surrogate code units, as JavaScript permits.
+fn append_string_segment(
+    text: &str,
+    template: bool,
+    units: &mut Vec<u16>,
+    budget: &mut StringExpressionBudget,
+) -> Option<()> {
+    budget.bytes = budget.bytes.checked_sub(text.len())?;
+    let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
-        let c = if c != '\\' {
-            c
+        let value = if c != '\\' {
+            if c == '\r' && template {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                u32::from('\n')
+            } else if matches!(c, '\n' | '\r') && !template {
+                return None;
+            } else {
+                u32::from(c)
+            }
         } else {
             match chars.next()? {
                 '\n' => continue,
@@ -938,15 +1067,15 @@ fn decode_literal(text: &str) -> Option<String> {
                     continue;
                 }
                 '\u{2028}' | '\u{2029}' => continue,
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                'b' => '\u{0008}',
-                'f' => '\u{000c}',
-                'v' => '\u{000b}',
-                '0' if !chars.peek().is_some_and(char::is_ascii_digit) => '\0',
+                'n' => u32::from('\n'),
+                'r' => u32::from('\r'),
+                't' => u32::from('\t'),
+                'b' => 8,
+                'f' => 12,
+                'v' => 11,
+                '0' if !chars.peek().is_some_and(char::is_ascii_digit) => 0,
                 '0'..='9' => return None,
-                'x' => char::from_u32(read_hex(&mut chars, 2)?)?,
+                'x' => read_hex(&mut chars, 2)?,
                 'u' => {
                     if chars.peek() == Some(&'{') {
                         chars.next();
@@ -958,30 +1087,33 @@ fn decode_literal(text: &str) -> Option<String> {
                                 break;
                             }
                             count += 1;
-                            if count > 6 {
-                                return None;
-                            }
                             value = value.checked_mul(16)?.checked_add(c.to_digit(16)?)?;
                         }
                         if count == 0 {
                             return None;
                         }
-                        char::from_u32(value)?
+                        value
                     } else {
-                        units.push(read_hex(&mut chars, 4)? as u16);
-                        continue;
+                        read_hex(&mut chars, 4)?
                     }
                 }
-                escaped => escaped,
+                escaped => u32::from(escaped),
             }
         };
-        units.extend(c.encode_utf16(&mut [0_u16; 2]).iter().copied());
+        if let Ok(unit) = u16::try_from(value) {
+            if units.len() >= super::MAX_PATH {
+                return None;
+            }
+            units.push(unit);
+        } else {
+            let c = char::from_u32(value)?;
+            if units.len().checked_add(c.len_utf16())? > super::MAX_PATH {
+                return None;
+            }
+            units.extend(c.encode_utf16(&mut [0_u16; 2]).iter().copied());
+        }
     }
-    let result = String::from_utf16(&units).ok()?;
-    if result.len() > super::MAX_PATH {
-        return None;
-    }
-    Some(result)
+    Some(())
 }
 
 fn read_hex(chars: &mut impl Iterator<Item = char>, count: usize) -> Option<u32> {
@@ -1084,6 +1216,284 @@ mod tests {
         assert_eq!(g.report.edges.len(), 2);
         assert!(g.report.fully_resolved);
         assert_eq!(g.report.edges[1].kind, LoadKind::DynamicImport);
+    }
+
+    fn scan_string_request(expression: &str, language: SourceLanguage) -> Option<String> {
+        let source = format!("require({expression});");
+        let (mut loads, notices, analyzed) = scan(
+            &mut Parser::new(),
+            source.as_bytes(),
+            language,
+            &mut Budget::default(),
+        )
+        .unwrap();
+        assert!(analyzed, "{expression}: {notices:?}");
+        assert!(notices.is_empty(), "{expression}: {notices:?}");
+        assert_eq!(loads.len(), 1, "{expression}: {loads:?}");
+        loads.pop().unwrap().specifier
+    }
+
+    #[test]
+    fn exact_string_loads_capture_and_replay_only_their_pinned_routes() {
+        use super::registry::{PinnedModuleRegistry, RequestStyle};
+        let root = tempfile::tempdir().unwrap();
+        let source = r#"
+const value = require(('./value' + '.cjs'));
+const resolved = require['re' + 'solve'](`./${'other'}.cjs`);
+import(`./${'dynamic' + '.mjs'}`);
+const fromPackage = require('string-' + 'fixture');
+"#;
+        put(root.path(), "app.cjs", source);
+        put(root.path(), "value.cjs", "module.exports = 42;");
+        put(
+            root.path(),
+            "other.cjs",
+            "throw new Error('resolve does not execute');",
+        );
+        put(root.path(), "dynamic.mjs", "export default 7;");
+        put(
+            root.path(),
+            "node_modules/string-fixture/package.json",
+            r#"{"exports":"./index.cjs"}"#,
+        );
+        put(
+            root.path(),
+            "node_modules/string-fixture/index.cjs",
+            "module.exports = require('./' + 'value.cjs');",
+        );
+        put(
+            root.path(),
+            "node_modules/string-fixture/value.cjs",
+            "module.exports = 17;",
+        );
+        let captured = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        assert!(captured.report().fully_resolved, "{:?}", captured.report());
+        assert!(!captured.report().execution_performed);
+        assert_eq!(
+            paths(&captured),
+            [
+                "app.cjs",
+                "dynamic.mjs",
+                "node_modules/string-fixture/index.cjs",
+                "node_modules/string-fixture/value.cjs",
+                "other.cjs",
+                "value.cjs",
+            ]
+        );
+        assert_eq!(
+            captured
+                .report()
+                .edges
+                .iter()
+                .map(|edge| edge.specifier.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "./value.cjs",
+                "./other.cjs",
+                "./dynamic.mjs",
+                "string-fixture",
+                "./value.cjs",
+            ]
+        );
+        let pin = captured.report().input_hash.clone();
+        let capsule = super::capsule::encode(&captured).unwrap();
+        put(
+            root.path(),
+            "value.cjs",
+            "throw new Error('live source changed');",
+        );
+        put(root.path(), "uncaptured.cjs", "module.exports = 99;");
+        put(
+            root.path(),
+            "node_modules/string-fixture/value.cjs",
+            "throw new Error('live package changed');",
+        );
+        let replayed = super::capsule::replay(capsule.bytes(), capsule.digest()).unwrap();
+        assert_eq!(replayed.report(), captured.report());
+        let registry = PinnedModuleRegistry::new(replayed, &pin).unwrap();
+        let entry = registry
+            .lookup(None, registry.entrypoint(), RequestStyle::Require)
+            .unwrap();
+        assert_eq!(
+            entry.source(),
+            source,
+            "capture must not rewrite guest code"
+        );
+        let value = registry
+            .lookup(Some(entry.id()), "./value.cjs", RequestStyle::Require)
+            .unwrap();
+        assert_eq!(value.source(), "module.exports = 42;");
+        let package = registry
+            .lookup(Some(entry.id()), "string-fixture", RequestStyle::Require)
+            .unwrap();
+        let package_value = registry
+            .lookup(Some(package.id()), "./value.cjs", RequestStyle::Require)
+            .unwrap();
+        assert_eq!(package_value.source(), "module.exports = 17;");
+        assert!(
+            registry
+                .lookup(Some(entry.id()), "./other.cjs", RequestStyle::Require)
+                .is_ok()
+        );
+        assert!(
+            registry
+                .lookup(Some(entry.id()), "./dynamic.mjs", RequestStyle::Import)
+                .is_ok()
+        );
+        for (specifier, style) in [
+            ("./uncaptured.cjs", RequestStyle::Require),
+            ("./value.cjs", RequestStyle::Import),
+        ] {
+            assert_eq!(
+                registry
+                    .lookup(Some(entry.id()), specifier, style)
+                    .err()
+                    .unwrap()
+                    .code,
+                "ERR_MODULE_REGISTRY_ROUTE"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_string_values_preserve_cooked_escapes_and_cross_operand_utf16() {
+        for (expression, expected) in [
+            (
+                "( /* prefix */ './' + ('li' + 'b.cjs') /* suffix */ )",
+                "./lib.cjs",
+            ),
+            ("`./${'lib'}.cjs`", "./lib.cjs"),
+            ("`./${`${'li'}b`}.cjs`", "./lib.cjs"),
+            (r#"`./\${literal}.cjs`"#, "./${literal}.cjs"),
+            (r#"'./\uD83D' + '\uDE00.cjs'"#, "./😀.cjs"),
+            (r#"`./${'\u{D83D}'}${'\u{DE00}'}.cjs`"#, "./😀.cjs"),
+            (r#"'./\u{00000061}.cjs'"#, "./a.cjs"),
+            ("`./a\r\nb\rc.cjs`", "./a\nb\nc.cjs"),
+            (r#"`./a\rb.cjs`"#, "./a\rb.cjs"),
+            ("`./a\\\r\nb.cjs`", "./ab.cjs"),
+            (r#"'./\x61' + '\u0062' + '\u{63}.cjs'"#, "./abc.cjs"),
+        ] {
+            assert_eq!(
+                scan_string_request(expression, SourceLanguage::JavaScript).as_deref(),
+                Some(expected),
+                "{expression:?}"
+            );
+        }
+        for expression in [r#"'./\uD800.cjs'"#, r#"'./\uDC00' + '\uD800.cjs'"#] {
+            assert!(scan_string_request(expression, SourceLanguage::JavaScript).is_none());
+        }
+    }
+
+    #[test]
+    fn exact_string_typescript_wrappers_preserve_runtime_string_values() {
+        for expression in [
+            "('./value.cjs' as const)",
+            "('./value.cjs' satisfies string)",
+            "('./value.cjs')!",
+            "('./' as string) + ('value.cjs' as const)",
+            "`./${('value' as const)}.cjs`",
+        ] {
+            assert_eq!(
+                scan_string_request(expression, SourceLanguage::TypeScript).as_deref(),
+                Some("./value.cjs"),
+                "{expression}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_string_capture_rejects_coercion_bindings_branches_and_side_effects() {
+        for expression in [
+            "'./' + name",
+            "`./${name}.cjs`",
+            "'./' + 1",
+            "`./${1}.cjs`",
+            "true ? './one.cjs' : './two.cjs'",
+            "'./one.cjs' || './two.cjs'",
+            "(touch(), './value.cjs')",
+            "(name = './value.cjs')",
+            "('./value.cjs').toString()",
+            "String.raw`./value.cjs`",
+            "tag`./value.cjs`",
+            "['./value.cjs'][0]",
+            "`./${{toString() { touch(); return 'value'; }}}.cjs`",
+        ] {
+            assert!(
+                scan_string_request(expression, SourceLanguage::JavaScript).is_none(),
+                "runtime behavior must stay unresolved: {expression}"
+            );
+        }
+        let root = tempfile::tempdir().unwrap();
+        put(
+            root.path(),
+            "app.cjs",
+            "require(('./ignored.cjs', './value.cjs')); require('./' + name);",
+        );
+        put(
+            root.path(),
+            "ignored.cjs",
+            "throw new Error('not a captured route');",
+        );
+        put(
+            root.path(),
+            "value.cjs",
+            "throw new Error('not a captured route');",
+        );
+        let captured = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        assert!(!captured.report().fully_resolved);
+        assert_eq!(paths(&captured), ["app.cjs"]);
+        assert!(
+            captured
+                .report()
+                .edges
+                .iter()
+                .all(|edge| edge.state == EdgeState::NonLiteral)
+        );
+        let pin = captured.report().input_hash.clone();
+        assert_eq!(
+            registry::PinnedModuleRegistry::new(captured, &pin)
+                .err()
+                .unwrap()
+                .code,
+            "ERR_MODULE_REGISTRY_INCOMPLETE"
+        );
+    }
+
+    #[test]
+    fn exact_string_evaluation_bounds_depth_work_and_final_utf8_bytes() {
+        let at_limit = "x".repeat(super::super::MAX_PATH);
+        assert_eq!(
+            scan_string_request(&format!("'{at_limit}'"), SourceLanguage::JavaScript),
+            Some(at_limit.clone())
+        );
+        for expression in [
+            format!("'{at_limit}' + 'x'"),
+            format!("'{}'", "é".repeat(super::super::MAX_PATH / 2 + 1)),
+            format!(
+                "{}'x'{}",
+                "(".repeat(MAX_STRING_EXPRESSION_DEPTH + 1),
+                ")".repeat(MAX_STRING_EXPRESSION_DEPTH + 1)
+            ),
+            format!("'{}'", "\\\n".repeat(MAX_STRING_EXPRESSION_BYTES / 2 + 1)),
+        ] {
+            assert!(scan_string_request(&expression, SourceLanguage::JavaScript).is_none());
+        }
+        // A balanced tree has shallow recursion and an empty result, but its
+        // many operands must still consume the expression work budget.
+        let mut many_empty_strings = "''".to_owned();
+        for _ in 0..12 {
+            many_empty_strings = format!("({many_empty_strings}+{many_empty_strings})");
+        }
+        assert!(scan_string_request(&many_empty_strings, SourceLanguage::JavaScript).is_none());
+        let at_depth = format!(
+            "{}'x'{}",
+            "(".repeat(MAX_STRING_EXPRESSION_DEPTH),
+            ")".repeat(MAX_STRING_EXPRESSION_DEPTH)
+        );
+        assert_eq!(
+            scan_string_request(&at_depth, SourceLanguage::JavaScript).as_deref(),
+            Some("x")
+        );
     }
 
     #[test]
