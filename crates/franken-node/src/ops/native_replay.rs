@@ -2698,23 +2698,85 @@ mod engine {
                     process.preparation.iter().any(|entry| matches!(
                         entry,
                         CapturedProcessPreparation::Prepare {
-                            outcome: Err(_),
+                            request,
+                            outcome: Ok(prepared),
+                        } if request != prepared
+                    )),
+                    "capture the actual shell executable selection"
+                );
+                assert!(
+                    process.preparation.iter().all(|entry| match entry {
+                        CapturedProcessPreparation::Preflight { outcome, .. } => outcome.is_ok(),
+                        CapturedProcessPreparation::Prepare { outcome, .. } => outcome.is_ok(),
+                    }),
+                    "IFC must refuse the tainted request before provider preparation"
+                );
+                assert!(
+                    process.journal.iter().any(|entry| matches!(
+                        entry,
+                        HostEffectJournalEntry::ProcessSpawn {
+                            outcome: Err(ProcessSpawnError::FlowPolicyBlocked),
                             ..
                         }
                     )),
-                    "the caught policy denial must come from preparation: {:?}",
-                    process.preparation
+                    "preserve the exact IFC refusal: {:?}",
+                    process.journal
                 );
-                assert!(process.journal.iter().any(|entry| matches!(
-                    entry,
-                    HostEffectJournalEntry::ProcessSpawn {
-                        outcome: Err(_),
-                        ..
-                    }
-                )));
                 let outcome =
                     reexecute(&capture).expect("replay exact signed shell selection and denial");
                 assert!(outcome.matched, "{outcome:?}");
+                assert!(outcome.host_effects_match && outcome.console_match);
+
+                // Use a clean request to exercise the provider's preparation
+                // refusal too. Child output in the original scenario taints
+                // the later request, so that scenario cannot prove this phase.
+                let denied_root = tempfile::tempdir().unwrap();
+                let denied_capture = record_process(
+                    denied_root.path(),
+                    "const cp = require('child_process'); try { cp.execFileSync('unapproved-command', [], { encoding: 'utf8' }); } catch (error) { console.log('expected-policy-denial'); }",
+                );
+                let denied_payload: NativeReplayPayload =
+                    serde_json::from_str(&denied_capture.payload_json).unwrap();
+                let CapturedAttempt::Completed(denied_completed) = &denied_payload.expected else {
+                    panic!(
+                        "caught preparation refusal must complete: {:?}",
+                        denied_payload.expected
+                    );
+                };
+                assert_eq!(
+                    denied_completed
+                        .console_output
+                        .iter()
+                        .map(|entry| entry.message.as_str())
+                        .collect::<Vec<_>>(),
+                    ["expected-policy-denial"]
+                );
+                let denied_process = denied_payload.process.as_ref().unwrap();
+                let (denied_request, denied_error) = denied_process
+                    .preparation
+                    .iter()
+                    .find_map(|entry| match entry {
+                        CapturedProcessPreparation::Prepare {
+                            request,
+                            outcome: Err(error @ ProcessSpawnError::PolicyViolation { code, .. }),
+                        } if code == "executable_alias_denied" => Some((request, error)),
+                        _ => None,
+                    })
+                    .expect("the clean request must reach executable-alias preparation policy");
+                assert!(
+                    denied_process.journal.iter().any(|entry| matches!(
+                        entry,
+                        HostEffectJournalEntry::ProcessSpawn {
+                            request,
+                            outcome: Err(error),
+                        } if request == denied_request && error == denied_error
+                    )),
+                    "journal the exact preparation request and typed refusal"
+                );
+                let denied_outcome = reexecute(&denied_capture)
+                    .expect("replay the exact executable-alias preparation refusal");
+                assert!(denied_outcome.matched, "{denied_outcome:?}");
+                assert!(denied_outcome.host_effects_match && denied_outcome.console_match);
             });
         }
 
