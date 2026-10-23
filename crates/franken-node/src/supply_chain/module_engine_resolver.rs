@@ -716,9 +716,10 @@ mod tests {
             ("app.mjs", "const name='buffer'; import(name);"),
             ("app.mjs", "const name = 'node:path'; import(name);"),
             ("app.mjs", "import '#path';"),
+            ("app.mjs", "import '#fs';"),
         ] {
             let root = tempfile::tempdir().unwrap();
-            put(root.path(), "package.json", r##"{"imports":{"#builtin":"buffer","#path":"node:path"}}"##);
+            put(root.path(), "package.json", r##"{"imports":{"#builtin":"buffer","#path":"node:path","#fs":"fs"}}"##);
             put(root.path(), file, source);
             let graph = capture(root.path(), file, GraphOptions::default()).unwrap();
             let pin = graph.report().input_hash.clone();
@@ -1861,6 +1862,67 @@ module.exports = { path: path, make: function(value) { return path.join('root', 
                     "shared mutation shared mutation",
                 ]
             );
+        }
+    }
+
+    #[test]
+    fn captured_package_import_builtin_aliases_match_node_across_package_scopes() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let root = tempfile::tempdir().unwrap();
+            put(
+                root.path(),
+                "package.json",
+                r##"{"imports":{"#shared":{"import":"path/posix","default":"events"},"#core/*":"*"}}"##,
+            );
+            put(
+                root.path(),
+                "app.mjs",
+                r#"
+import localPath from '#shared';
+import directPath from 'path/posix';
+import packagePath, { basename } from 'alias-user';
+import { Buffer } from '#core/buffer';
+console.log(localPath === directPath, localPath === packagePath, Buffer.from('ok').toString());
+console.log(localPath.join('root', 'file.txt'), packagePath.join('root', 'file.txt'));
+console.log(basename('C:\\root\\file.txt'));
+import('#shared').then(loaded => { console.log(loaded.default === localPath); });
+"#,
+            );
+            put(
+                root.path(),
+                "node_modules/alias-user/package.json",
+                r##"{"exports":"./index.mjs","imports":{"#shared":"path/win32"}}"##,
+            );
+            put(
+                root.path(),
+                "node_modules/alias-user/index.mjs",
+                "export { default, basename } from '#shared';",
+            );
+            let reference = node_reference_output(root.path(), "app.mjs");
+            assert_eq!(
+                reference,
+                "true false ok\nroot/file.txt root\\file.txt\nfile.txt\ntrue\n"
+            );
+            let result = execute_captured_graph_for_test(root.path(), "app.mjs", lane, || {
+                put(
+                    root.path(),
+                    "package.json",
+                    r##"{"imports":{"#shared":"events","#core/*":"*"}}"##,
+                );
+                put(
+                    root.path(),
+                    "node_modules/alias-user/package.json",
+                    r##"{"exports":"./index.mjs","imports":{"#shared":"buffer"}}"##,
+                );
+            });
+            let actual = result
+                .console_output
+                .iter()
+                .map(|entry| entry.message.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, reference.lines().collect::<Vec<_>>(), "{lane:?}");
         }
     }
 

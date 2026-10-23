@@ -256,7 +256,11 @@ impl PinnedModuleRegistry {
             ));
         }
         let report = graph.report();
-        let mut builtin_targets = BTreeMap::<(RequestStyle, String), (String, &'static str)>::new();
+        // Private imports are scoped to the importing package. Two modules
+        // may spell the same alias while their captured manifests select
+        // different native providers; never coalesce these route decisions.
+        let mut builtin_targets =
+            BTreeMap::<(ModuleId, RequestStyle, String), (String, &'static str)>::new();
         let mut has_missing_routes = false;
         let incomplete = || error(
             "ERR_MODULE_REGISTRY_INCOMPLETE",
@@ -275,9 +279,30 @@ impl PinnedModuleRegistry {
                 {
                     let request = edge.specifier.as_deref().ok_or_else(incomplete)?;
                     let style = RequestStyle::for_load(edge.kind);
-                    let name = native_builtin(request, style).ok_or_else(incomplete)?;
+                    let provider = if request.starts_with('#') {
+                        // Capture has already selected this exact imports
+                        // target and bound its manifest, conditions and branch
+                        // to the graph pin. Preserve the original request in
+                        // the route; the provider name is not a new load permit.
+                        let mapping = edge
+                            .mappings
+                            .last()
+                            .filter(|mapping| {
+                                style == RequestStyle::Import
+                                    && mapping.kind == super::super::MapKind::Imports
+                                    && mapping.request == request
+                                    && mapping.selection.target_kind
+                                        == super::super::TargetKind::ExternalPackage
+                                    && super::super::bare_builtin(&mapping.selection.target)
+                            })
+                            .ok_or_else(incomplete)?;
+                        mapping.selection.target.as_str()
+                    } else {
+                        request
+                    };
+                    let name = native_builtin(provider, style).ok_or_else(incomplete)?;
                     builtin_targets.insert(
-                        (style, request.to_owned()),
+                        (edge.importer.clone(), style, request.to_owned()),
                         (native_builtin_id(&report.input_hash, name), name),
                     );
                 }
@@ -370,7 +395,7 @@ impl PinnedModuleRegistry {
             let target = match edge.state {
                 EdgeState::RuntimeRequired => RegisteredTarget::Module {
                     id: builtin_targets
-                        .get(&(style, specifier.clone()))
+                        .get(&(edge.importer.clone(), style, specifier.clone()))
                         .ok_or_else(invalid_graph)?
                         .0
                         .clone(),
@@ -760,6 +785,142 @@ mod tests {
             .reachable_requests(None, registry.entrypoint(), RequestStyle::Import)
             .unwrap();
         assert_eq!(requests.len(), 7);
+    }
+
+    #[test]
+    fn package_import_builtin_aliases_remain_scoped_pinned_and_closed() {
+        let root = tempfile::tempdir().unwrap();
+        put(
+            root.path(),
+            "package.json",
+            r##"{"imports":{"#shared":{"import":"path/posix","default":"events"},"#core/*":"*"}}"##,
+        );
+        put(
+            root.path(),
+            "app.mjs",
+            "import '#shared'; export { basename } from '#shared'; import('#core/buffer'); import 'pkg';",
+        );
+        put(
+            root.path(),
+            "node_modules/pkg/package.json",
+            r##"{"exports":"./index.mjs","imports":{"#shared":"path/win32"}}"##,
+        );
+        put(root.path(), "node_modules/pkg/index.mjs", "import '#shared';");
+        put(
+            root.path(),
+            "node_modules/path/index.js",
+            "throw new Error('builtin shadow');",
+        );
+        let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        assert!(!graph.report().fully_resolved);
+        assert!(graph.report().diagnostics.is_empty());
+        assert!(
+            !graph
+                .report()
+                .probes
+                .iter()
+                .any(|probe| probe.path.starts_with("node_modules/path"))
+        );
+        let aliases = graph
+            .report()
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.specifier
+                    .as_deref()
+                    .is_some_and(|specifier| specifier.starts_with('#'))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(aliases.len(), 4);
+        assert!(aliases.iter().all(|edge| {
+            edge.state == EdgeState::RuntimeRequired
+                && edge.target.is_none()
+                && edge.mappings.len() == 1
+        }));
+        let encoded = capsule::encode(&graph).unwrap();
+        let admit = |graph, pin: &str| {
+            PinnedModuleRegistry::new_with_kind_resolver(
+                graph,
+                pin,
+                |_, _, _| Ok(ModuleKind::EsModule),
+                |specifier, style| {
+                    if style != RequestStyle::Import {
+                        return None;
+                    }
+                    match specifier {
+                        "path/posix" => Some("node:path/posix"),
+                        "path/win32" => Some("node:path/win32"),
+                        "buffer" => Some("node:buffer"),
+                        _ => None,
+                    }
+                },
+            )
+        };
+        let registry = admit(graph, &pin).ok().unwrap();
+        assert_eq!(registry.summary().modules, 5);
+        assert_eq!(registry.summary().routes, 4);
+        let package = registry
+            .lookup(Some(registry.entrypoint()), "pkg", RequestStyle::Import)
+            .unwrap();
+        let root_alias = registry
+            .lookup(Some(registry.entrypoint()), "#shared", RequestStyle::Import)
+            .unwrap();
+        let nested_alias = registry
+            .lookup(Some(package.id()), "#shared", RequestStyle::Import)
+            .unwrap();
+        assert_eq!(root_alias.origin().path, "node:path/posix");
+        assert_eq!(nested_alias.origin().path, "node:path/win32");
+        assert_ne!(root_alias.id(), nested_alias.id());
+        assert_eq!(
+            registry
+                .lookup(
+                    Some(registry.entrypoint()),
+                    "#core/buffer",
+                    RequestStyle::Import
+                )
+                .unwrap()
+                .origin()
+                .path,
+            "node:buffer"
+        );
+        for (importer, specifier, style) in [
+            (registry.entrypoint(), "#shared", RequestStyle::Require),
+            (registry.entrypoint(), "path/posix", RequestStyle::Import),
+            (registry.entrypoint(), "node:path/posix", RequestStyle::Import),
+            (registry.entrypoint(), "#core/events", RequestStyle::Import),
+            (package.id(), "#core/buffer", RequestStyle::Import),
+        ] {
+            assert_eq!(
+                registry
+                    .lookup(Some(importer), specifier, style)
+                    .err()
+                    .unwrap()
+                    .code,
+                "ERR_MODULE_REGISTRY_ROUTE"
+            );
+        }
+        put(
+            root.path(),
+            "package.json",
+            r##"{"imports":{"#shared":"events","#core/*":"*"}}"##,
+        );
+        let changed = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
+        assert_ne!(changed.report().input_hash, pin);
+        assert_eq!(
+            admit(changed, &pin).err().unwrap().code,
+            "ERR_MODULE_REGISTRY_PIN_MISMATCH"
+        );
+        let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+        let restored = admit(replayed, &pin).ok().unwrap();
+        assert_eq!(restored.summary(), registry.summary());
+        assert_eq!(
+            restored
+                .lookup(Some(restored.entrypoint()), "#shared", RequestStyle::Import)
+                .unwrap()
+                .id(),
+            root_alias.id()
+        );
     }
 
     #[test]

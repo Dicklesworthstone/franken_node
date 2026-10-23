@@ -3312,7 +3312,7 @@ fn run_emits_correlated_structured_logs() {
     }
 }
 
-/// `run <dir>` in an initialised workspace holding `files`, console-only.
+/// Run a file or directory target in an initialised console-only workspace.
 fn run_directory_target(files: &[(&str, &str)], target: &str) -> RunOutcome {
     run_project_target_with_setup(files, target, |_, _| {})
 }
@@ -3377,6 +3377,63 @@ fn run_directory_target_executes_package_main() {
     assert_eq!(outcome.stdout, "from-main\n");
 }
 
+#[test]
+fn run_inferred_js_prefers_exact_file_then_js_before_directory() {
+    for (files, expected) in [
+        (
+            vec![
+                ("app", "console.log('exact-file');\n"),
+                ("app.js", "console.log('inferred-file');\n"),
+            ],
+            "exact-file\n",
+        ),
+        (
+            vec![
+                ("app/index.js", "console.log('directory-main');\n"),
+                ("app.js", "console.log('inferred-file');\n"),
+            ],
+            "inferred-file\n",
+        ),
+    ] {
+        let outcome = run_directory_target(&files, "app");
+        assert_eq!(outcome.exit_code, Some(0), "stderr:\n{}", outcome.stderr);
+        assert_eq!(outcome.stdout, expected);
+    }
+}
+
+#[test]
+fn run_inferred_js_preserves_directory_syntax() {
+    for target in ["app/", "app/."] {
+        let outcome = run_directory_target(
+            &[
+                ("app/index.js", "console.log('directory-main');\n"),
+                ("app.js", "console.log('wrong-sibling');\n"),
+                ("app/..js", "console.log('wrong-dot-file');\n"),
+            ],
+            target,
+        );
+        assert_eq!(outcome.exit_code, Some(0), "{target}: {}", outcome.stderr);
+        assert_eq!(outcome.stdout, "directory-main\n", "{target}");
+    }
+}
+
+#[test]
+fn run_inferred_js_appends_to_existing_extension_and_uses_module_scope() {
+    let outcome = run_directory_target(
+        &[
+            ("package.json", r#"{"type":"module"}"#),
+            (
+                "src/app.custom.js",
+                "import { answer } from '../answer.mjs';\nconsole.log(String(answer));\n",
+            ),
+            ("answer.mjs", "export const answer = 42;\n"),
+        ],
+        "src/app.custom",
+    );
+    assert_eq!(outcome.exit_code, Some(0), "stderr:\n{}", outcome.stderr);
+    assert_eq!(outcome.stdout, "42\n");
+}
+
 /// A nested package main retains the explicitly selected package as both its
 /// module boundary and its filesystem root. Resolving `main` must not move
 /// `readFileSync('data.txt')` into the source directory.
@@ -3403,22 +3460,24 @@ fn run_project_authority_directory_main_reads_sibling_data() {
 
 #[test]
 fn run_project_authority_nested_file_reads_root_data_and_modules() {
-    let outcome = run_directory_target(
-        &[
-            (
-                "src/main.js",
-                "const fs = require('fs');\n\
-                 const value = require('../support/value.js');\n\
-                 console.log(value + ':' + fs.readFileSync('data.txt', 'utf8'));\n",
-            ),
-            ("support/value.js", "module.exports = 'support-module';\n"),
-            ("data.txt", "project-data"),
-            ("src/data.txt", "wrong-source-directory"),
-        ],
-        "src/main.js",
-    );
-    assert_eq!(outcome.exit_code, Some(0), "stderr:\n{}", outcome.stderr);
-    assert_eq!(outcome.stdout, "support-module:project-data\n");
+    for target in ["src/main.js", "src/main"] {
+        let outcome = run_directory_target(
+            &[
+                (
+                    "src/main.js",
+                    "const fs = require('fs');\n\
+                     const value = require('../support/value.js');\n\
+                     console.log(value + ':' + fs.readFileSync('data.txt', 'utf8'));\n",
+                ),
+                ("support/value.js", "module.exports = 'support-module';\n"),
+                ("data.txt", "project-data"),
+                ("src/data.txt", "wrong-source-directory"),
+            ],
+            target,
+        );
+        assert_eq!(outcome.exit_code, Some(0), "{target}: {}", outcome.stderr);
+        assert_eq!(outcome.stdout, "support-module:project-data\n", "{target}");
+    }
 }
 
 #[test]
@@ -3447,24 +3506,29 @@ fn run_project_authority_refuses_module_escape() {
 #[cfg(unix)]
 #[test]
 fn run_project_authority_refuses_directory_main_symlink_escape() {
-    let outcome = run_project_target_with_setup(
-        &[
-            ("pkg/package.json", r#"{"name":"pkg","main":"main.js"}"#),
-            ("outside.js", "console.log('outside-main-executed');\n"),
-        ],
-        "pkg",
-        |root, _| {
-            std::os::unix::fs::symlink("../outside.js", root.join("pkg/main.js"))
-                .expect("link package main outside its root");
-        },
-    );
-    assert_ne!(outcome.exit_code, Some(0));
-    assert!(!outcome.stdout.contains("outside-main-executed"));
-    assert!(
-        outcome.stderr.contains("escapes selected project root"),
-        "entrypoint containment must refuse before execution: {}",
-        outcome.stderr
-    );
+    for target in ["pkg", "pkg/main"] {
+        let outcome = run_project_target_with_setup(
+            &[
+                ("pkg/package.json", r#"{"name":"pkg","main":"main.js"}"#),
+                ("outside.js", "console.log('outside-main-executed');\n"),
+            ],
+            target,
+            |root, _| {
+                std::os::unix::fs::symlink("../outside.js", root.join("pkg/main.js"))
+                    .expect("link package main outside its root");
+            },
+        );
+        assert_ne!(outcome.exit_code, Some(0), "{target}");
+        assert!(
+            !outcome.stdout.contains("outside-main-executed"),
+            "{target}"
+        );
+        assert!(
+            outcome.stderr.contains("escapes selected project root"),
+            "entrypoint containment must refuse before execution for {target}: {}",
+            outcome.stderr
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -3849,7 +3913,7 @@ fn run_package_scope_accepts_bom_prefixed_package_metadata() {
 #[cfg(unix)]
 #[test]
 fn run_package_scope_refuses_manifest_symlinks_before_guest_execution() {
-    for target in ["pkg", "pkg/index.js"] {
+    for target in ["pkg", "pkg/index.js", "pkg/index"] {
         let outcome = run_project_target_with_setup(
             &[
                 ("outside.json", r#"{"main":"index.js","type":"module"}"#),

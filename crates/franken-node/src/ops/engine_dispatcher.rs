@@ -1308,6 +1308,10 @@ fn parse_native_session_output(
     } else {
         0
     };
+    // Count accepted WAL events once. Rescanning every preceding frame here
+    // made decoding an I/O-heavy session quadratic in its effect count.
+    // Final responses do not consume the WAL budget.
+    let mut wal_events = 0_usize;
 
     while offset < output.len() {
         let remaining = &output[offset..];
@@ -1349,25 +1353,16 @@ fn parse_native_session_output(
             ));
             break;
         }
-        if is_wal_event
-            && parsed
-                .frames
-                .iter()
-                .filter(|frame| {
-                    matches!(
-                        frame,
-                        NativeSessionOutputFrame::HostEffectAdmitted { .. }
-                            | NativeSessionOutputFrame::HostEffectCompleted { .. }
-                    )
-                })
-                .count()
-                >= NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS
-        {
+        if is_wal_event && wal_events >= NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS {
             parsed.protocol_error = Some(format!(
                 "native-session effect WAL exceeded {} events",
                 NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS
             ));
             break;
+        }
+        if is_wal_event {
+            // The admission bound above makes this increment overflow-free.
+            wal_events += 1;
         }
         parsed.frames.push(frame);
         offset = match offset.checked_add(frame_len) {
@@ -2915,12 +2910,48 @@ fn resolve_run_entrypoint_format(
     }
 }
 
+/// Select Node's exact-file, `.js`, then directory precedence before the
+/// caller canonicalizes the selected path and checks its authority. Append
+/// the extension to the whole filename: `app.custom` can select `app.custom.js`.
+fn resolve_run_target_path(app_path: &Path, anchored: &Path) -> io::Result<PathBuf> {
+    // Path components normalize away a trailing slash or `/.`, so inspect the
+    // original spelling. Explicit directory syntax must not select a sibling
+    // `.js` file, including when the operator selects `.` or `..`.
+    let final_segment = app_path
+        .as_os_str()
+        .as_encoded_bytes()
+        .rsplit(|byte| std::path::is_separator(char::from(*byte)))
+        .next()
+        .unwrap_or_default();
+    if matches!(final_segment, b"" | b"." | b"..") {
+        return Ok(anchored.to_path_buf());
+    }
+
+    match std::fs::metadata(anchored) {
+        // Exact files win. Preserve the normal rejection of nonregular
+        // objects instead of using inference to bypass them.
+        Ok(metadata) if !metadata.is_dir() => return Ok(anchored.to_path_buf()),
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+
+    let mut with_js = anchored.as_os_str().to_os_string();
+    with_js.push(".js");
+    let candidate = PathBuf::from(with_js);
+    match std::fs::metadata(&candidate) {
+        Ok(metadata) if metadata.is_file() => Ok(candidate),
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(anchored.to_path_buf()),
+    }
+}
+
 /// Canonical filesystem authority selected for one product run.
 ///
-/// Directory targets select that directory, even when `main` is nested. A
-/// relative file uses its nearest project marker at or below the invocation
-/// directory, or its own parent when none exists. Absolute files select only
-/// their parent. Every entrypoint must remain inside the selected root.
+/// Resolved directory targets select that directory, even when `main` is
+/// nested. Explicit and inferred files use the same authority: a relative
+/// file uses its nearest project marker at or below the invocation directory,
+/// or its own parent when none exists. Absolute files select only their
+/// parent. Every entrypoint must remain inside the selected root.
 /// A selected root below an enrolled fleet project is refused; selecting a
 /// narrower guest authority cannot discard the enclosing project's policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2945,12 +2976,22 @@ impl RunProjectPaths {
         if !invocation_root.is_dir() {
             anyhow::bail!("run invocation directory is not a directory");
         }
-        let anchored = EngineDispatcher::lexical_execution_app_path(app_path, &invocation_root);
+        let requested = EngineDispatcher::lexical_execution_app_path(app_path, &invocation_root);
+        let anchored = resolve_run_target_path(app_path, &requested)
+            .with_context(|| format!("inspect run target {}", requested.display()))?;
         let target = anchored
             .canonicalize()
             .with_context(|| format!("resolve run target {}", anchored.display()))?;
         let target_metadata = std::fs::metadata(&target)
             .with_context(|| format!("inspect run target {}", target.display()))?;
+        if anchored != requested && !target_metadata.is_file() {
+            // A candidate changed after probing. Inference must never turn
+            // into directory selection with a different authority boundary.
+            anyhow::bail!(
+                "inferred run target {} is not a regular file",
+                target.display()
+            );
+        }
 
         let mut package_manifests = Vec::new();
         let (project_root, entrypoint) = if target_metadata.is_dir() {
@@ -13644,6 +13685,238 @@ mod tests {
         );
     }
 
+    #[test]
+    fn run_target_path_uses_node_file_and_directory_precedence() {
+        let cases: &[(&str, &[&str], &str)] = &[
+            ("app", &["app.js"], "app.js"),
+            ("app", &["app", "app.js"], "app"),
+            ("app", &["app/index.js", "app.js"], "app.js"),
+            ("app", &["app/index.js"], "app"),
+            ("app", &["app.js/index.js"], "app"),
+            ("app.custom", &["app.custom.js"], "app.custom.js"),
+            ("nested/app", &["nested/app.js"], "nested/app.js"),
+        ];
+        for &(requested, files, expected) in cases {
+            let directory = tempfile::tempdir().expect("entrypoint precedence directory");
+            for file in files {
+                let path = directory.path().join(file);
+                std::fs::create_dir_all(path.parent().expect("fixture parent"))
+                    .expect("fixture directory");
+                std::fs::write(path, "console.log('selected');").expect("fixture source");
+            }
+            let anchored = directory.path().join(requested);
+            for input in [PathBuf::from(requested), anchored.clone()] {
+                assert_eq!(
+                    resolve_run_target_path(&input, &anchored).expect("select entrypoint"),
+                    directory.path().join(expected),
+                    "{input:?} with {files:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn run_target_path_preserves_explicit_directory_syntax() {
+        let directory = tempfile::tempdir().expect("directory syntax fixtures");
+        std::fs::create_dir(directory.path().join("app")).expect("application directory");
+        for file in [
+            "app.js",
+            "app/.js",
+            "app/..js",
+            "app/...js",
+            "..js",
+            "...js",
+        ] {
+            std::fs::write(directory.path().join(file), "console.log('wrong-file');")
+                .expect("sibling source");
+        }
+        for requested in ["app/", "app/.", "app/..", ".", "./", "..", ""] {
+            let anchored = directory.path().join(requested);
+            assert_eq!(
+                resolve_run_target_path(Path::new(requested), &anchored)
+                    .expect("explicit directory target"),
+                anchored,
+                "{requested:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn run_target_path_does_not_infer_unadmitted_extensions() {
+        let directory = tempfile::tempdir().expect("extension inference directory");
+        for extension in ["cjs", "mjs", "ts", "json", "node"] {
+            std::fs::write(directory.path().join(format!("app.{extension}")), "")
+                .expect("non-inferred source");
+        }
+        let anchored = directory.path().join("app");
+        assert_eq!(
+            resolve_run_target_path(Path::new("app"), &anchored).expect("unresolved target"),
+            anchored
+        );
+        assert!(RunProjectPaths::resolve(Path::new("app"), directory.path()).is_err());
+    }
+
+    #[test]
+    fn run_project_paths_inferred_js_preserves_file_authority_and_package_scope() {
+        let directory = tempfile::tempdir().expect("inferred file authority directory");
+        let root = directory.path().canonicalize().expect("canonical project");
+        std::fs::create_dir(root.join("src")).expect("source directory");
+        std::fs::write(root.join("package.json"), r#"{"type":"module"}"#)
+            .expect("project metadata");
+        for requested in ["src/app", "src/app.custom"] {
+            let entrypoint = root.join(format!("{requested}.js"));
+            std::fs::write(&entrypoint, "export const value = 42;").expect("inferred source");
+            let relative = RunProjectPaths::resolve(Path::new(requested), &root)
+                .expect("relative inferred entrypoint");
+            assert_eq!(relative.entrypoint(), entrypoint);
+            assert_eq!(relative.project_root(), root);
+            assert_eq!(relative.entrypoint_format, RunEntrypointFormat::EsModule);
+            assert_eq!(relative.package_manifests.len(), 1);
+            assert_eq!(
+                relative.package_manifests[0].relative_path,
+                Path::new("package.json")
+            );
+
+            let absolute = RunProjectPaths::resolve(&root.join(requested), &root)
+                .expect("absolute inferred entrypoint");
+            assert_eq!(absolute.entrypoint(), entrypoint);
+            assert_eq!(absolute.project_root(), root.join("src"));
+            assert_eq!(absolute.entrypoint_format, RunEntrypointFormat::Ambiguous);
+            assert!(absolute.package_manifests.is_empty());
+        }
+    }
+
+    #[test]
+    fn run_project_paths_inferred_js_does_not_capture_shadowed_directory_metadata() {
+        let directory = tempfile::tempdir().expect("shadowed package directory");
+        let root = directory.path().canonicalize().expect("canonical project");
+        std::fs::create_dir(root.join("app")).expect("shadowed application directory");
+        std::fs::write(root.join("package.json"), r#"{"type":"module"}"#)
+            .expect("project metadata");
+        std::fs::write(
+            root.join("app/package.json"),
+            r#"{"type":"commonjs","main":"index.js"}"#,
+        )
+        .expect("directory metadata");
+        std::fs::write(root.join("app/index.js"), "module.exports = 1;").expect("directory source");
+        std::fs::write(root.join("app.js"), "export const value = 42;").expect("sibling source");
+
+        let file = RunProjectPaths::resolve(Path::new("app"), &root).expect("inferred source");
+        assert_eq!(file.entrypoint(), root.join("app.js"));
+        assert_eq!(file.project_root(), root);
+        assert_eq!(file.entrypoint_format, RunEntrypointFormat::EsModule);
+        assert_eq!(file.package_manifests.len(), 1);
+        assert_eq!(
+            file.package_manifests[0].package_type.as_deref(),
+            Some("module")
+        );
+
+        for requested in ["app/", "app/."] {
+            let package = RunProjectPaths::resolve(Path::new(requested), &root)
+                .expect("explicit directory source");
+            assert_eq!(package.entrypoint(), root.join("app/index.js"));
+            assert_eq!(package.project_root(), root.join("app"));
+            assert_eq!(package.entrypoint_format, RunEntrypointFormat::CommonJs);
+            assert_eq!(package.package_manifests.len(), 1);
+            assert_eq!(
+                package.package_manifests[0].package_type.as_deref(),
+                Some("commonjs")
+            );
+        }
+    }
+
+    #[test]
+    fn run_project_paths_revalidates_inferred_entrypoint_precedence() {
+        for initial_directory in [false, true] {
+            let directory = tempfile::tempdir().expect("entrypoint revalidation directory");
+            let root = directory.path();
+            let first = if initial_directory {
+                std::fs::create_dir(root.join("app")).expect("initial application directory");
+                root.join("app/index.js")
+            } else {
+                root.join("app.js")
+            };
+            std::fs::write(first, "console.log('original');").expect("initial source");
+            let selected = RunProjectPaths::resolve(Path::new("app"), root)
+                .expect("original selected authority");
+            let higher_precedence = if initial_directory { "app.js" } else { "app" };
+            std::fs::write(root.join(higher_precedence), "console.log('replacement');")
+                .expect("new higher-precedence source");
+
+            let error = selected
+                .verify_target(Path::new("app"), root)
+                .expect_err("a new resolution winner invalidates preflight");
+            assert!(
+                error
+                    .to_string()
+                    .contains("authority changed after preflight")
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_project_paths_inferred_js_refuses_file_and_parent_symlink_escapes() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("inferred symlink authority directory");
+        let project = directory.path().join("project");
+        let outside = directory.path().join("outside");
+        std::fs::create_dir(&project).expect("selected project");
+        std::fs::create_dir(&outside).expect("outside directory");
+        std::fs::write(outside.join("app.js"), "console.log('outside');").expect("outside source");
+        symlink(outside.join("app.js"), project.join("app.js")).expect("linked entrypoint");
+        for requested in [PathBuf::from("app"), project.join("app")] {
+            let error = RunProjectPaths::resolve(&requested, &project)
+                .expect_err("inferred files cannot widen their selected parent");
+            assert!(error.to_string().contains("escapes selected project root"));
+        }
+
+        symlink(&outside, project.join("linked")).expect("linked parent directory");
+        let error = RunProjectPaths::resolve(Path::new("linked/app"), &project)
+            .expect_err("relative inference cannot leave the invocation directory");
+        assert!(error.to_string().contains("escapes invocation directory"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_target_path_keeps_nonregular_and_io_failures_closed() {
+        use rustix::fs::{Mode, mkfifoat};
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("nonregular inference directory");
+        let root = std::fs::File::open(directory.path()).expect("fixture root");
+        mkfifoat(&root, "fifo", Mode::RUSR | Mode::WUSR).expect("nonregular exact target");
+        std::fs::write(
+            directory.path().join("fifo.js"),
+            "console.log('wrong-file');",
+        )
+        .expect("sibling source");
+        let error = RunProjectPaths::resolve(Path::new("fifo"), directory.path())
+            .expect_err("inference must not bypass a nonregular exact target");
+        assert!(
+            error
+                .to_string()
+                .contains("not a regular file or directory")
+        );
+
+        symlink("loop", directory.path().join("loop")).expect("exact symlink loop");
+        std::fs::write(
+            directory.path().join("loop.js"),
+            "console.log('wrong-file');",
+        )
+        .expect("sibling source for unresolved target");
+        std::fs::create_dir(directory.path().join("package")).expect("directory target");
+        symlink("package.js", directory.path().join("package.js")).expect("candidate symlink loop");
+        for requested in ["loop", "package"] {
+            assert!(
+                resolve_run_target_path(Path::new(requested), &directory.path().join(requested))
+                    .is_err(),
+                "filesystem errors must not silently select another target: {requested}"
+            );
+        }
+    }
+
     #[cfg(feature = "engine")]
     #[test]
     fn bd_mnz7p_relative_entrypoint_uses_invocation_directory_as_module_root() {
@@ -18864,6 +19137,144 @@ mod tests {
         )
         .expect_err("trailing bytes must fail closed");
         assert!(trailing_error.contains("trailing bytes"));
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn native_session_wal_limit_keeps_final_response_outside_event_budget() {
+        let nonce = "00000000-0000-4000-8000-000000000127";
+        let mut output =
+            native_session_test_wal_prefix(NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS, nonce);
+        output.extend_from_slice(
+            &encode_native_session_frame(
+                &NativeSessionOutputFrame::Final {
+                    response: Box::new(NativeSessionResponse::TelemetryFailed {
+                        schema_version: NATIVE_SESSION_SCHEMA.to_string(),
+                        nonce: nonce.to_string(),
+                        message: "fixture terminal response".to_string(),
+                    }),
+                },
+                NATIVE_SESSION_MAX_RESPONSE_BYTES,
+            )
+            .expect("encode terminal response"),
+        );
+
+        let parsed = parse_native_session_output(&output, false);
+        assert!(parsed.protocol_error.is_none());
+        assert_eq!(
+            parsed.frames.len(),
+            NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS + 1
+        );
+        let reconciled = reconcile_native_session_output(parsed, nonce);
+        assert!(reconciled.protocol_error.is_none());
+        assert_eq!(
+            reconciled.entries.len(),
+            NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS / 2
+        );
+        assert!(reconciled.entries.iter().enumerate().all(|(index, entry)| {
+            entry.sequence == index as u64 && entry.state == NativeEffectWalState::ProviderReturned
+        }));
+        assert!(matches!(
+            reconciled.response,
+            Some(NativeSessionResponse::TelemetryFailed { message, .. })
+                if message == "fixture terminal response"
+        ));
+    }
+
+    #[cfg(feature = "engine")]
+    fn native_session_test_wal_prefix(events: usize, nonce: &str) -> Vec<u8> {
+        let mut output = Vec::new();
+        for event in 0..events {
+            let sequence = (event / 2) as u64;
+            let frame = if event % 2 == 0 {
+                NativeSessionOutputFrame::HostEffectAdmitted {
+                    schema_version: NATIVE_EFFECT_WAL_SCHEMA.to_string(),
+                    nonce: nonce.to_string(),
+                    sequence,
+                    effect_kind: "fs_read".to_string(),
+                    request_hash: format!("sha256:{sequence:064x}"),
+                }
+            } else {
+                NativeSessionOutputFrame::HostEffectCompleted {
+                    schema_version: NATIVE_EFFECT_WAL_SCHEMA.to_string(),
+                    nonce: nonce.to_string(),
+                    sequence,
+                }
+            };
+            output.extend_from_slice(
+                &encode_native_session_frame(&frame, NATIVE_SESSION_MAX_EFFECT_WAL_EVENT_BYTES)
+                    .expect("encode bounded WAL event"),
+            );
+        }
+        output
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn native_session_wal_event_limit_retains_exactly_the_verified_prefix() {
+        let nonce = "00000000-0000-4000-8000-000000000128";
+        let output =
+            native_session_test_wal_prefix(NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS + 2, nonce);
+        let parsed = parse_native_session_output(&output, false);
+        assert_eq!(parsed.frames.len(), NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS);
+        assert_eq!(
+            parsed.protocol_error.as_deref(),
+            Some("native-session effect WAL exceeded 2048 events")
+        );
+        let reconciled = reconcile_native_session_output(parsed, nonce);
+        assert_eq!(
+            reconciled.entries.len(),
+            NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS / 2
+        );
+        assert!(reconciled.entries.iter().enumerate().all(|(index, entry)| {
+            entry.sequence == index as u64 && entry.state == NativeEffectWalState::ProviderReturned
+        }));
+        assert!(reconciled.response.is_none());
+        assert_eq!(
+            reconciled.protocol_error.as_deref(),
+            Some("native-session effect WAL exceeded 2048 events")
+        );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn native_session_wal_limit_preserves_frame_validation_precedence() {
+        let nonce = "00000000-0000-4000-8000-000000000129";
+        let prefix = native_session_test_wal_prefix(NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS, nonce);
+        let frame = NativeSessionOutputFrame::HostEffectAdmitted {
+            schema_version: NATIVE_EFFECT_WAL_SCHEMA.to_string(),
+            nonce: nonce.to_string(),
+            sequence: (NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS / 2) as u64,
+            effect_kind: "fs_read".to_string(),
+            request_hash: format!("sha256:{:064x}", 1024),
+        };
+        let mut corrupted =
+            encode_native_session_frame(&frame, NATIVE_SESSION_MAX_EFFECT_WAL_EVENT_BYTES)
+                .expect("encode extra event");
+        *corrupted.last_mut().expect("frame contains a payload") ^= 1;
+        let oversized = encode_native_session_frame(
+            &NativeSessionOutputFrame::HostEffectCompleted {
+                schema_version: NATIVE_EFFECT_WAL_SCHEMA.to_string(),
+                nonce: "n".repeat(NATIVE_SESSION_MAX_EFFECT_WAL_EVENT_BYTES),
+                sequence: 1024,
+            },
+            NATIVE_SESSION_MAX_RESPONSE_BYTES,
+        )
+        .expect("encode oversized event with a valid digest");
+
+        for (extra, expected) in [
+            (corrupted, "native-session frame digest mismatch"),
+            (
+                oversized,
+                "native-session effect WAL event exceeded 1024 bytes",
+            ),
+        ] {
+            let mut output = prefix.clone();
+            output.extend_from_slice(&extra);
+            let parsed = parse_native_session_output(&output, false);
+            assert_eq!(parsed.frames.len(), NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS);
+            assert_eq!(parsed.protocol_error.as_deref(), Some(expected));
+        }
     }
 
     #[cfg(feature = "engine")]
