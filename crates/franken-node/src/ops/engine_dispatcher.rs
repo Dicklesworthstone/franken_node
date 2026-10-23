@@ -1308,6 +1308,10 @@ fn parse_native_session_output(
     } else {
         0
     };
+    // Count accepted WAL events once. Rescanning every preceding frame here
+    // made decoding an I/O-heavy session quadratic in its effect count.
+    // Final responses do not consume the WAL budget.
+    let mut wal_events = 0_usize;
 
     while offset < output.len() {
         let remaining = &output[offset..];
@@ -1349,25 +1353,16 @@ fn parse_native_session_output(
             ));
             break;
         }
-        if is_wal_event
-            && parsed
-                .frames
-                .iter()
-                .filter(|frame| {
-                    matches!(
-                        frame,
-                        NativeSessionOutputFrame::HostEffectAdmitted { .. }
-                            | NativeSessionOutputFrame::HostEffectCompleted { .. }
-                    )
-                })
-                .count()
-                >= NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS
-        {
+        if is_wal_event && wal_events >= NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS {
             parsed.protocol_error = Some(format!(
                 "native-session effect WAL exceeded {} events",
                 NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS
             ));
             break;
+        }
+        if is_wal_event {
+            // The admission bound above makes this increment overflow-free.
+            wal_events += 1;
         }
         parsed.frames.push(frame);
         offset = match offset.checked_add(frame_len) {
@@ -18864,6 +18859,144 @@ mod tests {
         )
         .expect_err("trailing bytes must fail closed");
         assert!(trailing_error.contains("trailing bytes"));
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn native_session_wal_limit_keeps_final_response_outside_event_budget() {
+        let nonce = "00000000-0000-4000-8000-000000000127";
+        let mut output =
+            native_session_test_wal_prefix(NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS, nonce);
+        output.extend_from_slice(
+            &encode_native_session_frame(
+                &NativeSessionOutputFrame::Final {
+                    response: Box::new(NativeSessionResponse::TelemetryFailed {
+                        schema_version: NATIVE_SESSION_SCHEMA.to_string(),
+                        nonce: nonce.to_string(),
+                        message: "fixture terminal response".to_string(),
+                    }),
+                },
+                NATIVE_SESSION_MAX_RESPONSE_BYTES,
+            )
+            .expect("encode terminal response"),
+        );
+
+        let parsed = parse_native_session_output(&output, false);
+        assert!(parsed.protocol_error.is_none());
+        assert_eq!(
+            parsed.frames.len(),
+            NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS + 1
+        );
+        let reconciled = reconcile_native_session_output(parsed, nonce);
+        assert!(reconciled.protocol_error.is_none());
+        assert_eq!(
+            reconciled.entries.len(),
+            NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS / 2
+        );
+        assert!(reconciled.entries.iter().enumerate().all(|(index, entry)| {
+            entry.sequence == index as u64 && entry.state == NativeEffectWalState::ProviderReturned
+        }));
+        assert!(matches!(
+            reconciled.response,
+            Some(NativeSessionResponse::TelemetryFailed { message, .. })
+                if message == "fixture terminal response"
+        ));
+    }
+
+    #[cfg(feature = "engine")]
+    fn native_session_test_wal_prefix(events: usize, nonce: &str) -> Vec<u8> {
+        let mut output = Vec::new();
+        for event in 0..events {
+            let sequence = (event / 2) as u64;
+            let frame = if event % 2 == 0 {
+                NativeSessionOutputFrame::HostEffectAdmitted {
+                    schema_version: NATIVE_EFFECT_WAL_SCHEMA.to_string(),
+                    nonce: nonce.to_string(),
+                    sequence,
+                    effect_kind: "fs_read".to_string(),
+                    request_hash: format!("sha256:{sequence:064x}"),
+                }
+            } else {
+                NativeSessionOutputFrame::HostEffectCompleted {
+                    schema_version: NATIVE_EFFECT_WAL_SCHEMA.to_string(),
+                    nonce: nonce.to_string(),
+                    sequence,
+                }
+            };
+            output.extend_from_slice(
+                &encode_native_session_frame(&frame, NATIVE_SESSION_MAX_EFFECT_WAL_EVENT_BYTES)
+                    .expect("encode bounded WAL event"),
+            );
+        }
+        output
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn native_session_wal_event_limit_retains_exactly_the_verified_prefix() {
+        let nonce = "00000000-0000-4000-8000-000000000128";
+        let output =
+            native_session_test_wal_prefix(NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS + 2, nonce);
+        let parsed = parse_native_session_output(&output, false);
+        assert_eq!(parsed.frames.len(), NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS);
+        assert_eq!(
+            parsed.protocol_error.as_deref(),
+            Some("native-session effect WAL exceeded 2048 events")
+        );
+        let reconciled = reconcile_native_session_output(parsed, nonce);
+        assert_eq!(
+            reconciled.entries.len(),
+            NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS / 2
+        );
+        assert!(reconciled.entries.iter().enumerate().all(|(index, entry)| {
+            entry.sequence == index as u64 && entry.state == NativeEffectWalState::ProviderReturned
+        }));
+        assert!(reconciled.response.is_none());
+        assert_eq!(
+            reconciled.protocol_error.as_deref(),
+            Some("native-session effect WAL exceeded 2048 events")
+        );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn native_session_wal_limit_preserves_frame_validation_precedence() {
+        let nonce = "00000000-0000-4000-8000-000000000129";
+        let prefix = native_session_test_wal_prefix(NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS, nonce);
+        let frame = NativeSessionOutputFrame::HostEffectAdmitted {
+            schema_version: NATIVE_EFFECT_WAL_SCHEMA.to_string(),
+            nonce: nonce.to_string(),
+            sequence: (NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS / 2) as u64,
+            effect_kind: "fs_read".to_string(),
+            request_hash: format!("sha256:{:064x}", 1024),
+        };
+        let mut corrupted =
+            encode_native_session_frame(&frame, NATIVE_SESSION_MAX_EFFECT_WAL_EVENT_BYTES)
+                .expect("encode extra event");
+        *corrupted.last_mut().expect("frame contains a payload") ^= 1;
+        let oversized = encode_native_session_frame(
+            &NativeSessionOutputFrame::HostEffectCompleted {
+                schema_version: NATIVE_EFFECT_WAL_SCHEMA.to_string(),
+                nonce: "n".repeat(NATIVE_SESSION_MAX_EFFECT_WAL_EVENT_BYTES),
+                sequence: 1024,
+            },
+            NATIVE_SESSION_MAX_RESPONSE_BYTES,
+        )
+        .expect("encode oversized event with a valid digest");
+
+        for (extra, expected) in [
+            (corrupted, "native-session frame digest mismatch"),
+            (
+                oversized,
+                "native-session effect WAL event exceeded 1024 bytes",
+            ),
+        ] {
+            let mut output = prefix.clone();
+            output.extend_from_slice(&extra);
+            let parsed = parse_native_session_output(&output, false);
+            assert_eq!(parsed.frames.len(), NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS);
+            assert_eq!(parsed.protocol_error.as_deref(), Some(expected));
+        }
     }
 
     #[cfg(feature = "engine")]
