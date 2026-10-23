@@ -2679,6 +2679,20 @@ mod engine {
                 );
                 let payload: NativeReplayPayload =
                     serde_json::from_str(&capture.payload_json).unwrap();
+                let CapturedAttempt::Completed(completed) = &payload.attempt else {
+                    panic!(
+                        "shell and caught policy denial must complete: {:?}",
+                        payload.attempt
+                    );
+                };
+                assert_eq!(
+                    completed
+                        .console_output
+                        .iter()
+                        .map(|entry| entry.message.as_str())
+                        .collect::<Vec<_>>(),
+                    ["shell-output", "expected-policy-denial"]
+                );
                 let process = payload.process.as_ref().unwrap();
                 assert!(process.preparation.iter().any(|entry| matches!(
                     entry,
