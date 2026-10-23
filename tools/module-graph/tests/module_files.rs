@@ -115,6 +115,85 @@ fn main_extension_index_and_strict_esm_resolution_follow_distinct_rules() {
 }
 
 #[test]
+fn commonjs_package_directory_entrypoints_match_node_without_file_shadowing() {
+    let root = fixture();
+    put(
+        root.path(),
+        "node_modules/legacy/package.json",
+        br#"{"main":"entry.cjs"}"#,
+    );
+    put(
+        root.path(),
+        "node_modules/legacy/lib/package.json",
+        br#"{"main":"nested.cjs"}"#,
+    );
+    for path in [
+        "node_modules/legacy.js",
+        "node_modules/legacy/entry.cjs",
+        "node_modules/legacy/lib.js",
+        "node_modules/legacy/lib/nested.cjs",
+        "node_modules/@scope/tool/index.js",
+        "node_modules/file-only.js",
+    ] {
+        source(root.path(), path);
+    }
+    for (request, expected) in [
+        ("legacy", "node_modules/legacy.js"),
+        ("legacy/", "node_modules/legacy/entry.cjs"),
+        ("legacy/lib", "node_modules/legacy/lib.js"),
+        ("legacy/lib/", "node_modules/legacy/lib/nested.cjs"),
+        ("@scope/tool/", "node_modules/@scope/tool/index.js"),
+    ] {
+        let report = same_as_node(root.path(), "app.js", request, "require");
+        assert_eq!(report["resolution"]["path"], expected);
+        assert_eq!(report["resolution"]["specifier"], request);
+    }
+    let (code, report) = run(root.path(), "app.js", "file-only/", "require", &[]);
+    assert_eq!(code, 1);
+    assert_eq!(report["error_code"], "MODULE_NOT_FOUND");
+    assert_eq!(
+        node(root.path(), "app.js", "file-only/", "require")["code"],
+        report["error_code"]
+    );
+}
+
+#[test]
+fn package_directory_requests_keep_nearest_exports_encapsulation() {
+    let root = fixture();
+    source(root.path(), "packages/app/entry.cjs");
+    source(root.path(), "packages/app/node_modules/legacy/sub.js");
+    source(root.path(), "node_modules/legacy/sub/index.js");
+    let report = same_as_node(
+        root.path(),
+        "packages/app/entry.cjs",
+        "legacy/sub/",
+        "require",
+    );
+    assert_eq!(
+        report["resolution"]["path"],
+        "node_modules/legacy/sub/index.js"
+    );
+    put(
+        root.path(),
+        "packages/app/node_modules/legacy/package.json",
+        br#"{"exports":{".":"./entry.cjs","./sub":null}}"#,
+    );
+    source(root.path(), "packages/app/node_modules/legacy/entry.cjs");
+    for mode in ["require", "import"] {
+        for request in ["legacy/", "legacy/sub/"] {
+            let (code, report) = run(root.path(), "packages/app/entry.cjs", request, mode, &[]);
+            assert_eq!(code, 1, "{report}");
+            assert_eq!(report["error_code"], "ERR_PACKAGE_PATH_NOT_EXPORTED");
+            assert_eq!(
+                node(root.path(), "packages/app/entry.cjs", request, mode)["code"],
+                report["error_code"]
+            );
+            assert!(report["resolution"].is_null());
+        }
+    }
+}
+
+#[test]
 fn self_and_internal_external_imports_resolve_without_losing_map_witnesses() {
     let root = fixture();
     put(root.path(), "package.json", br##"{"name":"application","exports":{"./feature":"./local.mjs"},"imports":{"#local":"./local.mjs","#external":"dependency/feature"}}"##);

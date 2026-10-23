@@ -719,7 +719,7 @@ impl Resolver {
                                 .ok_or_else(|| mode.missing(request));
                         }
                         let (path, suffix) = url_path(&package, &subpath)?;
-                        if !path.starts_with(&format!("{package}/")) {
+                        if path != package && !path.starts_with(&format!("{package}/")) {
                             return Err(error(
                                 "ERR_INVALID_MODULE_SPECIFIER",
                                 "package subpath escapes its package",
@@ -729,8 +729,22 @@ impl Resolver {
                     }
                 }
                 if lookup == PackageLookup::CommonJs {
-                    let path = join(&join(ancestor, "node_modules"), request);
-                    if let Some(found) = self.legacy(&path, mode)? {
+                    // A terminal slash requests a directory, just as it does
+                    // for relative CommonJS paths. Do not let a sibling .js,
+                    // .json or .node file win over the requested package or
+                    // subdirectory. Remove only this admitted terminal slash;
+                    // package_parts still rejects noncanonical inner segments.
+                    let directory_only = request.ends_with('/');
+                    let path = join(
+                        &join(ancestor, "node_modules"),
+                        request.strip_suffix('/').unwrap_or(request),
+                    );
+                    let found = if directory_only {
+                        self.directory(&path, mode)?
+                    } else {
+                        self.legacy(&path, mode)?
+                    };
+                    if let Some(found) = found {
                         return Ok((found, String::new()));
                     }
                 }
@@ -1124,7 +1138,12 @@ fn package_parts(request: &str) -> Result<(&str, String)> {
     super::validate_package_name(name)
         .map_err(|e| error("ERR_INVALID_MODULE_SPECIFIER", e.to_string()))?;
     let subpath = format!(".{}", &request[end..]);
+    // Legacy packages can expose directory entrypoints (`pkg/`, `pkg/lib/`).
+    // Keep that terminal slash in the subpath for exports encapsulation and
+    // ESM's directory rejection; it is not an empty inner path component.
     if request[end..]
+        .strip_suffix('/')
+        .unwrap_or(&request[end..])
         .split('/')
         .skip(1)
         .any(|p| p.is_empty() || matches!(p, "." | ".." | "node_modules"))
@@ -1828,6 +1847,242 @@ mod tests {
                 .report
                 .format_hint,
             "commonjs"
+        );
+    }
+
+    #[test]
+    fn commonjs_package_directory_requests_use_main_and_index_without_file_shadowing() {
+        let root = fixture();
+        put(root.path(), "node_modules/legacy.js", b"package file");
+        put(
+            root.path(),
+            "node_modules/legacy/package.json",
+            br#"{"main":"entry.cjs"}"#,
+        );
+        put(
+            root.path(),
+            "node_modules/legacy/entry.cjs",
+            b"package main",
+        );
+        put(root.path(), "node_modules/legacy/lib.js", b"subpath file");
+        put(
+            root.path(),
+            "node_modules/legacy/lib/package.json",
+            br#"{"main":"nested.cjs"}"#,
+        );
+        put(
+            root.path(),
+            "node_modules/legacy/lib/nested.cjs",
+            b"subpath main",
+        );
+        put(root.path(), "node_modules/@scope/tool/index.json", b"{}");
+        put(root.path(), "node_modules/file-only.js", b"not a directory");
+        for (request, expected) in [
+            ("legacy", "node_modules/legacy.js"),
+            ("legacy/", "node_modules/legacy/entry.cjs"),
+            ("legacy/lib", "node_modules/legacy/lib.js"),
+            ("legacy/lib/", "node_modules/legacy/lib/nested.cjs"),
+            ("@scope/tool/", "node_modules/@scope/tool/index.json"),
+        ] {
+            let captured = run(root.path(), "app.js", request, ResolutionMode::Require);
+            assert_eq!(captured.report.path, expected, "{request}");
+            assert_eq!(captured.report.specifier, request);
+        }
+        assert_eq!(
+            rejected(root.path(), "app.js", "file-only/", ResolutionMode::Require),
+            "MODULE_NOT_FOUND"
+        );
+        for request in ["legacy/", "legacy/lib/", "@scope/tool/"] {
+            assert_eq!(
+                rejected(root.path(), "app.js", request, ResolutionMode::Import),
+                "ERR_UNSUPPORTED_DIR_IMPORT",
+                "{request}"
+            );
+        }
+    }
+
+    #[test]
+    fn package_directory_requests_preserve_export_blocks_and_contained_search() {
+        let root = fixture();
+        put(root.path(), "packages/app/entry.cjs", b"entry");
+        put(
+            root.path(),
+            "packages/app/node_modules/legacy/sub.js",
+            b"skip file",
+        );
+        put(
+            root.path(),
+            "node_modules/legacy/sub/index.js",
+            b"outer directory",
+        );
+        assert_eq!(
+            run(
+                root.path(),
+                "packages/app/entry.cjs",
+                "legacy/sub/",
+                ResolutionMode::Require,
+            )
+            .report
+            .path,
+            "node_modules/legacy/sub/index.js"
+        );
+        put(
+            root.path(),
+            "packages/app/node_modules/legacy/package.json",
+            br#"{"exports":{".":"./entry.cjs","./sub":null}}"#,
+        );
+        put(
+            root.path(),
+            "packages/app/node_modules/legacy/entry.cjs",
+            b"main",
+        );
+        for mode in [ResolutionMode::Require, ResolutionMode::Import] {
+            for request in ["legacy/", "legacy/sub/"] {
+                assert_eq!(
+                    rejected(root.path(), "packages/app/entry.cjs", request, mode),
+                    "ERR_PACKAGE_PATH_NOT_EXPORTED",
+                    "{request}"
+                );
+            }
+            for request in ["legacy//", "legacy/sub//", "legacy/../private/"] {
+                assert_eq!(
+                    rejected(root.path(), "app.js", request, mode),
+                    "ERR_INVALID_MODULE_SPECIFIER",
+                    "{request}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn package_directory_routes_replay_frozen_sources_without_new_lookup_authority() {
+        use source_graph::registry::{PinnedModuleRegistry, RequestStyle};
+        use source_graph::{GraphOptions, LoadKind, capsule, capture};
+
+        let root = fixture();
+        put(
+            root.path(),
+            "app.cjs",
+            b"require('legacy/'); require.resolve('legacy/sub/');",
+        );
+        put(
+            root.path(),
+            "node_modules/legacy/package.json",
+            br#"{"main":"entry.cjs","type":"commonjs"}"#,
+        );
+        put(
+            root.path(),
+            "node_modules/legacy/entry.cjs",
+            b"module.exports=41;",
+        );
+        put(
+            root.path(),
+            "node_modules/legacy/sub/index.js",
+            b"module.exports=42;",
+        );
+        put(
+            root.path(),
+            "node_modules/legacy.js",
+            b"throw new Error('shadow file');",
+        );
+        put(
+            root.path(),
+            "node_modules/legacy/sub.js",
+            b"throw new Error('shadow subpath');",
+        );
+
+        let captured = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        assert!(captured.report().fully_resolved);
+        assert_eq!(captured.report().modules.len(), 3);
+        let requests: Vec<_> = captured
+            .report()
+            .edges
+            .iter()
+            .map(|edge| {
+                assert_eq!(edge.kind, LoadKind::Require);
+                assert_eq!(
+                    edge.conditions,
+                    ResolutionMode::Require.default_conditions()
+                );
+                edge.specifier.as_deref().unwrap()
+            })
+            .collect();
+        assert_eq!(requests, ["legacy/", "legacy/sub/"]);
+        assert!(!captured.report().probes.iter().any(|probe| matches!(
+            probe.path.as_str(),
+            "node_modules/legacy.js" | "node_modules/legacy/sub.js"
+        )));
+        let pin = captured.report().input_hash.clone();
+        let encoded = capsule::encode(&captured).unwrap();
+        put(
+            root.path(),
+            "node_modules/legacy/entry.cjs",
+            b"throw new Error('live main');",
+        );
+        put(
+            root.path(),
+            "node_modules/legacy/sub/index.js",
+            b"throw new Error('live subpath');",
+        );
+        put(
+            root.path(),
+            "node_modules/legacy/package.json",
+            br#"{"exports":{}}"#,
+        );
+
+        let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+        assert_eq!(replayed.report(), captured.report());
+        let registry = PinnedModuleRegistry::new(replayed, &pin).unwrap();
+        assert_eq!(registry.summary().routes, 2);
+        for (request, expected_path, expected_source) in [
+            (
+                "legacy/",
+                "node_modules/legacy/entry.cjs",
+                "module.exports=41;",
+            ),
+            (
+                "legacy/sub/",
+                "node_modules/legacy/sub/index.js",
+                "module.exports=42;",
+            ),
+        ] {
+            let module = registry
+                .lookup(Some(registry.entrypoint()), request, RequestStyle::Require)
+                .unwrap();
+            assert_eq!(module.origin().path, expected_path);
+            assert_eq!(module.source(), expected_source);
+            assert_eq!(
+                registry
+                    .lookup(
+                        Some(registry.entrypoint()),
+                        module.id(),
+                        RequestStyle::Require
+                    )
+                    .err()
+                    .unwrap()
+                    .code,
+                "ERR_MODULE_REGISTRY_ROUTE"
+            );
+        }
+        for (request, style) in [
+            ("legacy", RequestStyle::Require),
+            ("legacy/sub", RequestStyle::Require),
+            ("legacy/", RequestStyle::Import),
+            ("./node_modules/legacy/sub/index.js", RequestStyle::Require),
+        ] {
+            assert_eq!(
+                registry
+                    .lookup(Some(registry.entrypoint()), request, style)
+                    .err()
+                    .unwrap()
+                    .code,
+                "ERR_MODULE_REGISTRY_ROUTE"
+            );
+        }
+        let changed = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        assert_eq!(
+            PinnedModuleRegistry::new(changed, &pin).err().unwrap().code,
+            "ERR_MODULE_REGISTRY_PIN_MISMATCH"
         );
     }
 
