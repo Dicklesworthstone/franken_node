@@ -2764,10 +2764,37 @@ fn native_incident_replay_restores_frozen_esm_after_the_original_project_is_move
             !rejected.status.success(),
             "authenticated wrong pin must not execute: {rejected:?}",
         );
-        let rejection = String::from_utf8_lossy(&rejected.stderr);
+        let rejection: serde_json::Value = serde_json::from_slice(&rejected.stdout)
+            .expect("JSON replay refusal must remain machine-readable");
+        assert_eq!(rejected.status.code(), Some(1));
+        assert_eq!(
+            rejection["schema_version"],
+            "franken-node/incident-error-cli/v1"
+        );
+        assert_eq!(rejection["command"], "incident.replay");
+        assert_eq!(rejection["ok"], false);
         assert!(
-            rejection.contains("invalid frozen replay module capsule"),
+            rejection["error"]
+                .as_str()
+                .expect("typed capsule refusal diagnostic")
+                .contains("invalid frozen replay module capsule"),
             "authenticated candidate must reach capsule validation: {rejection}",
+        );
+        // Keep the original stderr diagnostic contract for the human mode as
+        // well; --json reports its structured refusal on stdout.
+        let rejected_human = execute_native_replay_with("wrong-capsule.fnbundle", |args| {
+            let human_args: Vec<_> = args
+                .iter()
+                .copied()
+                .filter(|arg| *arg != "--json")
+                .collect();
+            run_cli_in_workspace(&replay_root, &human_args)
+        });
+        assert_eq!(rejected_human.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&rejected_human.stderr)
+                .contains("invalid frozen replay module capsule"),
+            "authenticated human-mode refusal must name capsule validation: {rejected_human:?}"
         );
         assert!(
             !replay_root.join("node_modules").exists(),
