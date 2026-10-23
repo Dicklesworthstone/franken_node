@@ -4603,6 +4603,158 @@ mod tests {
     }
 
     #[test]
+    fn negative_lab_runtime_comprehensive_unicode_injection_and_scenario_attacks() {
+        // Test comprehensive Unicode injection and scenario ID attack resistance
+        let malicious_unicode_patterns = [
+            "\u{202E}\u{202D}fake_scenario\u{202C}".to_string(), // Right-to-left override
+            "scenario\u{000A}\u{000D}injected\x00nulls".to_string(), // CRLF + null injection
+            "\u{FEFF}bom_scenario\u{FFFE}reversed".to_string(),  // BOM injection attacks
+            "\u{200B}\u{200C}\u{200D}zero_width".to_string(),    // Zero-width characters
+            "场景\u{007F}\u{0001}\u{001F}控制字符".to_string(),  // Unicode + control chars
+            "\u{FFFF}\u{FFFE}\u{FDD0}non_characters".to_string(), // Non-character code points
+            "🧪🔬\u{1F4A5}💥\u{1F52B}🔫".to_string(),            // Complex emoji sequences
+            "\u{0300}\u{0301}\u{0302}combining_marks".to_string(), // Combining marks
+            format!("../../../{}", "x".repeat(1000)),            // Path traversal + long string
+            "scenario\x00\x01\x02\x03\x04\x05hidden".to_string(), // Binary injection
+            "scenario".repeat(100_000),                          // Extremely long scenario ID
+        ];
+
+        let config = LabConfig {
+            seed: 777,
+            max_interleavings: 1000,
+            max_ticks: 10_000,
+            enable_dpor: false,
+        };
+
+        let mut runtime = LabRuntime::new(config).expect("runtime should create");
+
+        for (i, pattern) in malicious_unicode_patterns.iter().enumerate() {
+            let unicode_scenario_id = format!("unicode_test_{}{}", pattern, i);
+
+            // Drive the Unicode scenario identifier through a real channel (a
+            // timer label); the runtime must accept it without corrupting state.
+            let _ = runtime.schedule_timer(1, &unicode_scenario_id);
+
+            // Test timer IDs with Unicode patterns
+            let unicode_timer_id = format!("timer_{}{}", pattern, i);
+            let timer_result = runtime.schedule_timer(100, &unicode_timer_id);
+
+            match timer_result {
+                Ok(_) => {
+                    // Timer scheduled with Unicode ID
+                    let _ = runtime.advance_clock(101);
+
+                    // Verify timer fired correctly despite Unicode content
+                    let events = runtime.events();
+                    let timer_events: Vec<_> = events
+                        .iter()
+                        .filter(|e| {
+                            e.event_code.contains("TIMER")
+                                && e.payload.contains(&format!("{}", i))
+                        })
+                        .collect();
+
+                    // Should have at least one timer-related event
+                    // Unicode should not corrupt event logging
+                }
+                Err(_) => {
+                    // Extreme Unicode timer IDs may be rejected
+                }
+            }
+
+            // Test virtual link names with Unicode patterns
+            let _unicode_link_id = format!("link_{}{}", pattern, i);
+            let unicode_source = format!("src_{}{}", pattern, i);
+            let unicode_target = format!("tgt_{}{}", pattern, i);
+
+            let fault_profile = FaultProfile {
+                drop_pct: 0.1,
+                reorder_depth: 1,
+                corrupt_probability: 0.0,
+                delay_ticks: 0,
+            };
+
+            let link_result = VirtualLink::new(&unicode_source, &unicode_target, fault_profile)
+                .and_then(|link| runtime.add_link(link));
+
+            match link_result {
+                Ok(idx) => {
+                    // Virtual link created with Unicode content
+                    // Verify link exists and can be used
+                    let send_result = runtime.send_message(idx, "unicode_test_message");
+                    match send_result {
+                        Ok(_) => {
+                            // Message sent successfully on Unicode link
+                        }
+                        Err(_) => {
+                            // May fail with extreme Unicode link configurations
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Extreme Unicode link names may be rejected
+                }
+            }
+
+            // Verify event log integrity after Unicode operations
+            let events = runtime.events();
+            for event in events {
+                // All events should remain valid UTF-8
+                assert!(!event.event_code.contains('\0'));
+                assert!(!event.payload.contains('\0'));
+                // Event structure should not be corrupted by Unicode
+                assert!(!event.event_code.is_empty());
+            }
+
+            // Test repro export with Unicode content
+            {
+                let export_result: Result<ReproBundle, LabError> =
+                    Ok(runtime.export_repro_bundle(true));
+                match export_result {
+                    Ok(bundle) => {
+                        // Bundle should serialize despite Unicode content
+                        let serialized = serde_json::to_string(&bundle);
+                        match serialized {
+                            Ok(json_str) => {
+                                // Should not contain null bytes or corruption
+                                assert!(!json_str.contains('\0'));
+
+                                // Should be deserializable
+                                let deserialized: Result<ReproBundle, _> =
+                                    serde_json::from_str(&json_str);
+                                match deserialized {
+                                    Ok(_) => {
+                                        // Successfully round-tripped despite Unicode
+                                    }
+                                    Err(_) => {
+                                        // Extreme Unicode may prevent deserialization
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                // Extreme Unicode may prevent serialization
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // Export may fail with extreme Unicode content
+                    }
+                }
+            }
+        }
+
+        // Final integrity check
+        let final_events = runtime.events();
+        assert!(final_events.len() <= MAX_EVENTS);
+
+        // All events should maintain structural integrity
+        for event in final_events {
+            assert!(!event.event_code.is_empty());
+            assert!(event.tick >= 0);
+        }
+    }
+
+    #[test]
     fn negative_reorder_buffer_overflow_and_push_bounded_edge_cases() {
         // Test reorder buffer behavior at capacity limits and push_bounded edge cases
 
@@ -5133,158 +5285,6 @@ mod tests {
             // Should handle massive budget without issues
             let start_result = rt.schedule_timer(1, "massive-test");
             assert!(start_result.is_ok());
-        }
-
-        #[test]
-        fn negative_lab_runtime_comprehensive_unicode_injection_and_scenario_attacks() {
-            // Test comprehensive Unicode injection and scenario ID attack resistance
-            let malicious_unicode_patterns = [
-                "\u{202E}\u{202D}fake_scenario\u{202C}".to_string(), // Right-to-left override
-                "scenario\u{000A}\u{000D}injected\x00nulls".to_string(), // CRLF + null injection
-                "\u{FEFF}bom_scenario\u{FFFE}reversed".to_string(),  // BOM injection attacks
-                "\u{200B}\u{200C}\u{200D}zero_width".to_string(),    // Zero-width characters
-                "场景\u{007F}\u{0001}\u{001F}控制字符".to_string(),  // Unicode + control chars
-                "\u{FFFF}\u{FFFE}\u{FDD0}non_characters".to_string(), // Non-character code points
-                "🧪🔬\u{1F4A5}💥\u{1F52B}🔫".to_string(),            // Complex emoji sequences
-                "\u{0300}\u{0301}\u{0302}combining_marks".to_string(), // Combining marks
-                format!("../../../{}", "x".repeat(1000)),            // Path traversal + long string
-                "scenario\x00\x01\x02\x03\x04\x05hidden".to_string(), // Binary injection
-                "scenario".repeat(100_000),                          // Extremely long scenario ID
-            ];
-
-            let config = LabConfig {
-                seed: 777,
-                max_interleavings: 1000,
-                max_ticks: 10_000,
-                enable_dpor: false,
-            };
-
-            let mut runtime = LabRuntime::new(config).expect("runtime should create");
-
-            for (i, pattern) in malicious_unicode_patterns.iter().enumerate() {
-                let unicode_scenario_id = format!("unicode_test_{}{}", pattern, i);
-
-                // Drive the Unicode scenario identifier through a real channel (a
-                // timer label); the runtime must accept it without corrupting state.
-                let _ = runtime.schedule_timer(1, &unicode_scenario_id);
-
-                // Test timer IDs with Unicode patterns
-                let unicode_timer_id = format!("timer_{}{}", pattern, i);
-                let timer_result = runtime.schedule_timer(100, &unicode_timer_id);
-
-                match timer_result {
-                    Ok(_) => {
-                        // Timer scheduled with Unicode ID
-                        let _ = runtime.advance_clock(101);
-
-                        // Verify timer fired correctly despite Unicode content
-                        let events = runtime.events();
-                        let timer_events: Vec<_> = events
-                            .iter()
-                            .filter(|e| {
-                                e.event_code.contains("TIMER")
-                                    && e.payload.contains(&format!("{}", i))
-                            })
-                            .collect();
-
-                        // Should have at least one timer-related event
-                        // Unicode should not corrupt event logging
-                    }
-                    Err(_) => {
-                        // Extreme Unicode timer IDs may be rejected
-                    }
-                }
-
-                // Test virtual link names with Unicode patterns
-                let _unicode_link_id = format!("link_{}{}", pattern, i);
-                let unicode_source = format!("src_{}{}", pattern, i);
-                let unicode_target = format!("tgt_{}{}", pattern, i);
-
-                let fault_profile = FaultProfile {
-                    drop_pct: 0.1,
-                    reorder_depth: 1,
-                    corrupt_probability: 0.0,
-                    delay_ticks: 0,
-                };
-
-                let link_result = VirtualLink::new(&unicode_source, &unicode_target, fault_profile)
-                    .and_then(|link| runtime.add_link(link));
-
-                match link_result {
-                    Ok(idx) => {
-                        // Virtual link created with Unicode content
-                        // Verify link exists and can be used
-                        let send_result = runtime.send_message(idx, "unicode_test_message");
-                        match send_result {
-                            Ok(_) => {
-                                // Message sent successfully on Unicode link
-                            }
-                            Err(_) => {
-                                // May fail with extreme Unicode link configurations
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        // Extreme Unicode link names may be rejected
-                    }
-                }
-
-                // Verify event log integrity after Unicode operations
-                let events = runtime.events();
-                for event in events {
-                    // All events should remain valid UTF-8
-                    assert!(!event.event_code.contains('\0'));
-                    assert!(!event.payload.contains('\0'));
-                    // Event structure should not be corrupted by Unicode
-                    assert!(!event.event_code.is_empty());
-                }
-
-                // Test repro export with Unicode content
-                {
-                    let export_result: Result<ReproBundle, LabError> =
-                        Ok(runtime.export_repro_bundle(true));
-                    match export_result {
-                        Ok(bundle) => {
-                            // Bundle should serialize despite Unicode content
-                            let serialized = serde_json::to_string(&bundle);
-                            match serialized {
-                                Ok(json_str) => {
-                                    // Should not contain null bytes or corruption
-                                    assert!(!json_str.contains('\0'));
-
-                                    // Should be deserializable
-                                    let deserialized: Result<ReproBundle, _> =
-                                        serde_json::from_str(&json_str);
-                                    match deserialized {
-                                        Ok(_) => {
-                                            // Successfully round-tripped despite Unicode
-                                        }
-                                        Err(_) => {
-                                            // Extreme Unicode may prevent deserialization
-                                        }
-                                    }
-                                }
-                                Err(_) => {
-                                    // Extreme Unicode may prevent serialization
-                                }
-                            }
-                        }
-                        Err(_) => {
-                            // Export may fail with extreme Unicode content
-                        }
-                    }
-                }
-            }
-
-            // Final integrity check
-            let final_events = runtime.events();
-            assert!(final_events.len() <= MAX_EVENTS);
-
-            // All events should maintain structural integrity
-            for event in final_events {
-                assert!(!event.event_code.is_empty());
-                assert!(event.tick >= 0);
-            }
         }
 
         #[test]
