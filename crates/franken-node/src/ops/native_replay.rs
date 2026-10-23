@@ -2694,13 +2694,17 @@ mod engine {
                     ["shell-output", "expected-policy-denial"]
                 );
                 let process = payload.process.as_ref().unwrap();
-                assert!(process.preparation.iter().any(|entry| matches!(
-                    entry,
-                    CapturedProcessPreparation::Prepare {
-                        outcome: Err(_),
-                        ..
-                    }
-                )));
+                assert!(
+                    process.preparation.iter().any(|entry| matches!(
+                        entry,
+                        CapturedProcessPreparation::Prepare {
+                            outcome: Err(_),
+                            ..
+                        }
+                    )),
+                    "the caught policy denial must come from preparation: {:?}",
+                    process.preparation
+                );
                 assert!(process.journal.iter().any(|entry| matches!(
                     entry,
                     HostEffectJournalEntry::ProcessSpawn {
@@ -2969,10 +2973,13 @@ mod engine {
                 assert!(!outcome.matched);
                 assert!(!outcome.console_match);
 
-                for source in [
-                    "void process.env.PATH;",
-                    "const raw = process; console.log(raw.argv);",
-                    "console.log(process['argv']);",
+                for (source, expected_denial) in [
+                    ("void process.env.PATH;", "capability denied: env_read"),
+                    (
+                        "const raw = process; console.log(raw.argv);",
+                        "ambient authority violation",
+                    ),
+                    ("console.log(process['argv']);", "ambient authority violation"),
                 ] {
                     let mut changed = original.clone();
                     changed.package.source = source.to_string();
@@ -2980,7 +2987,7 @@ mod engine {
                     let error =
                         reexecute(&changed).expect_err("shape grant stays narrow in replay");
                     assert!(
-                        error.contains("ambient authority violation"),
+                        error.contains(expected_denial),
                         "{source}: {error}"
                     );
                 }
