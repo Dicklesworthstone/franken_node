@@ -5,6 +5,11 @@ on:
     paths:
       - "crates/franken-node/Cargo.toml"
       - "crates/franken-node/src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "packaging/source-siblings.tsv"
+      - "rust-toolchain.toml"
+      - "scripts/bootstrap_source.sh"
       - "scripts/check_inline_lib_tests.py"
       - "tests/test_check_inline_lib_tests.py"
       - ".github/workflows/inline-lib-tests-gate.yml"
@@ -30,15 +35,6 @@ jobs:
         with:
           path: franken_node
 
-      - name: Check out franken_engine sibling
-        uses: actions/checkout@v4
-        with:
-          repository: Dicklesworthstone/franken_engine
-          path: franken_engine
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Gate parser unit tests
         run: python3 tests/test_check_inline_lib_tests.py
 
@@ -60,14 +56,18 @@ jobs:
         with:
           path: franken_node
 
-      - name: Check out franken_engine sibling
-        uses: actions/checkout@v4
-        with:
-          repository: Dicklesworthstone/franken_engine
-          path: franken_engine
+      - name: Materialize the complete pinned test source set
+        run: |
+          set -euo pipefail
+          bash scripts/bootstrap_source.sh --workspace "$PWD" \
+            --engine-ref dd1b3337f98ce381c3ff04307aca00153c20c453 \
+            --receipt "$RUNNER_TEMP/inline-source-inputs.tsv"
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust nightly
+        uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb
+        with:
+          toolchain: nightly-2026-09-21
+          components: clippy, rustfmt
 
       - name: Cache cargo home and target
         uses: Swatinem/rust-cache@v2
@@ -123,6 +123,7 @@ jobs:
         with:
           name: inline-lib-test-shard-evidence
           path: |
+            ${{ runner.temp }}/inline-source-inputs.tsv
             franken_node/inline-lib-tests.list
             franken_node/inline-lib-tests.plan.json
             franken_node/inline-lib-tests.plan.jsonl
