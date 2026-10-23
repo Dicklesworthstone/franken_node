@@ -5385,6 +5385,7 @@ const TELEMETRY_SOCKET_FILE_NAME: &str = "telemetry.sock";
 
 fn create_telemetry_socket_directory(preferred_root: &Path) -> Result<tempfile::TempDir> {
     const PREFIX: &str = "franken_telemetry_";
+    #[cfg(unix)]
     const RANDOM_BYTES: usize = 12;
     #[cfg(unix)]
     let preferred_root = {
@@ -5398,7 +5399,10 @@ fn create_telemetry_socket_directory(preferred_root: &Path) -> Result<tempfile::
             .as_bytes()
             .len()
             .saturating_add(PREFIX.len() + RANDOM_BYTES + TELEMETRY_SOCKET_FILE_NAME.len() + 2);
-        if preferred_root.is_absolute() && socket_path_bytes < 104 {
+        if preferred_root.is_absolute()
+            && preferred_root.to_str().is_some()
+            && socket_path_bytes < 104
+        {
             preferred_root
         } else {
             Path::new("/tmp")
@@ -5406,10 +5410,11 @@ fn create_telemetry_socket_directory(preferred_root: &Path) -> Result<tempfile::
     };
 
     let mut builder = tempfile::Builder::new();
-    builder.prefix(PREFIX).rand_bytes(RANDOM_BYTES);
+    builder.prefix(PREFIX);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
+        builder.rand_bytes(RANDOM_BYTES);
         builder.permissions(std::fs::Permissions::from_mode(0o700));
     }
     builder
@@ -11104,6 +11109,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn telemetry_socket_directory_binds_with_long_tmpdir_and_owner_only_permissions() {
+        use std::os::unix::ffi::OsStrExt as _;
         use std::os::unix::fs::PermissionsExt as _;
         use std::os::unix::net::UnixListener;
 
@@ -11114,8 +11120,14 @@ mod tests {
             .expect("create short test root");
         let long_root = root.path().join("long-temporary-root-".repeat(8));
         std::fs::create_dir(&long_root).expect("create long preferred temporary root");
+        // A root that cannot be carried in the UTF-8 worker field is never
+        // used, even on filesystems that cannot create this name.
+        let non_utf8_root = root
+            .path()
+            .join(std::ffi::OsStr::from_bytes(b"non-utf8-\xff"));
+        assert!(non_utf8_root.to_str().is_none());
 
-        for preferred_root in [root.path(), long_root.as_path()] {
+        for preferred_root in [root.path(), long_root.as_path(), non_utf8_root.as_path()] {
             let directory = create_telemetry_socket_directory(preferred_root)
                 .expect("create private telemetry directory");
             let expected_parent = if preferred_root == root.path() {
