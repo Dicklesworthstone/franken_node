@@ -33,3 +33,163 @@ pub fn bounded_read_to_string(path: &Path, limit: u64) -> io::Result<String> {
     }
     Ok(text)
 }
+
+#[cfg(test)]
+mod native_builtin_execution {
+    use super::module_resolution_graph::file_resolution::source_graph::{
+        GraphOptions, capsule, capture, engine_resolver::CapturedEngineResolver,
+    };
+    use frankenengine_engine::{
+        ast::ParseGoal,
+        baseline_interpreter::LaneChoice,
+        capability::RuntimeCapability,
+        execution_orchestrator::{ExecutionOrchestrator, ExtensionPackage, OrchestratorConfig},
+        module_resolver::{CapabilityPolicyHook, ModuleResolver, ResolutionContext},
+        runtime_config::RuntimeConfig,
+    };
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Arc;
+
+    fn execute(
+        resolver: Arc<CapturedEngineResolver>,
+        root: &std::path::Path,
+        commonjs: bool,
+    ) -> Vec<String> {
+        let policy = Arc::new(CapabilityPolicyHook::new(BTreeSet::from([
+            RuntimeCapability::ModuleLoad,
+            RuntimeCapability::Builtin,
+        ])));
+        let entry = resolver
+            .resolve(
+                &resolver.entry_request(),
+                &ResolutionContext::new("capture-test", "capture-decision", "capture-policy"),
+                policy.as_ref(),
+            )
+            .expect("admitted captured entry");
+        let installed = resolver
+            .execution_resolver(root, policy)
+            .expect("runtime resolver");
+        let mut engine = ExecutionOrchestrator::try_new_lab_with_runtime_config(
+            OrchestratorConfig {
+                commonjs_entry: commonjs,
+                parse_goal: if commonjs {
+                    ParseGoal::Script
+                } else {
+                    ParseGoal::Module
+                },
+                force_lane: Some(LaneChoice::QuickJs),
+                ..OrchestratorConfig::default()
+            },
+            RuntimeConfig::default(),
+        )
+        .expect("real sibling engine");
+        let package = ExtensionPackage {
+            extension_id: "captured-native-builtins".into(),
+            source: entry.module.record.source.clone(),
+            source_file: None,
+            module_root: None,
+            capabilities: vec!["module_load".into(), "builtin".into()],
+            version: "1.0.0".into(),
+            metadata: BTreeMap::new(),
+        };
+        engine
+            .execute_resolved_entry_with_resolver(&package, &entry, installed)
+            .expect("captured npm modules execute through the real engine")
+            .console_output
+            .into_iter()
+            .map(|entry| entry.message)
+            .collect()
+    }
+
+    #[test]
+    fn frozen_npm_package_uses_canonical_builtin_factories_after_source_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("node_modules/format-kit");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("package.json"),
+            r#"{"name":"format-kit","main":"index.cjs"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            package.join("index.cjs"),
+            r#"
+const util = require('node:util');
+const assert = require('node:assert/strict');
+const StringDecoder = require('string_decoder').StringDecoder;
+module.exports = {
+    util: util,
+    describe: function(value) {
+        assert.equal(value, 42);
+        const decoder = new StringDecoder('utf8');
+        const head = decoder.write(Buffer.from([226, 130]));
+        return util.format('%s=%d:%s', 'answer', value, head + decoder.end(Buffer.from([172])));
+    }
+};
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("app.cjs"),
+            r#"
+const kit = require('format-kit');
+const util = require('util');
+console.log(kit.describe(42));
+console.log(kit.util === util, require('util/types') === util.types);
+console.log(require('assert').strict === require('assert/strict'));
+"#,
+        )
+        .unwrap();
+        let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        let sealed = capsule::encode(&graph).unwrap();
+        // A later live-file mutation cannot change replayed application code.
+        std::fs::write(
+            package.join("index.cjs"),
+            "throw new Error('live source must not run');",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("app.cjs"),
+            "throw new Error('live entry must not run');",
+        )
+        .unwrap();
+        let replayed = capsule::replay(sealed.bytes(), sealed.digest()).unwrap();
+        let resolver = Arc::new(CapturedEngineResolver::new(replayed, &pin).ok().unwrap());
+        assert_eq!(
+            execute(resolver, root.path(), true),
+            ["answer=42:€", "true true", "true"]
+        );
+    }
+
+    #[test]
+    fn frozen_esm_gets_callable_assert_and_named_util_decoder_exports() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("app.mjs"),
+            r#"
+import assert, {strictEqual} from 'node:assert';
+import strict from 'assert/strict';
+import util, {format, MIMEType} from 'util';
+import * as utilNamespace from 'util';
+import types, {isMap} from 'node:util/types';
+import {StringDecoder} from 'node:string_decoder';
+strictEqual(strict, assert.strict);
+assert(types === util.types);
+strictEqual(Reflect.set(utilNamespace, 'format', null), false);
+strictEqual(Reflect.defineProperty(utilNamespace, 'format', {value: null}), false);
+strictEqual(utilNamespace.format, format);
+console.log(format('%s:%d', 'esm', 7), isMap(new Map()), typeof StringDecoder);
+console.log(new MIMEType('Text/Plain').essence);
+"#,
+        )
+        .unwrap();
+        let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        let resolver = Arc::new(CapturedEngineResolver::new(graph, &pin).ok().unwrap());
+        assert_eq!(
+            execute(resolver, root.path(), false),
+            ["esm:7 true function", "text/plain"]
+        );
+    }
+}
