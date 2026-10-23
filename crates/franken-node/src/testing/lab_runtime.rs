@@ -4631,39 +4631,32 @@ mod tests {
         for (i, pattern) in malicious_unicode_patterns.iter().enumerate() {
             let unicode_scenario_id = format!("unicode_test_{}{}", pattern, i);
 
-            // Drive the Unicode scenario identifier through a real channel (a
-            // timer label); the runtime must accept it without corrupting state.
-            let _ = runtime.schedule_timer(1, &unicode_scenario_id);
-
-            // Test timer IDs with Unicode patterns
+            // Labels are opaque strings, including embedded NUL. They must
+            // survive execution exactly; JSON escapes control characters.
+            let scenario_timer = runtime
+                .schedule_timer(1, &unicode_scenario_id)
+                .expect("schedule adversarial scenario label");
             let unicode_timer_id = format!("timer_{}{}", pattern, i);
-            let timer_result = runtime.schedule_timer(100, &unicode_timer_id);
-
-            match timer_result {
-                Ok(_) => {
-                    // Timer scheduled with Unicode ID
-                    let _ = runtime.advance_clock(101);
-
-                    // Verify timer fired correctly despite Unicode content
-                    let events = runtime.events();
-                    let timer_events: Vec<_> = events
-                        .iter()
-                        .filter(|e| {
-                            e.event_code.contains("TIMER")
-                                && e.payload.contains(&format!("{}", i))
-                        })
-                        .collect();
-
-                    // Should have at least one timer-related event
-                    // Unicode should not corrupt event logging
-                }
-                Err(_) => {
-                    // Extreme Unicode timer IDs may be rejected
-                }
+            let timer = runtime
+                .schedule_timer(100, &unicode_timer_id)
+                .expect("schedule adversarial timer label");
+            let fired = runtime.advance_clock(101).expect("fire both timers");
+            assert_eq!(fired.len(), 2);
+            for ((tick, callback), (id, label, delay)) in fired.iter().zip([
+                (scenario_timer, &unicode_scenario_id, 1),
+                (timer, &unicode_timer_id, 100),
+            ]) {
+                assert_eq!(*tick, i as u64 * 101 + delay);
+                assert_eq!(callback.id, id);
+                assert_eq!(&callback.label, label);
+                assert!(runtime.events().iter().any(|event| {
+                    event.event_code == EVT_TIMER_FIRED
+                        && event.tick == *tick
+                        && event.payload == format!("timer_id={id}, label={label}")
+                }));
             }
 
             // Test virtual link names with Unicode patterns
-            let _unicode_link_id = format!("link_{}{}", pattern, i);
             let unicode_source = format!("src_{}{}", pattern, i);
             let unicode_target = format!("tgt_{}{}", pattern, i);
 
@@ -4674,73 +4667,42 @@ mod tests {
                 delay_ticks: 0,
             };
 
-            let link_result = VirtualLink::new(&unicode_source, &unicode_target, fault_profile)
-                .and_then(|link| runtime.add_link(link));
-
-            match link_result {
-                Ok(idx) => {
-                    // Virtual link created with Unicode content
-                    // Verify link exists and can be used
-                    let send_result = runtime.send_message(idx, "unicode_test_message");
-                    match send_result {
-                        Ok(_) => {
-                            // Message sent successfully on Unicode link
-                        }
-                        Err(_) => {
-                            // May fail with extreme Unicode link configurations
-                        }
+            let link = VirtualLink::new(&unicode_source, &unicode_target, fault_profile)
+                .expect("create adversarial link endpoints");
+            let idx = runtime.add_link(link).expect("add adversarial link");
+            assert_eq!(runtime.find_link(&unicode_source, &unicode_target), Ok(idx));
+            let outcome = runtime
+                .send_message(idx, "unicode_test_message")
+                .expect("send through adversarial link");
+            assert!(matches!(
+                outcome,
+                MessageOutcome::Dropped
+                    | MessageOutcome::Reordered {
+                        buffer_position: 0,
+                        delay_ticks: 0,
                     }
-                }
-                Err(_) => {
-                    // Extreme Unicode link names may be rejected
-                }
-            }
+            ));
 
             // Verify event log integrity after Unicode operations
             let events = runtime.events();
             for event in events {
-                // All events should remain valid UTF-8
+                // Event codes are controlled identifiers; payloads preserve
+                // arbitrary valid strings rather than silently stripping NUL.
                 assert!(!event.event_code.contains('\0'));
-                assert!(!event.payload.contains('\0'));
-                // Event structure should not be corrupted by Unicode
                 assert!(!event.event_code.is_empty());
             }
 
-            // Test repro export with Unicode content
-            {
-                let export_result: Result<ReproBundle, LabError> =
-                    Ok(runtime.export_repro_bundle(true));
-                match export_result {
-                    Ok(bundle) => {
-                        // Bundle should serialize despite Unicode content
-                        let serialized = serde_json::to_string(&bundle);
-                        match serialized {
-                            Ok(json_str) => {
-                                // Should not contain null bytes or corruption
-                                assert!(!json_str.contains('\0'));
-
-                                // Should be deserializable
-                                let deserialized: Result<ReproBundle, _> =
-                                    serde_json::from_str(&json_str);
-                                match deserialized {
-                                    Ok(_) => {
-                                        // Successfully round-tripped despite Unicode
-                                    }
-                                    Err(_) => {
-                                        // Extreme Unicode may prevent deserialization
-                                    }
-                                }
-                            }
-                            Err(_) => {
-                                // Extreme Unicode may prevent serialization
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        // Export may fail with extreme Unicode content
-                    }
-                }
+            let bundle = runtime.export_repro_bundle(true);
+            let json = serde_json::to_string(&bundle).expect("serialize every adversarial input");
+            assert!(!json.contains('\0'));
+            if pattern.contains('\0') {
+                assert!(json.contains("\\u0000"));
             }
+            let restored: ReproBundle =
+                serde_json::from_str(&json).expect("deserialize every adversarial input");
+            assert_eq!(restored, bundle);
+            assert_eq!(restored.links[idx].source, unicode_source);
+            assert_eq!(restored.links[idx].target, unicode_target);
         }
 
         // Final integrity check
@@ -4750,7 +4712,7 @@ mod tests {
         // All events should maintain structural integrity
         for event in final_events {
             assert!(!event.event_code.is_empty());
-            assert!(event.tick >= 0);
+            assert!(event.tick <= malicious_unicode_patterns.len() as u64 * 101);
         }
     }
 
