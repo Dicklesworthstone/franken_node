@@ -146,9 +146,7 @@ pub fn reexecute(capture: &NativeReplayCapture) -> Result<NativeReplayOutcome, S
 }
 
 #[cfg(feature = "engine")]
-pub use engine::{
-    CapturedModuleSources, CapturingProcessSpawnProvider, ProcessReplayCaptureHostIo,
-};
+pub use engine::{CapturedModuleSources, CapturingProcessSpawnProvider};
 
 #[cfg(feature = "engine")]
 mod engine {
@@ -302,56 +300,6 @@ mod engine {
                 .execution_resolver(root, policy)
                 .map_err(|_| "cannot restore frozen replay module resolver".to_string())?;
             Ok((entry, runtime))
-        }
-    }
-
-    /// Apply the ordered replay journal's conservative exception floor during
-    /// the original capture execution, before the engine constructs its IR.
-    ///
-    /// All actual I/O, admission, and live supervision remain with the wrapped
-    /// product provider. This adds a classification restriction for capture;
-    /// it never changes an effect result or relabels an existing witness.
-    #[derive(Debug)]
-    pub struct ProcessReplayCaptureHostIo {
-        inner: Arc<dyn HostIoProvider>,
-    }
-
-    impl ProcessReplayCaptureHostIo {
-        pub fn new(inner: Arc<dyn HostIoProvider>) -> Self {
-            Self { inner }
-        }
-    }
-
-    impl HostIoProvider for ProcessReplayCaptureHostIo {
-        fn name(&self) -> &str {
-            self.inner.name()
-        }
-
-        fn filesystem_exception_provenance(&self) -> HostIoExceptionProvenance {
-            self.inner
-                .filesystem_exception_provenance()
-                .combine(HostIoExceptionProvenance::Unknown)
-        }
-
-        fn perform(&self, request: &HostIoRequest, granted: &[HostIoCapability]) -> HostIoOutcome {
-            self.inner.perform(request, granted)
-        }
-
-        fn perform_controlled(
-            &self,
-            request: &HostIoRequest,
-            granted: &[HostIoCapability],
-            control: Arc<dyn HostIoControl>,
-        ) -> HostIoOutcome {
-            self.inner.perform_controlled(request, granted, control)
-        }
-    }
-
-    fn capture_exception_provenance(process_capture: bool) -> HostIoExceptionProvenance {
-        if process_capture {
-            HostIoExceptionProvenance::Unknown
-        } else {
-            HostIoExceptionProvenance::ProviderInternal
         }
     }
 
@@ -1019,9 +967,7 @@ mod engine {
             if has_process_authority != self.process.is_some() {
                 return Err("native replay process authority requires its exact preparation and ordered journal".to_string());
             }
-            if self.host_io_exception_provenance
-                != capture_exception_provenance(self.process.is_some())
-            {
+            if self.host_io_exception_provenance != HostIoExceptionProvenance::ProviderInternal {
                 return Err(
                     "native replay exception provenance differs from its original capture mode"
                         .to_string(),
@@ -1318,10 +1264,9 @@ mod engine {
         /// finalized response, before either can be discarded or reread.
         /// The product caller supplies the same ambient grant and argv it gave
         /// the orchestrator, and must have installed its SandboxedHostIo plus
-        /// transparent policy decorators. If process_preparation is Some, the
-        /// caller must also have installed ProcessReplayCaptureHostIo during
-        /// the original execution so its lowering uses the ordered journal's
-        /// conservative exception floor.
+        /// transparent policy decorators. Process capture uses the same bounded
+        /// filesystem provider; replay binds its exact authenticated I/O
+        /// transcript into the globally ordered journal before lowering.
         /// A process-shape grant supplies only captured arguments and the
         /// engine's deterministic metadata shape.
         #[allow(clippy::too_many_arguments)]
@@ -1353,9 +1298,7 @@ mod engine {
                 orchestrator: CapturedOrchestratorSettings::capture(orchestrator_config)?,
                 runtime: runtime_config.clone(),
                 ambient_authority,
-                host_io_exception_provenance: capture_exception_provenance(
-                    process_preparation.is_some(),
-                ),
+                host_io_exception_provenance: HostIoExceptionProvenance::ProviderInternal,
                 process_argv: process_argv.to_vec(),
                 host_effect_transcript: result.host_effect_transcript.clone(),
                 process: CapturedProcessReplay::capture(
@@ -1382,9 +1325,8 @@ mod engine {
         /// Capture an uncaught guest exception and its finalized effect prefix.
         /// No successful IR4 witness or finalized nondeterminism trace is
         /// manufactured for an attempt the engine reported as failed.
-        /// As with from_execution, Some process_preparation requires that the
-        /// original execution installed ProcessReplayCaptureHostIo before
-        /// lowering and used this exact capturing process provider.
+        /// As with from_execution, Some process_preparation requires the exact
+        /// capturing process provider and the product's bounded I/O provider.
         // Keep product-admitted source/settings/provider inputs separate from
         // the live orchestrator and error that independently establish the
         // finalized failure evidence; no caller-built payload substitutes for
@@ -1439,9 +1381,7 @@ mod engine {
                 orchestrator: CapturedOrchestratorSettings::capture(orchestrator_config)?,
                 runtime: runtime_config.clone(),
                 ambient_authority,
-                host_io_exception_provenance: capture_exception_provenance(
-                    process_preparation.is_some(),
-                ),
+                host_io_exception_provenance: HostIoExceptionProvenance::ProviderInternal,
                 process_argv: process_argv.to_vec(),
                 host_effect_transcript,
                 process: CapturedProcessReplay::capture(process_preparation, &journal)?,
@@ -1664,7 +1604,7 @@ mod engine {
             ),
         };
         if expected_journal.is_some() {
-            outcome.policy_comparison_note.push_str(" Process outcomes are consumed in global journal order without live dispatch; the engine's Unknown filesystem exception provenance remains in force.");
+            outcome.policy_comparison_note.push_str(" Process outcomes are consumed in global journal order without live dispatch; filesystem outcomes are materialized from the authenticated bounded recorder and bound to that same journal before execution. Generic caller-supplied journals retain Unknown provenance.");
         }
         for (matches, subject) in [
             (outcome.terminal_state_match, "terminal state"),
@@ -1753,12 +1693,10 @@ mod engine {
                     )
                     .map_err(|error| format!("initialize native replay engine: {error}"))?;
                 orchestrator.set_process_argv(payload.process_argv.clone());
-                orchestrator.set_host_io(
-                    Arc::new(CapturedReplayHostIo),
-                    Some(Arc::new(CapturedReplayRecorder::new(
-                        payload.host_effect_transcript.clone(),
-                    ))),
-                );
+                let replay_io = Arc::new(CapturedReplayRecorder::new(
+                    payload.host_effect_transcript.clone(),
+                ));
+                orchestrator.set_host_io(Arc::new(CapturedReplayHostIo), Some(replay_io.clone()));
                 let replay_process_provider = payload.process.as_ref().map(|process| {
                     Arc::new(CapturedReplayProcessProvider::new(
                         process.preparation.clone(),
@@ -1769,12 +1707,18 @@ mod engine {
                 {
                     // An expired authority is intentional: ordered replay must
                     // consume captured outcomes without authorizing a live call.
-                    // Keep the journal's Unknown provenance floor unchanged.
+                    // Materialize every I/O result from the authenticated bounded
+                    // recorder and require exact global-journal agreement. A
+                    // generic caller-supplied replay journal still fails high.
+                    let journal = InMemoryHostEffectJournal::replaying_from_host_io_source(
+                        process.journal.clone(),
+                        Default::default(),
+                        replay_io.as_ref(),
+                    )
+                    .map_err(|error| format!("bind native replay host I/O source: {error}"))?;
                     orchestrator.set_process_spawn(
                         provider.clone(),
-                        Arc::new(InMemoryHostEffectJournal::replaying(
-                            process.journal.clone(),
-                        )),
+                        Arc::new(journal),
                         ProcessSpawnAttemptAuthority::expiring_at_unix_ms(0),
                     );
                 }
@@ -2540,9 +2484,7 @@ mod engine {
                 )
                 .expect("native process recorder");
             orchestrator.set_host_io(
-                Arc::new(ProcessReplayCaptureHostIo::new(Arc::new(
-                    SandboxedHostIo::with_root(root).expect("live bounded host I/O"),
-                ))),
+                Arc::new(SandboxedHostIo::with_root(root).expect("live bounded host I/O")),
                 Some(Arc::new(InMemoryHostIoTranscript::recording())),
             );
             let provider = process_provider(root);
@@ -2625,8 +2567,8 @@ mod engine {
                         serde_json::from_str(&capture.payload_json).unwrap();
                     assert_eq!(
                         payload.host_io_exception_provenance,
-                        HostIoExceptionProvenance::Unknown,
-                        "the original engine execution must use the replay journal's floor"
+                        HostIoExceptionProvenance::ProviderInternal,
+                        "the exact bounded I/O source preserves the original provider's floor"
                     );
                     let process = payload.process.as_ref().expect("ordered process capture");
                     assert!(

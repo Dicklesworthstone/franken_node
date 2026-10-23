@@ -9861,17 +9861,6 @@ impl EngineDispatcher {
                         )?,
                     );
                 }
-                let host_io = if replay_process_provider.is_some() {
-                    // Ordered replay has the engine's conservative Unknown
-                    // exception provenance. Use that same restriction in the
-                    // original capture before lowering; never relabel original
-                    // witnesses or relax comparison to manufacture a match.
-                    Arc::new(crate::ops::native_replay::ProcessReplayCaptureHostIo::new(
-                        host_io,
-                    )) as Arc<dyn HostIoProvider>
-                } else {
-                    host_io
-                };
                 orchestrator.set_host_io(host_io, Some(recorder));
                 tracing::info!(
                     execution_mode = "native",
