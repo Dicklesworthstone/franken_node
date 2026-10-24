@@ -81,9 +81,11 @@ def _facts_valid(facts: Any, format: str, anchor: str) -> bool:
                     "payload_sha256", "payload_bytes", "captured_terminal_state", "host_io_exchange_count"
                 }:
                     return False
-                if not _hex(value["payload_sha256"], 64) or value["captured_terminal_state"] not in {
+                if (not _hex(value["payload_sha256"], 64)
+                        or not isinstance(value["captured_terminal_state"], str)
+                        or value["captured_terminal_state"] not in {
                     "completed", "uncaught_exception", "engine_failure"
-                }:
+                }):
                     return False
                 if any(type(value[k]) is not int or not 0 <= value[k] <= MAX_INPUT_BYTES
                        for k in ("payload_bytes", "host_io_exchange_count")):
@@ -118,7 +120,7 @@ def verify_artifact(
         raise VerifierError("UNSUPPORTED_FORMAT", "unsupported evidence format")
     if not _hex(trusted_public_key_hex, 64):
         raise VerifierError("ANCHOR_INVALID", "expected a 32-byte hexadecimal public key")
-    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or not 0 < timeout <= 120:
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 120 or not math.isfinite(timeout):
         raise VerifierError("TIMEOUT_INVALID", "timeout must be finite and in (0, 120] seconds")
     try:
         executable = os.fspath(verifier)
@@ -145,7 +147,7 @@ def verify_artifact(
         raise VerifierError("PROTOCOL_INVALID", "verifier response exceeds its size bound")
     try:
         result = json.loads(process.stdout.decode("utf-8"), object_pairs_hook=_object)
-    except (UnicodeError, ValueError) as error:
+    except (UnicodeError, ValueError, RecursionError) as error:
         raise VerifierError("PROTOCOL_INVALID", "verifier returned invalid JSON") from error
     if not isinstance(result, dict) or result.get("schema_version") != PROTOCOL:
         raise VerifierError("PROTOCOL_INVALID", "unsupported verifier response schema")

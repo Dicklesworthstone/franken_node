@@ -209,8 +209,8 @@ pub fn decode_evidence_json(bytes: &[u8]) -> Result<Value, IncidentBundleError> 
     if bytes.len() > MAX_INCIDENT_BUNDLE_BYTES {
         return Err(IncidentBundleError::TooLarge { bytes: bytes.len() });
     }
-    let UnambiguousJson(value) =
-        serde_json::from_slice(bytes).map_err(|error| IncidentBundleError::Json(error.to_string()))?;
+    let UnambiguousJson(value) = serde_json::from_slice(bytes)
+        .map_err(|error| IncidentBundleError::Json(error.to_string()))?;
     Ok(value)
 }
 

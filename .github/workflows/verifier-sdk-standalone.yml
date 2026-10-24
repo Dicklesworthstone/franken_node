@@ -58,6 +58,19 @@ jobs:
       - name: Show toolchain
         run: rustup default stable && cargo --version
 
+      - name: Node runtime for isolated JS and TypeScript consumers
+        uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+
+      - name: Verify external consumer prerequisites
+        run: |
+          set -euo pipefail
+          node --version
+          python3 --version
+          python3 -c 'import sys; assert sys.version_info >= (3, 10)'
+          command -v bwrap
+
       - name: Dependency graph excludes franken-node crates
         run: |
           set -euo pipefail

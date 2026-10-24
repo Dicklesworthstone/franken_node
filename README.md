@@ -3644,7 +3644,8 @@ verification side of the protocol so that a verifier does not need to
 trust, or even depend on, the main `frankenengine-node` crate. It builds
 and tests on stable Rust from `sdk/verifier/` alone, with no workspace and
 no franken-node crates: `cargo test --manifest-path sdk/verifier/Cargo.toml`.
-CI checks this on every change (`verifier-sdk-standalone.yml`).
+The standalone workflow checks this (`verifier-sdk-standalone.yml`); a
+configured workflow is not evidence that hosted Actions are enabled or green.
 
 What it exposes:
 
@@ -3686,6 +3687,80 @@ The SDK is what a regulator, an auditor, or a research team uses to
 validate franken-node's public claims. Its conformance is asserted by
 `tests/conformance/verifier_sdk_capsule_replay.rs` and
 `tests/conformance/verifier_session_monotonic.rs`.
+
+Python and JS/TypeScript auditors can use the same independent Rust verifier
+through its offline executable. Install it with Cargo from the SDK directory
+in a standalone distribution (or use `--path sdk/verifier` in this checkout):
+
+```bash
+cargo install --path . --bin franken-verifier
+franken-verifier verify --format incident-bundle \
+  --trusted-key-hex "$AUDITOR_PUBLIC_KEY_HEX" < incident.fnbundle
+```
+
+Distribute the executable together with
+`bindings/python/franken_verifier.py`,
+`bindings/javascript/franken_verifier.mjs` and its adjacent
+`franken_verifier.d.mts`. The executable and public anchor must come from
+sources the auditor trusts independently of the artifact. No producer
+service, product/engine checkout, private signing key, Python package or JS
+package installation is required. Python requires 3.10 or later; JavaScript
+requires Node 18 or later. Running `.mts` directly additionally requires a
+Node version with built-in TypeScript stripping; the consumer test uses Node
+26. Both interfaces share the Rust cryptographic implementation; they are
+separate language interfaces, not independent cryptographic implementations.
+
+```python
+from pathlib import Path
+from franken_verifier import verify_artifact, VerifierError
+
+result = verify_artifact(
+    Path("incident.fnbundle").read_bytes(),
+    auditor_public_key_hex,
+    verifier="/trusted/bin/franken-verifier",
+)
+print(result["scope"], result["facts"]["incident_id"])
+```
+
+```javascript
+import { readFileSync } from "node:fs";
+import { verifyArtifact, VerifierError } from "./franken_verifier.mjs";
+
+const result = await verifyArtifact(
+  readFileSync("incident.fnbundle"), auditorPublicKeyHex,
+  { verifier: "/trusted/bin/franken-verifier", timeoutMs: 10_000 },
+);
+console.log(result.scope, result.facts.incident_id);
+```
+
+Pass original bytes, without decoding/re-encoding the artifact in Python or
+JavaScript. Results bind `artifact_sha256` to those exact input bytes. The
+versioned response is `franken-verifier-cli/v1`; errors throw `VerifierError`
+with a stable `code` and optional process exit/status diagnostics. The CLI
+exits 0 only for authenticated evidence, 1 for refusal and 2 for usage/I/O
+errors. Inputs are limited to 64 MiB, JSON nesting uses the Rust decoder's
+128-level limit, responses are bounded to 64 KiB, and callers can set a
+timeout up to 120 seconds (default 10 seconds). The executable is trusted
+code, not a sandbox for running arbitrary verifier programs.
+
+| Explicit format | Authenticated scope | Signature input |
+|---|---|---|
+| `incident-bundle` (default in bindings) | `authenticated_recorded_incident`: signed recorded events, hashes and bounded native-capture metadata | Embedded Ed25519 signature checked under the caller's anchor |
+| `capsule` | `authenticated_capsule_content`: independently re-derived signed payload/input hash | Signed SDK capsule JSON with strict fields |
+| `signed-bundle` | `authenticated_sdk_replay_bundle`: the distinct canonical SDK bundle format | Required detached `signature_hex` (Python), `signatureHex` (JS) or `--signature-hex` (CLI) |
+
+These scopes do not execute a captured guest or establish original-policy
+equivalence. Integrity-only SDK bundles are never returned as authenticated
+without their detached signature. Unknown/duplicate fields, invalid UTF-8,
+unsupported formats, tampering and foreign anchors fail closed. A native
+capture result exposes only digest/size/terminal-state/exchange-count metadata,
+not captured source, arguments, exception text or host-I/O values.
+
+`sdk/verifier/tests/language_clients.rs` runs real Python, JavaScript and
+TypeScript consumers of a copied distribution. On Linux, `bwrap` hides the
+product and engine checkouts; missing runtimes/isolation tools fail the test.
+Independent Node-crypto vectors and planted broken-child controls check
+signature, canonical-byte, protocol and failure propagation boundaries.
 
 This function runs as the doc-test of `verify_incident_bundle`
 (`sdk/verifier/src/incident_bundle.rs`), against a bundle the real CLI wrote:
