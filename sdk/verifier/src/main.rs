@@ -13,6 +13,7 @@ use frankenengine_verifier_sdk::incident_bundle::{
     decode_evidence_json, verify_incident_bundle,
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 const PROTOCOL: &str = "franken-verifier-cli/v1";
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
@@ -162,6 +163,7 @@ fn run(args: &[String], input: &mut impl Read) -> Result<Value, Failure> {
     result["schema_version"] = json!(PROTOCOL);
     result["format"] = json!(request.format);
     result["verdict"] = json!("verified");
+    result["artifact_sha256"] = json!(hex::encode(Sha256::digest(&bytes)));
     Ok(result)
 }
 
