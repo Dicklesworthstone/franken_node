@@ -1579,7 +1579,7 @@ fn current_campaign() {
         .open(output_path)
         .expect("new versioned output; never overwrite historical evidence");
     let mut cases = Vec::new();
-    for fixture in &FIXTURES {
+    for fixture in FIXTURES {
         let mut observations = serde_json::Map::new();
         for (runtime, binary) in &binaries {
             observations.insert(
@@ -1629,7 +1629,7 @@ fn current_campaign() {
         .count();
     let mut statement = json!({
         "schema_version": "franken-node/compromise-campaign/v3",
-        "campaign_id": format!("campaign-{}", uuid::Uuid::new_v4()),
+        "campaign_id": format!("campaign-{}", uuid::Uuid::now_v7()),
         "generated_at_utc": Utc::now().to_rfc3339(), "context": context, "cases": cases,
         "summary": {"baseline_attempts": FIXTURES.len(), "franken_attempts": FIXTURES.len(),
             "baseline_compromised": baseline, "franken_compromised": compromised,

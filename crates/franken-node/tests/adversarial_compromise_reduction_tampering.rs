@@ -1,7 +1,5 @@
 use frankenengine_node::supply_chain::ecosystem_telemetry::CompromiseReductionReport;
-use serde_json;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 
 const CAMPAIGN_NAME: &str = "adversarial-tampering-test";
 const CAMPAIGN_VERSION: &str = "2026.01.01";
@@ -46,12 +44,12 @@ impl CompromiseReductionHarness {
         hasher.update(entry.campaign_version.as_bytes());
         hasher.update((entry.reproducible_command.len() as u64).to_le_bytes());
         hasher.update(entry.reproducible_command.as_bytes());
-        hasher.update(&entry.minimum_required_ratio.to_le_bytes());
-        hasher.update(&entry.baseline_compromised.to_le_bytes());
-        hasher.update(&entry.hardened_compromised.to_le_bytes());
-        hasher.update(&entry.compromise_reduction_ratio.to_le_bytes());
-        hasher.update(&entry.total_attack_vectors.to_le_bytes());
-        hasher.update(&entry.containment_vectors.to_le_bytes());
+        hasher.update(entry.minimum_required_ratio.to_le_bytes());
+        hasher.update(entry.baseline_compromised.to_le_bytes());
+        hasher.update(entry.hardened_compromised.to_le_bytes());
+        hasher.update(entry.compromise_reduction_ratio.to_le_bytes());
+        hasher.update(entry.total_attack_vectors.to_le_bytes());
+        hasher.update(entry.containment_vectors.to_le_bytes());
 
         hex::encode(hasher.finalize())
     }

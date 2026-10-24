@@ -170,6 +170,7 @@ Owner: CreamPond. The operator explicitly requested implementation and a granula
     - [x] Implement opt-in v3 mode in the existing producer: exact compiled RCH source tag, actual executable hashes/versions, independently supplied authority, one attempt per runtime/case, retained streams and observations, namespace isolation and create-new signed output. No embedded measurement-key fallback, raw retry selection or historical artifact overwrite.
     - [ ] Compile/lint/test the producer on a frozen RCH source cut; compare formatting against the inherited baseline and retain failures.
     - [ ] Execute the real helper probe in Node, Bun and native: retain streams and the parent-isolation canary; raw runtimes must trip the owned oracle. This one plumbing probe cannot replace the full campaign or external authority.
+    - [ ] Repair the nine observed feature-enabled Clippy diagnostics in the existing tampering test without changing its assertions; execute the four original tests and retain any behavioral failures before repairing their harness.
     - [ ] Obtain the operator's independent measurement authority and frozen expected context. Missing information was requested; no authority has been invented.
     - [ ] Execute and independently consume the actual campaign; retain invalid/unsupported outcomes and losses, and reconcile its one census without rewriting either historical result.
   - [ ] Execute independent/planted negative acceptance, retain every newly admitted/rejected case and any actual measurement loss; close only full original acceptance.
