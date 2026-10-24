@@ -114,7 +114,7 @@ def verify_artifact(
         raise VerifierError("INPUT_INVALID", "data must be the original bytes")
     if len(data) > MAX_INPUT_BYTES:
         raise VerifierError("INPUT_TOO_LARGE", "evidence exceeds 64 MiB")
-    if format not in _SCOPES:
+    if not isinstance(format, str) or format not in _SCOPES:
         raise VerifierError("UNSUPPORTED_FORMAT", "unsupported evidence format")
     if not _hex(trusted_public_key_hex, 64):
         raise VerifierError("ANCHOR_INVALID", "expected a 32-byte hexadecimal public key")

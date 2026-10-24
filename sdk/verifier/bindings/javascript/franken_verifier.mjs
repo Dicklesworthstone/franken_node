@@ -67,6 +67,7 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
       encoding: "buffer", shell: false, timeout: Math.ceil(timeoutMs),
       killSignal: "SIGKILL", maxBuffer: MAX_RESPONSE_BYTES, windowsHide: true,
     }, (error, stdout, stderr) => {
+      if (error?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") return reject(new VerifierError("PROTOCOL_INVALID", "verifier response exceeds its size bound"));
       if (error?.killed) return reject(new VerifierError("PROCESS_TIMEOUT", "verifier exceeded its execution timeout"));
       if (error && typeof error.code !== "number") return reject(new VerifierError("PROCESS_UNAVAILABLE", "cannot execute the trusted verifier"));
       let result;
