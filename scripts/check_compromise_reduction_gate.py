@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Check retained bd-3cpa campaign conformance; not current release qualification.
+"""Authenticate a current bd-3cpa campaign statement and recompute its census.
 
 The v2 fixture uses a public test signing seed. Signature integrity is checked
 under an independent fixture pin, but cannot authenticate a fresh experiment.
-Current-source campaign authority/census qualification is tracked in .20/.21.
+Historical inspection is explicit and cannot qualify a current release. Real
+current-source measurement and its independent acceptance remain in .20/.21.
 """
 
 from __future__ import annotations
@@ -1385,7 +1386,8 @@ def main() -> int:
 
     if args.self_test:
         ok = self_test()
-        payload = {"ok": ok, "self_test": "passed" if ok else "failed"}
+        payload = {"ok": ok, "self_test": "passed" if ok else "failed",
+                   "evidence_class": "self_test_conformance", "release_qualified": False}
         if args.json:
             print(json.dumps(payload, indent=2))
         else:

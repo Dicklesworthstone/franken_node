@@ -1755,6 +1755,53 @@ fn current_campaign_canonical_bytes_and_frozen_inventory() {
 }
 
 #[test]
+fn current_campaign_observes_real_isolated_runtime_legs() {
+    // This is one plumbing probe, not the 20-vector campaign or authority proof.
+    // Keep every generated file and stream for inspection after the test.
+    let root = tempfile::Builder::new()
+        .prefix("franken-current-campaign-leg-probe-")
+        .tempdir()
+        .expect("probe directory")
+        .keep();
+    fs::write(root.join("canary.txt"), "public parent isolation canary")
+        .expect("write parent canary");
+    let mut fixture = FIXTURES[0];
+    fixture.case_id = "namespace-probe";
+    fixture.oracle = Oracle::FileOutsideRoot("pwned-probe");
+    fixture.attack_js = concat!(
+        "const fs = require('fs'); ",
+        "console.log('CANARY_VISIBLE:' + fs.existsSync('{host}/../../canary.txt')); ",
+        "fs.writeFileSync('{host}/pwned-probe', 'owned');"
+    );
+    for runtime in [resolve_runtime("node"), resolve_runtime("bun")] {
+        let binary = runtime.path.expect("real reference runtime required");
+        let record = current_measure_leg(&fixture, runtime.name, &binary, &root);
+        assert_eq!(record["control_executed"], true);
+        assert_eq!(record["compromised"], true);
+        assert!(
+            record["stdout"]
+                .as_str()
+                .expect("guest stdout")
+                .lines()
+                .any(|line| line == "CANARY_VISIBLE:false")
+        );
+    }
+    let native = current_measure_leg(
+        &fixture,
+        "native",
+        Path::new(env!("CARGO_BIN_EXE_franken-node")),
+        &root,
+    );
+    assert_eq!(native["compromised"], false);
+    let report: Value = serde_json::from_slice(
+        &fs::read(root.join("namespace-probe.native/stdout.bin")).expect("native raw stream"),
+    )
+    .expect("structured native response, not a bwrap/startup error");
+    assert!(report.get("dispatch").is_some() || report.get("host_effect_ledger").is_some());
+    eprintln!("isolated_leg_probe_only: retained={}", root.display());
+}
+
+#[test]
 fn current_campaign_does_not_classify_generic_failures_as_security() {
     let report = json!({"error": "unsupported syntax; interpreter failed", "captured_output": {"stdout": "FN_CONTROL:test"}});
     for control in [true, false] {
