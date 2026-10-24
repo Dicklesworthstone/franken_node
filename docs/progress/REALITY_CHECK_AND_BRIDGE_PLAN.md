@@ -77,6 +77,16 @@ The existing release contract additionally requires at least **1,000** compatibi
 9. The live GitHub Actions-permissions API reports **`enabled=false`**. Latest visible runs are Oct-8 push runs at `e3cdfd4c`, not current `7dc9108e`. The inspected no-contract job actually failed its gate after successful checkout; historical failures are not collectively relabelled infrastructure. No Actions setting or workflow dispatch was changed. UBS on the changed Markdown/JSONL exits 3, `no supported languages`, and explicitly checks nothing; it is not a scanner pass.
 10. The ZK soundness finding is source analysis of the public library API, with a concrete reproduction recipe in `.18`; its dedicated dynamic Rust regression remains unrun. The 86/86 Python gate checks structure. Neither that gate nor the inspected ledger verifier establishes the promised witness/predicate relation, and this assessment does not establish a reachable CLI or remote exploit.
 
+Completed remote receipt identities are below. Each invocation uses `RCH_REQUIRE_REMOTE=1`, the immutable five-root selection above, and `cargo +nightly-2026-09-21`. Product checks use default features; `--all-features` below applies only to the verifier SDK. All five wrappers have acknowledged terminal results and source/tree/pair release.
+
+| Cargo invocation after the pinned compiler selector | Local RCH wrapper | Result |
+|---|---|---|
+| `test --locked -p frankenengine-verifier-sdk` | `rchw-a40de954-5e5f-4c11-be28-7805eb87be63` | Exit 0; 426 passed / 0 failed / 11 ignored doctests. |
+| `test --locked -p frankenengine-verifier-sdk --all-features` | `rchw-0118760e-14fc-4548-9cec-555458469b45` | Exit 0; 432 passed / 0 failed / 11 ignored doctests. |
+| `check --locked --all-targets` | `rchw-fd1060bb-90c8-4739-994c-7a520f8ebf71` | Exit 0; compiler check, no test execution. |
+| `clippy --locked --all-targets -- -D warnings` | `rchw-0f51ab29-eb91-45b3-9861-d4c65dbf743e` | Exit 0; lint check, no test execution. |
+| `fmt --check` | `rchw-5eccb3cd-f8c4-4790-be78-e9230dd841b0` | Exit 1; 1,858 emitted diff hunks, no rewrite. |
+
 ### Bridge plan and acceptance sequence
 
 The plan organizes work by operator outcomes, preserving all charter targets. Three ambition and five refinement passes strengthened these existing rows and their canonical Beads in place.
