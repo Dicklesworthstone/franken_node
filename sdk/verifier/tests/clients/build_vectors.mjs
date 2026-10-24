@@ -93,7 +93,6 @@ add("bounded_verified_response", "incident-bundle", resealIncident(privacy), "RE
 add("invalid_utf8", "incident-bundle", Buffer.from([0xff]), "JSON_INVALID");
 add("nested_json_limit", "incident-bundle", "[".repeat(140) + "0" + "]".repeat(140), "JSON_INVALID");
 add("nonfinite_json_number", "incident-bundle", '{"x":1e9999}', "JSON_INVALID");
-add("integer_beyond_u64", "incident-bundle", '{"x":18446744073709551616}', "JSON_INVALID");
 add("unsupported_format", "guess", incidentBytes, "UNSUPPORTED_FORMAT");
 
 const capsule = {
@@ -136,6 +135,8 @@ sdk.integrity_hash = hash(Buffer.concat([Buffer.from("frankenengine-verifier-sdk
 const sdkSignature = sign(null, Buffer.concat(["frankenengine-verifier-sdk:ed25519-bundle-signature:v1:", sdk.schema_version, sdk.sdk_version, sdk.bundle_id, sdk.incident_id, sdk.created_at, sdk.integrity_hash].map(lp)), key).toString("hex");
 const sdkWire = canonical(sdk);
 add("signed_sdk_bundle_wide_integer_unicode_order", "signed-bundle", sdkWire, "verified", { signature_hex: sdkSignature });
+assert(sdkWire.includes('"wide_integer":18446744073709551615'));
+add("integer_beyond_u64", "signed-bundle", sdkWire.replace('"wide_integer":18446744073709551615', '"wide_integer":18446744073709551616'), "EVIDENCE_INVALID", { signature_hex: sdkSignature });
 add("sdk_foreign_anchor", "signed-bundle", sdkWire, "SIGNATURE_INVALID", { anchor: foreign, signature_hex: sdkSignature });
 add("sdk_signature_required", "signed-bundle", sdkWire, "SIGNATURE_MALFORMED");
 add("sdk_signature_wrong", "signed-bundle", sdkWire, "SIGNATURE_INVALID", { signature_hex: "00".repeat(64) });
