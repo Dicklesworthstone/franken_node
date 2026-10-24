@@ -1898,6 +1898,103 @@ mod tests {
     }
 
     #[test]
+    fn captured_create_require_factory_forms_execute_through_native_engine() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            for (entrypoint, factory, origin) in [
+                (
+                    "nested/app.mjs",
+                    "import mod from 'node:module';",
+                    "mod.createRequire(import.meta.url)",
+                ),
+                (
+                    "nested/app.cjs",
+                    "const {createRequire}=require('node:module');",
+                    "createRequire(__filename)",
+                ),
+                (
+                    "nested/app.cjs",
+                    "const {createRequire:make}=require('module');",
+                    "make(__filename)",
+                ),
+                (
+                    "nested/app.cjs",
+                    "const mod=require('node:module');",
+                    "mod.createRequire(__filename)",
+                ),
+            ] {
+                let root = tempfile::tempdir().unwrap();
+                let source = format!(
+                    "{factory} const local={origin}; \
+                     console.log(local('./dep.cjs'), local('dual')); \
+                     console.log(local.resolve('./asset.cjs'));"
+                );
+                put(root.path(), entrypoint, &source);
+                put(root.path(), "nested/dep.cjs", "module.exports=42;");
+                put(root.path(), "dep.cjs", "throw new Error('wrong origin');");
+                put(
+                    root.path(),
+                    "nested/asset.cjs",
+                    "throw new Error('resolve must not evaluate');",
+                );
+                put(
+                    root.path(),
+                    "node_modules/dual/package.json",
+                    r#"{"exports":{"import":"./imported.mjs","require":"./required.cjs"}}"#,
+                );
+                put(
+                    root.path(),
+                    "node_modules/dual/required.cjs",
+                    "module.exports=7;",
+                );
+                put(
+                    root.path(),
+                    "node_modules/dual/imported.mjs",
+                    "export default -1;",
+                );
+                let reference = node_reference_output(root.path(), entrypoint);
+                assert_eq!(
+                    reference,
+                    format!("42 7\n{}\n", root.path().join("nested/asset.cjs").display())
+                );
+                let result = execute_captured_graph_for_test(root.path(), entrypoint, lane, || {
+                    put(
+                        root.path(),
+                        entrypoint,
+                        "throw new Error('live entry reopened');",
+                    );
+                    put(
+                        root.path(),
+                        "nested/dep.cjs",
+                        "throw new Error('live dependency reopened');",
+                    );
+                    put(
+                        root.path(),
+                        "node_modules/dual/package.json",
+                        r#"{"exports":{}}"#,
+                    );
+                    put(
+                        root.path(),
+                        "node_modules/dual/required.cjs",
+                        "module.exports=0;",
+                    );
+                });
+                let actual = result
+                    .console_output
+                    .iter()
+                    .map(|entry| entry.message.as_str())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    actual,
+                    reference.lines().collect::<Vec<_>>(),
+                    "{lane:?}: {factory}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn native_commonjs_core_objects_execute_across_captured_package_boundaries() {
         use frankenengine_engine::baseline_interpreter::LaneChoice;
 

@@ -519,9 +519,12 @@ enum CreateRequireFactory {
 #[derive(Default)]
 struct CreateRequireBindings<'source> {
     factories: BTreeMap<&'source str, CreateRequireFactory>,
+    commonjs_factories: BTreeSet<&'source str>,
     loaders: BTreeSet<&'source str>,
     allowed_identifiers: BTreeSet<usize>,
     factory_members: BTreeSet<usize>,
+    factory_patterns: BTreeSet<usize>,
+    filename_origin: bool,
 }
 
 impl<'source> CreateRequireBindings<'source> {
@@ -529,6 +532,10 @@ impl<'source> CreateRequireBindings<'source> {
         let mut bindings = Self::default();
         let mut statements = root.walk();
         for statement in root.named_children(&mut statements) {
+            if statement.kind() == "lexical_declaration" && keyword(statement, "const") {
+                bindings.discover_commonjs_factories(statement, source)?;
+                continue;
+            }
             if statement.kind() != "import_statement" || keyword(statement, "type") {
                 continue;
             }
@@ -546,7 +553,17 @@ impl<'source> CreateRequireBindings<'source> {
                 }
                 let mut parts = clause.walk();
                 for part in clause.named_children(&mut parts) {
-                    if part.kind() == "namespace_import" {
+                    if part.kind() == "identifier" {
+                        // Node's default export is its native module object.
+                        // Prove every use exactly as for a namespace import;
+                        // importing it does not grant arbitrary loader access.
+                        bindings.add_factory(
+                            part,
+                            None,
+                            CreateRequireFactory::Namespace,
+                            source,
+                        )?;
+                    } else if part.kind() == "namespace_import" {
                         if let Some(name) = part.named_child(0) {
                             bindings.add_factory(
                                 name,
@@ -621,8 +638,14 @@ impl<'source> CreateRequireBindings<'source> {
                 let mut arguments = arguments
                     .named_children(&mut children)
                     .filter(|node| node.kind() != "comment");
+                let commonjs = factory.utf8_text(source.as_bytes())
+                    .is_ok_and(|name| bindings.commonjs_factories.contains(name));
                 let own_origin = arguments.next().is_some_and(|argument| {
                     let argument = runtime_operand(argument);
+                    if commonjs {
+                        return argument.kind() == "identifier"
+                            && argument.utf8_text(source.as_bytes()) == Ok("__filename");
+                    }
                     named_member(argument, "url", source)
                         && argument
                             .child_by_field_name("object")
@@ -644,6 +667,7 @@ impl<'source> CreateRequireBindings<'source> {
                 }
                 bindings.reserve_binding()?;
                 bindings.loaders.insert(spelling);
+                bindings.filename_origin |= commonjs;
                 bindings.allowed_identifiers.insert(name.id());
                 bindings.allowed_identifiers.insert(factory.id());
                 bindings
@@ -652,6 +676,72 @@ impl<'source> CreateRequireBindings<'source> {
             }
         }
         Ok(bindings)
+    }
+
+    /// Keep the ordinary require('node:module') edge in the graph. Only a
+    /// direct builtin load into a top-level const proves a factory. Defaults,
+    /// rest patterns, computed properties and other origins remain opaque.
+    fn discover_commonjs_factories(
+        &mut self,
+        statement: Node<'_>,
+        source: &'source str,
+    ) -> Result<()> {
+        let mut declarations = statement.walk();
+        for declaration in statement.named_children(&mut declarations) {
+            if declaration.kind() != "variable_declarator"
+                || !declaration
+                    .child_by_field_name("value")
+                    .is_some_and(|value| commonjs_module_source(value, source))
+            {
+                continue;
+            }
+            let Some(name) = declaration.child_by_field_name("name") else {
+                continue;
+            };
+            if name.kind() == "identifier" {
+                self.add_commonjs_factory(name, CreateRequireFactory::Namespace, source)?;
+            } else if name.kind() == "object_pattern" {
+                let mut properties = name.walk();
+                for property in name.named_children(&mut properties) {
+                    if property.kind() == "shorthand_property_identifier_pattern"
+                        && property.utf8_text(source.as_bytes()) == Ok("createRequire")
+                    {
+                        self.add_commonjs_factory(property, CreateRequireFactory::Named, source)?;
+                    } else if property.kind() == "pair_pattern"
+                        && property.child_by_field_name("key").is_some_and(|key| {
+                            key.utf8_text(source.as_bytes()) == Ok("createRequire")
+                                || literal(key, source).as_deref() == Some("createRequire")
+                        })
+                        && let Some(local) = property.child_by_field_name("value")
+                    {
+                        self.add_commonjs_factory(local, CreateRequireFactory::Named, source)?;
+                        if self.allowed_identifiers.contains(&local.id()) {
+                            self.factory_patterns.insert(property.id());
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn add_commonjs_factory(
+        &mut self,
+        local: Node<'_>,
+        kind: CreateRequireFactory,
+        source: &'source str,
+    ) -> Result<()> {
+        let spelling = local.utf8_text(source.as_bytes()).unwrap_or("");
+        // Do not replace the wrapper bindings authenticating the import and
+        // origin. The ordinary scan rejects the unproved declaration/use.
+        if matches!(spelling, "require" | "__filename") {
+            return Ok(());
+        }
+        self.add_factory(local, None, kind, source)?;
+        if self.allowed_identifiers.contains(&local.id()) {
+            self.commonjs_factories.insert(spelling);
+        }
+        Ok(())
     }
 
     fn reserve_binding(&self) -> Result<()> {
@@ -668,7 +758,10 @@ impl<'source> CreateRequireBindings<'source> {
         kind: CreateRequireFactory,
         source: &'source str,
     ) -> Result<()> {
-        if local.kind() != "identifier" {
+        if !matches!(
+            local.kind(),
+            "identifier" | "shorthand_property_identifier_pattern"
+        ) {
             return Ok(());
         }
         let spelling = local.utf8_text(source.as_bytes()).unwrap_or("");
@@ -917,12 +1010,27 @@ fn scan(
                 })
             }
             "identifier"
+            | "type_identifier"
             | "shorthand_property_identifier"
             | "shorthand_property_identifier_pattern"
                 if !erased =>
             {
                 let spelling = node.utf8_text(bytes).unwrap_or("");
-                if bindings.allowed_identifiers.contains(&node.id()) {
+                if bindings.filename_origin && spelling == "arguments"
+                    && commonjs_wrapper_arguments(node)
+                {
+                    issue = Some((
+                        "MUTABLE_CREATE_REQUIRE_ORIGIN",
+                        "CommonJS wrapper arguments may alias the createRequire __filename origin",
+                    ));
+                } else if bindings.filename_origin && spelling == "__filename"
+                    && !immutable_filename_use(node)
+                {
+                    issue = Some((
+                        "MUTABLE_CREATE_REQUIRE_ORIGIN",
+                        "createRequire capture requires the unchanged CommonJS __filename binding",
+                    ));
+                } else if bindings.allowed_identifiers.contains(&node.id()) {
                     // Exactly the immutable import, const declaration and
                     // factory callee proved by discovery above.
                 } else if !bindings.factories.is_empty() && spelling.contains('\\') {
@@ -933,7 +1041,7 @@ fn scan(
                 } else if bindings.factories.contains_key(spelling) {
                     issue = Some((
                         "INDIRECT_CREATE_REQUIRE",
-                        "createRequire factory must initialize a top-level const from this module's unchanged import.meta.url",
+                        "createRequire factory must initialize a top-level const from this module's unchanged origin",
                     ));
                 } else if bindings.loaders.contains(spelling) {
                     if !bindings.direct_loader_use(node, text) && !loader_typeof_probe(node) {
@@ -981,8 +1089,30 @@ fn scan(
                 ));
                 None
             }
+            "object_pattern"
+                if !erased
+                    && node.parent().is_some_and(|parent| {
+                        parent.kind() == "variable_declarator"
+                            && parent.child_by_field_name("value")
+                                .is_some_and(|value| commonjs_module_source(value, text))
+                    }) =>
+            {
+                let mut properties = node.walk();
+                if node.named_children(&mut properties).any(|property| {
+                    property.kind() != "comment"
+                        && !bindings.allowed_identifiers.contains(&property.id())
+                        && !bindings.factory_patterns.contains(&property.id())
+                }) {
+                    issue = Some((
+                        "INDIRECT_CREATE_REQUIRE",
+                        "module factory destructuring requires immutable, exact createRequire bindings",
+                    ));
+                }
+                None
+            }
             "pair_pattern"
                 if !erased
+                    && !bindings.factory_patterns.contains(&node.id())
                     && node.child_by_field_name("key").is_some_and(|key| {
                         key.utf8_text(bytes) == Ok("createRequire")
                             || literal(key, text).as_deref() == Some("createRequire")
@@ -1183,6 +1313,111 @@ fn named_member(node: Node<'_>, name: &str, source: &str) -> bool {
             .is_some_and(|property| property == name),
         _ => false,
     }
+}
+
+fn commonjs_module_source(node: Node<'_>, source: &str) -> bool {
+    let node = runtime_operand(node);
+    if node.kind() != "call_expression"
+        || !node
+            .child_by_field_name("function")
+            .is_some_and(|function| {
+                let function = runtime_operand(function);
+                function.kind() == "identifier"
+                    && function.utf8_text(source.as_bytes()) == Ok("require")
+            })
+    {
+        return false;
+    }
+    let Some(arguments) = node.child_by_field_name("arguments") else {
+        return false;
+    };
+    let mut cursor = arguments.walk();
+    let mut arguments = arguments
+        .named_children(&mut cursor)
+        .filter(|node| node.kind() != "comment");
+    arguments
+        .next()
+        .and_then(|node| literal(node, source))
+        .is_some_and(|name| matches!(name.as_str(), "module" | "node:module"))
+        && arguments.next().is_none()
+}
+
+/// A sloppy CommonJS wrapper maps arguments[3] to its __filename parameter.
+/// Arrow functions inherit that object, while ordinary functions own theirs.
+/// Do not allow the wrapper object to escape this immutable-origin proof.
+fn commonjs_wrapper_arguments(mut node: Node<'_>) -> bool {
+    for _ in 0..MAX_STRING_EXPRESSION_DEPTH {
+        let Some(parent) = node.parent() else {
+            return true;
+        };
+        if matches!(
+            parent.kind(),
+            "function_declaration"
+                | "function_expression"
+                | "generator_function"
+                | "generator_function_declaration"
+                | "method_definition"
+        ) {
+            return false;
+        }
+        node = parent;
+    }
+    // An unproved deeply nested reference cannot establish a separate owner.
+    true
+}
+
+/// The CommonJS filename is a string, so ordinary reads may escape safely.
+/// Any binding or write (including one in an unrelated nested scope) prevents
+/// this deliberately narrow proof. Dynamic scopes and escaped identifiers
+/// are rejected independently by the main scanner.
+fn immutable_filename_use(mut node: Node<'_>) -> bool {
+    let origin = node;
+    if node.kind() == "shorthand_property_identifier_pattern" {
+        return false;
+    }
+    for _ in 0..MAX_STRING_EXPRESSION_DEPTH {
+        let Some(parent) = node.parent() else {
+            return true;
+        };
+        let contains = |field: &str| {
+            parent.child_by_field_name(field).is_some_and(|value| {
+                value.start_byte() <= origin.start_byte() && origin.end_byte() <= value.end_byte()
+            })
+        };
+        if matches!(
+            parent.kind(),
+            "import_clause" | "import_specifier" | "namespace_import"
+        ) || (parent.kind() == "variable_declarator" && contains("name"))
+            || (matches!(
+                parent.kind(),
+                "function_declaration"
+                    | "function_expression"
+                    | "generator_function"
+                    | "generator_function_declaration"
+                    | "arrow_function"
+                    | "method_definition"
+            ) && (contains("name") || contains("parameters") || contains("parameter")))
+            || (matches!(
+                parent.kind(),
+                "class_declaration" | "abstract_class_declaration" | "class"
+            ) && contains("name"))
+            || (parent.kind() == "catch_clause" && contains("parameter"))
+            || (matches!(
+                parent.kind(),
+                "assignment_expression"
+                    | "augmented_assignment_expression"
+                    | "assignment_pattern"
+                    | "object_assignment_pattern"
+                    | "for_in_statement"
+            ) && contains("left"))
+            || parent.kind() == "update_expression"
+            || (parent.kind() == "unary_expression" && keyword(parent, "delete"))
+        {
+            return false;
+        }
+        node = parent;
+    }
+    false
 }
 
 /// import.meta is mutable in JavaScript. Reading its origin strings is safe;
@@ -1626,6 +1861,18 @@ mod tests {
                 SourceLanguage::JavaScript,
             ),
             (
+                "import mod from 'node:module'; const local=mod.createRequire(import.meta.url); local('./dep.cjs'); local.resolve('./dep.cjs');",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "import mod from 'module'; const local=(mod['createRequire']((import.meta).url)); (local)('./dep.cjs'); (local.resolve)('./dep.cjs');",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "import mod from 'node:module'; const local: Loader=mod.createRequire(import.meta.url as string); (local!)('./dep.cjs'); (local.resolve as Resolver)('./dep.cjs');",
+                SourceLanguage::TypeScript,
+            ),
+            (
                 "import * as module from 'module'; const local=(module['createRequire']((import.meta).url)); (local)('./dep.cjs'); (local.resolve)('./dep.cjs');",
                 SourceLanguage::JavaScript,
             ),
@@ -1658,6 +1905,330 @@ mod tests {
                 assert_eq!(load.specifier.as_deref(), Some("./dep.cjs"), "{source}");
                 assert!(!load.type_only);
             }
+        }
+    }
+
+    #[test]
+    fn create_require_commonjs_factories_capture_exact_filename_routes() {
+        for (source, language) in [
+            (
+                "const {createRequire}=require('node:module'); const local=createRequire(__filename); local('./dep.cjs'); local.resolve('./dep.cjs');",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "const {'createRequire':make}=require('module'); const local=make((__filename)); local('./dep' + '.cjs'); local['resolve']('./dep.cjs');",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "const mod=require('node:module'); const local=(mod.createRequire)(__filename); local('./dep.cjs'); local.resolve('./dep.cjs');",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "const mod=(require)('module'); const local=mod['cre' + 'ateRequire'](__filename); (local)('./dep.cjs'); (local.resolve)('./dep.cjs');",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "const {createRequire:make}=(require as Loader)('node:module'); const local: Loader=make(__filename as string) as Loader; (local!)('./dep.cjs'); (local.resolve as Resolver)('./dep.cjs');",
+                SourceLanguage::TypeScript,
+            ),
+            (
+                "const {createRequire:make}=require('node:module'); const first=make(__filename), second=make(__filename); first('./dep.cjs'); second.resolve('./dep.cjs'); console.log(__filename); function origin(){return __filename;} function ownArguments(){return arguments.length;} const metadata={__filename};",
+                SourceLanguage::JavaScript,
+            ),
+        ] {
+            let (loads, notices, analyzed) = scan(
+                &mut Parser::new(),
+                source.as_bytes(),
+                language,
+                &mut Budget::default(),
+            )
+            .unwrap();
+            assert!(analyzed, "{source}: {notices:?}");
+            assert!(notices.is_empty(), "{source}: {notices:?}");
+            assert_eq!(loads.len(), 3, "{source}: {loads:?}");
+            assert!(matches!(
+                loads[0].specifier.as_deref(),
+                Some("module" | "node:module")
+            ));
+            for load in &loads {
+                assert_eq!(load.kind, LoadKind::Require, "{source}");
+                assert!(!load.type_only);
+            }
+            for load in &loads[1..] {
+                assert_eq!(load.specifier.as_deref(), Some("./dep.cjs"), "{source}");
+            }
+        }
+    }
+
+    #[test]
+    fn create_require_commonjs_origin_factory_and_require_bindings_remain_immutable() {
+        let factory = "const {createRequire:make}=require('node:module');";
+        let loader = "const local=make(__filename); local('./dep.cjs');";
+        for mutation in [
+            "__filename='/other.cjs';",
+            "__filename += '/other.cjs';",
+            "var __filename;",
+            "let __filename='/other.cjs';",
+            "const __filename='/other.cjs';",
+            "function __filename(){}",
+            "function shadow(__filename){}",
+            "const shadow=(__filename)=>0;",
+            "try {} catch(__filename) {}",
+            "({__filename}=value);",
+            "({value:__filename}=value);",
+            "[__filename]=value;",
+            "for(__filename of values){}",
+            "for(__filename in values){}",
+            "__filename++;",
+            "delete __filename;",
+            "const {__filename}=value;",
+            "arguments[3]='/other.cjs';",
+            "const wrapper=arguments;",
+            "(()=>{arguments[3]='/other.cjs';})();",
+            "function shadow(require){}",
+            "require=replacement;",
+            "const escaped={make};",
+            "consume(make);",
+            "make=other;",
+            "function shadow(make){}",
+            "local=other;",
+            "local.resolve=other;",
+            "const escapedLoader={local};",
+            "function shadow(local){}",
+        ] {
+            let source = format!("{factory}{loader}{mutation}");
+            let (_, notices, analyzed) = scan(
+                &mut Parser::new(),
+                source.as_bytes(),
+                SourceLanguage::JavaScript,
+                &mut Budget::default(),
+            )
+            .unwrap();
+            assert!(analyzed, "{source}: {notices:?}");
+            assert!(
+                !notices.is_empty(),
+                "mutable binding became complete: {source}"
+            );
+        }
+        for source in [
+            "const {createRequire:make}=require('node:module'); const local=make(__dirname); local('./dep.cjs');",
+            "const {createRequire:make}=require('node:module'); const local=make('/other.cjs'); local('./dep.cjs');",
+            "const {createRequire:make}=require('node:module'); const origin=__filename; const local=make(origin); local('./dep.cjs');",
+            "const {createRequire:make}=require('node:module'); const local=make(__filename, extra); local('./dep.cjs');",
+            "let {createRequire:make}=require('node:module'); const local=make(__filename); local('./dep.cjs');",
+            "const {createRequire:make=other}=require('node:module'); const local=make(__filename); local('./dep.cjs');",
+            "const {['createRequire']:make}=require('node:module'); const local=make(__filename); local('./dep.cjs');",
+            "const {[property]:make}=require('node:module'); const local=make(__filename); local('./dep.cjs');",
+            "const {...mod}=require('node:module'); const local=mod.createRequire(__filename); local('./dep.cjs');",
+            "const {createRequire:require}=require('node:module'); const local=require(__filename); local('./dep.cjs');",
+            "const {createRequire:__filename}=require('node:module'); const local=__filename(__filename); local('./dep.cjs');",
+            "const {createRequire:make}=require('lookalike'); const local=make(__filename); local('./dep.cjs');",
+            "function nested(){const {createRequire:make}=require('node:module'); const local=make(__filename); local('./dep.cjs');}",
+        ] {
+            let (_, notices, analyzed) = scan(
+                &mut Parser::new(),
+                source.as_bytes(),
+                SourceLanguage::JavaScript,
+                &mut Budget::default(),
+            )
+            .unwrap();
+            assert!(analyzed, "{source}: {notices:?}");
+            assert!(
+                !notices.is_empty(),
+                "unproved factory became complete: {source}"
+            );
+        }
+        for import in [
+            "import mod from 'node:module'; const local=mod.createRequire(import.meta.url);",
+            "const mod=require('node:module'); const local=mod.createRequire(__filename);",
+        ] {
+            for mutation in [
+                "mod.createRequire=other;",
+                "mod['createRequire']=other;",
+                "Object.assign(mod, {createRequire:other});",
+                "Object.defineProperty(mod, 'createRequire', {value:other});",
+                "const alias=mod;",
+                "consume(mod);",
+                "function shadow(mod){}",
+            ] {
+                let source = format!("{import}{mutation}local('./dep.cjs');");
+                let (_, notices, analyzed) = scan(
+                    &mut Parser::new(),
+                    source.as_bytes(),
+                    SourceLanguage::JavaScript,
+                    &mut Budget::default(),
+                )
+                .unwrap();
+                assert!(analyzed, "{source}: {notices:?}");
+                assert!(
+                    !notices.is_empty(),
+                    "mutable namespace became complete: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn create_require_typescript_runtime_binding_names_are_not_erased() {
+        let factory = "const {createRequire:make}=require('node:module');";
+        let loader = "const local=make(__filename); local('./dep.cjs');";
+        for binding in [
+            "class __filename {}",
+            "abstract class __filename {}",
+            "const Example=class __filename {};",
+            "class make {}",
+            "class local {}",
+            "function * __filename() {}",
+            "function shadow(__filename: string) {}",
+            "const shadow=(__filename: string)=>0;",
+        ] {
+            let source = format!("{factory}{binding}{loader}");
+            let (_, notices, analyzed) = scan(
+                &mut Parser::new(),
+                source.as_bytes(),
+                SourceLanguage::TypeScript,
+                &mut Budget::default(),
+            )
+            .unwrap();
+            assert!(analyzed, "{source}: {notices:?}");
+            assert!(
+                notices.iter().any(|notice| matches!(
+                    notice.code,
+                    "MUTABLE_CREATE_REQUIRE_ORIGIN"
+                        | "INDIRECT_CREATE_REQUIRE"
+                        | "INDIRECT_CREATED_REQUIRE"
+                )),
+                "runtime binding must not be treated as an erased type: {source}: {notices:?}"
+            );
+        }
+        let source = format!(
+            "type __filename=string; interface make {{}} type local=unknown; {factory}{loader}"
+        );
+        let (loads, notices, analyzed) = scan(
+            &mut Parser::new(),
+            source.as_bytes(),
+            SourceLanguage::TypeScript,
+            &mut Budget::default(),
+        )
+        .unwrap();
+        assert!(analyzed);
+        assert!(
+            notices.is_empty(),
+            "type-only names do not replace runtime bindings: {notices:?}"
+        );
+        assert_eq!(loads.len(), 2);
+    }
+
+    #[test]
+    fn create_require_factory_forms_replay_nested_require_conditions_from_captured_bytes() {
+        for (entrypoint, factory, origin) in [
+            (
+                "nested/app.mjs",
+                "import mod from 'node:module';",
+                "mod.createRequire(import.meta.url)",
+            ),
+            (
+                "nested/app.cjs",
+                "const {createRequire}=require('node:module');",
+                "createRequire(__filename)",
+            ),
+            (
+                "nested/app.cjs",
+                "const {createRequire:make}=require('module');",
+                "make(__filename)",
+            ),
+            (
+                "nested/app.cjs",
+                "const mod=require('node:module');",
+                "mod.createRequire(__filename)",
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let source = format!(
+                "{factory} const local={origin}; local('dual'); local.resolve('./asset.cjs');"
+            );
+            put(root.path(), entrypoint, &source);
+            put(
+                root.path(),
+                "nested/asset.cjs",
+                "throw new Error('resolve-only asset');",
+            );
+            put(
+                root.path(),
+                "node_modules/dual/package.json",
+                r#"{"exports":{"import":"./imported.mjs","require":"./required.cjs"}}"#,
+            );
+            put(
+                root.path(),
+                "node_modules/dual/required.cjs",
+                "module.exports=42;",
+            );
+            put(
+                root.path(),
+                "node_modules/dual/imported.mjs",
+                "export default 0;",
+            );
+            let captured = capture(root.path(), entrypoint, GraphOptions::default()).unwrap();
+            assert!(
+                captured.report().diagnostics.is_empty(),
+                "{:?}",
+                captured.report()
+            );
+            let dependency = captured
+                .report()
+                .edges
+                .iter()
+                .find(|edge| edge.specifier.as_deref() == Some("dual"))
+                .unwrap();
+            assert_eq!(dependency.kind, LoadKind::Require);
+            assert_eq!(dependency.state, EdgeState::Resolved);
+            assert_eq!(dependency.importer.path, entrypoint);
+            assert_eq!(
+                dependency.target.as_ref().unwrap().path,
+                "node_modules/dual/required.cjs"
+            );
+            assert!(captured.report().edges.iter().any(|edge| {
+                edge.specifier.as_deref() == Some("./asset.cjs")
+                    && edge.kind == LoadKind::Require
+                    && edge
+                        .target
+                        .as_ref()
+                        .is_some_and(|target| target.path == "nested/asset.cjs")
+            }));
+            assert!(
+                !captured
+                    .report()
+                    .modules
+                    .iter()
+                    .any(|module| module.id.path == "node_modules/dual/imported.mjs")
+            );
+            let capsule = super::capsule::encode(&captured).unwrap();
+            put(root.path(), entrypoint, "throw new Error('changed entry');");
+            put(
+                root.path(),
+                "node_modules/dual/package.json",
+                r#"{"exports":{}}"#,
+            );
+            put(
+                root.path(),
+                "node_modules/dual/required.cjs",
+                "module.exports=0;",
+            );
+            put(
+                root.path(),
+                "nested/asset.cjs",
+                "throw new Error('changed asset');",
+            );
+            let replayed = super::capsule::replay(capsule.bytes(), capsule.digest()).unwrap();
+            assert_eq!(replayed.report(), captured.report());
+            assert_eq!(
+                replayed.source_bytes(&replayed.report().resolved_entrypoint),
+                Some(source.as_bytes()),
+            );
+            assert_eq!(
+                replayed.source_bytes(dependency.target.as_ref().unwrap()),
+                Some(b"module.exports=42;".as_slice()),
+            );
         }
     }
 
@@ -1742,9 +2313,9 @@ mod tests {
             "import * as mod from 'node:module'; const local=mod.createRequire(other); local('./dep.cjs');",
             "import * as mod from 'node:module'; const local=mod.createRequire(import.meta.url); consume(mod); local('./dep.cjs');",
             "import * as mod from 'node:module'; const local=mod.createRequire(import.meta.url); function shadow(mod){} local('./dep.cjs');",
-            "import mod from 'node:module'; const local=mod.createRequire(import.meta.url); local('./dep.cjs');",
-            "const {createRequire:make}=require('node:module'); const local=make(__filename); local('./dep.cjs');",
-            "const {createRequire}=require('node:module'); const local=createRequire(__filename); local('./dep.cjs');",
+            "import mod from 'node:module'; const local=mod.createRequire(other); local('./dep.cjs');",
+            "const {createRequire:make}=require('node:module'); const local=make(__dirname); local('./dep.cjs');",
+            "const {createRequire}=require('node:module'); const local=createRequire(__filename); createRequire=other; local('./dep.cjs');",
         ] {
             let (_, notices, analyzed) = scan(
                 &mut Parser::new(),
