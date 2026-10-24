@@ -1343,7 +1343,10 @@ fn current_corpus_digest(inventory: &[Value]) -> String {
 /// its owned project/oracle/state directories are visible. In particular the
 /// external signing key, context, parent /proc and other legs are absent.
 fn current_sandbox(binary: &Path, project: &Path, host: &Path, state: &Path) -> Command {
-    assert!(cfg!(target_os = "linux"), "current campaign requires Linux bwrap");
+    assert!(
+        cfg!(target_os = "linux"),
+        "current campaign requires Linux bwrap"
+    );
     let mut command = Command::new("/usr/bin/bwrap");
     command.args(["--die-with-parent", "--unshare-pid", "--new-session"]);
     for path in ["/usr", "/lib", "/lib64", "/bin", "/etc/passwd"] {
@@ -1366,10 +1369,18 @@ fn current_sandbox(binary: &Path, project: &Path, host: &Path, state: &Path) -> 
 }
 
 fn current_native_classification(
-    report: Option<&Value>, control: bool, compromised: bool, exit_code: Option<i32>,
+    report: Option<&Value>,
+    control: bool,
+    compromised: bool,
+    exit_code: Option<i32>,
 ) -> (&'static str, &'static str, String, bool) {
     if compromised {
-        return ("compromised", "none", "owned host oracle tripped".to_string(), false);
+        return (
+            "compromised",
+            "none",
+            "owned host oracle tripped".to_string(),
+            false,
+        );
     }
     // Only structured effect receipts establish runtime containment. Generic
     // interpreter errors, unsupported syntax and startup failures remain invalid.
@@ -1378,13 +1389,26 @@ fn current_native_classification(
         return ("contained", "runtime_containment", denials.join("; "), true);
     }
     if control && exit_code == Some(0) && denials.is_empty() {
-        return ("executed_uncompromised", "none", "completed without oracle effect".to_string(), false);
+        return (
+            "executed_uncompromised",
+            "none",
+            "completed without oracle effect".to_string(),
+            false,
+        );
     }
-    ("invalid", "none", "no typed runtime containment receipt".to_string(), false)
+    (
+        "invalid",
+        "none",
+        "no typed runtime containment receipt".to_string(),
+        false,
+    )
 }
 
 fn current_measure_leg(
-    fixture: &AdversarialExtensionFixture, runtime: &str, binary: &Path, root: &Path,
+    fixture: &AdversarialExtensionFixture,
+    runtime: &str,
+    binary: &Path,
+    root: &Path,
 ) -> Value {
     let leg = root.join(format!("{}.{}", fixture.case_id, runtime));
     fs::create_dir(&leg).expect("create unique retained leg");
@@ -1398,12 +1422,24 @@ fn current_measure_leg(
     let input = fs::read(project.join("index.js")).expect("read exact rendered input");
     let mut command = current_sandbox(binary, &project, &host, &state);
     if native {
-        command.args(["run", "index.js", "--policy", "strict", "--runtime", "franken-engine", "--engine-bin"])
-            .arg(binary).arg("--json");
+        command
+            .args([
+                "run",
+                "index.js",
+                "--policy",
+                "strict",
+                "--runtime",
+                "franken-engine",
+                "--engine-bin",
+            ])
+            .arg(binary)
+            .arg("--json");
     } else {
         command.arg("index.js");
     }
-    let child = command.spawn().expect("spawn isolated current campaign leg");
+    let child = command
+        .spawn()
+        .expect("spawn isolated current campaign leg");
     let output = wait_for_output(child, RUNTIME_TIMEOUT);
     fs::write(leg.join("stdout.bin"), &output.stdout).expect("retain raw stdout");
     fs::write(leg.join("stderr.bin"), &output.stderr).expect("retain raw stderr");
@@ -1411,10 +1447,15 @@ fn current_measure_leg(
     let compromised = oracle_tripped(&fixture.oracle, &host, &sink);
     let report = native.then(|| parse_json_stdout(&output)).flatten();
     let stdout = if native {
-        report.as_ref().and_then(|value| {
-            value["dispatch"]["captured_output"]["stdout"].as_str()
-                .or_else(|| value["captured_output"]["stdout"].as_str())
-        }).unwrap_or("").to_string()
+        report
+            .as_ref()
+            .and_then(|value| {
+                value["dispatch"]["captured_output"]["stdout"]
+                    .as_str()
+                    .or_else(|| value["captured_output"]["stdout"].as_str())
+            })
+            .unwrap_or("")
+            .to_string()
     } else {
         String::from_utf8(output.stdout).expect("UTF-8 guest stdout")
     };
@@ -1436,71 +1477,156 @@ fn current_measure_leg(
         record["evidence"] = json!(evidence);
         record["contained"] = json!(contained);
     }
-    fs::write(leg.join("observation.json"), current_canonical(&record)).expect("retain observation");
+    fs::write(leg.join("observation.json"), current_canonical(&record))
+        .expect("retain observation");
     record
 }
 
 fn current_campaign() {
     use frankenengine_node::supply_chain::artifact_signing::signing_key_from_seed_bytes;
     use zeroize::Zeroizing;
-    let required = |name| std::env::var_os(name).unwrap_or_else(|| panic!("required campaign input {name}"));
+    let required =
+        |name| std::env::var_os(name).unwrap_or_else(|| panic!("required campaign input {name}"));
     let context_path = PathBuf::from(required("FRANKEN_NODE_CAMPAIGN_CONTEXT"));
-    let context: Value = serde_json::from_slice(&fs::read(context_path).expect("read expected context"))
-        .expect("decode expected context");
+    let context: Value =
+        serde_json::from_slice(&fs::read(context_path).expect("read expected context"))
+            .expect("decode expected context");
     let source = option_env!("RCH_BUILD_SOURCE").expect("current campaign must be compiled by RCH");
-    assert_eq!(context["source_selection"], source, "exact RCH source selection");
-    assert_eq!(context["source_revisions"]["franken_node"], source.split_once("-overlay-").expect("RCH aggregate source identity").0);
+    assert_eq!(
+        context["source_selection"], source,
+        "exact RCH source selection"
+    );
+    assert_eq!(
+        context["source_revisions"]["franken_node"],
+        source
+            .split_once("-overlay-")
+            .expect("RCH aggregate source identity")
+            .0
+    );
     let inventory = current_inventory();
     assert_eq!(context["corpus_sha256"], current_corpus_digest(&inventory));
-    assert_eq!(context["policy_sha256"], current_digest(STRICT_CAMPAIGN_CONFIG.as_bytes()));
+    assert_eq!(
+        context["policy_sha256"],
+        current_digest(STRICT_CAMPAIGN_CONFIG.as_bytes())
+    );
     assert_eq!(context["policy_profile"], "strict");
     let binaries = [
-        ("node", resolve_runtime("node").path.expect("real Node required")),
-        ("bun", resolve_runtime("bun").path.expect("real Bun required")),
+        (
+            "node",
+            resolve_runtime("node").path.expect("real Node required"),
+        ),
+        (
+            "bun",
+            resolve_runtime("bun").path.expect("real Bun required"),
+        ),
         ("native", PathBuf::from(env!("CARGO_BIN_EXE_franken-node"))),
     ];
     for (runtime, binary) in &binaries {
-        assert_eq!(context["binary_sha256"][runtime], current_binary_digest(binary));
-        assert_eq!(context["runtime_versions"][runtime], runtime_version(binary).expect("measured runtime version"));
+        assert_eq!(
+            context["binary_sha256"][runtime],
+            current_binary_digest(binary)
+        );
+        assert_eq!(
+            context["runtime_versions"][runtime],
+            runtime_version(binary).expect("measured runtime version")
+        );
     }
     let trusted = required("FRANKEN_NODE_CAMPAIGN_TRUSTED_KEY_HEX");
     let trusted = trusted.to_str().expect("public key UTF-8");
-    assert!(![
-        "22fc297792f0b6ffc0bfcfdb7edb0c0aa14e025a365ec0e342e86e3829cb74b6",
-        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
-        "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
-    ].contains(&trusted), "public conformance key is not measurement authority");
+    assert!(
+        ![
+            "22fc297792f0b6ffc0bfcfdb7edb0c0aa14e025a365ec0e342e86e3829cb74b6",
+            "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+            "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+        ]
+        .contains(&trusted),
+        "public conformance key is not measurement authority"
+    );
     let key_path = PathBuf::from(required("FRANKEN_NODE_CAMPAIGN_KEY_FILE"));
-    let key_path = key_path.canonicalize().expect("resolve external measurement key");
-    assert!(!["/usr", "/lib", "/lib64", "/bin", "/etc"].iter().any(|path| key_path.starts_with(path)), "key must not live in public runtime mounts");
+    let key_path = key_path
+        .canonicalize()
+        .expect("resolve external measurement key");
+    assert!(
+        !["/usr", "/lib", "/lib64", "/bin", "/etc"]
+            .iter()
+            .any(|path| key_path.starts_with(path)),
+        "key must not live in public runtime mounts"
+    );
     let seed = Zeroizing::new(fs::read(&key_path).expect("read external measurement key"));
     let key = signing_key_from_seed_bytes(&seed).expect("32-byte measurement seed");
-    assert_eq!(hex::encode(key.verifying_key().to_bytes()), trusted, "separately supplied measurement authority");
+    assert_eq!(
+        hex::encode(key.verifying_key().to_bytes()),
+        trusted,
+        "separately supplied measurement authority"
+    );
     let root = PathBuf::from(required("FRANKEN_NODE_CAMPAIGN_WORK_DIR"));
-    assert!(root.is_absolute(), "absolute retained work directory required");
+    assert!(
+        root.is_absolute(),
+        "absolute retained work directory required"
+    );
     fs::create_dir(&root).expect("new retained campaign directory required");
-    let root = root.canonicalize().expect("resolve retained work directory");
-    assert!(!key_path.starts_with(&root), "key must be outside guest-visible campaign directories");
+    let root = root
+        .canonicalize()
+        .expect("resolve retained work directory");
+    assert!(
+        !key_path.starts_with(&root),
+        "key must be outside guest-visible campaign directories"
+    );
     let output_path = PathBuf::from(required("FRANKEN_NODE_CAMPAIGN_OUTPUT"));
-    let mut output = fs::OpenOptions::new().write(true).create_new(true).open(output_path)
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output_path)
         .expect("new versioned output; never overwrite historical evidence");
     let mut cases = Vec::new();
     for fixture in &FIXTURES {
         let mut observations = serde_json::Map::new();
         for (runtime, binary) in &binaries {
-            observations.insert((*runtime).to_string(), current_measure_leg(fixture, runtime, binary, &root));
-            assert_eq!(context["binary_sha256"][runtime], current_binary_digest(binary), "binary changed during measurement");
+            observations.insert(
+                (*runtime).to_string(),
+                current_measure_leg(fixture, runtime, binary, &root),
+            );
+            assert_eq!(
+                context["binary_sha256"][runtime],
+                current_binary_digest(binary),
+                "binary changed during measurement"
+            );
         }
-        let mut case = inventory.iter().find(|item| item["case_id"] == fixture.case_id).expect("frozen case inventory").clone();
+        let mut case = inventory
+            .iter()
+            .find(|item| item["case_id"] == fixture.case_id)
+            .expect("frozen case inventory")
+            .clone();
         case["observations"] = json!(observations);
         cases.push(case);
     }
-    let baseline = cases.iter().filter(|case| ["node", "bun"].iter().all(|runtime| {
-        case["observations"][runtime]["compromised"] == true && case["observations"][runtime]["control_executed"] == true
-    })).count();
-    let compromised = cases.iter().filter(|case| case["observations"]["native"]["compromised"] == true).count();
-    let contained = cases.iter().filter(|case| case["observations"]["native"]["contained"] == true && case["observations"]["native"]["control_executed"] == true).count();
-    let prevented = cases.iter().filter(|case| case["observations"]["native"]["compromised"] == false && case["observations"]["native"]["control_executed"] == false).count();
+    let baseline = cases
+        .iter()
+        .filter(|case| {
+            ["node", "bun"].iter().all(|runtime| {
+                case["observations"][runtime]["compromised"] == true
+                    && case["observations"][runtime]["control_executed"] == true
+            })
+        })
+        .count();
+    let compromised = cases
+        .iter()
+        .filter(|case| case["observations"]["native"]["compromised"] == true)
+        .count();
+    let contained = cases
+        .iter()
+        .filter(|case| {
+            case["observations"]["native"]["contained"] == true
+                && case["observations"]["native"]["control_executed"] == true
+        })
+        .count();
+    let prevented = cases
+        .iter()
+        .filter(|case| {
+            case["observations"]["native"]["compromised"] == false
+                && case["observations"]["native"]["control_executed"] == false
+        })
+        .count();
     let mut statement = json!({
         "schema_version": "franken-node/compromise-campaign/v3",
         "campaign_id": format!("campaign-{}", uuid::Uuid::new_v4()),
@@ -1512,15 +1638,25 @@ fn current_campaign() {
     });
     let bytes = current_canonical(&statement);
     let mut message = CURRENT_SIGNATURE_DOMAIN.to_vec();
-    message.extend(u64::try_from(bytes.len()).expect("statement length").to_le_bytes());
+    message.extend(
+        u64::try_from(bytes.len())
+            .expect("statement length")
+            .to_le_bytes(),
+    );
     message.extend(&bytes);
     statement["signature"] = json!({"algorithm": "ed25519", "public_key_hex": trusted,
         "statement_sha256": current_digest(&bytes), "signature_hex": hex::encode(key.sign(&message).to_bytes())});
-    output.write_all(&current_canonical(&statement)).expect("write measured statement");
+    output
+        .write_all(&current_canonical(&statement))
+        .expect("write measured statement");
     output.sync_all().expect("persist measured statement");
     // Completion means observations were recorded, not that the reduction
     // claim passed. Only the independent consumer determines that verdict.
-    eprintln!("current campaign recorded: {baseline}/{} baseline, {compromised}/{} native, {contained} executed containment; qualification not asserted", FIXTURES.len(), FIXTURES.len());
+    eprintln!(
+        "current campaign recorded: {baseline}/{} baseline, {compromised}/{} native, {contained} executed containment; qualification not asserted",
+        FIXTURES.len(),
+        FIXTURES.len()
+    );
 }
 
 #[test]
@@ -1594,27 +1730,56 @@ fn compromise_reduction_v2_measures_raw_runtime_baseline_against_strict_policy()
 
 #[test]
 fn current_campaign_canonical_bytes_and_frozen_inventory() {
-    assert_eq!(current_canonical(&json!({"z": [true, null, -1, "é"], "a": {"y": 2, "b": 1}})),
-        "{\"a\":{\"b\":1,\"y\":2},\"z\":[true,null,-1,\"é\"]}".as_bytes());
+    assert_eq!(
+        current_canonical(&json!({"z": [true, null, -1, "é"], "a": {"y": 2, "b": 1}})),
+        "{\"a\":{\"b\":1,\"y\":2},\"z\":[true,null,-1,\"é\"]}".as_bytes()
+    );
     let inventory = current_inventory();
     assert_eq!(inventory.len(), 20);
-    let classes = inventory.iter().map(|case| case["attack_class"].as_str().expect("class")).collect::<std::collections::BTreeSet<_>>();
+    let classes = inventory
+        .iter()
+        .map(|case| case["attack_class"].as_str().expect("class"))
+        .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(classes.len(), 10);
-    assert!(inventory.windows(2).all(|pair| pair[0]["case_id"].as_str() < pair[1]["case_id"].as_str()));
-    println!("source_inventory_only: corpus={} policy={} source={}", current_corpus_digest(&inventory), current_digest(STRICT_CAMPAIGN_CONFIG.as_bytes()), option_env!("RCH_BUILD_SOURCE").unwrap_or("unavailable"));
+    assert!(
+        inventory
+            .windows(2)
+            .all(|pair| pair[0]["case_id"].as_str() < pair[1]["case_id"].as_str())
+    );
+    println!(
+        "source_inventory_only: corpus={} policy={} source={}",
+        current_corpus_digest(&inventory),
+        current_digest(STRICT_CAMPAIGN_CONFIG.as_bytes()),
+        option_env!("RCH_BUILD_SOURCE").unwrap_or("unavailable")
+    );
 }
 
 #[test]
 fn current_campaign_does_not_classify_generic_failures_as_security() {
     let report = json!({"error": "unsupported syntax; interpreter failed", "captured_output": {"stdout": "FN_CONTROL:test"}});
     for control in [true, false] {
-        assert_eq!(current_native_classification(Some(&report), control, false, Some(1)).0, "invalid");
+        assert_eq!(
+            current_native_classification(Some(&report), control, false, Some(1)).0,
+            "invalid"
+        );
     }
     let denial = json!({"dispatch": {"host_effect_ledger": {"entries": [{"receipt": {"policy_outcome": {"outcome": "denied", "reason": "capability denied: fs:write"}}}]}}});
-    assert_eq!(current_native_classification(Some(&denial), true, false, Some(1)).0, "contained");
-    assert_eq!(current_native_classification(Some(&denial), false, false, Some(1)).0, "invalid");
-    assert_eq!(current_native_classification(Some(&denial), true, true, Some(1)).0, "compromised");
-    assert_eq!(current_native_classification(denial.get("dispatch"), true, false, Some(1)).0, "contained");
+    assert_eq!(
+        current_native_classification(Some(&denial), true, false, Some(1)).0,
+        "contained"
+    );
+    assert_eq!(
+        current_native_classification(Some(&denial), false, false, Some(1)).0,
+        "invalid"
+    );
+    assert_eq!(
+        current_native_classification(Some(&denial), true, true, Some(1)).0,
+        "compromised"
+    );
+    assert_eq!(
+        current_native_classification(denial.get("dispatch"), true, false, Some(1)).0,
+        "contained"
+    );
 }
 
 #[test]
