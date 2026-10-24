@@ -271,17 +271,27 @@ if (-not $NoVerify) {
   }
   Write-Ok "Checksum verified"
 
-  # Sigstore/cosign (best-effort)
+  # A missing optional bundle may be skipped. Once fetched, verification must
+  # succeed: a verifier exception must never be mistaken for bundle absence.
   if (Get-Command cosign -ErrorAction SilentlyContinue) {
     if (-not $SigstoreBundleUrl) { $SigstoreBundleUrl = "$url.sigstore.json" }
     $bundleFile = Join-Path $tmp ([System.IO.Path]::GetFileName($SigstoreBundleUrl))
+    $bundleAvailable = $false
     try {
       Invoke-WebRequest -Uri $SigstoreBundleUrl -OutFile $bundleFile -UseBasicParsing
-      & cosign verify-blob --bundle $bundleFile --certificate-identity-regexp $CosignIdentityRegex --certificate-oidc-issuer $CosignOidcIssuer $zipFile | Out-Null
-      if ($LASTEXITCODE -ne 0) { Write-Err "Signature verification failed"; exit 1 }
-      Write-Ok "Signature verified (cosign)"
+      $bundleAvailable = $true
     } catch {
-      Write-Warn "Sigstore bundle not found; skipping signature verification"
+      Write-Warn "Sigstore bundle not found; skipping signature verification. $($_.Exception.Message)"
+    }
+    if ($bundleAvailable) {
+      try {
+        & cosign verify-blob --bundle $bundleFile --certificate-identity-regexp $CosignIdentityRegex --certificate-oidc-issuer $CosignOidcIssuer $zipFile | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "cosign exited $LASTEXITCODE" }
+      } catch {
+        Write-Err "Signature verification failed: $($_.Exception.Message)"
+        exit 1
+      }
+      Write-Ok "Signature verified (cosign)"
     }
   } else {
     Write-Warn "cosign not found; skipping signature verification"

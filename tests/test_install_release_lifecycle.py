@@ -10,6 +10,7 @@ import functools
 import hashlib
 import http.server
 import io
+import json
 import os
 import shlex
 import shutil
@@ -390,17 +391,45 @@ class PowerShellInstallation(unittest.TestCase):
                 archive.writestr(info, payload)
         return path
 
-    def run_installer(self, archive, *options, checksum=None):
+    def run_installer(self, archive, *options, checksum=None, prelude=""):
         environment = dict(os.environ)
         for name in ("HOME", "USERPROFILE", "LOCALAPPDATA", "TMPDIR", "TMP", "TEMP"):
             directory = self.root / name
             directory.mkdir(exist_ok=True)
             environment[name] = str(directory)
-        return subprocess.run([
-            self.pwsh, "-NoProfile", "-File", str(ROOT / "install.ps1"),
+        arguments = [
             "-Dest", str(self.dest), "-Version", "v-test", "-ArtifactUrl",
             f"http://127.0.0.1:{self.server.server_port}/{archive.name}",
             "-Checksum", checksum or hashlib.sha256(archive.read_bytes()).hexdigest(), *options,
+        ]
+        script = ROOT / "install.ps1"
+        if prelude:
+            # A verifier protocol fixture lives in the calling PowerShell scope;
+            # ZIP download, hashes and publication still use the shipped installer.
+            # This does not exercise or certify Sigstore cryptography.
+            environment["INSTALL_TEST_SCRIPT"] = str(script)
+            named_arguments = {
+                "Dest": str(self.dest), "Version": "v-test",
+                "ArtifactUrl": f"http://127.0.0.1:{self.server.server_port}/{archive.name}",
+                "Checksum": checksum or hashlib.sha256(archive.read_bytes()).hexdigest(),
+            }
+            for option in options:
+                self.assertIn(option, ("-Verify", "-NoVerify"))
+                named_arguments[option.removeprefix("-")] = True
+            environment["INSTALL_TEST_ARGUMENTS"] = json.dumps(named_arguments)
+            script = self.root / "invoke-installer.ps1"
+            script.write_text(prelude + r'''
+$installerArguments = @{}
+foreach ($property in (ConvertFrom-Json $env:INSTALL_TEST_ARGUMENTS).PSObject.Properties) {
+  $installerArguments[$property.Name] = $property.Value
+}
+& $env:INSTALL_TEST_SCRIPT @installerArguments
+if (-not $?) { exit 1 }
+exit $LASTEXITCODE
+''', encoding="utf-8")
+            arguments = []
+        return subprocess.run([
+            self.pwsh, "-NoProfile", "-File", str(script), *arguments,
         ], cwd=self.root, env=environment, capture_output=True, text=True, timeout=35, check=False)
 
     def assert_preserved(self, result):
@@ -467,6 +496,69 @@ class PowerShellInstallation(unittest.TestCase):
         result = self.run_installer(self.archive(self.runnable_payload()), checksum="0" * 64)
         self.assert_preserved(result)
         self.assertIn("Checksum mismatch", result.stdout + result.stderr)
+
+    def test_signature_verifier_exception_does_not_become_an_optional_bundle_skip(self):
+        archive = self.archive(self.runnable_payload())
+        Path(str(archive) + ".sigstore.json").write_text("verifier protocol fixture", encoding="utf-8")
+        result = self.run_installer(archive, prelude='function cosign { throw "planted verifier exception" }')
+        self.assert_preserved(result)
+        output = result.stdout + result.stderr
+        self.assertIn("planted verifier exception", output)
+        self.assertNotIn("Sigstore bundle not found", output)
+        self.assertNotIn("Signature verified", output)
+        self.assertEqual(list(self.dest.glob(".franken-node.previous.*.exe")), [])
+        self.assertEqual(list(self.dest.glob(".franken-node.install.*.exe")), [])
+
+    def test_signature_verifier_native_nonzero_preserves_the_previous_install(self):
+        archive = self.archive(self.runnable_payload())
+        Path(str(archive) + ".sigstore.json").write_text("verifier protocol fixture", encoding="utf-8")
+        result = self.run_installer(archive, prelude=r'''
+function cosign {
+  if ($env:OS -eq "Windows_NT") { & "$env:SystemRoot\System32\findstr.exe" --version }
+  else { & /usr/bin/false }
+}
+''')
+        self.assert_preserved(result)
+        self.assertIn("Signature verification failed", result.stdout + result.stderr)
+        self.assertNotIn("Signature verified", result.stdout)
+        self.assertEqual(list(self.dest.glob(".franken-node.previous.*.exe")), [])
+        self.assertEqual(list(self.dest.glob(".franken-node.install.*.exe")), [])
+
+    def test_signature_verifier_protocol_success_reaches_candidate_validation(self):
+        archive = self.archive(self.runnable_payload())
+        Path(str(archive) + ".sigstore.json").write_text("verifier protocol fixture", encoding="utf-8")
+        result = self.run_installer(archive, "-Verify", prelude=r'''
+function cosign {
+  $expected = @("verify-blob", "--bundle", "--certificate-identity-regexp", "--certificate-oidc-issuer")
+  foreach ($argument in $expected) {
+    if ($args -notcontains $argument) { throw "missing verifier argument: $argument" }
+  }
+  $global:LASTEXITCODE = 0
+}
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.target.read_bytes(), self.runnable_payload())
+        self.assertIn("Signature verified (cosign)", result.stdout)
+        self.assertIn("Self-test passed", result.stdout)
+
+    def test_missing_optional_bundle_skips_without_invoking_the_verifier(self):
+        archive = self.archive(self.runnable_payload())
+        result = self.run_installer(archive, prelude='function cosign { throw "UNEXPECTED_VERIFIER_INVOCATION" }')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.target.read_bytes(), self.runnable_payload())
+        self.assertIn("Sigstore bundle not found", result.stdout)
+        self.assertNotIn("UNEXPECTED_VERIFIER_INVOCATION", result.stdout + result.stderr)
+        self.assertNotIn("Signature verified", result.stdout)
+
+    def test_no_verify_skips_signature_protocol_but_still_validates_the_candidate(self):
+        archive = self.archive(self.runnable_payload())
+        result = self.run_installer(archive, "-NoVerify", "-Verify",
+                                    prelude='function cosign { throw "UNEXPECTED_VERIFIER_INVOCATION" }')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.target.read_bytes(), self.runnable_payload())
+        self.assertIn("Verification skipped (-NoVerify)", result.stdout)
+        self.assertIn("Self-test passed", result.stdout)
+        self.assertNotIn("UNEXPECTED_VERIFIER_INVOCATION", result.stdout + result.stderr)
 
     def test_archive_without_a_binary_preserves_the_previous_install(self):
         result = self.run_installer(self.archive(b"", names=()))
