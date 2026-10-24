@@ -1760,7 +1760,7 @@ fn current_campaign_observes_real_isolated_runtime_legs() {
     // Keep every generated file and stream for inspection after the test.
     let root = tempfile::Builder::new()
         .prefix("franken-current-campaign-leg-probe-")
-        .tempdir()
+        .tempdir_in("/tmp")
         .expect("probe directory")
         .keep();
     fs::write(root.join("canary.txt"), "public parent isolation canary")

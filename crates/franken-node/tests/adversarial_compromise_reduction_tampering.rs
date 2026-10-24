@@ -8,6 +8,10 @@ const TRACE_ID_PREFIX: &str = "trace-tamper";
 struct CompromiseReductionHarness {
     entries: Vec<CompromiseReductionReport>,
     integrity_hashes: Vec<String>,
+    // Retained separately from the arrays the attack helpers can mutate.
+    // This test-only commitment is not a production measurement authority.
+    committed_count: usize,
+    committed_order_hash: String,
 }
 
 impl CompromiseReductionHarness {
@@ -15,6 +19,8 @@ impl CompromiseReductionHarness {
         Self {
             entries: Vec::new(),
             integrity_hashes: Vec::new(),
+            committed_count: 0,
+            committed_order_hash: Self::order_hash(&[]),
         }
     }
 
@@ -23,6 +29,19 @@ impl CompromiseReductionHarness {
         let hash = self.compute_entry_hash(&entry);
         self.integrity_hashes.push(hash);
         self.entries.push(entry);
+        self.committed_count = self.entries.len();
+        self.committed_order_hash = Self::order_hash(&self.integrity_hashes);
+    }
+
+    fn order_hash(hashes: &[String]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(b"compromise_reduction_order_v1:");
+        hasher.update((hashes.len() as u64).to_le_bytes());
+        for hash in hashes {
+            hasher.update((hash.len() as u64).to_le_bytes());
+            hasher.update(hash.as_bytes());
+        }
+        hex::encode(hasher.finalize())
     }
 
     fn compute_entry_hash(&self, entry: &CompromiseReductionReport) -> String {
@@ -55,7 +74,9 @@ impl CompromiseReductionHarness {
     }
 
     fn verify_integrity(&self) -> Result<(), String> {
-        if self.entries.len() != self.integrity_hashes.len() {
+        if self.entries.len() != self.integrity_hashes.len()
+            || self.entries.len() != self.committed_count
+        {
             return Err("Entry count mismatch with integrity hashes".to_string());
         }
 
@@ -69,6 +90,10 @@ impl CompromiseReductionHarness {
                     i, expected_hash, computed_hash
                 ));
             }
+        }
+
+        if Self::order_hash(&self.integrity_hashes) != self.committed_order_hash {
+            return Err("Integrity check failed: ordered census commitment mismatch".to_string());
         }
 
         Ok(())
