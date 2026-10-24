@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """Assessment and real-process report/capture integration tests."""
 
+import contextlib
 import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import migrate_report
@@ -78,6 +82,38 @@ class TestMeasuredReport(unittest.TestCase):
         self.candidate.mkdir()
         self.node = shutil.which("node")
         self.command = [self.node, "{test}"]
+        self.processes = []
+        self.addCleanup(self.cleanup_processes)
+
+    def cleanup_processes(self):
+        # These leader PIDs come only from the fixtures launched by this test.
+        leader = self.root / "guest-leader.pid"
+        if leader.exists() and leader.read_text():
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(int(leader.read_text()), signal.SIGKILL)
+        for process in self.processes:
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=5)
+
+    @staticmethod
+    def running(pid):
+        if Path("/proc/self/stat").exists():
+            try:
+                return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+            except FileNotFoundError:
+                return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+
+    def assert_stopped(self, pid):
+        deadline = time.monotonic() + 3
+        while self.running(pid) and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertFalse(self.running(pid), f"owned guest {pid} still executing")
 
     def sources(self, original="console.log(42);", candidate=None):
         for root, text in ((self.original, original), (self.candidate, original if candidate is None else candidate)):
@@ -122,6 +158,181 @@ class TestMeasuredReport(unittest.TestCase):
         self.assertFalse(result["rollout_plan"]["execution_authorized"])
         self.assertEqual([p["status"] for p in result["rollout_plan"]["phases"]],
                          ["eligible_for_evaluation", "not_evaluated", "not_evaluated", "not_evaluated"])
+
+    def cancelled_cli(self, signum, repeated=False):
+        leader = self.root / "guest-leader.pid"
+        child = self.root / "guest-child.pid"
+        candidate = self.root / "candidate-started"
+        child_source = ("const fs=require('fs');process.on('SIGTERM',()=>{});"
+                        f"fs.writeFileSync({json.dumps(str(child))},String(process.pid));"
+                        "setInterval(()=>{},1000);")
+        self.sources(
+            "const fs=require('fs');process.on('SIGTERM',()=>{});\n"
+            "fs.writeSync(1,'PRIVATE-PARTIAL-REPORT-OUTPUT\\n');\n"
+            "require('child_process').spawn(process.execPath,['-e',"
+            + json.dumps(child_source) + "],{stdio:'ignore'});\n"
+            f"fs.writeFileSync({json.dumps(str(leader))},String(process.pid));\n"
+            "setInterval(()=>{},1000);\n",
+            f"require('fs').writeFileSync({json.dumps(str(candidate))},'unexpected');\n")
+        output, failures = self.root / "interrupted.json", self.root / "failures"
+        command = [sys.executable, migrate_report.__file__, str(self.original),
+                   "--migrated-project", str(self.candidate), "--execute", "--json",
+                   "--baseline-command", json.dumps(self.command), "--migration-command", json.dumps(self.command),
+                   "--out", str(output), "--failure-dir", str(failures)]
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.processes.append(process)
+        deadline = time.monotonic() + 8
+        while not (leader.exists() and child.exists() and leader.stat().st_size and child.stat().st_size):
+            if process.poll() is not None or time.monotonic() >= deadline:
+                self.fail(f"guest did not reach the controlled blocking point: status={process.poll()}")
+            time.sleep(.01)
+        pids = int(leader.read_text()), int(child.read_text())
+        process.send_signal(signum)
+        if repeated:
+            time.sleep(.005)
+            if process.poll() is None:
+                process.send_signal(signal.SIGINT if signum == signal.SIGTERM else signal.SIGTERM)
+        stdout, stderr = process.communicate(timeout=8)
+        for pid in pids:
+            self.assert_stopped(pid)
+        self.assertEqual(process.returncode, 128 + signum, (stdout, stderr))
+        report = json.loads(stdout)
+        self.assertEqual(report, json.loads(output.read_text()))
+        self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(report["workflow_status"], "ERROR")
+        self.assertEqual(report["cancellation"], {"signal": signum, "requested": True})
+        self.assert_blocked(report)
+        row = report["validation"]["validation_results"][0]
+        self.assertEqual(row["baseline"]["termination"], "cancelled")
+        self.assertFalse(row["baseline"]["streams"]["stdout"]["complete"])
+        self.assertGreater(row["baseline"]["streams"]["stdout"]["bytes_observed"], 0)
+        self.assertNotIn("migration", row)
+        self.assertFalse(candidate.exists())
+        self.assertFalse(failures.exists(), "interrupted runs cannot create a replayable failure capsule")
+        self.assertEqual(report["failure_artifact"]["status"], "unavailable")
+        self.assertNotIn(b"PRIVATE-PARTIAL-REPORT-OUTPUT", stdout)
+        self.assertNotIn(b"Traceback", stderr)
+
+    def test_cli_sigterm_stops_owned_guests_and_exports_partial_error(self):
+        self.cancelled_cli(signal.SIGTERM)
+
+    def test_cli_sigint_preserves_diagnostics_and_stops_owned_guests(self):
+        self.cancelled_cli(signal.SIGINT)
+
+    def test_cli_repeated_signals_keep_first_signal_and_do_not_interrupt_cleanup(self):
+        self.cancelled_cli(signal.SIGTERM, repeated=True)
+
+    def test_precancelled_library_call_does_not_execute_or_install_handlers(self):
+        marker = self.root / "unexpected-execution"
+        self.sources(f"require('fs').writeFileSync({json.dumps(str(marker))},'unexpected');")
+        handlers = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
+        token = migrate_report.runner.CancellationState(signal.SIGINT)
+        report = self.generate(cancellation=token, failure_dir=self.root / "failures")
+        self.assertEqual(report["workflow_status"], "ERROR")
+        self.assertEqual(report["cancellation"]["signal"], signal.SIGINT)
+        self.assertFalse(marker.exists())
+        self.assertFalse((self.root / "failures").exists())
+        self.assertIsNone(report["validation"])
+        self.assertEqual(handlers, {s: signal.getsignal(s) for s in handlers})
+
+    def test_cancel_after_baseline_retains_completed_observation_without_candidate(self):
+        self.sources()
+        token = migrate_report.runner.CancellationState()
+        real_run = migrate_report.runner.run_command
+        def run_then_cancel(*args, **kwargs):
+            observation = real_run(*args, **kwargs)
+            token.request(signal.SIGTERM)
+            return observation
+        with patch.object(migrate_report.runner, "run_command", side_effect=run_then_cancel) as run:
+            report = self.generate(cancellation=token)
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(report["workflow_status"], "ERROR")
+        self.assertEqual(report["validation"]["validation_results"][0]["baseline"]["termination"], "exited")
+        self.assertNotIn("migration", report["validation"]["validation_results"][0])
+        self.assert_blocked(report)
+
+    def test_cancel_during_identity_recheck_cannot_report_go(self):
+        self.sources()
+        token = migrate_report.runner.CancellationState()
+        real_bindings = replay.runtime_bindings
+        calls = 0
+        def bindings_then_cancel(*args, **kwargs):
+            nonlocal calls
+            observed = real_bindings(*args, **kwargs)
+            calls += 1
+            if calls == 2:
+                token.request(signal.SIGTERM)
+            return observed
+        with patch.object(replay, "runtime_bindings", side_effect=bindings_then_cancel):
+            report = self.generate(cancellation=token)
+        self.assertEqual(calls, 2)
+        self.assertEqual(report["validation"]["validation_results"][0]["status"], "PASS")
+        self.assertEqual(report["workflow_status"], "ERROR")
+        self.assertFalse(report["input_binding_verified"])
+        self.assert_blocked(report)
+
+    def test_cancel_before_capsule_publication_retains_failure_without_a_capsule(self):
+        self.sources("console.log(1);", "console.log(2);")
+        token = migrate_report.runner.CancellationState()
+        real_seal = replay.seal
+        def seal_then_cancel(*args, **kwargs):
+            capsule = real_seal(*args, **kwargs)
+            token.request(signal.SIGTERM)
+            return capsule
+        with patch.object(replay, "seal", side_effect=seal_then_cancel):
+            report = self.generate(cancellation=token, failure_dir=self.root / "failures")
+        self.assertEqual(report["validation"]["validation_results"][0]["status"], "FAIL")
+        self.assertEqual(report["failure_artifact"]["status"], "unavailable")
+        self.assertFalse((self.root / "failures").exists())
+        self.assert_blocked(report)
+
+    def test_late_cancel_blocks_confidence_and_rollout_without_losing_passed_cases(self):
+        self.sources()
+        token = migrate_report.runner.CancellationState()
+        real_plan = migrate_report.planner_mod.generate_plan
+        def plan_then_cancel(*args, **kwargs):
+            plan = real_plan(*args, **kwargs)
+            token.request(signal.SIGINT)
+            return plan
+        with patch.object(migrate_report.planner_mod, "generate_plan", side_effect=plan_then_cancel):
+            report = self.generate(cancellation=token)
+        self.assertEqual(report["validation"]["validation_results"][0]["status"], "PASS")
+        self.assert_blocked(report)
+        self.assertFalse(report["confidence"]["go_decision"]["proceed"])
+        self.assertFalse(report["rollout_plan"]["validation_gate"]["passed"])
+        self.assertEqual(report["rollout_plan"]["phases"][0]["status"], "blocked")
+        self.assertEqual(report["executive_summary"]["blocking_reasons"],
+                         report["confidence"]["go_decision"]["blocking_reasons"])
+        self.assertEqual(report["executive_summary"]["blocking_reasons"],
+                         report["rollout_plan"]["validation_gate"]["blocking_reasons"])
+
+    def test_cancellation_during_report_fsync_refreshes_json_and_html_before_publication(self):
+        self.sources()
+        real_fsync = os.fsync
+        for format in ("json", "html"):
+            with self.subTest(format=format):
+                report = self.generate()
+                self.assertEqual(report["executive_summary"]["go_decision"], "GO")
+                token = migrate_report.runner.CancellationState()
+                calls = 0
+                def fsync_then_cancel(descriptor):
+                    nonlocal calls
+                    real_fsync(descriptor)
+                    calls += 1
+                    token.request(signal.SIGTERM)
+                output = self.root / f"cancel-during-publish.{format}"
+                with patch.object(migrate_report.os, "fsync", side_effect=fsync_then_cancel):
+                    migrate_report.write_new_report(report, output, format, cancellation=token)
+                self.assertEqual(calls, 2)
+                self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(report["workflow_status"], "ERROR")
+                self.assertEqual(report["validation"]["validation_results"][0]["status"], "PASS")
+                self.assert_blocked(report)
+                if format == "json":
+                    self.assertEqual(json.loads(output.read_text()), report)
+                else:
+                    self.assertIn("<h1>NO-GO:", output.read_text())
+                    self.assertNotIn("<h1>GO:", output.read_text())
 
     def test_console_divergence_overrides_clean_static_assessment(self):
         self.sources("console.log('reference');", "console.log('wrong');")
@@ -240,7 +451,8 @@ class TestMeasuredReport(unittest.TestCase):
         result = self.generate()
         self.assertEqual(result["validation"]["summary"]["verdict"], "PASS")
         dependency = result["candidate_assessment"]["scan"]["dependencies"][0]
-        self.assertEqual(dependency["manifest"], "packages/worker/package.json")
+        self.assertEqual(dependency["declared_in"], "packages/worker/package.json")
+        self.assertEqual(dependency["source"], "packages/worker/package.json")
         self.assertTrue(dependency["has_native_addon"])
         self.assert_blocked(result)
 

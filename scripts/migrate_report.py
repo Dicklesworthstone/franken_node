@@ -4,6 +4,8 @@
 --execute runs trusted code with your authority; workspace copies are NOT an OS
 sandbox. Without it this is static assessment only and cannot produce GO.
 GO permits evaluation of the captured test scope, never production deployment.
+SIGINT/SIGTERM stop the owned validation process groups and retain a partial
+error report. Library callers may supply cancellation without signal handlers.
 """
 
 from __future__ import annotations
@@ -92,7 +94,8 @@ def preflight_destinations(roots: list[Path], *destinations: Path | None) -> Non
         resolved.append(target)
 
 
-def assess_snapshot(root: Path, display_path: str, registry: dict, deadline: float) -> dict:
+def assess_snapshot(root: Path, display_path: str, registry: dict, deadline: float, *,
+                    cancellation: runner.CancellationState | None = None) -> dict:
     """Reuse scanner/risk/rewrite rules over the private captured workspace.
 
     Inspect every project package manifest, including monorepos. Malformed or
@@ -101,9 +104,12 @@ def assess_snapshot(root: Path, display_path: str, registry: dict, deadline: flo
     """
     usage, manifests = [], {}
     metadata_bytes = 0
+    runner.check_cancellation(cancellation)
     for directory, names, files in os.walk(root, followlinks=False, onerror=runner.raise_walk_error):
+        runner.check_cancellation(cancellation)
         names[:] = sorted(name for name in names if name not in {".git", "node_modules"})
         for name in sorted(files):
+            runner.check_cancellation(cancellation)
             if time.monotonic() >= deadline:
                 raise TimeoutError("migration assessment exhausted total budget")
             path = Path(directory) / name
@@ -133,6 +139,7 @@ def assess_snapshot(root: Path, display_path: str, registry: dict, deadline: flo
                 for item in found:
                     item["source_file"] = relative
                 usage.extend(found)
+    runner.check_cancellation(cancellation)
     if time.monotonic() >= deadline:
         raise TimeoutError("migration assessment exhausted total budget")
     dependencies = inventory_mod.scan_dependencies(
@@ -173,7 +180,8 @@ def dependency_review_reasons(scan: dict) -> list[str]:
 def generate_full_report(project_dir: Path, *, migrated_project: Path | None = None,
                          execute: bool = False, failure_dir: Path | None = None,
                          baseline_command=runner.DEFAULT_BASELINE_COMMAND,
-                         migration_command=runner.DEFAULT_MIGRATION_COMMAND, **options) -> dict:
+                         migration_command=runner.DEFAULT_MIGRATION_COMMAND,
+                         cancellation: runner.CancellationState | None = None, **options) -> dict:
     """One snapshot feeds assessment, execution, confidence, and failure export."""
     timestamp = datetime.now(timezone.utc).isoformat()
     result = {"report_version": "1.0", "workflow_schema": "measured-migration-report-v1",
@@ -186,6 +194,7 @@ def generate_full_report(project_dir: Path, *, migrated_project: Path | None = N
                                     "confidence_score": 0, "risk_score": None, "difficulty": "unknown",
                                     "apis_detected": 0, "suggestions_count": 0}}
     try:
+        runner.check_cancellation(cancellation)
         if type(execute) is not bool or (failure_dir is not None and not execute):
             raise ValueError("failure capture requires explicit execute=True / --execute")
         options = replay.checked_options(options)
@@ -197,7 +206,7 @@ def generate_full_report(project_dir: Path, *, migrated_project: Path | None = N
         snapshots, input_digests, captured = {}, {}, {}
         for leg, root in zip(replay.LEGS, roots):
             if root not in captured:
-                captured[root] = runner.capture_project(root, deadline)
+                captured[root] = runner.capture_project(root, deadline, cancellation=cancellation)
             snapshots[leg], input_digests[f"{leg}_sha256"] = captured[root]
         result["inputs"] = input_digests
         result["events"].append({"stage": "capture", "status": "completed", "inputs": input_digests})
@@ -205,8 +214,10 @@ def generate_full_report(project_dir: Path, *, migrated_project: Path | None = N
         # execution rather than discovering lost evidence after a failure.
         manifests = blobs = None
         if failure_dir is not None:
+            runner.check_cancellation(cancellation)
             manifests, blobs = replay.encode_snapshots(snapshots)
             snapshots = replay.decode_snapshots(manifests, blobs)
+            runner.check_cancellation(cancellation)
         registry = scanner_mod.load_registry()
         result["registry_available"] = bool(registry)
         with tempfile.TemporaryDirectory(prefix="measured-migration-report-") as temporary:
@@ -214,17 +225,19 @@ def generate_full_report(project_dir: Path, *, migrated_project: Path | None = N
             assessments = {}
             for leg, display in zip(replay.LEGS, roots):
                 workspace = root / leg
-                runner.stage_project(snapshots[leg], workspace, deadline)
+                runner.stage_project(snapshots[leg], workspace, deadline, cancellation=cancellation)
                 # The staged inputs must still be the captured assessment inputs.
-                if runner.capture_project(workspace, deadline)[1] != input_digests[f"{leg}_sha256"]:
+                if runner.capture_project(workspace, deadline, cancellation=cancellation)[1] != input_digests[f"{leg}_sha256"]:
                     raise ValueError("staged assessment input digest mismatch")
-                assessments[leg] = assess_snapshot(workspace, str(display), registry, deadline)
+                assessments[leg] = assess_snapshot(workspace, str(display), registry, deadline,
+                                                   cancellation=cancellation)
             result.update(assessments["baseline"])
             candidate = assessments["migration"]
             result["candidate_assessment"] = candidate
             result["events"].append({"stage": "assessment", "status": "completed"})
             if execute:
-                commands, bindings = replay.runtime_bindings(baseline_command, migration_command, deadline)
+                commands, bindings = replay.runtime_bindings(baseline_command, migration_command, deadline,
+                                                             cancellation=cancellation)
                 # Reserve some of the total allowance for post-execution identity
                 # checking. If it cannot finish, retain results but fail closed.
                 remaining = deadline - time.monotonic()
@@ -233,18 +246,23 @@ def generate_full_report(project_dir: Path, *, migrated_project: Path | None = N
                 validation = runner.validate_project(root / "baseline", migrated_project=root / "migration",
                                                      baseline_command=commands["baseline"],
                                                      migration_command=commands["migration"],
+                                                     cancellation=cancellation,
                                                      **{**options, "total_timeout_seconds": remaining * .9})
                 result["validation"] = validation
                 result["runtime_bindings"] = bindings
+                # Partial diagnostics still name the caller's projects after
+                # disposable execution workspaces are cleaned up.
+                validation["project"], validation["migrated_project"] = map(str, roots)
+                runner.check_cancellation(cancellation)
                 if validation.get("inputs") != input_digests:
                     raise ValueError("assessment and execution input digests disagree")
-                _, after = replay.runtime_bindings(commands["baseline"], commands["migration"], deadline)
+                _, after = replay.runtime_bindings(commands["baseline"], commands["migration"], deadline,
+                                                    cancellation=cancellation)
+                runner.check_cancellation(cancellation)
                 if after != bindings:
                     raise ValueError("runtime or validator changed during measured report")
                 result["input_binding_verified"] = True
                 result["events"].append({"stage": "validation", "status": validation["summary"]["verdict"]})
-                # Replace disposable reporting paths, not captured observations.
-                validation["project"], validation["migrated_project"] = map(str, roots)
                 if failure_dir is not None:
                     if validation["summary"]["verdict"] == "FAIL":
                         capsule = replay.seal({"schema_version": replay.CAPSULE_SCHEMA,
@@ -254,9 +272,10 @@ def generate_full_report(project_dir: Path, *, migrated_project: Path | None = N
                                               "expected": replay.execution_observation(validation),
                                               "scope": "exact-input re-execution; not deterministic runtime replay",
                                               "environment_captured": False, "release_certification": False})
+                        runner.check_cancellation(cancellation)
                         Path(failure_dir).mkdir(mode=0o700)
                         path = Path(failure_dir) / f"{capsule['replay_id']}.json"
-                        replay.write_capsule(capsule, path)
+                        replay.write_capsule(capsule, path, cancellation=cancellation)
                         result["failure_artifact"] = {"status": "captured", "path": str(path),
                                                       "content_sha256": capsule["content_sha256"],
                                                       "replay_id": capsule["replay_id"]}
@@ -265,6 +284,7 @@ def generate_full_report(project_dir: Path, *, migrated_project: Path | None = N
                                                       else "unavailable", "reason": validation["summary"]["verdict"]}
             else:
                 result["events"].append({"stage": "validation", "status": "NOT_RUN"})
+            runner.check_cancellation(cancellation)
             confidence = confidence_mod.generate_report(candidate["scan"]["summary"], candidate["risk_assessment"],
                                                         result["validation"])
             result["confidence"] = confidence
@@ -300,7 +320,7 @@ def generate_full_report(project_dir: Path, *, migrated_project: Path | None = N
                                          else "VALIDATED" if go else "BLOCKED")
             if measured_verdict == "ERROR":
                 result["errors"].extend(result["validation"]["errors"])
-    except (OSError, ValueError, TypeError, KeyError, RecursionError) as error:
+    except (OSError, ValueError, TypeError, KeyError, RecursionError, runner.ExecutionCancelled) as error:
         result["errors"].append({"type": type(error).__name__, "message": str(error)})
         result["workflow_status"] = "ERROR"
         result["executive_summary"]["go_decision"] = "NO-GO"
@@ -310,7 +330,38 @@ def generate_full_report(project_dir: Path, *, migrated_project: Path | None = N
             result["rollout_plan"]["validation_gate"] = {"passed": False, "blocking_reasons": [str(error)]}
         if result["failure_artifact"]["status"] == "pending":
             result["failure_artifact"] = {"status": "unavailable", "reason": str(error)}
+    record_cancellation(result, cancellation)
     return result
+
+
+def record_cancellation(report: dict, cancellation: runner.CancellationState | None) -> None:
+    """Keep all decision consumers blocked while retaining measured observations."""
+    runner.record_cancellation(report, cancellation)
+    if cancellation is None or cancellation.signum is None:
+        return
+    reason = f"execution cancelled by signal {cancellation.signum}"
+    report["workflow_status"] = "ERROR"
+    executive = report["executive_summary"]
+    blockers = list(executive.get("blocking_reasons", []))
+    if reason not in blockers:
+        blockers.append(reason)
+    executive.update(go_decision="NO-GO", blocking_reasons=blockers)
+    if report.get("validation") is not None:
+        runner.record_cancellation(report["validation"], cancellation)
+    if "confidence" in report:
+        report["confidence"]["go_decision"].update(proceed=False, blocking_reasons=blockers, rationale=reason)
+    if "rollout_plan" in report:
+        plan = report["rollout_plan"]
+        plan["execution_authorized"] = False
+        plan["validation_gate"] = {"passed": False, "blocking_reasons": blockers}
+        for phase in plan["phases"]:
+            if phase["name"] == "shadow":
+                phase["status"] = "blocked"
+            phase["execution_authorized"] = False
+    if report["failure_artifact"]["status"] == "pending":
+        report["failure_artifact"] = {"status": "unavailable", "reason": reason}
+    if not any(event["stage"] == "cancellation" for event in report["events"]):
+        report["events"].append({"stage": "cancellation", "status": "requested", "signal": cancellation.signum})
 
 
 def render_html(report: dict) -> str:
@@ -323,10 +374,18 @@ def render_html(report: dict) -> str:
             f"<pre>{html.escape(json.dumps(report, indent=2, allow_nan=False))}</pre></body></html>\n")
 
 
-def write_new_report(report: dict, path: Path, format: str = "json") -> None:
-    """Publish atomically without replacing an existing file, including a race."""
+def write_new_report(report: dict, path: Path, format: str = "json", *,
+                     cancellation: runner.CancellationState | None = None) -> None:
+    """Publish a diagnostic snapshot without replacing an existing file.
+
+    Refresh a cancellation latched during serialization/fsync before the final
+    publication checkpoint. Signals after publication do not undo a completed
+    artifact; the CLI still reports its first latched interruption.
+    """
     if format not in {"json", "html"}:
         raise ValueError("report format must be json or html")
+    record_cancellation(report, cancellation)
+    serialized_signal = cancellation.signum if cancellation is not None else None
     text = render_html(report) if format == "html" else json.dumps(report, indent=2, allow_nan=False) + "\n"
     with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".migration-report-", delete=False) as stream:
         temporary = Path(stream.name)
@@ -334,6 +393,16 @@ def write_new_report(report: dict, path: Path, format: str = "json") -> None:
             stream.write(text.encode("utf-8"))
             stream.flush()
             os.fsync(stream.fileno())
+            if cancellation is not None and cancellation.signum != serialized_signal:
+                # The signal is latched once, so at most one refresh is needed.
+                # Only this private unpublished temporary is rewritten.
+                record_cancellation(report, cancellation)
+                text = render_html(report) if format == "html" else json.dumps(report, indent=2, allow_nan=False) + "\n"
+                stream.seek(0)
+                stream.truncate()
+                stream.write(text.encode("utf-8"))
+                stream.flush()
+                os.fsync(stream.fileno())
         except BaseException:
             temporary.unlink(missing_ok=True)
             raise
@@ -384,8 +453,19 @@ def main() -> int:
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
+    cancellation = runner.CancellationState()
+    with runner.termination_signals(cancellation):
+        status = _execute_cli(args, parser, cancellation)
+        return 128 + cancellation.signum if cancellation.signum is not None else status
+
+
+def _execute_cli(args: argparse.Namespace, parser: argparse.ArgumentParser,
+                 cancellation: runner.CancellationState) -> int:
     if args.self_test:
         result = self_test()
+        if cancellation.signum is not None:
+            runner.record_cancellation(result, cancellation)
+            result["verdict"] = "ERROR"
         print(json.dumps(result, indent=2))
         return 0 if result["verdict"] == "PASS" else 1
     if args.project_dir is None:
@@ -397,10 +477,13 @@ def main() -> int:
         report = generate_full_report(args.project_dir, migrated_project=args.migrated_project,
                                       execute=args.execute, failure_dir=args.failure_dir,
                                       baseline_command=args.baseline_command, migration_command=args.migration_command,
+                                      cancellation=cancellation,
                                       compare_filesystem=args.compare_filesystem, timeout_seconds=args.timeout_seconds,
                                       total_timeout_seconds=args.total_timeout_seconds, max_output_bytes=args.max_output_bytes)
+        record_cancellation(report, cancellation)
         if args.out is not None:
-            write_new_report(report, args.out, args.format)
+            write_new_report(report, args.out, args.format, cancellation=cancellation)
+        record_cancellation(report, cancellation)
         print(json.dumps(report, indent=2, allow_nan=False) if args.json else
               f"{report['workflow_status']}: {report['executive_summary']['go_decision']}\n"
               f"{report['executive_summary']['decision_scope']}\n"
@@ -411,7 +494,9 @@ def main() -> int:
         # or the path to a successfully retained failure capsule.
         result = {"workflow_status": "ERROR", "error": str(error)}
         if report is not None:
+            record_cancellation(report, cancellation)
             result["measured_report"] = report
+        runner.record_cancellation(result, cancellation)
         print(json.dumps(result, allow_nan=False))
         return 2
 
