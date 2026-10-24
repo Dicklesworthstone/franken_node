@@ -1142,6 +1142,10 @@ def capture_project(project: Path, deadline: float, *,
     External links and special files are refused rather than touching targets
     outside the disposable workspace. This is not an atomic filesystem snapshot.
     """
+    check_cancellation(cancellation)
+    project = Path(project).resolve(strict=True)
+    if not project.is_dir():
+        raise ValueError("project capture root must be a directory")
     entries = []
     total = 0
     for directory, names, files in os.walk(project, followlinks=False, onerror=raise_walk_error):
@@ -1160,6 +1164,17 @@ def capture_project(project: Path, deadline: float, *,
                     raise ValueError(f"external workspace symlink refused: {relative}")
                 link = os.readlink(path)
                 lexical_target = Path(os.path.abspath(path.parent / link))
+                if os.path.isabs(link) and not lexical_target.is_relative_to(project):
+                    # An absolute link may spell the captured root through an
+                    # alias (for example macOS /var -> /private/var). Rebase
+                    # only that root prefix, preserving all links inside it.
+                    # Resolving the entire target would flatten a->b->c and
+                    # change behavior when a test retargets b.
+                    for prefix in (lexical_target, *lexical_target.parents):
+                        check_cancellation(cancellation)
+                        if prefix.resolve(strict=True) == project:
+                            lexical_target = project / lexical_target.relative_to(prefix)
+                            break
                 if (not lexical_target.is_relative_to(project)
                         or ".git" in lexical_target.relative_to(project).parts
                         or ".git" in target.relative_to(project).parts):

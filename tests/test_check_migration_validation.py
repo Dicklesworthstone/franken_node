@@ -40,6 +40,49 @@ class TestDiscoverTests(unittest.TestCase):
             tests = runner.discover_tests(Path(tmpdir))
         self.assertEqual(len(tests), 0)
 
+    @unittest.skipUnless(os.name == "posix", "POSIX symlink capture required")
+    def test_capture_through_root_alias_preserves_relative_links(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            project, alias = root / "project", root / "project-alias"
+            project.mkdir()
+            (project / "value").write_bytes(b"captured")
+            (project / "middle").symlink_to("value")
+            (project / "chain").symlink_to("middle")
+            alias.symlink_to(project, target_is_directory=True)
+            entries, digest = runner.capture_project(alias, time.monotonic() + 5)
+            indexed = {entry.path: entry for entry in entries}
+            self.assertEqual(indexed["chain"].link, "middle")
+            self.assertEqual(indexed["middle"].link, "value")
+            self.assertEqual(indexed["value"].data, b"captured")
+            canonical, canonical_digest = runner.capture_project(project.resolve(), time.monotonic() + 5)
+            self.assertEqual(entries, canonical)
+            self.assertEqual(digest, canonical_digest)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX symlink capture required")
+    def test_relative_escape_through_external_root_alias_is_not_rebased(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            project, alias = root / "project", root / "project-alias"
+            project.mkdir()
+            (project / "value").write_bytes(b"captured")
+            alias.symlink_to(project, target_is_directory=True)
+            (project / "escape").symlink_to("../project-alias/value")
+            with self.assertRaisesRegex(ValueError, "external or excluded workspace symlink"):
+                runner.capture_project(project.resolve(), time.monotonic() + 5)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX symlink capture required")
+    def test_absolute_root_alias_cannot_reintroduce_excluded_git_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            project, alias = root / "project", root / "project-alias"
+            (project / ".git").mkdir(parents=True)
+            (project / ".git/config").write_bytes(b"excluded metadata")
+            alias.symlink_to(project, target_is_directory=True)
+            (project / "metadata-link").symlink_to(alias / ".git/config")
+            with self.assertRaisesRegex(ValueError, "external or excluded workspace symlink"):
+                runner.capture_project(project.resolve(), time.monotonic() + 5)
+
 
 class TestCanonicalizeOutput(unittest.TestCase):
     def test_replaces_timestamps(self):
@@ -510,6 +553,24 @@ class TestLiveMigrationValidation(unittest.TestCase):
         row = report["validation_results"][0]
         self.assertEqual(row["baseline"]["streams"]["stdout"]["sha256"], runner.hashlib.sha256(b"second\n").hexdigest())
         self.assertEqual(row["baseline"]["workspace_delta"]["changed_paths"], 1)
+
+    def test_absolute_root_alias_link_preserves_intermediate_retargeting(self):
+        code = ("const fs=require('fs'); fs.unlinkSync('middle'); fs.symlinkSync('second','middle'); "
+                "console.log(fs.readFileSync('chain','utf8'));")
+        self.write_case(code)
+        for name, root in (("before-alias", self.before), ("after-alias", self.after)):
+            alias = self.root / name
+            alias.symlink_to(root, target_is_directory=True)
+            (root / "first").write_text("first", encoding="utf-8")
+            (root / "second").write_text("second", encoding="utf-8")
+            (root / "middle").symlink_to("first")
+            (root / "chain").symlink_to(alias / "middle")
+        report = self.validate(compare_filesystem=True)
+        self.assertEqual(report["summary"]["verdict"], "PASS", report["errors"])
+        row = report["validation_results"][0]
+        self.assertEqual(row["baseline"]["streams"]["stdout"]["sha256"], runner.hashlib.sha256(b"second\n").hexdigest())
+        self.assertEqual(row["baseline"]["workspace_delta"]["changed_paths"], 1)
+        self.assertEqual(row["baseline"]["workspace_delta"], row["migration"]["workspace_delta"])
 
 
 if __name__ == "__main__":

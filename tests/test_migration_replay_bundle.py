@@ -180,12 +180,17 @@ class ReplayBundleTests(unittest.TestCase):
 
     def test_concurrent_destination_creation_cannot_be_overwritten(self):
         real_link = os.link
+        expected_destination = self.bundle.parent.resolve(strict=True) / self.bundle.name
+        injections = 0
         def race(source, destination, *args, **kwargs):
-            if Path(destination) == self.bundle:
+            nonlocal injections
+            if Path(destination) == expected_destination:
+                injections += 1
                 self.bundle.write_bytes(b"concurrent evidence")
             return real_link(source, destination, *args, **kwargs)
         with patch.object(runner.os, "link", side_effect=race):
             report = self.execute()
+        self.assertEqual(injections, 1, "the concurrent writer must actually reach publication")
         self.assertEqual(report["summary"]["verdict"], "ERROR")
         self.assertEqual(self.bundle.read_bytes(), b"concurrent evidence")
         self.assertNotIn("replay_bundle", report)
