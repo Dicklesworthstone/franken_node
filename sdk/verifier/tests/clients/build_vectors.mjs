@@ -35,6 +35,10 @@ add("foreign_anchor", "incident-bundle", incidentBytes, "SIGNER_UNTRUSTED", { an
 const badSignature = clone(incident);
 badSignature.signature.signature_hex = "00".repeat(64);
 add("invalid_signature", "incident-bundle", canonical(badSignature), "SIGNATURE_INVALID");
+const truncatedSignature = clone(incident); truncatedSignature.signature.signature_hex = "ab".repeat(63);
+add("truncated_incident_signature", "incident-bundle", canonical(truncatedSignature), "SIGNATURE_MALFORMED");
+const selfSelected = clone(incident); selfSelected.signature.public_key_hex = foreign;
+add("embedded_self_selected_key", "incident-bundle", canonical(selfSelected), "SIGNER_UNTRUSTED");
 const unsigned = clone(incident); delete unsigned.signature;
 add("absent_signature", "incident-bundle", canonical(unsigned), "EVIDENCE_INVALID");
 const tampered = clone(incident); tampered.initial_state_snapshot.epoch += 1;
@@ -76,11 +80,20 @@ const rawCapture = canonical(captured("completed"));
 add("unsupported_signed_capture", "incident-bundle", withCapture(rawCapture, { schema_version: "franken-node/native-replay-capture/v99" }), "EVIDENCE_INVALID");
 add("wrong_signed_capture_digest", "incident-bundle", withCapture(rawCapture, { payload_sha256: "0".repeat(64) }), "EVIDENCE_INVALID");
 add("duplicate_inner_capture_member", "incident-bundle", withCapture(`${rawCapture.slice(0, -1)},"package":{}}`), "EVIDENCE_INVALID");
+const missingSource = captured("completed"); delete missingSource.package.source;
+add("signed_capture_missing_source", "incident-bundle", withCapture(canonical(missingSource)), "EVIDENCE_INVALID");
+const missingEffect = captured("completed"); missingEffect.host_effect_transcript = [[{}]];
+add("signed_capture_missing_effect_outcome", "incident-bundle", withCapture(canonical(missingEffect)), "EVIDENCE_INVALID");
+const ambiguousEffect = captured("completed"); ambiguousEffect.host_effect_transcript = [[{}, { Ok: null, Err: "ambiguous" }]];
+add("signed_capture_ambiguous_effect_outcome", "incident-bundle", withCapture(canonical(ambiguousEffect)), "EVIDENCE_INVALID");
+const missingSourceBinding = captured("completed"); missingSourceBinding.module_sources = { capsule_base64: "PRIVATE-SOURCE-SENTINEL", graph_input_hash: "claimed-graph" };
+add("signed_capture_missing_source_binding", "incident-bundle", withCapture(canonical(missingSourceBinding)), "EVIDENCE_INVALID");
 const privacy = clone(incident); privacy.policy_version = "P".repeat(70_000);
 add("bounded_verified_response", "incident-bundle", resealIncident(privacy), "RESPONSE_TOO_LARGE");
 add("invalid_utf8", "incident-bundle", Buffer.from([0xff]), "JSON_INVALID");
 add("nested_json_limit", "incident-bundle", "[".repeat(140) + "0" + "]".repeat(140), "JSON_INVALID");
 add("nonfinite_json_number", "incident-bundle", '{"x":1e9999}', "JSON_INVALID");
+add("integer_beyond_u64", "incident-bundle", '{"x":18446744073709551616}', "JSON_INVALID");
 add("unsupported_format", "guess", incidentBytes, "UNSUPPORTED_FORMAT");
 
 const capsule = {
