@@ -177,6 +177,7 @@ Owner: CreamPond. The operator explicitly requested implementation and a granula
 - [ ] Continue source/installed workload qualification and benign IFC/compatibility work (`.11/.12/.13`, `bd-34d5`, `bd-28sz`) in coordination with their current owners. Preserve the 1,000-case release floor and real incumbent comparisons.
 - [ ] Continue real rollout/migration (`bd-tenx3.3`, `bd-v0lgc`), then authenticated known-good recovery (`.22/.23`) with real resumed workloads.
 - [ ] Complete offline captured-application replay before full state/policy/scheduler time travel (`bd-f5b04.10/.11` → `.24/.25`); retain interruption/completeness unknowns.
+  - [x] Inspect current wiring before starting another implementation: `incident replay --execute` already calls native `reexecute`; v3 frozen-module capture is owned by BlueSpire under `.10`, and `.11` remains its independent acceptance gate. Preserve that work and dependency order; `.24` is blocked, not an unconnected CLI shortcut.
 - [ ] Finish operational trust/fleet/frontier integration (`.14/.15`, `bd-tenx3.1`, `bd-f5b04`) through actual consumer effects rather than model-only tests.
 - [ ] Finish cryptographic ZK (`.18/.19`) through a real proof backend and independently checked witness relation; do not substitute signed assertions or refusal-only behavior.
 - [ ] Earn effective blocking CI, production adoption and external replications (`.9`, `bd-tenx3.2/.6`, `bd-whxp`); configuration changes, field trials and independent actors retain their actual authority requirements.
