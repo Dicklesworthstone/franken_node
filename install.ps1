@@ -56,6 +56,23 @@ function Assert-RegularInstallFile {
   }
 }
 
+function Get-InstallFileHash {
+  param([string]$Path)
+  # Use the framework implementation directly: checksum verification must not
+  # depend on the Get-FileHash utility cmdlet being discoverable.
+  $algorithm = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+      return [System.BitConverter]::ToString($algorithm.ComputeHash($stream)).Replace("-", "").ToLowerInvariant()
+    } finally {
+      $stream.Dispose()
+    }
+  } finally {
+    $algorithm.Dispose()
+  }
+}
+
 function Assert-InstallBinary {
   param([string]$Path, [ValidateRange(1, 10000)][int]$TimeoutMillis = 10000)
   # Native nonzero exits do not throw in Windows PowerShell. Check ExitCode
@@ -107,19 +124,19 @@ function Install-VerifiedBinary {
     $staged = Join-Path $destinationRoot ".$BinaryName.install.$identity.exe"
     $backup = Join-Path $destinationRoot ".$BinaryName.previous.$identity.exe"
     $failed = Join-Path $destinationRoot ".$BinaryName.failed.$identity.exe"
-    $sourceHash = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash
+    $sourceHash = Get-InstallFileHash $Source
     # Stage next to the destination, never across volumes and never over an
     # existing file. Failure evidence is retained instead of discarded.
     [System.IO.File]::Copy($Source, $staged, $false)
     $stageHandle = [System.IO.File]::Open($staged, [System.IO.FileMode]::Open,
       [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
     try { $stageHandle.Flush($true) } finally { $stageHandle.Dispose() }
-    if ((Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash -ne $sourceHash) {
+    if ((Get-InstallFileHash $staged) -ne $sourceHash) {
       throw "Staged candidate differs from its source; previous installation preserved"
     }
     try { Assert-InstallBinary $staged }
     catch { throw "Candidate cannot run; previous installation preserved. $($_.Exception.Message)" }
-    if ((Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash -ne $sourceHash) {
+    if ((Get-InstallFileHash $staged) -ne $sourceHash) {
       throw "Candidate changed during validation; previous installation preserved"
     }
     if (Test-Path -LiteralPath $installedPath) {
@@ -133,7 +150,7 @@ function Install-VerifiedBinary {
         Write-Info "Running self-test..."
         Assert-InstallBinary $installedPath
       }
-      if ((Get-FileHash -LiteralPath $installedPath -Algorithm SHA256).Hash -ne $sourceHash) {
+      if ((Get-InstallFileHash $installedPath) -ne $sourceHash) {
         throw "Installed candidate changed during verification"
       }
     } catch {
@@ -247,9 +264,9 @@ if (-not $NoVerify) {
       exit 1
     }
   }
-  $hash = Get-FileHash $zipFile -Algorithm SHA256
-  if ($hash.Hash.ToLower() -ne $checksumToUse.ToLower()) {
-    Write-Err "Checksum mismatch! Expected $checksumToUse, got $($hash.Hash.ToLower())"
+  $hash = Get-InstallFileHash $zipFile
+  if ($hash -ne $checksumToUse.ToLowerInvariant()) {
+    Write-Err "Checksum mismatch! Expected $checksumToUse, got $hash"
     exit 1
   }
   Write-Ok "Checksum verified"
