@@ -24,6 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::DateTime;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use hex;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
@@ -53,7 +54,8 @@ const ED25519_CAPSULE_SIGNATURE_DOMAIN: &[u8] =
 ///
 /// INV-CAPSULE-VERSIONED-API: carries schema_version.
 /// INV-CAPSULE-STABLE-SCHEMA: fields are fixed for a given schema version.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CapsuleManifest {
     pub schema_version: String,
     pub capsule_id: String,
@@ -70,7 +72,8 @@ pub struct CapsuleManifest {
 ///
 /// INV-CAPSULE-NO-PRIVILEGED-ACCESS: all data needed for replay is included.
 /// INV-CAPSULE-VERDICT-REPRODUCIBLE: deterministic replay from contained data.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReplayCapsule {
     pub manifest: CapsuleManifest,
     pub payload: String,

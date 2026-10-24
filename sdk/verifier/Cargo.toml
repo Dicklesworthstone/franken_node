@@ -9,6 +9,10 @@ edition = "2024"
 description = "Verifier SDK for replaying bundles, checking canonical hashes, and verifying Ed25519 signatures"
 license = "LicenseRef-MIT-OpenAI-Anthropic-Rider"
 
+[[bin]]
+name = "franken-verifier"
+path = "src/main.rs"
+
 [features]
 fuzz = ["arbitrary"]
 test-support = []

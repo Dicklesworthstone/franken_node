@@ -195,6 +195,25 @@ impl std::error::Error for IncidentBundleError {}
 /// serde_json's normal recursion limit and end-of-input check remain enabled.
 struct UnambiguousJson(Value);
 
+/// Decode bounded evidence JSON without losing duplicate object members.
+///
+/// This is also the decoder for the offline SDK executable's signed capsule
+/// input. It preserves integer values and leaves serde_json's recursion limit
+/// enabled. Decoding alone establishes neither integrity nor authenticity.
+///
+/// # Errors
+///
+/// Rejects inputs larger than 64 MiB, invalid UTF-8/JSON, duplicate members
+/// (including escaped aliases), excessive nesting and trailing input.
+pub fn decode_evidence_json(bytes: &[u8]) -> Result<Value, IncidentBundleError> {
+    if bytes.len() > MAX_INCIDENT_BUNDLE_BYTES {
+        return Err(IncidentBundleError::TooLarge { bytes: bytes.len() });
+    }
+    let UnambiguousJson(value) =
+        serde_json::from_slice(bytes).map_err(|error| IncidentBundleError::Json(error.to_string()))?;
+    Ok(value)
+}
+
 impl<'de> Deserialize<'de> for UnambiguousJson {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct JsonVisitor;
@@ -398,11 +417,7 @@ pub fn verify_incident_bundle(
     bytes: &[u8],
     trusted_signer: &VerifyingKey,
 ) -> Result<VerifiedIncidentBundle, IncidentBundleError> {
-    if bytes.len() > MAX_INCIDENT_BUNDLE_BYTES {
-        return Err(IncidentBundleError::TooLarge { bytes: bytes.len() });
-    }
-    let UnambiguousJson(value) =
-        serde_json::from_slice(bytes).map_err(|err| IncidentBundleError::Json(err.to_string()))?;
+    let value = decode_evidence_json(bytes)?;
     let Value::Object(object) = value else {
         return Err(IncidentBundleError::NotAnObject);
     };
