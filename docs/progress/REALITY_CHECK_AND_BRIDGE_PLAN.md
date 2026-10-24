@@ -144,6 +144,32 @@ Ten new issues form five implementation/proof pairs under `bd-reality-20260923-2
 
 The immediate high-value sequence is: finish current-source/native qualification and reference expectations; repair the proven evidence-consumer/soundness gaps without relaxing gates; measure the representative compatibility/migration/containment workflows on that exact candidate; complete operational replay/control/recovery integrations; then qualify the installed release and earn field adoption/independent reproduction. Do not turn this assessment into another claim based only on issue counts.
 
+## Execution TODO — 2026-10-24
+
+Owner: CreamPond. The operator explicitly requested implementation and a granular TODO. This checklist gates this work block's completion and retires into the canonical Beads as their acceptance is actually met; it earns no capability credit. It prevents the observed failure mode of stopping at an audit or losing remaining proof obligations. It is the single execution checklist for this block, not a new reporting system.
+
+- [x] Recheck HEAD, dirty paths, graph authority and existing owners; preserve peer edits.
+- [x] Claim ready `.26` and reserve only its implementation/docs/test surfaces.
+- [ ] Deliver independently usable Python and JS/TypeScript verifier interfaces (`.26`).
+  - [ ] Expose the existing Rust cryptographic verifier through a bounded offline executable, with independently supplied public anchors and stable versioned verdict/error output.
+  - [ ] Preserve original input bytes and format distinctions; reject unsupported formats, duplicate/unknown fields, tampering, foreign keys and oversized input through the authoritative verifier.
+  - [ ] Provide callable Python and JS APIs, TypeScript declarations, process timeouts, typed process/protocol/verification errors and executable prerequisites, using no alternate package manager or unsafe code.
+  - [ ] Document exact supported signed formats, capsule/recorded-evidence scope, distribution contents and caller responsibility for trusting the verifier executable and public anchor.
+  - [ ] Build the standalone SDK binary and run focused positive/adversarial tests, then required compiler/lint/format checks through RCH. Keep inherited failures separate.
+- [ ] Execute the isolated-consumer proof (`.27`) after implementation exists.
+  - [ ] Run real Python and Node consumers outside the product/engine checkout with only distributed bindings, the verifier executable, signed CLI output and separately supplied public anchors.
+  - [ ] Compare both interfaces with Rust and independent protocol vectors; exercise signature/content/key/schema/duplicate/size/depth/UTF-8/number/protocol/timeout negatives.
+  - [ ] Run a planted broken-verifier control; retain nonzero named counts and exact distribution/source/runtime identities. Shared Rust verification counts once, not as independent cryptographic implementations.
+  - [ ] Recheck original acceptance in a fresh solo pass; close only satisfied items with cited evidence. Leave unmet scope open rather than splitting it away.
+- [ ] Repair authenticated campaign evidence consumption (`.20`) and execute its companion acceptance (`.21`): preserve the old gate and signed bytes; reproduce the signature defect; implement independent-anchor/statement/census verification; publish the old/new acceptance split without changing charter thresholds; obtain an actual fresh campaign before claiming it.
+- [ ] Continue source/installed workload qualification and benign IFC/compatibility work (`.11/.12/.13`, `bd-34d5`, `bd-28sz`) in coordination with their current owners. Preserve the 1,000-case release floor and real incumbent comparisons.
+- [ ] Continue real rollout/migration (`bd-tenx3.3`, `bd-v0lgc`), then authenticated known-good recovery (`.22/.23`) with real resumed workloads.
+- [ ] Complete offline captured-application replay before full state/policy/scheduler time travel (`bd-f5b04.10/.11` → `.24/.25`); retain interruption/completeness unknowns.
+- [ ] Finish operational trust/fleet/frontier integration (`.14/.15`, `bd-tenx3.1`, `bd-f5b04`) through actual consumer effects rather than model-only tests.
+- [ ] Finish cryptographic ZK (`.18/.19`) through a real proof backend and independently checked witness relation; do not substitute signed assertions or refusal-only behavior.
+- [ ] Earn effective blocking CI, production adoption and external replications (`.9`, `bd-tenx3.2/.6`, `bd-whxp`); configuration changes, field trials and independent actors retain their actual authority requirements.
+- [ ] At each completed work block: sync Beads, check active cycles and closure evidence, inspect the actual code/test/gate diff, fill the skill's bounded honesty/work inventory, commit coherent changes and synchronize main and its legacy mirror. Preserve dirty peer work and all guarded DB/WAL state.
+
 ## Current assessment — 2026-10-21
 
 ### Execution TODO — started 2026-10-21 after the assessment
