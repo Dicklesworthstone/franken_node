@@ -75,7 +75,7 @@ jobs:
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb
         with:
-          toolchain: nightly-2026-08-15
+          toolchain: nightly-2026-09-21
 
       - name: Build release-certification binary
         working-directory: franken_node
@@ -274,7 +274,7 @@ jobs:
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb
         with:
-          toolchain: nightly-2026-08-15
+          toolchain: nightly-2026-09-21
           targets: ${{ matrix.target }}
 
       - name: Build franken-node
@@ -335,21 +335,6 @@ jobs:
           tar -cJf "dist/$TARBALL" -C "target/${{ matrix.target }}/release" franken-node
           (cd dist && shasum -a 256 "$TARBALL" > "$TARBALL.sha256")
 
-      - name: Install and execute the packaged binary on its native host (Unix)
-        if: matrix.os != 'windows-latest'
-        working-directory: franken_node
-        shell: bash
-        run: |
-          set -euo pipefail
-          sandbox="$(mktemp -d "$RUNNER_TEMP/franken-release-install.XXXXXXXX")"
-          mkdir -p "$sandbox/home" "$sandbox/tmp" "$sandbox/bin"
-          HOME="$sandbox/home" TMPDIR="$sandbox/tmp" \
-            bash ./install.sh --offline "dist/franken-node-${{ matrix.target }}.tar.xz" \
-              --dest "$sandbox/bin" --verify --no-gum
-          cmp "target/${{ matrix.target }}/release/franken-node" "$sandbox/bin/franken-node"
-          "$sandbox/bin/franken-node" --version
-          "$sandbox/bin/franken-node" --help
-
       - name: Create zip archive (Windows)
         if: matrix.os == 'windows-latest'
         working-directory: franken_node
@@ -366,6 +351,33 @@ jobs:
           Compress-Archive -Path $binary -DestinationPath "dist/$zip" -Force
           $hash = (Get-FileHash "dist/$zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $zip`n" | Out-File -FilePath "dist/$zip.sha256" -Encoding ascii -NoNewline
+
+      - name: Qualify the installed package on its native host
+        working-directory: franken_node
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCHIVE_EXTENSION: ${{ matrix.archive }}
+        run: |
+          set -euo pipefail
+          suffix=""
+          if [[ "$TARGET" = *windows* ]]; then suffix=".exe"; fi
+          python scripts/smoke_installed_release.py \
+            --archive "dist/franken-node-$TARGET.$ARCHIVE_EXTENSION" \
+            --expected-binary "target/$TARGET/release/franken-node$suffix" \
+            --evidence-dir "$RUNNER_TEMP/franken-release-smoke"
+
+      - name: Retain installed-package acceptance streams, including failures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-smoke-${{ matrix.target }}
+          # Do not upload workspace/home/state: init creates private signing keys.
+          path: |
+            ${{ runner.temp }}/franken-release-smoke/*.json
+            ${{ runner.temp }}/franken-release-smoke/*.stdout
+            ${{ runner.temp }}/franken-release-smoke/*.stderr
+          if-no-files-found: warn
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -388,6 +400,8 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: dist
+          # Acceptance logs are separate CI artifacts, not release payloads.
+          pattern: '{x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu,aarch64-apple-darwin,x86_64-pc-windows-msvc,release-certification-bundle}'
           merge-multiple: true
 
       - name: Require the complete platform set and certified sources before signing

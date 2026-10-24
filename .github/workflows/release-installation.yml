@@ -10,6 +10,9 @@ on:
       - '.gitattributes'
       - 'tests/test_source_bootstrap.py'
       - 'tests/test_release_source_binding.py'
+      - 'scripts/smoke_installed_release.py'
+      - 'tests/test_release_matrix_contract.py'
+      - 'rust-toolchain.toml'
       - 'tests/test_install_script.py'
       - 'tests/test_install_release_lifecycle.py'
       - '.github/workflows/dist.yml'
@@ -22,6 +25,9 @@ on:
       - '.gitattributes'
       - 'tests/test_source_bootstrap.py'
       - 'tests/test_release_source_binding.py'
+      - 'scripts/smoke_installed_release.py'
+      - 'tests/test_release_matrix_contract.py'
+      - 'rust-toolchain.toml'
       - 'tests/test_install_script.py'
       - 'tests/test_install_release_lifecycle.py'
       - '.github/workflows/dist.yml'
@@ -69,6 +75,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest discover -s tests -p test_release_source_binding.py -v 2>&1 | tee evidence/release-source-binding-tests.log
+          python3 -m unittest discover -s tests -p test_release_matrix_contract.py -v 2>&1 | tee evidence/release-matrix-tests.log
           python3 -m unittest discover -s tests -p test_install_script.py -v 2>&1 | tee evidence/original-tests.log
       - name: Preserve exact installer evidence
         if: always()
