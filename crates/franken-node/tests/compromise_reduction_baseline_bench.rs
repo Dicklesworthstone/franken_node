@@ -777,14 +777,14 @@ fn wait_for_output(mut child: Child, timeout: Duration) -> Output {
     let out_handle = thread::spawn(move || {
         let mut buf = Vec::new();
         if let Some(pipe) = stdout.as_mut() {
-            let _ = pipe.read_to_end(&mut buf);
+            pipe.read_to_end(&mut buf).expect("collect complete stdout");
         }
         buf
     });
     let err_handle = thread::spawn(move || {
         let mut buf = Vec::new();
         if let Some(pipe) = stderr.as_mut() {
-            let _ = pipe.read_to_end(&mut buf);
+            pipe.read_to_end(&mut buf).expect("collect complete stderr");
         }
         buf
     });
@@ -801,8 +801,8 @@ fn wait_for_output(mut child: Child, timeout: Duration) -> Output {
     };
     Output {
         status,
-        stdout: out_handle.join().unwrap_or_default(),
-        stderr: err_handle.join().unwrap_or_default(),
+        stdout: out_handle.join().expect("stdout collector completed"),
+        stderr: err_handle.join().expect("stderr collector completed"),
     }
 }
 
