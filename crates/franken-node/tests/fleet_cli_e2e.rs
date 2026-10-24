@@ -16,8 +16,7 @@ use frankenengine_node::control_plane::fleet_transport::{
     load_active_fleet_policy,
 };
 use frankenengine_node::supply_chain::trust_card::{
-    QuarantineSource, ReputationTrend, RiskAssessment, RiskLevel, SnapshotSourceContext,
-    TrustCardInput, TrustCardMutation, TrustCardRegistry,
+    QuarantineSource, SnapshotSourceContext, TrustCardInput, TrustCardMutation, TrustCardRegistry,
 };
 use insta::{assert_json_snapshot, assert_snapshot};
 use sha2::{Digest, Sha256};
