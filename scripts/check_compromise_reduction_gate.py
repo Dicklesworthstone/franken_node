@@ -16,7 +16,7 @@ import math
 import re
 import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +35,13 @@ EXPECTED_RAW_BASELINE_RUNTIMES = ["bun", "node"]
 HISTORICAL_FIXTURE_KEY = "22fc297792f0b6ffc0bfcfdb7edb0c0aa14e025a365ec0e342e86e3829cb74b6"
 MAX_CAMPAIGN_BYTES = 64 * 1024 * 1024
 MAX_CAMPAIGN_DEPTH = 128
+CURRENT_CAMPAIGN_SCHEMA = "franken-node/compromise-campaign/v3"
+CURRENT_SIGNATURE_DOMAIN = b"franken-node:compromise-campaign-signature:v3:"
+CURRENT_CORPUS_DOMAIN = b"franken-node:compromise-campaign-corpus:v3:"
+SOURCE_ROOTS = {"franken_node", "franken_engine", "fastapi_rust", "frankentui", "sqlmodel_rust"}
+CAMPAIGN_RUNTIMES = {"node", "bun", "native"}
+CONTEXT_FIELDS = {"source_revisions", "binary_sha256", "runtime_versions", "corpus_sha256",
+                  "policy_sha256", "policy_profile", "source_selection"}
 REQUIRED_BENCHMARK_ASSERTIONS = {
     "status != baseline_unavailable": "baseline_unavailable",
     "baseline_compromised == Some(20)": "baseline_compromised, Some(20)",
@@ -347,7 +354,8 @@ def historical_fixture_signature_errors(artifact: dict[str, Any]) -> list[str]:
             or signature.get("key_id") != "adversarial-extension-runtime-bench-v2"):
         return ["unsupported historical fixture signature scope"]
     key = signature.get("public_key")
-    if not isinstance(key, str) or not hmac.compare_digest(key, HISTORICAL_FIXTURE_KEY):
+    if (not isinstance(key, str) or re.fullmatch(r"[0-9a-f]{64}", key) is None
+            or not hmac.compare_digest(key, HISTORICAL_FIXTURE_KEY)):
         return ["historical fixture signer is not the independently pinned key"]
     encoded_signature = signature.get("value")
     if (not isinstance(encoded_signature, str)
@@ -374,6 +382,266 @@ def historical_fixture_signature_errors(artifact: dict[str, Any]) -> list[str]:
     except (InvalidSignature, UnsupportedAlgorithm, ValueError):
         return ["historical fixture Ed25519 signature does not verify"]
     return []
+
+
+def _sha256_text(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", value) is not None
+
+
+def _canonical_current(value: Any) -> bytes:
+    """The v3 statement is integer-only sorted-key UTF-8 JSON."""
+    pending = [(value, 1)]
+    while pending:
+        node, depth = pending.pop()
+        if depth > MAX_CAMPAIGN_DEPTH or isinstance(node, float):
+            raise ValueError("unsupported canonical campaign value")
+        if isinstance(node, dict):
+            if any(not isinstance(key, str) for key in node):
+                raise ValueError("non-string campaign key")
+            pending.extend((item, depth + 1) for item in node.values())
+        elif isinstance(node, list):
+            pending.extend((item, depth + 1) for item in node)
+        elif node is not None and not isinstance(node, (str, int, bool)):
+            raise ValueError("unsupported canonical campaign value")
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+                      allow_nan=False).encode("utf-8")
+
+
+def _context_valid(context: Any) -> bool:
+    if not isinstance(context, dict) or set(context) != CONTEXT_FIELDS:
+        return False
+    revisions, binaries, versions = (context[key] for key in
+                                    ("source_revisions", "binary_sha256", "runtime_versions"))
+    return (
+        isinstance(revisions, dict) and set(revisions) == SOURCE_ROOTS
+        and all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value)
+                for value in revisions.values())
+        and isinstance(binaries, dict) and set(binaries) == CAMPAIGN_RUNTIMES
+        and all(_sha256_text(value) for value in binaries.values())
+        and len(set(binaries.values())) == 3
+        and isinstance(versions, dict) and set(versions) == CAMPAIGN_RUNTIMES
+        and all(isinstance(value, str) and 0 < len(value) <= 128 for value in versions.values())
+        and _sha256_text(context["corpus_sha256"]) and _sha256_text(context["policy_sha256"])
+        and context["policy_profile"] == "strict"
+        and isinstance(context["source_selection"], str)
+        and re.fullmatch(r"[0-9a-f]{40}-overlay-[0-9a-f]{64}", context["source_selection"]) is not None
+        and context["source_selection"].startswith(revisions["franken_node"] + "-overlay-")
+    )
+
+
+def _current_result(error: str | None = None) -> dict[str, Any]:
+    return {
+        "schema_version": "franken-node/compromise-campaign-verification/v1",
+        "verdict": "FAIL", "evidence_class": "unverified_campaign_statement",
+        "release_qualified": False, "independently_reproduced": False,
+        "errors": [error] if error is not None else [], "computed": {},
+    }
+
+
+def _wilson_interval_bp(successes: int, trials: int) -> list[int]:
+    z = 1.96
+    rate = successes / trials
+    denominator = 1 + z * z / trials
+    center = (rate + z * z / (2 * trials)) / denominator
+    margin = z / denominator * math.sqrt(rate * (1 - rate) / trials + z * z / (4 * trials * trials))
+    return [math.floor(max(0, min(1, value)) * 10000 + 0.5) for value in (center - margin, center + margin)]
+
+
+def verify_current_campaign(
+    artifact: dict[str, Any], trusted_public_key_hex: str, expected_context: dict[str, Any],
+    *, now: datetime | None = None, max_age_seconds: int = 86400,
+) -> dict[str, Any]:
+    """Authenticate an externally pinned v3 statement and recompute its census.
+
+    The caller must obtain its key/context independently of the statement.
+    This checks signed measurement assertions, not independent occurrence of
+    the experiment or external replication. Synthetic validator positives
+    cannot supply the real campaign acceptance required by .20/.21.
+    """
+    result = _current_result()
+    errors: list[str] = result["errors"]
+    if (not isinstance(artifact, dict) or set(artifact) != {
+            "schema_version", "campaign_id", "generated_at_utc", "context", "cases", "summary", "signature"
+    } or artifact.get("schema_version") != CURRENT_CAMPAIGN_SCHEMA):
+        errors.append("CURRENT_SCHEMA_INVALID")
+        return result
+    if (not _context_valid(expected_context) or artifact["context"] != expected_context):
+        errors.append("CURRENT_CONTEXT_MISMATCH")
+        return result
+    if (not isinstance(trusted_public_key_hex, str)
+            or re.fullmatch(r"[0-9a-f]{64}", trusted_public_key_hex) is None
+            or trusted_public_key_hex in {HISTORICAL_FIXTURE_KEY,
+                "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+                "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"}):
+        errors.append("CURRENT_MEASUREMENT_ANCHOR_REQUIRED")
+        return result
+    if (not isinstance(artifact["campaign_id"], str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", artifact["campaign_id"]) is None):
+        errors.append("CURRENT_CAMPAIGN_ID_INVALID")
+        return result
+    try:
+        generated = _parse_iso8601(artifact["generated_at_utc"])
+        clock = now if now is not None else datetime.now(timezone.utc)
+        if (type(max_age_seconds) is not int or not 0 < max_age_seconds <= 86400
+                or generated.utcoffset() is None or clock.utcoffset() is None
+                or not 0 <= (clock - generated).total_seconds() <= max_age_seconds):
+            raise ValueError("campaign outside freshness policy")
+    except (TypeError, ValueError, AttributeError, OverflowError):
+        errors.append("CURRENT_CAMPAIGN_NOT_FRESH")
+        return result
+    signature = artifact["signature"]
+    if (not isinstance(signature, dict) or set(signature) != {
+            "algorithm", "public_key_hex", "statement_sha256", "signature_hex"
+    } or signature.get("algorithm") != "ed25519"
+            or signature.get("public_key_hex") != trusted_public_key_hex
+            or not isinstance(signature.get("signature_hex"), str)
+            or re.fullmatch(r"[0-9a-f]{128}", signature["signature_hex"]) is None):
+        errors.append("CURRENT_SIGNATURE_INVALID")
+        return result
+    try:
+        unsigned = {key: value for key, value in artifact.items() if key != "signature"}
+        statement = _canonical_current(unsigned)
+        if len(statement) > MAX_CAMPAIGN_BYTES:
+            raise ValueError("statement too large")
+        digest = "sha256:" + hashlib.sha256(statement).hexdigest()
+        if signature["statement_sha256"] != digest:
+            raise ValueError("statement digest mismatch")
+        from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    except ImportError:
+        errors.append("CURRENT_CRYPTO_UNAVAILABLE")
+        return result
+    except (TypeError, ValueError, UnicodeError, RecursionError):
+        errors.append("CURRENT_STATEMENT_INVALID")
+        return result
+    try:
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(trusted_public_key_hex)).verify(
+            bytes.fromhex(signature["signature_hex"]),
+            CURRENT_SIGNATURE_DOMAIN + len(statement).to_bytes(8, "little") + statement,
+        )
+    except (InvalidSignature, UnsupportedAlgorithm, ValueError):
+        errors.append("CURRENT_SIGNATURE_INVALID")
+        return result
+    result["evidence_class"] = "authenticated_campaign_statement"
+    cases = artifact["cases"]
+    if not isinstance(cases, list) or not 20 <= len(cases) <= 10000:
+        errors.append("CURRENT_CENSUS_SIZE_INVALID")
+        return result
+    ids: set[str] = set()
+    classes: set[str] = set()
+    inventory: list[dict[str, Any]] = []
+    baseline = compromised = contained = prevented = 0
+    common = {"available", "binary_sha256", "input_sha256", "stdout", "stderr", "exit_code",
+              "timed_out", "control_executed", "compromised"}
+    native_extra = {"outcome", "evidence", "security_control", "contained"}
+    for case in cases:
+        if (not isinstance(case, dict) or set(case) != {
+                "case_id", "attack_class", "template_sha256", "observations"
+        } or not isinstance(case.get("case_id"), str)
+                or re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", case["case_id"]) is None
+                or case["case_id"] in ids or not isinstance(case.get("attack_class"), str)
+                or case["attack_class"] not in REQUIRED_ATTACK_CLASSES
+                or not _sha256_text(case.get("template_sha256"))):
+            errors.append("CURRENT_CASE_INVALID")
+            return result
+        ids.add(case["case_id"])
+        classes.add(case["attack_class"])
+        inventory.append({key: case[key] for key in ("case_id", "attack_class", "template_sha256")})
+        observations = case["observations"]
+        if not isinstance(observations, dict) or set(observations) != CAMPAIGN_RUNTIMES:
+            errors.append("CURRENT_ATTEMPTS_NOT_PAIRED")
+            return result
+        for runtime in ("node", "bun", "native"):
+            record = observations[runtime]
+            fields = common | native_extra if runtime == "native" else common
+            if (not isinstance(record, dict) or set(record) != fields
+                    or record["available"] is not True or type(record["timed_out"]) is not bool
+                    or record["binary_sha256"] != expected_context["binary_sha256"][runtime]
+                    or not _sha256_text(record["input_sha256"])
+                    or not isinstance(record["stdout"], str) or not isinstance(record["stderr"], str)
+                    or type(record["control_executed"]) is not bool or type(record["compromised"]) is not bool
+                    or record["control_executed"] != ("FN_CONTROL:" + case["case_id"] in record["stdout"].splitlines())):
+                errors.append("CURRENT_OBSERVATION_INVALID")
+                return result
+            completed = (record["timed_out"] is False and type(record["exit_code"]) is int
+                         and -(2**31) <= record["exit_code"] < 2**31)
+            stopped_after_compromise = (runtime != "native" and record["timed_out"] is True
+                                        and record["exit_code"] is None
+                                        and record["control_executed"] is True
+                                        and record["compromised"] is True)
+            # Raw network attacks can leave their event loop alive after the
+            # host oracle fires. Retain that termination as a proved baseline
+            # compromise, never as a successful defense. A native timeout is
+            # always unqualified, even when its positive control appeared.
+            if not (completed or stopped_after_compromise):
+                errors.append("CURRENT_OBSERVATION_INVALID")
+                return result
+            if runtime != "native" and (record["control_executed"] is not True
+                                         or record["compromised"] is not True):
+                errors.append("CURRENT_RAW_CONTROL_NOT_COMPROMISED")
+                return result
+        baseline += 1  # Both real incumbent legs above executed their positive controls.
+        native = observations["native"]
+        outcome = native["outcome"]
+        if (not isinstance(outcome, str) or outcome not in VALID_FRANKEN_OUTCOMES
+                or type(native["contained"]) is not bool
+                or not isinstance(native["evidence"], str) or not 0 < len(native["evidence"]) <= 4096
+                or not isinstance(native["security_control"], str)
+                or native["compromised"] != (outcome == "compromised")
+                or (native["compromised"] and native["contained"])):
+            errors.append("CURRENT_NATIVE_CLASSIFICATION_INVALID")
+            return result
+        denial_controls = {"blocked_at_lowering": "ambient_authority_denied",
+                           "capability_denied": "capability_gate", "ssrf_denied": "ssrf_gate",
+                           "ifc_denied": "ifc_gate"}
+        if outcome in denial_controls:
+            if native["security_control"] != denial_controls[outcome] or native["exit_code"] == 0:
+                errors.append("CURRENT_SECURITY_DENIAL_INVALID")
+                return result
+            if outcome == "blocked_at_lowering" and native["control_executed"]:
+                errors.append("CURRENT_SECURITY_DENIAL_INVALID")
+                return result
+        elif not native["control_executed"]:
+            errors.append("CURRENT_NATIVE_CONTROL_NOT_EXECUTED")
+            return result
+        if outcome == "executed_uncompromised" and (native["exit_code"] != 0 or native["contained"]):
+            errors.append("CURRENT_NATIVE_CLASSIFICATION_INVALID")
+            return result
+        if outcome == "contained" and (not native["contained"] or native["security_control"] != "runtime_containment"):
+            errors.append("CURRENT_NATIVE_CLASSIFICATION_INVALID")
+            return result
+        compromised += int(native["compromised"])
+        contained += int(native["contained"] and native["control_executed"])
+        prevented += int(not native["compromised"] and not native["control_executed"])
+    inventory.sort(key=lambda value: value["case_id"])
+    corpus = "sha256:" + hashlib.sha256(CURRENT_CORPUS_DOMAIN + _canonical_current(inventory)).hexdigest()
+    if corpus != expected_context["corpus_sha256"]:
+        errors.append("CURRENT_CORPUS_MISMATCH")
+    if classes != REQUIRED_ATTACK_CLASSES:
+        errors.append("CURRENT_CLASS_COVERAGE_INCOMPLETE")
+    computed = {"baseline_attempts": len(cases), "franken_attempts": len(cases),
+                "baseline_compromised": baseline, "franken_compromised": compromised,
+                "executed_containment": contained, "prevented_before_control": prevented,
+                "ratio_numerator": baseline, "ratio_denominator": max(compromised, 1),
+                "minimum_required_ratio": 10}
+    result["computed"] = computed
+    result["uncertainty"] = {
+        "method": "Wilson interval, z=1.96; descriptive, not a new gate threshold",
+        "baseline_compromise_rate_bp": _wilson_interval_bp(baseline, len(cases)),
+        "native_compromise_rate_bp": _wilson_interval_bp(compromised, len(cases)),
+        "empirical_ratio": "infinite" if compromised == 0 else f"{baseline}/{compromised}",
+        "zero_observations_prove_zero_population_risk": False,
+    }
+    if (not isinstance(artifact["summary"], dict) or artifact["summary"] != computed
+            or any(type(value) is not int for value in artifact["summary"].values())):
+        errors.append("CURRENT_SUMMARY_MISMATCH")
+    if contained < 3:
+        errors.append("CURRENT_EXECUTED_CONTAINMENT_BELOW_THREE")
+    if baseline < 10 * max(compromised, 1):
+        errors.append("CURRENT_REDUCTION_BELOW_TEN")
+    result["verdict"] = "FAIL" if errors else "PASS"
+    result["release_qualified"] = not errors
+    return result
 
 
 def _validate_benchmark_proof(report: dict[str, Any]) -> list[str]:
@@ -1096,9 +1364,24 @@ def main() -> int:
     parser.add_argument("--self-test", action="store_true", help="Run internal self-test and exit.")
     parser.add_argument("--replay-campaign", action="store_true", help="Replay campaign aggregate metrics from report artifact.")
     parser.add_argument("--report", default=str(REPORT), help="Override report path.")
+    parser.add_argument("--historical-conformance", action="store_true",
+                        help="Inspect public v2 fixture conformance only; never qualify a current release.")
+    parser.add_argument("--campaign", type=Path, help="Current signed v3 campaign statement.")
+    parser.add_argument("--expected-context", type=Path,
+                        help="Source/binary/runtime/corpus/policy pins obtained independently of the campaign.")
+    parser.add_argument("--trusted-measurement-key-hex",
+                        help="Independent measurement-authority public key, not the key selected by an artifact.")
+    parser.add_argument("--max-age-seconds", type=int, default=86400,
+                        help="Require current evidence within this bound (1..86400 seconds).")
     args = parser.parse_args()
 
     report_path = Path(args.report)
+    historical_mode = args.self_test or args.replay_campaign or args.historical_conformance
+    if sum(bool(value) for value in (args.self_test, args.replay_campaign, args.historical_conformance)) > 1:
+        parser.error("select one evidence mode")
+    current_inputs = (args.campaign, args.expected_context, args.trusted_measurement_key_hex)
+    if historical_mode and any(value is not None for value in current_inputs):
+        parser.error("current campaign inputs cannot be ignored in a historical inspection mode")
 
     if args.self_test:
         ok = self_test()
@@ -1117,16 +1400,31 @@ def main() -> int:
             print(payload)
         return 0 if payload.get("ok") else 1
 
-    result = run_checks(report_path=report_path)
+    if args.historical_conformance:
+        result = run_checks(report_path=report_path)
+    elif not all(value is not None for value in current_inputs):
+        result = _current_result("CURRENT_MEASUREMENT_INPUTS_REQUIRED")
+    else:
+        try:
+            artifact = _read_campaign_json(args.campaign)
+            context = _read_campaign_json(args.expected_context)
+        except (OSError, UnicodeError, ValueError, RecursionError):
+            result = _current_result("CURRENT_INPUT_JSON_INVALID")
+        else:
+            result = verify_current_campaign(artifact, args.trusted_measurement_key_hex, context,
+                                             max_age_seconds=args.max_age_seconds)
     if args.json:
         print(json.dumps(result, indent=2))
     else:
-        print(f"[{result['verdict']}] {result['title']}")
+        print(f"[{result['verdict']}] {result.get('title', 'Current compromise campaign statement')}")
         print(f"evidence_class={result['evidence_class']} release_qualified={result['release_qualified']}")
-        print(f"passed={result['passed']} failed={result['failed']} total={result['total']}")
-        for check in result["checks"]:
+        if "checks" in result:
+            print(f"passed={result['passed']} failed={result['failed']} total={result['total']}")
+        for check in result.get("checks", []):
             status = "PASS" if check["pass"] else "FAIL"
             print(f"- {status}: {check['check']} ({check['detail']})")
+        for error in result.get("errors", []):
+            print(f"- FAIL: {error}")
 
     return 0 if result["verdict"] == "PASS" else 1
 
