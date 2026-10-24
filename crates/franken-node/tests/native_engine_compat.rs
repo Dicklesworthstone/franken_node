@@ -2910,8 +2910,40 @@ fn full_project_compatibility_corpus() {
             "--artifacts-dir",
         ]);
         command.arg(directory);
+        // These are caller-only reference selectors and a compiler source
+        // stamp. Pass selectors as arguments; the product binary already
+        // embeds its build identity. All other ambient runtime overrides
+        // remain visible to the runner's fail-closed environment check.
+        for name in [
+            "FRANKEN_NODE_PROJECT_CORPUS_NODE",
+            "FRANKEN_NODE_PROJECT_CORPUS_BUN",
+            "FRANKEN_NODE_PROJECT_CORPUS_NODE_VERSION",
+            "FRANKEN_NODE_PROJECT_CORPUS_BUN_VERSION",
+            "FRANKEN_NODE_GIT_SHA",
+        ] {
+            command.env_remove(name);
+        }
         command
     };
+
+    let override_directory = retained.join("runtime-override");
+    let overridden = command(&override_directory, CORPUS_SHA256)
+        .env("FRANKEN_NODE_RUNTIME_PREFERRED", "node")
+        .output()
+        .expect("exercise the unchanged ambient-override guard");
+    std::fs::write(retained.join("override.stdout"), &overridden.stdout).unwrap();
+    std::fs::write(retained.join("override.stderr"), &overridden.stderr).unwrap();
+    assert_eq!(overridden.status.code(), Some(2));
+    let override_error: serde_json::Value = serde_json::from_slice(&overridden.stdout).unwrap();
+    assert_eq!(override_error["verdict"], "ERROR");
+    assert!(
+        override_error["detail"]
+            .as_str()
+            .unwrap()
+            .contains("FRANKEN_NODE_RUNTIME_PREFERRED"),
+        "{override_error}"
+    );
+    assert!(!override_directory.exists());
 
     // A different corpus must fail before starting runtimes or creating a
     // case directory. This negative uses the same real runner and inputs.
@@ -2931,7 +2963,8 @@ fn full_project_compatibility_corpus() {
         refusal["detail"]
             .as_str()
             .unwrap()
-            .contains("corpus digest does not match")
+            .contains("corpus digest does not match"),
+        "{refusal}"
     );
     assert!(!refused_directory.exists());
 
