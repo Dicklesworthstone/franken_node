@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import importlib.util
 import json
 import sys
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, mkdtemp
 from unittest import TestCase, main
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -308,6 +310,78 @@ class TestCompromiseReductionGate(TestCase):
 
     def test_self_test_passes(self) -> None:
         self.assertTrue(mod.self_test())
+
+
+class TestHistoricalCampaignSignature(TestCase):
+    """Public-fixture crypto conformance, never fresh campaign authentication."""
+
+    def setUp(self) -> None:
+        self.artifact = json.loads((ROOT / mod.BENCHMARK_ARTIFACT_RELATIVE_PATH).read_text())
+
+    def test_genuine_frozen_signature_verifies_under_external_fixture_pin(self) -> None:
+        self.assertEqual(mod.historical_fixture_signature_errors(self.artifact), [])
+
+    def test_missing_invalid_truncated_or_foreign_signatures_are_rejected(self) -> None:
+        missing = copy.deepcopy(self.artifact)
+        missing.pop("signature")
+        variants = [missing]
+        for field, value in [
+            ("value", "ed25519:" + "00" * 64),
+            ("value", "ed25519:" + "ab" * 63),
+            ("public_key", "00" * 32),
+            ("algorithm", "ed25519-unrecognized"),
+            ("key_id", "producer-selected-authority"),
+            ("payload_sha256", "sha256:" + "00" * 32),
+        ]:
+            variant = copy.deepcopy(self.artifact)
+            variant["signature"][field] = value
+            variants.append(variant)
+        for variant in variants:
+            with self.subTest(signature=variant.get("signature", {}).get("key_id")):
+                self.assertTrue(mod.historical_fixture_signature_errors(variant))
+
+    def test_resealed_timestamp_tamper_still_requires_the_signature(self) -> None:
+        self.artifact["generated_at_utc"] = "2026-10-24T00:00:00Z"
+        self.assertEqual(mod.historical_fixture_signature_errors(self.artifact),
+                         ["historical fixture signed payload digest mismatch"])
+        unsigned = {key: value for key, value in self.artifact.items() if key != "signature"}
+        payload = json.dumps(unsigned, ensure_ascii=False, separators=(",", ":")).encode()
+        self.artifact["signature"]["payload_sha256"] = "sha256:" + hashlib.sha256(payload).hexdigest()
+        self.assertEqual(mod.historical_fixture_signature_errors(self.artifact),
+                         ["historical fixture Ed25519 signature does not verify"])
+
+    def test_historical_success_is_explicitly_not_release_qualification(self) -> None:
+        result = mod.run_checks()
+        self.assertEqual(result["verdict"], "PASS")
+        self.assertEqual(result["evidence_class"], "historical_fixture_conformance")
+        self.assertIs(result["release_qualified"], False)
+        replay = mod.replay_campaign()
+        self.assertEqual(replay["evidence_class"], "unverified_report_aggregation")
+        self.assertIs(replay["release_qualified"], False)
+
+    def test_duplicate_alias_utf8_nesting_and_nonfinite_inputs_are_rejected(self) -> None:
+        root = Path(mkdtemp(prefix="bd-3cpa-decode-controls-"))
+        for name, raw in [
+            ("duplicate", b'{"signature":{},"signature":{}}'),
+            ("escaped_alias", b'{"signature":{},"\\u0073ignature":{}}'),
+            ("nested_duplicate", b'{"x":{"a":1,"a":2}}'),
+            ("utf8", b'\xff'),
+            ("depth", b'[' * 2000 + b'0' + b']' * 2000),
+            ("nonfinite", b'{"value":NaN}'),
+            ("overflowing_float", b'{"value":1e9999}'),
+            ("bounded_depth", b'{"value":' + b'[' * 129 + b'0' + b']' * 129 + b'}'),
+        ]:
+            path = root / name
+            path.write_bytes(raw)
+            with self.subTest(name=name), self.assertRaises((ValueError, UnicodeError, RecursionError)):
+                mod._read_campaign_json(path)
+
+    def test_oversize_input_is_refused_before_json_decoding(self) -> None:
+        path = Path(mkdtemp(prefix="bd-3cpa-size-control-")) / "large.json"
+        with path.open("wb") as stream:
+            stream.truncate(mod.MAX_CAMPAIGN_BYTES + 1)
+        with self.assertRaisesRegex(ValueError, "exceeds 64 MiB"):
+            mod._read_campaign_json(path)
 
 
 if __name__ == "__main__":

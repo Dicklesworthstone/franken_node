@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
-"""Verify bd-3cpa: concrete target gate for >=10x compromise reduction."""
+"""Check retained bd-3cpa campaign conformance; not current release qualification.
+
+The v2 fixture uses a public test signing seed. Signature integrity is checked
+under an independent fixture pin, but cannot authenticate a fresh experiment.
+Current-source campaign authority/census qualification is tracked in .20/.21.
+"""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
+import math
+import re
 import sys
 import tempfile
 from datetime import datetime
@@ -22,6 +30,11 @@ BENCHMARK_TEST_RELATIVE_PATH = "crates/franken-node/tests/compromise_reduction_b
 BENCHMARK_ARTIFACT_RELATIVE_PATH = "artifacts/adversarial/compromise_reduction_v2.json"
 BENCHMARK_TEST_NAME = "compromise_reduction_v2_measures_raw_runtime_baseline_against_strict_policy"
 EXPECTED_RAW_BASELINE_RUNTIMES = ["bun", "node"]
+# This is public conformance material, NOT release/measurement authority. The
+# verifier pins it independently instead of trusting an artifact-selected key.
+HISTORICAL_FIXTURE_KEY = "22fc297792f0b6ffc0bfcfdb7edb0c0aa14e025a365ec0e342e86e3829cb74b6"
+MAX_CAMPAIGN_BYTES = 64 * 1024 * 1024
+MAX_CAMPAIGN_DEPTH = 128
 REQUIRED_BENCHMARK_ASSERTIONS = {
     "status != baseline_unavailable": "baseline_unavailable",
     "baseline_compromised == Some(20)": "baseline_compromised, Some(20)",
@@ -272,6 +285,97 @@ def _count_compromised(vectors: list[dict[str, Any]]) -> tuple[int, int, int]:
     return baseline, hardened, contained
 
 
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON member")
+        value[key] = item
+    return value
+
+
+def _reject_nonfinite(value: str) -> None:
+    raise ValueError("non-finite JSON number")
+
+
+def _finite_float(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("non-finite JSON number")
+    return number
+
+
+def _read_campaign_json(path: Path) -> dict[str, Any]:
+    # Bound the actual read, not only a potentially stale stat result.
+    with path.open("rb") as stream:
+        data = stream.read(MAX_CAMPAIGN_BYTES + 1)
+    if len(data) > MAX_CAMPAIGN_BYTES:
+        raise ValueError("campaign exceeds 64 MiB")
+    value = json.loads(data.decode("utf-8"), object_pairs_hook=_unique_object,
+                       parse_constant=_reject_nonfinite, parse_float=_finite_float)
+    if not isinstance(value, dict):
+        raise ValueError("campaign root must be an object")
+    pending = [(value, 1)]
+    while pending:
+        node, depth = pending.pop()
+        if depth > MAX_CAMPAIGN_DEPTH:
+            raise ValueError("campaign nesting exceeds 128 levels")
+        if isinstance(node, dict):
+            pending.extend((item, depth + 1) for item in node.values())
+        elif isinstance(node, list):
+            pending.extend((item, depth + 1) for item in node)
+    return value
+
+
+def historical_fixture_signature_errors(artifact: dict[str, Any]) -> list[str]:
+    """Verify the retained v2 fixture signature, without granting release credit.
+
+    v2 signs compact serde struct-field order, not sorted-key JSON. The frozen
+    wire preserves that order; decoding/re-encoding a reordered artifact is
+    therefore deliberately not accepted as the same signed representation.
+    The public test seed makes this reproducible conformance only. Even a
+    valid signature here cannot authenticate a fresh production experiment.
+    """
+    signature = artifact.get("signature")
+    if not isinstance(signature, dict) or set(signature) != {
+        "algorithm", "key_id", "public_key", "payload_sha256", "value"
+    }:
+        return ["historical fixture signature is missing or malformed"]
+    if (artifact.get("schema_version") != "2.1.0"
+            or artifact.get("artifact_id") != "compromise_reduction_v2"
+            or signature.get("algorithm") != "ed25519-fixture-v1"
+            or signature.get("key_id") != "adversarial-extension-runtime-bench-v2"):
+        return ["unsupported historical fixture signature scope"]
+    key = signature.get("public_key")
+    if not isinstance(key, str) or not hmac.compare_digest(key, HISTORICAL_FIXTURE_KEY):
+        return ["historical fixture signer is not the independently pinned key"]
+    encoded_signature = signature.get("value")
+    if (not isinstance(encoded_signature, str)
+            or re.fullmatch(r"ed25519:[0-9a-f]{128}", encoded_signature) is None):
+        return ["historical fixture Ed25519 signature must contain 64 bytes"]
+    unsigned = {key: value for key, value in artifact.items() if key != "signature"}
+    try:
+        payload = json.dumps(unsigned, ensure_ascii=False, separators=(",", ":"),
+                             allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError, RecursionError):
+        return ["historical fixture payload cannot be encoded unambiguously"]
+    digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+    if signature.get("payload_sha256") != digest:
+        return ["historical fixture signed payload digest mismatch"]
+    try:
+        from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    except ImportError:
+        return ["Ed25519 verification requires the cryptography runtime; not verified"]
+    try:
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(HISTORICAL_FIXTURE_KEY)).verify(
+            bytes.fromhex(encoded_signature.removeprefix("ed25519:")), payload
+        )
+    except (InvalidSignature, UnsupportedAlgorithm, ValueError):
+        return ["historical fixture Ed25519 signature does not verify"]
+    return []
+
+
 def _validate_benchmark_proof(report: dict[str, Any]) -> list[str]:
     proof = report.get("benchmark_proof")
     if not isinstance(proof, dict):
@@ -378,13 +482,15 @@ def _validate_benchmark_proof(report: dict[str, Any]) -> list[str]:
         errors.append(f"benchmark proof artifact missing: {_safe_rel(artifact_path)}")
     else:
         try:
-            artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            errors.append(f"benchmark proof artifact invalid JSON: {exc}")
+            artifact = _read_campaign_json(artifact_path)
+        except (OSError, UnicodeError, ValueError, RecursionError):
+            errors.append("benchmark proof artifact is not bounded unambiguous JSON")
             artifact = {}
         if not isinstance(artifact, dict):
             errors.append("benchmark proof artifact root must be an object")
             artifact = {}
+
+        errors.extend(historical_fixture_signature_errors(artifact))
 
         pass_criterion = artifact.get("pass_criterion")
         if not isinstance(pass_criterion, dict):
@@ -476,11 +582,11 @@ def run_checks(spec_path: Path = SPEC, report_path: Path = REPORT) -> dict[str, 
     report_errors: list[str] = []
     if report_path.is_file():
         try:
-            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report = _read_campaign_json(report_path)
             if not isinstance(report, dict):
                 report_errors.append("report root must be an object")
-        except json.JSONDecodeError as exc:
-            report_errors.append(f"invalid report JSON: {exc}")
+        except (OSError, UnicodeError, ValueError, RecursionError):
+            report_errors.append("report is not bounded unambiguous JSON")
 
     _check("report parse", len(report_errors) == 0, "; ".join(report_errors) if report_errors else "ok")
     if report_errors:
@@ -492,6 +598,8 @@ def run_checks(spec_path: Path = SPEC, report_path: Path = REPORT) -> dict[str, 
             "title": "Compromise reduction gate (>= 10x)",
             "section": "13",
             "verdict": "FAIL",
+            "evidence_class": "historical_fixture_conformance",
+            "release_qualified": False,
             "total": total,
             "passed": passed,
             "failed": failed,
@@ -706,7 +814,7 @@ def run_checks(spec_path: Path = SPEC, report_path: Path = REPORT) -> dict[str, 
             "event_code": "CRG-002" if gate_passed else "CRG-003",
             "trace_id": trace,
             "message": (
-                "Compromise reduction gate passed."
+                "Historical campaign conformance passed; current release remains unqualified."
                 if gate_passed
                 else "Compromise reduction gate failed."
             ),
@@ -756,6 +864,8 @@ def run_checks(spec_path: Path = SPEC, report_path: Path = REPORT) -> dict[str, 
         "title": "Compromise reduction gate (>= 10x)",
         "section": "13",
         "trace_id": trace,
+        "evidence_class": "historical_fixture_conformance",
+        "release_qualified": False,
         "verdict": verdict,
         "total": total,
         "passed": passed,
@@ -777,7 +887,7 @@ def run_checks(spec_path: Path = SPEC, report_path: Path = REPORT) -> dict[str, 
 def replay_campaign(report_path: Path = REPORT) -> dict[str, Any]:
     """Replay aggregate campaign metrics from report artifact only."""
     try:
-        report = json.loads(report_path.read_text(encoding="utf-8"))
+        report = _read_campaign_json(report_path)
     except Exception as exc:
         return {
             "ok": False,
@@ -799,6 +909,8 @@ def replay_campaign(report_path: Path = REPORT) -> dict[str, Any]:
 
     payload: dict[str, Any] = {
         "ok": True,
+        "evidence_class": "unverified_report_aggregation",
+        "release_qualified": False,
         "bead_id": report.get("bead_id"),
         "campaign_name": report.get("campaign_name"),
         "total_attack_vectors": len(parsed_vectors),
@@ -1010,6 +1122,7 @@ def main() -> int:
         print(json.dumps(result, indent=2))
     else:
         print(f"[{result['verdict']}] {result['title']}")
+        print(f"evidence_class={result['evidence_class']} release_qualified={result['release_qualified']}")
         print(f"passed={result['passed']} failed={result['failed']} total={result['total']}")
         for check in result["checks"]:
             status = "PASS" if check["pass"] else "FAIL"

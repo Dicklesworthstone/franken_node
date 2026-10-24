@@ -6,6 +6,41 @@ Enforce a concrete release gate proving host-compromise reduction of `>= 10x`
 for hardened `franken_node` versus an unhardened baseline under the same
 reproducible adversarial campaign.
 
+**Current evidence scope (2026-10-24):** the retained v2 fixture and the older
+20/2 summary do not qualify a current release. The existing checker now
+cryptographically verifies the v2 fixture under an independently pinned public
+test key, rejects ambiguous/oversized input, and reports
+`evidence_class=historical_fixture_conformance`, `release_qualified=false`.
+The test seed is public conformance material, never production measurement
+authority. Report aggregation alone is labeled `unverified_report_aggregation`.
+This scope correction preserves every release invariant below; current signed
+campaign/source/binary/corpus qualification and the real measurement remain
+open under `bd-reality-20260923-26n9r.20` and its companion `.21`.
+
+The historical consumer requires Python's `cryptography` Ed25519 runtime,
+failing closed if it is unavailable. The signed v2 payload is compact UTF-8
+JSON in its retained serde struct-field order, with `signature` removed;
+reordering keys changes that signed representation. Its declared SHA-256 and
+Ed25519 signature must both verify. The public verification key is pinned by
+the consumer, never selected from the artifact. JSON readers reject duplicate
+members (including escaped aliases), invalid UTF-8/non-finite numbers, inputs
+larger than 64 MiB and nesting deeper than 128 values. No frozen artifact is
+regenerated to satisfy this check.
+
+The paired old/new gate check retains the five original control inputs:
+
+| Control | Original gate | Signature-aware historical checker |
+|---|---|---|
+| Genuine frozen artifact | PASS 27/27 | PASS 27/27, not release-qualified |
+| Missing signature | PASS 27/27 | FAIL 26/27 |
+| Invalid signature | PASS 27/27 | FAIL 26/27 |
+| Substituted embedded public key | PASS 27/27 | FAIL 26/27 |
+| Changed signed timestamp | PASS 27/27 | FAIL 26/27 |
+
+Thus this bounded five-input population has one retained acceptance, four
+new refusals, no newly admitted input and no denominator/threshold change.
+This comparison is verifier conformance, not a new security measurement.
+
 ## Quantified Invariants
 
 - `INV-CRG-RATIO`: `compromise_reduction_ratio >= 10.0`, where
