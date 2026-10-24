@@ -6,112 +6,25 @@
 //! fallback to trusting the lockfile's workspace projection.
 
 use super::{
-    Capture, DependencyAdmission, DependencyFinding, LockedPackage, MAX_DEPTH,
-    MAX_LOCK_BYTES, MAX_MANIFEST_BYTES, SECTIONS, bounded_text, flag, identity,
-    name, relative, time_remaining,
+    Capture, DependencyAdmission, DependencyFinding, LockedPackage, MAX_DEPTH, MAX_LOCK_BYTES,
+    MAX_MANIFEST_BYTES, SECTIONS, bounded_text, flag, name, time_remaining,
+};
+use crate::supply_chain::module_resolution_graph::workspace_selection::{
+    self, open_directory as directory,
 };
 use anyhow::{Context, Result, ensure};
-use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, openat, statat};
+use rustix::fs::{AtFlags, statat};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
 
 const MAX_PATTERNS: usize = 64;
 const MAX_MANIFESTS: usize = 1024;
 const MAX_DIRECTORIES: usize = 4096;
 const MAX_ENTRIES: usize = 50_000;
-const EXCLUDED: &[&str] = &[
-    "node_modules", ".git", ".beads", ".migrate-backup", ".franken-node", ".franken-rewrite",
-];
 
 pub(super) fn manifest_path(directory: &str) -> String {
     if directory.is_empty() { "package.json".into() }
     else { format!("{directory}/package.json") }
-}
-
-struct Pattern {
-    parts: Vec<String>,
-}
-
-impl Pattern {
-    fn parse(raw: &Value) -> Result<Self> {
-        let raw = bounded_text(raw, "workspace selector")?;
-        let raw = raw.strip_prefix("./").unwrap_or(raw);
-        let raw = raw.strip_suffix('/').unwrap_or(raw);
-        relative(raw)?;
-        ensure!(!raw.contains(['!', '?', '[', ']', '{', '}', '(', ')', '|']),
-            "unsupported workspace selector dialect; use literal components, * or **");
-        let parts: Vec<_> = raw.split('/').map(str::to_owned).collect();
-        ensure!(parts.len() <= MAX_DEPTH && parts.iter().all(|part|
-            !EXCLUDED.contains(&part.as_str()) && (!part.contains("**") || part == "**")),
-            "workspace selector is too deep, reserved or uses unsupported glob syntax");
-        Ok(Self { parts })
-    }
-
-    fn closure(&self, state: &mut [bool]) {
-        for (index, part) in self.parts.iter().enumerate() {
-            if state[index] && part == "**" { state[index + 1] = true; }
-        }
-    }
-
-    fn start(&self) -> Vec<bool> {
-        let mut state = vec![false; self.parts.len() + 1];
-        state[0] = true;
-        self.closure(&mut state);
-        state
-    }
-
-    fn step(&self, state: &[bool], component: &str) -> Vec<bool> {
-        let mut next = vec![false; state.len()];
-        for (index, part) in self.parts.iter().enumerate() {
-            if !state[index] { continue; }
-            if part == "**" {
-                if !component.starts_with('.') { next[index] = true; }
-            } else if component_matches(part, component) {
-                next[index + 1] = true;
-            }
-        }
-        self.closure(&mut next);
-        next
-    }
-}
-
-// Wildcards match bytes only between UTF-8 literals. No recursion/backtracking
-// tree is allocated; directory components and patterns have explicit bounds.
-fn component_matches(pattern: &str, text: &str) -> bool {
-    if text.starts_with('.') && !pattern.starts_with('.') { return false; }
-    let (pattern, text) = (pattern.as_bytes(), text.as_bytes());
-    let (mut p, mut t, mut retry) = (0, 0, 0);
-    let mut star = None;
-    while t < text.len() {
-        if p < pattern.len() && pattern[p] != b'*' && pattern[p] == text[t] {
-            p += 1;
-            t += 1;
-        } else if p < pattern.len() && pattern[p] == b'*' {
-            star = Some(p);
-            p += 1;
-            retry = t;
-        } else if let Some(index) = star {
-            retry += 1;
-            t = retry;
-            p = index + 1;
-        } else { return false; }
-    }
-    while p < pattern.len() && pattern[p] == b'*' { p += 1; }
-    p == pattern.len()
-}
-
-fn directory(root: &File, path: &str) -> Result<File> {
-    let mut current = root.try_clone()?;
-    if !path.is_empty() {
-        relative(path)?;
-        for component in path.split('/') {
-            current = File::from(openat(&current, component,
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty())?);
-        }
-    }
-    Ok(current)
 }
 
 /// The root and all selected manifests are read exactly once, even when
@@ -123,66 +36,54 @@ pub(super) fn capture(capture: &mut Capture, root: Value) -> Result<BTreeMap<Str
         Some(value) => value.as_array().context("workspaces must be an array of selectors")?.as_slice(),
     };
     ensure!(raw.len() <= MAX_PATTERNS, "workspace selector count exceeds limit");
-    let patterns: Vec<_> = raw.iter().map(Pattern::parse).collect::<Result<_>>()?;
+    let patterns = raw
+        .iter()
+        .map(|selector| bounded_text(selector, "workspace selector").map(str::to_owned))
+        .collect::<Result<Vec<_>>>()?;
     let mut manifests = BTreeMap::from([(String::new(), root)]);
     if patterns.is_empty() { return Ok(manifests); }
     let mut names = BTreeSet::new();
     if let Some(value) = manifests[""].get("name") {
         names.insert(name(bounded_text(value, "root package name")?)?.to_owned());
     }
-    let mut matched = vec![false; patterns.len()];
-    let initial: Vec<_> = patterns.iter().map(Pattern::start).collect();
-    let mut pending = vec![(String::new(), initial, 0_usize)];
-    let (mut entries, mut directories) = (0_usize, 1_usize);
-    while let Some((path, states, depth)) = pending.pop() {
-        time_remaining(capture.deadline)?;
-        let fd = directory(&capture.root, &path).with_context(|| format!("capture workspace directory {path}"))?;
-        let before = fd.metadata()?;
-        let selected = states.iter().any(|state| state.last() == Some(&true));
-        if !path.is_empty() && selected {
-            let source = manifest_path(&path);
-            ensure!(manifests.len() < MAX_MANIFESTS, "workspace manifest count exceeds limit");
-            if let Some(manifest) = capture.read(&source, MAX_MANIFEST_BYTES)? {
-                let package = name(bounded_text(manifest.get("name").context("workspace package name missing")?, "workspace package name")?)?;
-                ensure!(names.insert(package.to_owned()), "duplicate workspace/root package name");
-                // Nested project managers are not silently treated as part of
-                // the root's npm resolution contract.
-                ensure!(manifest.get("workspaces").is_none(), "nested workspace configuration requires separate assessment");
-                for (seen, state) in matched.iter_mut().zip(&states) {
-                    *seen |= state.last() == Some(&true);
-                }
-                manifests.insert(path.clone(), manifest);
-            }
-        }
-        let descend = states.iter().any(|state| state[..state.len() - 1].iter().any(|active| *active));
-        if !descend { continue; }
-        let mut children = BTreeMap::new();
-        for entry in Dir::read_from(&fd)? {
-            time_remaining(capture.deadline)?;
-            let entry = entry?;
-            let bytes = entry.file_name().to_bytes();
-            if bytes == b"." || bytes == b".." { continue; }
-            entries += 1;
-            ensure!(entries <= MAX_ENTRIES, "workspace directory entry count exceeds limit");
-            let component = entry.file_name().to_str().context("workspace directory entry must be UTF-8")?;
-            if EXCLUDED.contains(&component) { continue; }
-            let next: Vec<_> = patterns.iter().zip(&states).map(|(pattern, state)| pattern.step(state, component)).collect();
-            if !next.iter().any(|state| state.iter().any(|active| *active)) { continue; }
-            let stat = statat(&fd, entry.file_name(), AtFlags::SYMLINK_NOFOLLOW)?;
-            let kind = FileType::from_raw_mode(stat.st_mode);
-            ensure!(kind != FileType::Symlink, "workspace selector may traverse a symlink; inventory refused");
-            if kind != FileType::Directory { continue; }
-            ensure!(depth < MAX_DEPTH, "workspace traversal depth exceeds limit");
-            directories += 1;
-            ensure!(directories <= MAX_DIRECTORIES, "workspace directory count exceeds limit");
-            let child = if path.is_empty() { component.into() } else { format!("{path}/{component}") };
-            relative(&child)?;
-            ensure!(children.insert(child, next).is_none(), "workspace directory changed during enumeration");
-        }
-        ensure!(identity(&before) == identity(&fd.metadata()?), "workspace directory changed during enumeration");
-        pending.extend(children.into_iter().rev().map(|(path, state)| (path, state, depth + 1)));
-    }
-    ensure!(matched.iter().all(|seen| *seen), "workspace selector matched no package manifests; incomplete inventory refused");
+    let held_root = capture.root.try_clone()?;
+    workspace_selection::walk::<anyhow::Error>(
+        &held_root,
+        &patterns,
+        workspace_selection::Limits {
+            patterns: MAX_PATTERNS,
+            manifests: MAX_MANIFESTS,
+            directories: MAX_DIRECTORIES,
+            entries: MAX_ENTRIES,
+            depth: MAX_DEPTH,
+            require_matches: true,
+        },
+        Some(capture.deadline),
+        |path, _| {
+            let source = manifest_path(path);
+            let Some(manifest) = capture.read(&source, MAX_MANIFEST_BYTES)? else {
+                return Ok(false);
+            };
+            let package = name(bounded_text(
+                manifest
+                    .get("name")
+                    .context("workspace package name missing")?,
+                "workspace package name",
+            )?)?;
+            ensure!(
+                names.insert(package.to_owned()),
+                "duplicate workspace/root package name"
+            );
+            // Nested project managers are not silently treated as part of
+            // the root's npm resolution contract.
+            ensure!(
+                manifest.get("workspaces").is_none(),
+                "nested workspace configuration requires separate assessment"
+            );
+            manifests.insert(path.to_owned(), manifest);
+            Ok(true)
+        },
+    )?;
     Ok(manifests)
 }
 
@@ -435,20 +336,6 @@ mod tests {
         fs::create_dir_all(root.path().join("packages/a")).unwrap();
         fs::write(root.path().join("packages/a/package.json"), vec![b' '; MAX_MANIFEST_BYTES + 1]).unwrap();
         assert!(inspect(root.path(), deadline()).is_err());
-    }
-
-    #[test]
-    fn star_matcher_handles_utf8_suffixes_and_does_not_match_path_separators() {
-        assert!(component_matches("π*-app", "π工具-app"));
-        assert!(component_matches("a*b*c", "axbybc"));
-        assert!(!component_matches("a*b*c", "axbybd"));
-        assert!(!component_matches("*", ".hidden"));
-        assert!(component_matches(".hidden*", ".hidden-name"));
-        let pattern = Pattern::parse(&json!("packages/*")).unwrap();
-        let s = pattern.step(&pattern.start(), "packages");
-        let s = pattern.step(&s, "a");
-        assert_eq!(s.last(), Some(&true));
-        assert!(!pattern.step(&s, "b").iter().any(|active| *active));
     }
 
     fn linked_fixture() -> tempfile::TempDir {

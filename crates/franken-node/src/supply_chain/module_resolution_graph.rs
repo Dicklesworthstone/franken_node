@@ -28,6 +28,546 @@ pub mod package_targets;
 #[path = "module_dependency_topology.rs"]
 pub mod dependency_topology;
 
+/// Shared npm/Bun workspace selection for trust topology and checked migration.
+/// Callers retain their own manifest admission, count limits and missing-match
+/// policy. One descriptor-relative walk carries all selector states, so overlap
+/// never reopens a manifest or multiplies directory enumeration.
+#[cfg(unix)]
+pub(crate) mod workspace_selection {
+    use super::{ModuleResolutionGraphError, ModuleResolutionGraphResult, enforce_len};
+    use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, open, openat, statat};
+    use std::collections::BTreeMap;
+    use std::fs::{File, Metadata};
+    use std::os::unix::fs::MetadataExt;
+    use std::path::{Component, Path, PathBuf};
+    use std::time::Instant;
+
+    const MAX_PATH_BYTES: usize = 4096;
+    const MAX_DEPTH: usize = 64;
+    const EXCLUDED: &[&str] = &[
+        "node_modules",
+        ".git",
+        ".beads",
+        ".migrate-backup",
+        ".franken-node",
+        ".franken-rewrite",
+    ];
+
+    pub(crate) struct Limits {
+        pub patterns: usize,
+        /// Includes the already captured root manifest.
+        pub manifests: usize,
+        pub directories: usize,
+        pub entries: usize,
+        pub depth: usize,
+        pub require_matches: bool,
+    }
+
+    fn invalid(detail: impl Into<String>) -> ModuleResolutionGraphError {
+        ModuleResolutionGraphError::InvalidMetadata {
+            detail: detail.into(),
+        }
+    }
+
+    fn io_error(
+        path: impl Into<PathBuf>,
+        source: impl Into<std::io::Error>,
+    ) -> ModuleResolutionGraphError {
+        ModuleResolutionGraphError::Io {
+            path: path.into(),
+            source: source.into(),
+        }
+    }
+
+    fn check_deadline(deadline: Option<Instant>) -> ModuleResolutionGraphResult<()> {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(invalid("workspace inventory deadline exceeded"));
+        }
+        Ok(())
+    }
+
+    fn relative(path: &str) -> bool {
+        !path.is_empty()
+            && path.len() <= MAX_PATH_BYTES
+            && path.split('/').count() <= MAX_DEPTH
+            && !path.contains(['\\', ':'])
+            && !path.chars().any(char::is_control)
+            && path.split('/').all(|part| !matches!(part, "" | "." | ".."))
+    }
+
+    struct Pattern {
+        parts: Vec<String>,
+    }
+
+    impl Pattern {
+        fn parse(raw: &str) -> ModuleResolutionGraphResult<Self> {
+            let normalized = raw.strip_prefix("./").unwrap_or(raw);
+            let normalized = normalized.strip_suffix('/').unwrap_or(normalized);
+            if raw.trim() != raw
+                || raw.len() > MAX_PATH_BYTES
+                || !relative(normalized)
+                || normalized.contains(['!', '?', '[', ']', '{', '}', '(', ')', '|'])
+                || normalized
+                    .split('/')
+                    .any(|part| EXCLUDED.contains(&part) || (part.contains("**") && part != "**"))
+            {
+                return Err(ModuleResolutionGraphError::InvalidWorkspacePattern {
+                    pattern: raw.to_owned(),
+                });
+            }
+            Ok(Self {
+                parts: normalized.split('/').map(str::to_owned).collect(),
+            })
+        }
+
+        fn closure(&self, state: &mut [bool]) {
+            for (index, part) in self.parts.iter().enumerate() {
+                if state[index] && part == "**" {
+                    state[index + 1] = true;
+                }
+            }
+        }
+
+        fn start(&self) -> Vec<bool> {
+            let mut state = vec![false; self.parts.len() + 1];
+            state[0] = true;
+            self.closure(&mut state);
+            state
+        }
+
+        fn step(&self, state: &[bool], component: &str) -> Vec<bool> {
+            let mut next = vec![false; state.len()];
+            for (index, part) in self.parts.iter().enumerate() {
+                if !state[index] {
+                    continue;
+                }
+                if part == "**" {
+                    if !component.starts_with('.') {
+                        next[index] = true;
+                    }
+                } else if component_matches(part, component) {
+                    next[index + 1] = true;
+                }
+            }
+            self.closure(&mut next);
+            next
+        }
+    }
+
+    // Wildcards match bytes only between UTF-8 literals. No recursive glob
+    // backtracking tree is allocated; components, patterns and visits are bounded.
+    fn component_matches(pattern: &str, text: &str) -> bool {
+        if text.starts_with('.') && !pattern.starts_with('.') {
+            return false;
+        }
+        let (pattern, text) = (pattern.as_bytes(), text.as_bytes());
+        let (mut p, mut t, mut retry) = (0, 0, 0);
+        let mut star = None;
+        while t < text.len() {
+            if p < pattern.len() && pattern[p] != b'*' && pattern[p] == text[t] {
+                p += 1;
+                t += 1;
+            } else if p < pattern.len() && pattern[p] == b'*' {
+                star = Some(p);
+                p += 1;
+                retry = t;
+            } else if let Some(index) = star {
+                retry += 1;
+                t = retry;
+                p = index + 1;
+            } else {
+                return false;
+            }
+        }
+        while p < pattern.len() && pattern[p] == b'*' {
+            p += 1;
+        }
+        p == pattern.len()
+    }
+
+    pub(crate) fn open_root(project: &Path) -> ModuleResolutionGraphResult<File> {
+        let root = if project.is_absolute() {
+            project.to_path_buf()
+        } else {
+            project
+                .canonicalize()
+                .map_err(|error| io_error(project, error))?
+        };
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let mut directory =
+            File::from(open("/", flags, Mode::empty()).map_err(|error| io_error(&root, error))?);
+        for part in root.components() {
+            match part {
+                Component::RootDir | Component::CurDir => {}
+                Component::Normal(name) => {
+                    directory = File::from(
+                        openat(&directory, name, flags, Mode::empty())
+                            .map_err(|error| io_error(&root, error))?,
+                    );
+                }
+                _ => {
+                    return Err(invalid(
+                        "workspace authority must not contain parent traversal",
+                    ));
+                }
+            }
+        }
+        Ok(directory)
+    }
+
+    pub(crate) fn open_directory(root: &File, path: &str) -> ModuleResolutionGraphResult<File> {
+        let mut current = root.try_clone().map_err(|error| io_error(path, error))?;
+        if !path.is_empty() {
+            if !relative(path) || path.split('/').any(|part| EXCLUDED.contains(&part)) {
+                return Err(invalid(
+                    "workspace directory must be bounded, project-relative and outside reserved state",
+                ));
+            }
+            for component in path.split('/') {
+                current = File::from(
+                    openat(
+                        &current,
+                        component,
+                        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                        Mode::empty(),
+                    )
+                    .map_err(|error| io_error(path, error))?,
+                );
+            }
+        }
+        Ok(current)
+    }
+
+    fn identity(metadata: &Metadata) -> (u64, u64, u64, u32, i64, i64, i64, i64) {
+        (
+            metadata.dev(),
+            metadata.ino(),
+            metadata.len(),
+            metadata.mode(),
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+            metadata.ctime(),
+            metadata.ctime_nsec(),
+        )
+    }
+
+    /// Visit every selected directory once while its descriptor is held.
+    /// The callback owns manifest capture and returns whether one existed;
+    /// source bytes and semantic policy never move into the glob matcher.
+    pub(crate) fn walk<E: From<ModuleResolutionGraphError>>(
+        root: &File,
+        selectors: &[String],
+        limits: Limits,
+        deadline: Option<Instant>,
+        mut visit_manifest: impl FnMut(&str, &File) -> Result<bool, E>,
+    ) -> Result<(), E> {
+        check_deadline(deadline)?;
+        enforce_len("workspace patterns", selectors.len(), limits.patterns)?;
+        let patterns = selectors
+            .iter()
+            .map(|raw| Pattern::parse(raw))
+            .collect::<ModuleResolutionGraphResult<Vec<_>>>()?;
+        if patterns.is_empty() {
+            return Ok(());
+        }
+        enforce_len("package manifests", 1, limits.manifests)?;
+        enforce_len("workspace directories", 1, limits.directories)?;
+        let mut matched = vec![false; patterns.len()];
+        let initial: Vec<_> = patterns.iter().map(Pattern::start).collect();
+        let mut pending = vec![(String::new(), initial, 0_usize)];
+        let (mut entries, mut directories, mut manifests) = (0_usize, 1_usize, 1_usize);
+        while let Some((path, states, depth)) = pending.pop() {
+            check_deadline(deadline)?;
+            let fd = open_directory(root, &path)?;
+            let before = fd.metadata().map_err(|error| io_error(&path, error))?;
+            let selected = states.iter().any(|state| state.last() == Some(&true));
+            if !path.is_empty() && selected && visit_manifest(&path, &fd)? {
+                manifests = manifests.saturating_add(1);
+                enforce_len("package manifests", manifests, limits.manifests)?;
+                for (seen, state) in matched.iter_mut().zip(&states) {
+                    *seen |= state.last() == Some(&true);
+                }
+            }
+            let descend = states
+                .iter()
+                .any(|state| state[..state.len() - 1].iter().any(|active| *active));
+            if !descend {
+                let after = fd.metadata().map_err(|error| io_error(&path, error))?;
+                if identity(&before) != identity(&after) {
+                    return Err(invalid("workspace directory changed during enumeration").into());
+                }
+                continue;
+            }
+            let mut children = BTreeMap::new();
+            for entry in Dir::read_from(&fd).map_err(|error| io_error(&path, error))? {
+                check_deadline(deadline)?;
+                let entry = entry.map_err(|error| io_error(&path, error))?;
+                let bytes = entry.file_name().to_bytes();
+                if bytes == b"." || bytes == b".." {
+                    continue;
+                }
+                entries = entries.saturating_add(1);
+                enforce_len("workspace directory entries", entries, limits.entries)?;
+                let component = entry
+                    .file_name()
+                    .to_str()
+                    .map_err(|_| invalid("workspace directory entry must be UTF-8"))?;
+                if EXCLUDED.contains(&component) {
+                    continue;
+                }
+                let next: Vec<_> = patterns
+                    .iter()
+                    .zip(&states)
+                    .map(|(pattern, state)| pattern.step(state, component))
+                    .collect();
+                if !next.iter().any(|state| state.iter().any(|active| *active)) {
+                    continue;
+                }
+                let stat = statat(&fd, entry.file_name(), AtFlags::SYMLINK_NOFOLLOW)
+                    .map_err(|error| io_error(&path, error))?;
+                let kind = FileType::from_raw_mode(stat.st_mode);
+                if kind == FileType::Symlink {
+                    return Err(invalid(
+                        "workspace selector may traverse a symlink; inventory refused",
+                    )
+                    .into());
+                }
+                if kind != FileType::Directory {
+                    continue;
+                }
+                enforce_len(
+                    "workspace traversal depth",
+                    depth.saturating_add(1),
+                    limits.depth,
+                )?;
+                directories = directories.saturating_add(1);
+                enforce_len("workspace directories", directories, limits.directories)?;
+                let child = if path.is_empty() {
+                    component.into()
+                } else {
+                    format!("{path}/{component}")
+                };
+                if !relative(&child) {
+                    return Err(invalid(
+                        "workspace directory must be bounded and project-relative",
+                    )
+                    .into());
+                }
+                if children.insert(child, next).is_some() {
+                    return Err(invalid("workspace directory changed during enumeration").into());
+                }
+            }
+            let after = fd.metadata().map_err(|error| io_error(&path, error))?;
+            if identity(&before) != identity(&after) {
+                return Err(invalid("workspace directory changed during enumeration").into());
+            }
+            pending.extend(
+                children
+                    .into_iter()
+                    .rev()
+                    .map(|(path, state)| (path, state, depth + 1)),
+            );
+        }
+        if limits.require_matches && matched.iter().any(|seen| !seen) {
+            return Err(invalid(
+                "workspace selector matched no package manifests; incomplete inventory refused",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn limits() -> Limits {
+            Limits {
+                patterns: 8,
+                manifests: 8,
+                directories: 32,
+                entries: 128,
+                depth: 8,
+                require_matches: true,
+            }
+        }
+
+        #[test]
+        fn star_matcher_handles_utf8_suffixes_and_does_not_match_path_separators() {
+            assert!(component_matches("π*-app", "π工具-app"));
+            assert!(component_matches("a*b*c", "axbybc"));
+            assert!(!component_matches("a*b*c", "axbybd"));
+            assert!(!component_matches("*", ".hidden"));
+            assert!(component_matches(".hidden*", ".hidden-name"));
+            let pattern = Pattern::parse("packages/*").unwrap();
+            let s = pattern.step(&pattern.start(), "packages");
+            let s = pattern.step(&s, "a");
+            assert_eq!(s.last(), Some(&true));
+            assert!(!pattern.step(&s, "b").iter().any(|active| *active));
+        }
+
+        #[test]
+        fn overlapping_selection_preserves_caller_bounds_and_never_returns_partial_success() {
+            let root = tempfile::tempdir().unwrap();
+            for directory in ["packages/a", "packages/b"] {
+                std::fs::create_dir_all(root.path().join(directory)).unwrap();
+                std::fs::write(root.path().join(directory).join("package.json"), "{}").unwrap();
+            }
+            let held = open_root(root.path()).unwrap();
+            let selectors = ["packages/*".to_owned(), "packages/**".to_owned()];
+            let present = |path: &str| root.path().join(path).join("package.json").is_file();
+            let mut visits = Vec::new();
+            walk::<ModuleResolutionGraphError>(&held, &selectors, limits(), None, |path, _| {
+                visits.push(path.to_owned());
+                Ok(present(path))
+            })
+            .unwrap();
+            assert_eq!(visits, ["packages", "packages/a", "packages/b"]);
+
+            for (limited, expected_bound) in [
+                (
+                    Limits {
+                        patterns: 1,
+                        ..limits()
+                    },
+                    "workspace patterns",
+                ),
+                (
+                    Limits {
+                        manifests: 2,
+                        ..limits()
+                    },
+                    "package manifests",
+                ),
+                (
+                    Limits {
+                        directories: 2,
+                        ..limits()
+                    },
+                    "workspace directories",
+                ),
+                (
+                    Limits {
+                        entries: 1,
+                        ..limits()
+                    },
+                    "workspace directory entries",
+                ),
+                (
+                    Limits {
+                        depth: 1,
+                        ..limits()
+                    },
+                    "workspace traversal depth",
+                ),
+            ] {
+                let failure = walk::<ModuleResolutionGraphError>(
+                    &held,
+                    &selectors,
+                    limited,
+                    None,
+                    |path, _| Ok(present(path)),
+                )
+                .unwrap_err();
+                assert!(
+                    matches!(failure, ModuleResolutionGraphError::BoundExceeded { bound, .. }
+                    if bound == expected_bound),
+                    "{failure}"
+                );
+            }
+            let failure = walk::<ModuleResolutionGraphError>(
+                &held,
+                &selectors,
+                limits(),
+                Some(Instant::now()),
+                |_, _| panic!("expired inventory must not capture a manifest"),
+            )
+            .unwrap_err();
+            assert!(failure.to_string().contains("deadline exceeded"));
+        }
+
+        #[test]
+        fn manifest_budget_counts_packages_instead_of_selected_directories() {
+            let root = tempfile::tempdir().unwrap();
+            for directory in ["packages/a", "packages/b", "packages/z-unpackaged"] {
+                std::fs::create_dir_all(root.path().join(directory)).unwrap();
+            }
+            for directory in ["", "packages/a", "packages/b"] {
+                std::fs::write(root.path().join(directory).join("package.json"), "{}").unwrap();
+            }
+            let held = open_root(root.path()).unwrap();
+            let selectors = ["packages/**".to_owned()];
+            let exact_budget = Limits {
+                manifests: 3,
+                ..limits()
+            };
+            let mut visits = Vec::new();
+            walk::<ModuleResolutionGraphError>(&held, &selectors, exact_budget, None, |path, _| {
+                visits.push(path.to_owned());
+                Ok(root.path().join(path).join("package.json").is_file())
+            })
+            .unwrap();
+            assert_eq!(
+                visits,
+                [
+                    "packages",
+                    "packages/a",
+                    "packages/b",
+                    "packages/z-unpackaged"
+                ]
+            );
+
+            std::fs::write(root.path().join("packages/z-unpackaged/package.json"), "{}").unwrap();
+            let failure = walk::<ModuleResolutionGraphError>(
+                &held,
+                &selectors,
+                Limits {
+                    manifests: 3,
+                    ..limits()
+                },
+                None,
+                |path, _| Ok(root.path().join(path).join("package.json").is_file()),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    failure,
+                    ModuleResolutionGraphError::BoundExceeded {
+                        bound: "package manifests",
+                        limit: 3,
+                    }
+                ),
+                "{failure}"
+            );
+        }
+
+        #[test]
+        fn terminal_directory_mutation_during_manifest_capture_is_refused() {
+            for selector in ["packages/a", "packages/*"] {
+                let root = tempfile::tempdir().unwrap();
+                std::fs::create_dir_all(root.path().join("packages/a")).unwrap();
+                let held = open_root(root.path()).unwrap();
+                let failure = walk::<ModuleResolutionGraphError>(
+                    &held,
+                    &[selector.to_owned()],
+                    limits(),
+                    None,
+                    |path, _| {
+                        std::fs::write(root.path().join(path).join("new-entry"), "changed")
+                            .unwrap();
+                        Ok(true)
+                    },
+                )
+                .unwrap_err();
+                assert!(
+                    failure.to_string().contains("changed during enumeration"),
+                    "{failure}"
+                );
+            }
+        }
+    }
+}
+
 const MAX_PACKAGE_JSON_BYTES: u64 = 512 * 1024;
 const MAX_CAPTURED_MANIFEST_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PACKAGE_MANIFESTS: usize = 256;
@@ -769,6 +1309,59 @@ fn workspace_patterns(manifest: &Value) -> ModuleResolutionGraphResult<Vec<Strin
     Ok(patterns)
 }
 
+#[cfg(unix)]
+fn collect_workspace_manifest_paths(
+    project_root: &Path,
+    patterns: &[String],
+) -> ModuleResolutionGraphResult<Vec<PathBuf>> {
+    use rustix::fs::{AtFlags, FileType, statat};
+
+    if patterns.is_empty() {
+        return Ok(Vec::new());
+    }
+    let root = workspace_selection::open_root(project_root)?;
+    let mut manifests = Vec::new();
+    workspace_selection::walk::<ModuleResolutionGraphError>(
+        &root,
+        patterns,
+        workspace_selection::Limits {
+            patterns: MAX_WORKSPACE_PATTERNS,
+            manifests: MAX_PACKAGE_MANIFESTS,
+            directories: 4096,
+            entries: 50_000,
+            depth: 64,
+            // A metadata topology may be partial. Checked migration retains
+            // its stricter requirement that every selector match a manifest.
+            require_matches: false,
+        },
+        None,
+        |directory, fd| {
+            let path = project_root.join(directory).join("package.json");
+            match statat(fd, "package.json", AtFlags::SYMLINK_NOFOLLOW) {
+                Err(rustix::io::Errno::NOENT) => Ok(false),
+                Err(error) => Err(ModuleResolutionGraphError::Io {
+                    path,
+                    source: error.into(),
+                }),
+                Ok(metadata)
+                    if FileType::from_raw_mode(metadata.st_mode) == FileType::RegularFile =>
+                {
+                    manifests.push(path);
+                    Ok(true)
+                }
+                Ok(_) => invalid_metadata(
+                    "workspace package.json must be a regular file, not a symlink or device",
+                ),
+            }
+        },
+    )?;
+    manifests.sort();
+    Ok(manifests)
+}
+
+// Preserve the existing portable selection path where the descriptor-relative
+// reader and checked-migration capture are not available.
+#[cfg(not(unix))]
 fn collect_workspace_manifest_paths(
     project_root: &Path,
     patterns: &[String],
@@ -787,6 +1380,7 @@ fn collect_workspace_manifest_paths(
     Ok(manifests.into_iter().collect())
 }
 
+#[cfg(not(unix))]
 fn expand_workspace_pattern(
     project_root: &Path,
     pattern: &str,
@@ -1510,6 +2104,82 @@ mod tests {
         assert_eq!(
             canonical_module_resolution_graph_bytes(&first).expect("first bytes"),
             canonical_module_resolution_graph_bytes(&second).expect("second bytes")
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn nested_workspace_selectors_share_migration_inventory_without_duplicate_packages() {
+        use std::time::{Duration, Instant};
+
+        let tmp = tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"root","workspaces":["./packages/**/tool-*/","packages/team/plugins/*","packages/@scope/*","packages/tool-root"]}"#,
+        )
+        .unwrap();
+        let selected = [
+            ("packages/tool-root", "root-tool"),
+            ("packages/team/tool-nested", "nested-tool"),
+            ("packages/team/plugins/tool-plugin", "plugin-tool"),
+            ("packages/@scope/工具", "unicode-tool"),
+        ];
+        for (directory, name) in selected {
+            std::fs::create_dir_all(root.join(directory)).unwrap();
+            std::fs::write(
+                root.join(directory).join("package.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "name": name,
+                    "dependencies": {"shared": "^1"}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        for directory in [
+            "packages/.hidden/tool-private",
+            "packages/node_modules/tool-installed",
+            "packages/.git/tool-state",
+        ] {
+            std::fs::create_dir_all(root.join(directory)).unwrap();
+            std::fs::write(root.join(directory).join("package.json"), "not-json").unwrap();
+        }
+
+        let graph = build_canonical_module_resolution_graph(root).expect("nested workspace graph");
+        let expected = std::iter::once("package.json".to_owned())
+            .chain(
+                selected
+                    .iter()
+                    .map(|(path, _)| format!("{path}/package.json")),
+            )
+            .collect::<BTreeSet<_>>();
+        let actual = graph
+            .packages
+            .iter()
+            .map(|package| package.relative_manifest_path.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected);
+        assert_eq!(graph.packages.len(), selected.len() + 1);
+        assert_eq!(graph.dependency_edges.len(), selected.len());
+
+        let admission = crate::migration::dependency_admission::inspect(
+            root,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .expect("same selected workspace manifests in checked migration");
+        assert_eq!(admission.manifests_scanned, graph.packages.len());
+        assert_eq!(
+            admission
+                .inputs
+                .iter()
+                .map(|input| input.path.clone())
+                .collect::<BTreeSet<_>>(),
+            expected,
+        );
+        assert_eq!(
+            graph,
+            build_canonical_module_resolution_graph(root).unwrap()
         );
     }
 
