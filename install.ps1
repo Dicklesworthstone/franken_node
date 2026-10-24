@@ -10,7 +10,7 @@
 #   -Version vX.Y.Z   Install a specific release tag (default: latest)
 #   -Dest DIR         Install dir (default: %USERPROFILE%\.local\bin)
 #   -EasyMode         Add the install dir to your User PATH
-#   -Verify           Run `franken-node --version` after install
+#   -Verify           Also verify after install (candidates are always checked)
 #   -NoVerify         Skip checksum + signature verification (testing only)
 #
 # Release asset: franken-node-x86_64-pc-windows-msvc.zip (+ .sha256, + .sigstore.json)
@@ -46,6 +46,118 @@ function Test-UserPathContains {
     if ($entry.TrimEnd('\') -ieq $PathToFind.TrimEnd('\')) { return $true }
   }
   return $false
+}
+
+function Assert-RegularInstallFile {
+  param([string]$Path)
+  $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+  if ($item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+    throw "Install path must be a regular file, not a directory or link: $Path"
+  }
+}
+
+function Assert-InstallBinary {
+  param([string]$Path, [ValidateRange(1, 10000)][int]$TimeoutMillis = 10000)
+  # Native nonzero exits do not throw in Windows PowerShell. Check ExitCode
+  # explicitly, and never let an interactive/broken candidate hang an upgrade.
+  $process = New-Object System.Diagnostics.Process
+  $process.StartInfo.FileName = $Path
+  $process.StartInfo.Arguments = "--version"
+  $process.StartInfo.UseShellExecute = $false
+  $process.StartInfo.CreateNoWindow = $true
+  $process.StartInfo.RedirectStandardInput = $true
+  try {
+    if (-not $process.Start()) { throw "Could not start candidate: $Path" }
+    $process.StandardInput.Close()
+    if (-not $process.WaitForExit($TimeoutMillis)) {
+      if ([System.Environment]::Version.Major -ge 5) { $process.Kill($true) }
+      else { $process.Kill() }
+      if (-not $process.WaitForExit(1000)) { throw "Candidate cleanup is unproven: $Path" }
+      throw "Candidate version probe timed out: $Path"
+    }
+    if ($process.ExitCode -ne 0) {
+      throw "Candidate version probe exited $($process.ExitCode): $Path"
+    }
+  } finally {
+    $process.Dispose()
+  }
+}
+
+function Install-VerifiedBinary {
+  param([string]$Source, [string]$Destination, [switch]$PostVerify)
+  Assert-RegularInstallFile $Source
+  $destinationRoot = [System.IO.Path]::GetFullPath($Destination)
+  if (-not (Test-Path -LiteralPath $destinationRoot)) {
+    New-Item -ItemType Directory -Path $destinationRoot -ErrorAction Stop | Out-Null
+  }
+  $directory = Get-Item -LiteralPath $destinationRoot -Force -ErrorAction Stop
+  if (-not $directory.PSIsContainer -or ($directory.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+    throw "Install destination must be a directory, not a link: $destinationRoot"
+  }
+  $installedPath = Join-Path $destinationRoot "$BinaryName.exe"
+  $lockPath = Join-Path $destinationRoot ".$BinaryName.install.lock"
+  if (Test-Path -LiteralPath $lockPath) { Assert-RegularInstallFile $lockPath }
+  # A stable exclusive handle serializes cooperating installers. Keep the lock
+  # file after release; deleting it would let another process lock a new inode.
+  $lock = [System.IO.File]::Open($lockPath, [System.IO.FileMode]::OpenOrCreate,
+    [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+  try {
+    if (Test-Path -LiteralPath $installedPath) { Assert-RegularInstallFile $installedPath }
+    $identity = [System.Guid]::NewGuid().ToString("N")
+    $staged = Join-Path $destinationRoot ".$BinaryName.install.$identity.exe"
+    $backup = Join-Path $destinationRoot ".$BinaryName.previous.$identity.exe"
+    $failed = Join-Path $destinationRoot ".$BinaryName.failed.$identity.exe"
+    $sourceHash = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash
+    # Stage next to the destination, never across volumes and never over an
+    # existing file. Failure evidence is retained instead of discarded.
+    [System.IO.File]::Copy($Source, $staged, $false)
+    $stageHandle = [System.IO.File]::Open($staged, [System.IO.FileMode]::Open,
+      [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
+    try { $stageHandle.Flush($true) } finally { $stageHandle.Dispose() }
+    if ((Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash -ne $sourceHash) {
+      throw "Staged candidate differs from its source; previous installation preserved"
+    }
+    try { Assert-InstallBinary $staged }
+    catch { throw "Candidate cannot run; previous installation preserved. $($_.Exception.Message)" }
+    if ((Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash -ne $sourceHash) {
+      throw "Candidate changed during validation; previous installation preserved"
+    }
+    if (Test-Path -LiteralPath $installedPath) {
+      Assert-RegularInstallFile $installedPath
+      [System.IO.File]::Replace($staged, $installedPath, $backup)
+    } else {
+      [System.IO.File]::Move($staged, $installedPath)
+    }
+    try {
+      if ($PostVerify) {
+        Write-Info "Running self-test..."
+        Assert-InstallBinary $installedPath
+      }
+      if ((Get-FileHash -LiteralPath $installedPath -Algorithm SHA256).Hash -ne $sourceHash) {
+        throw "Installed candidate changed during verification"
+      }
+    } catch {
+      $verificationError = $_.Exception.Message
+      try {
+        if ([System.IO.File]::Exists($backup)) {
+          [System.IO.File]::Replace($backup, $installedPath, $failed)
+          $recovery = "prior installation restored"
+        } else {
+          [System.IO.File]::Move($installedPath, $failed)
+          $recovery = "no prior installation existed; candidate withheld"
+        }
+      } catch {
+        throw "Post-install verification failed; restoration is unproven. Inspect $backup and $installedPath. $verificationError; $($_.Exception.Message)"
+      }
+      throw "Post-install verification failed; $recovery, failed candidate retained at $failed. $verificationError"
+    }
+    if ($PostVerify) { Write-Ok "Self-test passed" }
+    if ([System.IO.File]::Exists($backup)) { Write-Info "Previous installation retained at $backup" }
+    Write-Ok "Installed $BinaryName -> $installedPath"
+    return $installedPath
+  } finally {
+    $lock.Dispose()
+  }
 }
 
 Write-Host ""
@@ -167,17 +279,22 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $extractDir = Join-Path $tmp "extract"
 [System.IO.Compression.ZipFile]::ExtractToDirectory($zipFile, $extractDir)
 
-$bin = Get-ChildItem -Path $extractDir -Recurse -Filter "$BinaryName.exe" | Select-Object -First 1
-if (-not $bin) {
-  Write-Err "Binary $BinaryName.exe not found in archive"
+$candidates = @()
+if (Test-Path -LiteralPath $extractDir) {
+  $candidates = @(Get-ChildItem -LiteralPath $extractDir -Recurse -Filter "$BinaryName.exe" -File)
+}
+if ($candidates.Count -ne 1) {
+  Write-Err "Archive must contain exactly one $BinaryName.exe; found $($candidates.Count)"
   exit 1
 }
 
 # Install
-if (-not (Test-Path $Dest)) { New-Item -ItemType Directory -Force -Path $Dest | Out-Null }
-$installed = Join-Path $Dest "$BinaryName.exe"
-Copy-Item $bin.FullName $installed -Force
-Write-Ok "Installed $BinaryName -> $installed"
+try {
+  $installed = Install-VerifiedBinary -Source $candidates[0].FullName -Destination $Dest -PostVerify:$Verify
+} catch {
+  Write-Err "Installation failed: $($_.Exception.Message)"
+  exit 1
+}
 
 # PATH management
 $path = [Environment]::GetEnvironmentVariable("PATH", "User")
@@ -196,13 +313,6 @@ if (-not (Test-UserPathContains -PathValue $path -PathToFind $Dest)) {
 
 # Cleanup
 Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
-
-# Self-test
-if ($Verify) {
-  Write-Info "Running self-test..."
-  try { & $installed --version | Out-Null; Write-Ok "Self-test passed" }
-  catch { Write-Warn "Self-test could not run $BinaryName" }
-}
 
 Write-Host ""
 Write-Ok "Done. franken-node installed at: $installed"

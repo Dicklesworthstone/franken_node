@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'install.sh'
+      - 'install.ps1'
       - 'scripts/bootstrap_source.sh'
       - 'packaging/source-siblings.tsv'
       - '.gitattributes'
@@ -20,6 +21,7 @@ on:
   pull_request:
     paths:
       - 'install.sh'
+      - 'install.ps1'
       - 'scripts/bootstrap_source.sh'
       - 'packaging/source-siblings.tsv'
       - '.gitattributes'
@@ -89,6 +91,43 @@ jobs:
             packaging/source-siblings.tsv
             tests/test_source_bootstrap.py
             tests/test_release_source_binding.py
+            tests/test_install_release_lifecycle.py
+          if-no-files-found: error
+          retention-days: 7
+
+  powershell-installer:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    env:
+      REQUIRE_POWERSHELL_INSTALL_TESTS: "1"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Exercise actual PowerShell installer transactions on Windows
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path evidence | Out-Null
+          git rev-parse HEAD | Out-File evidence/revision.txt
+          Get-FileHash install.ps1,tests/test_install_release_lifecycle.py | Format-List | Out-File evidence/source-hashes.txt
+          $PSVersionTable | ConvertTo-Json | Out-File evidence/pwsh-version.json
+          python -m unittest discover -s tests -p test_install_release_lifecycle.py -k PowerShellInstallation -v 2>&1 | Tee-Object -FilePath evidence/powershell-tests.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Exercise Windows PowerShell 5.1 native-exit handling
+        shell: pwsh
+        env:
+          INSTALL_TEST_POWERSHELL: powershell.exe
+        run: |
+          python -m unittest discover -s tests -p test_install_release_lifecycle.py -k PowerShellInstallation -v 2>&1 | Tee-Object -FilePath evidence/windows-powershell-tests.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve Windows installer results including failures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: release-installation-windows
+          path: |
+            evidence/
+            install.ps1
             tests/test_install_release_lifecycle.py
           if-no-files-found: error
           retention-days: 7

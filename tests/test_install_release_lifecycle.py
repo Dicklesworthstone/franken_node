@@ -1,20 +1,25 @@
 """Real tar/filesystem/installer tests; fixture executables are not Franken builds.
 
-No network, Rust toolchain, or native-engine compatibility claims. Downloader,
+No external network, Rust toolchain, or native-engine compatibility claims. Downloader,
 copy and rename failures are injected at their shell boundaries; archive parsing,
 checksum computation, candidate execution and file replacement remain real.
 """
 from __future__ import annotations
 
+import functools
 import hashlib
+import http.server
 import io
 import os
-from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import tarfile
 import tempfile
+import threading
 import unittest
+import zipfile
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 INSTALL_SCRIPT = ROOT / "install.sh"
@@ -339,6 +344,256 @@ class ReleaseInstallation(unittest.TestCase):
         self.assert_preserved(result)
         self.assertNotIn("x86_64", (self.root / "urls").read_text())
         self.assertNotIn("BAD_SOURCE_BUILD", result.stdout)
+
+
+class PowerShellInstallation(unittest.TestCase):
+    """Real PowerShell/ZIP/HTTP/file operations, not native Franken proof.
+
+    A host utility supplies runnable fixture bytes; malformed payloads and
+    executable fixtures exercise installer mechanics only.
+    """
+
+    def setUp(self):
+        self.pwsh = shutil.which(os.environ.get("INSTALL_TEST_POWERSHELL", "pwsh"))
+        if not self.pwsh:
+            if os.environ.get("REQUIRE_POWERSHELL_INSTALL_TESTS") == "1":
+                self.fail("required PowerShell executable is unavailable")
+            self.skipTest("PowerShell is not installed")
+        self.temporary = tempfile.TemporaryDirectory(prefix="powershell-installer-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.dest = self.root / "install with spaces"
+        self.dest.mkdir()
+        self.target = self.dest / "franken-node.exe"
+        self.old = self.runnable_payload() if os.name == "nt" else OLD
+        self.target.write_bytes(self.old)
+        self.target.chmod(0o755)
+        self.downloads = self.root / "downloads"
+        self.downloads.mkdir()
+        handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(self.downloads))
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.addCleanup(self.stop_server)
+
+    def stop_server(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+
+    def archive(self, payload: bytes, *, names=("franken-node.exe",)) -> Path:
+        path = self.downloads / "franken-node-x86_64-pc-windows-msvc.zip"
+        with zipfile.ZipFile(path, "w") as archive:
+            for name in names:
+                info = zipfile.ZipInfo(name)
+                info.external_attr = (0o100755 << 16)
+                archive.writestr(info, payload)
+        return path
+
+    def run_installer(self, archive, *options, checksum=None):
+        environment = dict(os.environ)
+        for name in ("HOME", "USERPROFILE", "LOCALAPPDATA", "TMPDIR", "TMP", "TEMP"):
+            directory = self.root / name
+            directory.mkdir(exist_ok=True)
+            environment[name] = str(directory)
+        return subprocess.run([
+            self.pwsh, "-NoProfile", "-File", str(ROOT / "install.ps1"),
+            "-Dest", str(self.dest), "-Version", "v-test", "-ArtifactUrl",
+            f"http://127.0.0.1:{self.server.server_port}/{archive.name}",
+            "-Checksum", checksum or hashlib.sha256(archive.read_bytes()).hexdigest(), *options,
+        ], cwd=self.root, env=environment, capture_output=True, text=True, timeout=35, check=False)
+
+    def assert_preserved(self, result):
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.target.read_bytes(), self.old)
+        previous = subprocess.run([str(self.target), "--version"], capture_output=True, text=True,
+                                  timeout=5, check=False)
+        self.assertEqual(previous.returncode, 0, previous.stdout + previous.stderr)
+        self.assertNotIn("Installed franken-node", result.stdout)
+        self.assertNotIn("Self-test passed", result.stdout)
+        self.assertNotIn("Done. franken-node installed", result.stdout)
+
+    def test_broken_candidate_is_checked_before_replacing_the_previous_install(self):
+        result = self.run_installer(self.archive(b"not an executable\n"))
+        self.assert_preserved(result)
+
+    def test_verify_cannot_print_success_after_an_unlaunchable_candidate(self):
+        result = self.run_installer(self.archive(b"not an executable\n"), "-Verify")
+        self.assert_preserved(result)
+
+    def runnable_payload(self):
+        source = (Path(os.environ["SystemRoot"]) / "System32/curl.exe"
+                  if os.name == "nt" else Path("/usr/bin/true"))
+        self.assertTrue(source.is_file(), f"required host utility fixture is missing: {source}")
+        return source.read_bytes()
+
+    def test_successful_upgrade_preserves_previous_bytes_as_a_backup(self):
+        payload = self.runnable_payload()
+        result = self.run_installer(self.archive(payload), "-Verify")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.target.read_bytes(), payload)
+        backups = list(self.dest.glob(".franken-node.previous.*.exe"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), self.old)
+        self.assertIn("Self-test passed", result.stdout)
+
+    def test_successful_first_install_needs_no_existing_destination(self):
+        self.target.rename(self.root / "old-fixture")
+        payload = self.runnable_payload()
+        result = self.run_installer(self.archive(payload), "-Verify")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.target.read_bytes(), payload)
+        self.assertEqual(list(self.dest.glob(".franken-node.previous.*.exe")), [])
+
+    def test_multiple_archive_binaries_cannot_select_an_arbitrary_candidate(self):
+        archive = self.archive(self.runnable_payload(), names=("first/franken-node.exe", "second/franken-node.exe"))
+        result = self.run_installer(archive)
+        self.assert_preserved(result)
+        self.assertIn("exactly one", result.stdout + result.stderr)
+
+    def test_skip_checksums_does_not_skip_candidate_validation(self):
+        result = self.run_installer(self.archive(b"not an executable\n"), "-NoVerify")
+        self.assert_preserved(result)
+
+    def test_nonzero_version_probe_preserves_the_previous_install(self):
+        source = (Path(os.environ["SystemRoot"]) / "System32/findstr.exe"
+                  if os.name == "nt" else Path("/usr/bin/false"))
+        self.assertTrue(source.is_file())
+        result = self.run_installer(self.archive(source.read_bytes()), "-Verify")
+        self.assert_preserved(result)
+        self.assertIn("version probe exited", result.stdout + result.stderr)
+
+    def test_checksum_mismatch_never_reaches_candidate_promotion(self):
+        result = self.run_installer(self.archive(self.runnable_payload()), checksum="0" * 64)
+        self.assert_preserved(result)
+        self.assertIn("Checksum mismatch", result.stdout + result.stderr)
+
+    def test_archive_without_a_binary_preserves_the_previous_install(self):
+        result = self.run_installer(self.archive(b"", names=()))
+        self.assert_preserved(result)
+        self.assertIn("exactly one", result.stdout + result.stderr)
+
+    def run_functions(self, body):
+        # Parse the actual shipped helper functions rather than reimplementing
+        # promotion. Individual process failures can be planted at that boundary;
+        # locks, stage copies, hashes, backups and replacements remain real.
+        source = self.root / "candidate.exe"
+        source.write_bytes(self.runnable_payload())
+        source.chmod(0o755)
+        driver = self.root / "driver.ps1"
+        driver.write_text(r'''
+param([string]$Installer, [string]$Source, [string]$Destination)
+$ErrorActionPreference = "Stop"
+$BinaryName = "franken-node"
+$tokens = $null
+$parseErrors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($Installer, [ref]$tokens, [ref]$parseErrors)
+if ($parseErrors.Count -ne 0) { throw "Installer parse failed" }
+foreach ($function in $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
+  . ([scriptblock]::Create($function.Extent.Text))
+}
+''' + body, encoding="utf-8")
+        return subprocess.run([self.pwsh, "-NoProfile", "-File", str(driver),
+                               "-Installer", str(ROOT / "install.ps1"), "-Source", str(source),
+                               "-Destination", str(self.dest)], cwd=self.root,
+                              capture_output=True, text=True, timeout=20, check=False)
+
+    def test_post_install_process_failure_restores_old_bytes_and_retains_the_failed_candidate(self):
+        result = self.run_functions(r'''
+$script:checks = 0
+function Assert-InstallBinary {
+  param([string]$Path)
+  $script:checks++
+  if ($script:checks -eq 2) { throw "planted post-install failure" }
+}
+Install-VerifiedBinary -Source $Source -Destination $Destination -PostVerify
+''')
+        self.assert_preserved(result)
+        failed = list(self.dest.glob(".franken-node.failed.*.exe"))
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0].read_bytes(), self.runnable_payload())
+        self.assertIn("prior installation restored", result.stderr)
+
+    def test_first_install_post_verify_failure_withholds_and_retains_the_candidate(self):
+        self.target.rename(self.root / "old-fixture")
+        result = self.run_functions(r'''
+$script:checks = 0
+function Assert-InstallBinary {
+  param([string]$Path)
+  $script:checks++
+  if ($script:checks -eq 2) { throw "planted post-install failure" }
+}
+Install-VerifiedBinary -Source $Source -Destination $Destination -PostVerify
+''')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.target.exists())
+        failed = list(self.dest.glob(".franken-node.failed.*.exe"))
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0].read_bytes(), self.runnable_payload())
+        self.assertIn("candidate withheld", result.stderr)
+
+    def test_exclusive_installer_lock_refuses_a_competing_writer_without_staging(self):
+        result = self.run_functions(r'''
+$lockPath = Join-Path $Destination ".franken-node.install.lock"
+$held = [System.IO.File]::Open($lockPath, [System.IO.FileMode]::OpenOrCreate,
+  [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+try { Install-VerifiedBinary -Source $Source -Destination $Destination }
+finally { $held.Dispose() }
+''')
+        self.assert_preserved(result)
+        self.assertEqual(list(self.dest.glob(".franken-node.install.*.exe")), [])
+        # A second invocation must reuse the stable lock after the owner exits.
+        successful = self.run_functions("Install-VerifiedBinary -Source $Source -Destination $Destination")
+        self.assertEqual(successful.returncode, 0, successful.stdout + successful.stderr)
+
+    def test_candidate_mutation_during_validation_is_not_promoted(self):
+        result = self.run_functions(r'''
+function Assert-InstallBinary {
+  param([string]$Path)
+  [System.IO.File]::WriteAllText($Path, "planted candidate mutation")
+}
+Install-VerifiedBinary -Source $Source -Destination $Destination
+''')
+        self.assert_preserved(result)
+        self.assertIn("changed during validation", result.stderr)
+
+    def test_directory_target_cannot_consume_the_candidate_as_a_child(self):
+        self.target.rename(self.root / "old-fixture")
+        self.target.mkdir()
+        result = self.run_functions("Install-VerifiedBinary -Source $Source -Destination $Destination")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.target.is_dir())
+        self.assertEqual(list(self.target.iterdir()), [])
+        self.assertEqual((self.root / "old-fixture").read_bytes(), self.old)
+
+    def test_source_copy_failure_never_replaces_the_existing_install(self):
+        result = self.run_functions('Install-VerifiedBinary -Source "$Source.absent" -Destination $Destination')
+        self.assert_preserved(result)
+        self.assertEqual(list(self.dest.glob(".franken-node.previous.*.exe")), [])
+
+    def test_locked_windows_destination_fails_promotion_and_preserves_old_bytes(self):
+        if os.name != "nt":
+            self.skipTest("Windows prohibits replacement of a file held without delete sharing")
+        result = self.run_functions(r'''
+$held = [System.IO.File]::Open((Join-Path $Destination "franken-node.exe"),
+  [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+try { Install-VerifiedBinary -Source $Source -Destination $Destination }
+finally { $held.Dispose() }
+''')
+        self.assert_preserved(result)
+        staged = list(self.dest.glob(".franken-node.install.*.exe"))
+        self.assertEqual(len(staged), 1)
+        self.assertEqual(staged[0].read_bytes(), self.runnable_payload())
+
+    def test_version_probe_timeout_is_bounded_and_does_not_replace_old_install(self):
+        if os.name == "nt":
+            self.skipTest("POSIX sleeper fixture; native Windows process timeout awaits its own executable fixture")
+        result = self.run_functions(r'''
+[System.IO.File]::WriteAllText($Source, "#!/bin/sh`nexec sleep 30`n")
+Assert-InstallBinary -Path $Source -TimeoutMillis 100
+''')
+        self.assert_preserved(result)
+        self.assertIn("timed out", result.stderr)
 
 
 if __name__ == "__main__":
