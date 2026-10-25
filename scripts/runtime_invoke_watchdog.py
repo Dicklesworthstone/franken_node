@@ -33,7 +33,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any, BinaryIO, Iterator, Sequence
+from typing import Any, BinaryIO, Iterator, Mapping, Sequence
 
 
 SCHEMA = "franken-node.runtime-invoke-watchdog.v1"
@@ -353,12 +353,26 @@ def _stop_process(process: subprocess.Popen[bytes], grace_ms: int,
                 # Failed evidence storage cannot prevent KILL and reaping.
                 cleanup["output_error"] = str(error)
 
-    cleanup["term_sent"] = _signal_group(process.pid, signal.SIGTERM)
+    def signal_scope(sig: int) -> bool:
+        # Darwin can return EPERM for a group containing only its unreaped
+        # zombie leader. Reap before signalling, but still signal the group:
+        # living descendants can outlast the leader. Handle an exit racing
+        # the signal only when poll actually reaps the previously live leader;
+        # a genuine permission failure must still propagate.
+        process.poll()
+        try:
+            return _signal_group(process.pid, sig)
+        except PermissionError:
+            if process.returncode is not None or process.poll() is None:
+                raise
+            return _signal_group(process.pid, sig)
+
+    cleanup["term_sent"] = signal_scope(signal.SIGTERM)
     # Do not equate the leader exiting with all descendants exiting. A child may
     # ignore TERM, or may inherit output handles after the leader has finished.
     if cleanup["term_sent"]:
         drain_until(time.monotonic() + grace_ms / 1000)
-        cleanup["kill_sent"] = _signal_group(process.pid, signal.SIGKILL)
+        cleanup["kill_sent"] = signal_scope(signal.SIGKILL)
     try:
         process.wait(timeout=max(grace_ms / 1000, 0.1))
         cleanup["leader_reaped"] = True
@@ -375,12 +389,14 @@ def supervise(command: Sequence[str], artifacts_dir: Path, *, wall_time_ms: int 
               max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
               stdin_data: bytes | None = None,
               max_stdin_bytes: int = DEFAULT_MAX_STDIN_BYTES,
-              cancellation: Cancellation | None = None) -> dict[str, Any]:
+              cancellation: Cancellation | None = None,
+              env: Mapping[str, str] | None = None) -> dict[str, Any]:
     """Supervise a native invocation. Never parse logs to guess timeout origin.
 
     The command is an argument vector, not a shell command. The output directory
     is exclusive so a failed launch cannot reuse a previous run's success files.
-    No environment variables are copied into the receipt.
+    An explicit environment applies only to the child. No environment variables
+    are copied into the receipt; omitting env preserves normal inheritance.
     """
     cancellation = cancellation or Cancellation()
     positive_ms(str(wall_time_ms))
@@ -452,7 +468,7 @@ def supervise(command: Sequence[str], artifacts_dir: Path, *, wall_time_ms: int 
                 event("wrapper_deadline_exceeded")
                 return receipt
             try:
-                process = subprocess.Popen(list(command), cwd=receipt["cwd"],
+                process = subprocess.Popen(list(command), cwd=receipt["cwd"], env=env,
                                            stdin=subprocess.DEVNULL if stdin_data is None else subprocess.PIPE,
                                            stdout=subprocess.PIPE,
                                            stderr=subprocess.PIPE, bufsize=0, start_new_session=True)

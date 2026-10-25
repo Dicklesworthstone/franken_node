@@ -15,12 +15,21 @@ import http.server
 import json
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import tempfile
 import threading
 from pathlib import Path
 from urllib.parse import quote
+
+try:
+    from scripts.runtime_invoke_watchdog import supervise
+except ModuleNotFoundError:
+    from runtime_invoke_watchdog import supervise
+
+WALL_TIME_MS = 60_000
+MAX_OUTPUT_BYTES = 1 << 20
 
 
 class SmokeFailure(RuntimeError):
@@ -62,25 +71,55 @@ class Probe:
         prefix = self.evidence / f"{len(self.steps):02d}-{name}"
         result = None
         error = None
-        # Files, rather than pipes, retain partial output on timeout and avoid
-        # buffering unbounded candidate output in the qualification process.
-        with prefix.with_suffix(".stdout").open("xb") as out, prefix.with_suffix(".stderr").open("xb") as err:
+        supervision_path = None
+        if os.name == "posix":
+            scope = prefix.with_suffix(".watchdog")
+            supervision_path = str(prefix.with_suffix(".watchdog.json"))
             try:
-                result = subprocess.run(command, cwd=self.workspace, env=self.env,
-                                        stdin=subprocess.DEVNULL, stdout=out, stderr=err,
-                                        timeout=60, check=False)
-            except (OSError, subprocess.TimeoutExpired) as failure:
+                receipt = supervise(command, scope, cwd=self.workspace, env=self.env,
+                                    wall_time_ms=WALL_TIME_MS, max_output_bytes=MAX_OUTPUT_BYTES)
+                if receipt["runtime_exit_code"] is not None:
+                    result = subprocess.CompletedProcess(command, receipt["runtime_exit_code"])
+                if (receipt["outcome"] not in ("completed", "runtime_failed")
+                        or not receipt["output_complete"] or not receipt["stdin_delivery_complete"]
+                        or not receipt.get("cleanup", {}).get("leader_reaped")):
+                    error = f"watchdog {receipt['outcome']}; inspect {supervision_path}"
+            except (OSError, ValueError) as failure:
                 error = str(failure)
+            finally:
+                # Keep the existing public stream layout as well as the bounded
+                # raw capture and typed supervision receipt. Neither is reused.
+                for stream_name, suffix in (("stdout.log", ".stdout"), ("stderr.log", ".stderr")):
+                    with prefix.with_suffix(suffix).open("xb") as output:
+                        source = scope / stream_name
+                        if source.exists():
+                            with source.open("rb") as captured:
+                                shutil.copyfileobj(captured, output)
+                # dist.yml retains root-level JSON only, excluding private
+                # workspace/home state. Keep the environment-free receipt in
+                # that same public evidence set rather than an ephemeral path.
+                if (scope / "watchdog.json").is_file():
+                    with (scope / "watchdog.json").open("rb") as source, \
+                            Path(supervision_path).open("xb") as output:
+                        shutil.copyfileobj(source, output)
+        else:
+            with prefix.with_suffix(".stdout").open("xb") as out, prefix.with_suffix(".stderr").open("xb") as err:
+                try:
+                    result = subprocess.run(command, cwd=self.workspace, env=self.env,
+                                            stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+                                            timeout=WALL_TIME_MS / 1000, check=False)
+                except (OSError, subprocess.TimeoutExpired) as failure:
+                    error = str(failure)
         step = {"name": name, "command": command, "cwd": str(self.workspace),
                 "expected_exit": expected_exit,
                 "returncode": None if result is None else result.returncode,
-                "error": error, "passed": False}
+                "error": error, "passed": False, "supervision_receipt": supervision_path}
         self.steps.append(step)
         if error is None:
             streams = [prefix.with_suffix(suffix) for suffix in (".stdout", ".stderr")]
-            if any(path.stat().st_size > 1 << 20 for path in streams):
+            if any(path.stat().st_size > MAX_OUTPUT_BYTES for path in streams):
                 step["error"] = "candidate output exceeds 1 MiB; raw streams retained"
-            actual, errors = [path.read_bytes() if path.stat().st_size <= 1 << 20 else b"" for path in streams]
+            actual, errors = [path.read_bytes() if path.stat().st_size <= MAX_OUTPUT_BYTES else b"" for path in streams]
             # Signals, Windows exception statuses and usage errors are not
             # policy refusals. The governed refusal contract is exit 1.
             valid_exit = result.returncode == expected_exit

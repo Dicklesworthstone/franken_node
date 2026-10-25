@@ -41,6 +41,19 @@ class WatchdogTests(unittest.TestCase):
         self.assertEqual((self.artifacts / "stderr.log").read_bytes(), b"warning\x00")
         self.assertEqual(json.loads((self.artifacts / "watchdog.json").read_text()), result)
 
+    def test_explicit_environment_is_child_scoped_and_not_in_receipt(self):
+        secret = "watchdog-environment-private-test-value"
+        key = "WATCHDOG_CHILD_ENVIRONMENT_TEST"
+        with mock.patch.dict(os.environ, {key: "parent value"}):
+            result = self.run_code(
+                "import hashlib,os; print(hashlib.sha256(os.environ['" + key + "'].encode()).hexdigest())",
+                env={key: secret})
+            self.assertEqual(os.environ[key], "parent value")
+        self.assertEqual(result["outcome"], "completed")
+        self.assertEqual((self.artifacts / "stdout.log").read_text().strip(),
+                         hashlib.sha256(secret.encode()).hexdigest())
+        self.assertNotIn(secret, (self.artifacts / "watchdog.json").read_text())
+
     def test_timeout_preserves_partial_evidence_and_stops_ignoring_process(self):
         result = self.run_code("import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
                                "print('before hang',flush=True); time.sleep(60)", budget=1000)
@@ -135,16 +148,24 @@ class WatchdogTests(unittest.TestCase):
         # reaps it; kill(pid, 0) alone incorrectly reports it as still running.
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
-            try:
-                state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
-            except FileNotFoundError:
-                return
+            if Path("/proc/self/stat").exists():
+                try:
+                    state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+                except FileNotFoundError:
+                    return
+            else:
+                observed = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
+                                          capture_output=True, text=True, timeout=2)
+                self.assertFalse(observed.stderr, observed.stderr)
+                if observed.returncode == 1 and not observed.stdout.strip():
+                    return
+                self.assertEqual(observed.returncode, 0, observed.stderr)
+                state = observed.stdout.strip()[:1]
             if state == "Z":
                 return
             time.sleep(0.01)
         self.fail(f"process {pid} remained alive after cleanup")
 
-    @unittest.skipUnless(Path("/proc/self/stat").exists(), "process-state assertion uses procfs")
     def test_descendant_ignoring_term_is_killed_after_leader_exits(self):
         code = """
 import os,signal,time
@@ -167,7 +188,6 @@ else:
         self.assertTrue(result["cleanup"]["kill_sent"])
         self.assert_process_stopped(pid)
 
-    @unittest.skipUnless(Path("/proc/self/stat").exists(), "process-state assertion uses procfs")
     def test_deadline_stops_parent_and_descendant(self):
         code = """
 import os,signal,time
@@ -182,6 +202,33 @@ time.sleep(60)
         pid = int((self.artifacts / "stdout.log").read_text())
         self.assert_process_stopped(pid)
         self.assert_process_stopped(result["runtime_pid"])
+
+    def test_term_handler_exit_does_not_leave_ignoring_descendant(self):
+        code = """
+import os,signal,time
+reader,writer=os.pipe()
+pid=os.fork()
+if pid == 0:
+    os.close(reader)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    os.write(writer,b'ready')
+    os.close(writer)
+    time.sleep(60)
+else:
+    os.close(writer)
+    os.read(reader,5)
+    signal.signal(signal.SIGTERM, lambda *_: os._exit(0))
+    print(pid,flush=True)
+    time.sleep(60)
+"""
+        result = self.run_code(code, budget=1000)
+        pid = int((self.artifacts / "stdout.log").read_text())
+        self.assertEqual(result["outcome"], "wrapper_timeout")
+        self.assertTrue(result["fail_closed"])
+        self.assertEqual(result["runtime_exit_code"], 0)
+        self.assertTrue(result["cleanup"]["leader_reaped"])
+        self.assertTrue(result["cleanup"]["kill_sent"])
+        self.assert_process_stopped(pid)
 
     def test_preexisting_cancellation_never_launches_runtime(self):
         cancellation = watchdog.Cancellation()
@@ -700,7 +747,7 @@ sys.stdout.buffer.write(data)
             capture_output=True, text=True, timeout=5)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         result = json.loads(completed.stdout)
-        self.assertEqual(result["cwd"], str(child_dir))
+        self.assertEqual(result["cwd"], str(child_dir.resolve()))
         self.assertTrue(result["stdin_delivery_complete"])
         self.assertEqual((self.artifacts / "stdin.bin").read_bytes(), source.read_bytes())
         self.assertEqual((self.artifacts / "stdout.log").read_bytes(), source.read_bytes())

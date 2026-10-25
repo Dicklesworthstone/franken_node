@@ -10,8 +10,11 @@ import importlib.util
 import json
 import os
 import re
+import signal
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -273,6 +276,70 @@ class TestInstalledReleaseProbe(unittest.TestCase):
             probe.run("usage", [sys.executable, "-c", "import sys; print('run blocked by active safe mode'); sys.exit(2)"],
                       expected_exit=1, diagnostic=b"run blocked by active safe mode")
         self.assertEqual(probe.steps[-1]["returncode"], 2)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX watchdog integration")
+    def test_output_flood_is_stopped_with_bounded_raw_evidence(self):
+        probe = self.probe("output-flood")
+        with self.assertRaises(SMOKE.SmokeFailure):
+            probe.run("flood", [sys.executable, "-c", "import os; os.write(1,b'x'*(4*1024*1024))"])
+        receipt = json.loads(Path(probe.steps[-1]["supervision_receipt"]).read_text())
+        self.assertEqual(receipt["outcome"], "output_limit_exceeded")
+        self.assertTrue(receipt["fail_closed"])
+        self.assertTrue(receipt["cleanup"]["leader_reaped"])
+        for path in (probe.evidence / "00-flood.stdout", Path(receipt["stdout_path"])):
+            self.assertEqual(path.stat().st_size, 1 << 20)
+            self.assertEqual(path.read_bytes(), b"x" * (1 << 20))
+
+    @unittest.skipUnless(os.name == "posix", "POSIX watchdog integration")
+    def test_timeout_cannot_pass_after_zero_exit_or_leave_descendant_running(self):
+        probe = self.probe("scope-timeout")
+        code = """
+import os,signal,time
+reader,writer=os.pipe()
+pid=os.fork()
+if pid == 0:
+    os.close(reader)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    os.write(writer,b'ready')
+    os.close(writer)
+    time.sleep(60)
+else:
+    os.close(writer)
+    os.read(reader,5)
+    signal.signal(signal.SIGTERM, lambda *_: os._exit(0))
+    print(pid,flush=True)
+    time.sleep(60)
+"""
+        pid = None
+        try:
+            with patch.object(SMOKE, "WALL_TIME_MS", 1000), self.assertRaises(SMOKE.SmokeFailure):
+                probe.run("timeout", [sys.executable, "-u", "-c", code])
+            pid = int((probe.evidence / "00-timeout.stdout").read_text())
+            receipt = json.loads(Path(probe.steps[-1]["supervision_receipt"]).read_text())
+            self.assertEqual(receipt["outcome"], "wrapper_timeout")
+            self.assertEqual(receipt["runtime_exit_code"], 0)
+            self.assertTrue(receipt["cleanup"]["leader_reaped"])
+            self.assertTrue(receipt["cleanup"]["kill_sent"])
+            self.assertFalse(probe.steps[-1]["passed"])
+            deadline = time.monotonic() + 3
+            while True:
+                observed = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
+                                          capture_output=True, text=True, timeout=2)
+                self.assertFalse(observed.stderr, observed.stderr)
+                if observed.returncode == 1 and not observed.stdout.strip():
+                    break
+                self.assertEqual(observed.returncode, 0, observed.stderr)
+                if observed.stdout.strip().startswith("Z"):
+                    break
+                if time.monotonic() >= deadline:
+                    self.fail(f"descendant {pid} still running after release probe timeout")
+                time.sleep(0.01)
+        finally:
+            if pid is not None:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
 
 if __name__ == "__main__":
