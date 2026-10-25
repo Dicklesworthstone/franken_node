@@ -7984,6 +7984,41 @@ fn build_backup_path(path: &Path, timestamp_suffix: &str) -> PathBuf {
     }
 }
 
+/// Stage credential-bearing configuration and backups privately before publication.
+fn write_private_init_file(
+    path: &Path,
+    mut source: impl std::io::Read,
+    overwrite: bool,
+) -> Result<()> {
+    let parent = normalized_directory(path.parent().unwrap_or_else(|| Path::new(".")));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("failed staging private init file in {}", parent.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        temporary
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed protecting init file for {}", path.display()))?;
+    }
+    std::io::copy(&mut source, temporary.as_file_mut())
+        .with_context(|| format!("failed staging init contents for {}", path.display()))?;
+    temporary
+        .as_file()
+        .sync_all()
+        .with_context(|| format!("failed syncing init contents for {}", path.display()))?;
+    let publication = if overwrite {
+        temporary.persist(path)
+    } else {
+        temporary.persist_noclobber(path)
+    };
+    publication
+        .with_context(|| format!("failed publishing private init file {}", path.display()))?;
+    #[cfg(unix)]
+    sync_directory(parent)?;
+    Ok(())
+}
+
 fn apply_init_write_policy(
     path: &Path,
     content: &str,
@@ -7991,17 +8026,19 @@ fn apply_init_write_policy(
     backup_existing: bool,
     timestamp_suffix: &str,
 ) -> Result<InitFileAction> {
-    if path.exists() {
+    if path.symlink_metadata().is_ok() {
         if backup_existing {
             let backup_path = build_backup_path(path, timestamp_suffix);
-            std::fs::copy(path, &backup_path).with_context(|| {
+            let original = std::fs::File::open(path)
+                .with_context(|| format!("failed opening init backup source {}", path.display()))?;
+            write_private_init_file(&backup_path, original, false).with_context(|| {
                 format!(
                     "failed creating backup {} from {}",
                     backup_path.display(),
                     path.display()
                 )
             })?;
-            std::fs::write(path, content)
+            write_private_init_file(path, content.as_bytes(), true)
                 .with_context(|| format!("failed writing {}", path.display()))?;
             return Ok(InitFileAction {
                 path: path.display().to_string(),
@@ -8010,7 +8047,7 @@ fn apply_init_write_policy(
             });
         }
         if overwrite {
-            std::fs::write(path, content)
+            write_private_init_file(path, content.as_bytes(), true)
                 .with_context(|| format!("failed writing {}", path.display()))?;
             return Ok(InitFileAction {
                 path: path.display().to_string(),
@@ -8024,7 +8061,8 @@ fn apply_init_write_policy(
         );
     }
 
-    std::fs::write(path, content).with_context(|| format!("failed writing {}", path.display()))?;
+    write_private_init_file(path, content.as_bytes(), false)
+        .with_context(|| format!("failed writing {}", path.display()))?;
     Ok(InitFileAction {
         path: path.display().to_string(),
         action: InitFileActionKind::Created,
@@ -34344,7 +34382,7 @@ fn main() -> Result<()> {
                 if !overwrite && !backup_existing {
                     let existing = [&config_path, &profile_path]
                         .into_iter()
-                        .filter(|path| path.exists())
+                        .filter(|path| path.symlink_metadata().is_ok())
                         .map(|path| path.display().to_string())
                         .collect::<Vec<_>>();
                     if !existing.is_empty() {

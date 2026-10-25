@@ -34,6 +34,22 @@ When `--out-dir` is omitted:
 | `--backup-existing` | backup then replace existing files |
 | `--overwrite` + `--backup-existing` | reject (mutually exclusive) |
 
+### Credential File Publication
+
+The generated config contains registry signing material and authorized API keys.
+On Unix, init stages both generated files and their backups with owner-only
+permissions (`0600`) before writing their contents. Creation, explicit overwrite,
+and backup replacement preserve that mode even under umask `022` or when replacing
+an older mode-`0644` file. Overwrite and backup preserve configured key values.
+
+A dangling symlink counts as an occupied target: the default policy refuses it.
+Explicit overwrite replaces the symlink entry itself without writing through it.
+New files and backups use publication that refuses to overwrite an occupied path.
+Replacement uses a same-directory staged file after syncing its contents; Unix
+also syncs the containing directory. These are file publication guarantees, not
+a transaction covering both generated files. Windows ACL behavior and recovery
+from power loss require separate qualification.
+
 ## Determinism Contract
 
 For equivalent inputs (resolved config and flags):
