@@ -140,7 +140,12 @@ fn dangling_symlink_and_socket_state_are_refused() {
     use std::os::unix::fs::symlink;
     use std::os::unix::net::UnixListener;
 
-    let directory = tempfile::tempdir().unwrap();
+    // RCH's inherited TMPDIR can exceed sockaddr_un's path limit before
+    // this test reaches the non-regular-controller admission check.
+    let directory = tempfile::Builder::new()
+        .prefix("fn-sock-")
+        .tempdir_in("/tmp")
+        .unwrap();
     let linked = directory.path().join("linked");
     let linked_app = entry(&linked);
     symlink("missing-controller.json", state_path(&linked)).unwrap();
