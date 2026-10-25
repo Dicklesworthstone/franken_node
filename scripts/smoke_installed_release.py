@@ -44,7 +44,7 @@ class Probe:
         self.workspace.mkdir()
         self.env = {key: value for key, value in os.environ.items()
                     if not key.startswith("FRANKEN_NODE_") and key != "NODE_OPTIONS"}
-        for key, child in (("HOME", "home"), ("USERPROFILE", "home"),
+        for key, child in (("HOME", "home"), ("USERPROFILE", "home"), ("XDG_CONFIG_HOME", "home"),
                            ("XDG_STATE_HOME", "state"), ("LOCALAPPDATA", "state")):
             directory = self.evidence / child
             directory.mkdir(exist_ok=True)
@@ -131,7 +131,9 @@ def exercise(probe: Probe, command: list[str]) -> None:
         encoding="utf-8")
     probe.run("version", command + ["--version"])
     probe.run("help", command + ["--help"])
-    probe.run("init", command + ["init", "--profile", "balanced", "--out-dir", ".", "--json"])
+    # JSON init includes newly generated API-key values. The human report
+    # retains bootstrap counts without putting those values in public streams.
+    probe.run("init", command + ["init", "--profile", "balanced", "--out-dir", "."])
     if not (workspace / "franken_node.toml").is_file():
         raise SmokeFailure("init returned success without writing franken_node.toml")
     run = command + ["run", "hello.js", "--policy", "balanced", "--console-only"]

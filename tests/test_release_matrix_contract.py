@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 README_PATH = ROOT / "README.md"
@@ -135,14 +136,20 @@ class TestReleaseMatrixContract(unittest.TestCase):
 # This executable deliberately models the CLI protocol, not native JavaScript.
 # Its positives prove harness plumbing only; planted violations must be refused.
 PROTOCOL_CANDIDATE = r'''
-import pathlib, sys
+import json, pathlib, sys
 mode, *args = sys.argv[1:]
 root = pathlib.Path.cwd()
 active = root / "active"
 if args[0] in ("--version", "--help"):
     print("protocol test double")
 elif args[0] == "init":
-    (root / "franken_node.toml").write_text('profile = "balanced"')
+    secret = "release-protocol-fixture-private-api-key"
+    (root / "franken_node.toml").write_text(
+        'profile = "balanced"\n[security]\nauthorized_api_keys = ["' + secret + '"]\n')
+    if "--json" in args:
+        print(json.dumps({"bootstrap_synthesis": {"authorized_api_keys_generated": [secret]}}))
+    else:
+        print("bootstrap_synthesis: registry_signing_key_generated=true authorized_api_keys_generated=1")
 elif args[:2] == ["safe-mode", "enter"]:
     active.write_text("active")
 elif args[:2] == ["safe-mode", "exit"]:
@@ -187,6 +194,36 @@ class TestInstalledReleaseProbe(unittest.TestCase):
         self.assertTrue(all(step["passed"] for step in probe.steps))
         self.assertEqual(probe.steps[-1]["name"], "native-after-recovery")
         self.assertFalse((probe.workspace / "forbidden.txt").exists())
+
+    def test_generated_bootstrap_keys_stay_out_of_public_acceptance_streams(self):
+        probe = self.probe("private-bootstrap")
+        SMOKE.exercise(probe, [sys.executable, str(self.candidate), "normal"])
+        secret = b"release-protocol-fixture-private-api-key"
+        self.assertIn(secret, (probe.workspace / "franken_node.toml").read_bytes())
+        self.assertEqual(len(probe.steps), 10)
+        self.assertTrue(all(step["passed"] for step in probe.steps))
+        public = [path for path in probe.evidence.iterdir()
+                  if path.is_file() and path.suffix in {".json", ".stdout", ".stderr"}]
+        self.assertTrue(public)
+        for path in public:
+            with self.subTest(artifact=path.name):
+                self.assertNotIn(secret, path.read_bytes())
+
+    def test_inherited_xdg_config_is_not_visible_to_the_candidate(self):
+        operator_config = self.root / "operator-config"
+        operator_config.mkdir()
+        marker = operator_config / "operator.marker"
+        marker.write_bytes(b"private operator configuration")
+        with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(operator_config)}):
+            probe = self.probe("isolated-config")
+            probe.run(
+                "observe-config-root",
+                [sys.executable, "-c",
+                 "import os,pathlib; p=pathlib.Path(os.environ['XDG_CONFIG_HOME'])/'operator.marker'; "
+                 "print('inherited' if p.is_file() else 'isolated')"],
+                stdout=b"isolated\n",
+            )
+        self.assertEqual(marker.read_bytes(), b"private operator configuration")
 
     def test_planted_wrong_output_effects_and_false_containment_are_refused(self):
         for mode, failed_step in (("wrong-hello", "native-hello"), ("wrong-local", "native-local-import"),
