@@ -6,7 +6,10 @@
 #[path = "native_rewrite_transactions.rs"]
 mod rewrite_transactions;
 
-use super::{TempDir, franken_node_command, native_smoke_supervisor, parse_json_stdout, repo_root};
+use super::{
+    TempDir, franken_node_command, initialize_native_project, native_smoke_supervisor,
+    parse_json_stdout, repo_root,
+};
 use std::path::Path;
 use std::process::Output;
 use std::time::Duration;
@@ -83,6 +86,7 @@ fn assert_no_guest_state(project: &TempDir) {
 #[test]
 fn validate_reports_every_discovered_case_without_smoke_rescue() {
     let project = project("const = ;\n");
+    initialize_native_project(project.path(), false);
     let output = invoke(project.path(), false, false, false);
     assert!(!output.status.success());
     let report = parse_json_stdout(&output, "primary suite validation");
@@ -95,6 +99,7 @@ fn validate_reports_every_discovered_case_without_smoke_rescue() {
     assert_eq!(suite["cases"][0]["test"], "a.test.js");
     assert_eq!(suite["cases"][1]["test"], "b.test.js");
     assert_ne!(suite["cases"][0]["status"], "PASS");
+    assert_eq!(suite["cases"][1]["status"], "PASS", "{report}");
     assert!(
         suite["input_sha256"]
             .as_str()
@@ -110,6 +115,7 @@ fn validate_reports_every_discovered_case_without_smoke_rescue() {
 #[test]
 fn primary_report_keeps_rollout_blocked_after_suite_failure() {
     let project = project("const = ;\n");
+    initialize_native_project(project.path(), false);
     let output = invoke(project.path(), true, false, false);
     // Report generation may succeed while its admission decision is no-go.
     let report = parse_json_stdout(&output, "primary report suite propagation");
@@ -118,6 +124,8 @@ fn primary_report_keeps_rollout_blocked_after_suite_failure() {
         "{report}"
     );
     assert_eq!(report["validation"]["status"], "fail");
+    assert_eq!(report["validation"]["test_suite"]["passed"], 1, "{report}");
+    assert_eq!(report["validation"]["test_suite"]["failed"], 1, "{report}");
     assert_eq!(report["executive_summary"]["go_no_go"], "no_go");
     let rollout = report["rollout_plan"]["phases"]
         .as_array()
@@ -210,6 +218,7 @@ fn static_prerequisites_block_all_runtime_dispatch() {
 #[test]
 fn successful_native_suite_requires_two_complete_measured_cases() {
     let project = project("console.log(6*7);\n");
+    initialize_native_project(project.path(), false);
     let output = invoke(project.path(), false, false, false);
     let report = parse_json_stdout(&output, "successful primary native suite");
     assert!(
@@ -243,7 +252,11 @@ fn successful_native_suite_requires_two_complete_measured_cases() {
 fn validate_and_report_execute_only_the_selected_nested_package_inventory() {
     let container = TempDir::new().expect("project container");
     let app = container.path().join("app");
-    std::fs::create_dir_all(app.join(".franken-node")).expect("nested project");
+    std::fs::create_dir_all(&app).expect("nested project");
+    // Declared dependencies require actual authoritative trust state, even
+    // when the selected test does not import those dependencies.
+    initialize_native_project(&app, true);
+    std::fs::create_dir_all(app.join(".franken-node")).expect("test inventory directory");
     let manifest = r#"{"name":"nested-suite","version":"1.0.0","engines":{"node":">=20"},"dependencies":{"ordinary":"^1"}}"#;
     let lock = r#"{"lockfileVersion":3,"packages":{"":{"dependencies":{"ordinary":"^1"}},"node_modules/ordinary":{"version":"1.2.3"}}}"#;
     let installed_manifest = r#"{"name":"ordinary","version":"1.2.3"}"#;

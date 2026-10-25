@@ -66,6 +66,31 @@ fn franken_node_command() -> Command {
     Command::cargo_bin("franken-node").expect("franken-node binary")
 }
 
+fn initialize_native_project(project: &Path, with_state: bool) {
+    let home = TempDir::new().expect("private bootstrap home");
+    let mut command = franken_node_command();
+    command
+        .current_dir(project)
+        .env_clear()
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .env("XDG_CONFIG_HOME", home.path())
+        .args(["init", "--profile", "balanced", "--out-dir", "."]);
+    if !with_state {
+        command.arg("--no-state");
+    }
+    let output = command
+        .output()
+        .expect("initialize the actual native configuration");
+    assert!(
+        output.status.success(),
+        "native bootstrap failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(project.join("franken_node.toml").is_file());
+    assert_eq!(project.join(".franken-node").exists(), with_state);
+}
+
 #[cfg(unix)]
 mod native_smoke_admission_regressions {
     use super::*;
@@ -224,6 +249,7 @@ mod native_smoke_admission_regressions {
     #[test]
     fn native_failure_cannot_be_replaced_by_successful_references() {
         let fixture = Fixture::new("const = ;\n");
+        initialize_native_project(&fixture.project, false);
         let project = fixture.project.to_string_lossy().into_owned();
         let output = run_cli_with_wall_timeout(
             &["migrate", "validate", &project, "--json"],
@@ -243,6 +269,7 @@ mod native_smoke_admission_regressions {
     #[test]
     fn native_report_keeps_rollout_blocked_after_native_failure() {
         let fixture = Fixture::new("const = ;\n");
+        initialize_native_project(&fixture.project, false);
         let project = fixture.project.to_string_lossy().into_owned();
         let output = run_cli_with_wall_timeout(
             &["migrate-report", &project, "--format", "json"],
@@ -270,6 +297,7 @@ mod native_smoke_admission_regressions {
     #[cfg(feature = "engine")]
     fn renamed_native_binary_validates_itself_not_a_reference() {
         let fixture = Fixture::new("console.log('native-smoke-ok');\n");
+        initialize_native_project(&fixture.project, false);
         let renamed = fixture.root.path().join("renamed runtime");
         let original = franken_node_command();
         std::fs::copy(Path::new(original.get_program()), &renamed).expect("copy native binary");
@@ -828,6 +856,7 @@ fn migration_demo_pipeline_runs_live_migrate_commands_end_to_end() {
     let temp = TempDir::new().expect("temp dir");
     let project_path = temp.path().join("project");
     std::fs::create_dir_all(&project_path).expect("project dir");
+    initialize_native_project(&project_path, false);
     std::fs::write(
         project_path.join("index.js"),
         "console.log(JSON.stringify({ demo: 'migration-singularity', ok: true }));\n",
@@ -1377,18 +1406,19 @@ fn migrate_audit_json_out_writes_artifact_without_stdout_payload() {
     assert_eq!(report["schema_version"], serde_json::json!("1.0.0"));
     assert_eq!(report["summary"]["package_manifests"], serde_json::json!(1));
     assert_eq!(report["summary"]["risky_scripts"], serde_json::json!(1));
+    let findings = report["findings"].as_array().expect("audit findings");
+    for (index, finding) in findings.iter().enumerate() {
+        assert_eq!(finding["id"], format!("mig-audit-{:03}", index + 1));
+    }
     assert!(
-        report["findings"].as_array().is_some_and(|findings| {
-            findings.iter().any(|finding| {
-                finding["id"] == serde_json::json!("mig-audit-002")
-                    && finding["category"] == serde_json::json!("scripts")
-                    && finding["severity"] == serde_json::json!("high")
-                    && finding["message"]
-                        == serde_json::json!(
-                            "risky install/build script pattern detected in package.json"
-                        )
-                    && finding["path"] == serde_json::json!("package.json")
-            })
+        findings.iter().any(|finding| {
+            finding["category"] == serde_json::json!("scripts")
+                && finding["severity"] == serde_json::json!("high")
+                && finding["message"]
+                    == serde_json::json!(
+                        "risky install/build script pattern detected in package.json"
+                    )
+                && finding["path"] == serde_json::json!("package.json")
         }),
         "JSON report must include the real package.json script finding: {report:#?}"
     );
@@ -1451,11 +1481,19 @@ fn migrate_rewrite_apply_emits_rollback_plan_and_updates_manifest() {
     assert!(stdout.contains("mode: apply"));
     assert!(stdout.contains("rewrites_planned=2"));
     assert!(stdout.contains("rewrites_applied=2"));
+    let target_line = format!("target: {project_arg}");
+    assert!(
+        stdout.lines().any(|line| line == target_line),
+        "human output must name the actual project target: {stdout}"
+    );
     assert!(
         serde_json::from_str::<serde_json::Value>(&stdout).is_err(),
         "human migrate rewrite output must not parse as JSON"
     );
-    golden::assert_scrubbed_golden("migrate/rewrite_apply_stdout", &stdout);
+    // Scrub this known, already-checked path before the generic duration
+    // scrubber can mistake random temp-name bytes such as `12ms` for time.
+    let stdout_for_golden = stdout.replace(&project_arg, "[PATH]");
+    golden::assert_scrubbed_golden("migrate/rewrite_apply_stdout", &stdout_for_golden);
     log_phase(
         "migrate_rewrite_apply_emits_rollback_plan_and_updates_manifest",
         "human_output_checked",
@@ -2163,6 +2201,7 @@ fn migrate_validate_passes_for_hardened_project() {
     let temp = TempDir::new().expect("temp dir");
     let project_path = temp.path().join("project");
     std::fs::create_dir_all(&project_path).expect("project dir");
+    initialize_native_project(&project_path, false);
 
     std::fs::write(project_path.join("index.js"), "console.log('hello');\n").expect("write js");
     std::fs::write(

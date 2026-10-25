@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 
 const A: &str = "const fs = require('fs');\nconsole.log(fs.existsSync('package.json'));\n";
 const B: &str = "const path = require('path');\nconsole.log(path.sep);\n";
+const NORMALIZED_A: &str =
+    "const fs = require('node:fs');\nconsole.log(fs.existsSync('package.json'));\n";
+const NORMALIZED_B: &str = "const path = require('node:path');\nconsole.log(path.sep);\n";
 
 fn project() -> tempfile::TempDir {
     let root = tempfile::tempdir().unwrap();
@@ -28,6 +31,20 @@ fn originals(root: &Path) {
     assert_eq!(fs::read_to_string(root.join("z.js")).unwrap(), B);
 }
 
+fn assert_commonjs_execution(root: &Path) {
+    for (file, expected) in [("a.js", b"true\n".as_slice()), ("z.js", b"/\n".as_slice())] {
+        let output = std::process::Command::new("node")
+            .current_dir(root)
+            .env_remove("NODE_OPTIONS")
+            .arg(file)
+            .output()
+            .expect("execute the actual CommonJS fixture with Node");
+        assert!(output.status.success(), "{file}: {output:?}");
+        assert_eq!(output.stdout, expected, "{file}");
+        assert!(output.stderr.is_empty(), "{file}: {output:?}");
+    }
+}
+
 fn pending(root: &Path) -> PathBuf {
     root.join(".migrate-backup/.franken-rewrite/pending.json")
 }
@@ -35,20 +52,20 @@ fn pending(root: &Path) -> PathBuf {
 #[test]
 fn primary_apply_installs_complete_plan_and_preserves_executable_sources() {
     let root = project();
+    assert_commonjs_execution(root.path());
     let report = run_rewrite(root.path(), true).unwrap();
     assert_eq!(report.rewrites_planned, 2);
     assert_eq!(report.rewrites_applied, 2);
     assert_eq!(report.rollback_entries.len(), 2);
-    assert!(
-        fs::read_to_string(root.path().join("a.js"))
-            .unwrap()
-            .contains("import fs from \"node:fs\"")
+    assert_eq!(
+        fs::read_to_string(root.path().join("a.js")).unwrap(),
+        NORMALIZED_A
     );
-    assert!(
-        fs::read_to_string(root.path().join("z.js"))
-            .unwrap()
-            .contains("import path from \"node:path\"")
+    assert_eq!(
+        fs::read_to_string(root.path().join("z.js")).unwrap(),
+        NORMALIZED_B
     );
+    assert_commonjs_execution(root.path());
     assert_eq!(
         fs::metadata(root.path().join("a.js"))
             .unwrap()
@@ -250,6 +267,7 @@ fn primary_rewrite_then_operator_rollback_restores_the_complete_original_project
     let manifest = r#"{"name":"needs-pin","version":"1.0.0"}"#;
     fs::write(root.path().join("package.json"), manifest).unwrap();
     fs::write(root.path().join("keep.txt"), "unrelated input").unwrap();
+    assert_commonjs_execution(root.path());
     let before = run_rewrite(root.path(), false).unwrap();
     assert_eq!(before.rewrites_planned, 3);
     let applied = run_rewrite(root.path(), true).unwrap();
@@ -262,14 +280,19 @@ fn primary_rewrite_then_operator_rollback_restores_the_complete_original_project
     let preview = rollback::run(root.path(), Some(id), false);
     assert_eq!(preview.status, RollbackStatus::Ready, "{preview:#?}");
     assert_eq!(preview.files.len(), 3);
-    assert!(
-        fs::read_to_string(root.path().join("a.js"))
-            .unwrap()
-            .contains("import fs")
+    assert_eq!(
+        fs::read_to_string(root.path().join("a.js")).unwrap(),
+        NORMALIZED_A
     );
+    assert_eq!(
+        fs::read_to_string(root.path().join("z.js")).unwrap(),
+        NORMALIZED_B
+    );
+    assert_commonjs_execution(root.path());
     let restored = rollback::run(root.path(), Some(id), true);
     assert_eq!(restored.status, RollbackStatus::RolledBack, "{restored:#?}");
     originals(root.path());
+    assert_commonjs_execution(root.path());
     assert_eq!(
         fs::read_to_string(root.path().join("package.json")).unwrap(),
         manifest
