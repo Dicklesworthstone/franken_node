@@ -26,47 +26,176 @@
 use std::process::Command;
 use tempfile::TempDir;
 
-/// Locate the debug binary produced by the workspace build.
-///
-/// Tests under `crates/franken-node/tests/` build alongside the binary, so we
-/// can rely on `CARGO_BIN_EXE_franken-node` (set by Cargo for integration
-/// tests) when present, falling back to the conventional debug path.
+/// Every case requires the actual binary selected by Cargo for this target.
 fn franken_node_binary() -> std::path::PathBuf {
-    if let Some(p) = std::option_env!("CARGO_BIN_EXE_franken-node") {
-        return std::path::PathBuf::from(p);
-    }
-    // Conventional fallback: workspace target dir relative to this crate.
-    let crate_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    crate_dir
-        .parent() // crates/
-        .and_then(|p| p.parent()) // workspace root
-        .unwrap_or_else(|| crate_dir.as_path().parent().unwrap())
-        .join("target")
-        .join("debug")
-        .join("franken-node")
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_franken-node"))
 }
 
-/// Quick gate: skip the test cleanly if the binary isn't built. This keeps
-/// the suite green for fresh checkouts where `cargo test` is run before
-/// `cargo build --bin franken-node`, while still asserting on dev machines
-/// and CI where the binary exists.
-fn require_binary() -> Option<std::path::PathBuf> {
-    let bin = franken_node_binary();
-    if bin.exists() {
-        Some(bin)
-    } else {
-        eprintln!(
-            "skipping init_bootstrap_smoke: binary not found at {} \
-             (build with `cargo build -p frankenengine-node --bin franken-node`)",
-            bin.display()
+#[cfg(unix)]
+fn init_with_public_umask(
+    root: &std::path::Path,
+    home: &std::path::Path,
+    flags: &[&str],
+) -> std::process::Output {
+    Command::new("/bin/sh")
+        .args(["-c", "umask 022; exec \"$@\"", "init-permissions"])
+        .arg(franken_node_binary())
+        .args([
+            "init",
+            "--profile",
+            "balanced",
+            "--no-state",
+            "--out-dir",
+            ".",
+        ])
+        .args(flags)
+        .current_dir(root)
+        .env_clear()
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("XDG_CONFIG_HOME", home)
+        .output()
+        .expect("execute the actual init with a child-only umask")
+}
+
+#[cfg(unix)]
+#[test]
+fn init_config_and_backups_stay_private_across_all_write_policies() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let project = TempDir::new().expect("private project");
+    let home = TempDir::new().expect("isolated home");
+    let root = project.path();
+    let config = root.join("franken_node.toml");
+    let examples = root.join("franken_node.profile_examples.toml");
+    let mut modes = Vec::new();
+    let initial = init_with_public_umask(root, home.path(), &[]);
+    assert!(initial.status.success(), "{initial:?}");
+    let original = std::fs::read(&config).expect("generated credential config");
+    let parsed: toml::Value = toml::from_str(std::str::from_utf8(&original).unwrap()).unwrap();
+    assert!(
+        !parsed["trust"]["registry_signing_key"]
+            .as_str()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !parsed["security"]["authorized_api_keys"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    for path in [&config, &examples] {
+        modes.push(std::fs::metadata(path).unwrap().permissions().mode() & 0o777);
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    let overwritten = init_with_public_umask(root, home.path(), &["--overwrite"]);
+    assert!(overwritten.status.success(), "{overwritten:?}");
+    assert!(
+        std::fs::read(&config).unwrap() == original,
+        "overwrite changed configured key values"
+    );
+    for path in [&config, &examples] {
+        modes.push(std::fs::metadata(path).unwrap().permissions().mode() & 0o777);
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    let backed_up = init_with_public_umask(root, home.path(), &["--backup-existing"]);
+    assert!(backed_up.status.success(), "{backed_up:?}");
+    assert!(
+        std::fs::read(&config).unwrap() == original,
+        "backup overwrite changed configured key values"
+    );
+    let backups: Vec<_> = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains(".bak.")
+        })
+        .collect();
+    assert_eq!(
+        backups.len(),
+        2,
+        "config and profile backups must both be retained"
+    );
+    let config_backup = backups
+        .iter()
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("franken_node.toml.bak.")
+        })
+        .expect("credential config backup");
+    assert!(
+        std::fs::read(config_backup).unwrap() == original,
+        "backup did not preserve configured values"
+    );
+    for path in [&config, &examples].into_iter().chain(backups.iter()) {
+        modes.push(std::fs::metadata(path).unwrap().permissions().mode() & 0o777);
+    }
+    assert_eq!(modes.len(), 8);
+    assert!(
+        modes.iter().all(|mode| *mode == 0o600),
+        "init exposed config or backup permissions: {modes:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn init_refuses_dangling_generated_file_links_and_overwrites_only_the_link() {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::fs::symlink;
+
+    for (name, other) in [
+        ("franken_node.toml", "franken_node.profile_examples.toml"),
+        ("franken_node.profile_examples.toml", "franken_node.toml"),
+    ] {
+        let project = TempDir::new().expect("private project");
+        let home = TempDir::new().expect("isolated home");
+        let outside = TempDir::new().expect("private outside directory");
+        let target = outside.path().join("must-not-create-config.toml");
+        let link = project.path().join(name);
+        symlink(&target, &link).unwrap();
+        let output = init_with_public_umask(project.path(), home.path(), &[]);
+        assert!(
+            !output.status.success(),
+            "init must refuse an occupied symlink path: {name}"
         );
-        None
+        assert!(
+            !target.exists(),
+            "init wrote outside the requested project: {name}"
+        );
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            !project.path().join(other).exists(),
+            "init created the other generated file before refusing {name}"
+        );
+
+        let replacement = init_with_public_umask(project.path(), home.path(), &["--overwrite"]);
+        assert!(replacement.status.success(), "{replacement:?}");
+        assert!(
+            !target.exists(),
+            "explicit overwrite followed the symlink target: {name}"
+        );
+        let metadata = std::fs::symlink_metadata(&link).unwrap();
+        assert!(metadata.is_file(), "overwrite must replace the link itself");
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
     }
 }
 
 #[test]
 fn init_succeeds_on_empty_directory_and_synthesizes_security_defaults() {
-    let Some(bin) = require_binary() else { return };
+    let bin = franken_node_binary();
 
     let tmp = TempDir::new().expect("tempdir");
     let root = tmp.path();
@@ -145,7 +274,7 @@ fn init_succeeds_on_empty_directory_and_synthesizes_security_defaults() {
 
 #[test]
 fn init_is_idempotent_with_overwrite_preserving_signing_key() {
-    let Some(bin) = require_binary() else { return };
+    let bin = franken_node_binary();
 
     let tmp = TempDir::new().expect("tempdir");
     let root = tmp.path();
@@ -212,7 +341,7 @@ fn init_is_idempotent_with_overwrite_preserving_signing_key() {
 
 #[test]
 fn config_resolved_from_init_output_is_valid_for_subsequent_commands() {
-    let Some(bin) = require_binary() else { return };
+    let bin = franken_node_binary();
 
     let tmp = TempDir::new().expect("tempdir");
     let root = tmp.path();
@@ -269,7 +398,7 @@ fn config_resolved_from_init_output_is_valid_for_subsequent_commands() {
 /// the signing key sat in terminal scrollback.
 #[test]
 fn init_without_out_dir_persists_config_beside_the_state_it_signed() {
-    let Some(bin) = require_binary() else { return };
+    let bin = franken_node_binary();
     let tmp = TempDir::new().expect("tempdir");
     let root = tmp.path();
 
@@ -311,7 +440,7 @@ fn init_without_out_dir_persists_config_beside_the_state_it_signed() {
 /// preview: the resolved config goes to stdout and nothing is written.
 #[test]
 fn init_no_state_without_out_dir_prints_config_and_writes_nothing() {
-    let Some(bin) = require_binary() else { return };
+    let bin = franken_node_binary();
     let tmp = TempDir::new().expect("tempdir");
     let root = tmp.path();
 
@@ -361,7 +490,7 @@ fn assert_init_json_error(output: &std::process::Output, error_needle: &str) {
 
 #[test]
 fn init_scan_no_state_json_fails_closed() {
-    let Some(bin) = require_binary() else { return };
+    let bin = franken_node_binary();
     let tmp = TempDir::new().expect("tempdir");
     let output = Command::new(&bin)
         .args([
@@ -385,7 +514,7 @@ fn init_scan_no_state_json_fails_closed() {
 
 #[test]
 fn init_existing_files_json_fails_closed_without_overwrite() {
-    let Some(bin) = require_binary() else { return };
+    let bin = franken_node_binary();
     let tmp = TempDir::new().expect("tempdir");
     let first = Command::new(&bin)
         .args(["init", "--profile", "balanced", "--out-dir", ".", "--json"])
@@ -404,7 +533,7 @@ fn init_existing_files_json_fails_closed_without_overwrite() {
 
 #[test]
 fn init_overwrite_and_backup_json_fails_closed() {
-    let Some(bin) = require_binary() else { return };
+    let bin = franken_node_binary();
     let tmp = TempDir::new().expect("tempdir");
     let output = Command::new(&bin)
         .args([
@@ -446,7 +575,7 @@ fn init_file_action(report: &serde_json::Value, path_suffix: &str) -> String {
 /// `trust scan --deep/--audit` and `trust sync` work without env setup.
 #[test]
 fn init_provisions_trust_scan_remotecap_key_and_scoped_token() {
-    let Some(bin) = require_binary() else { return };
+    let bin = franken_node_binary();
     let tmp = TempDir::new().expect("tempdir");
     let root = tmp.path();
     let run = |args: &[&str]| {
@@ -572,7 +701,7 @@ fn init_provisions_trust_scan_remotecap_key_and_scoped_token() {
 /// silently ignored.
 #[test]
 fn unknown_network_policy_key_is_rejected_not_ignored() {
-    let Some(bin) = require_binary() else { return };
+    let bin = franken_node_binary();
     let tmp = TempDir::new().expect("tempdir");
     let root = tmp.path();
     let init = Command::new(&bin)
