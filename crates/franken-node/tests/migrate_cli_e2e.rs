@@ -167,6 +167,60 @@ mod native_smoke_admission_regressions {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn uninitialized_native_failure_preserves_the_structured_admission_reason() {
+        let fixture = Fixture::new("console.log('must-not-run');\n");
+        let home = fixture.root.path().join("private-home");
+        std::fs::create_dir(&home).expect("isolated home");
+        std::fs::write(fixture.project.join("franken_node.toml"), "[trust]\n")
+            .expect("explicitly uninitialized trust configuration");
+        for json_output in [false, true] {
+            let mut command = franken_node_command();
+            command
+                .current_dir(repo_root())
+                .env_clear()
+                .envs(fixture.environment())
+                .env("HOME", &home)
+                .env("XDG_CONFIG_HOME", &home)
+                .args(["migrate", "validate"])
+                .arg(&fixture.project);
+            if json_output {
+                command.arg("--json");
+            }
+            let output = native_smoke_supervisor::run_command_with_timeout(
+                &mut command,
+                Duration::from_secs(30),
+                Duration::from_secs(1),
+            )
+            .expect("bounded actual migration CLI");
+            assert_eq!(output.status.code(), Some(1));
+            let message = if json_output {
+                let report = parse_json_stdout(&output, "uninitialized native admission");
+                assert_native_failure(&report);
+                report["checks"]
+                    .as_array()
+                    .expect("validation checks")
+                    .iter()
+                    .find(|check| check["id"] == "mig-validate-005")
+                    .expect("native smoke check")["message"]
+                    .as_str()
+                    .expect("native failure reason")
+                    .to_owned()
+            } else {
+                let text = String::from_utf8(output.stdout).expect("human migration report");
+                assert!(text.contains("status: FAIL"), "{text}");
+                text
+            };
+            assert!(
+                message.contains("trust.registry_signing_key must be configured"),
+                "structured native admission reason was lost: {message}"
+            );
+            assert!(!message.contains("must-not-run"));
+            assert!(!fixture.marker.exists(), "no successful reference fallback");
+        }
+    }
+
     #[test]
     fn native_failure_cannot_be_replaced_by_successful_references() {
         let fixture = Fixture::new("const = ;\n");

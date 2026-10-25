@@ -1377,8 +1377,19 @@ fn execute_migration_runtime_smoke_with_target(
         .code()
         .ok_or_else(|| anyhow::anyhow!("runtime smoke process terminated by signal"))?;
     if !output.status.success() {
+        // `run --json` writes admission errors to stdout. Preserve that
+        // structured reason without copying guest output into the report.
+        let native_error = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .ok()
+            .filter(|report| {
+                report["schema_version"] == "franken-node/run-error-cli/v1" && report["ok"] == false
+            })
+            .and_then(|report| report["error"].as_str().map(str::to_owned));
+        let native_error = native_error
+            .map(|error| format!("error={error}; "))
+            .unwrap_or_default();
         anyhow::bail!(
-            "native runtime `franken-node` exited with code {exit_code}; stderr={}",
+            "native runtime `franken-node` exited with code {exit_code}; {native_error}stderr={}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }

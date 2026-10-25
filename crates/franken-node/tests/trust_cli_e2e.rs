@@ -3564,7 +3564,7 @@ fn trust_sync_collects_all_osv_pages_before_updating_signed_risk() {
 
     let captured = requests.lock().expect("captured paginated queries");
     assert_eq!(captured.len(), 6);
-    for pages in captured.chunks_exact(3) {
+    for pages in captured.as_chunks::<3>().0 {
         let initial: Value = serde_json::from_str(&pages[0]).unwrap();
         assert!(initial.get("page_token").is_none());
         for (body, token) in pages[1..].iter().zip(["page-2", "page-3"]) {
