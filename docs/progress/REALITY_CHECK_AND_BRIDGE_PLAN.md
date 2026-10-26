@@ -1,5 +1,20 @@
 # Reality Check and Bridge Plan: franken_node
 
+## Active execution TODO — 2026-10-26 evening
+
+This checklist answers the operator's explicit request for a granular TODO. Consumer: the implementing agent and operator. Gate: finish and verify the concrete work below. Observed defect: the mutation lane has incomplete Cargo inputs, uses the wrong compiler, and omits the inline-test override; the publishing recipe supplies an unsupported directory and PEM key. Retire this active checklist into the completed history when these items are finished or explicitly handed off. No additional capability credit comes from the checklist itself.
+
+- [x] Preserve peer config/Beads migration edits; check file ownership and reserve exact edit surfaces.
+- [x] Recheck resource admission: `sbh check --need 20G` now passes (493.9 GB, 12.36% free); no cleanup or bypass performed.
+- [ ] Repair the existing mutation workflow using the complete pinned sibling bootstrap and pinned nightly.
+- [ ] Enable actual inline tests, reject an empty focused discovery, and preserve the existing mutation population and floor.
+- [ ] Validate the lane's CLI arguments and remote output retention; run a bounded genuine mutation control if admitted.
+- [ ] Exercise supported registry file/key publication, then verify and tamper-check the stored artifact in an isolated workspace.
+- [ ] Correct every README publishing example to match the successful invocation and its actual trust/provenance scope.
+- [ ] Run checks appropriate to the final changes; retain failures and distinguish hosted execution from local validation.
+- [ ] Re-read the owned diff, fill the real-work/honesty review, update existing Beads with exact results, and check graph cycles.
+- [ ] Commit only owned changes, preserve concurrent edits, and publish the reviewed result with unresolved work explicit.
+
 ## Comprehensive reality check — 2026-10-26 America/New_York
 
 **The project has useful native execution and substantial trust infrastructure, but it is not charter-complete or release-qualified.** The limiting work is a composed operator workflow with continuous authority, real containment/recovery, representative compatibility and independently checkable measurements. Thousands of closed issues and source-token validators do not establish those outcomes. This assessment refreshes the V1–V20 checklist and B1–B7 bridge; the active implementation history below remains intact.
