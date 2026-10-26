@@ -158,11 +158,11 @@ fn workspace_graph_uses_physical_context_only_after_explicit_link_admission() {
 }
 
 #[test]
-fn syntax_and_loader_alias_diagnostics_prevent_a_complete_result() {
+fn syntax_and_mutable_loader_alias_diagnostics_prevent_a_complete_result() {
     let root = tempfile::tempdir().unwrap();
     put(root.path(), "app.mjs", "import './broken.mjs'; import './alias.cjs';");
     put(root.path(), "broken.mjs", "export const = ;");
-    put(root.path(), "alias.cjs", "const load=require; load('concealed');");
+    put(root.path(), "alias.cjs", "let load=require; load('concealed');");
     let (code, report) = run(root.path(), "app.mjs", &[]);
     assert_eq!(code, 1, "{report}");
     let codes: Vec<_> = report["source_graph"]["diagnostics"].as_array().unwrap().iter()
@@ -404,9 +404,9 @@ fn typed_parse_failures_preserve_capture_without_asserting_dependency_completene
 }
 
 #[test]
-fn typed_computed_loads_and_asserted_loader_aliases_remain_incomplete() {
+fn typed_computed_loads_and_mutable_loader_aliases_remain_incomplete() {
     let root = tempfile::tempdir().unwrap();
-    put(root.path(), "app.ts", "const load = require as Loader; load('hidden'); import(name as string);");
+    put(root.path(), "app.ts", "let load = require as Loader; load('hidden'); import(name as string);");
     let (code, report) = run(root.path(), "app.ts", &[]);
     assert_eq!(code, 1, "{report}");
     assert!(report["source_graph"]["edges"].as_array().unwrap().iter().any(|e| e["state"] == "non_literal"));
@@ -435,6 +435,103 @@ fn replay_capsule(path: &Path, pin: &str, cwd: &Path) -> (i32, Value) {
     let report = serde_json::from_slice(&output.stdout).unwrap_or_else(|e|
         panic!("invalid replay JSON: {e}; stderr={}", String::from_utf8_lossy(&output.stderr)));
     (output.status.code().unwrap(), report)
+}
+
+#[test]
+fn immutable_commonjs_aliases_match_node_routes_and_replay_without_source_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let unrelated = temp.path().join("unrelated");
+    std::fs::create_dir(&unrelated).unwrap();
+    put(
+        &project,
+        "app.cjs",
+        "const load=require; const forward=(load); console.log(forward('pkg'), forward('./value.cjs')); console.log(forward.resolve('pkg')===require.resolve('pkg'));",
+    );
+    put(&project, "value.cjs", "module.exports=42;");
+    put(
+        &project,
+        "node_modules/pkg/package.json",
+        r#"{"main":"index.cjs"}"#,
+    );
+    put(
+        &project,
+        "node_modules/pkg/index.cjs",
+        "const read=require; module.exports=read('./value.cjs');",
+    );
+    put(
+        &project,
+        "node_modules/pkg/value.cjs",
+        "module.exports=17;",
+    );
+    let reference = Command::new("node")
+        .env_remove("NODE_OPTIONS")
+        .env_remove("NODE_PATH")
+        .current_dir(&project)
+        .arg("app.cjs")
+        .output()
+        .unwrap();
+    assert!(
+        reference.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reference.stderr)
+    );
+    assert_eq!(reference.stdout, b"17 42\ntrue\n");
+
+    let capsule = temp.path().join("aliases.fnsc");
+    let (code, captured) = export_capsule(&project, "app.cjs", &capsule, &[]);
+    assert_eq!(code, 0, "{captured}");
+    assert_eq!(captured["source_graph"]["fully_resolved"], true);
+    assert_eq!(
+        paths(&captured),
+        [
+            "app.cjs",
+            "node_modules/pkg/index.cjs",
+            "node_modules/pkg/value.cjs",
+            "value.cjs"
+        ]
+    );
+    let edges = captured["source_graph"]["edges"].as_array().unwrap();
+    assert_eq!(edges.len(), 5);
+    assert!(
+        edges
+            .iter()
+            .all(|edge| edge["kind"] == "require" && edge["state"] == "resolved")
+    );
+    assert_node_edges(&project, &captured);
+    std::fs::rename(&project, temp.path().join("original-not-at-recorded-path")).unwrap();
+    let (code, replayed) = replay_capsule(
+        &capsule,
+        captured["capsule_hash"].as_str().unwrap(),
+        &unrelated,
+    );
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["source_graph"], captured["source_graph"]);
+    assert_eq!(replayed["replay_verified"], true);
+    assert_eq!(replayed["execution_performed"], false);
+}
+
+#[test]
+fn commonjs_aliases_keep_unproved_bindings_and_requests_incomplete() {
+    let root = tempfile::tempdir().unwrap();
+    put(
+        root.path(),
+        "dep.cjs",
+        "throw Error('capture never executes source');",
+    );
+    for source in [
+        "const load=require; function shadow(load){load('./dep.cjs');}",
+        "const load=require; load.resolve=other; load('./dep.cjs');",
+        "const load=require; consume(load); load('./dep.cjs');",
+        "const load=require; arguments[1]=other; load('./dep.cjs');",
+        "const load=require; const next=load; next(request);",
+    ] {
+        put(root.path(), "app.cjs", source);
+        let (code, report) = run(root.path(), "app.cjs", &[]);
+        assert_eq!(code, 1, "{source}: {report}");
+        assert_eq!(report["source_graph"]["fully_resolved"], false);
+        assert_eq!(report["execution_performed"], false);
+    }
 }
 
 #[test]

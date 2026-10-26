@@ -512,15 +512,17 @@ enum CreateRequireFactory {
 }
 
 /// A deliberately narrow binding proof, not general JavaScript scope analysis.
-/// Only immutable top-level imports and const declarations participate. Every
-/// other occurrence of their names is checked by the ordinary bounded walk;
-/// shadowing, mutation and escape make the graph incomplete instead of lending
-/// an unrelated function the captured importer's require authority.
+/// Only immutable top-level imports and const declarations participate. Native
+/// CommonJS require may also flow through an ordered chain of const aliases.
+/// Every other occurrence of their names is checked by the ordinary bounded
+/// walk; shadowing, mutation and escape make the graph incomplete instead of
+/// lending an unrelated function the captured importer's require authority.
 #[derive(Default)]
 struct CreateRequireBindings<'source> {
     factories: BTreeMap<&'source str, CreateRequireFactory>,
     commonjs_factories: BTreeSet<&'source str>,
     loaders: BTreeSet<&'source str>,
+    commonjs_aliases: BTreeSet<&'source str>,
     allowed_identifiers: BTreeSet<usize>,
     factory_members: BTreeSet<usize>,
     factory_patterns: BTreeSet<usize>,
@@ -600,6 +602,7 @@ impl<'source> CreateRequireBindings<'source> {
             }
         }
         if bindings.factories.is_empty() {
+            bindings.discover_commonjs_aliases(root, source)?;
             return Ok(bindings);
         }
         let mut statements = root.walk();
@@ -675,7 +678,62 @@ impl<'source> CreateRequireBindings<'source> {
                     .insert(runtime_operand(function).id());
             }
         }
+        bindings.discover_commonjs_aliases(root, source)?;
         Ok(bindings)
+    }
+
+    /// An alias retains exactly this module's require origin. Only earlier
+    /// aliases in top-level const initializers may supply a later alias; no
+    /// fixed-point inference, nested binding, property read or executable
+    /// expression can manufacture another loader. The full scan still rejects
+    /// every unproved occurrence of require or any alias, including shadowing.
+    fn discover_commonjs_aliases(&mut self, root: Node<'_>, source: &'source str) -> Result<()> {
+        // An explicitly imported factory or createRequire result named
+        // require is not the CommonJS wrapper binding. Its existing narrower
+        // contract remains authoritative, including refusal of aliases.
+        if self.factories.contains_key("require") || self.loaders.contains("require") {
+            return Ok(());
+        }
+        let mut statements = root.walk();
+        for statement in root.named_children(&mut statements) {
+            if statement.kind() != "lexical_declaration" || !keyword(statement, "const") {
+                continue;
+            }
+            let mut declarations = statement.walk();
+            for declaration in statement.named_children(&mut declarations) {
+                if declaration.kind() != "variable_declarator" {
+                    continue;
+                }
+                let Some(name) = declaration.child_by_field_name("name") else {
+                    continue;
+                };
+                let Some(value) = declaration.child_by_field_name("value") else {
+                    continue;
+                };
+                let value = runtime_operand(value);
+                if name.kind() != "identifier" || value.kind() != "identifier" {
+                    continue;
+                }
+                let origin = value.utf8_text(source.as_bytes()).unwrap_or("");
+                if origin != "require" && !self.commonjs_aliases.contains(origin) {
+                    continue;
+                }
+                let spelling = name.utf8_text(source.as_bytes()).unwrap_or("");
+                if spelling == "require"
+                    || spelling.contains('\\')
+                    || self.factories.contains_key(spelling)
+                    || self.loaders.contains(spelling)
+                {
+                    continue;
+                }
+                self.reserve_binding()?;
+                self.commonjs_aliases.insert(spelling);
+                self.loaders.insert(spelling);
+                self.allowed_identifiers.insert(name.id());
+                self.allowed_identifiers.insert(value.id());
+            }
+        }
+        Ok(())
     }
 
     /// Keep the ordinary require('node:module') edge in the graph. Only a
@@ -1016,7 +1074,15 @@ fn scan(
                 if !erased =>
             {
                 let spelling = node.utf8_text(bytes).unwrap_or("");
-                if bindings.filename_origin && spelling == "arguments"
+                if !bindings.commonjs_aliases.is_empty()
+                    && spelling == "arguments"
+                    && commonjs_wrapper_arguments(node)
+                {
+                    issue = Some((
+                        "MUTABLE_REQUIRE_ORIGIN",
+                        "CommonJS wrapper arguments may replace the aliased require binding",
+                    ));
+                } else if bindings.filename_origin && spelling == "arguments"
                     && commonjs_wrapper_arguments(node)
                 {
                     issue = Some((
@@ -1038,6 +1104,11 @@ fn scan(
                         "UNSUPPORTED_CREATE_REQUIRE_BINDING",
                         "escaped identifiers need decoded scope analysis before createRequire capture",
                     ));
+                } else if !bindings.commonjs_aliases.is_empty() && spelling.contains('\\') {
+                    issue = Some((
+                        "UNSUPPORTED_REQUIRE_ALIAS_BINDING",
+                        "escaped identifiers need decoded scope analysis before require alias capture",
+                    ));
                 } else if bindings.factories.contains_key(spelling) {
                     issue = Some((
                         "INDIRECT_CREATE_REQUIRE",
@@ -1045,10 +1116,17 @@ fn scan(
                     ));
                 } else if bindings.loaders.contains(spelling) {
                     if !bindings.direct_loader_use(node, text) && !loader_typeof_probe(node) {
-                        issue = Some((
-                            "INDIRECT_CREATED_REQUIRE",
-                            "created require is shadowed, mutated or escapes its captured direct calls",
-                        ));
+                        issue = Some(if bindings.commonjs_aliases.contains(spelling) {
+                            (
+                                "INDIRECT_REQUIRE_ALIAS",
+                                "require alias is shadowed, mutated or escapes its captured direct calls",
+                            )
+                        } else {
+                            (
+                                "INDIRECT_CREATED_REQUIRE",
+                                "created require is shadowed, mutated or escapes its captured direct calls",
+                            )
+                        });
                     }
                 } else if spelling == "require"
                     && !direct_callee(node, text)
@@ -1342,22 +1420,29 @@ fn commonjs_module_source(node: Node<'_>, source: &str) -> bool {
         && arguments.next().is_none()
 }
 
-/// A sloppy CommonJS wrapper maps arguments[3] to its __filename parameter.
-/// Arrow functions inherit that object, while ordinary functions own theirs.
+/// A sloppy CommonJS wrapper maps arguments[1] to require and arguments[3] to
+/// __filename. Arrow functions inherit that object, while ordinary functions
+/// own theirs. Computed method names still execute in the enclosing scope.
 /// Do not allow the wrapper object to escape this immutable-origin proof.
 fn commonjs_wrapper_arguments(mut node: Node<'_>) -> bool {
     for _ in 0..MAX_STRING_EXPRESSION_DEPTH {
         let Some(parent) = node.parent() else {
             return true;
         };
-        if matches!(
-            parent.kind(),
-            "function_declaration"
-                | "function_expression"
-                | "generator_function"
-                | "generator_function_declaration"
-                | "method_definition"
-        ) {
+        let method_name = parent.kind() == "method_definition"
+            && parent
+                .child_by_field_name("name")
+                .is_some_and(|name| name.id() == node.id());
+        if !method_name
+            && matches!(
+                parent.kind(),
+                "function_declaration"
+                    | "function_expression"
+                    | "generator_function"
+                    | "generator_function_declaration"
+                    | "method_definition"
+            )
+        {
             return false;
         }
         node = parent;
@@ -1843,6 +1928,273 @@ mod tests {
         assert!(notices.is_empty(), "{expression}: {notices:?}");
         assert_eq!(loads.len(), 1, "{expression}: {loads:?}");
         loads.pop().unwrap().specifier
+    }
+
+    #[test]
+    fn commonjs_require_const_aliases_capture_exact_calls_and_resolve_routes() {
+        for (source, language) in [
+            (
+                "const load=require; load('./dep.cjs'); load.resolve('./dep.cjs');",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "const first=(require), second=((first)); const third=second; third('./' + 'dep.cjs'); third['res' + 'olve'](`./${'dep'}.cjs`);",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "const load=require; function nested(){return load('./dep.cjs');} const later=()=>load.resolve('./dep.cjs'); if(typeof load==='function') nested(); function ownArguments(){return arguments.length;}",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "const load=require; load?.('./dep.cjs'); load?.resolve?.('./dep.cjs'); function ownArguments(){return {[arguments.length](){return arguments.length;}};}",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "type load=unknown; interface next {} const load: Loader=(require as Loader); const next: Loader=load!; (next as Loader)('./dep.cjs'); (next.resolve as Resolver)('./dep.cjs');",
+                SourceLanguage::TypeScript,
+            ),
+        ] {
+            let (loads, notices, analyzed) = scan(
+                &mut Parser::new(),
+                source.as_bytes(),
+                language,
+                &mut Budget::default(),
+            )
+            .unwrap();
+            assert!(analyzed, "{source}: {notices:?}");
+            assert!(notices.is_empty(), "{source}: {notices:?}");
+            assert_eq!(loads.len(), 2, "{source}: {loads:?}");
+            for load in loads {
+                assert_eq!(load.kind, LoadKind::Require, "{source}");
+                assert_eq!(load.specifier.as_deref(), Some("./dep.cjs"), "{source}");
+                assert!(!load.type_only);
+            }
+        }
+    }
+
+    #[test]
+    fn commonjs_require_aliases_refuse_shadowing_mutation_and_escaped_origins() {
+        for body in [
+            "load=replacement;",
+            "load.resolve=replacement;",
+            "Object.assign(load, {resolve:replacement});",
+            "const escaped={load};",
+            "consume(load);",
+            "export {load};",
+            "let next=load; next('./dep.cjs');",
+            "function nested(){const next=load; next('./dep.cjs');}",
+            "function shadow(load){load('./dep.cjs');}",
+            "const shadow=(load)=>load('./dep.cjs');",
+            "function load(){}",
+            "{const load=replacement; load('./dep.cjs');}",
+            "try {} catch(load) {load('./dep.cjs');}",
+            "const {load}=replacement;",
+            "({load}=replacement);",
+            "for(load of values){}",
+            "load.call(null, './dep.cjs');",
+            "load.apply(null, ['./dep.cjs']);",
+            "const resolve=load.resolve; resolve('./dep.cjs');",
+            "load.resolve('./dep.cjs', {paths:['other']});",
+            "load[property]('./dep.cjs');",
+            "eval('require=replacement');",
+            "(eval)('load=replacement');",
+            "with(context){load('./dep.cjs');}",
+            "require=replacement;",
+            "function shadow(require){}",
+            "arguments[1]=replacement;",
+            "const escapedArguments=arguments;",
+            "(()=>{arguments[1]=replacement;})();",
+            "lo\\u0061d=replacement;",
+            "function shadow(lo\\u0061d){}",
+            "\\u0072equire=replacement;",
+        ] {
+            let source = format!("const load=require; {body} load('./dep.cjs');");
+            let (_, notices, analyzed) = scan(
+                &mut Parser::new(),
+                source.as_bytes(),
+                SourceLanguage::JavaScript,
+                &mut Budget::default(),
+            )
+            .unwrap();
+            assert!(analyzed, "{source}: {notices:?}");
+            assert!(
+                !notices.is_empty(),
+                "unproved alias became complete: {source}"
+            );
+        }
+        for source in [
+            "let load=require; load('./dep.cjs');",
+            "var load=require; load('./dep.cjs');",
+            "const first=second; const second=require; first('./dep.cjs');",
+            "const load=(0, require); load('./dep.cjs');",
+            "const load=condition ? require : other; load('./dep.cjs');",
+            "const load=module.require; load('./dep.cjs');",
+            "const {load}=require; load('./dep.cjs');",
+            "function nested(){const load=require; load('./dep.cjs');}",
+            "import {createRequire as require} from 'node:module'; const load=require; load('./dep.cjs');",
+            "import {createRequire} from 'node:module'; const require=createRequire(import.meta.url); const load=require; load('./dep.cjs');",
+            "({[arguments[1]=replacement](){}}); const load=require; load('./dep.cjs');",
+            "class Example {[arguments[1]=replacement](){}} const load=require; load('./dep.cjs');",
+        ] {
+            let (_, notices, analyzed) = scan(
+                &mut Parser::new(),
+                source.as_bytes(),
+                SourceLanguage::JavaScript,
+                &mut Budget::default(),
+            )
+            .unwrap();
+            assert!(analyzed, "{source}: {notices:?}");
+            assert!(
+                !notices.is_empty(),
+                "unsupported alias became complete: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn commonjs_require_aliases_preserve_nonliteral_requests_and_binding_bounds() {
+        let source =
+            "const load=require; const next=load; next(request); next.resolve(`./${name}.cjs`);";
+        let (loads, notices, analyzed) = scan(
+            &mut Parser::new(),
+            source.as_bytes(),
+            SourceLanguage::JavaScript,
+            &mut Budget::default(),
+        )
+        .unwrap();
+        assert!(analyzed);
+        assert!(notices.is_empty(), "{notices:?}");
+        assert_eq!(loads.len(), 2);
+        assert!(
+            loads
+                .iter()
+                .all(|load| load.kind == LoadKind::Require && load.specifier.is_none())
+        );
+
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.cjs", source);
+        let captured = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        assert!(!captured.report().fully_resolved);
+        assert!(
+            captured
+                .report()
+                .edges
+                .iter()
+                .all(|edge| edge.state == EdgeState::NonLiteral)
+        );
+        let pin = captured.report().input_hash.clone();
+        assert_eq!(
+            registry::PinnedModuleRegistry::new(captured, &pin)
+                .err()
+                .unwrap()
+                .code,
+            "ERR_MODULE_REGISTRY_INCOMPLETE"
+        );
+
+        let source = (0..=MAX_SITES)
+            .map(|index| format!("const load{index}=require;"))
+            .collect::<String>();
+        let failure = scan(
+            &mut Parser::new(),
+            source.as_bytes(),
+            SourceLanguage::JavaScript,
+            &mut Budget::default(),
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, "ERR_MODULE_GRAPH_LIMIT");
+    }
+
+    #[test]
+    fn commonjs_require_alias_capsules_preserve_importer_routes_and_optional_absence() {
+        use super::registry::{PinnedModuleRegistry, RequestStyle};
+        let root = tempfile::tempdir().unwrap();
+        let source = "const load=require; const next=load; next('pkg'); next('./value.cjs'); try{next('optional')}catch(error){}";
+        put(root.path(), "app.cjs", source);
+        put(root.path(), "value.cjs", "module.exports=42;");
+        put(
+            root.path(),
+            "node_modules/pkg/package.json",
+            r#"{"main":"index.cjs"}"#,
+        );
+        put(
+            root.path(),
+            "node_modules/pkg/index.cjs",
+            "const read=require; module.exports=read('./value.cjs');",
+        );
+        put(
+            root.path(),
+            "node_modules/pkg/value.cjs",
+            "module.exports=17;",
+        );
+        let captured = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        assert!(captured.report().diagnostics.is_empty());
+        assert_eq!(captured.report().edges.len(), 4);
+        assert!(
+            !captured.report().fully_resolved,
+            "missing optional route remains explicit"
+        );
+        let pin = captured.report().input_hash.clone();
+        let capsule = super::capsule::encode(&captured).unwrap();
+        put(
+            root.path(),
+            "value.cjs",
+            "throw new Error('live source changed');",
+        );
+        put(
+            root.path(),
+            "node_modules/pkg/value.cjs",
+            "throw new Error('live package changed');",
+        );
+        put(
+            root.path(),
+            "node_modules/optional/index.js",
+            "module.exports='new live dependency';",
+        );
+        put(root.path(), "uncaptured.cjs", "module.exports=99;");
+        let replayed = super::capsule::replay(capsule.bytes(), capsule.digest()).unwrap();
+        assert_eq!(replayed.report(), captured.report());
+        let registry = PinnedModuleRegistry::new(replayed, &pin).unwrap();
+        let entry = registry
+            .lookup(None, registry.entrypoint(), RequestStyle::Require)
+            .unwrap();
+        assert_eq!(entry.source(), source);
+        let local = registry
+            .lookup(Some(entry.id()), "./value.cjs", RequestStyle::Require)
+            .unwrap();
+        assert_eq!(local.source(), "module.exports=42;");
+        let package = registry
+            .lookup(Some(entry.id()), "pkg", RequestStyle::Require)
+            .unwrap();
+        let nested = registry
+            .lookup(Some(package.id()), "./value.cjs", RequestStyle::Require)
+            .unwrap();
+        assert_eq!(nested.source(), "module.exports=17;");
+        assert_ne!(nested.id(), local.id());
+        assert_eq!(registry.summary().missing_routes, 1);
+        assert_eq!(
+            registry
+                .lookup(Some(entry.id()), "optional", RequestStyle::Require)
+                .err()
+                .unwrap()
+                .code,
+            "MODULE_NOT_FOUND"
+        );
+        for (importer, specifier, style) in [
+            (entry.id(), "./uncaptured.cjs", RequestStyle::Require),
+            (entry.id(), "./value.cjs", RequestStyle::Import),
+            (package.id(), "pkg", RequestStyle::Require),
+            (package.id(), "optional", RequestStyle::Require),
+        ] {
+            assert_eq!(
+                registry
+                    .lookup(Some(importer), specifier, style)
+                    .err()
+                    .unwrap()
+                    .code,
+                "ERR_MODULE_REGISTRY_ROUTE",
+                "{importer} {specifier} {style:?}"
+            );
+        }
     }
 
     #[test]
@@ -2781,12 +3133,12 @@ const fromPackage = require('string-' + 'fixture');
     }
 
     #[test]
-    fn computed_loads_and_loader_aliases_never_look_complete() {
+    fn computed_loads_and_mutable_loader_aliases_never_look_complete() {
         let root = tempfile::tempdir().unwrap();
         put(
             root.path(),
             "app.mjs",
-            "import(name); const load=require; load('hidden'); const f=eval;",
+            "import(name); let load=require; load('hidden'); const f=eval;",
         );
         let g = graph(root.path());
         assert_eq!(g.report.edges[0].state, EdgeState::NonLiteral);
@@ -2856,7 +3208,7 @@ const fromPackage = require('string-' + 'fixture');
             "const require = replacement; typeof require;",
             "function require() {} typeof require;",
             "try {} catch (require) { typeof require; }",
-            "const load = require as Loader; typeof require; load('./hidden.cjs');",
+            "let load = require as Loader; typeof require; load('./hidden.cjs');",
             "const load = typeof require === 'function' ? require : fallback;",
         ] {
             let (_, notices, analyzed) = scan(
@@ -3792,12 +4144,12 @@ require!('./dep.cjs');
     }
 
     #[test]
-    fn executable_loader_wrappers_and_stored_aliases_are_not_treated_as_direct_calls() {
+    fn executable_loader_wrappers_and_mutable_aliases_are_not_treated_as_direct_calls() {
         let root = tempfile::tempdir().unwrap();
         put(
             root.path(),
             "app.ts",
-            "const load = require as Loader; load('hidden'); (other, require)('hidden');",
+            "let load = require as Loader; load('hidden'); (other, require)('hidden');",
         );
         let g = typed_graph(root.path(), "app.ts");
         assert!(!g.report.fully_resolved);

@@ -423,6 +423,14 @@ replace the complete set for every edge. Supported quoted escapes and
 substitution-free template literals are decoded without running JavaScript.
 Comments and ordinary string contents are not treated as module requests.
 
+Native CommonJS `require` can also flow through an ordered chain of top-level
+`const` aliases, such as `const load = require; const next = load;` followed by
+`next('./value.cjs')` or `next.resolve('package-name')`. These calls retain the
+original module's resolution context and capture only their exact requests.
+Mutation, shadowing, escaped loader references, mutable bindings, alternate
+resolve search paths and nonliteral requests keep the graph incomplete. This
+does not grant a loader permission to open another route at execution time.
+
 Each edge records its source byte span, one-based line/column, load kind, request,
 resolution status, target identity and selected package-map branches. Literal
 calls are conservatively included even inside deferred functions or dead
@@ -447,13 +455,14 @@ loads, parse failures and observed indirect loader/code-generation surfaces.
 Missing entrypoints return `UNRESOLVED`, exit 1. Unsafe capture and resource
 failures return `ERROR`, exit 2, without a partial successful graph.
 
-`fully_resolved` is **not runtime completeness**. Arbitrary aliases, computed
-property access, generated code, binding/control-flow analysis, import-attribute
+`fully_resolved` is **not runtime completeness**. Arbitrary aliases beyond the
+bounded forms above, generated code, general binding/control-flow analysis, import-attribute
 validation and module evaluation/linking semantics are outside the scanner.
 Shadowed direct require calls can be conservative false positives. A tree-sitter
 parse is not an engine compatibility result. `runtime_completeness`,
-`execution_performed` and `release_certification` remain false on every result;
-`franken-node run` and the engine loader are unchanged.
+`execution_performed` and `release_certification` remain false on every result.
+The product's `run --frozen-modules` separately admits this graph through the
+engine adapter; successful analysis alone does not authorize execution.
 
 The domain-separated graph `input_hash` binds the entrypoint, conditions and
 symlink policy, all captured source identities, edges, diagnostics, consulted
