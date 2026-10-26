@@ -5,6 +5,14 @@ on:
     paths:
       - '.cargo-mutants.toml'
       - '.github/workflows/mutants-gate.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/franken-node/Cargo.toml'
+      - 'crates/franken-node/src/lib.rs'
+      - 'rust-toolchain.toml'
+      - 'packaging/source-siblings.tsv'
+      - 'scripts/bootstrap_source.sh'
+      - 'scripts/check_inline_lib_tests.py'
       - 'crates/franken-node/src/security/constant_time.rs'
       - 'crates/franken-node/src/observability/evidence_ledger.rs'
       - 'crates/franken-node/src/connector/canonical_serializer.rs'
@@ -35,14 +43,31 @@ jobs:
         with:
           path: franken_node
 
-      - name: Check out franken_engine sibling
-        uses: actions/checkout@v4
-        with:
-          repository: Dicklesworthstone/franken_engine
-          path: franken_engine
+      - name: Materialize the complete pinned test source set
+        run: |
+          set -euo pipefail
+          bash scripts/bootstrap_source.sh --workspace "$PWD" \
+            --engine-ref dd1b3337f98ce381c3ff04307aca00153c20c453 \
+            --receipt "$RUNNER_TEMP/mutation-source-inputs.tsv"
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust nightly
+        uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb
+        with:
+          toolchain: nightly-2026-09-21
+
+      - name: Package the complete immutable mutation source set
+        run: |
+          set -euo pipefail
+          mkdir mutation-inputs
+          while IFS=$'\t' read -r repo revision; do
+            case "$repo" in \#*) continue ;; esac
+            git -C "../$repo" archive --format=tar "$revision" > "mutation-inputs/$repo.tar"
+          done < "$RUNNER_TEMP/mutation-source-inputs.tsv"
+          (cd mutation-inputs; sha256sum *.tar > SHA256SUMS)
+          bash scripts/bootstrap_source.sh --workspace "$PWD" \
+            --engine-ref dd1b3337f98ce381c3ff04307aca00153c20c453 --verify-only \
+            --receipt "$RUNNER_TEMP/mutation-source-inputs-after-packaging.tsv"
+          cmp "$RUNNER_TEMP/mutation-source-inputs.tsv" "$RUNNER_TEMP/mutation-source-inputs-after-packaging.tsv"
 
       - name: Cache cargo home and target
         uses: Swatinem/rust-cache@v2
@@ -58,25 +83,53 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/remote_compilation_helper/main/install.sh | bash
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Install cargo-mutants
-        run: cargo install cargo-mutants --version 27.0.0 --locked
-
       - name: Run cargo-mutants
         id: mutants
         env:
           RCH_VISIBILITY: summary
+          RCH_REQUIRE_REMOTE: "1"
         run: |
           set +e
-          "$HOME/.local/bin/rch" exec -- cargo mutants \
-            --config .cargo-mutants.toml \
-            --package frankenengine-node \
-            --test-package frankenengine-node \
-            --cargo-test-arg=--lib \
-            --cargo-test-arg=--tests \
-            --in-place=false \
-            --no-shuffle \
-            --timeout 60 \
-            --output mutants-output
+          # One admitted job installs and uses the tool on the SAME worker.
+          # Job transport carries only the primary root. Explicit archives
+          # carry every sibling, then mutations affect only a fresh extraction.
+          "$HOME/.local/bin/rch" exec --job --result-dir mutants-output -- \
+            env CARGO_INCREMENTAL=0 RUSTFLAGS="--cfg franken_node_inline_tests" \
+            bash -c '
+              set -euo pipefail
+              mkdir -p mutants-output
+              output="$PWD/mutants-output"
+              (cd mutation-inputs; sha256sum -c SHA256SUMS) > "$output/source-input-checks.txt"
+              campaign_root=$(mktemp -d)
+              for repo in franken_node franken_engine frankentui fastapi_rust sqlmodel_rust; do
+                mkdir "$campaign_root/$repo"
+                tar -xf "mutation-inputs/$repo.tar" -C "$campaign_root/$repo"
+              done
+              cd "$campaign_root/franken_node"
+              cargo +nightly-2026-09-21 install cargo-mutants --version 27.0.0 --locked
+              cargo +nightly-2026-09-21 test --locked -p frankenengine-node --lib -- --list \
+                > "$output/inline-tests.list"
+              python3 scripts/check_inline_lib_tests.py "$output/inline-tests.list" --min-tests 1 --json
+              python3 -c '\''import pathlib
+          import sys
+          listing = pathlib.Path(sys.argv[1]).read_text()
+          for module in ("security::constant_time::", "observability::evidence_ledger::", "connector::canonical_serializer::"):
+              count = sum(line.startswith(module) and line.endswith(": test") for line in listing.splitlines())
+              print(f"{module} {count} discovered tests")
+              if count == 0:
+                  raise SystemExit(f"no tests discovered for mutation target {module}")'\'' "$output/inline-tests.list"
+              cargo +nightly-2026-09-21 mutants \
+                --config .cargo-mutants.toml \
+                --package frankenengine-node \
+                --test-package frankenengine-node \
+                --cargo-test-arg=--locked \
+                --cargo-test-arg=--lib \
+                --cargo-test-arg=--tests \
+                --in-place \
+                --no-shuffle \
+                --timeout 60 \
+                --output "$output"
+            '
           status=$?
           echo "exit_code=$status" >> "$GITHUB_OUTPUT"
           exit 0
@@ -86,7 +139,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cargo-mutants-output
-          path: franken_node/mutants-output
+          path: |
+            ${{ runner.temp }}/mutation-source-inputs.tsv
+            franken_node/mutation-inputs/SHA256SUMS
+            franken_node/mutants-output
           if-no-files-found: warn
           retention-days: 7
 
@@ -97,9 +153,9 @@ jobs:
           import json
           import pathlib
 
-          outcomes_path = pathlib.Path("mutants-output/outcomes.json")
+          outcomes_path = pathlib.Path("mutants-output/mutants.out/outcomes.json")
           if not outcomes_path.exists():
-              print("mutants-output/outcomes.json was not produced")
+              print(f"{outcomes_path} was not produced")
           else:
               outcomes = json.loads(outcomes_path.read_text())
               print(json.dumps(outcomes.get("summary", {}), indent=2, sort_keys=True))
@@ -137,18 +193,17 @@ jobs:
           import sys
 
           floor_bp = int(os.environ.get("MUTATION_SCORE_FLOOR_BP", "2500"))
-          path = pathlib.Path("mutants-output/outcomes.json")
+          path = pathlib.Path("mutants-output/mutants.out/outcomes.json")
           if not path.exists():
-              print("mutation-adequacy: outcomes.json absent; skipping floor "
-                    "(exit-code gate already enforced)")
-              sys.exit(0)
+              print("::error::mutation-adequacy: outcomes.json absent")
+              sys.exit(1)
           try:
               data = json.loads(path.read_text())
           except (OSError, json.JSONDecodeError) as exc:
-              print(f"mutation-adequacy: could not read outcomes.json ({exc}); skipping floor")
-              sys.exit(0)
+              print(f"::error::mutation-adequacy: could not read outcomes.json ({exc})")
+              sys.exit(1)
 
-          outcomes = data.get("outcomes", data if isinstance(data, list) else [])
+          outcomes = data if isinstance(data, list) else data.get("outcomes", [])
           caught = missed = timeout = unviable = other = 0
           for outcome in outcomes:
               summary = outcome.get("summary") if isinstance(outcome, dict) else None
@@ -166,10 +221,10 @@ jobs:
 
           viable = caught + missed + timeout
           if viable == 0:
-              print(f"mutation-adequacy: no viable mutants parsed "
+              print(f"::error::mutation-adequacy: no viable mutants parsed "
                     f"(caught={caught} missed={missed} timeout={timeout} "
-                    f"unviable={unviable} other={other}); skipping floor")
-              sys.exit(0)
+                    f"unviable={unviable} other={other})")
+              sys.exit(1)
 
           # A timeout is a detection: the mutant made the suite hang/fail.
           score_bp = round((caught + timeout) * 10000 / viable)
