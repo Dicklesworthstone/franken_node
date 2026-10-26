@@ -3898,7 +3898,8 @@ one pass.
   Obtain the full `sha256:` plus 64 lowercase hexadecimal digits from a reviewed
   `franken-module-graph --capture-source-graph` report's `input_hash`, using the
   same project root, entrypoint and symlink options. Keep that approval outside
-  guest-writable source. The native worker checks the pin before preparing or
+  guest-writable source; a configured pin needs an operator-controlled TOML file.
+  The native worker checks the pin before preparing or
   evaluating modules, then executes that same captured graph. Changed captured
   source, observed manifests, links or resolution probes require a newly approved pin,
   even when console output would be identical. A graph pin is operator-selected

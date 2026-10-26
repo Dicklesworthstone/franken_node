@@ -28,7 +28,7 @@
     "operational_impact": {
       "operator_notes": "Omitting the pin preserves existing behavior. A supplied pin must be canonical and requires frozen execution. The existing resolver consumes exactly the capture it validates. This is operator-selected integrity, not registry-signed provenance or an authority grant.",
       "required_actions": ["Retain the reviewed graph hash outside guest-writable source and explicitly approve a new pin after intended source or resolution changes."],
-      "rollout_notes": "Current-source native tests and required Rust checks are pending. GitHub Actions is disabled; no hosted CI, benchmark, production rollout, rollback rehearsal or quantitative risk reduction is claimed. The complete no-contract gate must remain non-passing until its actual evidence obligations are satisfied."
+      "rollout_notes": "On committed candidate 6e40cb120, strict remote all-target default-feature compiler and Clippy checks pass, the predeclared 13 native plus 3 public CLI/config regressions pass, and the exact source-built Linux binary passes all 10 existing first-safe-workload steps. Workspace formatting and UBS remain non-clean. GitHub Actions is disabled; no hosted CI, benchmark, production rollout, archive installation, automatic artifact recovery or quantitative risk reduction is claimed. The complete no-contract gate remains non-passing until its actual evidence obligations are satisfied."
     },
     "risk_delta": {
       "previous_tier": "high",
@@ -36,9 +36,9 @@
       "rationale": "Adds an opt-in integrity boundary without claiming a measured reduction in production compromise risk. Full artifact-authority and capability-envelope integration remains open."
     },
     "compatibility": {
-      "backward_compatibility": "compatible",
+      "backward_compatibility": "breaking",
       "forward_compatibility": "enables",
-      "details": "Default serialized configs omit the new optional field. Explicit pins require updated source builds; CLI takes precedence over TOML. Resource, capability, trust, containment and parser restrictions continue to apply."
+      "details": "Default serialized configs omit the new optional field and existing CLI/config behavior is preserved. Rust callers using explicit RuntimeConfig struct literals must initialize the new optional field. Explicit pins require updated source builds; CLI takes precedence over TOML. Resource, capability, trust, containment and parser restrictions continue to apply."
     },
     "dependency_changes": {"added": [], "removed": [], "updated": []}
   }
