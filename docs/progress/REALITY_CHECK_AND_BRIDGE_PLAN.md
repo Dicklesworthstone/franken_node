@@ -1,5 +1,72 @@
 # Reality Check and Bridge Plan: franken_node
 
+## Follow-up reality check — 2026-10-25, 22:30 America/New_York
+
+**The project is not finished or release-qualified. It has real native execution and useful trust/control mechanisms, but its central promise is a composed, measurable operator workflow that the current evidence does not yet establish.** The 20-goal matrix and B1–B7 bridge below remain the complete scope. This follow-up corrects stale diagnoses and sharpens existing tasks; it does not create another parallel roadmap or count planning as delivered capability.
+
+### Source, intake and proof boundaries
+
+Read the complete root `AGENTS.md` and `README.md`, charter, canonical plan, engine split, close condition, architecture overview and roadmap; traced the relevant runtime, replay, rollout, trust observation, fleet server and ZK paths against existing issue acceptance. The literal `/data/projects/AGENTS.md` is unavailable. Available ancestor guidance was read, but its missing named sections are not claimed as read. This remains a comprehensive assessment across product domains, not a manual reading of every one of the roughly 1,195 Markdown files or every implementation function.
+
+The inspected product HEAD is `a16eb183adca04789be2197498350ce5445215cc`; sibling engine HEAD is `c8f5618a01141b424d1b79659615d10563e7d3c6`. Pre-existing edits to `config.rs` and the Beads migration-state file were preserved. No runtime implementation was changed. Native results in earlier sections retain their original source/binary identities; they are not current-source acceptance for this follow-up.
+
+Fresh raw gate outputs, Python test logs, before/after issue snapshots and graph outputs are retained at `/tmp/franken-node-reality-followup-20261025.Sh8DHf/`. This is temporary local audit evidence, not a durable public qualification archive. The earlier published-binary campaign and remote watchdog evidence remain separately recorded in the durable private directory named in Engineering follow-through below. Neither historical campaign was rerun here.
+
+### Fresh checks and what they actually establish
+
+| Check | Follow-up result | Meaning |
+|---|---|---|
+| Default oracle close condition | FAIL; L1 remains RED, retained 391/560 = 69.82% | Below the 95% ship floor; no new native compatibility rate measured |
+| Oracle consistency mode | PASS, with L1 RED | Honest artifacts may merge; this does not permit shipping |
+| Migration velocity gate | FAIL, 20/22; 1.2353x and frozen-input drift | The >=3x outcome remains unmet; do not regenerate the frozen cohort to conceal drift |
+| Compromise reduction gate | FAIL, `CURRENT_MEASUREMENT_INPUTS_REQUIRED` | `release_qualified=false`, `independently_reproduced=false`; authenticated current experiments still required |
+| Independent replications gate | FAIL, 20/24; zero independent passing replications | Placeholder evidence is not external reproduction |
+| Impossible-capability adoption validator | PASS, 74/74 | Validates honest pending structure, not production adoption |
+| Watchdog / project runner / installed-release helper tests | 53 + 48 + 19 = **120 passed**, no skips | Repaired supervision is exercised; no installed native candidate is thereby qualified |
+| Compromise / migration verifier tests | 30 + 17 = **47 passed** | Consumers handle their tested positive/negative evidence correctly; failed product measurements stay failed |
+| Rust/source-native verification | **UNRUN** | SBH admission fails: about 284.0 GB available, 7.107% against 8.061%; no Cargo check, clippy, fmt or native build was launched |
+
+The first sandboxed watchdog run had three errors and the release-helper run one error because their cleanup checks could not execute `ps`. Those logs are retained. Approved reruns outside that restriction pass 53/53 and 19/19. This is an environment-scoped rerun, not a softened deadline/assertion or an erased product failure. Total successful Python coverage here is **167 tests**. It does not independently repeat the previously reported Linux run or the 170-project native campaign.
+
+### Material code findings and corrections to older diagnoses
+
+- **Native execution is real.** The old epic title claiming the runtime cannot run real programs was too broad. Useful hello/local-module execution has retained installed-binary evidence. Representative ecosystem behavior, current-source performance and advertised-platform runtime safety remain open.
+- **Trust observation and fleet HTTP are real.** `trust_observe_cli.rs` consumes signed collector observations; `control_plane/fleet_http_server.rs` binds a real server. They do not establish automatic per-dependency attribution in mixed applications or certified quiescence of every admitted native session.
+- **Replay is narrower than full time travel.** `ops/native_replay.rs:1398` explicitly treats `decisions_match` as informational. Frozen-source guest replay is valuable, but matching execution is not an independently verified original-policy/state certificate or stepwise history navigation.
+- **Rollout has advanced beyond the September defect.** `migration/rollout.rs` now verifies lockstep evidence and computes a cohort-conditioned Wilson lower bound. The operator ceiling remains separate, transitions still assign `receipt_signature: Some(state.digest())`, and stage persistence is not live production traffic control. Existing `.16` now identifies its old description as historical rather than instructing someone to repair already-fixed hard-coded acceptance.
+- **ZK soundness is still a real gap.** `security/zk_attestation.rs` checks ledger state, expiry, structure and a supplied `PredicateOutcome::Pass`; the inspected success path does not verify a cryptographic witness relation. Existing `.18/.19` remain necessary. The presence of a soundness-named check is not cryptographic soundness.
+- **Documentation contradicts itself across versions.** The architecture overview still says no pinned toolchain and file-only fleet behavior in some sections, while `rust-toolchain.toml` pins `nightly-2026-09-21` and its own fleet section describes the real server. README passages similarly mix older observation/containment limitations with newer routes. `.16` now explicitly requires executable, version-scoped example reconciliation; correcting prose earns no capability closure.
+
+### Bridge decisions, ambition and refinement
+
+The next product outcome is an exact supported candidate that an operator can install, run usefully, contain, recover and independently inspect. Current-source qualification and delivery to installed assets come first; the historical macOS v0.2.0 safe-mode defect must not be confused with the newer source implementation. Then complete the existing artifact-authority and fleet-quiescence pairs while preserving the broader compatibility, migration, replay, frontier and field-evidence tracks. No ambition target, denominator, profile distinction or negative control was removed.
+
+Three ambition reviews strengthened the existing bridge:
+
+1. **Compose the operator workflow.** Require useful native execution before testing denial, and qualify the actual distributed/installed artifacts rather than stopping at helper tests or source inspection.
+2. **Close authority gaps in time as well as identity.** A hash checked before loading is insufficient if mutable bytes can change before consumption. Extend `.28/.29` to prove authenticated snapshot consumption or pre-effect refusal under controlled atomic replacement, symlink retargeting and cache races.
+3. **Carry containment across failure and restart.** A valid certificate for an old session population must not certify a new one after coordinator/agent restart. Extend `.30/.31` to reconcile epochs, session populations and unresolved effects across persistence/application/certification boundaries, without replaying indeterminate effects.
+
+Five refinement passes were completed on the existing graph, using the skill's frozen generation/refinement prompts:
+
+| Pass | Review and result |
+|---|---|
+| 1 — Current factual basis | Updated the epic title, `.12` supervisor note and `.16` closure-reconciliation scope. Preserved original descriptions/comments as dated evidence and existing owners/statuses. |
+| 2 — Complete positive and negative authority path | Added the check/use-race obligation to `.28` and a controlled, independently observed handoff test to `.29`. Original useful execution, exact module closure and wrong-authority controls remain required. |
+| 3 — Recovery and population completeness | Added restart reconciliation to `.30` and authentic-old-certificate/new-session counterexamples to `.31`. Unknown effects remain indeterminate; release is not automatic retry. |
+| 4 — Coverage, proof and dependencies | Rechecked all V1–V20 goals against existing tasks, implementation/proof ordering, detailed logging, independent anchors, retained evidence and executable documentation. Added `.16` example/version acceptance; no duplicate task or speculative dependency was necessary. |
+| 5 — Final adversarial/graph review | Re-read the amended pairs, confirmed useful positives and producer-distinct negatives survive, retained current owners and closure gates, and found no further required change. No implementation/qualification issue was closed. |
+
+Seven existing issues changed through `br`: the epic, `.12`, `.16`, `.28`, `.29`, `.30`, `.31`. No new issue was needed: every numbered vision goal already has broad coverage, and the newly explicit temporal acceptance belongs in existing tasks. Completing all those tasks **honestly to their full acceptance** addresses the identified engineering scope; merely changing all their statuses to closed cannot prove measured charter outcomes, field adoption or independent external replication. Those remain empirical obligations with their own gates.
+
+### Graph validation and handoff
+
+`br sync --flush-only` succeeds. Explicit `/Users/jemanuel/.local/bin/bv --db .beads/issues.jsonl` triage, actionable plan, priority and insights load **4,399 valid rows, zero skipped/error rows**, with complete source authority and data hash `b5995537e39543ba65565e778b574a727b5acfc4ae0cccfb223a01d806203c71`: **4,332 closed / 36 open / 26 in progress / 5 blocked**. These counts measure workflow state, not percentage of product completion.
+
+The PATH-resolved older `bv` omitted 114 rows and is not authoritative for this audit. The corrected viewer skips its large-graph cycle algorithm; **`br dep cycles --json` independently reports zero active cycles**. Algorithmic suggestions to lower charter blockers were not applied mechanically. The plan's top-ranked epic is not itself a useful coding unit: agents should take its concrete ready children and their named acceptance, beginning with qualified source/asset execution and the authority/quiescence implementation pairs. Rust qualification, actual current campaigns, current installed safety, external replication and production adoption remain unresolved; none is relabelled complete by this report.
+
+Final diff validation passes; canonical/base JSONL agree byte-for-byte. The seven issue diffs change only titles, notes, acceptance and update timestamps, with no status, owner, dependency or closure changes. UBS returns 3 for the Markdown-only report because no supported language is present: no scanner ran, and this is not recorded as a pass or bypassed with an allow-no-scan flag.
+
 ## Engineering follow-through — 2026-10-25
 
 Implementation **`22c373b9b39607bbe8107e7233b26c6ff27369aa`** removes two demonstrated qualification blockers. This is exercised enablement, not a runtime compatibility, security KPI or release-readiness win.
