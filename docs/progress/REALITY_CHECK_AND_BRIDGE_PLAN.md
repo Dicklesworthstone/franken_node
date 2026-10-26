@@ -67,6 +67,8 @@ The PATH-resolved older `bv` omitted 114 rows and is not authoritative for this 
 
 Final diff validation passes; canonical/base JSONL agree byte-for-byte. The seven issue diffs change only titles, notes, acceptance and update timestamps, with no status, owner, dependency or closure changes. UBS returns 3 for the Markdown-only report because no supported language is present: no scanner ran, and this is not recorded as a pass or bypassed with an allow-no-scan flag.
 
+Publication encountered three newer peer commits through `c664edac6a3fe74d6db1204af775d82dba798a98`, integrated without conflicts or stashing. They add immutable CommonJS require aliases, frozen-package crypto/zlib routes and SQLModel pin alignment. The README delta was read in full. The peer commit explicitly reports Node fixture observations but unverified native builds; this audit likewise does not qualify those new source paths. Its tests and source conclusions retain the `a16eb183` boundary above. The peer changes do not close artifact-authority continuity or current-source qualification.
+
 ## Engineering follow-through — 2026-10-25
 
 Implementation **`22c373b9b39607bbe8107e7233b26c6ff27369aa`** removes two demonstrated qualification blockers. This is exercised enablement, not a runtime compatibility, security KPI or release-readiness win.
