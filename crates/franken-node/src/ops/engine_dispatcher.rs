@@ -5495,10 +5495,23 @@ fn run_exit_status(containment_exit_code: i32, program_exit_code: Option<i32>) -
     }
 }
 
-fn validate_native_frozen_modules(
-    config: &Config,
-) -> Result<(), ActionableError> {
+fn validate_native_frozen_modules(config: &Config) -> Result<(), ActionableError> {
+    config
+        .runtime
+        .validate_frozen_module_graph_hash()
+        .map_err(|error| {
+            ActionableError::new(
+                error.to_string(),
+                "Supply a canonical frozen module graph SHA-256 pin",
+            )
+        })?;
     if config.runtime.frozen_modules != Some(true) {
+        if config.runtime.frozen_module_graph_hash.is_some() {
+            return Err(ActionableError::new(
+                "A frozen module graph pin requires frozen modules.",
+                "Enable --frozen-modules or set runtime.frozen_modules = true",
+            ));
+        }
         if config.runtime.frozen_module_symlinks == Some(true) {
             return Err(ActionableError::new(
                 "Contained module symlinks require frozen modules.",
@@ -5534,6 +5547,7 @@ fn prepare_native_frozen_modules(
     policy_id: &str,
     contained_symlinks: bool,
     capture_replay: bool,
+    expected_graph_hash: Option<&str>,
 ) -> std::result::Result<FrozenNativeModules, String> {
     #[cfg(not(unix))]
     {
@@ -5544,6 +5558,7 @@ fn prepare_native_frozen_modules(
             policy_id,
             contained_symlinks,
             capture_replay,
+            expected_graph_hash,
         );
         Err("Frozen module capture requires Unix".to_string())
     }
@@ -5582,7 +5597,12 @@ fn prepare_native_frozen_modules(
         } else {
             None
         };
-        let pin = graph.report().input_hash.clone();
+        // A configured pin is authority retained by the operator, not a hash
+        // derived from the untrusted graph currently under examination. The
+        // resolver validates it and consumes this same immutable capture.
+        let pin = expected_graph_hash
+            .unwrap_or(&graph.report().input_hash)
+            .to_owned();
         let resolver = Arc::new(
             CapturedEngineResolver::new_with_parser_options(graph, &pin, parser_options.clone())
                 .map_err(|error| format!("Frozen module source admission failed: {error}"))?,
@@ -9614,6 +9634,7 @@ impl EngineDispatcher {
                     &orchestrator_config.policy_id,
                     config.runtime.frozen_module_symlinks == Some(true),
                     capture_replay,
+                    config.runtime.frozen_module_graph_hash.as_deref(),
                 )
                 .map_err(|error| {
                     native_engine_spawn_error_with_telemetry_cleanup(error, &mut telemetry_guard)

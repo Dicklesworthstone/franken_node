@@ -1,0 +1,45 @@
+{
+  "summary_id": "chg-20261026-frozen-module-graph-pin",
+  "contract_version": "1.0",
+  "change_summary": {
+    "intent": "Bind native frozen module execution to an operator-retained source-graph pin before evaluation.",
+    "scope": {
+      "subsystems": ["franken_node.runtime", "franken_node.supply_chain"],
+      "modules": [
+        "crates/franken-node/src/config.rs",
+        "crates/franken-node/src/cli.rs",
+        "crates/franken-node/src/main.rs",
+        "crates/franken-node/src/ops/engine_dispatcher.rs"
+      ]
+    },
+    "surface_area_delta": {
+      "new_apis": [
+        "run --frozen-module-graph-hash sha256:...",
+        "runtime.frozen_module_graph_hash",
+        "RuntimeConfig::validate_frozen_module_graph_hash"
+      ],
+      "removed_apis": [],
+      "changed_signatures": ["Optional source pin in serialized RuntimeConfig; explicit constructors initialize None"]
+    },
+    "affected_contracts": {
+      "beads": ["bd-reality-20260923-26n9r.28", "bd-reality-20260923-26n9r.29"],
+      "documents": ["README.md", "tools/module-graph/README.md", "docs/progress/REALITY_CHECK_AND_BRIDGE_PLAN.md"]
+    },
+    "operational_impact": {
+      "operator_notes": "Omitting the pin preserves existing behavior. A supplied pin must be canonical and requires frozen execution. The existing resolver consumes exactly the capture it validates. This is operator-selected integrity, not registry-signed provenance or an authority grant.",
+      "required_actions": ["Retain the reviewed graph hash outside guest-writable source and explicitly approve a new pin after intended source or resolution changes."],
+      "rollout_notes": "Current-source native tests and required Rust checks are pending. GitHub Actions is disabled; no hosted CI, benchmark, production rollout, rollback rehearsal or quantitative risk reduction is claimed. The complete no-contract gate must remain non-passing until its actual evidence obligations are satisfied."
+    },
+    "risk_delta": {
+      "previous_tier": "high",
+      "new_tier": "high",
+      "rationale": "Adds an opt-in integrity boundary without claiming a measured reduction in production compromise risk. Full artifact-authority and capability-envelope integration remains open."
+    },
+    "compatibility": {
+      "backward_compatibility": "compatible",
+      "forward_compatibility": "enables",
+      "details": "Default serialized configs omit the new optional field. Explicit pins require updated source builds; CLI takes precedence over TOML. Resource, capability, trust, containment and parser restrictions continue to apply."
+    },
+    "dependency_changes": {"added": [], "removed": [], "updated": []}
+  }
+}

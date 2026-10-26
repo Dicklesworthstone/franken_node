@@ -2360,6 +2360,270 @@ fn frozen_module_cli_runs_large_npm_source_with_configured_parser_limits() {
 
 #[test]
 #[cfg(all(feature = "engine", unix))]
+fn frozen_module_graph_pin_binds_native_cjs_and_esm_bytes() {
+    use frankenengine_node::supply_chain::module_resolution_graph::file_resolution::source_graph::{
+        GraphOptions, capture,
+    };
+
+    for (entry_name, entry_source, dependency_name, dependency_source, manifest_type) in [
+        (
+            "app.js",
+            "console.log('PINNED_WORKLOAD_RAN', require('./side.js'));\n",
+            "side.js",
+            "module.exports=42;\n",
+            "commonjs",
+        ),
+        (
+            "app.js",
+            "import value from './side.js'; console.log('PINNED_WORKLOAD_RAN', value);\n",
+            "side.js",
+            "export default 42;\n",
+            "module",
+        ),
+    ] {
+        let workspace = TempDir::new().unwrap();
+        let app = create_test_app(workspace.path(), entry_name, entry_source);
+        let dependency = create_test_app(workspace.path(), dependency_name, dependency_source);
+        // .js requires this manifest's type field to determine runtime syntax,
+        // so the observed manifest bytes are part of the approved graph.
+        let manifest_source = format!(
+            "{{\"name\":\"pinned-workload\",\"version\":\"1.0.0\",\"type\":\"{manifest_type}\"}}\n"
+        );
+        let manifest = create_test_app(workspace.path(), "package.json", &manifest_source);
+        // Retain approval before launching the CLI. The worker must not replace
+        // this expected value with a digest it derives from later live files.
+        let reviewed_pin = capture(workspace.path(), entry_name, GraphOptions::default())
+            .unwrap()
+            .report()
+            .input_hash
+            .clone();
+        let mut config = balanced_config();
+        config.runtime.frozen_modules = Some(true);
+        config.runtime.frozen_module_graph_hash = Some(reviewed_pin.clone());
+        let approved = invoke_product_supervisor_with_options(
+            &app,
+            &config,
+            "balanced",
+            Path::new(franken_node_bin()),
+            &[],
+        )
+        .unwrap();
+        assert!(
+            approved.status.success(),
+            "{}\n{}",
+            approved.stdout,
+            approved.stderr
+        );
+        let dispatch = parse_product_dispatch(&approved).unwrap();
+        assert_eq!(dispatch.captured_output.stdout, "PINNED_WORKLOAD_RAN 42\n");
+        assert_eq!(
+            dispatch
+                .engine_decision
+                .unwrap()
+                .frozen_modules
+                .unwrap()
+                .graph_input_hash,
+            reviewed_pin,
+        );
+
+        // Each mutation preserves console behavior. Output agreement therefore
+        // cannot masquerade as continuity of the reviewed artifact identity.
+        for (path, original, changed) in [
+            (
+                &app,
+                entry_source,
+                format!("{entry_source}// changed entry bytes\n"),
+            ),
+            (
+                &dependency,
+                dependency_source,
+                format!("{dependency_source}// changed dependency bytes\n"),
+            ),
+            (
+                &manifest,
+                manifest_source.as_str(),
+                format!(
+                    "{{\"name\":\"pinned-workload\",\"version\":\"2.0.0\",\"type\":\"{manifest_type}\"}}\n"
+                ),
+            ),
+        ] {
+            std::fs::write(path, changed).unwrap();
+            let stale = invoke_product_supervisor_with_options(
+                &app,
+                &config,
+                "balanced",
+                Path::new(franken_node_bin()),
+                &[],
+            )
+            .unwrap();
+            assert!(
+                !stale.status.success(),
+                "stale pin admitted {}",
+                path.display()
+            );
+            let diagnostics = format!("{}\n{}", stale.stdout, stale.stderr);
+            assert!(
+                diagnostics.contains("ERR_MODULE_REGISTRY_PIN_MISMATCH"),
+                "{diagnostics}"
+            );
+            assert!(
+                !diagnostics.contains("PINNED_WORKLOAD_RAN"),
+                "{diagnostics}"
+            );
+
+            let new_pin = capture(workspace.path(), entry_name, GraphOptions::default())
+                .unwrap()
+                .report()
+                .input_hash
+                .clone();
+            assert_ne!(new_pin, reviewed_pin);
+            let approved_change = invoke_product_supervisor_with_options(
+                &app,
+                &config,
+                "balanced",
+                Path::new(franken_node_bin()),
+                &["--frozen-module-graph-hash", &new_pin],
+            )
+            .unwrap();
+            assert!(
+                approved_change.status.success(),
+                "{}\n{}",
+                approved_change.stdout,
+                approved_change.stderr
+            );
+            let dispatch = parse_product_dispatch(&approved_change).unwrap();
+            assert_eq!(dispatch.captured_output.stdout, "PINNED_WORKLOAD_RAN 42\n");
+            assert_eq!(
+                dispatch
+                    .engine_decision
+                    .unwrap()
+                    .frozen_modules
+                    .unwrap()
+                    .graph_input_hash,
+                new_pin,
+            );
+            std::fs::write(path, original).unwrap();
+        }
+    }
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn frozen_module_graph_pin_does_not_claim_unobserved_manifest_integrity() {
+    use frankenengine_node::supply_chain::module_resolution_graph::file_resolution::source_graph::{
+        GraphOptions, capture,
+    };
+
+    // Retain the exact counterexample from the first native run: explicit
+    // .cjs routes need no package type, so an unused root manifest is outside
+    // this graph pin. Full artifact metadata authority is a separate obligation.
+    let workspace = TempDir::new().unwrap();
+    let app = create_test_app(
+        workspace.path(),
+        "app.cjs",
+        "console.log('PINNED_WORKLOAD_RAN', require('./side.cjs'));\n",
+    );
+    create_test_app(workspace.path(), "side.cjs", "module.exports=42;\n");
+    let manifest = create_test_app(
+        workspace.path(),
+        "package.json",
+        "{\"name\":\"pinned-workload\",\"version\":\"1.0.0\"}\n",
+    );
+    let pin = capture(workspace.path(), "app.cjs", GraphOptions::default())
+        .unwrap()
+        .report()
+        .input_hash
+        .clone();
+    std::fs::write(
+        &manifest,
+        "{\"name\":\"pinned-workload\",\"version\":\"2.0.0\"}\n",
+    )
+    .unwrap();
+    assert_eq!(
+        capture(workspace.path(), "app.cjs", GraphOptions::default())
+            .unwrap()
+            .report()
+            .input_hash,
+        pin,
+    );
+    let mut config = balanced_config();
+    config.runtime.frozen_modules = Some(true);
+    config.runtime.frozen_module_graph_hash = Some(pin);
+    let output = invoke_product_supervisor_with_options(
+        &app,
+        &config,
+        "balanced",
+        Path::new(franken_node_bin()),
+        &[],
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        output.stdout,
+        output.stderr
+    );
+    assert_eq!(
+        parse_product_dispatch(&output)
+            .unwrap()
+            .captured_output
+            .stdout,
+        "PINNED_WORKLOAD_RAN 42\n"
+    );
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn frozen_module_graph_pin_requires_frozen_execution_and_canonical_hash() {
+    let workspace = TempDir::new().unwrap();
+    let app = create_test_app(
+        workspace.path(),
+        "app.cjs",
+        "console.log('UNAPPROVED_GUEST_RAN');\n",
+    );
+    let pin = format!("sha256:{}", "0".repeat(64));
+    for (options, expected) in [
+        (
+            vec!["--frozen-module-graph-hash", pin.as_str()],
+            "requires frozen modules",
+        ),
+        (
+            vec![
+                "--frozen-modules",
+                "--frozen-module-graph-hash",
+                "sha256:invalid",
+            ],
+            "64 lowercase hexadecimal",
+        ),
+        (
+            vec![
+                "--frozen-modules",
+                "--frozen-module-graph-hash",
+                pin.as_str(),
+            ],
+            "ERR_MODULE_REGISTRY_PIN_MISMATCH",
+        ),
+    ] {
+        let output = invoke_product_supervisor_with_options(
+            &app,
+            &balanced_config(),
+            "balanced",
+            Path::new(franken_node_bin()),
+            &options,
+        )
+        .unwrap();
+        assert!(!output.status.success());
+        let diagnostics = format!("{}\n{}", output.stdout, output.stderr);
+        assert!(diagnostics.contains(expected), "{diagnostics}");
+        assert!(
+            !diagnostics.contains("UNAPPROVED_GUEST_RAN"),
+            "{diagnostics}"
+        );
+    }
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
 fn frozen_module_config_refuses_computed_loads_before_guest_execution() {
     let workspace = TempDir::new().unwrap();
     let app = create_test_app(

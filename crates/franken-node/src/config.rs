@@ -1445,6 +1445,14 @@ impl Config {
                     MAX_MERGE_DECISIONS,
                 );
             }
+            if let Some(value) = &section.frozen_module_graph_hash {
+                self.runtime.frozen_module_graph_hash = Some(value.clone());
+                push_bounded(
+                    decisions,
+                    MergeDecision::new(stage.clone(), "runtime.frozen_module_graph_hash", value),
+                    MAX_MERGE_DECISIONS,
+                );
+            }
             if let Some(value) = &section.environment_allowlist {
                 self.runtime.environment_allowlist.clone_from(value);
                 push_bounded(
@@ -2404,6 +2412,7 @@ impl Config {
         self.runtime.validate_execution_budget()?;
         self.runtime.validate_parse_budget()?;
         self.runtime.validate_environment_allowlist()?;
+        self.runtime.validate_frozen_module_graph_hash()?;
         validate_opt_score(
             "migration.verification_threshold",
             self.migration.verification_threshold,
@@ -3325,6 +3334,7 @@ struct RuntimeOverrides {
     pub allow_process_shape: Option<bool>,
     pub frozen_modules: Option<bool>,
     pub frozen_module_symlinks: Option<bool>,
+    pub frozen_module_graph_hash: Option<String>,
     pub environment_allowlist: Option<BTreeSet<String>>,
     pub max_instructions: Option<u64>,
     pub max_registers: Option<u32>,
@@ -4095,6 +4105,11 @@ pub struct RuntimeConfig {
     /// Omitted or false values retain the default rejection of all symlinks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frozen_module_symlinks: Option<bool>,
+    /// Independently retained source-graph commitment required by native frozen
+    /// execution. The pin authenticates selection only to its operator-supplied
+    /// value; it grants no capabilities and is not publisher provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_module_graph_hash: Option<String>,
     /// Exact host environment variable names that native `run` may expose
     /// through named `process.env.NAME` / `process.env["NAME"]` reads.
     /// Values are snapshotted once inside the authenticated worker, never
@@ -4160,6 +4175,25 @@ pub struct RuntimeParseBudget {
 }
 
 impl RuntimeConfig {
+    /// Validate before capture, including for directly constructed library configs.
+    /// Enabling frozen execution is checked after CLI overrides are applied.
+    pub fn validate_frozen_module_graph_hash(&self) -> Result<(), ConfigError> {
+        if let Some(hash) = &self.frozen_module_graph_hash
+            && !hash.strip_prefix("sha256:").is_some_and(|digest| {
+                digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+        {
+            return Err(ConfigError::ValidationFailed(
+                "runtime.frozen_module_graph_hash must be sha256: followed by 64 lowercase hexadecimal digits"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Resolve the narrow process-metadata grant without changing any other
     /// profile permission. Explicit false also tightens legacy-risky.
     #[must_use]
@@ -4363,6 +4397,7 @@ impl RuntimeConfig {
             allow_process_shape: None,
             frozen_modules: None,
             frozen_module_symlinks: None,
+            frozen_module_graph_hash: None,
             environment_allowlist: BTreeSet::new(),
             max_instructions: None,
             max_registers: None,
@@ -4402,6 +4437,7 @@ impl RuntimeConfig {
             allow_process_shape: None,
             frozen_modules: None,
             frozen_module_symlinks: None,
+            frozen_module_graph_hash: None,
             environment_allowlist: BTreeSet::new(),
             max_instructions: None,
             max_registers: None,
@@ -4441,6 +4477,7 @@ impl RuntimeConfig {
             allow_process_shape: None,
             frozen_modules: None,
             frozen_module_symlinks: None,
+            frozen_module_graph_hash: None,
             environment_allowlist: BTreeSet::new(),
             max_instructions: None,
             max_registers: None,
@@ -6619,6 +6656,66 @@ registry_signing_key = "x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c="
                 assert_eq!(decoded.allows_process_shape(profile), allowed);
             }
         }
+    }
+
+    #[test]
+    fn frozen_module_graph_hash_preserves_defaults_and_profile_selection() {
+        for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+            let runtime = Config::for_profile(profile).runtime;
+            assert_eq!(runtime.frozen_module_graph_hash, None);
+            let encoded = serde_json::to_value(&runtime).unwrap();
+            assert!(encoded.get("frozen_module_graph_hash").is_none());
+            let decoded: RuntimeConfig = serde_json::from_value(encoded).unwrap();
+            assert_eq!(decoded.frozen_module_graph_hash, None);
+        }
+        let (_dir, path) = security_baseline_file();
+        let baseline = std::fs::read_to_string(&path).unwrap();
+        let base_pin = format!("sha256:{}", "1".repeat(64));
+        let profile_pin = format!("sha256:{}", "2".repeat(64));
+        std::fs::write(&path, format!(
+            "{baseline}\n[runtime]\nfrozen_modules = true\nfrozen_module_graph_hash = '{base_pin}'\n\
+             [profiles.balanced.runtime]\nfrozen_module_graph_hash = '{profile_pin}'\n",
+        )).unwrap();
+        let resolved = Config::resolve_with_env(
+            Some(&path),
+            CliOverrides::default(),
+            &map_lookup(BTreeMap::new()),
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.config.runtime.frozen_module_graph_hash.as_deref(),
+            Some(profile_pin.as_str())
+        );
+        assert!(resolved.decisions.iter().any(|decision| {
+            decision.field == "runtime.frozen_module_graph_hash"
+                && decision.stage == MergeStage::Profile
+        }));
+        let decoded: Config =
+            serde_json::from_slice(&serde_json::to_vec(&resolved.config).unwrap()).unwrap();
+        assert_eq!(
+            decoded.runtime.frozen_module_graph_hash.as_deref(),
+            Some(profile_pin.as_str())
+        );
+    }
+
+    #[test]
+    fn frozen_module_graph_hash_rejects_noncanonical_or_unbounded_pins() {
+        let mut runtime = Config::default().runtime;
+        for hash in [
+            String::new(),
+            "0".repeat(64),
+            format!("sha256:{}", "a".repeat(63)),
+            format!("sha256:{}", "a".repeat(65)),
+            format!("sha256:{}", "A".repeat(64)),
+            format!("sha256:{}", "g".repeat(64)),
+            format!("sha256:{}\n", "a".repeat(64)),
+            "sha256:".repeat(10_000),
+        ] {
+            runtime.frozen_module_graph_hash = Some(hash);
+            assert!(runtime.validate_frozen_module_graph_hash().is_err());
+        }
+        runtime.frozen_module_graph_hash = Some(format!("sha256:{}", "a0".repeat(32)));
+        runtime.validate_frozen_module_graph_hash().unwrap();
     }
 
     #[test]

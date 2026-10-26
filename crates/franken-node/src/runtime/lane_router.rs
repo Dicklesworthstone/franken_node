@@ -1250,6 +1250,7 @@ mod tests {
             allow_process_shape: None,
             frozen_modules: None,
             frozen_module_symlinks: None,
+            frozen_module_graph_hash: None,
             environment_allowlist: Default::default(),
             max_instructions: None,
             max_registers: None,

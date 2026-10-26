@@ -34505,6 +34505,7 @@ fn main() -> Result<()> {
                 capture_replay,
                 frozen_modules,
                 frozen_module_symlinks,
+                frozen_module_graph_hash,
                 app_args,
             } = args;
 
@@ -34536,6 +34537,9 @@ fn main() -> Result<()> {
             }
             if let Some(allowed) = frozen_module_symlinks {
                 resolved.config.runtime.frozen_module_symlinks = Some(allowed);
+            }
+            if let Some(hash) = frozen_module_graph_hash {
+                resolved.config.runtime.frozen_module_graph_hash = Some(hash);
             }
             if resolved.config.runtime.frozen_module_symlinks == Some(true)
                 && resolved.config.runtime.frozen_modules != Some(true)

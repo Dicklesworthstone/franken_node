@@ -3891,6 +3891,23 @@ one pass.
   in configuration. Capture rejects links that escape the project, absolute
   targets, and cycles; the default continues to reject module symlinks.
 
+  Source builds also accept an independently retained source-graph pin:
+  `run app.cjs --frozen-modules --frozen-module-graph-hash "$REVIEWED_SOURCE_GRAPH_HASH"`.
+  The equivalent configuration is `runtime.frozen_module_graph_hash = "sha256:..."`
+  with `runtime.frozen_modules = true`; an explicit CLI pin takes precedence.
+  Obtain the full `sha256:` plus 64 lowercase hexadecimal digits from a reviewed
+  `franken-module-graph --capture-source-graph` report's `input_hash`, using the
+  same project root, entrypoint and symlink options. Keep that approval outside
+  guest-writable source. The native worker checks the pin before preparing or
+  evaluating modules, then executes that same captured graph. Changed captured
+  source, observed manifests, links or resolution probes require a newly approved pin,
+  even when console output would be identical. A graph pin is operator-selected
+  source integrity; it supplies neither publisher provenance nor additional
+  capabilities. Files the graph never observes are outside this commitment:
+  for example, a `.cjs` entry with explicit relative `.cjs` loads need not read
+  an unused root `package.json`. Signing-registry integration and current installed-release
+  qualification remain separate requirements.
+
   The broader host-effect
   "runtime-of-record" — the full Node/Bun host-API surface with
   capability-metered effects — is still in active development under the

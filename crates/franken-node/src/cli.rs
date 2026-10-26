@@ -354,6 +354,12 @@ pub struct RunArgs {
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub frozen_module_symlinks: Option<bool>,
 
+    /// Require the captured frozen module graph to match an independently
+    /// retained sha256:<64 lowercase hex digits> commitment before evaluation.
+    /// Requires frozen modules enabled by flag or config; grants no authority.
+    #[arg(long, value_name = "SHA256")]
+    pub frozen_module_graph_hash: Option<String>,
+
     /// Arguments for the program itself, after `--`
     /// (`franken-node run app.js -- a b`). They become `process.argv[2..]`
     /// where the policy lets the program read `process.argv` (bd-my9hk).
@@ -3468,6 +3474,21 @@ mod parser_contract_extra_tests {
         };
         assert!(args.frozen_modules);
         assert!(args.capture_replay);
+
+        let pin = format!("sha256:{}", "a".repeat(64));
+        let cli = parse(&[
+            "franken-node",
+            "run",
+            "app.js",
+            "--frozen-modules",
+            "--frozen-module-graph-hash",
+            &pin,
+        ])
+        .map_err(|error| error.to_string())?;
+        let Command::Run(args) = cli.command else {
+            return Err("expected pinned frozen-module run command".to_string());
+        };
+        assert_eq!(args.frozen_module_graph_hash.as_deref(), Some(pin.as_str()));
 
         let cli = parse(&[
             "franken-node",
