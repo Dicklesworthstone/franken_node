@@ -337,11 +337,13 @@ pub struct RunArgs {
     pub capture_replay: bool,
 
     /// Freeze supported literal import/require routes and source bytes before
-    /// native execution. Supports require, import, reexport and import() of
-    /// buffer, events, os, querystring, url, timers, perf_hooks and path
-    /// (including path/posix and path/win32). Computed loads, unsupported
-    /// builtins and uncaptured routes are refused. With --capture-replay, the
-    /// authenticated source graph is retained for closed-world offline replay.
+    /// native execution. Supports require, import, reexport and import() for
+    /// the engine's native builtin providers, including crypto, zlib, buffer,
+    /// events, path, util, assert, module, timers and streams. Importing a
+    /// provider does not grant additional operation capabilities. Computed
+    /// loads, unsupported builtins and uncaptured routes are refused. With
+    /// --capture-replay, the authenticated source graph is retained for
+    /// closed-world offline replay.
     #[arg(long)]
     pub frozen_modules: bool,
 

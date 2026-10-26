@@ -6,6 +6,12 @@ use franken_module_graph_schema as schema_versions;
 #[path = "../../crates/franken-node/src/supply_chain/module_resolution_graph.rs"]
 mod module_resolution_graph;
 
+// Keep the product namespace used by the shared dependency workspace selector.
+#[cfg(target_os = "linux")]
+mod supply_chain {
+    pub(crate) use crate::module_resolution_graph;
+}
+
 #[cfg(target_os = "linux")]
 #[allow(dead_code)]
 #[path = "../../crates/franken-node/src/migration/dependency_admission.rs"]

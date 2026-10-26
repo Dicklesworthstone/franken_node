@@ -746,7 +746,11 @@ mod tests {
     #[test]
     fn native_builtin_routes_and_descriptors_survive_closed_capsule_replay() {
         let root = tempfile::tempdir().unwrap();
-        put(root.path(), "app.cjs", "require('buffer');");
+        put(
+            root.path(),
+            "app.cjs",
+            "require('buffer'); require('node:crypto'); require('zlib');",
+        );
         let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
         let pin = graph.report().input_hash.clone();
         let encoded = capsule::encode(&graph).unwrap();
@@ -1895,6 +1899,143 @@ mod tests {
         assert!(reference.status.success(), "{reference:?}");
         assert!(reference.stderr.is_empty(), "{reference:?}");
         String::from_utf8(reference.stdout).unwrap()
+    }
+
+    #[test]
+    fn captured_crypto_zlib_packages_match_node_without_live_source_access() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        // These are ordinary module values crossing a package boundary, not
+        // source-pattern hostcalls. A captured package must be able to extract
+        // methods while preserving the native module's realm-wide identity.
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            for (entrypoint, imports) in [
+                (
+                    "app.cjs",
+                    "const load = require; const next = load; \
+                     const crypto = next('crypto'); const zlib = next('node:zlib'); \
+                     const createHash = crypto.createHash; const kit = next('archive-kit');",
+                ),
+                (
+                    "app.mjs",
+                    "import crypto, { createHash } from 'crypto'; \
+                     import zlib from 'node:zlib'; import kit from 'archive-kit';",
+                ),
+            ] {
+                let root = tempfile::tempdir().unwrap();
+                put(
+                    root.path(),
+                    "node_modules/archive-kit/package.json",
+                    r#"{"name":"archive-kit","version":"1.0.0","main":"index.cjs"}"#,
+                );
+                put(
+                    root.path(),
+                    "node_modules/archive-kit/index.cjs",
+                    r#"
+const crypto = require('node:crypto');
+const zlib = require('zlib');
+const hash = crypto.createHash;
+const hmac = crypto.createHmac;
+const compress = zlib.gzipSync;
+const decompress = zlib.gunzipSync;
+module.exports = {
+    crypto: crypto,
+    zlib: zlib,
+    digest: function(value) { return hash('sha256').update(value).digest('hex'); },
+    authenticate: function(value) { return hmac('sha256', 'key').update(value).digest('hex'); },
+    pack: function(value) { return compress(value); },
+    unpack: function(value) { return decompress(value).toString('utf8'); }
+};
+"#,
+                );
+                let source = format!(
+                    r#"{imports}
+console.log(crypto === kit.crypto, zlib === kit.zlib, createHash === kit.crypto.createHash);
+console.log(kit.digest('abc'));
+console.log(kit.authenticate('payload'));
+console.log(kit.unpack(kit.pack('frozen npm archive')));
+// An independently produced gzip member prevents a paired implementation
+// error in compression and decompression from making the roundtrip pass.
+console.log(kit.unpack(Buffer.from('1f8b08000000000000034b4c4a0600c241243503000000', 'hex')));
+crypto.createHash = function() {{ return 'shared mutation'; }};
+console.log(kit.crypto.createHash(), createHash('sha256').update('abc').digest('hex'));
+import('node:zlib').then(function(again) {{
+    console.log(again.default === zlib, again.gunzipSync === kit.zlib.gunzipSync);
+}});
+"#
+                );
+                put(root.path(), entrypoint, &source);
+                let reference = node_reference_output(root.path(), entrypoint);
+                assert!(reference.starts_with("true true true\n"));
+                assert!(reference.contains("\nfrozen npm archive\nabc\n"));
+                let result = execute_captured_graph_for_test(root.path(), entrypoint, lane, || {
+                    put(
+                        root.path(),
+                        entrypoint,
+                        "throw new Error('live entry must not execute');",
+                    );
+                    put(
+                        root.path(),
+                        "node_modules/archive-kit/index.cjs",
+                        "throw new Error('live npm package must not execute');",
+                    );
+                    put(
+                        root.path(),
+                        "node_modules/archive-kit/package.json",
+                        r#"{"main":"missing.cjs"}"#,
+                    );
+                });
+                let actual = result
+                    .console_output
+                    .iter()
+                    .map(|entry| entry.message.as_str())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    actual,
+                    reference.lines().collect::<Vec<_>>(),
+                    "{entrypoint} through {lane:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn captured_crypto_module_does_not_grant_entropy_authority() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            for (entrypoint, source) in [
+                (
+                    "app.cjs",
+                    "const crypto = require('crypto'); const random = crypto.randomBytes; \
+                     random(8); console.log('ENTROPY_MUST_NOT_BE_GRANTED');",
+                ),
+                (
+                    "app.mjs",
+                    "import { randomBytes } from 'node:crypto'; \
+                     randomBytes(8); console.log('ENTROPY_MUST_NOT_BE_GRANTED');",
+                ),
+            ] {
+                let root = tempfile::tempdir().unwrap();
+                put(root.path(), entrypoint, source);
+                let result = execute_captured_graph_with_policy_for_test(
+                    root.path(),
+                    entrypoint,
+                    lane,
+                    Arc::new(CapabilityPolicyHook::new(BTreeSet::from([
+                        RuntimeCapability::ModuleLoad,
+                        RuntimeCapability::Builtin,
+                    ]))),
+                    || {},
+                );
+                let error = result.expect_err("importing crypto must not grant random_read");
+                let detail = error.to_string();
+                assert!(
+                    detail.contains("random_read"),
+                    "{entrypoint} through {lane:?} must retain a typed entropy denial: {detail}"
+                );
+            }
+        }
     }
 
     #[test]

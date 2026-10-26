@@ -2098,8 +2098,8 @@ dependencies = [
  "serde_json",
  "sha1 0.10.7",
  "sha2 0.10.9",
- "sqlmodel 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "sqlmodel-core 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sqlmodel 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
+ "sqlmodel-core 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
  "sqlmodel-frankensqlite",
  "subtle",
  "syn 2.0.117",
@@ -5151,18 +5151,17 @@ dependencies = [
 [[package]]
 name = "sqlmodel"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "147556a247057924a80e8e1be91f3593524208ec994bb2151be98a983c0479f7"
+source = "git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9#7f432ff690260ef85aca5227e2372b2eb63230c9"
 dependencies = [
  "asupersync 0.5.0",
  "serde",
  "serde_json",
- "sqlmodel-core 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "sqlmodel-macros 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "sqlmodel-pool 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "sqlmodel-query 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "sqlmodel-schema 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "sqlmodel-session 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sqlmodel-core 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
+ "sqlmodel-macros 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
+ "sqlmodel-pool 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
+ "sqlmodel-query 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
+ "sqlmodel-schema 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
+ "sqlmodel-session 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
 ]
 
 [[package]]
@@ -5179,8 +5178,7 @@ dependencies = [
 [[package]]
 name = "sqlmodel-core"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ebd4107cf2b888fbbcc9e8a967320d606dcf131ef2d0a065861276ce5a8cf330"
+source = "git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9#7f432ff690260ef85aca5227e2372b2eb63230c9"
 dependencies = [
  "asupersync 0.5.0",
  "regex",
@@ -5192,8 +5190,7 @@ dependencies = [
 [[package]]
 name = "sqlmodel-frankensqlite"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae972c7984b901a618d61e7b548dde65f135e9344343b7d3abbe7ea73e73ad52"
+source = "git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9#7f432ff690260ef85aca5227e2372b2eb63230c9"
 dependencies = [
  "asupersync 0.5.0",
  "fsqlite 0.4.1",
@@ -5202,7 +5199,7 @@ dependencies = [
  "fsqlite-types 0.4.0",
  "serde",
  "serde_json",
- "sqlmodel-core 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sqlmodel-core 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
 ]
 
 [[package]]
@@ -5218,8 +5215,7 @@ dependencies = [
 [[package]]
 name = "sqlmodel-macros"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51befb90af4eafe07cf3d6cd741db97d0912a07a9da9e0f892ffc5e77a2d1ae5"
+source = "git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9#7f432ff690260ef85aca5227e2372b2eb63230c9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5239,11 +5235,10 @@ dependencies = [
 [[package]]
 name = "sqlmodel-pool"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d090572646f14c79363c6a78fe073afdb2213b77421b1815b31a6761e1f3ffa2"
+source = "git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9#7f432ff690260ef85aca5227e2372b2eb63230c9"
 dependencies = [
  "asupersync 0.5.0",
- "sqlmodel-core 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sqlmodel-core 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
  "tracing",
 ]
 
@@ -5260,12 +5255,11 @@ dependencies = [
 [[package]]
 name = "sqlmodel-query"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9c2c6a610f463f3ac71e3012aa4bed116baa4aced69ea39eb03799419c86c82"
+source = "git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9#7f432ff690260ef85aca5227e2372b2eb63230c9"
 dependencies = [
  "asupersync 0.5.0",
  "serde",
- "sqlmodel-core 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sqlmodel-core 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
  "tracing",
 ]
 
@@ -5283,13 +5277,12 @@ dependencies = [
 [[package]]
 name = "sqlmodel-schema"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9684e458e90c493b3726db7e546521af392394db6f942ba693b937113094f901"
+source = "git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9#7f432ff690260ef85aca5227e2372b2eb63230c9"
 dependencies = [
  "asupersync 0.5.0",
  "serde",
- "sqlmodel-core 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "sqlmodel-macros 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sqlmodel-core 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
+ "sqlmodel-macros 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
  "tracing",
 ]
 
@@ -5308,14 +5301,13 @@ dependencies = [
 [[package]]
 name = "sqlmodel-session"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "599cad01a26e1db00bcecf0fa87da1ad68ea9eace97bd4b056b716f13b1b1e2e"
+source = "git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9#7f432ff690260ef85aca5227e2372b2eb63230c9"
 dependencies = [
  "asupersync 0.5.0",
  "serde",
  "serde_json",
- "sqlmodel-core 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "sqlmodel-query 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sqlmodel-core 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
+ "sqlmodel-query 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
  "tracing",
 ]
 
