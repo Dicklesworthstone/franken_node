@@ -3,9 +3,9 @@
 //! One resolver owns every source, manifest, link and negative probe for the
 //! whole graph. This is a conservative source graph, not execution or proof of
 //! all runtime dependencies: literal deferred loads are included even in dead
-//! branches; exact string concatenations, templates and bounded conditional
-//! string choices add no runtime lookup authority. Dynamic/indirect loaders
-//! and unsupported syntax stay explicit.
+//! branches; exact string concatenations, templates, proven top-level constants
+//! and bounded conditional string choices add no runtime lookup authority.
+//! Dynamic/indirect loaders and unsupported syntax stay explicit.
 //! TypeScript follows explicit runtime syntax, not tsconfig-dependent emit.
 //! Whole-declaration type imports and import types are recorded but never read;
 //! inline type specifiers retain their declaration's side-effect dependency.
@@ -903,6 +903,200 @@ impl<'source> CreateRequireBindings<'source> {
     }
 }
 
+/// Immutable primitive values may flow into module requests, but a matching
+/// spelling alone is not a binding proof. Reject a name if any runtime use is
+/// a second declaration, a write, or a context we cannot classify. This is
+/// deliberately stricter than lexical scope resolution: even an unrelated
+/// inner shadow prevents inference for that name throughout the module.
+#[derive(Default)]
+struct ConstStringBindings<'source> {
+    values: BTreeMap<&'source str, ConstStringValue>,
+}
+
+struct ConstStringValue {
+    alternatives: StringAlternatives,
+    available_after: usize,
+}
+
+impl<'source> ConstStringBindings<'source> {
+    fn discover(
+        root: Node<'_>,
+        source: &'source str,
+        language: SourceLanguage,
+        budget: &mut Budget,
+    ) -> Result<Self> {
+        let mut candidates = Vec::new();
+        let mut declarations = BTreeMap::new();
+        let mut invalid = BTreeSet::new();
+        let mut statements = root.walk();
+        for statement in root.named_children(&mut statements) {
+            if statement.kind() != "lexical_declaration" || !keyword(statement, "const") {
+                continue;
+            }
+            let mut children = statement.walk();
+            for declaration in statement.named_children(&mut children) {
+                if declaration.kind() != "variable_declarator" {
+                    continue;
+                }
+                let (Some(name), Some(value)) = (
+                    declaration.child_by_field_name("name"),
+                    declaration.child_by_field_name("value"),
+                ) else {
+                    continue;
+                };
+                if name.kind() != "identifier"
+                    || !matches!(
+                        runtime_operand(value).kind(),
+                        "string"
+                            | "template_string"
+                            | "identifier"
+                            | "ternary_expression"
+                            | "binary_expression"
+                    )
+                {
+                    continue;
+                }
+                let spelling = name.utf8_text(source.as_bytes()).unwrap_or("");
+                if spelling.contains('\\') {
+                    continue;
+                }
+                if candidates.len() >= MAX_SITES {
+                    return Err(limit());
+                }
+                if declarations.insert(spelling, name.id()).is_some() {
+                    invalid.insert(spelling);
+                }
+                candidates.push((spelling, value, declaration.end_byte()));
+            }
+        }
+        if candidates.is_empty() {
+            return Ok(Self::default());
+        }
+
+        // This proof walk shares the capture's syntax budget. It cannot hide
+        // work in a separate, unbounded traversal before the ordinary scanner.
+        let mut cursor = root.walk();
+        let mut type_context = vec![false];
+        loop {
+            budget.ast_nodes += 1;
+            if budget.ast_nodes > MAX_AST_NODES {
+                return Err(limit());
+            }
+            let node = cursor.node();
+            let erased = language.is_typescript()
+                && (*type_context.last().expect("root context") || erased_region(node));
+            if !erased
+                && matches!(
+                    node.kind(),
+                    "identifier"
+                        | "shorthand_property_identifier"
+                        | "shorthand_property_identifier_pattern"
+                )
+            {
+                let spelling = node.utf8_text(source.as_bytes()).unwrap_or("");
+                // An escaped declaration could shadow an unescaped use. Do
+                // not infer binding identity without decoding all such names.
+                if spelling.contains('\\') {
+                    return Ok(Self::default());
+                }
+                if declarations
+                    .get(spelling)
+                    .is_some_and(|id| *id != node.id())
+                    && !const_string_read(node)
+                {
+                    invalid.insert(spelling);
+                }
+            }
+            if cursor.goto_first_child() {
+                type_context.push(erased);
+                continue;
+            }
+            loop {
+                if cursor.goto_next_sibling() {
+                    break;
+                }
+                if !cursor.goto_parent() {
+                    let mut bindings = Self::default();
+                    // Bound the total retained values and alias-copy work for
+                    // all constants, not merely each initializer in isolation.
+                    let mut inference_budget = FiniteStringBudget::default();
+                    for (spelling, value, available_after) in candidates {
+                        if !invalid.contains(spelling)
+                            && let Some(alternatives) =
+                                finite_strings(value, source, &bindings, &mut inference_budget, 0)
+                        {
+                            bindings.values.insert(
+                                spelling,
+                                ConstStringValue {
+                                    alternatives,
+                                    available_after,
+                                },
+                            );
+                        }
+                    }
+                    return Ok(bindings);
+                }
+                type_context.pop();
+            }
+        }
+    }
+}
+
+/// Classify expression reads, not declarations by exclusion. Unknown syntax
+/// remains unproved, including nested parameter/destructuring binding forms.
+fn const_string_read(mut node: Node<'_>) -> bool {
+    while let Some(parent) = node.parent() {
+        if wrapper_operand(parent).is_some_and(|operand| operand.id() == node.id()) {
+            node = parent;
+            continue;
+        }
+        let field_is = |field| {
+            parent
+                .child_by_field_name(field)
+                .is_some_and(|child| child.id() == node.id())
+        };
+        return match parent.kind() {
+            "arguments"
+            | "array"
+            | "binary_expression"
+            | "ternary_expression"
+            | "sequence_expression"
+            | "return_statement"
+            | "throw_statement"
+            | "expression_statement"
+            | "unary_expression"
+            | "await_expression"
+            | "yield_expression"
+            | "spread_element"
+            | "template_substitution"
+            | "computed_property_name"
+            | "subscript_expression"
+            | "if_statement"
+            | "while_statement"
+            | "do_statement"
+            | "switch_statement"
+            | "switch_case"
+            | "for_statement" => true,
+            "object" => node.kind() == "shorthand_property_identifier",
+            "call_expression" => field_is("function"),
+            "new_expression" => field_is("constructor"),
+            "member_expression" => field_is("object"),
+            "variable_declarator" | "pair" | "required_parameter" | "optional_parameter" => {
+                field_is("value")
+            }
+            "assignment_expression"
+            | "augmented_assignment_expression"
+            | "assignment_pattern"
+            | "object_assignment_pattern"
+            | "for_in_statement" => field_is("right"),
+            "arrow_function" => field_is("body"),
+            "export_specifier" => field_is("name"),
+            _ => false,
+        };
+    }
+    false
+}
+
 fn scan(
     parser: &mut Parser,
     bytes: &[u8],
@@ -993,6 +1187,8 @@ fn scan(
         ));
     }
     let bindings = CreateRequireBindings::discover(tree.root_node(), text)?;
+    let mut strings = ConstStringBindings::default();
+    let mut strings_discovered = false;
     let mut loads = Vec::new();
     let mut notices = Vec::new();
     let mut cursor = tree.walk();
@@ -1229,7 +1425,15 @@ fn scan(
             ));
         }
         if let Some((kind, argument)) = request {
-            let specifiers = request_literals(argument, text);
+            let mut specifiers = request_literals(argument, text, &strings);
+            if specifiers.is_none() && !erased && !strings_discovered {
+                // Keep ordinary literal/finite-expression graphs on their
+                // existing single-walk path. Prove constants only when an
+                // otherwise opaque runtime request actually needs them.
+                strings = ConstStringBindings::discover(tree.root_node(), text, language, budget)?;
+                strings_discovered = true;
+                specifiers = request_literals(argument, text, &strings);
+            }
             let unresolved = specifiers.is_none();
             // A finite choice is a set of potential routes at the same source
             // site, not a prediction of the branch that execution will take.
@@ -1629,21 +1833,22 @@ fn literal(node: Node<'_>, source: &str) -> Option<String> {
 }
 
 /// Enumerate only a bounded set of literal request results. Conditions are
-/// never evaluated, and a value from a binding, call, coercion or unknown
-/// branch invalidates the entire set. The ordinary AST walk still examines
+/// never evaluated, and an unproved binding, call, coercion or unknown branch
+/// invalidates the entire set. The ordinary AST walk still examines
 /// every condition for nested loads, loader mutations and dynamic code.
 /// Keep `literal` narrower: loader/factory identity must remain an exact
 /// spelling, not a conditional expression with executable tests.
-fn request_literals(node: Node<'_>, source: &str) -> Option<Vec<String>> {
+fn request_literals(
+    node: Node<'_>,
+    source: &str,
+    bindings: &ConstStringBindings<'_>,
+) -> Option<Vec<String>> {
     // Preserve the existing single-buffer path for ordinary package imports.
     if let Some(value) = literal(node, source) {
         return Some(vec![value]);
     }
-    let mut budget = FiniteStringBudget {
-        expression: StringExpressionBudget::default(),
-        copied_units: MAX_STRING_EXPRESSION_BYTES,
-    };
-    finite_strings(node, source, &mut budget, 0)?
+    let mut budget = FiniteStringBudget::default();
+    finite_strings(node, source, bindings, &mut budget, 0)?
         .into_iter()
         .map(|units| {
             let value = String::from_utf16(&units).ok()?;
@@ -1657,6 +1862,15 @@ struct FiniteStringBudget {
     // Bound intermediate Cartesian-product copying independently of source
     // size and final unique values (many concatenations can deduplicate).
     copied_units: usize,
+}
+
+impl Default for FiniteStringBudget {
+    fn default() -> Self {
+        Self {
+            expression: StringExpressionBudget::default(),
+            copied_units: MAX_STRING_EXPRESSION_BYTES,
+        }
+    }
 }
 
 type StringAlternatives = BTreeSet<Vec<u16>>;
@@ -1689,6 +1903,7 @@ fn concatenate_strings(
 fn finite_strings(
     node: Node<'_>,
     source: &str,
+    bindings: &ConstStringBindings<'_>,
     budget: &mut FiniteStringBudget,
     depth: usize,
 ) -> Option<StringAlternatives> {
@@ -1701,18 +1916,35 @@ fn finite_strings(
         | "as_expression"
         | "satisfies_expression"
         | "non_null_expression" => {
-            finite_strings(wrapper_operand(node)?, source, budget, depth + 1)
+            finite_strings(wrapper_operand(node)?, source, bindings, budget, depth + 1)
+        }
+        "identifier" => {
+            let value = bindings
+                .values
+                .get(node.utf8_text(source.as_bytes()).ok()?)?;
+            if node.start_byte() < value.available_after {
+                return None;
+            }
+            let mut alternatives = BTreeSet::new();
+            for units in &value.alternatives {
+                budget.expression.nodes = budget.expression.nodes.checked_sub(1)?;
+                budget.copied_units = budget.copied_units.checked_sub(units.len())?;
+                alternatives.insert(units.clone());
+            }
+            Some(alternatives)
         }
         "ternary_expression" => {
             let mut values = finite_strings(
                 node.child_by_field_name("consequence")?,
                 source,
+                bindings,
                 budget,
                 depth + 1,
             )?;
             let alternative = finite_strings(
                 node.child_by_field_name("alternative")?,
                 source,
+                bindings,
                 budget,
                 depth + 1,
             )?;
@@ -1724,11 +1956,17 @@ fn finite_strings(
                 .child_by_field_name("operator")
                 .is_some_and(|operator| operator.kind() == "+") =>
         {
-            let left =
-                finite_strings(node.child_by_field_name("left")?, source, budget, depth + 1)?;
+            let left = finite_strings(
+                node.child_by_field_name("left")?,
+                source,
+                bindings,
+                budget,
+                depth + 1,
+            )?;
             let right = finite_strings(
                 node.child_by_field_name("right")?,
                 source,
+                bindings,
                 budget,
                 depth + 1,
             )?;
@@ -1775,7 +2013,8 @@ fn finite_strings(
                                 return None;
                             }
                         }
-                        let choices = finite_strings(expression?, source, budget, depth + 1)?;
+                        let choices =
+                            finite_strings(expression?, source, bindings, budget, depth + 1)?;
                         values = concatenate_strings(values, choices, budget)?;
                         start = part.end_byte();
                     }
@@ -2108,6 +2347,10 @@ mod tests {
 
     fn scan_string_requests(expression: &str, language: SourceLanguage) -> Vec<Option<String>> {
         let source = format!("require({expression});");
+        scan_source_requests(&source, language)
+    }
+
+    fn scan_source_requests(source: &str, language: SourceLanguage) -> Vec<Option<String>> {
         let (loads, notices, analyzed) = scan(
             &mut Parser::new(),
             source.as_bytes(),
@@ -2115,9 +2358,355 @@ mod tests {
             &mut Budget::default(),
         )
         .unwrap();
-        assert!(analyzed, "{expression}: {notices:?}");
-        assert!(notices.is_empty(), "{expression}: {notices:?}");
+        assert!(analyzed, "{source}: {notices:?}");
+        assert!(notices.is_empty(), "{source}: {notices:?}");
         loads.into_iter().map(|load| load.specifier).collect()
+    }
+
+    #[test]
+    fn const_request_strings_capture_prior_primitives_through_all_load_consumers() {
+        for (source, language, expected) in [
+            (
+                "const prefix='./', leaf='dep', suffix='.cjs'; const target=prefix+leaf+suffix; const alias=(target); require(alias); require.resolve(target); import(target);",
+                SourceLanguage::JavaScript,
+                vec!["./dep.cjs", "./dep.cjs", "./dep.cjs"],
+            ),
+            (
+                "const leaf=flag?'one':'two'; const target=`./${leaf}.cjs`; require(target);",
+                SourceLanguage::JavaScript,
+                vec!["./one.cjs", "./two.cjs"],
+            ),
+            (
+                "const target='./dep.cjs'; const load=require; function nested(){return load(target);} console.log(target.length, {target});",
+                SourceLanguage::JavaScript,
+                vec!["./dep.cjs"],
+            ),
+            (
+                "import {createRequire as make} from 'node:module'; const load=make(import.meta.url); const target='./dep.cjs'; load(target); load.resolve(target);",
+                SourceLanguage::JavaScript,
+                vec!["node:module", "./dep.cjs", "./dep.cjs"],
+            ),
+            (
+                "type target = string; const target=('./dep.cjs' as const); require((target satisfies string)!); export {target};",
+                SourceLanguage::TypeScript,
+                vec!["./dep.cjs"],
+            ),
+            (
+                "const high='\\uD83D', low='\\uDE00'; const target='./'+high+low+'.cjs'; require(target);",
+                SourceLanguage::JavaScript,
+                vec!["./😀.cjs"],
+            ),
+        ] {
+            assert_eq!(
+                scan_source_requests(source, language),
+                expected
+                    .into_iter()
+                    .map(|value| Some(value.to_owned()))
+                    .collect::<Vec<_>>(),
+                "{source}",
+            );
+        }
+    }
+
+    #[test]
+    fn const_request_strings_reject_shadowing_mutation_and_unknown_bindings() {
+        for interference in [
+            "target='./other.cjs';",
+            "target += '.cjs';",
+            "++target;",
+            "(target)='./other.cjs';",
+            "[target]=values;",
+            "({target}=values);",
+            "({key:target}=values);",
+            "({target='./other.cjs'}=values);",
+            "for(target of values){}",
+            "for(target in values){}",
+            "{ const target='./other.cjs'; }",
+            "{ let target; }",
+            "function nested(target){}",
+            "function nested({target}){}",
+            "function nested(...target){}",
+            "function nested(target='./other.cjs'){}",
+            "const nested=target=>0;",
+            "const nested=({target})=>0;",
+            "const nested=function target(){};",
+            "const nested=class target{};",
+            "try{}catch(target){}",
+            "try{}catch({target}){}",
+            "function nested(){var target;}",
+            "function nested(targ\\u0065t){}",
+        ] {
+            let source = format!("const target='./dep.cjs'; {interference} require(target);");
+            assert_eq!(
+                scan_source_requests(&source, SourceLanguage::JavaScript),
+                vec![None],
+                "unproved binding: {source}",
+            );
+        }
+        for source in [
+            "let target='./dep.cjs'; require(target);",
+            "var target='./dep.cjs'; require(target);",
+            "const target=runtimeName; require(target);",
+            "const target=getName(); require(target);",
+            "const target=names.path; require(target);",
+            "const {target}=names; require(target);",
+            "{const target='./dep.cjs'; require(target);}",
+            "function nested(){const target='./dep.cjs'; return require(target);}",
+            "const targ\\u0065t='./dep.cjs'; require(target);",
+        ] {
+            assert_eq!(
+                scan_source_requests(source, SourceLanguage::JavaScript),
+                vec![None],
+                "{source}",
+            );
+        }
+    }
+
+    #[test]
+    fn const_request_strings_keep_choices_atomic_and_bindings_in_source_order() {
+        for source in [
+            "require(target); const target='./dep.cjs';",
+            "const first=second; const second='./dep.cjs'; require(first);",
+            "const target=target; require(target);",
+            "function nested(){return require(target);} const target='./dep.cjs'; nested();",
+            "const target='./dep.cjs'; function nested(target){} const alias=target; require(alias);",
+            "const target=flag?'./dep.cjs':unknown; require(target);",
+            "const target='./dep.cjs'; require(flag?target:unknown);",
+            "const target=flag?'./dep.cjs':('./other.cjs', './dep.cjs'); require(target);",
+            "const target=flag?'./dep.cjs':1; require(target);",
+            "const target=flag?'./dep.cjs':'\\uD800'; require(target);",
+            "const target='./dep.cjs'; const alias=target; target='./other.cjs'; require(alias);",
+        ] {
+            assert_eq!(
+                scan_source_requests(source, SourceLanguage::JavaScript),
+                vec![None],
+                "partial or reordered inference: {source}",
+            );
+        }
+    }
+
+    #[test]
+    fn const_request_strings_preserve_literal_edges_and_dynamic_code_diagnostics() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "dep.cjs", "module.exports=42;");
+        put(
+            root.path(),
+            "app.cjs",
+            "const target='./dep.cjs'; function nested(target){} require('./dep.cjs'); require(target);",
+        );
+        let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        assert_eq!(paths(&graph), ["app.cjs", "dep.cjs"]);
+        assert_eq!(graph.report().edges[0].state, EdgeState::Resolved);
+        assert_eq!(graph.report().edges[1].state, EdgeState::NonLiteral);
+        assert!(!graph.report().fully_resolved);
+        let pin = graph.report().input_hash.clone();
+        assert_eq!(
+            registry::PinnedModuleRegistry::new(graph, &pin)
+                .err()
+                .unwrap()
+                .code,
+            "ERR_MODULE_REGISTRY_INCOMPLETE",
+        );
+        for dynamic in ["eval('target');", "Function('return 1');", "with(scope){}"] {
+            put(
+                root.path(),
+                "app.cjs",
+                &format!("const target='./dep.cjs'; {dynamic} require(target);"),
+            );
+            let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+            assert!(!graph.report().fully_resolved, "{dynamic}");
+            assert!(!graph.report().diagnostics.is_empty(), "{dynamic}");
+        }
+    }
+
+    #[test]
+    fn const_request_strings_bound_alternatives_and_total_alias_copy_work() {
+        let variants = (0..MAX_STRING_ALTERNATIVES)
+            .map(|index| format!("./variant-{index:02}.cjs"))
+            .collect::<Vec<_>>();
+        let mut expression = format!("'{}'", variants.last().unwrap());
+        for value in variants.iter().rev().skip(1) {
+            expression = format!("flag ? '{value}' : ({expression})");
+        }
+        assert_eq!(
+            scan_source_requests(
+                &format!("const target={expression}; require(target);"),
+                SourceLanguage::JavaScript,
+            ),
+            variants.into_iter().map(Some).collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            scan_source_requests(
+                &format!("const target=flag?'./overflow.cjs':({expression}); require(target);"),
+                SourceLanguage::JavaScript,
+            ),
+            vec![None],
+        );
+        let path = "a".repeat(super::super::MAX_PATH);
+        let mut source = format!("const name0='{path}';");
+        for index in 1..=MAX_STRING_EXPRESSION_BYTES / path.len() + 1 {
+            source.push_str(&format!("const name{index}=name{};", index - 1));
+        }
+        let last = MAX_STRING_EXPRESSION_BYTES / path.len() + 1;
+        source.push_str(&format!("require(name{last});"));
+        assert_eq!(
+            scan_source_requests(&source, SourceLanguage::JavaScript),
+            vec![None]
+        );
+        assert_eq!(
+            scan_source_requests(
+                &format!(
+                    "const target='{}'; require(target);",
+                    "é".repeat(super::super::MAX_PATH)
+                ),
+                SourceLanguage::JavaScript,
+            ),
+            vec![None],
+        );
+    }
+
+    #[test]
+    fn const_request_strings_share_capture_syntax_and_site_limits() {
+        let source = "const target=flag?'./one.cjs':'./two.cjs'; require(target);";
+        for mut budget in [
+            Budget {
+                ast_nodes: MAX_AST_NODES - 1,
+                ..Budget::default()
+            },
+            Budget {
+                sites: MAX_SITES - 1,
+                ..Budget::default()
+            },
+        ] {
+            assert_eq!(
+                scan(
+                    &mut Parser::new(),
+                    source.as_bytes(),
+                    SourceLanguage::JavaScript,
+                    &mut budget
+                )
+                .unwrap_err()
+                .code,
+                "ERR_MODULE_GRAPH_LIMIT",
+            );
+        }
+        let mut source = (0..=MAX_SITES)
+            .map(|index| format!("const target{index}='./dep.cjs';"))
+            .collect::<String>();
+        source.push_str("require(target0);");
+        assert_eq!(
+            scan(
+                &mut Parser::new(),
+                source.as_bytes(),
+                SourceLanguage::JavaScript,
+                &mut Budget::default(),
+            )
+            .unwrap_err()
+            .code,
+            "ERR_MODULE_GRAPH_LIMIT",
+        );
+    }
+
+    #[test]
+    fn const_request_routes_preserve_capsule_sources_absence_context_and_pin() {
+        use super::registry::{PinnedModuleRegistry, RequestStyle};
+        let root = tempfile::tempdir().unwrap();
+        let source = "const name='pkg'; const optional='optional'; require(name); try{require(optional)}catch(error){}";
+        put(root.path(), "app.cjs", source);
+        put(
+            root.path(),
+            "node_modules/pkg/package.json",
+            r#"{"main":"index.cjs"}"#,
+        );
+        let package_source = "const leaf=flag?'one':'two'; const target=`./${leaf}.cjs`; module.exports=require(target);";
+        put(root.path(), "node_modules/pkg/index.cjs", package_source);
+        put(root.path(), "node_modules/pkg/one.cjs", "module.exports=1;");
+        put(root.path(), "node_modules/pkg/two.cjs", "module.exports=2;");
+        let captured = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        assert!(captured.report().diagnostics.is_empty());
+        assert_eq!(captured.report().modules.len(), 4);
+        assert_eq!(captured.report().edges.len(), 4);
+        assert!(
+            !captured.report().fully_resolved,
+            "captured optional absence stays explicit"
+        );
+        let pin = captured.report().input_hash.clone();
+        let capsule = super::capsule::encode(&captured).unwrap();
+        put(
+            root.path(),
+            "app.cjs",
+            "throw new Error('live entry changed');",
+        );
+        put(
+            root.path(),
+            "node_modules/pkg/index.cjs",
+            "throw new Error('live package changed');",
+        );
+        put(
+            root.path(),
+            "node_modules/pkg/one.cjs",
+            "module.exports=100;",
+        );
+        put(
+            root.path(),
+            "node_modules/pkg/extra.cjs",
+            "module.exports=999;",
+        );
+        put(
+            root.path(),
+            "node_modules/optional/index.js",
+            "module.exports='new live package';",
+        );
+        let replayed = super::capsule::replay(capsule.bytes(), capsule.digest()).unwrap();
+        assert_eq!(replayed.report(), captured.report());
+        let registry = PinnedModuleRegistry::new(replayed, &pin).unwrap();
+        let entry = registry
+            .lookup(None, registry.entrypoint(), RequestStyle::Require)
+            .unwrap();
+        assert_eq!(entry.source(), source);
+        let package = registry
+            .lookup(Some(entry.id()), "pkg", RequestStyle::Require)
+            .unwrap();
+        assert_eq!(package.source(), package_source);
+        for (request, expected) in [
+            ("./one.cjs", "module.exports=1;"),
+            ("./two.cjs", "module.exports=2;"),
+        ] {
+            assert_eq!(
+                registry
+                    .lookup(Some(package.id()), request, RequestStyle::Require)
+                    .unwrap()
+                    .source(),
+                expected
+            );
+        }
+        assert_eq!(
+            registry
+                .lookup(Some(entry.id()), "optional", RequestStyle::Require)
+                .err()
+                .unwrap()
+                .code,
+            "MODULE_NOT_FOUND",
+        );
+        for (from, request, style) in [
+            (entry.id(), "./one.cjs", RequestStyle::Require),
+            (package.id(), "./one.cjs", RequestStyle::Import),
+            (package.id(), "./extra.cjs", RequestStyle::Require),
+        ] {
+            assert_eq!(
+                registry
+                    .lookup(Some(from), request, style)
+                    .err()
+                    .unwrap()
+                    .code,
+                "ERR_MODULE_REGISTRY_ROUTE",
+            );
+        }
+        put(root.path(), "app.cjs", source);
+        put(root.path(), "node_modules/pkg/index.cjs", package_source);
+        let changed = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        assert_ne!(changed.report().input_hash, pin);
+        assert!(PinnedModuleRegistry::new(changed, &pin).is_err());
     }
 
     #[test]

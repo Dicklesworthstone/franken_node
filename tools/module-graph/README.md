@@ -428,8 +428,19 @@ Native CommonJS `require` can also flow through an ordered chain of top-level
 `next('./value.cjs')` or `next.resolve('package-name')`. These calls retain the
 original module's resolution context and capture only their exact requests.
 Mutation, shadowing, escaped loader references, mutable bindings, alternate
-resolve search paths and nonliteral requests keep the graph incomplete. This
+resolve search paths and unbounded requests keep the graph incomplete. This
 does not grant a loader permission to open another route at execution time.
+
+Request values can use proven top-level `const` strings and earlier constant
+aliases: `const directory = './'; const target = directory + 'adapter.cjs';
+require(target)`. The same analysis applies to `require.resolve`, `import()`
+and supported `createRequire` loaders. Bounded conditional string choices and
+template substitutions capture all possible routes without evaluating a
+condition. The complete request becomes opaque if any alternative is unknown.
+Only prior, immutable primitive bindings are inferred; shadowing, assignments,
+destructuring, escaped identifiers and forward references prevent inference.
+The additional proof walk and retained alternatives consume bounded syntax,
+copy and graph budgets. Ordinary literal requests keep their existing path.
 
 Each edge records its source byte span, one-based line/column, load kind, request,
 resolution status, target identity and selected package-map branches. Literal
