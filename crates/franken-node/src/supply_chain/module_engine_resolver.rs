@@ -704,14 +704,90 @@ mod tests {
     }
 
     #[test]
+    fn filesystem_builtin_routes_share_descriptors_without_granting_io() {
+        for (file, source, style) in [
+            (
+                "app.cjs",
+                "require('fs'); require('node:fs'); require('fs/promises'); require('node:fs/promises');",
+                ImportStyle::Require,
+            ),
+            (
+                "app.mjs",
+                "import 'fs'; import 'node:fs'; import 'fs/promises'; import('node:fs/promises');",
+                ImportStyle::Import,
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            put(root.path(), file, source);
+            put(
+                root.path(),
+                "node_modules/fs/index.js",
+                "throw new Error('shadowed builtin');",
+            );
+            let graph = capture(root.path(), file, GraphOptions::default()).unwrap();
+            let pin = graph.report().input_hash.clone();
+            let encoded = capsule::encode(&graph).unwrap();
+            let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+            let resolver = CapturedEngineResolver::new(replayed, &pin).ok().unwrap();
+            assert_eq!(resolver.summary().graph_input_hash, pin);
+            assert_eq!(resolver.summary().modules, 3);
+            let policy = CapabilityPolicyHook::new(BTreeSet::from([
+                RuntimeCapability::ModuleLoad,
+                RuntimeCapability::Builtin,
+            ]));
+            let entry = resolver
+                .resolve(&resolver.entry_request(), &context(), &policy)
+                .unwrap();
+            for (bare, native) in [
+                ("fs", NativeBuiltinModule::Fs),
+                ("fs/promises", NativeBuiltinModule::FsPromises),
+            ] {
+                let request = |specifier: &str| {
+                    ModuleRequest::new(specifier, style)
+                        .with_referrer(entry.module.record.id.clone())
+                        .with_compatibility_mode(CompatibilityMode::NodeCompat)
+                };
+                let resolved = resolver
+                    .resolve(&request(bare), &context(), &policy)
+                    .unwrap();
+                let alias = resolver
+                    .resolve(&request(&format!("node:{bare}")), &context(), &policy)
+                    .unwrap();
+                assert_eq!(resolved.module.record, alias.module.record);
+                assert_eq!(
+                    NativeBuiltinModule::from_record(&resolved.module.record),
+                    Some(native)
+                );
+                assert_eq!(
+                    resolved.module.content_hash,
+                    resolved.module.record.canonical_hash()
+                );
+                assert_eq!(
+                    resolved.module.record.required_capabilities,
+                    BTreeSet::from([RuntimeCapability::ModuleLoad, RuntimeCapability::Builtin,])
+                );
+                assert!(resolved.module.record.source.is_empty());
+                assert!(resolved.module.record.dependencies.is_empty());
+                assert_eq!(
+                    resolver
+                        .resolve(&request(bare), &context(), &granted())
+                        .unwrap_err()
+                        .code,
+                    ResolutionErrorCode::PolicyDenied
+                );
+            }
+        }
+    }
+
+    #[test]
     fn unsupported_builtin_providers_and_indirect_loaders_remain_refused() {
         for (file, source) in [
-            ("app.cjs", "require('fs');"),
+            ("app.cjs", "require('worker_threads');"),
             ("app.cjs", "require('node:unknown');"),
             ("app.cjs", "let name='buffer'; require(name);"),
             ("app.cjs", "require.resolve('buffer', {paths: ['/tmp']});"),
             ("app.cjs", "require('#builtin');"),
-            ("app.mjs", "import 'node:fs';"),
+            ("app.mjs", "import 'node:worker_threads';"),
             ("app.mjs", "import('node:unknown');"),
             ("app.mjs", "let name='buffer'; import(name);"),
             ("app.mjs", "let name = 'node:path'; import(name);"),
