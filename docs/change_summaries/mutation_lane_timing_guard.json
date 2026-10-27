@@ -12,6 +12,7 @@
         "crates/franken-node/src/migration/validation_suite.rs",
         "crates/franken-node/src/migration/test_inventory.rs",
         "crates/franken-node/src/supply_chain/module_engine_resolver.rs",
+        "crates/franken-node/src/supply_chain/module_file_resolution.rs",
         "scripts/migration_validation_runner.py",
         "scripts/failure_replay.py",
         "scripts/minimize_migration_failure.py",

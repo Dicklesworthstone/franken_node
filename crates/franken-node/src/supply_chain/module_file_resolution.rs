@@ -366,6 +366,16 @@ impl Resolver {
         if !path.is_empty() {
             validate_path(path)?;
         }
+        // Entries are immutable physical observations: a recorded non-link
+        // already has captured directory parents and needs no component walk.
+        // Alias spellings must still expand links. Sealed replay must visit
+        // every parent again to reconstruct its observed-input evidence.
+        if !self.sealed
+            && let Some(entry) = self.entries.get(path)
+            && !matches!(entry.as_ref(), Entry::Symlink { .. })
+        {
+            return Ok((path.to_owned(), Rc::clone(entry)));
+        }
         let mut pending: VecDeque<String> = path.split('/').map(str::to_owned).collect();
         let mut resolved = Vec::<String>::new();
         let mut links = 0;
@@ -1300,6 +1310,151 @@ mod tests {
             Err(e) => e.code,
             Ok(_) => panic!("unexpected linked resolution for {request}"),
         }
+    }
+
+    #[test]
+    fn repeated_physical_lookups_keep_captured_files_and_negative_observations() {
+        let root = fixture();
+        put(root.path(), "deep/package/value.cjs", b"module.exports = 1;");
+        let mut resolver = Resolver::new(root.path(), &[], SymlinkPolicy::Reject).unwrap();
+        let (path, source) = resolver.locate("deep/package/value.cjs").unwrap();
+        let (_, missing) = resolver.locate("deep/package/absent.cjs").unwrap();
+        let probes = resolver.probes();
+        assert!(matches!(missing.as_ref(), Entry::Missing));
+
+        put(root.path(), "deep/package/value.cjs", b"module.exports = 2;");
+        put(root.path(), "deep/package/absent.cjs", b"module.exports = 3;");
+        for _ in 0..16 {
+            let (again_path, again) = resolver.locate("deep/package/value.cjs").unwrap();
+            let (_, still_missing) = resolver.locate("deep/package/absent.cjs").unwrap();
+            assert_eq!(again_path, path);
+            assert!(Rc::ptr_eq(&source, &again));
+            assert!(Rc::ptr_eq(&missing, &still_missing));
+            assert!(matches!(
+                again.as_ref(),
+                Entry::File { bytes, .. } if bytes == b"module.exports = 1;"
+            ));
+            assert_eq!(resolver.probes(), probes);
+        }
+
+        let mut fresh = Resolver::new(root.path(), &[], SymlinkPolicy::Reject).unwrap();
+        let (_, changed) = fresh.locate("deep/package/value.cjs").unwrap();
+        assert!(matches!(
+            changed.as_ref(),
+            Entry::File { bytes, .. } if bytes == b"module.exports = 2;"
+        ));
+        assert!(fresh.probe("deep/package/absent.cjs").unwrap().is_file());
+    }
+
+    #[test]
+    fn warmed_physical_targets_do_not_skip_alias_expansion_or_parent_checks() {
+        let root = fixture();
+        put(root.path(), "right/value.mjs", b"export const value = 1;");
+        fs::create_dir_all(root.path().join("right/nested")).unwrap();
+        link(root.path(), "left/junction", "../right/nested");
+        link(root.path(), "entry.mjs", "left/junction/../value.mjs");
+        link(root.path(), "missing.mjs", "absent/../right/value.mjs");
+        link(root.path(), "not-dir.mjs", "right/value.mjs/../value.mjs");
+        let mut resolver = Resolver::new(root.path(), &[], SymlinkPolicy::Contained).unwrap();
+        let (_, source) = resolver.locate("right/value.mjs").unwrap();
+        resolver.locate("right/nested").unwrap();
+
+        for _ in 0..2 {
+            let (path, aliased) = resolver.locate("entry.mjs").unwrap();
+            assert_eq!(path, "right/value.mjs");
+            assert!(Rc::ptr_eq(&source, &aliased));
+            assert!(matches!(
+                resolver.locate("missing.mjs").unwrap().1.as_ref(),
+                Entry::Missing
+            ));
+            assert!(matches!(
+                resolver.locate("not-dir.mjs").unwrap().1.as_ref(),
+                Entry::Missing
+            ));
+        }
+        for path in ["entry.mjs", "left/junction"] {
+            assert!(resolver.probes().iter().any(|probe| {
+                probe.path == path && probe.kind == ProbeKind::Symlink
+            }));
+        }
+        assert!(!resolver.entries.contains_key("left/junction/value.mjs"));
+    }
+
+    #[test]
+    fn sealed_physical_lookups_reobserve_parents_and_refuse_uncaptured_inputs() {
+        let root = fixture();
+        put(root.path(), "deep/package/value.cjs", b"module.exports = 1;");
+        let mut resolver = Resolver::new(root.path(), &[], SymlinkPolicy::Reject).unwrap();
+        resolver.locate("deep/package/value.cjs").unwrap();
+        assert!(resolver.observed.is_empty());
+        resolver.sealed = true;
+
+        resolver.locate("deep/package/value.cjs").unwrap();
+        assert_eq!(
+            resolver.observed,
+            ["", "deep", "deep/package", "deep/package/value.cjs"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<BTreeSet<_>>()
+        );
+        // Even a file now present on disk cannot turn an omitted observation
+        // into a captured result once the resolver is sealed.
+        put(root.path(), "deep/package/uncaptured.cjs", b"module.exports = 2;");
+        assert_eq!(
+            resolver
+                .locate("deep/package/uncaptured.cjs")
+                .err()
+                .unwrap()
+                .code,
+            "ERR_MODULE_CAPSULE_INPUT_MISSING"
+        );
+    }
+
+    #[test]
+    fn repeated_physical_and_alias_routes_keep_identical_capsule_evidence() {
+        use source_graph::{GraphOptions, capsule, capture};
+
+        let root = fixture();
+        put(
+            root.path(),
+            "app.cjs",
+            b"require('./packages/dep/index.cjs'); require('dep'); require('dep'); require('./missing.cjs');",
+        );
+        put(
+            root.path(),
+            "packages/dep/package.json",
+            br#"{"name":"dep","type":"commonjs","main":"index.cjs"}"#,
+        );
+        put(
+            root.path(),
+            "packages/dep/index.cjs",
+            b"module.exports = 42;",
+        );
+        link(root.path(), "node_modules/dep", "../packages/dep");
+        let graph = capture(
+            root.path(),
+            "app.cjs",
+            GraphOptions {
+                symlink_policy: SymlinkPolicy::Contained,
+                ..GraphOptions::default()
+            },
+        )
+        .unwrap();
+        let encoded = capsule::encode(&graph).unwrap();
+
+        put(root.path(), "packages/dep/index.cjs", b"throw Error('changed');");
+        put(root.path(), "missing.cjs", b"module.exports = 'new';");
+        let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+        assert_eq!(graph.report(), replayed.report());
+        assert_eq!(graph.report().modules.len(), 2);
+        assert_eq!(graph.report().edges.len(), 4);
+        for module in &graph.report().modules {
+            assert_eq!(
+                graph.source_bytes(&module.id),
+                replayed.source_bytes(&module.id)
+            );
+        }
+        assert_eq!(capsule::encode(&replayed).unwrap().bytes(), encoded.bytes());
     }
 
     #[test]
