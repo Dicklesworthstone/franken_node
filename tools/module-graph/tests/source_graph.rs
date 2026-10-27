@@ -158,11 +158,113 @@ fn workspace_graph_uses_physical_context_only_after_explicit_link_admission() {
 }
 
 #[test]
+fn bundled_single_assignment_loaders_match_node_and_replay_after_project_move() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    // Rolldown's fdir 6.5.0 output uses this var createRequire prelude and
+    // resolve/require optional-dependency idiom. Fixture bytes never execute.
+    put(
+        &project,
+        "app.mjs",
+        "import {createRequire} from 'module'; var __require = /* @__PURE__ */ createRequire(import.meta.url); try{__require.resolve('matcher'); __require('matcher');}catch(error){} try{__require('optional')}catch(error){}",
+    );
+    put(
+        &project,
+        "node_modules/matcher/package.json",
+        r#"{"exports":{"import":"./wrong.mjs","require":"./index.cjs"}}"#,
+    );
+    put(
+        &project,
+        "node_modules/matcher/index.cjs",
+        "let load=require; var next=load; next('./leaf.cjs'); throw Error('never execute');",
+    );
+    put(
+        &project,
+        "node_modules/matcher/leaf.cjs",
+        "throw Error('never execute');",
+    );
+    put(
+        &project,
+        "node_modules/matcher/wrong.mjs",
+        "throw Error('wrong conditions');",
+    );
+    let (code, captured) = run(&project, "app.mjs", &[]);
+    assert_eq!(code, 1, "{captured}");
+    assert!(
+        captured["source_graph"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        paths(&captured),
+        [
+            "app.mjs",
+            "node_modules/matcher/index.cjs",
+            "node_modules/matcher/leaf.cjs"
+        ]
+    );
+    let edges = captured["source_graph"]["edges"].as_array().unwrap();
+    assert_eq!(edges.len(), 5);
+    assert_eq!(
+        edges
+            .iter()
+            .filter(|edge| edge["state"] == "resolved")
+            .count(),
+        3
+    );
+    assert_eq!(
+        edges
+            .iter()
+            .filter(|edge| edge["error"]["code"] == "MODULE_NOT_FOUND")
+            .count(),
+        1
+    );
+    assert_node_edges(&project, &captured);
+    let capsule = temp.path().join("bundled.fnsc");
+    let (_, exported) = export_capsule(&project, "app.mjs", &capsule, &[]);
+    assert_eq!(exported["source_graph"], captured["source_graph"]);
+    std::fs::rename(&project, temp.path().join("original-project")).unwrap();
+    put(&project, "app.mjs", "throw Error('replacement source');");
+    put(
+        &project,
+        "node_modules/optional/index.js",
+        "throw Error('installed after capture');",
+    );
+    let (code, replayed) = replay_capsule(
+        &capsule,
+        exported["capsule_hash"].as_str().unwrap(),
+        temp.path(),
+    );
+    assert_eq!(code, 1, "{replayed}");
+    assert_eq!(replayed["source_graph"], captured["source_graph"]);
+    assert_eq!(replayed["replay_verified"], true);
+    assert_eq!(replayed["execution_performed"], false);
+    for source in [
+        "import {createRequire} from 'module'; var load=createRequire(import.meta.url); load=other; load('matcher');",
+        "import {createRequire} from 'module'; run(); var load=createRequire(import.meta.url); function run(){load('matcher');}",
+        "import {createRequire} from 'module'; var load=createRequire(import.meta.url); function shadow(load){load('matcher');}",
+        "var load=require; const escape={load}; load('matcher');",
+    ] {
+        put(&project, "app.mjs", source);
+        let (code, refused) = run(&project, "app.mjs", &[]);
+        assert_eq!(code, 1, "{refused}");
+        assert!(
+            !refused["source_graph"]["diagnostics"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn syntax_and_mutable_loader_alias_diagnostics_prevent_a_complete_result() {
     let root = tempfile::tempdir().unwrap();
     put(root.path(), "app.mjs", "import './broken.mjs'; import './alias.cjs';");
     put(root.path(), "broken.mjs", "export const = ;");
-    put(root.path(), "alias.cjs", "let load=require; load('concealed');");
+    put(root.path(), "alias.cjs", "let load; load=require; load('concealed');");
     let (code, report) = run(root.path(), "app.mjs", &[]);
     assert_eq!(code, 1, "{report}");
     let codes: Vec<_> = report["source_graph"]["diagnostics"].as_array().unwrap().iter()
@@ -406,7 +508,7 @@ fn typed_parse_failures_preserve_capture_without_asserting_dependency_completene
 #[test]
 fn typed_computed_loads_and_mutable_loader_aliases_remain_incomplete() {
     let root = tempfile::tempdir().unwrap();
-    put(root.path(), "app.ts", "let load = require as Loader; load('hidden'); import(name as string);");
+    put(root.path(), "app.ts", "let load; load = require as Loader; load('hidden'); import(name as string);");
     let (code, report) = run(root.path(), "app.ts", &[]);
     assert_eq!(code, 1, "{report}");
     assert!(report["source_graph"]["edges"].as_array().unwrap().iter().any(|e| e["state"] == "non_literal"));
