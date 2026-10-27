@@ -528,21 +528,36 @@ pub(crate) fn project_bun_lock_for_topology(
     Ok(lock)
 }
 
-fn inspect_with_installation(project: &Path, deadline: Instant, check_installation: bool) -> Result<DependencyAdmission> {
+fn inspect_with_installation(
+    project: &Path,
+    deadline: Instant,
+    check_installation: bool,
+) -> Result<DependencyAdmission> {
     let mut capture = Capture::new(project, deadline)?;
     let manifest = capture.read("package.json", MAX_MANIFEST_BYTES)?.context("dependency admission requires package.json")?;
     capture.refuse_binary_bun_lock("bun.lockb")?;
-    let package_lock = capture.read("package-lock.json", MAX_LOCK_BYTES)?;
-    let shrinkwrap = capture.read("npm-shrinkwrap.json", MAX_LOCK_BYTES)?;
-    ensure!(package_lock.is_none() || shrinkwrap.is_none(), "both npm lockfiles are present; dependency inventory is ambiguous");
+    // Match the documented npm <=11 authority contract used by the runtime
+    // topology: shrinkwrap wins, and the ignored package-lock is not parsed,
+    // inventoried or merged. Only absence permits fallback; malformed,
+    // unreadable or unsupported selected metadata still fails closed.
+    let (npm_source, npm_lock) = match capture.read("npm-shrinkwrap.json", MAX_LOCK_BYTES)? {
+        Some(lock) => ("npm-shrinkwrap.json", Some(lock)),
+        None => (
+            "package-lock.json",
+            capture.read("package-lock.json", MAX_LOCK_BYTES)?,
+        ),
+    };
     let bun_lock = capture.read("bun.lock", MAX_LOCK_BYTES)?;
-    ensure!(bun_lock.is_none() || (package_lock.is_none() && shrinkwrap.is_none()),
-        "Bun and npm lockfiles are both present; select one dependency authority before checked execution");
+    ensure!(
+        bun_lock.is_none() || npm_lock.is_none(),
+        "Bun and npm lockfiles are both present; select one dependency authority before checked execution"
+    );
     let (source, lock, catalogs) = if let Some(bun_lock) = bun_lock {
         let (projection, catalogs) = bun::project_lock(bun_lock, &manifest, deadline)?;
         ("bun.lock", Some(projection), Some(catalogs))
-    } else if package_lock.is_some() { ("package-lock.json", package_lock, None) }
-        else { ("npm-shrinkwrap.json", shrinkwrap, None) };
+    } else {
+        (npm_source, npm_lock, None)
+    };
     let packages = match &lock {
         None => BTreeMap::new(),
         Some(lock) => match lock.get("lockfileVersion").and_then(Value::as_u64) {
@@ -655,6 +670,166 @@ mod tests {
     }
 
     #[test]
+    fn shrinkwrap_authority_binds_installed_identity_for_all_supported_lock_versions() {
+        for version in [1, 2, 3] {
+            let root = fixture(
+                json!({"dependencies":{"ordinary":"^2"}}),
+                Some(modern_fixture(json!({
+                    "node_modules/ordinary":{"version":"1.0.0","hasInstallScript":true},
+                    "node_modules/sharp":{"version":"0.33.0"}
+                }))),
+            );
+            let selected = if version == 1 {
+                json!({"lockfileVersion":1,"dependencies":{"ordinary":{"version":"2.3.4"}}})
+            } else {
+                json!({"lockfileVersion":version,"packages":{"node_modules/ordinary":{"version":"2.3.4"}}})
+            };
+            let bytes = serde_json::to_vec(&selected).unwrap();
+            fs::write(root.path().join("npm-shrinkwrap.json"), &bytes).unwrap();
+            fs::create_dir_all(root.path().join("node_modules/ordinary")).unwrap();
+            fs::write(
+                root.path().join("node_modules/ordinary/package.json"),
+                r#"{"name":"ordinary","version":"2.3.4"}"#,
+            )
+            .unwrap();
+            fs::write(
+                root.path().join("node_modules/ordinary/index.js"),
+                "throw Error('admission must not execute package code');",
+            )
+            .unwrap();
+
+            let report = inspect_for_execution(root.path(), deadline()).unwrap();
+            assert!(!report.requires_review(), "v{version}: {report:?}");
+            assert!(report.installation_checked);
+            assert_eq!(report.packages_scanned, 1);
+            assert_eq!(report.installed_packages_scanned, 1);
+            assert!(
+                !report
+                    .inputs
+                    .iter()
+                    .any(|input| input.path == "package-lock.json")
+            );
+            let input = report
+                .inputs
+                .iter()
+                .find(|input| input.path == "npm-shrinkwrap.json")
+                .unwrap();
+            assert_eq!(input.bytes, bytes.len());
+            assert_eq!(input.sha256, hex::encode(Sha256::digest(&bytes)));
+
+            // The ignored tree can be stale or malformed without changing
+            // either the selected installation or its captured evidence.
+            fs::write(root.path().join("package-lock.json"), b"not JSON\0\xff").unwrap();
+            assert_eq!(
+                report,
+                inspect_for_execution(root.path(), deadline()).unwrap()
+            );
+
+            fs::write(
+                root.path().join("node_modules/ordinary/package.json"),
+                r#"{"name":"ordinary","version":"1.0.0"}"#,
+            )
+            .unwrap();
+            let stale = inspect_for_execution(root.path(), deadline()).unwrap();
+            assert!(
+                stale
+                    .findings
+                    .iter()
+                    .any(|finding| finding.code == "installed_identity_mismatch")
+            );
+        }
+    }
+
+    #[test]
+    fn selected_shrinkwrap_findings_cannot_be_hidden_by_a_clean_package_lock() {
+        let root = fixture(json!({}), Some(modern_fixture(json!({}))));
+        fs::write(
+            root.path().join("npm-shrinkwrap.json"),
+            serde_json::to_vec(&modern_fixture(json!({
+                "node_modules/sharp":{"version":"0.33.0","hasInstallScript":true}
+            })))
+            .unwrap(),
+        )
+        .unwrap();
+        let report = inspect_for_execution(root.path(), deadline()).unwrap();
+        assert_eq!(codes(&report), ["install_script", "native_addon"]);
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|finding| finding.source == "npm-shrinkwrap.json")
+        );
+        assert!(!report.installation_checked);
+        assert_eq!(report.packages_scanned, 1);
+    }
+
+    #[test]
+    fn selected_shrinkwrap_failures_never_fall_back_to_a_valid_package_lock() {
+        for (selected, expected) in [
+            ("not JSON", "invalid dependency JSON in npm-shrinkwrap.json"),
+            (
+                "[]",
+                "npm-shrinkwrap.json: dependency metadata must be an object",
+            ),
+            (
+                r#"{"lockfileVersion":3,"packages":{},"packages":{}}"#,
+                "invalid dependency JSON in npm-shrinkwrap.json",
+            ),
+            (
+                r#"{"lockfileVersion":99}"#,
+                "unsupported or missing npm lockfileVersion",
+            ),
+            (
+                r#"{"lockfileVersion":3,"packages":[]}"#,
+                "modern npm lockfile requires a packages object",
+            ),
+        ] {
+            let root = fixture(json!({}), Some(modern_fixture(json!({}))));
+            fs::write(root.path().join("npm-shrinkwrap.json"), selected).unwrap();
+            let error = inspect_for_execution(root.path(), deadline()).unwrap_err();
+            assert!(
+                format!("{error:#}").contains(expected),
+                "{selected}: {error:#}"
+            );
+        }
+        let root = fixture(json!({}), Some(modern_fixture(json!({}))));
+        std::os::unix::fs::symlink("package-lock.json", root.path().join("npm-shrinkwrap.json"))
+            .unwrap();
+        let error = inspect_for_execution(root.path(), deadline()).unwrap_err();
+        assert!(format!("{error:#}").contains("cannot capture npm-shrinkwrap.json"));
+        let root = fixture(json!({}), Some(modern_fixture(json!({}))));
+        fs::create_dir(root.path().join("npm-shrinkwrap.json")).unwrap();
+        let error = inspect_for_execution(root.path(), deadline()).unwrap_err();
+        assert!(
+            format!("{error:#}")
+                .contains("npm-shrinkwrap.json: expected a bounded regular metadata file")
+        );
+    }
+
+    #[test]
+    fn npm_lock_precedence_does_not_choose_between_npm_and_bun_authorities() {
+        for name in ["npm-shrinkwrap.json", "package-lock.json"] {
+            let root = fixture(json!({}), None);
+            fs::write(
+                root.path().join(name),
+                serde_json::to_vec(&modern_fixture(json!({}))).unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                root.path().join("bun.lock"),
+                r#"{"lockfileVersion":2,"workspaces":{"":{}},"packages":{}}"#,
+            )
+            .unwrap();
+            let error = inspect_for_execution(root.path(), deadline()).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("Bun and npm lockfiles are both present")
+            );
+        }
+    }
+
+    #[test]
     fn nested_native_addons_keep_each_location_and_version() {
         let root = fixture(json!({}), Some(modern_fixture(json!({
             "node_modules/ordinary":{"version":"1.0.0"},
@@ -759,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_or_ambiguous_metadata_never_returns_a_clean_report() {
+    fn malformed_metadata_never_returns_a_clean_report() {
         for lock in [json!({}), json!({"lockfileVersion":true}), json!({"lockfileVersion":4}),
             json!({"lockfileVersion":3,"packages":[]}),
             modern_fixture(json!({"../escape":{}})),
@@ -768,9 +943,6 @@ mod tests {
             let root = fixture(json!({}), Some(lock));
             assert!(inspect(root.path(), deadline()).is_err());
         }
-        let root = fixture(json!({}), Some(modern_fixture(json!({}))));
-        fs::write(root.path().join("npm-shrinkwrap.json"), r#"{"lockfileVersion":1}"#).unwrap();
-        assert!(inspect(root.path(), deadline()).unwrap_err().to_string().contains("both npm lockfiles"));
     }
 
     #[test]
