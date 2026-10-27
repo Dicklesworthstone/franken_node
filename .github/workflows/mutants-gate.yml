@@ -168,7 +168,8 @@ jobs:
               print(f"{outcomes_path} was not produced")
           else:
               outcomes = json.loads(outcomes_path.read_text())
-              print(json.dumps(outcomes.get("summary", {}), indent=2, sort_keys=True))
+              keys = ("cargo_mutants_version", "total_mutants", "caught", "missed", "timeout", "unviable")
+              print(json.dumps({key: outcomes.get(key) for key in keys}, indent=2, sort_keys=True))
           PY
 
       - name: Enforce cargo-mutants exit code
@@ -246,8 +247,8 @@ jobs:
           print(f"mutation-adequacy: caught={caught} missed={missed} timeout={timeout} "
                 f"unviable={unviable} viable={viable} score={score_bp}bp floor={floor_bp}bp")
           if (caught + timeout) * 10000 < floor_bp * viable:
-              print(f"::error::mutation score {score_bp}bp is below the registered floor "
-                    f"{floor_bp}bp (bd-5r99w.14)")
+              print(f"::error::mutation detection ratio {caught + timeout}/{viable} "
+                    f"is below the registered floor {floor_bp}bp (bd-5r99w.14)")
               sys.exit(1)
           print("mutation-adequacy: floor satisfied")
           PY

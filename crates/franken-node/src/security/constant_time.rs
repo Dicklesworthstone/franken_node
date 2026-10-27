@@ -26,7 +26,6 @@ pub fn ct_eq_bytes(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{ct_eq, ct_eq_bytes};
-    use proptest::prelude::*;
 
     #[test]
     fn equal_strings_match() {
@@ -373,7 +372,7 @@ mod comprehensive_boundary_negative_tests {
     fn negative_ct_eq_bytes_with_memory_alignment_boundaries() {
         // Test with arrays that cross typical memory alignment boundaries
         for size in [1, 2, 3, 4, 7, 8, 15, 16, 31, 32, 63, 64, 127, 128] {
-            let mut a = vec![0x5A; size];
+            let a = vec![0x5A; size];
             let mut b = vec![0x5A; size];
 
             // Modify the middle byte
@@ -540,7 +539,7 @@ mod comprehensive_boundary_negative_tests {
         let valid_utf8 = String::from("hello world");
 
         // Create a string with invalid UTF-8 continuation bytes
-        let mut invalid_utf8_bytes = b"hello \xFF\xFE world".to_vec();
+        let invalid_utf8_bytes = b"hello \xFF\xFE world".to_vec();
 
         // Compare using byte comparison since invalid UTF-8 can't be made into a &str
         assert!(!ct_eq_bytes(valid_utf8.as_bytes(), &invalid_utf8_bytes));
@@ -613,7 +612,7 @@ mod comprehensive_boundary_negative_tests {
         let cache_boundary_test_sizes = [63, 64, 65, 127, 128, 129];
 
         for &size in &cache_boundary_test_sizes {
-            let mut pattern_a = vec![0x5A; size];
+            let pattern_a = vec![0x5A; size];
             let mut pattern_b = vec![0x5A; size];
 
             // Modify the first byte
@@ -684,7 +683,7 @@ mod comprehensive_boundary_negative_tests {
         assert!(!ct_eq_bytes(&large_a, &large_b));
 
         // Test length difference near boundaries
-        let mut almost_max = vec![0x77; max_reasonable_len.saturating_sub(1)];
+        let almost_max = vec![0x77; max_reasonable_len.saturating_sub(1)];
         assert!(!ct_eq_bytes(&large_a, &almost_max)); // Different lengths
     }
 
@@ -749,7 +748,7 @@ mod comprehensive_boundary_negative_tests {
         );
 
         // Should contain latest vectors
-        assert!(test_vectors.len() > 0, "Should contain some test vectors");
+        assert!(!test_vectors.is_empty(), "Should contain some test vectors");
 
         // Test constant-time comparison with bounded vectors
         for (i, vec_a) in test_vectors.iter().enumerate() {
@@ -1010,7 +1009,7 @@ mod comprehensive_boundary_negative_tests {
                     // Only finite logarithms should be used in analysis
                     if safe_log_ratio.is_finite() {
                         assert!(
-                            safe_log_ratio >= f64::MIN && safe_log_ratio <= f64::MAX,
+                            (f64::MIN..=f64::MAX).contains(&safe_log_ratio),
                             "Log ratio should be in valid range: {}",
                             description
                         );
@@ -1201,7 +1200,7 @@ mod comprehensive_boundary_negative_tests {
         // Bounded storage with safe length handling
         for i in 0u32..20 {
             let data_size = i.saturating_mul(100).min(10000); // Bounded size growth
-            let safe_size = u32::try_from(data_size).unwrap_or(u32::MAX) as usize;
+            let safe_size = usize::try_from(data_size).expect("bounded fixture size fits usize");
 
             let test_data = vec![i as u8; safe_size];
 
@@ -1228,11 +1227,16 @@ mod comprehensive_boundary_negative_tests {
 
         // Test constant-time comparisons with domain separation
         for (i, data) in test_data_store.iter().enumerate() {
-            let data_len = data.len();
-
-            // Fail-closed size validation
-            let is_valid_size = data_len >= 0; // Always true, but demonstrates pattern
-            assert!(is_valid_size, "Size validation should be fail-closed");
+            // Exercise the real length boundary instead of an always-true
+            // comparison on usize. No artificial maximum is imposed on ct_eq.
+            if let Some((_, shorter)) = data.split_last() {
+                assert!(
+                    !ct_eq_bytes(data, shorter),
+                    "Truncating the input must change equality at index {i}"
+                );
+            } else {
+                assert!(ct_eq_bytes(data, &[]), "Two empty inputs must match");
+            }
 
             // Domain-separated hash simulation
             let domain_prefix = format!("ct_test_v1:{}:", i);
@@ -1295,7 +1299,7 @@ mod comprehensive_boundary_negative_tests {
         );
 
         // Verify all hardening patterns work together without conflicts
-        assert!(test_data_store.len() > 0, "Should have test data");
+        assert!(!test_data_store.is_empty(), "Should have test data");
         assert!(
             test_data_store.len() <= MAX_STORE_SIZE,
             "Should respect bounds"
