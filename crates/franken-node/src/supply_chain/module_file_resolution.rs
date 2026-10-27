@@ -1315,15 +1315,27 @@ mod tests {
     #[test]
     fn repeated_physical_lookups_keep_captured_files_and_negative_observations() {
         let root = fixture();
-        put(root.path(), "deep/package/value.cjs", b"module.exports = 1;");
+        put(
+            root.path(),
+            "deep/package/value.cjs",
+            b"module.exports = 1;",
+        );
         let mut resolver = Resolver::new(root.path(), &[], SymlinkPolicy::Reject).unwrap();
         let (path, source) = resolver.locate("deep/package/value.cjs").unwrap();
         let (_, missing) = resolver.locate("deep/package/absent.cjs").unwrap();
         let probes = resolver.probes();
         assert!(matches!(missing.as_ref(), Entry::Missing));
 
-        put(root.path(), "deep/package/value.cjs", b"module.exports = 2;");
-        put(root.path(), "deep/package/absent.cjs", b"module.exports = 3;");
+        put(
+            root.path(),
+            "deep/package/value.cjs",
+            b"module.exports = 2;",
+        );
+        put(
+            root.path(),
+            "deep/package/absent.cjs",
+            b"module.exports = 3;",
+        );
         for _ in 0..16 {
             let (again_path, again) = resolver.locate("deep/package/value.cjs").unwrap();
             let (_, still_missing) = resolver.locate("deep/package/absent.cjs").unwrap();
@@ -1373,9 +1385,12 @@ mod tests {
             ));
         }
         for path in ["entry.mjs", "left/junction"] {
-            assert!(resolver.probes().iter().any(|probe| {
-                probe.path == path && probe.kind == ProbeKind::Symlink
-            }));
+            assert!(
+                resolver
+                    .probes()
+                    .iter()
+                    .any(|probe| { probe.path == path && probe.kind == ProbeKind::Symlink })
+            );
         }
         assert!(!resolver.entries.contains_key("left/junction/value.mjs"));
     }
@@ -1383,7 +1398,11 @@ mod tests {
     #[test]
     fn sealed_physical_lookups_reobserve_parents_and_refuse_uncaptured_inputs() {
         let root = fixture();
-        put(root.path(), "deep/package/value.cjs", b"module.exports = 1;");
+        put(
+            root.path(),
+            "deep/package/value.cjs",
+            b"module.exports = 1;",
+        );
         let mut resolver = Resolver::new(root.path(), &[], SymlinkPolicy::Reject).unwrap();
         resolver.locate("deep/package/value.cjs").unwrap();
         assert!(resolver.observed.is_empty());
@@ -1399,7 +1418,11 @@ mod tests {
         );
         // Even a file now present on disk cannot turn an omitted observation
         // into a captured result once the resolver is sealed.
-        put(root.path(), "deep/package/uncaptured.cjs", b"module.exports = 2;");
+        put(
+            root.path(),
+            "deep/package/uncaptured.cjs",
+            b"module.exports = 2;",
+        );
         assert_eq!(
             resolver
                 .locate("deep/package/uncaptured.cjs")
@@ -1442,7 +1465,11 @@ mod tests {
         .unwrap();
         let encoded = capsule::encode(&graph).unwrap();
 
-        put(root.path(), "packages/dep/index.cjs", b"throw Error('changed');");
+        put(
+            root.path(),
+            "packages/dep/index.cjs",
+            b"throw Error('changed');",
+        );
         put(root.path(), "missing.cjs", b"module.exports = 'new';");
         let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
         assert_eq!(graph.report(), replayed.report());

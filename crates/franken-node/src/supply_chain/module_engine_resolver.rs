@@ -3379,6 +3379,83 @@ import('node:zlib').then(function(again) {{
     }
 
     #[test]
+    fn captured_file_url_origin_keeps_encoded_query_identity_and_runtime_policy() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            for deny_dependency in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                put(
+                    root.path(),
+                    "app.mjs",
+                    "import value from './nested%20space/app.mjs?copy#part'; console.log(value);",
+                );
+                put(
+                    root.path(),
+                    "nested space/app.mjs",
+                    r#"
+import {createRequire as make} from 'node:module';
+import {fileURLToPath as toPath} from 'node:url';
+const __filename = toPath(import.meta.url), origin = __filename;
+const local = make(origin);
+export default local('./dep.cjs');
+"#,
+                );
+                put(root.path(), "nested space/dep.cjs", "module.exports=42;");
+                put(root.path(), "dep.cjs", "throw new Error('wrong origin');");
+                assert_eq!(node_reference_output(root.path(), "app.mjs"), "42\n");
+                let mut policy = CapabilityPolicyHook::new(BTreeSet::from([
+                    RuntimeCapability::ModuleLoad,
+                    RuntimeCapability::Builtin,
+                ]));
+                if deny_dependency {
+                    policy = policy.deny_specifier("./dep.cjs");
+                }
+                let result = execute_captured_graph_with_policy_for_test(
+                    root.path(),
+                    "app.mjs",
+                    lane,
+                    Arc::new(policy),
+                    || {
+                        for path in ["app.mjs", "nested space/app.mjs", "nested space/dep.cjs"] {
+                            put(
+                                root.path(),
+                                path,
+                                "throw new Error('live source reopened');",
+                            );
+                        }
+                    },
+                );
+                if deny_dependency {
+                    let error =
+                        result.expect_err("converted filenames never grant dependency authority");
+                    let detail = error.to_string();
+                    assert!(
+                        detail.contains("closed-world module resolution refused"),
+                        "{lane:?}: {detail}"
+                    );
+                    assert!(
+                        detail.contains("./dep.cjs") && detail.contains("policy"),
+                        "{lane:?}: {detail}"
+                    );
+                } else {
+                    let result =
+                        result.expect("the current captured filename remains the only origin");
+                    assert_eq!(
+                        result
+                            .console_output
+                            .iter()
+                            .map(|line| line.message.as_str())
+                            .collect::<Vec<_>>(),
+                        ["42"],
+                        "{lane:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn captured_create_require_factory_forms_execute_through_native_engine() {
         use frankenengine_engine::baseline_interpreter::LaneChoice;
 
@@ -3388,6 +3465,26 @@ import('node:zlib').then(function(again) {{
                     "nested/app.mjs",
                     "import mod from 'node:module';",
                     "mod.createRequire(import.meta.url)",
+                ),
+                (
+                    "nested/app.mjs",
+                    "import {createRequire as make} from 'node:module'; import {fileURLToPath} from 'node:url';",
+                    "make(fileURLToPath(import.meta.url))",
+                ),
+                (
+                    "nested/app.mjs",
+                    "import {createRequire as make} from 'node:module'; import {fileURLToPath as toPath} from 'url'; const __filename=toPath(import.meta.url), origin=__filename;",
+                    "make(origin)",
+                ),
+                (
+                    "nested/app.mjs",
+                    "import {createRequire} from 'node:module'; import * as urls from 'node:url';",
+                    "createRequire(urls.fileURLToPath(import.meta.url))",
+                ),
+                (
+                    "nested/app.mjs",
+                    "import {createRequire} from 'node:module'; import urls from 'node:url'; const filename=urls.fileURLToPath(import.meta.url);",
+                    "createRequire(filename)",
                 ),
                 (
                     "nested/app.cjs",

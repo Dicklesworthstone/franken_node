@@ -3932,6 +3932,13 @@ one pass.
   branch; it does not execute conditions or predict the branch that will run.
   Mutable, shadowed, forward-referenced and otherwise unproved bindings remain
   refused, and these expressions grant no access to uncaptured modules.
+  ESM packages can construct a captured loader with
+  `createRequire(fileURLToPath(import.meta.url))`. Named, renamed, default and
+  namespace imports from `url` or `node:url` are supported, as are earlier
+  top-level `const` filename aliases. Capture proves the converter and origin
+  bindings; runtime still requires the exact current captured filename and
+  authorizes every dependency request. Arbitrary URL inputs, converter mutation,
+  shadowing and unproved filename aliases remain refused.
   CommonJS packages can also use `require.main === module` and the equivalent
   strict equality/inequality checks through proven loader aliases to distinguish
   CLI execution from a dependency load. Capture retains dependencies from both

@@ -530,6 +530,10 @@ enum CreateRequireFactory {
 struct CreateRequireBindings<'source> {
     factories: BTreeMap<&'source str, CreateRequireFactory>,
     commonjs_factories: BTreeMap<&'source str, usize>,
+    origin_converters: BTreeMap<&'source str, CreateRequireFactory>,
+    filename_aliases: BTreeMap<&'source str, CreateRequireFilename<'source>>,
+    used_origin_converters: BTreeSet<&'source str>,
+    used_filename_aliases: BTreeSet<&'source str>,
     loaders: BTreeSet<&'source str>,
     created_loaders: BTreeMap<&'source str, usize>,
     commonjs_aliases: BTreeSet<&'source str>,
@@ -539,6 +543,13 @@ struct CreateRequireBindings<'source> {
     declarations: BTreeSet<usize>,
     mutable_bindings: BTreeMap<&'source str, LoaderInitialization>,
     filename_origin: bool,
+}
+
+struct CreateRequireFilename<'source> {
+    available_after: usize,
+    declaration: usize,
+    converter: &'source str,
+    previous: Option<&'source str>,
 }
 
 struct LoaderInitialization {
@@ -559,13 +570,14 @@ impl<'source> CreateRequireBindings<'source> {
             if statement.kind() != "import_statement" || keyword(statement, "type") {
                 continue;
             }
-            let from_module = statement
+            let imported_module = statement
                 .child_by_field_name("source")
-                .and_then(|node| literal(node, source))
-                .is_some_and(|name| matches!(name.as_str(), "module" | "node:module"));
-            if !from_module {
-                continue;
-            }
+                .and_then(|node| literal(node, source));
+            let origin_converter = match imported_module.as_deref() {
+                Some("module" | "node:module") => false,
+                Some("url" | "node:url") => true,
+                _ => continue,
+            };
             let mut children = statement.walk();
             for clause in statement.named_children(&mut children) {
                 if clause.kind() != "import_clause" {
@@ -577,18 +589,20 @@ impl<'source> CreateRequireBindings<'source> {
                         // Node's default export is its native module object.
                         // Prove every use exactly as for a namespace import;
                         // importing it does not grant arbitrary loader access.
-                        bindings.add_factory(
+                        bindings.add_import_binding(
                             part,
                             None,
                             CreateRequireFactory::Namespace,
+                            origin_converter,
                             source,
                         )?;
                     } else if part.kind() == "namespace_import" {
                         if let Some(name) = part.named_child(0) {
-                            bindings.add_factory(
+                            bindings.add_import_binding(
                                 name,
                                 None,
                                 CreateRequireFactory::Namespace,
+                                origin_converter,
                                 source,
                             )?;
                         }
@@ -602,15 +616,17 @@ impl<'source> CreateRequireBindings<'source> {
                             let Some(imported) = specifier.child_by_field_name("name") else {
                                 continue;
                             };
+                            let function = if origin_converter { "fileURLToPath" } else { "createRequire" };
                             if imported.kind() == "identifier"
-                                && imported.utf8_text(source.as_bytes()) == Ok("createRequire")
+                                && imported.utf8_text(source.as_bytes()) == Ok(function)
                             {
                                 let local =
                                     specifier.child_by_field_name("alias").unwrap_or(imported);
-                                bindings.add_factory(
+                                bindings.add_import_binding(
                                     local,
                                     Some(imported),
                                     CreateRequireFactory::Named,
+                                    origin_converter,
                                     source,
                                 )?;
                             }
@@ -632,6 +648,9 @@ impl<'source> CreateRequireBindings<'source> {
             let mut declarations = statement.walk();
             for declaration in statement.named_children(&mut declarations) {
                 if declaration.kind() != "variable_declarator" {
+                    continue;
+                }
+                if bindings.discover_filename_alias(declaration, source)? {
                     continue;
                 }
                 let Some(name) = declaration.child_by_field_name("name") else {
@@ -668,14 +687,7 @@ impl<'source> CreateRequireBindings<'source> {
                         return argument.kind() == "identifier"
                             && argument.utf8_text(source.as_bytes()) == Ok("__filename");
                     }
-                    named_member(argument, "url", source)
-                        && argument
-                            .child_by_field_name("object")
-                            .is_some_and(|object| {
-                                let object = runtime_operand(object);
-                                object.kind() == "meta_property"
-                                    && object.utf8_text(source.as_bytes()) == Ok("import.meta")
-                            })
+                    bindings.prove_esm_origin(argument, source)
                 });
                 if !own_origin || arguments.next().is_some() {
                     continue;
@@ -704,6 +716,186 @@ impl<'source> CreateRequireBindings<'source> {
         bindings.discover_commonjs_aliases(root, source)?;
         bindings.prove_initialization_prelude(root);
         Ok(bindings)
+    }
+
+    /// An ESM URL converter is only trusted at the exact call sites used to
+    /// prove this module's filename. Its namespace cannot escape or be mutated.
+    fn add_import_binding(
+        &mut self,
+        local: Node<'_>,
+        imported: Option<Node<'_>>,
+        kind: CreateRequireFactory,
+        origin_converter: bool,
+        source: &'source str,
+    ) -> Result<()> {
+        if !origin_converter {
+            return self.add_factory(local, imported, kind, source);
+        }
+        if local.kind() != "identifier" {
+            return Ok(());
+        }
+        let spelling = local.utf8_text(source.as_bytes()).unwrap_or("");
+        if spelling.contains('\\')
+            || matches!(
+                spelling,
+                "require" | "createRequire" | "__filename" | "eval" | "Function"
+            )
+            || self.factories.contains_key(spelling)
+            || self.origin_converters.contains_key(spelling)
+        {
+            return Ok(());
+        }
+        self.reserve_binding()?;
+        self.origin_converters.insert(spelling, kind);
+        self.allowed_identifiers.insert(local.id());
+        if let Some(imported) = imported {
+            self.allowed_identifiers.insert(imported.id());
+        }
+        Ok(())
+    }
+
+    fn filename_conversion<'tree>(&self, node: Node<'tree>, source: &str) -> Option<Node<'tree>> {
+        let node = runtime_operand(node);
+        if node.kind() != "call_expression" {
+            return None;
+        }
+        let function = runtime_operand(node.child_by_field_name("function")?);
+        let converter = if function.kind() == "identifier"
+            && self
+                .origin_converters
+                .get(function.utf8_text(source.as_bytes()).ok()?)
+                == Some(&CreateRequireFactory::Named)
+        {
+            function
+        } else if named_member(function, "fileURLToPath", source) {
+            let object = runtime_operand(function.child_by_field_name("object")?);
+            if object.kind() != "identifier"
+                || self
+                    .origin_converters
+                    .get(object.utf8_text(source.as_bytes()).ok()?)
+                    != Some(&CreateRequireFactory::Namespace)
+            {
+                return None;
+            }
+            object
+        } else {
+            return None;
+        };
+        let arguments = node.child_by_field_name("arguments")?;
+        let mut cursor = arguments.walk();
+        let mut arguments = arguments
+            .named_children(&mut cursor)
+            .filter(|argument| argument.kind() != "comment");
+        if !arguments
+            .next()
+            .is_some_and(|argument| own_import_meta_url(argument, source))
+            || arguments.next().is_some()
+        {
+            return None;
+        }
+        Some(converter)
+    }
+
+    /// Filename strings may flow through earlier top-level const aliases.
+    /// Activation is deferred until a createRequire origin uses the chain:
+    /// unrelated URL imports and filename declarations gain no new restrictions.
+    fn discover_filename_alias(
+        &mut self,
+        declaration: Node<'_>,
+        source: &'source str,
+    ) -> Result<bool> {
+        if !declaration
+            .parent()
+            .is_some_and(|parent| keyword(parent, "const"))
+        {
+            return Ok(false);
+        }
+        let (Some(name), Some(value)) = (
+            declaration.child_by_field_name("name"),
+            declaration.child_by_field_name("value"),
+        ) else {
+            return Ok(false);
+        };
+        if name.kind() != "identifier" {
+            return Ok(false);
+        }
+        let spelling = name.utf8_text(source.as_bytes()).unwrap_or("");
+        if spelling.contains('\\')
+            || matches!(spelling, "require" | "createRequire" | "eval" | "Function")
+            || self.factories.contains_key(spelling)
+            || self.origin_converters.contains_key(spelling)
+            || self.filename_aliases.contains_key(spelling)
+            || self.loaders.contains(spelling)
+        {
+            return Ok(false);
+        }
+        let value = runtime_operand(value);
+        let previous = value.utf8_text(source.as_bytes()).unwrap_or("");
+        let (converter, previous, used_identifier) =
+            if let Some(converter) = self.filename_conversion(value, source) {
+                (
+                    converter.utf8_text(source.as_bytes()).unwrap_or(""),
+                    None,
+                    converter.id(),
+                )
+            } else if value.kind() == "identifier"
+                && let Some(origin) = self.filename_aliases.get(previous)
+                && origin.available_after <= value.start_byte()
+            {
+                (origin.converter, Some(previous), value.id())
+            } else {
+                return Ok(false);
+            };
+        self.reserve_binding()?;
+        self.filename_aliases.insert(
+            spelling,
+            CreateRequireFilename {
+                available_after: declaration.end_byte(),
+                declaration: declaration.id(),
+                converter,
+                previous,
+            },
+        );
+        self.allowed_identifiers.insert(name.id());
+        self.allowed_identifiers.insert(used_identifier);
+        Ok(true)
+    }
+
+    fn prove_esm_origin(&mut self, node: Node<'_>, source: &'source str) -> bool {
+        let node = runtime_operand(node);
+        if own_import_meta_url(node, source) {
+            return true;
+        }
+        if let Some(converter) = self.filename_conversion(node, source) {
+            self.used_origin_converters
+                .insert(converter.utf8_text(source.as_bytes()).unwrap_or(""));
+            self.allowed_identifiers.insert(converter.id());
+            return true;
+        }
+        if node.kind() != "identifier" {
+            return false;
+        }
+        let mut spelling = node.utf8_text(source.as_bytes()).unwrap_or("");
+        if !self
+            .filename_aliases
+            .get(spelling)
+            .is_some_and(|origin| origin.available_after <= node.start_byte())
+        {
+            return false;
+        }
+        self.allowed_identifiers.insert(node.id());
+        // Chains point strictly backwards in source order. Each name is
+        // activated at most once for the whole module, even with many loaders.
+        while self.used_filename_aliases.insert(spelling) {
+            let origin = &self.filename_aliases[spelling];
+            self.declarations.insert(origin.declaration);
+            self.used_origin_converters.insert(origin.converter);
+            let Some(previous) = origin.previous else {
+                break;
+            };
+            spelling = previous;
+        }
+        true
     }
 
     /// An alias retains exactly this module's require origin. Only earlier
@@ -931,7 +1123,12 @@ impl<'source> CreateRequireBindings<'source> {
     }
 
     fn reserve_binding(&self) -> Result<()> {
-        if self.factories.len() + self.loaders.len() >= MAX_SITES {
+        if self.factories.len()
+            + self.loaders.len()
+            + self.origin_converters.len()
+            + self.filename_aliases.len()
+            >= MAX_SITES
+        {
             return Err(limit());
         }
         Ok(())
@@ -951,7 +1148,10 @@ impl<'source> CreateRequireBindings<'source> {
             return Ok(());
         }
         let spelling = local.utf8_text(source.as_bytes()).unwrap_or("");
-        if spelling.contains('\\') || self.factories.contains_key(spelling) {
+        if spelling.contains('\\')
+            || self.factories.contains_key(spelling)
+            || self.origin_converters.contains_key(spelling)
+        {
             return Ok(());
         }
         self.reserve_binding()?;
@@ -1040,6 +1240,16 @@ impl<'source> CreateRequireBindings<'source> {
         }
         false
     }
+}
+
+fn own_import_meta_url(node: Node<'_>, source: &str) -> bool {
+    let node = runtime_operand(node);
+    named_member(node, "url", source)
+        && node.child_by_field_name("object").is_some_and(|object| {
+            let object = runtime_operand(object);
+            object.kind() == "meta_property"
+                && object.utf8_text(source.as_bytes()) == Ok("import.meta")
+        })
 }
 
 fn loader_declaration(node: Node<'_>) -> bool {
@@ -1467,6 +1677,20 @@ fn scan(
                     issue = Some((
                         "UNSUPPORTED_REQUIRE_ALIAS_BINDING",
                         "escaped identifiers need decoded scope analysis before require alias capture",
+                    ));
+                } else if bindings.used_origin_converters.contains(spelling) {
+                    issue = Some((
+                        "UNSUPPORTED_CREATE_REQUIRE_ORIGIN",
+                        "fileURLToPath origin converters require immutable imports and exact captured origin calls",
+                    ));
+                } else if bindings.used_filename_aliases.contains(spelling)
+                    && (!const_string_read(node)
+                        || bindings.filename_aliases.get(spelling)
+                            .is_some_and(|origin| node.start_byte() < origin.available_after))
+                {
+                    issue = Some((
+                        "MUTABLE_CREATE_REQUIRE_ORIGIN",
+                        "createRequire filename aliases require unchanged const bindings without shadowing or early reads",
                     ));
                 } else if bindings.factories.contains_key(spelling) {
                     issue = Some((
@@ -3778,6 +4002,186 @@ module.exports={load,lookup,optional};
     }
 
     #[test]
+    fn create_require_file_url_origins_capture_exact_commonjs_routes() {
+        for (imports, initializer, language) in [
+            (
+                "import {fileURLToPath} from 'node:url';",
+                "const local=make(fileURLToPath(import.meta.url));",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "import {fileURLToPath as toPath} from 'url';",
+                "const __filename=toPath(import.meta.url); const local=make(__filename);",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "import * as urls from 'node:url';",
+                "const filename=urls.fileURLToPath(import.meta.url), next=filename; const local=make(next); console.log(filename, {next});",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "import urls from 'url';",
+                "const local=make(urls['fileURLToPath']((import.meta).url));",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "import {fileURLToPath as toPath} from 'node:url';",
+                "const filename=toPath(import.meta.url), next=filename; var local=make(next);",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "import {fileURLToPath as toPath} from 'node:url';",
+                "const filename: string=toPath(import.meta.url as string); const local: Loader=make(filename as string);",
+                SourceLanguage::TypeScript,
+            ),
+        ] {
+            let source = format!(
+                "import {{createRequire as make}} from 'node:module'; {imports} {initializer} \
+                 local('./dep.cjs'); local.resolve('./asset.cjs');"
+            );
+            let (loads, notices, analyzed) = scan(
+                &mut Parser::new(),
+                source.as_bytes(),
+                language,
+                &mut Budget::default(),
+            )
+            .unwrap();
+            assert!(analyzed && notices.is_empty(), "{source}: {notices:?}");
+            assert_eq!(loads.len(), 4, "{source}: {loads:?}");
+            assert_eq!(loads[0].kind, LoadKind::StaticImport);
+            assert_eq!(loads[1].kind, LoadKind::StaticImport);
+            assert_eq!(loads[2].kind, LoadKind::Require);
+            assert_eq!(loads[2].specifier.as_deref(), Some("./dep.cjs"));
+            assert_eq!(loads[3].kind, LoadKind::Require);
+            assert_eq!(loads[3].specifier.as_deref(), Some("./asset.cjs"));
+        }
+    }
+
+    #[test]
+    fn create_require_file_url_origins_reject_unproved_binding_and_origin_changes() {
+        let imports = "import {createRequire as make} from 'node:module'; \
+            import {fileURLToPath as toPath} from 'node:url';";
+        for initializer in [
+            "const local=make(toPath('file:///other.mjs'));",
+            "const local=make(toPath(new URL(import.meta.url)));",
+            "const local=make(toPath(import.meta.url, {windows:false}));",
+            "const local=make(toPath(...[import.meta.url]));",
+            "const local=make((0,toPath)(import.meta.url));",
+            "const local=make(toPath.call(null, import.meta.url));",
+            "const convert=toPath; const local=make(convert(import.meta.url));",
+            "const local=make(filename); const filename=toPath(import.meta.url);",
+            "let filename=toPath(import.meta.url); const local=make(filename);",
+            "var filename=toPath(import.meta.url); const local=make(filename);",
+            "{ const filename=toPath(import.meta.url); const local=make(filename); }",
+        ] {
+            let source = format!("{imports} {initializer} local('./dep.cjs');");
+            let (_, notices, analyzed) = scan(
+                &mut Parser::new(),
+                source.as_bytes(),
+                SourceLanguage::JavaScript,
+                &mut Budget::default(),
+            )
+            .unwrap();
+            assert!(analyzed && !notices.is_empty(), "{source}: {notices:?}");
+        }
+        for mutation in [
+            "toPath=other;",
+            "function shadow(toPath){}",
+            "const escaped=toPath;",
+            "filename=other;",
+            "filename+='x';",
+            "filename++;",
+            "({filename}=other);",
+            "for(filename of other){}",
+            "function shadow(filename){}",
+            "import.meta.url='file:///other.mjs';",
+            "Object.assign(import.meta, {url:'file:///other.mjs'});",
+            "function shadow(file\\u006eame){}",
+            "function shadow(toPa\\u0074h){}",
+        ] {
+            let source = format!(
+                "{imports} const filename=toPath(import.meta.url); const local=make(filename); \
+                 {mutation} local('./dep.cjs');"
+            );
+            let (_, notices, analyzed) = scan(
+                &mut Parser::new(),
+                source.as_bytes(),
+                SourceLanguage::JavaScript,
+                &mut Budget::default(),
+            )
+            .unwrap();
+            assert!(analyzed && !notices.is_empty(), "{source}: {notices:?}");
+        }
+        for mutation in [
+            "urls.fileURLToPath=other;",
+            "urls['fileURLToPath']=other;",
+            "Object.assign(urls, {fileURLToPath:other});",
+            "Object.defineProperty(urls, 'fileURLToPath', {value:other});",
+            "const escaped=urls;",
+            "function shadow(urls){}",
+        ] {
+            let source = format!(
+                "import {{createRequire as make}} from 'node:module'; import * as urls from 'node:url'; \
+                 const local=make(urls.fileURLToPath(import.meta.url)); {mutation} local('./dep.cjs');"
+            );
+            let (_, notices, analyzed) = scan(
+                &mut Parser::new(),
+                source.as_bytes(),
+                SourceLanguage::JavaScript,
+                &mut Budget::default(),
+            )
+            .unwrap();
+            assert!(analyzed && !notices.is_empty(), "{source}: {notices:?}");
+        }
+        let source = "import {createRequire as make} from 'node:module'; \
+            import {fileURLToPath as toPath} from './untrusted.mjs'; \
+            const local=make(toPath(import.meta.url)); local('./dep.cjs');";
+        let (_, notices, analyzed) = scan(
+            &mut Parser::new(),
+            source.as_bytes(),
+            SourceLanguage::JavaScript,
+            &mut Budget::default(),
+        )
+        .unwrap();
+        assert!(analyzed && !notices.is_empty(), "{notices:?}");
+    }
+
+    #[test]
+    fn unused_file_url_origin_candidates_do_not_restrict_ordinary_url_code() {
+        let source = "import {createRequire as make} from 'node:module'; \
+            import {fileURLToPath as toPath} from 'node:url'; \
+            const filename=toPath(import.meta.url); const local=make(import.meta.url); \
+            function display(filename){return filename;} \
+            console.log(display(filename), toPath('file:///another.mjs')); local('./dep.cjs');";
+        let (_, notices, analyzed) = scan(
+            &mut Parser::new(),
+            source.as_bytes(),
+            SourceLanguage::JavaScript,
+            &mut Budget::default(),
+        )
+        .unwrap();
+        assert!(analyzed && notices.is_empty(), "{notices:?}");
+
+        // An inactive conversion is still an arbitrary initializer for the
+        // existing var/let loader prelude proof; it must not become a grant.
+        let source = source.replace("const local=", "var local=");
+        let (_, notices, analyzed) = scan(
+            &mut Parser::new(),
+            source.as_bytes(),
+            SourceLanguage::JavaScript,
+            &mut Budget::default(),
+        )
+        .unwrap();
+        assert!(analyzed);
+        assert!(
+            notices
+                .iter()
+                .any(|notice| notice.code == "UNPROVED_LOADER_INITIALIZATION"),
+            "{notices:?}"
+        );
+    }
+
+    #[test]
     fn create_require_commonjs_factories_capture_exact_filename_routes() {
         for (source, language) in [
             (
@@ -3995,6 +4399,16 @@ module.exports={load,lookup,optional};
                 "nested/app.mjs",
                 "import mod from 'node:module';",
                 "mod.createRequire(import.meta.url)",
+            ),
+            (
+                "nested/app.mjs",
+                "import {createRequire as make} from 'node:module'; import {fileURLToPath as toPath} from 'node:url'; const filename=toPath(import.meta.url), origin=filename;",
+                "make(origin)",
+            ),
+            (
+                "nested/app.mjs",
+                "import {createRequire} from 'node:module'; import * as urls from 'node:url';",
+                "createRequire(urls.fileURLToPath(import.meta.url))",
             ),
             (
                 "nested/app.cjs",
