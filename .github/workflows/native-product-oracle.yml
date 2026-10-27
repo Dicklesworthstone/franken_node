@@ -394,19 +394,27 @@ jobs:
             --test native_engine_compat -- --list 2>&1 | tee native-buffer-product-test-list.log
           for test in \
             ordinary_buffer_import_keeps_module_process_authority_private \
-            frozen_module_cli_checks_filesystem_authority_when_called; do
+            frozen_module_cli_checks_filesystem_authority_when_called \
+            run_blocks_secret_egress_and_proves_non_exfiltration_bd_plhag \
+            run_blocks_secret_egress_to_allowed_sink_bd_n1bym \
+            run_surfaces_signed_http_request_write_end_body_ledger_bd_3894s; do
             grep -Fxq "$test: test" native-buffer-product-test-list.log
           done
-      - name: Execute real product Buffer and signed filesystem controls
+      - name: Execute real product Buffer filesystem and HTTP evidence controls
         run: |
           set -euo pipefail
+          status=0
           for test in \
             ordinary_buffer_import_keeps_module_process_authority_private \
-            frozen_module_cli_checks_filesystem_authority_when_called; do
+            frozen_module_cli_checks_filesystem_authority_when_called \
+            run_blocks_secret_egress_and_proves_non_exfiltration_bd_plhag \
+            run_blocks_secret_egress_to_allowed_sink_bd_n1bym \
+            run_surfaces_signed_http_request_write_end_body_ledger_bd_3894s; do
             cargo test --locked -j1 -p frankenengine-node \
               --test native_engine_compat "$test" \
-              -- --exact --nocapture --test-threads=1 2>&1 | tee -a native-buffer-product-tests.log
+              -- --exact --nocapture --test-threads=1 2>&1 | tee -a native-buffer-product-tests.log || status=1
           done
+          exit "$status"
       - name: Retain native product authority results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
