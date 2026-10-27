@@ -114,7 +114,9 @@ jobs:
               done
               cd "$campaign_root/franken_node"
               rustup toolchain install nightly-2026-09-21 --profile minimal
-              cargo +nightly-2026-09-21 install cargo-mutants --version 27.0.0 --locked
+              cargo +nightly-2026-09-21 install cargo-mutants --version 27.0.0 --locked \
+                --root "$campaign_root/mutation-tools"
+              export PATH="$campaign_root/mutation-tools/bin:$PATH"
               cargo +nightly-2026-09-21 test --locked -p frankenengine-node --lib -- --list \
                 > "$output/inline-tests.list"
               python3 scripts/check_inline_lib_tests.py "$output/inline-tests.list" --min-tests 1 --json
