@@ -922,6 +922,13 @@ nonregistry sources, omitted alias ranges, dist-tags, and bundled or
 nested-shrinkwrap contexts require review.
 Workspace and installed-package manifests cannot redefine the root's overrides.
 
+On Linux, trust dependency queries use that same captured override authority,
+including the replacement fork's identity and its locked version. Reports keep
+the original dependency request alongside the effective override. The topology
+commitment binds the complete selected root rules, including unused entries and
+resolved `$dependency` references; later queries do not reopen package metadata.
+Unsupported override contexts and conflicting captured identities fail closed.
+
 Bun text-lock projects also support root scalar registry `overrides` and
 `resolutions`, checked against both the lock graph and actual hoisted or isolated
 installations. The presence of `overrides`, including an empty object, takes
@@ -932,6 +939,16 @@ active replacement. Versioned `npm:` aliases keep their original requirements.
 Nested or version-qualified rules, reference/catalog replacements, replacement
 sources and contextual workspace replacements still require review. Lifecycle,
 native-addon, patch and trusted-dependency checks remain in force.
+
+The shared Unix workspace selector accepts bounded brace alternatives such as
+`{apps,packages}/*`, `packages/{core,{cli,api}}` and `packages/{,group/}core`,
+alongside literal paths, `*` and standalone `**`. Alternatives and overlapping
+selectors share one descriptor-relative directory walk, and each manifest is
+captured once. Checked migration requires a match for each authored selector,
+rather than for every alternative. Expanded alternatives count against the
+existing pattern limit. Numeric brace ranges, negation and other unsupported
+glob dialects still require review; symlink and reserved-directory restrictions
+remain in force.
 
 ### Verification
 
@@ -3922,11 +3939,14 @@ one pass.
   the CommonJS objects, and named exports come from the same native providers.
   Each route retains its policy and information-flow checks, including cached
   loads. This does not provide the complete Node/Bun builtin API inventory.
-  TypeScript enums in frozen `.ts`, `.mts` and `.cts` modules use the engine's
-  existing normalizer. Initializer dependencies remain in the pinned graph,
-  and prepared JavaScript must preserve those routes and obey the configured
-  parser budget. Namespace, parameter-property and import-equals transforms
-  remain outside frozen-module admission.
+  TypeScript enums and prefix assertions such as `<number>value` in frozen
+  `.ts`, `.mts` and `.cts` modules use the engine's existing normalizer.
+  Assertions erase types without converting runtime values; their type-only
+  imports never grant filesystem access. Initializer and asserted-expression
+  dependencies remain in the pinned graph, and prepared JavaScript must preserve
+  those routes and obey the configured parser budget. JSX/TSX syntax, namespace,
+  parameter-property and import-equals transforms remain outside frozen-module
+  admission.
   Frozen capture also supports immutable top-level request strings such as
   `const target = './adapter.cjs'; require(target)`, earlier constant aliases,
   string concatenation, templates, and bounded conditional string choices.

@@ -2107,6 +2107,137 @@ mod tests {
     }
 
     #[test]
+    fn typescript_angle_assertions_keep_shared_preparation_and_frozen_routes() {
+        use frankenengine_engine::ts_normalization::prepare_source_entry_for_public_entrypoints;
+
+        for (path, source, syntax, dependency, dependency_source, style) in [
+            (
+                "app.cts",
+                "const answer=<import('unread-types').Value>(<unknown>(<Loader>require)(<string>'./seed.cjs')); module.exports=answer;",
+                ModuleSyntax::CommonJs,
+                "./seed.cjs",
+                "module.exports=42;",
+                ImportStyle::Require,
+            ),
+            (
+                "app.mts",
+                "import {seed} from './seed.mjs'; export const answer=<number><unknown>seed;",
+                ModuleSyntax::EsModule,
+                "./seed.mjs",
+                "export const seed=42;",
+                ImportStyle::Import,
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            put(root.path(), path, source);
+            put(root.path(), &dependency[2..], dependency_source);
+            let graph = capture(root.path(), path, GraphOptions::default()).unwrap();
+            assert!(
+                graph.report().fully_resolved,
+                "{:?}",
+                graph.report().diagnostics
+            );
+            assert!(
+                !graph
+                    .report()
+                    .probes
+                    .iter()
+                    .any(|probe| probe.path.contains("unread-types"))
+            );
+            let pin = graph.report().input_hash.clone();
+            let encoded = capsule::encode(&graph).unwrap();
+            let resolver = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
+            let entry = resolver
+                .resolve(&resolver.entry_request(), &context(), &granted())
+                .unwrap();
+            let prepared = prepare_source_entry_for_public_entrypoints(
+                source,
+                path,
+                "captured-module-preparation",
+                &pin,
+                "franken-node.engine-source-preparation.v1",
+            )
+            .unwrap();
+            assert_eq!(entry.module.record.source, prepared.prepared_source);
+            assert_eq!(entry.module.record.syntax, syntax);
+            assert_eq!(
+                entry.module.record.dependencies,
+                vec![ModuleDependency::new(dependency, style)]
+            );
+            let summary = resolver.preparation_reports().next().unwrap();
+            assert_eq!(summary.source_ingestion, prepared.source_ingestion);
+            assert_eq!(
+                summary.normalization_witness,
+                prepared
+                    .normalization_output
+                    .map(|normalization| normalization.witness)
+            );
+            assert!(summary.normalization_witness.is_some());
+
+            put(
+                root.path(),
+                path,
+                "throw new Error('live typed entry was reopened');",
+            );
+            put(
+                root.path(),
+                &dependency[2..],
+                "throw new Error('live dependency was reopened');",
+            );
+            let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+            let restored = CapturedEngineResolver::new(replayed, &pin).ok().unwrap();
+            assert_eq!(
+                entry,
+                restored
+                    .resolve(&restored.entry_request(), &context(), &granted())
+                    .unwrap()
+            );
+            assert_eq!(
+                resolver.preparation_reports().collect::<Vec<_>>(),
+                restored.preparation_reports().collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn typescript_angle_assertions_preserve_dependency_and_parser_limits() {
+        let root = tempfile::tempdir().unwrap();
+        let source = "module.exports=<number>(<Loader>require)('./seed.cjs');";
+        put(root.path(), "app.cts", source);
+        put(root.path(), "seed.cjs", "module.exports=42;");
+        let graph = capture(root.path(), "app.cts", GraphOptions::default()).unwrap();
+        let module = graph
+            .report()
+            .modules
+            .iter()
+            .find(|module| module.id.path == "app.cts")
+            .unwrap();
+        for changed in [
+            "module.exports=<number>42;",
+            "module.exports=<number>(<Loader>require)('./uncaptured.cjs');",
+        ] {
+            assert_eq!(
+                SourcePreparer::default()
+                    .prepare(module, changed, graph.report())
+                    .err()
+                    .unwrap()
+                    .code,
+                "ERR_MODULE_ENGINE_DEPENDENCY_DRIFT"
+            );
+        }
+        let pin = graph.report().input_hash.clone();
+        let mut options = ParserOptions::default();
+        options.budget.max_token_count = 1;
+        assert_eq!(
+            CapturedEngineResolver::new_with_parser_options(graph, &pin, options)
+                .err()
+                .unwrap()
+                .code,
+            "ERR_MODULE_ENGINE_PARSE_LIMIT"
+        );
+    }
+
+    #[test]
     fn typescript_enums_keep_normalization_witnesses_and_module_routes() {
         use frankenengine_engine::ts_normalization::prepare_source_entry_for_public_entrypoints;
 
@@ -2628,6 +2759,121 @@ module.exports = { State, Label, offset: require('./offset.cjs') };
         assert!(reference.status.success(), "{reference:?}");
         assert!(reference.stderr.is_empty(), "{reference:?}");
         String::from_utf8(reference.stdout).unwrap()
+    }
+
+    #[test]
+    fn native_frozen_typescript_angle_assertions_match_node_package_execution() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            for (entrypoint, load) in [
+                (
+                    "app.cts",
+                    "const seed=(<Loader>require)(<string>'assertion-kit');",
+                ),
+                ("app.mts", "import {seed} from 'assertion-kit';"),
+            ] {
+                let root = tempfile::tempdir().unwrap();
+                let source = format!(
+                    r#"
+{load}
+const numbers=<Array<number>>[seed, 2];
+const raw: unknown={{ value: numbers[0] + numbers[1] }};
+const identity=<T>(value: T): T => value;
+console.log((<{{value:number}}>raw).value, typeof (<number><unknown>'7'),
+    (<(value:number)=>number>((value)=>value+1))(identity(seed)));
+"#
+                );
+                put(root.path(), entrypoint, &source);
+                put(
+                    root.path(),
+                    "node_modules/assertion-kit/package.json",
+                    r#"{"exports":{"import":"./value.mjs","require":"./value.cjs"}}"#,
+                );
+                put(
+                    root.path(),
+                    "node_modules/assertion-kit/value.cjs",
+                    "module.exports=40;",
+                );
+                put(
+                    root.path(),
+                    "node_modules/assertion-kit/value.mjs",
+                    "export const seed=40;",
+                );
+                // Node requires its explicit transformation mode for prefix
+                // assertions. Run the same original TypeScript and installed
+                // JavaScript package, not a hand-translated reference fixture.
+                let reference = std::process::Command::new("node")
+                    .args(["--no-warnings", "--experimental-transform-types"])
+                    .arg(root.path().join(entrypoint))
+                    .current_dir(root.path())
+                    .env_remove("NODE_OPTIONS")
+                    .env_remove("NODE_PATH")
+                    .output()
+                    .unwrap();
+                assert!(reference.status.success(), "{reference:?}");
+                assert!(reference.stderr.is_empty(), "{reference:?}");
+                let expected = String::from_utf8(reference.stdout).unwrap();
+                assert_eq!(expected, "42 string 41\n");
+                let result = execute_captured_graph_for_test(root.path(), entrypoint, lane, || {
+                    for path in [
+                        entrypoint,
+                        "node_modules/assertion-kit/value.cjs",
+                        "node_modules/assertion-kit/value.mjs",
+                    ] {
+                        put(
+                            root.path(),
+                            path,
+                            "throw new Error('uncaptured source was reopened');",
+                        );
+                    }
+                    put(
+                        root.path(),
+                        "node_modules/assertion-kit/package.json",
+                        r#"{"exports":"./uncaptured.js"}"#,
+                    );
+                });
+                assert_eq!(
+                    result
+                        .console_output
+                        .iter()
+                        .map(|entry| entry.message.as_str())
+                        .collect::<Vec<_>>(),
+                    expected.lines().collect::<Vec<_>>(),
+                    "{entrypoint}: {lane:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_typescript_angle_assertions_do_not_bypass_module_policy() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let root = tempfile::tempdir().unwrap();
+            put(
+                root.path(),
+                "app.cts",
+                "console.log(<number>(<Loader>require)('./seed.cjs'));",
+            );
+            put(root.path(), "seed.cjs", "module.exports=42;");
+            let error = execute_captured_graph_with_policy_for_test(
+                root.path(),
+                "app.cts",
+                lane,
+                Arc::new(granted().deny_specifier("./seed.cjs")),
+                || {},
+            )
+            .expect_err("type erasure cannot authorize a module load");
+            let detail = error.to_string();
+            assert!(
+                detail.contains("closed-world module resolution refused"),
+                "{lane:?}: {detail}"
+            );
+            assert!(detail.contains("./seed.cjs"), "{lane:?}: {detail}");
+            assert!(detail.contains("policy"), "{lane:?}: {detail}");
+        }
     }
 
     #[test]

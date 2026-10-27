@@ -154,6 +154,87 @@ pub(crate) mod workspace_selection {
         }
     }
 
+    /// Brace alternatives share one walk with every other selector. Expansion
+    /// is bounded before filesystem access, including branches that match no
+    /// directory. Keep the authored selector index: one successful alternative
+    /// satisfies that selector, while overlapping alternatives capture once.
+    fn compile_patterns(
+        selectors: &[String],
+        limit: usize,
+        deadline: Option<Instant>,
+    ) -> ModuleResolutionGraphResult<Vec<(usize, Pattern)>> {
+        enforce_len("workspace patterns", selectors.len(), limit)?;
+        let mut compiled = Vec::new();
+        for (selector, raw) in selectors.iter().enumerate() {
+            let invalid_pattern = || ModuleResolutionGraphError::InvalidWorkspacePattern {
+                pattern: raw.clone(),
+            };
+            if raw.trim() != raw || raw.len() > MAX_PATH_BYTES {
+                return Err(invalid_pattern());
+            }
+            let mut pending = vec![raw.clone()];
+            while let Some(pattern) = pending.pop() {
+                check_deadline(deadline)?;
+                let Some(start) = pattern.find('{') else {
+                    enforce_len("expanded workspace patterns", compiled.len() + 1, limit)?;
+                    compiled.push((selector, Pattern::parse(&pattern)?));
+                    continue;
+                };
+                if pattern[..start].contains('}') {
+                    return Err(invalid_pattern());
+                }
+                let mut depth = 0;
+                let mut separators = Vec::new();
+                let mut end = None;
+                for (offset, character) in pattern[start..].char_indices() {
+                    match character {
+                        '{' => {
+                            depth += 1;
+                            enforce_len("workspace brace depth", depth, MAX_DEPTH)?;
+                        }
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = Some(start + offset);
+                                break;
+                            }
+                        }
+                        ',' if depth == 1 => separators.push(start + offset),
+                        _ => {}
+                    }
+                }
+                let end = end.ok_or_else(invalid_pattern)?;
+                // Only explicit alternative lists are supported. Numeric
+                // ranges, literal/unbalanced braces and unknown dialects stay
+                // errors instead of being interpreted as a partial selector.
+                if separators.is_empty() {
+                    return Err(invalid_pattern());
+                }
+                separators.push(end);
+                enforce_len(
+                    "expanded workspace patterns",
+                    compiled.len() + pending.len() + separators.len(),
+                    limit,
+                )?;
+                let mut begin = start + 1;
+                for stop in separators {
+                    let expanded = format!(
+                        "{}{}{}",
+                        &pattern[..start],
+                        &pattern[begin..stop],
+                        &pattern[end + 1..]
+                    );
+                    // Each expansion removes delimiters; this still checks
+                    // bounds explicitly before retaining or parsing a branch.
+                    enforce_len("workspace pattern bytes", expanded.len(), MAX_PATH_BYTES)?;
+                    pending.push(expanded);
+                    begin = stop + 1;
+                }
+            }
+        }
+        Ok(compiled)
+    }
+
     // Wildcards match bytes only between UTF-8 literals. No recursive glob
     // backtracking tree is allocated; components, patterns and visits are bounded.
     fn component_matches(pattern: &str, text: &str) -> bool {
@@ -262,18 +343,17 @@ pub(crate) mod workspace_selection {
         mut visit_manifest: impl FnMut(&str, &File) -> Result<bool, E>,
     ) -> Result<(), E> {
         check_deadline(deadline)?;
-        enforce_len("workspace patterns", selectors.len(), limits.patterns)?;
-        let patterns = selectors
-            .iter()
-            .map(|raw| Pattern::parse(raw))
-            .collect::<ModuleResolutionGraphResult<Vec<_>>>()?;
+        let patterns = compile_patterns(selectors, limits.patterns, deadline)?;
         if patterns.is_empty() {
             return Ok(());
         }
         enforce_len("package manifests", 1, limits.manifests)?;
         enforce_len("workspace directories", 1, limits.directories)?;
-        let mut matched = vec![false; patterns.len()];
-        let initial: Vec<_> = patterns.iter().map(Pattern::start).collect();
+        let mut matched = vec![false; selectors.len()];
+        let initial: Vec<_> = patterns
+            .iter()
+            .map(|(_, pattern)| pattern.start())
+            .collect();
         let mut pending = vec![(String::new(), initial, 0_usize)];
         let (mut entries, mut directories, mut manifests) = (0_usize, 1_usize, 1_usize);
         while let Some((path, states, depth)) = pending.pop() {
@@ -284,8 +364,8 @@ pub(crate) mod workspace_selection {
             if !path.is_empty() && selected && visit_manifest(&path, &fd)? {
                 manifests = manifests.saturating_add(1);
                 enforce_len("package manifests", manifests, limits.manifests)?;
-                for (seen, state) in matched.iter_mut().zip(&states) {
-                    *seen |= state.last() == Some(&true);
+                for ((selector, _), state) in patterns.iter().zip(&states) {
+                    matched[*selector] |= state.last() == Some(&true);
                 }
             }
             let descend = states
@@ -318,7 +398,7 @@ pub(crate) mod workspace_selection {
                 let next: Vec<_> = patterns
                     .iter()
                     .zip(&states)
-                    .map(|(pattern, state)| pattern.step(state, component))
+                    .map(|((_, pattern), state)| pattern.step(state, component))
                     .collect();
                 if !next.iter().any(|state| state.iter().any(|active| *active)) {
                     continue;
@@ -404,6 +484,152 @@ pub(crate) mod workspace_selection {
             let s = pattern.step(&s, "a");
             assert_eq!(s.last(), Some(&true));
             assert!(!pattern.step(&s, "b").iter().any(|active| *active));
+        }
+
+        #[test]
+        fn brace_lists_expand_nested_utf8_empty_and_cross_directory_alternatives() {
+            // Literal expansion sets also observed with npm 11.9.0's
+            // minimatch.braceExpand; no filesystem or package code executes.
+            for (source, expected) in [
+                (
+                    "packages/{core,{cli,工具}}",
+                    vec!["packages/cli", "packages/core", "packages/工具"],
+                ),
+                ("{apps,packages}/*", vec!["apps/*", "packages/*"]),
+                (
+                    "packages/{,group/}core",
+                    vec!["packages/core", "packages/group/core"],
+                ),
+                (
+                    "./{apps,packages}/{a,b}/",
+                    vec!["apps/a", "apps/b", "packages/a", "packages/b"],
+                ),
+            ] {
+                let patterns = compile_patterns(&[source.into()], 8, None).unwrap();
+                let mut actual = patterns
+                    .iter()
+                    .map(|(selector, pattern)| {
+                        assert_eq!(*selector, 0);
+                        pattern.parts.join("/")
+                    })
+                    .collect::<Vec<_>>();
+                actual.sort();
+                assert_eq!(actual, expected, "{source}");
+            }
+        }
+
+        #[test]
+        fn brace_alternatives_walk_once_and_match_the_authored_selector() {
+            let root = tempfile::tempdir().unwrap();
+            for path in [
+                "apps/web",
+                "packages/core",
+                "packages/cli",
+                "packages/group/工具",
+            ] {
+                std::fs::create_dir_all(root.path().join(path)).unwrap();
+                std::fs::write(root.path().join(path).join("package.json"), "{}").unwrap();
+            }
+            let held = open_root(root.path()).unwrap();
+            let selectors = [
+                "apps/{web,missing}".into(),
+                "packages/{core,{cli,group/*}}".into(),
+                "packages/{core,core}".into(),
+            ];
+            let mut visits = Vec::new();
+            walk::<ModuleResolutionGraphError>(&held, &selectors, limits(), None, |path, _| {
+                visits.push(path.to_owned());
+                Ok(root.path().join(path).join("package.json").is_file())
+            })
+            .unwrap();
+            assert_eq!(
+                visits,
+                [
+                    "apps/web",
+                    "packages/cli",
+                    "packages/core",
+                    "packages/group/工具"
+                ]
+            );
+            let error = walk::<ModuleResolutionGraphError>(
+                &held,
+                &["packages/{absent,missing}".into()],
+                limits(),
+                None,
+                |_, _| panic!("absent alternatives must not visit a manifest"),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("matched no package manifests"));
+        }
+
+        #[test]
+        fn every_brace_branch_is_validated_before_a_manifest_is_opened() {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(root.path().join("packages/a")).unwrap();
+            let held = open_root(root.path()).unwrap();
+            for pattern in [
+                "packages/{a,../outside}",
+                "{packages/a,/outside}",
+                "packages/{a,node_modules/private}",
+                "packages/{a,.git/private}",
+                "packages/{a,part-{1..3}}",
+                "packages/{a,b?}",
+                "packages/{a,{b}}",
+                "packages/{a,{b,c}",
+                "packages/{a,b}}",
+                "packages/{}",
+            ] {
+                let result = walk::<ModuleResolutionGraphError>(
+                    &held,
+                    &[pattern.into()],
+                    limits(),
+                    None,
+                    |_, _| panic!("invalid branch applied a supported prefix: {pattern}"),
+                );
+                assert!(result.is_err(), "{pattern}");
+            }
+        }
+
+        #[test]
+        fn brace_expansion_has_aggregate_nontruncating_pattern_and_depth_bounds() {
+            let root = tempfile::tempdir().unwrap();
+            let held = open_root(root.path()).unwrap();
+            for selectors in [
+                vec!["packages/{a,b,c}/{x,y,z}".into()],
+                vec!["packages/{a,b,c,d}".into(), "apps/{a,b,c,d,e}".into()],
+            ] {
+                let failure = walk::<ModuleResolutionGraphError>(
+                    &held,
+                    &selectors,
+                    limits(),
+                    None,
+                    |_, _| panic!("expansion limit must precede filesystem selection"),
+                )
+                .unwrap_err();
+                assert!(
+                    matches!(
+                        failure,
+                        ModuleResolutionGraphError::BoundExceeded {
+                            bound: "expanded workspace patterns",
+                            limit: 8
+                        }
+                    ),
+                    "{failure}"
+                );
+            }
+            let pattern = format!(
+                "packages/{}a{}",
+                "{x,".repeat(MAX_DEPTH + 1),
+                "}".repeat(MAX_DEPTH + 1)
+            );
+            assert!(matches!(
+                compile_patterns(&[pattern], 128, None),
+                Err(ModuleResolutionGraphError::BoundExceeded {
+                    bound: "workspace brace depth",
+                    ..
+                })
+            ));
+            assert!(compile_patterns(&["packages/{a,b}".into()], 8, Some(Instant::now())).is_err());
         }
 
         #[test]
@@ -905,18 +1131,31 @@ fn build_graph_parts(
     }
 
     let captured_lockfile = capture_package_lock(project_root)?;
-    // npm needs only the compact graph projection. Retain original parsed
-    // manifests for Bun's raw declaration binding and catalog expansion only.
-    let mut captured_manifests = captured_lockfile
-        .as_ref()
-        .is_some_and(|lock| lock.bun)
-        .then(CapturedManifests::default);
+    let bun = captured_lockfile.as_ref().is_some_and(|lock| lock.bun);
+    // Capture the root once. Ordinary npm projects can release its parsed
+    // value immediately; Bun and root overrides need the same captured
+    // manifests for authority binding, never a second filesystem read.
+    let mut captured_manifests = Some(CapturedManifests::default());
     let root_manifest = parse_manifest(
         project_root,
         &root_manifest_path,
         false,
         captured_manifests.as_mut(),
     )?;
+    let root_overrides = captured_manifests
+        .as_ref()
+        .and_then(|captured| captured.values.get(""))
+        .and_then(|root| root.get("overrides"))
+        .is_some_and(|rules| !rules.as_object().is_some_and(serde_json::Map::is_empty));
+    if !bun && !root_overrides {
+        captured_manifests = None;
+    }
+    #[cfg(not(target_os = "linux"))]
+    if root_overrides {
+        return invalid_metadata(
+            "root override trust admission requires the native Linux metadata parser",
+        );
+    }
     let workspace_manifest_paths =
         collect_workspace_manifest_paths(project_root, &root_manifest.package.workspace_patterns)?;
 
@@ -936,7 +1175,7 @@ fn build_graph_parts(
         pins: lockfile_pins,
         details,
     } = read_package_lock(captured_lockfile, captured_manifests.as_mut())?;
-    if let Some(captured) = captured_manifests {
+    if let Some(captured) = captured_manifests.filter(|_| bun) {
         for manifest in &mut manifests {
             let directory = manifest_directory(&manifest.relative_manifest_path);
             let value = captured.values.get(directory).ok_or_else(|| {
@@ -1535,6 +1774,8 @@ struct LockfileDetails {
     requirements: BTreeMap<String, Vec<DependencySpec>>,
     dependency_kinds_complete: bool,
     edges: usize,
+    #[cfg(target_os = "linux")]
+    overrides: Option<crate::migration::dependency_admission::CapturedRootOverrides>,
 }
 
 impl LockfileDetails {
@@ -1696,17 +1937,36 @@ fn read_package_lock(
     captured: Option<CapturedLockfile>,
     captured_manifests: Option<&mut CapturedManifests>,
 ) -> ModuleResolutionGraphResult<Lockfile> {
+    #[cfg(target_os = "linux")]
+    let mut captured_manifests = captured_manifests;
     let Some(CapturedLockfile {
         path: lockfile_path,
         raw,
         bun,
-    }) = captured else {
-        return Ok(Lockfile::default());
+    }) = captured
+    else {
+        let lockfile = Lockfile::default();
+        #[cfg(target_os = "linux")]
+        let mut lockfile = lockfile;
+        #[cfg(target_os = "linux")]
+        if let Some(manifests) = captured_manifests {
+            lockfile.details.overrides =
+                crate::migration::dependency_admission::capture_topology_overrides(
+                    &manifests.values,
+                    None,
+                    false,
+                    std::time::Instant::now() + std::time::Duration::from_secs(15),
+                )
+                .map_err(|error| ModuleResolutionGraphError::InvalidMetadata {
+                    detail: format!("captured root override authority: {error:#}"),
+                })?;
+        }
+        return Ok(lockfile);
     };
     let value: Value = if bun {
         #[cfg(target_os = "linux")]
         {
-            let captured_manifests = captured_manifests.ok_or_else(|| {
+            let captured_manifests = captured_manifests.as_deref_mut().ok_or_else(|| {
                 ModuleResolutionGraphError::InvalidMetadata {
                     detail: "Bun lockfile requires captured project manifests".into(),
                 }
@@ -1723,13 +1983,25 @@ fn read_package_lock(
         #[cfg(not(target_os = "linux"))]
         {
             let _ = captured_manifests;
-            return invalid_metadata("Bun text-lock trust admission requires the native Linux metadata parser");
+            return invalid_metadata(
+                "Bun text-lock trust admission requires the native Linux metadata parser",
+            );
         }
     } else {
-        serde_json::from_str(&raw).map_err(|source| ModuleResolutionGraphError::Json {
-            path: lockfile_path.clone(),
-            source,
-        })?
+        match captured_manifests.as_ref() {
+            #[cfg(target_os = "linux")]
+            Some(_) => crate::migration::dependency_admission::parse_unique(
+                raw.as_bytes(),
+                std::time::Instant::now() + std::time::Duration::from_secs(15),
+            )
+            .map_err(|error| ModuleResolutionGraphError::InvalidMetadata {
+                detail: format!("{}: {error:#}", lockfile_path.display()),
+            })?,
+            _ => serde_json::from_str(&raw).map_err(|source| ModuleResolutionGraphError::Json {
+                path: lockfile_path.clone(),
+                source,
+            })?,
+        }
     };
 
     if !value.is_object() {
@@ -1741,6 +2013,19 @@ fn read_package_lock(
         return invalid_metadata("unsupported lockfileVersion; supported versions are 1, 2 and 3");
     }
     let mut lockfile = Lockfile::default();
+    #[cfg(target_os = "linux")]
+    if let Some(manifests) = captured_manifests {
+        lockfile.details.overrides =
+            crate::migration::dependency_admission::capture_topology_overrides(
+                &manifests.values,
+                Some(&value),
+                bun,
+                std::time::Instant::now() + std::time::Duration::from_secs(15),
+            )
+            .map_err(|error| ModuleResolutionGraphError::InvalidMetadata {
+                detail: format!("captured root override authority: {error:#}"),
+            })?;
+    }
     if let Some(packages_value) = value.get("packages") {
         lockfile.details.dependency_kinds_complete = true;
         let packages = packages_value.as_object().ok_or_else(|| {

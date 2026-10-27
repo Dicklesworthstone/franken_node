@@ -1,7 +1,8 @@
 //! Bounded selection of npm workspace manifests from the private capture.
 //!
-//! Selectors support literal components, `*` within a component and standalone
-//! `**`. Unsupported glob dialects fail explicitly. No installed-package or
+//! Selectors support literal components, `*` within a component, standalone
+//! `**` and bounded nested brace alternatives. Unsupported glob dialects fail
+//! explicitly. No installed-package or
 //! state-directory traversal, symlink following, package-manager execution or
 //! fallback to trusting the lockfile's workspace projection.
 
@@ -237,6 +238,133 @@ mod tests {
     }
 
     #[test]
+    fn brace_selected_npm_and_bun_workspaces_bind_the_actual_installation() {
+        use super::super::inspect_for_execution;
+        use crate::supply_chain::module_resolution_graph::build_canonical_module_resolution_graph;
+        use std::os::unix::fs::symlink;
+
+        let core = json!({"name":"core","version":"1.0.0"});
+        let ui = json!({"name":"ui","version":"1.0.0","dependencies":{"core":"^1"}});
+        for bun in [false, true] {
+            let root_manifest = json!({"name":"root", "workspaces":[
+                "{apps,packages}/{core,ui,missing}", "packages/{core,core}"
+            ], "dependencies":{"core":"^1","ui":"^1"}});
+            let root = fixture(root_manifest.clone(), None);
+            write(root.path(), "packages/core", core.clone());
+            write(root.path(), "apps/ui", ui.clone());
+            fs::create_dir_all(root.path().join("packages/unselected")).unwrap();
+            fs::write(
+                root.path().join("packages/unselected/package.json"),
+                "must not parse",
+            )
+            .unwrap();
+            let (filename, lock) = if bun {
+                (
+                    "bun.lock",
+                    json!({"lockfileVersion":1,"workspaces":{
+                        "":{"name":"root","dependencies":{"core":"^1","ui":"^1"}},
+                        "packages/core":core,"apps/ui":ui
+                    },"packages":{
+                        "core":["core@workspace:packages/core"],
+                        "ui":["ui@workspace:apps/ui"]
+                    }}),
+                )
+            } else {
+                (
+                    "package-lock.json",
+                    modern_fixture(json!({
+                        "":root_manifest,"packages/core":core,"apps/ui":ui,
+                        "node_modules/core":{"link":true,"resolved":"packages/core"},
+                        "node_modules/ui":{"link":true,"resolved":"apps/ui"}
+                    })),
+                )
+            };
+            fs::write(
+                root.path().join(filename),
+                serde_json::to_vec(&lock).unwrap(),
+            )
+            .unwrap();
+            fs::create_dir(root.path().join("node_modules")).unwrap();
+            symlink("../packages/core", root.path().join("node_modules/core")).unwrap();
+            symlink("../apps/ui", root.path().join("node_modules/ui")).unwrap();
+
+            let report = inspect_for_execution(root.path(), deadline()).unwrap();
+            assert!(
+                report.installation_checked && !report.requires_review(),
+                "{filename}: {report:#?}"
+            );
+            for path in [
+                "package.json",
+                "packages/core/package.json",
+                "apps/ui/package.json",
+            ] {
+                assert_eq!(
+                    report
+                        .inputs
+                        .iter()
+                        .filter(|input| input.path == path)
+                        .count(),
+                    1
+                );
+            }
+            assert!(
+                !report
+                    .inputs
+                    .iter()
+                    .any(|input| input.path.contains("unselected"))
+            );
+            let graph = build_canonical_module_resolution_graph(root.path()).unwrap();
+            assert_eq!(graph.packages.len(), 3);
+            assert!(
+                graph
+                    .dependency_edges
+                    .iter()
+                    .all(|edge| edge.target_package_id.is_some())
+            );
+            assert_eq!(
+                report,
+                inspect_for_execution(root.path(), deadline()).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn brace_selected_workspaces_preserve_lifecycle_and_link_authority_checks() {
+        use std::os::unix::fs::symlink;
+        let root = fixture(
+            json!({"workspaces":["packages/{safe,{risky,missing}}"]}),
+            None,
+        );
+        write(root.path(), "packages/safe", json!({"name":"safe"}));
+        write(
+            root.path(),
+            "packages/risky",
+            json!({"name":"risky", "scripts":{"prepare":"must never execute"}}),
+        );
+        let report = inspect(root.path(), deadline()).unwrap();
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.code == "install_script"
+                    && finding.source == "packages/risky/package.json#scripts.prepare")
+        );
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(
+            outside.path().join("package.json"),
+            "private unparseable bytes",
+        )
+        .unwrap();
+        symlink(outside.path(), root.path().join("packages/missing")).unwrap();
+        assert!(
+            inspect(root.path(), deadline())
+                .unwrap_err()
+                .to_string()
+                .contains("symlink")
+        );
+    }
+
+    #[test]
     fn private_and_hoisted_identities_are_used_without_double_counting_packages() {
         let root = fixture(json!({"workspaces":["packages/*"]}), Some(modern_fixture(json!({
             "node_modules/dep":{"version":"1.0.0"},
@@ -271,7 +399,18 @@ mod tests {
 
     #[test]
     fn unknown_glob_dialects_and_reserved_or_missing_selections_fail_explicitly() {
-        for selector in ["../outside", "/outside", "packages/{a,b}", "packages/[ab]", "!packages/a", "packages/a?", "node_modules/*", ".git/*", "packages/a**b", "missing/*"] {
+        for selector in [
+            "../outside",
+            "/outside",
+            "packages/{1..3}",
+            "packages/[ab]",
+            "!packages/a",
+            "packages/a?",
+            "node_modules/*",
+            ".git/*",
+            "packages/a**b",
+            "missing/*",
+        ] {
             let root = fixture(json!({"workspaces":[selector]}), None);
             assert!(inspect(root.path(), deadline()).is_err(), "{selector}");
         }

@@ -1974,12 +1974,17 @@ fn requires_typescript_transform(node: Node<'_>) -> bool {
         // Enum initializers have explicit runtime loads, all visited by the
         // ordinary walk. The engine owns their bounded
         // normalization and rescans its output before registry admission; it
-        // must preserve every captured route. Other transforms still lack that
-        // contract, including namespaces, legacy `module` declarations and
-        // import aliases.
-        "internal_module" | "module" | "import_alias" | "decorator" | "type_assertion" => true,
+        // must preserve every captured route. Prefix assertions are erased by
+        // that same engine front end only for .ts/.mts/.cts, never as TSX.
+        // Namespaces, legacy `module` declarations and import aliases still
+        // lack a semantics-preserving normalization contract.
+        "internal_module" | "module" | "import_alias" | "decorator" => true,
         "export_statement" => keyword(node, "="),
         "required_parameter" | "optional_parameter" => {
+            // Engine parameter-property emission currently assigns through
+            // `this`; Node's transform-mode class-field definition also bypasses
+            // inherited setters and fixes initialization order. Route equality
+            // alone cannot establish that missing runtime contract.
             let mut cursor = node.walk();
             keyword(node, "readonly")
                 || node
@@ -2431,7 +2436,8 @@ fn finite_strings(
         "parenthesized_expression"
         | "as_expression"
         | "satisfies_expression"
-        | "non_null_expression" => {
+        | "non_null_expression"
+        | "type_assertion" => {
             finite_strings(wrapper_operand(node)?, source, bindings, budget, depth + 1)
         }
         "identifier" => {
@@ -2582,7 +2588,8 @@ fn append_exact_string(
         "parenthesized_expression"
         | "as_expression"
         | "satisfies_expression"
-        | "non_null_expression" => {
+        | "non_null_expression"
+        | "type_assertion" => {
             append_exact_string(wrapper_operand(node)?, source, units, budget, depth + 1)
         }
         "binary_expression"
@@ -2906,6 +2913,11 @@ mod tests {
                 "type target = string; const target=('./dep.cjs' as const); require((target satisfies string)!); export {target};",
                 SourceLanguage::TypeScript,
                 vec!["./dep.cjs"],
+            ),
+            (
+                "const prefix=<string>'./'; const leaf=<string>(flag?'one.cjs':'two.cjs'); const target=<string>(prefix+leaf); require(<string>target); require.resolve(<string>target); import(<string>target);",
+                SourceLanguage::TypeScript,
+                vec!["./one.cjs", "./two.cjs", "./one.cjs", "./two.cjs", "./one.cjs", "./two.cjs"],
             ),
             (
                 "const high='\\uD83D', low='\\uDE00'; const target='./'+high+low+'.cjs'; require(target);",
@@ -4959,12 +4971,69 @@ const fromPackage = require('string-' + 'fixture');
             "('./value.cjs')!",
             "('./' as string) + ('value.cjs' as const)",
             "`./${('value' as const)}.cjs`",
+            "<string>'./value.cjs'",
+            "<string>(<unknown>'./value.cjs')",
+            "(<string /* type */>'./') + (<const>'value.cjs')",
+            "`./${<string>'value'}.cjs`",
         ] {
             assert_eq!(
                 scan_string_request(expression, SourceLanguage::TypeScript).as_deref(),
                 Some("./value.cjs"),
                 "{expression}"
             );
+        }
+    }
+
+    #[test]
+    fn prefix_asserted_request_operands_keep_static_proof_and_loader_kinds() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "dep.cjs", "module.exports=1;");
+        put(
+            root.path(),
+            "app.cts",
+            "const target=<string>'./dep.cjs'; require(<string>'./dep.cjs'); require.resolve(<string>target); import(<string>('./'+'dep.cjs'));",
+        );
+        let graph = typed_graph(root.path(), "app.cts");
+        assert!(graph.report.fully_resolved, "{:?}", graph.report);
+        assert_eq!(
+            graph
+                .report
+                .edges
+                .iter()
+                .map(|edge| (edge.kind, edge.specifier.as_deref(), edge.state))
+                .collect::<Vec<_>>(),
+            vec![
+                (LoadKind::Require, Some("./dep.cjs"), EdgeState::Resolved),
+                (LoadKind::Require, Some("./dep.cjs"), EdgeState::Resolved),
+                (
+                    LoadKind::DynamicImport,
+                    Some("./dep.cjs"),
+                    EdgeState::Resolved
+                ),
+            ]
+        );
+        for source in [
+            "require(<string>unknown); require.resolve(<string>unknown); import(<string>unknown);",
+            "require(<string>(touch(), './dep.cjs'));",
+            "require(<string>(flag ? './dep.cjs' : unknown));",
+            "require(<string>1);",
+            "const target=<string>unknown; require(target);",
+            "const target='./dep.cjs'; function f(target: string){return require(<string>target);}",
+        ] {
+            put(root.path(), "app.cts", source);
+            let graph = typed_graph(root.path(), "app.cts");
+            assert!(!graph.report.fully_resolved, "{source}: {:?}", graph.report);
+            assert!(!graph.report.edges.is_empty(), "{source}");
+            assert!(
+                graph
+                    .report
+                    .edges
+                    .iter()
+                    .all(|edge| edge.state == EdgeState::NonLiteral),
+                "{source}: {:?}",
+                graph.report
+            );
+            assert_eq!(paths(&graph), ["app.cts"], "{source}");
         }
     }
 
@@ -6903,19 +6972,90 @@ require!('./dep.cjs');
     }
 
     #[test]
-    fn angle_assertions_keep_explicit_calls_but_require_non_strip_transform() {
+    fn angle_assertions_preserve_runtime_requests_and_erase_type_only_requests() {
         let root = tempfile::tempdir().unwrap();
-        put(root.path(), "app.ts", "(<Loader>require)('./dep.cjs');");
         put(root.path(), "dep.cjs", "module.exports=1;");
-        let g = typed_graph(root.path(), "app.ts");
-        assert!(!g.report.fully_resolved);
-        assert_eq!(g.report.edges[0].state, EdgeState::Resolved);
-        assert!(
-            g.report
-                .diagnostics
-                .iter()
-                .any(|d| d.code == "TYPESCRIPT_TRANSFORM_REQUIRED")
-        );
+        put(root.path(), "dep.mjs", "export const value=1;");
+        let common_js = "const value=<import('types').Value>(<unknown>require('./dep.cjs')); (<Loader>require)(<string>'./dep.cjs');";
+        for (entry, source) in [
+            ("app.ts", common_js),
+            ("app.cts", common_js),
+            (
+                "app.mts",
+                "import {value} from './dep.mjs'; const typed=<import('types').Value>(<unknown>value); export {value} from './dep.mjs';",
+            ),
+        ] {
+            put(root.path(), entry, source);
+            let graph = typed_graph(root.path(), entry);
+            assert!(graph.report.fully_resolved, "{entry}: {:?}", graph.report);
+            assert_eq!(
+                graph
+                    .report
+                    .edges
+                    .iter()
+                    .filter(|edge| edge.state == EdgeState::Resolved)
+                    .count(),
+                2
+            );
+            assert_eq!(
+                graph
+                    .report
+                    .edges
+                    .iter()
+                    .filter(|edge| edge.state == EdgeState::TypeOnly)
+                    .count(),
+                1
+            );
+            assert!(
+                !graph
+                    .report
+                    .probes
+                    .iter()
+                    .any(|probe| probe.path.contains("types"))
+            );
+            let pin = graph.report.input_hash.clone();
+            let encoded = capsule::encode(&graph).unwrap();
+            let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+            assert_eq!(graph.report, replayed.report);
+            assert_eq!(
+                registry::PinnedModuleRegistry::new(replayed, &pin)
+                    .err()
+                    .unwrap()
+                    .code,
+                "ERR_MODULE_REGISTRY_FORMAT"
+            );
+        }
+        // This capture records explicit static routes without proving that
+        // an ESM runtime supplies a CommonJS loader. A prefix assertion must
+        // preserve that existing boundary rather than change the evidence.
+        for source in [
+            "const value=require('./dep.cjs');",
+            "const value=<number>require('./dep.cjs');",
+        ] {
+            put(root.path(), "app.mts", source);
+            let graph = typed_graph(root.path(), "app.mts");
+            assert!(graph.report.fully_resolved, "{source}: {:?}", graph.report);
+            assert!(!graph.report.runtime_completeness);
+            assert_eq!(graph.report.edges.len(), 1);
+            let edge = &graph.report.edges[0];
+            assert_eq!(
+                (edge.kind, edge.specifier.as_deref(), edge.state),
+                (LoadKind::Require, Some("./dep.cjs"), EdgeState::Resolved)
+            );
+        }
+        for (entry, source) in [
+            ("app.tsx", "require(<string>'./dep.cjs');"),
+            ("app.js", "require(<string>'./dep.cjs');"),
+            ("app.tsx", "const value=<number>require('./dep.cjs');"),
+            ("app.tsx", "const value=<X>{require('./dep.cjs')}</X>;"),
+            ("app.js", "const value=<number>require('./dep.cjs');"),
+        ] {
+            put(root.path(), entry, source);
+            assert!(
+                !typed_graph(root.path(), entry).report.fully_resolved,
+                "{entry}: {source}"
+            );
+        }
     }
 
     #[test]
