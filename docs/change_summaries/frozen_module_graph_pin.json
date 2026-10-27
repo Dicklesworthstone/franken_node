@@ -2,7 +2,7 @@
   "summary_id": "chg-20261026-frozen-module-graph-pin",
   "contract_version": "1.0",
   "change_summary": {
-    "intent": "Bind native frozen module execution to an operator-retained source-graph pin before evaluation.",
+    "intent": "Expose bounded source capture through verify source-graph so an operator can inspect and retain the pin used by native frozen module execution before evaluation.",
     "scope": {
       "subsystems": ["franken_node.runtime", "franken_node.supply_chain"],
       "modules": [
@@ -14,6 +14,8 @@
     },
     "surface_area_delta": {
       "new_apis": [
+        "verify source-graph <project_path> <entrypoint> [--allow-contained-symlinks] [--json]",
+        "franken-node/verify-source-graph-error-cli/v1",
         "run --frozen-module-graph-hash sha256:...",
         "runtime.frozen_module_graph_hash",
         "RuntimeConfig::validate_frozen_module_graph_hash"
@@ -26,9 +28,9 @@
       "documents": ["README.md", "tools/module-graph/README.md", "docs/progress/REALITY_CHECK_AND_BRIDGE_PLAN.md"]
     },
     "operational_impact": {
-      "operator_notes": "Omitting the pin preserves existing behavior. A supplied pin must be canonical and requires frozen execution. The existing resolver consumes exactly the capture it validates. This is operator-selected integrity, not registry-signed provenance or an authority grant.",
+      "operator_notes": "verify source-graph uses the existing bounded source_graph::capture and franken-node/module-source-graph/v2 report without guest evaluation, network access or dependency installation. It returns zero only for complete capture within the declared static request scope, and one for incomplete capture or input errors. Runtime completeness and release certification remain false. Contained symlinks require explicit opt-in, matching run's frozen-module-symlinks policy. Omitting the run pin preserves existing behavior. A supplied pin must be canonical and requires frozen execution. The existing resolver consumes exactly the capture it validates. This is operator-selected integrity, not registry-signed provenance or an authority grant.",
       "required_actions": ["Retain the reviewed graph hash outside guest-writable source and explicitly approve a new pin after intended source or resolution changes."],
-      "rollout_notes": "On committed candidate 6e40cb120, strict remote all-target default-feature compiler and Clippy checks pass, the predeclared 13 native plus 3 public CLI/config regressions pass, and the exact source-built Linux binary passes all 10 existing first-safe-workload steps. Workspace formatting and UBS remain non-clean. GitHub Actions is disabled; no hosted CI, benchmark, production rollout, archive installation, automatic artifact recovery or quantitative risk reduction is claimed. The complete no-contract gate remains non-passing until its actual evidence obligations are satisfied."
+      "rollout_notes": "Historical evidence on committed candidate 6e40cb120: strict remote all-target default-feature compiler and Clippy checks pass, the predeclared 13 native plus 3 public CLI/config regressions pass, and the exact source-built Linux binary passes all 10 existing first-safe-workload steps. That evidence predates verify source-graph and does not qualify this new command. Its real CLI and native pin-matrix execution are pending. Workspace formatting and UBS remain non-clean. GitHub Actions is disabled; no hosted CI, benchmark, production rollout, archive installation, automatic artifact recovery or quantitative risk reduction is claimed. The complete no-contract gate remains non-passing until its actual evidence obligations are satisfied."
     },
     "risk_delta": {
       "previous_tier": "high",

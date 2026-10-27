@@ -1,5 +1,5 @@
 use clap::{CommandFactory, Parser, error::ErrorKind};
-use frankenengine_node::cli::{Cli, Command, MigrateCommand};
+use frankenengine_node::cli::{Cli, Command, MigrateCommand, VerifyCommand};
 use std::path::PathBuf;
 
 /// Trigger every clap debug-assertion (argument-name uniqueness, group
@@ -16,6 +16,165 @@ fn cli_structure_passes_clap_debug_assertions() {
 
 fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
     Cli::try_parse_from(args)
+}
+
+#[test]
+fn source_graph_capture_arguments_preserve_the_explicit_symlink_choice() {
+    for (extra, expected) in [(None, false), (Some("--allow-contained-symlinks"), true)] {
+        let mut arguments = vec![
+            "franken-node",
+            "verify",
+            "source-graph",
+            "project",
+            "src/main.mjs",
+            "--json",
+        ];
+        arguments.extend(extra);
+        let Command::Verify(VerifyCommand::SourceGraph(args)) = parse(&arguments).unwrap().command
+        else {
+            panic!("expected source graph verification");
+        };
+        assert_eq!(args.project_path, PathBuf::from("project"));
+        assert_eq!(args.entrypoint, "src/main.mjs");
+        assert_eq!(args.allow_contained_symlinks, expected);
+        assert!(args.json);
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn source_graph_cli_captures_without_evaluation_and_preserves_incomplete_evidence() {
+    let project = tempfile::TempDir::new().unwrap();
+    let entry = project.path().join("app.cjs");
+    std::fs::write(
+        &entry,
+        "const value = require('./side.cjs'); console.log(value);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.path().join("side.cjs"),
+        "throw new Error('SOURCE_BODY_MUST_NEVER_EXECUTE'); module.exports = 42;\n",
+    )
+    .unwrap();
+    let (captured, report) = inspect_source_graph(project.path(), "app.cjs", false);
+    assert!(
+        captured.status.success(),
+        "{}",
+        String::from_utf8_lossy(&captured.stderr)
+    );
+    assert_eq!(
+        report["schema_version"],
+        "franken-node/module-source-graph/v2"
+    );
+    assert_eq!(report["fully_resolved"], true);
+    assert_eq!(report["execution_performed"], false);
+    assert_eq!(report["runtime_completeness"], false);
+    assert_eq!(report["release_certification"], false);
+    assert_eq!(report["modules"].as_array().unwrap().len(), 2);
+    assert!(!String::from_utf8_lossy(&captured.stdout).contains("SOURCE_BODY_MUST_NEVER_EXECUTE"));
+    let initial_pin = report["input_hash"].as_str().unwrap().to_string();
+    assert_eq!(initial_pin.len(), 71);
+    assert!(initial_pin.starts_with("sha256:"));
+
+    let human = std::process::Command::new(env!("CARGO_BIN_EXE_franken-node"))
+        .args(["verify", "source-graph"])
+        .arg(project.path())
+        .arg("app.cjs")
+        .output()
+        .unwrap();
+    assert!(human.status.success());
+    let human_report = String::from_utf8(human.stdout).unwrap();
+    assert!(human_report.contains(&format!("Graph pin: {initial_pin}")));
+    assert!(human_report.contains("no guest execution"));
+
+    std::fs::write(&entry, "require(globalThis.unboundedRequest);\n").unwrap();
+    let (incomplete, report) = inspect_source_graph(project.path(), "app.cjs", false);
+    assert_eq!(incomplete.status.code(), Some(1));
+    assert_eq!(report["fully_resolved"], false);
+    assert_eq!(report["execution_performed"], false);
+    assert_ne!(report["input_hash"], initial_pin);
+    assert!(
+        report["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|edge| edge["state"] == "non_literal")
+    );
+}
+
+#[cfg(unix)]
+fn inspect_source_graph(
+    project: &std::path::Path,
+    entrypoint: &str,
+    allow_links: bool,
+) -> (std::process::Output, serde_json::Value) {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_franken-node"));
+    command
+        .args(["verify", "source-graph"])
+        .arg(project)
+        .arg(entrypoint)
+        .arg("--json");
+    if allow_links {
+        command.arg("--allow-contained-symlinks");
+    }
+    let output = command.output().unwrap();
+    let report = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "{error}: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    (output, report)
+}
+
+#[test]
+#[cfg(unix)]
+fn source_graph_cli_checks_entrypoint_and_contained_symlink_boundaries() {
+    let project = tempfile::TempDir::new().unwrap();
+    std::fs::write(project.path().join("side.cjs"), "module.exports = 42;\n").unwrap();
+
+    for invalid in ["../outside.cjs", "/outside.cjs"] {
+        let (denied, report) = inspect_source_graph(project.path(), invalid, false);
+        assert_eq!(denied.status.code(), Some(1));
+        assert_eq!(
+            report["schema_version"],
+            "franken-node/verify-source-graph-error-cli/v1"
+        );
+        assert_eq!(report["command"], "verify.source-graph");
+        assert_eq!(report["ok"], false);
+    }
+    std::os::unix::fs::symlink("side.cjs", project.path().join("linked.cjs")).unwrap();
+    let (denied, _) = inspect_source_graph(project.path(), "linked.cjs", false);
+    assert_eq!(denied.status.code(), Some(1));
+    let (allowed, report) = inspect_source_graph(project.path(), "linked.cjs", true);
+    assert!(allowed.status.success(), "{report}");
+    assert_eq!(report["execution_performed"], false);
+}
+
+#[test]
+fn source_graph_cli_missing_inputs_emit_one_json_error() {
+    for arguments in [
+        vec!["verify", "source-graph", "--json"],
+        vec!["verify", "source-graph", "--not-a-real-option", "--json"],
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_franken-node"))
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            report["schema_version"],
+            "franken-node/verify-source-graph-error-cli/v1"
+        );
+        assert_eq!(report["ok"], false);
+        assert!(
+            output.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[test]

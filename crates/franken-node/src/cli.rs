@@ -1135,6 +1135,11 @@ pub struct MigrateReportArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum VerifyCommand {
+    /// Capture a bounded source-graph commitment without executing guest code.
+    /// Content identity is not publisher authentication or execution approval.
+    #[command(name = "source-graph")]
+    SourceGraph(VerifySourceGraphArgs),
+
     /// Verify a crate-src module contract (not a guest JS module).
     #[command(name = "module")]
     Module(VerifyModuleArgs),
@@ -1168,6 +1173,29 @@ pub enum VerifyCommand {
     /// Generate a recovery runbook from a `--readiness-input` snapshot (not a live broker).
     #[command(name = "recovery-runbook")]
     RecoveryRunbook(VerifyRecoveryRunbookArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct VerifySourceGraphArgs {
+    /// Project root containing the entrypoint and its supported dependencies.
+    /// Handler-required so --json errors remain machine-readable.
+    #[arg(default_value = "", value_parser = parse_handler_required_pathbuf)]
+    pub project_path: PathBuf,
+
+    /// Project-relative entrypoint, such as app.cjs or src/main.mjs.
+    /// Absolute paths and parent traversal are rejected by the capture engine.
+    #[arg(default_value = "")]
+    pub entrypoint: String,
+
+    /// Permit project-contained relative symlinks, matching run's opt-in policy.
+    /// Absolute links, escaping paths and cycles remain rejected.
+    #[arg(long)]
+    pub allow_contained_symlinks: bool,
+
+    /// Emit the existing franken-node/module-source-graph/v2 report.
+    /// Contains module metadata and commitments, not source bodies.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]

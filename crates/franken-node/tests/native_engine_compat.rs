@@ -2361,8 +2361,23 @@ fn frozen_module_cli_runs_large_npm_source_with_configured_parser_limits() {
 #[test]
 #[cfg(all(feature = "engine", unix))]
 fn frozen_module_graph_pin_binds_native_cjs_and_esm_bytes() {
-    use frankenengine_node::supply_chain::module_resolution_graph::file_resolution::source_graph::{
-        GraphOptions, capture,
+    let capture_pin = |project: &Path, entrypoint: &str| {
+        let output = Command::new(franken_node_bin())
+            .args(["verify", "source-graph"])
+            .arg(project)
+            .arg(entrypoint)
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["fully_resolved"], true);
+        assert_eq!(report["execution_performed"], false);
+        report["input_hash"].as_str().unwrap().to_owned()
     };
 
     for (entry_name, entry_source, dependency_name, dependency_source, manifest_type) in [
@@ -2392,11 +2407,7 @@ fn frozen_module_graph_pin_binds_native_cjs_and_esm_bytes() {
         let manifest = create_test_app(workspace.path(), "package.json", &manifest_source);
         // Retain approval before launching the CLI. The worker must not replace
         // this expected value with a digest it derives from later live files.
-        let reviewed_pin = capture(workspace.path(), entry_name, GraphOptions::default())
-            .unwrap()
-            .report()
-            .input_hash
-            .clone();
+        let reviewed_pin = capture_pin(workspace.path(), entry_name);
         let mut config = balanced_config();
         config.runtime.frozen_modules = Some(true);
         config.runtime.frozen_module_graph_hash = Some(reviewed_pin.clone());
@@ -2471,11 +2482,7 @@ fn frozen_module_graph_pin_binds_native_cjs_and_esm_bytes() {
                 "{diagnostics}"
             );
 
-            let new_pin = capture(workspace.path(), entry_name, GraphOptions::default())
-                .unwrap()
-                .report()
-                .input_hash
-                .clone();
+            let new_pin = capture_pin(workspace.path(), entry_name);
             assert_ne!(new_pin, reviewed_pin);
             let approved_change = invoke_product_supervisor_with_options(
                 &app,

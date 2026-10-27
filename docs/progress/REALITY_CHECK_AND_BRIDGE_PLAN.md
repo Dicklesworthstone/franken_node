@@ -1,5 +1,25 @@
 # Reality Check and Bridge Plan: franken_node
 
+## Active execution TODO — 2026-10-27 continuation
+
+Consumer: the operator and implementing agent, explicitly requested to retain a granular TODO. Retire this active block into history when the bounded implementation/validation below is complete or handed off. Scope: expose the existing bounded source capture before native execution, then verify the resulting operator workflow. This does not implement publisher authentication or close `.28/.29`.
+
+- [x] Refresh main, dirty paths, ready Beads and resource admission; preserve peer config, migration state, ru-aside file, sessions and history.
+- [x] Freeze product `42c69a5b0`, engine `c8f5618a0`, frankentui `bb8c49f10`, fastapi `08f7251c9` and sqlmodel `7f432ff69` for the native compatibility target and default inline discovery. Launch strict remote commands with three-hour budgets; results remain pending.
+- [x] Merge current main into the isolated review branch. The only conflict is the `.9` tracker record; resolve from the owning engine's export after proving it contains every record/comment from both inputs. No new Rust bytes beyond main are introduced by that preservation merge. The required UBS scan was not run before this merge commit; record that ordering failure and run the scoped scan before further publication.
+- [x] Inspect existing capture, source capsule, native pin and registry admission consumers. Select product `verify source-graph` as the smallest useful connection; avoid creating a second graph builder or inventing a signed-admission protocol.
+- [x] Reserve CLI, handler, existing tests, README and existing pin-change summary; notify the broad `.28` owner and keep ownership/acceptance intact.
+- [x] Add CLI arguments and dispatch to the existing bounded `source_graph::capture`, reusing its exact report/hash contract. No guest execution, install, network, signature approval or capability grant.
+- [ ] Validate complete capture, incomplete capture, missing/unsafe inputs and explicit contained-link opt-in through the real product binary; preserve errors and report scope.
+- [x] Make the existing native CJS/ESM pin matrix obtain reviewed/replacement pins through the product CLI; retain all useful execution, entry/dependency/manifest mutation, stale-pin refusal and valid-new-pin assertions. Implementation is present; execution of the new candidate remains pending.
+- [x] Document a two-command inspect/review/pinned-run workflow and exact non-claims; update the existing source-pin change summary. The summary gate passes when given the actual working-diff file list. Its default committed-diff discovery checked the previous mutation summary instead; retain that result without attributing it to this change.
+- [ ] Finish the frozen-main baseline probes and retain their full populations, fixtures/real-native distinction, ignored full-project campaign and terminal acknowledgments.
+- [ ] Compile and execute the new candidate, including the public CLI tests and existing native pin matrix; run required strict remote check/Clippy/fmt and scoped UBS. No old-source result qualifies new code.
+- [x] Inspect static-scan deltas before a source commit: preserved baseline/candidate scans cover the same four Rust files and report 16/17 critical, 3,417/3,472 warnings and 1,749/1,771 informational findings. The one additional critical is the intentional JSON-parse failure diagnostic in the integration-test helper, classified as library code by the scanner; it cannot be linked into the product. Keep the finding visible rather than suppressing it. Existing critical categories are unchanged. Pinned read-only formatting of these files has 45 inherited groups and no groups in new hunks after manual corrections; this is not a whole-workspace formatting pass.
+- [ ] Fix observed implementation failures without dropping assertions, changing the registered corpus or treating refusal as useful execution.
+- [ ] Complete a fresh solo diff/acceptance review and written anti-ceremony/honesty inventory; no independent-verification claim.
+- [ ] Update Beads on actual evidence, verify empty active cycles, preserve peer edits and publish a concrete reviewed result with unresolved work explicit.
+
 ## Active execution TODO — 2026-10-26 evening
 
 This checklist answers the operator's explicit request for a granular TODO. Consumer: the implementing agent and operator. Gate: finish and verify the concrete work below. Observed defect: the mutation lane has incomplete Cargo inputs, uses the wrong compiler, and omits the inline-test override; the publishing recipe supplies an unsupported directory and PEM key. Retire this active checklist into the completed history when these items are finished or explicitly handed off. No additional capability credit comes from the checklist itself.
