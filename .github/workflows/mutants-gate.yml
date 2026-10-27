@@ -65,7 +65,7 @@ jobs:
             case "$repo" in \#*) continue ;; esac
             git -C "../$repo" archive --format=tar "$revision" > "$input_dir/$repo.tar"
           done < "$RUNNER_TEMP/mutation-source-inputs.tsv"
-          (cd "$input_dir"; sha256sum *.tar > SHA256SUMS)
+          (cd "$input_dir"; sha256sum ./*.tar > SHA256SUMS)
           bash scripts/bootstrap_source.sh --workspace "$PWD" \
             --engine-ref c8f5618a01141b424d1b79659615d10563e7d3c6 --verify-only \
             --receipt "$RUNNER_TEMP/mutation-source-inputs-after-packaging.tsv"
