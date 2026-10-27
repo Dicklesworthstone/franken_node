@@ -3942,6 +3942,13 @@ one pass.
   Exit 0 means the declared static request scope is complete; incomplete captures
   retain diagnostics and exit 1. Runtime completeness and release certification
   remain false. Use the same project root and entrypoint for inspection and execution.
+  Native file execution chooses its root from the selected path: an absolute
+  entrypoint uses its parent; a relative entrypoint searches for the nearest
+  `package.json` or `franken_node.toml` between its parent and the invocation
+  directory, falling back to its parent. For a nested packaged entrypoint,
+  inspect the package root and run the relative entrypoint from that root.
+  Switching that nested path to an absolute path changes the admitted root
+  and can invalidate the reviewed pin.
   If inspection needs `--allow-contained-symlinks`, execution also needs
   `--frozen-module-symlinks`. The development `franken-module-graph` tool exposes
   the same capture through `--capture-source-graph`.

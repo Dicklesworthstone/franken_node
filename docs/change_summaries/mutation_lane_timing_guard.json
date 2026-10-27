@@ -4,7 +4,7 @@
   "change_summary": {
     "intent": "Restore qualification wiring, align the development engine API with the landed module adapter, register dormant migration suites and make legacy source-check workflows read-only. Node production constant-time comparison functions remain unchanged.",
     "scope": {
-      "subsystems": ["franken_node.security", "franken_node.control_plane", "franken_node.test_strategies"],
+      "subsystems": ["franken_node.security", "franken_node.control_plane", "franken_node.test_strategies", "franken_node.migration"],
       "modules": ["crates/franken-node/src/security/constant_time.rs", "crates/franken-node/src/control_plane/fleet_transport.rs", "crates/franken-node/src/test_strategies/mod.rs", "crates/franken-node/src/migration/validation_suite.rs", "crates/franken-node/src/migration/test_inventory.rs", "crates/franken-node/Cargo.toml", "crates/franken-node/tests/native_engine_compat.rs", "crates/franken-node/tests/native_rewrite_transactions.rs", "crates/franken-node/tests/typed_module_rewrites.rs", ".github/actions/franken-siblings/action.yml", ".github/workflows/mutants-gate.yml", ".github/workflows/inline-lib-tests-gate.yml", ".github/workflows/esm-module-rewrite.yml", ".github/workflows/corpus-success-admission.yml"]
     },
     "surface_area_delta": {
@@ -42,6 +42,6 @@
       "forward_compatibility": "enables",
       "details": "The development Node adapter requires the newer engine error-code API; old-engine source pairing does not compile. All28 newly registered Linux migration cases are preserved. Property inputs, the10x timing limit, three mutant targets, per-mutant60-second budget and2500bp floor remain intact. Source-mutating CI qualification now refuses."
     },
-    "dependency_changes": {"added": [], "removed": [], "updated": ["Development franken_engine source pin c8f5618a01141b424d1b79659615d10563e7d3c6 -> 3d23c93f3b0974d1ccddad1e3639949a36454f21;27 upstream commits explicitly selected and separately qualified; normal manifests/lock unchanged"]}
+    "dependency_changes": {"added": [], "removed": [], "updated": ["Development franken_engine source pin c8f5618a01141b424d1b79659615d10563e7d3c6 -> 3d23c93f3b0974d1ccddad1e3639949a36454f21;27 upstream commits explicitly selected and requiring separate runtime qualification; normal manifests/lock unchanged"]}
   }
 }
