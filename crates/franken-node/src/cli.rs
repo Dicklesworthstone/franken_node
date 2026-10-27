@@ -341,7 +341,7 @@ pub struct RunArgs {
     /// the engine's native builtin providers, including crypto, zlib, buffer,
     /// events, path, util, assert, module, timers and streams. Importing a
     /// provider does not grant additional operation capabilities. Immutable
-    /// top-level const request strings and finite string choices are supported.
+    /// lexically scoped const request strings and finite string choices are supported.
     /// Unbounded loads, unsupported builtins and uncaptured routes are refused.
     /// With --capture-replay, the authenticated source graph is retained for
     /// closed-world offline replay.
