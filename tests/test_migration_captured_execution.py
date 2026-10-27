@@ -29,7 +29,7 @@ class CapturedExecutionTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix="captured-execution-test-")
         self.addCleanup(self.directory.cleanup)
-        self.root = Path(self.directory.name)
+        self.root = Path(self.directory.name).resolve()
 
     def put(self, path, data, root=None):
         target = (root or self.root) / path
@@ -64,9 +64,61 @@ class CapturedExecutionTests(unittest.TestCase):
 
     def test_implicit_inventory_covers_all_native_extensions_and_excludes_state(self):
         for name in ["a.test.mts", "b.spec.cts", "test/one.mjs", "__tests__/nested/t.cjs",
+                     "view.test.jsx", "__tests__/view.tsx", "app.test.js", "app.spec.ts",
+                     "test/types.d.ts", "test/types.d.mts", "__tests__/types.d.cts",
                      ".franken-node/bad.test.js", ".migrate-backup/bad.test.js", "node_modules/bad.test.js"]:
             self.put(name, "// source")
-        self.assertEqual(list(self.inventory()), ["__tests__/nested/t.cjs", "a.test.mts", "b.spec.cts", "test/one.mjs"])
+        self.assertEqual(list(self.inventory()), ["__tests__/nested/t.cjs", "__tests__/view.tsx",
+                         "a.test.mts", "app.spec.ts", "app.test.js", "b.spec.cts", "test/one.mjs", "view.test.jsx"])
+
+    def test_explicit_inventory_accepts_every_executable_extension(self):
+        names = [f"scripts/check.{extension}" for extension in
+                 ("js", "mjs", "cjs", "ts", "mts", "cts", "jsx", "tsx")]
+        for name in names:
+            self.put(name, "// source")
+        self.manifest(names)
+        self.assertEqual(list(self.inventory()), sorted(names))
+
+    def test_explicit_declarations_are_rejected_before_runtime_resolution(self):
+        for extension in ("ts", "mts", "cts"):
+            with self.subTest(extension=extension):
+                name = f"scripts/types.d.{extension}"
+                self.put(name, "declare const value: number;")
+                self.manifest([name])
+                with self.assertRaisesRegex(ValueError, "declaration"):
+                    self.inventory()
+                report = self.validate(executable="/nonexistent/declaration-must-not-execute")
+                self.assertEqual(report["summary"]["verdict"], "ERROR")
+                self.assertEqual(report["validation_results"], [])
+                self.assertIn("declaration", report["errors"][0]["message"])
+
+    def test_declarations_only_remain_no_tests_without_resolving_a_runtime(self):
+        for extension in ("ts", "mts", "cts"):
+            self.put(f"test/types.d.{extension}", "declare const value: number;")
+        report = self.validate(executable="/nonexistent/declaration-must-not-execute")
+        self.assertEqual(report["summary"]["verdict"], "NO_TESTS")
+        self.assertEqual(report["summary"]["total_tests"], 0)
+        self.assertEqual(report["validation_results"], [])
+        self.assertEqual(report["errors"], [])
+
+    @unittest.skipUnless(shutil.which("bun"), "real Bun executable required for JSX/TSX")
+    def test_real_bun_executes_jsx_and_tsx_with_captured_configuration(self):
+        # Bun on both snapshots proves orchestration, not native Franken parity.
+        self.put("tsconfig.json", '{"compilerOptions":{"jsx":"react","jsxFactory":"h"}}')
+        self.put("view.test.jsx", "const h = (tag, props, child) => child; console.log(<box>jsx</box>);")
+        self.put("view.test.tsx", "const h = (tag: string, props: unknown, child: number): number => child; console.log(<box>{21 * 2}</box>);")
+        self.put("test/types.d.ts", "declare const supportingType: number;")
+        report = self.validate(executable=shutil.which("bun"), timeout_seconds=2, total_timeout_seconds=20)
+        self.assertEqual(report["summary"], {"total_tests": 2, "passed": 2, "failed": 0,
+                                            "skipped": 0, "errored": 0, "verdict": "PASS"})
+        self.assertFalse(report["release_certification"])
+        expected = {"view.test.jsx": b"jsx\n", "view.test.tsx": b"42\n"}
+        for row in report["validation_results"]:
+            output = expected[row["test"]]
+            for role in ("baseline", "migration"):
+                stream = row[role]["streams"]["stdout"]
+                self.assertEqual(stream["bytes_observed"], len(output))
+                self.assertEqual(stream["sha256"], hashlib.sha256(output).hexdigest())
 
     def test_invalid_manifest_never_falls_back_to_a_passing_heuristic(self):
         self.put("ok.test.js", "print('should not run')")

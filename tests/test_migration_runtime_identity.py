@@ -20,7 +20,7 @@ class RuntimeIdentityTests(unittest.TestCase):
     def setUp(self):
         self.scratch = tempfile.TemporaryDirectory(prefix="migration-identities-")
         self.addCleanup(self.scratch.cleanup)
-        self.root = Path(self.scratch.name)
+        self.root = Path(self.scratch.name).resolve()
         self.project = self.root / "project"
         self.project.mkdir()
         # Explicit trusted wrapper; hash is for this file, not for its interpreter.

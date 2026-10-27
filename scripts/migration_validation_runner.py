@@ -61,8 +61,15 @@ VERIFICATION_COMMANDS = [
 ]
 TEST_PATTERNS = [
     "**/*.test.js", "**/*.test.ts", "**/*.spec.js", "**/*.spec.ts",
+    "**/*.test.mjs", "**/*.test.cjs", "**/*.test.mts", "**/*.test.cts",
+    "**/*.spec.mjs", "**/*.spec.cjs", "**/*.spec.mts", "**/*.spec.cts",
+    "**/*.test.jsx", "**/*.test.tsx", "**/*.spec.jsx", "**/*.spec.tsx",
     "**/__tests__/**/*.js", "**/__tests__/**/*.ts",
+    "**/__tests__/**/*.mjs", "**/__tests__/**/*.cjs", "**/__tests__/**/*.mts", "**/__tests__/**/*.cts",
+    "**/__tests__/**/*.jsx", "**/__tests__/**/*.tsx",
     "**/test/**/*.js", "**/test/**/*.ts",
+    "**/test/**/*.mjs", "**/test/**/*.cjs", "**/test/**/*.mts", "**/test/**/*.cts",
+    "**/test/**/*.jsx", "**/test/**/*.tsx",
 ]
 TIMESTAMP_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 PID_PATTERN = re.compile(r"\bpid[=: ]+\d+\b", re.IGNORECASE)
@@ -89,7 +96,8 @@ REPLAY_BUNDLE_SCHEMA = "franken-node/migration-replay/v1"
 MAX_REPLAY_BUNDLE_BYTES = 512 * 1024 * 1024
 MAX_REPLAY_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_REPLAY_OBJECTS = 60_000
-TEST_EXTENSIONS = frozenset({"js", "mjs", "cjs", "ts", "mts", "cts"})
+TEST_EXTENSIONS = frozenset({"js", "mjs", "cjs", "ts", "mts", "cts", "jsx", "tsx"})
+DECLARATION_SUFFIXES = (".d.ts", ".d.mts", ".d.cts")
 DISCOVERY_EXCLUSIONS = frozenset({"node_modules", ".git", ".migrate-backup", ".franken-node"})
 EXECUTION_EXCLUSIONS = DISCOVERY_EXCLUSIONS | {".beads", ".franken-rewrite"}
 PRIVATE_RUNTIME_VARIABLES = (
@@ -161,6 +169,7 @@ def _is_discovered_test(name: str) -> bool:
     extension = path.suffix.removeprefix(".")
     return (not (set(path.parts) & DISCOVERY_EXCLUSIONS)
             and extension in TEST_EXTENSIONS
+            and not path.name.endswith(DECLARATION_SUFFIXES)
             and (path.name.endswith((f".test.{extension}", f".spec.{extension}"))
                  or bool(set(path.parts[:-1]) & {"test", "__tests__"})))
 
@@ -453,6 +462,8 @@ def captured_test_inventory(capture: list[SnapshotEntry]) -> TestInventory:
         name = _canonical_test_path(name)
         if Path(name).suffix.removeprefix(".") not in TEST_EXTENSIONS:
             raise ValueError("migration test manifest requires a standalone JS/TS entrypoint")
+        if name.endswith(DECLARATION_SUFFIXES):
+            raise ValueError("migration test manifest cannot execute a TypeScript declaration file")
         _ordinary_file(entries, name)
         if name in tests:
             raise ValueError("duplicate migration test entrypoint")
