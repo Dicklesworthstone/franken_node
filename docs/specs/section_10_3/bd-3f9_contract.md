@@ -29,6 +29,8 @@ Defaults use `node {test}` and `franken-node run --console-only {test}`. Command
 
 Capture returns 1 when the measured migration fails **and still writes the capsule**; 0 means the measured migration passed. Infrastructure errors, missing runtimes, no tests, incomplete execution, or invalid inputs return 2 and do not produce a replayable capsule. Existing output paths are refused, not overwritten.
 
+When measurements exist before a run is rejected for incomplete execution, executed-input identity, post-run runtime/validator identity or capsule size, the CLI's `ERROR` JSON retains the sanitized report in `execution`. Library callers receive `ReplayExecutionError`, a `ValueError` with the same diagnostic report in its `execution` attribute. Completed stream hashes, byte counts and exits remain available; raw source and guest streams are not added to the report. These observations do not satisfy the rejecting check or authorize replay/fix certification. Capture `--out` remains exclusively a valid capsule destination and stays absent on these failures; replay `--out` may retain its error diagnostic. Failures before a report exists have no collected execution to attach.
+
 Inspect a capsule without invoking or even resolving its runtimes:
 
 ```bash

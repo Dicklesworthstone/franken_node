@@ -2,7 +2,7 @@
   "summary_id": "chg-20261026-mutation-lane-timing-guard",
   "contract_version": "1.0",
   "change_summary": {
-    "intent": "Restore qualification wiring, align the development engine API with the landed module adapter, register dormant migration suites, align Python executable-test discovery with native JSX/TSX and declaration rules, and make legacy source-check workflows read-only. Node production constant-time comparison functions remain unchanged.",
+    "intent": "Restore qualification wiring, align the development engine API with the landed module adapter, register dormant migration suites, align Python executable-test discovery with native JSX/TSX and declaration rules, retain replay execution after rejected post-run checks, and make legacy source-check workflows read-only. Node production constant-time comparison functions remain unchanged.",
     "scope": {
       "subsystems": ["franken_node.security", "franken_node.control_plane", "franken_node.test_strategies", "franken_node.migration"],
       "modules": [
@@ -12,6 +12,8 @@
         "crates/franken-node/src/migration/validation_suite.rs",
         "crates/franken-node/src/migration/test_inventory.rs",
         "scripts/migration_validation_runner.py",
+        "scripts/failure_replay.py",
+        "tests/test_check_failure_replay.py",
         "tests/test_migration_captured_execution.py",
         "tests/test_migration_runtime_identity.py",
         "tests/test_migration_capsule_file_evidence.py",
@@ -31,17 +33,19 @@
       ]
     },
     "surface_area_delta": {
-      "new_apis": [],
+      "new_apis": ["scripts/failure_replay.py::ReplayExecutionError(ValueError), carrying sanitized diagnostic execution"],
       "removed_apis": [],
       "changed_signatures": []
     },
     "affected_contracts": {
-      "beads": ["bd-reality-20260923-26n9r.9", "bd-m6p9k", "bd-ugkme", "bd-topj8"],
-      "documents": ["README.md", "docs/progress/REALITY_CHECK_AND_BRIDGE_PLAN.md", "docs/specs/section_10_3/bd-2st_contract.md"]
+      "beads": ["bd-reality-20260923-26n9r.9", "bd-m6p9k", "bd-ugkme", "bd-topj8", "bd-091z0"],
+      "documents": ["README.md", "docs/progress/REALITY_CHECK_AND_BRIDGE_PLAN.md", "docs/specs/section_10_3/bd-2st_contract.md", "docs/specs/section_10_3/bd-3f9_contract.md"]
     },
     "operational_impact": {
       "operator_notes": "Production ct_eq and ct_eq_bytes are unchanged. The test retains its input strategy and 10x limit, measuring warmed alternating batches by medians. Outliers affecting a minority of batches can now pass, including scheduling disturbances or sporadic leakage; persistent content-dependent early exits remain a required negative control. This coarse regression guard does not certify rare/tail leakage or side-channel soundness. The mutation floor retains all three configured source files and 2500 bp, requires the pinned tool schema, and refuses absent/empty/unknown outcomes and rounded-up sub-floor ratios.",
       "required_actions": [
+        "Final replay diagnostic source runs all804 predeclared cases (all754 migration-pattern plus all50 failure-replay):801pass,3existing absent-local-native-binary skips,0fail/error in148.503s. Preserve all46 original replay methods plus4 new ones. Four separately retained actual CLI reports demonstrate complete failing capture(1), useful reproduction(0), changed-runtime rejection retaining both measurements(2), and launch-error capture retaining the real reference(2); no rejected capture capsule and no input-capsule mutation. This qualifies the bounded Python evidence wiring only. The fresh frozen-a4d6 formatter probe again recovers255/ACKtrue with no admitted workload or formatting verdict; raw worker process-guard refusal is retained. No RCH guards, pressure limits, global binaries or daemon state are relaxed or replaced. Full native and full merge-contract qualification stay open.",
+        "On a4d6c9b80 plus the replay diagnostic repair, collected execution survives rejected measured-run completeness, executed-input identity, post-run runtime/validator bindings and capsule-size checks via ReplayExecutionError(ValueError). CLI remains ERROR/2; failed capture publishes no capsule and changed provenance cannot certify replay/fix. Original real CLI proves Node ran while its report disappeared; four corrected original-producer regressions fail on missing execution after an initial new-test helper invocation had duplicate-keyword errors. Four actual-process controls now cover library/CLI capture with OS ENOEXEC and library/CLI replay with a genuinely changed trusted launcher. Replay fixtures first complete useful capture and reproduction, then retain both exact output digests after refusal, leave the input capsule byte-identical and preserve false runtime-identity recheck. All50 failure-replay tests pass0skip, retaining46 originals plus4. Existing self-test passes3 checks. These are Node orchestration controls, not native Franken, release or independent verification. Scoped UBS exits0 both,0critical, warnings6/9, info117/131; added warnings are intentional test JSON parsing, with no suppression or warning-free claim. Full migration/replay and native qualification remain separately scoped.",
         "Final unchanged broad discovery pattern executes754 cases in158.348s:751pass,0fail/error,3skips. Existing skipped rollout cases require absent target/debug/franken-node; they provide no native proof. Preserve the original752 run with9fail3error3skip and all769 declared original methods plus6 additions. Node26.8.1/Bun1.4.0/Python3.15.0 executable identities are retained. The original intermittent minimizer nonreproduction is unexplained even though focused/full module and this final run pass; no root-cause fix is claimed. Summary schema passes; full merge-contract still lacks7 evidence groups with no override. Three source91920 remote attempts recover255/ACKtrue without Cargo verdict and the alternate normally occupied worker refuses103; no native/compiler/format/Clippy/hosted/release pass is inferred from these Python results.",
         "The demo source checker previously rejects the real current franken-node run --console-only index.js assertion while accepting its obsolete franken-node index.js replacement. The retained7-case control reports2 failures. The fix requires the current command within assert_eq! on rewritten_manifest scripts/start; obsolete/wrong/removed-assertion private source variants must fail exactly that check. This is a source-shape check, not native execution or a semantic Rust parser. Restore source-fix callback cancellation kwargs and its earlier exact inventory refusal without weakening mutation/digest/no-lookup assertions. Canonicalize the minimizer fixture executable while preserving nonexecution of malicious recorded argv. All100 full demo/source-fix/minimizer tests pass0skip in41.973s; public static demo probe passes96 checks. UBS exits0 both with0critical8warnings, info219/222; added method/function/fixture-string inventory is reviewed, no suppression or warning-free claim. Broad migration rerun and the originally intermittent minimizer reproduction remain separately accounted for.",
         "On071ca1872 plus the replay repair, a missing runtime observation now raises the existing incomplete-file-evidence ValueError rather than uncaught KeyError; replay returns ERROR with available execution, never reproduction certification. The deterministic original-producer regression fails for both missing legs after genuine Node capsule capture. Candidate launch failure must retain the exact completed baseline file map. All290 direct-validator and capsule-file tests pass, zero skips, in38.696s, retaining289 originals plus1. Same-scope UBS stays2critical11warnings, info115/118, both exits1; existing lifecycle/magic findings remain reviewed, no suppression. This repairs orchestration error handling, not native replay or independent certification. Broad752 failures and the intermittently nonreproducing minimizer remain separately open.",

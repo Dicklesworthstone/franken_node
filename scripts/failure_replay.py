@@ -9,6 +9,8 @@ runs with the caller's authority. Workspace copies are NOT an OS sandbox.
 SIGINT/SIGTERM request cancellation, drain the owned process supervisors and
 retain partial diagnostic observations. Interrupted runs cannot publish a new
 replayable capsule or verify a fix. Library calls never install signal handlers.
+Rejected post-execution checks also retain collected diagnostics in the error;
+those observations do not make an incomplete or changed run replayable.
 """
 
 from __future__ import annotations
@@ -43,6 +45,18 @@ MAX_EXECUTABLE_BYTES = 512 * 1024 * 1024
 HASH_RE = re.compile(r"[0-9a-f]{64}\Z")
 ID_RE = re.compile(r"REPLAY-[a-zA-Z0-9-]{1,80}\Z")
 LEGS = ("baseline", "migration")
+
+
+class ReplayExecutionError(ValueError):
+    """Rejected evidence with the sanitized execution that was already collected.
+
+    The attached report is diagnostic; it is not a replayable capsule or proof
+    that the runtime, inputs or validator passed the rejecting check.
+    """
+
+    def __init__(self, message: str, execution: dict):
+        super().__init__(message)
+        self.execution = execution
 
 
 class ReplayCancelled(runner.ExecutionCancelled):
@@ -479,7 +493,7 @@ def execute_snapshots(snapshots: dict, baseline_command, migration_command,
         # cancelled ERROR into a generic missing-input error or discard it.
         check_cancellation(cancellation, report)
         if report.get("inputs") != digests:
-            raise ValueError("executed inputs differ from the restored capsule")
+            raise ReplayExecutionError("executed inputs differ from the restored capsule", report)
         return report
 
 
@@ -508,15 +522,20 @@ def capture_migration(project: Path, *, migrated_project: Path | None = None,
     report = execute_snapshots(snapshots, commands["baseline"], commands["migration"], options,
                                deadline=deadline, cancellation=cancellation)
     # Preserve incomplete measured files for inspection, not as replay proof.
-    expected = execution_observation(report, complete_file_roles=())
+    try:
+        expected = execution_observation(report, complete_file_roles=())
+    except ValueError as error:
+        raise ReplayExecutionError(str(error), report) from error
     try:
         _, after_bindings = runtime_bindings(commands["baseline"], commands["migration"], deadline,
                                              cancellation=cancellation)
     except runner.ExecutionCancelled:
         check_cancellation(cancellation, report)
         raise
+    except (OSError, ValueError) as error:
+        raise ReplayExecutionError(str(error), report) from error
     if after_bindings != bindings:
-        raise ValueError("runtime or validator changed during capture")
+        raise ReplayExecutionError("runtime or validator changed during capture", report)
     artifact = seal({
         "schema_version": CAPSULE_SCHEMA,
         "captured_at": datetime.now(timezone.utc).isoformat(),
@@ -529,7 +548,7 @@ def capture_migration(project: Path, *, migrated_project: Path | None = None,
         "environment_captured": False, "release_certification": False,
     })
     if len(canonical_bytes(artifact)) > MAX_CAPSULE_BYTES:
-        raise ValueError("capsule exceeds serialized byte bound")
+        raise ReplayExecutionError("capsule exceeds serialized byte bound", report)
     check_cancellation(cancellation, report)
     return artifact
 
@@ -650,8 +669,10 @@ def replay_migration(artifact: dict, *, execute: bool = False,
     except runner.ExecutionCancelled:
         check_cancellation(cancellation, report)
         raise
+    except (OSError, ValueError) as error:
+        raise ReplayExecutionError(str(error), report) from error
     if after_bindings != bindings:
-        raise ValueError("runtime or validator changed during replay")
+        raise ReplayExecutionError("runtime or validator changed during replay", report)
     result = {"schema_version": "migration-replay-result-v1", "replay_id": artifact["replay_id"],
               "content_sha256": artifact["content_sha256"], "verdict": "ERROR",
               "recorded_validation_verdict": artifact["expected"]["validation_verdict"],
@@ -898,6 +919,8 @@ def _execute_cli(args: argparse.Namespace, cancellation: runner.CancellationStat
         result, code = {"verdict": "ERROR", "error": str(error)}, 2
         if isinstance(error, ReplayCancelled) and error.execution is not None:
             result["execution"] = error.execution
+    except ReplayExecutionError as error:
+        result, code = {"verdict": "ERROR", "error": str(error), "execution": error.execution}, 2
     except (OSError, ValueError, TypeError, KeyError, RecursionError) as error:
         result, code = {"verdict": "ERROR", "error": str(error)}, 2
     record_cancellation(result, cancellation)

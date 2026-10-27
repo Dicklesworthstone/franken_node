@@ -255,6 +255,98 @@ class TestExecutableReplay(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "runtime executable not found"):
             replay.capture_migration(self.before, baseline_command=["/absent/node", "{test}"], migration_command=self.command)
 
+    def invalid_candidate(self):
+        executable = self.root / "invalid-executable"
+        executable.write_bytes(b"not an executable image\n")
+        executable.chmod(0o700)
+        return [str(executable), "{test}"]
+
+    def assert_reference_retained(self, report, *, candidate_completed=False):
+        self.assertIsInstance(report, dict)
+        self.assertEqual(report["summary"]["verdict"], "ERROR")
+        self.assertFalse(report["release_certification"])
+        self.assertEqual(len(report["validation_results"]), 1)
+        row = report["validation_results"][0]
+        expected = {"baseline": b"expected\n", "migration": b"actual\n"}
+        for leg in (replay.LEGS if candidate_completed else ("baseline",)):
+            self.assertEqual(row[leg]["exit_code"], 0)
+            self.assertEqual(row[leg]["termination"], "exited")
+            self.assertEqual(row[leg]["streams"]["stdout"]["sha256"],
+                             hashlib.sha256(expected[leg]).hexdigest())
+            self.assertEqual(row[leg]["streams"]["stdout"]["bytes_observed"], len(expected[leg]))
+            self.assertNotIn("stdout", row[leg])
+        if not candidate_completed:
+            self.assertNotIn("migration", row)
+
+    def test_capture_launch_error_retains_real_reference_in_library_exception(self):
+        with self.assertRaisesRegex(ValueError, "complete nonempty") as failure:
+            replay.capture_migration(self.before, migrated_project=self.after,
+                baseline_command=self.command, migration_command=self.invalid_candidate())
+        self.assert_reference_retained(getattr(failure.exception, "execution", None))
+
+    def test_capture_cli_launch_error_retains_reference_without_publishing_capsule(self):
+        destination = self.root / "must-not-publish.json"
+        result = subprocess.run([sys.executable, replay.__file__, "--capture", str(self.before),
+            "--migrated-project", str(self.after), "--baseline-command", json.dumps(self.command),
+            "--migration-command", json.dumps(self.invalid_candidate()), "--out", str(destination), "--json"],
+            capture_output=True, timeout=20, check=False)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["verdict"], "ERROR")
+        self.assert_reference_retained(report.get("execution"))
+        self.assertFalse(destination.exists())
+
+    def runtime_mutation_capsule(self):
+        wrapper = self.root / "mutable-node-launcher"
+        wrapper.write_text(f"#!{sys.executable}\nimport os,sys\nos.execv({self.command[0]!r}, [{self.command[0]!r}, *sys.argv[1:]])\n",
+                           encoding="utf-8")
+        wrapper.chmod(0o755)
+        switch = self.root / "ambient-mutation-switch"
+        switch.write_text("stable", encoding="utf-8")
+        prefix = ("const fs=require('fs');if(fs.readFileSync(" + json.dumps(str(switch))
+                  + ",'utf8')==='mutate')fs.appendFileSync(" + json.dumps(str(wrapper))
+                  + ", '# provenance-changed\\n');\n")
+        for project in (self.before, self.after):
+            source = project / "app.test.js"
+            source.write_text(prefix + source.read_text(encoding="utf-8"), encoding="utf-8")
+        candidate = [str(wrapper), "{test}"]
+        artifact = replay.capture_migration(self.before, migrated_project=self.after,
+            baseline_command=self.command, migration_command=candidate)
+        positive = replay.replay_migration(artifact, execute=True,
+            baseline_command=self.command, migration_command=candidate)
+        self.assertEqual(positive["verdict"], "REPRODUCED", positive)
+        switch.write_text("mutate", encoding="utf-8")
+        return artifact, candidate
+
+    def test_replay_provenance_error_retains_both_real_legs_in_library_exception(self):
+        artifact, candidate = self.runtime_mutation_capsule()
+        original = copy.deepcopy(artifact)
+        with self.assertRaisesRegex(ValueError, "runtime or validator changed during replay") as failure:
+            replay.replay_migration(artifact, execute=True, baseline_command=self.command,
+                migration_command=candidate, expected_sha256=artifact["content_sha256"])
+        report = getattr(failure.exception, "execution", None)
+        self.assert_reference_retained(report, candidate_completed=True)
+        self.assertFalse(report["runtime_identity_rechecked"])
+        self.assertEqual(artifact, original)
+
+    def test_replay_cli_provenance_error_retains_execution_and_input_capsule(self):
+        artifact, candidate = self.runtime_mutation_capsule()
+        capsule, diagnostic = self.root / "input-capsule.json", self.root / "diagnostic.json"
+        replay.write_capsule(artifact, capsule)
+        original = capsule.read_bytes()
+        result = subprocess.run([sys.executable, replay.__file__, "--replay", str(capsule), "--execute",
+            "--baseline-command", json.dumps(self.command), "--migration-command", json.dumps(candidate),
+            "--expected-sha256", artifact["content_sha256"], "--out", str(diagnostic), "--json"],
+            capture_output=True, timeout=20, check=False)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["verdict"], "ERROR")
+        self.assertIn("runtime or validator changed during replay", report["error"])
+        self.assert_reference_retained(report.get("execution"), candidate_completed=True)
+        self.assertFalse(report["execution"]["runtime_identity_rechecked"])
+        self.assertEqual(json.loads(diagnostic.read_text()), report)
+        self.assertEqual(capsule.read_bytes(), original)
+
     def test_duplicate_json_and_nonfinite_values_rejected(self):
         path = self.root / "invalid.json"
         for text in ('{"schema_version":1,"schema_version":2}', '{"x":NaN}', '{"x":Infinity}'):
