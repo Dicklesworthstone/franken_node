@@ -14,7 +14,7 @@ name: README Quick Example Smoke
 
 on:
   push:
-    # `master` mirrors `main` for legacy URLs; running on both doubled every
+    # The legacy mirror has identical commits; running on both doubled every
     # multi-hour engine build for the same commit.
     branches: [main]
   pull_request:
@@ -22,6 +22,12 @@ on:
       - crates/franken-node/**
       - README.md
       - scripts/check_readme_quick_example.sh
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - packaging/source-siblings.tsv
+      - scripts/bootstrap_source.sh
+      - .github/actions/franken-siblings/action.yml
       - .github/workflows/readme-quick-example-smoke.yml
   workflow_dispatch: {}
 

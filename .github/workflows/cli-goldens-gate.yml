@@ -13,6 +13,12 @@ on:
       - "crates/franken-node/tests/goldens/**"
       - "crates/franken-node/src/cli.rs"
       - "crates/franken-node/src/main.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "packaging/source-siblings.tsv"
+      - "scripts/bootstrap_source.sh"
+      - ".github/actions/franken-siblings/action.yml"
       - ".github/workflows/cli-goldens-gate.yml"
   push:
     branches: [main]
@@ -22,6 +28,12 @@ on:
       - "crates/franken-node/tests/goldens/**"
       - "crates/franken-node/src/cli.rs"
       - "crates/franken-node/src/main.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "packaging/source-siblings.tsv"
+      - "scripts/bootstrap_source.sh"
+      - ".github/actions/franken-siblings/action.yml"
       - ".github/workflows/cli-goldens-gate.yml"
   workflow_dispatch: {}
 

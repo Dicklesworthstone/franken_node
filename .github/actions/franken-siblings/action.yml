@@ -1,10 +1,9 @@
 name: franken-siblings
 description: >-
-  Check out the sibling repositories franken_node builds against side by side
-  (Cargo path dependencies such as ../../../franken_engine and ../frankentui)
-  and expose them under /dp for the absolute dev-dependency paths. Records the
-  exact sibling revisions in $RUNNER_TEMP/sibling-revisions.txt so every run's
-  evidence names the engine revision it built against.
+  Materialize the complete pinned Cargo source set using bootstrap_source.sh.
+  Preserve existing checkouts and record the product, source lock and all four
+  sibling revisions in $RUNNER_TEMP/sibling-revisions.txt. The receipt records
+  source inputs; successful compilation and qualification require separate proof.
 runs:
   using: composite
   steps:
@@ -22,24 +21,22 @@ runs:
         sudo swapon /mnt/franken-swapfile
         free -h
         echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
-    - name: Clone siblings next to the workspace
+    - name: Materialize pinned siblings next to the workspace
       shell: bash
       run: |
         set -euo pipefail
-        parent="$(dirname "$GITHUB_WORKSPACE")"
-        : > "$RUNNER_TEMP/sibling-revisions.txt"
-        for repo in franken_engine frankentui fastapi_rust sqlmodel_rust asupersync frankensqlite; do
-          if [ ! -d "$parent/$repo/.git" ]; then
-            git clone --depth 1 "https://github.com/Dicklesworthstone/$repo.git" "$parent/$repo"
-          fi
-          echo "$repo $(git -C "$parent/$repo" rev-parse HEAD)" >> "$RUNNER_TEMP/sibling-revisions.txt"
-        done
-        sudo mkdir -p /dp
-        for repo in franken_engine frankentui fastapi_rust sqlmodel_rust asupersync frankensqlite; do
-          sudo ln -sfn "$parent/$repo" "/dp/$repo"
-        done
-        sudo ln -sfn "$GITHUB_WORKSPACE" /dp/franken_node
+        bash "$GITHUB_WORKSPACE/scripts/bootstrap_source.sh" \
+          --workspace "$GITHUB_WORKSPACE" \
+          --engine-ref c8f5618a01141b424d1b79659615d10563e7d3c6 \
+          --receipt "$RUNNER_TEMP/sibling-revisions.txt"
         cat "$RUNNER_TEMP/sibling-revisions.txt"
+    - name: Retain pinned source inputs
+      if: ${{ always() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: sibling-source-inputs-${{ github.job }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/sibling-revisions.txt
+        if-no-files-found: error
     - name: Install the nightly toolchain the workspace requires
       shell: bash
       run: |
