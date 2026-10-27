@@ -2635,8 +2635,10 @@ console.log("UNADMITTED_ROUTE_CONTINUED");
         .unwrap();
         assert!(!denied.status.success(), "{}", denied.stdout);
         let diagnostics = format!("{}\n{}", denied.stdout, denied.stderr);
+        // A nonliteral edge is refused during graph admission, before guest
+        // evaluation or the resolver's later per-request route lookup.
         assert!(
-            diagnostics.contains("ERR_MODULE_REGISTRY_ROUTE"),
+            diagnostics.contains("ERR_MODULE_REGISTRY_INCOMPLETE"),
             "{diagnostics}"
         );
         assert!(
