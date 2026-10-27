@@ -6,11 +6,13 @@ This checklist answers the operator's explicit request for a granular TODO. Cons
 
 - [x] Preserve peer config/Beads migration edits; check file ownership and reserve exact edit surfaces.
 - [x] Recheck resource admission: `sbh check --need 20G` now passes (493.9 GB, 12.36% free); no cleanup or bypass performed.
-- [ ] Repair the existing mutation workflow using the complete pinned sibling bootstrap and pinned nightly.
-- [ ] Enable actual inline tests, reject an empty focused discovery, and preserve the existing mutation population and floor.
+- [x] Repair mutation-lane source materialization, worker-local tool installation, pinned nightly, isolated source archives, and failure-output retrieval. Native qualification remains a separate unchecked item below.
+- [x] Wire the inline override and per-target nonzero discovery, preserve all three mutation targets and the 2,500 bp floor, and reject missing/malformed/empty outcomes at the tool's actual `mutants.out/outcomes.json` path. Nine executable gate controls pass; they are not a mutation score.
+- [x] Replace the stale engine pin in both mutation and inline workflows; the old pin fails `--locked`, while the c8f5618a0 selection passes resolution and starts compilation. Make the shared sibling action read the repository's pinned compiler.
 - [ ] Validate the lane's CLI arguments and remote output retention; run a bounded genuine mutation control if admitted.
-- [ ] Exercise supported registry file/key publication, then verify and tamper-check the stored artifact in an isolated workspace.
-- [ ] Correct every README publishing example to match the successful invocation and its actual trust/provenance scope.
+- [ ] Finish native inline discovery on the exact selected five-repository source set; retain the complete population and any compiler/test failures.
+- [x] Exercise supported registry file/key publication, then verify and tamper-check the stored artifact in an isolated workspace: published macOS v0.2.0 accepts a file/hex seed, verifies it, and refuses modified stored bytes. This is local operator publication, not independent provenance.
+- [x] Correct all three README publishing examples to use a file artifact, accepted seed encoding, and returned extension ID; document the actual local publication scope.
 - [ ] Run checks appropriate to the final changes; retain failures and distinguish hosted execution from local validation.
 - [ ] Re-read the owned diff, fill the real-work/honesty review, update existing Beads with exact results, and check graph cycles.
 - [ ] Commit only owned changes, preserve concurrent edits, and publish the reviewed result with unresolved work explicit.

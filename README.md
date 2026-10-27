@@ -2756,37 +2756,48 @@ the default profile.
 
 Minimum requirements:
 
-1. **Package layout.** A standard Node package directory with a
-   `package.json` and your extension's entrypoint.
+1. **Package layout.** Build your Node package, then archive its
+   `package.json` and entrypoint into a single artifact file such as
+   `dist/plugin.tgz`. `registry publish` reads file bytes; it does not
+   package a directory for you.
 2. **Ed25519 signing key.** A 32-byte raw private key. franken-node
    accepts the key file in hex, base64, or a supported JSON wrapper.
-   Generate one with any standard Ed25519 tool; store it under
+   Generate a random 32-byte seed in an accepted encoding; store it under
    `.franken-node/keys/` (the bootstrap layout `.gitignore`s this
    directory).
 3. **Explicit version.** `--version <semver>` on `registry publish`;
    there is no implicit "latest".
-4. **Provenance metadata.** If `registry.require_provenance = true`
-   (the default in `strict`), include attestation metadata accepted by
-   `extensions::artifact_contract`.
+4. **Source metadata.** Run from your Git checkout with a committed source
+   revision and an `origin` URL. The local publisher collects that metadata
+   and signs its publication manifest and provenance with the supplied key.
+   This is local operator publication, not independent build attestation
+   or external publisher authorization.
 
 End-to-end publish + verify:
 
 ```bash
-# One-time: generate a signing key and trust card seed for the publisher
-mkdir -p .franken-node/keys
-openssl genpkey -algorithm Ed25519 -out .franken-node/keys/publisher.ed25519
+# From the extension's Git checkout, with package.json and index.js built:
+mkdir -p dist
+tar -czf dist/plugin.tgz package.json index.js
 
-# Publish
-franken-node registry publish ./dist/plugin \
+# One-time: create a publisher seed without overwriting an existing key.
+# Keep the key private; OpenSSL's Ed25519 PEM output is not accepted here.
+umask 077
+mkdir -p .franken-node/keys
+(set -o noclobber; openssl rand -hex 32 > .franken-node/keys/publisher.ed25519)
+
+# Publish a file into the local on-disk registry.
+franken-node registry publish ./dist/plugin.tgz \
     --version 1.2.3 \
     --signing-key .franken-node/keys/publisher.ed25519 \
-    --json
+    --json > publish.json
 
-# Verify the locally stored artifact (recomputes hash, checks signature)
-franken-node registry verify npm:@example/plugin
+# Use the actual extension_id returned by publish (not an npm package name).
+extension_id=$(python3 -c 'import json; print(json.load(open("publish.json"))["extension_id"])')
+franken-node registry verify "$extension_id" --json
 
-# Search the registry with an assurance floor
-franken-node registry search auth --min-assurance 3
+# Find the local publication with the CLI's level-2 assurance floor.
+franken-node registry search plugin --min-assurance 2
 
 # Periodic GC of older lineage entries
 franken-node registry gc --keep 5
@@ -3303,7 +3314,7 @@ into the corresponding section above.
 | Run a counterfactual | `franken-node incident counterfactual --bundle … --trusted-public-key … --policy strict` |
 | Diagnose environment | `franken-node doctor --verbose --json` |
 | Workspace pressure | `franken-node doctor workspace-pressure` (human stdout; `--human-output <path>` writes a file) |
-| Publish an extension | `franken-node registry publish ./dist --version 1.2.3 --signing-key …` |
+| Publish an extension | `franken-node registry publish ./dist/plugin.tgz --version 1.2.3 --signing-key …` |
 | Verify a release | `franken-node verify release ./release-dir --key-dir ./trusted-keys` |
 | Issue capability | `franken-node remotecap issue --scope … --endpoint … --ttl 300` |
 | Audit config | `franken-node ops config-audit --json` |
@@ -3341,15 +3352,19 @@ is undergoing API-drift remediation; the verification-target compile census
 
 `fuzz/regression/` is meant to keep discovered failure inputs as permanent
 regression cases, but today it holds 5 inputs for 2 of the 146 targets
-(`shim`, `migration`, dated 2026-02), and no test or CI step replays them
-yet (bd-fuzz-regression-corpus-f28ac). Coverage data lives in
+(`shim`, `migration`, dated 2026-02). The legacy category adapter reads these
+seeds through simulated functions under `fuzz/targets/`; that does not establish
+regression replay across the 146 registered cargo-fuzz targets
+(bd-fuzz-regression-corpus-f28ac). Coverage data lives in
 `fuzz/coverage/`; fuzz artifacts live in `fuzz/artifacts/`. The
-`mutants-gate.yml` workflow runs `cargo-mutants` against the test
-surface as a separate proof-of-effective-coverage signal: a mutant that
+`mutants-gate.yml` workflow is configured to run `cargo-mutants` against the test
+surface as a separate effective-coverage signal: a mutant that
 survives indicates a gap in the test surface, not a bug per se. The gate
-enforces a **registered mutation-adequacy floor** (`MUTATION_SCORE_FLOOR_BP`)
-on pull requests that touch the focused modules. Changes currently land by
-direct push to `main`, so the gate has not run yet.
+requires a **registered mutation-adequacy floor** (`MUTATION_SCORE_FLOOR_BP`)
+on pull requests that touch the focused modules. It also requires nonzero
+inline-test discovery for every focused module and readable, nonempty mutant
+outcomes. Hosted execution and an actual mutation score remain unverified;
+workflow configuration and gate-control tests do not supply that measurement.
 
 ### Effective coverage, not a raw count
 
@@ -3357,15 +3372,16 @@ A raw test *count* is Goodhart-bait, so the honest "tests" signal is
 **effective coverage**, expressed as three recomputable parts rather than a
 single token count:
 
-1. **Tests actually run** by a default `cargo test -p frankenengine-node`
-   (~4,100 registered; the flagship CLI e2e suites require `--features
+1. **Registered test surfaces** for `cargo test -p frankenengine-node`
+   (thousands registered; the flagship CLI e2e suites require `--features
    test-support`, most conformance families `--features advanced-features`,
    and the ~22k inline unit tests run only on the dedicated inline lane).
-   This count is recomputed from the committed tree by the Honesty Manifest
-   ([Honesty Manifest](#honesty-manifest)).
+   The Honesty Manifest recomputes source counts from the committed tree
+   ([Honesty Manifest](#honesty-manifest)); those counts do not establish
+   discovery, execution, or success. Retain actual test-run results separately.
 2. **Mutation adequacy** — the fraction of seeded mutants the suite catches,
-   measured by `mutants-gate.yml` against the registered floor (a
-   pull-request gate that has not run yet; see above).
+   to be measured by `mutants-gate.yml` against the registered floor (hosted
+   execution remains unverified; see above).
    Mutation score measures whether the tests would *catch a regression*, which a
    count cannot.
 3. **A pass-rate confidence interval** — the verifier SDK exposes the Wilson
@@ -3374,9 +3390,9 @@ single token count:
    pair (e.g. 95/100 → a 95% lower bound of ~88.8%), rather than trusting a bare
    "all green."
 
-The mutation score is enforced live by the gate (it is not baked into the
-committed manifest, which would defeat the point); the run-count and the
-interval method are independently recomputable.
+The configured gate computes its score from run outcomes rather than a score
+baked into the committed manifest. A measured score requires a completed run;
+the source count and interval calculation remain separately recomputable.
 
 ---
 
@@ -3542,10 +3558,11 @@ franken-node incident replay --bundle ./INC-2026-0007.fnbundle \
     --trusted-public-key ./keys/replay-trust-anchor.pub
 
 # Reproduce a registry publish + verify cycle
-franken-node registry publish ./dist/plugin \
+franken-node registry publish ./dist/plugin.tgz \
     --version 1.2.3 \
-    --signing-key ./keys/publisher.ed25519
-franken-node registry verify npm:@example/plugin
+    --signing-key .franken-node/keys/publisher.ed25519 --json > publish.json
+extension_id=$(python3 -c 'import json; print(json.load(open("publish.json"))["extension_id"])')
+franken-node registry verify "$extension_id" --json
 
 # Reproduce the doctor activation telemetry (checked-in fixture)
 franken-node doctor --verbose --json \
