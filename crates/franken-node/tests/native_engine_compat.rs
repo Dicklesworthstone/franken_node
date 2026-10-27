@@ -3238,11 +3238,122 @@ import('path/posix').then(function(again) {
 
 #[test]
 #[cfg(all(feature = "engine", unix))]
+fn ordinary_buffer_import_keeps_module_process_authority_private() {
+    for (module_source, expected_stdout) in [
+        (
+            "import { Blob, File } from 'node:buffer'; export function inspect() { const file = new File(['hi'], 'sample.txt'); return [file.name, file.size, new Blob(['ok']).size].join(':'); }",
+            Some("sample.txt:2:2\n"),
+        ),
+        (
+            "import { Blob } from 'node:buffer'; const process = { platform: 'guest-local' }; export function inspect() { return process.platform + ':' + new Blob(['ok']).size; }",
+            Some("guest-local:2\n"),
+        ),
+        (
+            "import { Blob } from 'node:buffer'; export function inspect() { return process.platform + ':' + new Blob(['ok']).size; }",
+            None,
+        ),
+    ] {
+        let workspace = TempDir::new().unwrap();
+        create_test_app(workspace.path(), "library.mjs", module_source);
+        let app = create_test_app(
+            workspace.path(),
+            "app.mjs",
+            "import { inspect } from './library.mjs'; console.log(inspect());",
+        );
+        let config = balanced_config();
+        let output =
+            invoke_product_supervisor(&app, &config, "balanced", Path::new(franken_node_bin()))
+                .unwrap();
+        let diagnostics = format!("{}\n{}", output.stdout, output.stderr);
+        if let Some(expected_stdout) = expected_stdout {
+            assert!(output.status.success(), "{module_source}: {diagnostics}");
+            let dispatch = parse_product_dispatch(&output).unwrap();
+            assert_eq!(dispatch.captured_output.stdout, expected_stdout);
+        } else {
+            assert!(
+                !output.status.success(),
+                "guest process access must stay denied"
+            );
+            assert!(
+                diagnostics.contains("ambient authority violation"),
+                "{diagnostics}"
+            );
+            assert!(diagnostics.contains("process.shape_read"), "{diagnostics}");
+        }
+    }
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn frozen_module_cli_checks_filesystem_authority_when_called() {
+    for (profile, policy) in [
+        (Profile::LegacyRisky, "legacy-risky"),
+        (Profile::Balanced, "balanced"),
+    ] {
+        let workspace = TempDir::new().unwrap();
+        let app = create_test_app(
+            workspace.path(),
+            "app.cjs",
+            "require('fs').writeFileSync('out.txt', 'real effect bytes'); require('fs').readFileSync('out.txt');",
+        );
+        let mut config = Config {
+            profile,
+            ..Config::default()
+        };
+        config.runtime.frozen_modules = Some(true);
+        let output =
+            invoke_product_supervisor(&app, &config, policy, Path::new(franken_node_bin()))
+                .unwrap();
+        let diagnostics = format!("{}\n{}", output.stdout, output.stderr);
+        assert!(
+            !diagnostics.contains("ERR_MODULE_REGISTRY_INCOMPLETE"),
+            "the implemented filesystem provider must load: {diagnostics}"
+        );
+        if policy == "balanced" {
+            assert!(!output.status.success(), "{diagnostics}");
+            assert!(
+                diagnostics.contains("capability denied: fs:write"),
+                "{diagnostics}"
+            );
+            assert!(!workspace.path().join("out.txt").exists());
+        } else {
+            assert!(output.status.success(), "{diagnostics}");
+            assert_eq!(
+                std::fs::read(workspace.path().join("out.txt")).unwrap(),
+                b"real effect bytes"
+            );
+            let dispatch = parse_product_dispatch(&output).unwrap();
+            assert_eq!(dispatch.runtime, "franken_engine");
+            assert!(!dispatch.used_fallback_runtime);
+            let ledger = dispatch.host_effect_ledger.unwrap();
+            assert_eq!(ledger.effect_count, 2);
+            assert_eq!(ledger.allowed_count, 2);
+            assert_eq!(ledger.denied_count, 0);
+            let kinds: Vec<_> = ledger
+                .entries
+                .iter()
+                .map(|entry| entry.receipt.effect_kind.label())
+                .collect();
+            assert_eq!(kinds, vec!["fs_write", "fs_read"]);
+            let entries = serde_json::to_value(&ledger.entries).unwrap();
+            let entries: Vec<frankenengine_verifier_sdk::bundle::EffectReceiptChainEntry> =
+                serde_json::from_value(entries).unwrap();
+            let verified = frankenengine_verifier_sdk::VerifierSdk::new("verifier://frozen-fs")
+                .verify_effect_chain_entries(&entries)
+                .unwrap();
+            assert_eq!(verified.effect_count, 2);
+            assert_eq!(verified.head_chain_hash, ledger.chain_head_hash);
+        }
+    }
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
 fn frozen_module_cli_refuses_unsupported_native_builtin_routes_before_execution() {
     for (filename, source) in [
         (
             "app.cjs",
-            "console.log('FROZEN_CORE_MUST_NOT_RUN'); require('fs');",
+            "console.log('FROZEN_CORE_MUST_NOT_RUN'); require('node:vm');",
         ),
         (
             "app.mjs",
