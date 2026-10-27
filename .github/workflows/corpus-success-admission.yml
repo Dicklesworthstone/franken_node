@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   admission:
@@ -20,6 +20,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Prepare the reviewed admission and summary changes
         shell: bash
         run: |
@@ -658,6 +660,13 @@ jobs:
           git apply --recount --check evidence/summary-integrity.patch
           git apply --recount evidence/summary-integrity.patch
           git diff --check
+      # Corrections prepared above cannot substitute for checked-in sources.
+      # This deliberately refuses patch-only qualification until they land.
+      - name: Refuse tracked source changes before validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code HEAD
       - name: Execute the complete Python gate and production Rust admission tests
         shell: bash
         run: |
@@ -665,19 +674,12 @@ jobs:
           python3 -m unittest discover -s tests -p test_check_compatibility_corpus_pass_gate.py -v 2>&1 | tee evidence/python-tests.log
           python3 -m py_compile scripts/check_compatibility_corpus_pass_gate.py tests/test_check_compatibility_corpus_pass_gate.py
           bash evidence/test-rust.sh
-      - name: Publish tested corrections directly to main
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      - name: Retain the unchanged checked revision
         shell: bash
         run: |
           set -euo pipefail
-          git add -- crates/franken-node/src/ops/compat_corpus_run.rs scripts/check_compatibility_corpus_pass_gate.py tests/test_check_compatibility_corpus_pass_gate.py
-          if ! git diff --cached --quiet; then
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'fix(compat): enforce successful execution, immutable floors and bound summary evidence' -m 'Reject matching runtime failures as PASS; preserve Node-canonical success. Merge mandatory band floors and reject weakened/invalid thresholds. Compare unrounded counts. Validate explicitly paired summaries without confusing custom reports with canonical charter data. Full Python gate tests and selected production Rust live/writer/digest tests passed. No canonical artifacts, threshold constants or digest schemas changed.'
-            git push origin HEAD:main
-          fi
-          git rev-parse HEAD > evidence/published-revision.txt
+          git diff --exit-code HEAD
+          git rev-parse HEAD > evidence/checked-revision.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:

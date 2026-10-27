@@ -2361,8 +2361,23 @@ fn frozen_module_cli_runs_large_npm_source_with_configured_parser_limits() {
 #[test]
 #[cfg(all(feature = "engine", unix))]
 fn frozen_module_graph_pin_binds_native_cjs_and_esm_bytes() {
-    use frankenengine_node::supply_chain::module_resolution_graph::file_resolution::source_graph::{
-        GraphOptions, capture,
+    let capture_pin = |project: &Path, entrypoint: &str| {
+        let output = Command::new(franken_node_bin())
+            .args(["verify", "source-graph"])
+            .arg(project)
+            .arg(entrypoint)
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["fully_resolved"], true);
+        assert_eq!(report["execution_performed"], false);
+        report["input_hash"].as_str().unwrap().to_owned()
     };
 
     for (entry_name, entry_source, dependency_name, dependency_source, manifest_type) in [
@@ -2392,11 +2407,7 @@ fn frozen_module_graph_pin_binds_native_cjs_and_esm_bytes() {
         let manifest = create_test_app(workspace.path(), "package.json", &manifest_source);
         // Retain approval before launching the CLI. The worker must not replace
         // this expected value with a digest it derives from later live files.
-        let reviewed_pin = capture(workspace.path(), entry_name, GraphOptions::default())
-            .unwrap()
-            .report()
-            .input_hash
-            .clone();
+        let reviewed_pin = capture_pin(workspace.path(), entry_name);
         let mut config = balanced_config();
         config.runtime.frozen_modules = Some(true);
         config.runtime.frozen_module_graph_hash = Some(reviewed_pin.clone());
@@ -2471,11 +2482,7 @@ fn frozen_module_graph_pin_binds_native_cjs_and_esm_bytes() {
                 "{diagnostics}"
             );
 
-            let new_pin = capture(workspace.path(), entry_name, GraphOptions::default())
-                .unwrap()
-                .report()
-                .input_hash
-                .clone();
+            let new_pin = capture_pin(workspace.path(), entry_name);
             assert_ne!(new_pin, reviewed_pin);
             let approved_change = invoke_product_supervisor_with_options(
                 &app,
@@ -2504,6 +2511,144 @@ fn frozen_module_graph_pin_binds_native_cjs_and_esm_bytes() {
             );
             std::fs::write(path, original).unwrap();
         }
+    }
+}
+
+#[test]
+#[cfg(all(feature = "engine", target_os = "linux"))]
+fn frozen_module_cli_preserves_captured_package_errors_without_granting_unknown_routes() {
+    let reviewed_incomplete_pin = |root: &Path| {
+        let output = Command::new(franken_node_bin())
+            .args(["verify", "source-graph"])
+            .arg(root)
+            .args(["app.cjs", "--json"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            report["schema_version"],
+            "franken-node/module-source-graph/v2"
+        );
+        assert_eq!(report["fully_resolved"], false);
+        assert_eq!(report["execution_performed"], false);
+        // Incompleteness is retained for review, not silently approved. This
+        // test explicitly retains the exact graph, including negative routes.
+        report["input_hash"].as_str().unwrap().to_owned()
+    };
+    for (specifier, name, code, type_error) in [
+        (
+            "pkg/private",
+            "Error",
+            "ERR_PACKAGE_PATH_NOT_EXPORTED",
+            false,
+        ),
+        (
+            "#optional",
+            "TypeError",
+            "ERR_PACKAGE_IMPORT_NOT_DEFINED",
+            true,
+        ),
+    ] {
+        let root = TempDir::new().unwrap();
+        create_test_app(
+            root.path(),
+            "package.json",
+            r##"{"name":"captured-package-errors","version":"1.0.0","imports":{"#present":"./present.cjs"}}"##,
+        );
+        create_test_app(root.path(), "present.cjs", "module.exports = 42;");
+        let package = root.path().join("node_modules/pkg");
+        std::fs::create_dir_all(&package).unwrap();
+        create_test_app(
+            &package,
+            "package.json",
+            r#"{"name":"pkg","version":"1.0.0","exports":{".":"./index.cjs"}}"#,
+        );
+        create_test_app(&package, "index.cjs", "module.exports = 42;");
+        let source = format!(
+            r#"try {{ require("{specifier}"); }} catch (error) {{ console.log("require", error.name, error.code, error instanceof TypeError); }}
+try {{ require.resolve("{specifier}"); }} catch (error) {{ console.log("resolve", error.name, error.code, error instanceof TypeError); }}
+import("{specifier}").catch(error => console.log("import", error.name, error.code, error instanceof TypeError));
+console.log("continued");
+"#
+        );
+        let app = create_test_app(root.path(), "app.cjs", &source);
+        let reviewed_pin = reviewed_incomplete_pin(root.path());
+        let mut config = balanced_config();
+        config.runtime.frozen_modules = Some(true);
+        config.runtime.frozen_module_graph_hash = Some(reviewed_pin.clone());
+        let output = invoke_product_supervisor_with_options(
+            &app,
+            &config,
+            "balanced",
+            Path::new(franken_node_bin()),
+            &[],
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            output.stdout,
+            output.stderr
+        );
+        let dispatch = parse_product_dispatch(&output).unwrap();
+        assert!(!dispatch.used_fallback_runtime);
+        assert_eq!(
+            dispatch
+                .engine_decision
+                .as_ref()
+                .unwrap()
+                .frozen_modules
+                .as_ref()
+                .unwrap()
+                .graph_input_hash,
+            reviewed_pin
+        );
+        assert_eq!(
+            dispatch.captured_output.stdout,
+            format!(
+                "require {name} {code} {type_error}\nresolve {name} {code} {type_error}\ncontinued\nimport {name} {code} {type_error}\n"
+            )
+        );
+        assert!(dispatch.captured_output.stderr.is_empty());
+
+        // The same package name obtained outside the captured literal request
+        // set must remain a fatal authority refusal, not a catchable fallback.
+        create_test_app(
+            root.path(),
+            "app.cjs",
+            &format!(
+                r#"globalThis.uncapturedRoute = "{specifier}";
+try {{ require(globalThis.uncapturedRoute); }} catch (error) {{ console.log("UNADMITTED_ROUTE_CAUGHT"); }}
+console.log("UNADMITTED_ROUTE_CONTINUED");
+"#
+            ),
+        );
+        config.runtime.frozen_module_graph_hash = Some(reviewed_incomplete_pin(root.path()));
+        let denied = invoke_product_supervisor_with_options(
+            &app,
+            &config,
+            "balanced",
+            Path::new(franken_node_bin()),
+            &[],
+        )
+        .unwrap();
+        assert!(!denied.status.success(), "{}", denied.stdout);
+        let diagnostics = format!("{}\n{}", denied.stdout, denied.stderr);
+        // A nonliteral edge is refused during graph admission, before guest
+        // evaluation or the resolver's later per-request route lookup.
+        assert!(
+            diagnostics.contains("ERR_MODULE_REGISTRY_INCOMPLETE"),
+            "{diagnostics}"
+        );
+        assert!(
+            !diagnostics.contains("UNADMITTED_ROUTE_CAUGHT"),
+            "{diagnostics}"
+        );
+        assert!(
+            !diagnostics.contains("UNADMITTED_ROUTE_CONTINUED"),
+            "{diagnostics}"
+        );
     }
 }
 

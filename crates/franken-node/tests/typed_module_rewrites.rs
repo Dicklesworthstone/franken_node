@@ -13,13 +13,19 @@ use std::time::{Duration, Instant};
 
 fn project(kind: &str) -> tempfile::TempDir {
     let root = tempfile::tempdir().unwrap();
-    fs::write(root.path().join("package.json"), serde_json::json!({
-        "name":"typed-migration", "type":kind, "engines":{"node":">=22"}
-    }).to_string()).unwrap();
+    fs::write(
+        root.path().join("package.json"),
+        serde_json::json!({
+            "name":"typed-migration", "type":kind, "engines":{"node":">=22"}
+        })
+        .to_string(),
+    )
+    .unwrap();
     fs::write(
         root.path().join("package-lock.json"),
         "{\"lockfileVersion\":3,\"packages\":{\"\":{}}}\n",
-    ).unwrap();
+    )
+    .unwrap();
     root
 }
 
@@ -41,8 +47,14 @@ fn all_typed_extensions_use_specifier_only_migration_under_commonjs_package() {
     assert_eq!(report.manual_review_items, 0);
     assert_eq!(report.rollback_entries.len(), 4);
     for name in ["input.ts", "view.tsx", "module.mts", "common.cts"] {
-        assert_eq!(fs::read_to_string(root.path().join(name)).unwrap(), source.replacen("'fs'", "'node:fs'", 1));
-        assert_eq!(fs::read_to_string(root.path().join(".migrate-backup").join(name)).unwrap(), source);
+        assert_eq!(
+            fs::read_to_string(root.path().join(name)).unwrap(),
+            source.replacen("'fs'", "'node:fs'", 1)
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join(".migrate-backup").join(name)).unwrap(),
+            source
+        );
     }
     let repeated = run_rewrite(root.path(), true).unwrap();
     assert_eq!(repeated.rewrites_applied, 0);
@@ -57,7 +69,10 @@ fn tsx_components_keep_jsx_text_type_annotations_and_attributes() {
     let report = run_rewrite(root.path(), true).unwrap();
     assert_eq!(report.manual_review_items, 0, "{report:#?}");
     assert_eq!(report.rewrites_applied, 1);
-    assert_eq!(fs::read_to_string(root.path().join("view.tsx")).unwrap(), source.replacen("'path'", "'node:path'", 1));
+    assert_eq!(
+        fs::read_to_string(root.path().join("view.tsx")).unwrap(),
+        source.replacen("'path'", "'node:path'", 1)
+    );
 }
 
 #[test]
@@ -74,7 +89,10 @@ fn typed_rollback_restores_exact_bytes_and_executable_permissions() {
     let restored = rollback::run(root.path(), Some(&history.history[0].transaction_id), true);
     assert_eq!(restored.status, RollbackStatus::RolledBack, "{restored:#?}");
     assert_eq!(fs::read_to_string(&path).unwrap(), source);
-    assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o755);
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
 }
 
 #[test]
@@ -82,10 +100,18 @@ fn commonjs_interop_ambient_modules_and_computed_imports_remain_review_only() {
     let root = project("module");
     let sources = [
         ("module.cts", "import fs = require('fs'); export = fs;"),
-        ("ambient.d.ts", "import type { Stats } from 'fs'; declare module 'fs' { interface Extra {} }"),
-        ("dynamic.ts", "import type { Stats } from 'fs'; const module = import(name);"),
+        (
+            "ambient.d.ts",
+            "import type { Stats } from 'fs'; declare module 'fs' { interface Extra {} }",
+        ),
+        (
+            "dynamic.ts",
+            "import type { Stats } from 'fs'; const module = import(name);",
+        ),
     ];
-    for (name, source) in sources { fs::write(root.path().join(name), source).unwrap(); }
+    for (name, source) in sources {
+        fs::write(root.path().join(name), source).unwrap();
+    }
     let report = run_rewrite(root.path(), true).unwrap();
     assert_eq!(report.rewrites_applied, 0, "{report:#?}");
     assert!(report.manual_review_items >= 3);
@@ -110,23 +136,44 @@ fn audit_counts_mts_and_cts_and_javascript_cannot_gain_a_typed_grammar() {
     let report = run_rewrite(root.path(), true).unwrap();
     assert_eq!(report.rewrites_applied, 0);
     assert!(report.manual_review_items > 0);
-    assert_eq!(fs::read_to_string(root.path().join("invalid.js")).unwrap(), source);
+    assert_eq!(
+        fs::read_to_string(root.path().join("invalid.js")).unwrap(),
+        source
+    );
 }
 
 #[test]
 fn node_and_bun_execute_original_and_installed_typed_sources_with_equal_outputs() {
     let root = project("commonjs");
     fs::write(root.path().join("module.mts"), "import type { Stats } from 'fs';\nimport {basename} from 'path';\nconst path: string = '/a/b'; console.log(basename(path));\n").unwrap();
-    fs::write(root.path().join("common.cts"), "import type { Stats } from 'fs';\nconst n: number = 42; console.log(n);\n").unwrap();
-    let run = || ["module.mts", "common.cts"].map(|name| {
-        ["node", "bun"].map(|runtime| {
-            let mut command = Command::new(runtime);
-            if runtime == "node" { command.arg("--experimental-strip-types").env("NODE_NO_WARNINGS", "1"); }
-            let output = command.arg(name).current_dir(root.path()).output().expect("real Node and Bun required");
-            assert!(output.status.success(), "{runtime} {name}: {:?}", output.stderr);
-            (output.stdout, output.stderr)
+    fs::write(
+        root.path().join("common.cts"),
+        "import type { Stats } from 'fs';\nconst n: number = 42; console.log(n);\n",
+    )
+    .unwrap();
+    let run = || {
+        ["module.mts", "common.cts"].map(|name| {
+            ["node", "bun"].map(|runtime| {
+                let mut command = Command::new(runtime);
+                if runtime == "node" {
+                    command
+                        .arg("--experimental-strip-types")
+                        .env("NODE_NO_WARNINGS", "1");
+                }
+                let output = command
+                    .arg(name)
+                    .current_dir(root.path())
+                    .output()
+                    .expect("real Node and Bun required");
+                assert!(
+                    output.status.success(),
+                    "{runtime} {name}: {:?}",
+                    output.stderr
+                );
+                (output.stdout, output.stderr)
+            })
         })
-    });
+    };
     let before = run();
     let report = run_rewrite(root.path(), true).unwrap();
     assert_eq!(report.rewrites_applied, 2, "{report:#?}");
@@ -143,20 +190,46 @@ fn declarations_are_not_coverage_and_jsx_test_counterparts_cannot_be_omitted() {
     use validation_suite::rewrite_candidate::RewriteCandidate;
     let root = project("module");
     fs::create_dir(root.path().join("test")).unwrap();
-    for name in ["test/types.d.ts", "test/sample.test.d.ts", "test/types.d.mts", "test/types.d.cts"] {
-        fs::write(root.path().join(name), "export interface Item {value:number}").unwrap();
+    for name in [
+        "test/types.d.ts",
+        "test/sample.test.d.ts",
+        "test/types.d.mts",
+        "test/types.d.cts",
+    ] {
+        fs::write(
+            root.path().join(name),
+            "export interface Item {value:number}",
+        )
+        .unwrap();
     }
-    assert!(validation_suite::run_project(root.path(), Path::new("/absent/native"))
-        .unwrap_err().to_string().contains("no tests discovered"));
+    assert!(
+        validation_suite::run_project(root.path(), Path::new("/absent/native"))
+            .unwrap_err()
+            .to_string()
+            .contains("no tests discovered")
+    );
     for name in ["a.test.tsx", "b.spec.jsx", "c.test.mts", "d.test.cts"] {
         fs::write(root.path().join(name), "// captured entrypoint").unwrap();
     }
-    let captured = RewriteCandidate::capture(root.path(), Instant::now() + Duration::from_secs(30)).unwrap();
-    assert_eq!(captured.test_inventory().unwrap(), ["a.test.tsx", "b.spec.jsx", "c.test.mts", "d.test.cts"].map(std::path::PathBuf::from));
+    let captured =
+        RewriteCandidate::capture(root.path(), Instant::now() + Duration::from_secs(30)).unwrap();
+    assert_eq!(
+        captured.test_inventory().unwrap(),
+        ["a.test.tsx", "b.spec.jsx", "c.test.mts", "d.test.cts"].map(std::path::PathBuf::from)
+    );
     let other = project("module");
     fs::write(other.path().join("c.test.mts"), "// only one counterpart").unwrap();
-    assert!(validation_suite::run_project_comparison(root.path(), Some(other.path()), Path::new("/absent/native"), false)
-        .unwrap_err().to_string().contains("test inventories differ"));
+    assert!(
+        validation_suite::run_project_comparison(
+            root.path(),
+            Some(other.path()),
+            Path::new("/absent/native"),
+            false
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("test inventories differ")
+    );
 }
 
 #[test]
@@ -164,14 +237,29 @@ fn explicit_manifests_accept_jsx_and_refuse_declaration_entrypoints() {
     use validation_suite::rewrite_candidate::RewriteCandidate;
     let root = project("module");
     fs::create_dir(root.path().join(".franken-node")).unwrap();
-    for name in ["view.tsx", "view.jsx", "types.d.ts", "types.d.mts", "types.d.cts"] {
+    for name in [
+        "view.tsx",
+        "view.jsx",
+        "types.d.ts",
+        "types.d.mts",
+        "types.d.cts",
+    ] {
         fs::write(root.path().join(name), "// captured file").unwrap();
-        fs::write(root.path().join(".franken-node/migration-tests.json"), serde_json::json!({
-            "schema_version":"franken-node/migration-tests/v1", "tests":[name]
-        }).to_string()).unwrap();
-        let captured = RewriteCandidate::capture(root.path(), Instant::now() + Duration::from_secs(30));
+        fs::write(
+            root.path().join(".franken-node/migration-tests.json"),
+            serde_json::json!({
+                "schema_version":"franken-node/migration-tests/v1", "tests":[name]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let captured =
+            RewriteCandidate::capture(root.path(), Instant::now() + Duration::from_secs(30));
         if name.starts_with("view") {
-            assert_eq!(captured.unwrap().test_inventory().unwrap(), [std::path::PathBuf::from(name)]);
+            assert_eq!(
+                captured.unwrap().test_inventory().unwrap(),
+                [std::path::PathBuf::from(name)]
+            );
         } else {
             assert!(captured.err().unwrap().to_string().contains("declaration"));
         }

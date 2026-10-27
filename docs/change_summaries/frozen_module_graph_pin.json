@@ -2,18 +2,23 @@
   "summary_id": "chg-20261026-frozen-module-graph-pin",
   "contract_version": "1.0",
   "change_summary": {
-    "intent": "Bind native frozen module execution to an operator-retained source-graph pin before evaluation.",
+    "intent": "Expose bounded source capture through verify source-graph so an operator can inspect and retain the pin used by native frozen module execution before evaluation.",
     "scope": {
       "subsystems": ["franken_node.runtime", "franken_node.supply_chain"],
       "modules": [
         "crates/franken-node/src/config.rs",
         "crates/franken-node/src/cli.rs",
         "crates/franken-node/src/main.rs",
-        "crates/franken-node/src/ops/engine_dispatcher.rs"
+        "crates/franken-node/src/ops/engine_dispatcher.rs",
+        "crates/franken-node/tests/cli_arg_validation.rs",
+        "crates/franken-node/tests/native_engine_compat.rs",
+        "crates/franken-node/tests/goldens/verify_cli/verify_help.snap"
       ]
     },
     "surface_area_delta": {
       "new_apis": [
+        "verify source-graph <project_path> <entrypoint> [--allow-contained-symlinks] [--json]",
+        "franken-node/verify-source-graph-error-cli/v1",
         "run --frozen-module-graph-hash sha256:...",
         "runtime.frozen_module_graph_hash",
         "RuntimeConfig::validate_frozen_module_graph_hash"
@@ -26,9 +31,9 @@
       "documents": ["README.md", "tools/module-graph/README.md", "docs/progress/REALITY_CHECK_AND_BRIDGE_PLAN.md"]
     },
     "operational_impact": {
-      "operator_notes": "Omitting the pin preserves existing behavior. A supplied pin must be canonical and requires frozen execution. The existing resolver consumes exactly the capture it validates. This is operator-selected integrity, not registry-signed provenance or an authority grant.",
-      "required_actions": ["Retain the reviewed graph hash outside guest-writable source and explicitly approve a new pin after intended source or resolution changes."],
-      "rollout_notes": "On committed candidate 6e40cb120, strict remote all-target default-feature compiler and Clippy checks pass, the predeclared 13 native plus 3 public CLI/config regressions pass, and the exact source-built Linux binary passes all 10 existing first-safe-workload steps. Workspace formatting and UBS remain non-clean. GitHub Actions is disabled; no hosted CI, benchmark, production rollout, archive installation, automatic artifact recovery or quantitative risk reduction is claimed. The complete no-contract gate remains non-passing until its actual evidence obligations are satisfied."
+      "operator_notes": "verify source-graph uses the existing bounded source_graph::capture and franken-node/module-source-graph/v2 report without guest evaluation, network access or dependency installation. It returns zero only for complete capture within the declared static request scope, and one for incomplete capture or input errors. Runtime completeness and release certification remain false. Contained symlinks require explicit opt-in, matching run's frozen-module-symlinks policy. Omitting the run pin preserves existing behavior. A supplied pin must be canonical and requires frozen execution. The existing resolver consumes exactly the capture it validates. This is operator-selected integrity, not registry-signed provenance or an authority grant.",
+      "required_actions": ["Retain the reviewed graph hash outside guest-writable source and explicitly approve a new pin after intended source or resolution changes.", "The verify help golden receives exactly the new declared command line, by hand, with every previous byte preserved. The ordinary CLI target now checks that same golden without test-support or update mode; its final17-case population remains unconfirmed after SSH255. Existing16-case passes do not cover it.", "The complete native target is red:28pass7fail1ignore. The publicCLI CJS/ESM pin matrix passes all original useful/stale/replacement assertions. The package-error test passes its first literal-error positive then hits the earlier INCOMPLETE guard; its exact expected code is corrected without changing runtime rules or no-guest assertions. The second #optional iteration and corrected-case rerun remain open. Other security-flow/evidence, parser-key diagnostic and fs-provider classification failures remain blocking, with no inherited-baseline attribution. See the granular TODO for every named failing case and required positive/negative proof."],
+      "rollout_notes": "Historical6e40cb120 selected regressions/Linux smoke do not qualify this command or the new engine pair. e04/C8 default check fails101 on two preexisting adapter/API errors. After selecting engine3d23, D8ba default all-target check/strict Clippy pass0/ACKtrue (builds30081605498307147/150). Its complete no-engine run passes16CLI+20transactional+8typed cases, zero failures/ignores/filters (build30081605498307142), preserving the predecessorC53 typed3fail. D488 test-support compilation and default inline discovery pass0/ACKtrue, listing17647unique tests; those tests are not executed. D488 full native execution ends101/ACKtrue (build30081605498307129):28pass7fail1ignore. The CJS/ESM CLI-derived pin matrix succeeds:8useful initial/replacement executions and6stale-pin refusals within one Rust test. The new package-error case reaches its first useful Node-compatible positive then fails on an over-specific negative code; corrected test-only bytes remain unexecuted, and the second iteration is unproven. Native binarySHAeda551f76a205bd63b7e40fb1b68ef53aa177d784c588964f8eb3400e6e33b78. Final53a6 default check passes0/ACKtrue before that later literal correction. Final45-case/fmt jobs endSSH255; recovery acknowledges termination only. D8ba binary help exactly matches1297 reviewed golden bytes, empty stderr, stableSHA2cb72ba094509d6238427fbfea894d48b478fed462951f2b924299149bd30140; this is not the new17-case target. Fresh admission fails below8.0606%; no newCargo/native qualification, cleanup or bypass follows. Last real globalfmt onD8ba fails1869 inherited groups; new hunks are formatted and UBS remains non-clean. Actions is disabled, complete merge-contract evidence remains seven groups short, and full native/hosted/release/independent qualification remains open. No benchmark, automatic recovery or quantitative risk reduction is claimed."
     },
     "risk_delta": {
       "previous_tier": "high",

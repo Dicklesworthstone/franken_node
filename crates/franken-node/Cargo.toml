@@ -257,6 +257,15 @@ name = "migrate_cli_e2e"
 path = "tests/migrate_cli_e2e.rs"
 required-features = ["test-support"]
 
+# These public migration API suites were otherwise hidden by autotests=false.
+[[test]]
+name = "native_rewrite_transactions"
+path = "tests/native_rewrite_transactions.rs"
+
+[[test]]
+name = "typed_module_rewrites"
+path = "tests/typed_module_rewrites.rs"
+
 [[test]]
 name = "compromise_reduction_baseline_bench"
 path = "tests/compromise_reduction_baseline_bench.rs"

@@ -913,6 +913,7 @@ every leaf command available in the current build.
 | Command | Purpose |
 |---|---|
 | `franken-node verify module <id>` | Verify a franken_node crate-src module contract (`api`, `cli`, …). Not guest JS conformance. The module id is handler-required so `--json` failures emit `verifier-cli-contract-v1` instead of a human clap error. Flags: `--json`. |
+| `franken-node verify source-graph <project> <entrypoint>` | Capture the existing bounded static module graph without executing guest code. Emits its content commitment for later pinned execution; does not authenticate a publisher or grant authority. Flags: `--json` (existing `franken-node/module-source-graph/v2` report), `--allow-contained-symlinks`. Exit 0 means the declared static scope is complete; incomplete capture or errors exit 1. Missing/unsafe input errors use `franken-node/verify-source-graph-error-cli/v1`. Unix only. |
 | `franken-node verify migration <id>` | Check a local migration evidence record and its post-conditions; does not re-run `migrate rewrite`. The migration id is handler-required so `--json` failures emit `verifier-cli-contract-v1` instead of a human clap error. Flags: `--json` (`live_rewrite=false`, `source=local_evidence_record`). |
 | `franken-node verify compatibility <target>` | Probe a concrete runtime (`node`, `bun`, `franken-node`). Profile names (`strict`, `balanced`, `legacy-risky`) fail closed and do not auto-PASS. The target is handler-required so `--json` failures emit `verifier-cli-contract-v1` instead of a human clap error. `node`/`bun` smoke is `console.log`; `franken-node` smoke is fixture JS through the embedded engine (`run --console-only`), not `--version` alone. Flags: `--json`. |
 | `franken-node verify corpus <path>` | Verify corpus schema and coverage. The corpus path is handler-required so `--json` failures emit `verifier-cli-contract-v1` instead of a human clap error. Flags: `--json`. |
@@ -3925,9 +3926,33 @@ one pass.
   `run app.cjs --frozen-modules --frozen-module-graph-hash "$REVIEWED_SOURCE_GRAPH_HASH"`.
   The equivalent configuration is `runtime.frozen_module_graph_hash = "sha256:..."`
   with `runtime.frozen_modules = true`; an explicit CLI pin takes precedence.
-  Obtain the full `sha256:` plus 64 lowercase hexadecimal digits from a reviewed
-  `franken-module-graph --capture-source-graph` report's `input_hash`, using the
-  same project root, entrypoint and symlink options. Keep that approval outside
+  Obtain the full `sha256:` plus 64 lowercase hexadecimal digits without running
+  the guest through the product CLI:
+
+  ```sh
+  franken-node verify source-graph ./project app.cjs --json
+  # Review and retain input_hash as REVIEWED_SOURCE_GRAPH_HASH, then:
+  franken-node run ./project/app.cjs --frozen-modules \
+    --frozen-module-graph-hash "$REVIEWED_SOURCE_GRAPH_HASH"
+  ```
+
+  The inspection uses the same bounded source capture as native frozen execution
+  and emits its existing `franken-node/module-source-graph/v2` metadata report,
+  without source bodies, dependency installation, network access or guest evaluation.
+  Exit 0 means the declared static request scope is complete; incomplete captures
+  retain diagnostics and exit 1. Runtime completeness and release certification
+  remain false. Use the same project root and entrypoint for inspection and execution.
+  Native file execution chooses its root from the selected path: an absolute
+  entrypoint uses its parent; a relative entrypoint searches for the nearest
+  `package.json` or `franken_node.toml` between its parent and the invocation
+  directory, falling back to its parent. For a nested packaged entrypoint,
+  inspect the package root and run the relative entrypoint from that root.
+  Switching that nested path to an absolute path changes the admitted root
+  and can invalidate the reviewed pin.
+  If inspection needs `--allow-contained-symlinks`, execution also needs
+  `--frozen-module-symlinks`. The development `franken-module-graph` tool exposes
+  the same capture through `--capture-source-graph`.
+  Keep that approval outside
   guest-writable source; a configured pin needs an operator-controlled TOML file.
   The native worker checks the pin before preparing or
   evaluating modules, then executes that same captured graph. Changed captured

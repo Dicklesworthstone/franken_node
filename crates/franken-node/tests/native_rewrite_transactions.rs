@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! Real filesystem tests of the primary migration rewrite API.
 //! ESM regressions also execute trusted Node fixtures; no native-runtime parity is claimed.
 

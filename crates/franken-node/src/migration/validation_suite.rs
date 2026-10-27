@@ -142,6 +142,26 @@ fn excluded_from_discovery(path: &Path) -> bool {
         if ["node_modules", ".git", ".migrate-backup", ".franken-node"].iter().any(|skip| name == *skip)))
 }
 
+fn is_declaration(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            [".d.ts", ".d.mts", ".d.cts"]
+                .iter()
+                .any(|suffix| name.ends_with(suffix))
+        })
+}
+
+fn is_test_source(path: &Path) -> bool {
+    !is_declaration(path)
+        && path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| {
+                ["js", "mjs", "cjs", "jsx", "ts", "tsx", "mts", "cts"].contains(&ext)
+            })
+}
+
 fn is_test(path: &Path) -> bool {
     if excluded_from_discovery(path) {
         return false;
@@ -151,8 +171,7 @@ fn is_test(path: &Path) -> bool {
         .and_then(|name| name.to_str())
         .unwrap_or("");
     let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
-    let supported = ["js", "mjs", "cjs", "ts", "mts", "cts"].contains(&extension);
-    supported
+    is_test_source(path)
         && (name
             .strip_suffix(extension)
             .is_some_and(|stem| stem.ends_with(".test.") || stem.ends_with(".spec."))
@@ -1764,6 +1783,12 @@ mod tests {
             "z.spec.mjs",
             "test/plain.js",
             "a.test.ts",
+            "b.test.tsx",
+            "c.spec.jsx",
+            "test/types.d.ts",
+            "test/types.d.mts",
+            "test/types.d.cts",
+            "sample.test.d.ts",
             "__tests__/nested/x.cjs",
             "node_modules/pkg/x.test.js",
             ".migrate-backup/a.test.js",
@@ -1786,6 +1811,8 @@ mod tests {
             [
                 "__tests__/nested/x.cjs",
                 "a.test.ts",
+                "b.test.tsx",
+                "c.spec.jsx",
                 "test/plain.js",
                 "z.spec.mjs"
             ]

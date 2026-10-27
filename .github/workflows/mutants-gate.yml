@@ -32,7 +32,9 @@ on:
 jobs:
   cargo-mutants:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # The retained cold inline compile needed 109.7 minutes before reporting
+    # source errors. Budget the campaign separately from each mutant's 60s.
+    timeout-minutes: 240
     defaults:
       run:
         shell: bash
@@ -47,7 +49,7 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/bootstrap_source.sh --workspace "$PWD" \
-            --engine-ref c8f5618a01141b424d1b79659615d10563e7d3c6 \
+            --engine-ref 3d23c93f3b0974d1ccddad1e3639949a36454f21 \
             --receipt "$RUNNER_TEMP/mutation-source-inputs.tsv"
 
       - name: Install pinned Rust nightly
@@ -67,7 +69,7 @@ jobs:
           done < "$RUNNER_TEMP/mutation-source-inputs.tsv"
           (cd "$input_dir"; sha256sum ./*.tar > SHA256SUMS)
           bash scripts/bootstrap_source.sh --workspace "$PWD" \
-            --engine-ref c8f5618a01141b424d1b79659615d10563e7d3c6 --verify-only \
+            --engine-ref 3d23c93f3b0974d1ccddad1e3639949a36454f21 --verify-only \
             --receipt "$RUNNER_TEMP/mutation-source-inputs-after-packaging.tsv"
           cmp "$RUNNER_TEMP/mutation-source-inputs.tsv" "$RUNNER_TEMP/mutation-source-inputs-after-packaging.tsv"
           cp -R "$input_dir" mutation-inputs
@@ -92,6 +94,8 @@ jobs:
           RCH_VISIBILITY: summary
           RCH_REQUIRE_REMOTE: "1"
           RCH_BUILD_SLOTS: "1"
+          RCH_BUILD_TIMEOUT_SEC: "10800"
+          RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS: "300"
         run: |
           set +e
           # One admitted job installs and uses the tool on the SAME worker.

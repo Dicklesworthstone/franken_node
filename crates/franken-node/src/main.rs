@@ -121,8 +121,8 @@ use crate::cli::{
     RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand, SafeModeCommand,
     SafeModeEnterArgs, SafeModeExitArgs, SafeModeStatusArgs, TrustCardCommand, TrustCommand,
     VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs,
-    VerifyModuleArgs, VerifyRecoveryRunbookArgs, VerifyReleaseArgs, VerifyTransparencyLogArgs,
-    load_doctor_policy_activation_input,
+    VerifyModuleArgs, VerifyRecoveryRunbookArgs, VerifyReleaseArgs, VerifySourceGraphArgs,
+    VerifyTransparencyLogArgs, load_doctor_policy_activation_input,
 };
 use crate::ops::workspace_pressure_policy::WorkspacePressureInputs;
 use crate::policy::{
@@ -29595,6 +29595,8 @@ fn sanitize_crypto_failure_reason(detailed_reason: &Option<String>) -> Option<St
 }
 
 const VERIFY_RELEASE_ERROR_CLI_SCHEMA_VERSION: &str = "franken-node/verify-release-error-cli/v1";
+const VERIFY_SOURCE_GRAPH_ERROR_CLI_SCHEMA_VERSION: &str =
+    "franken-node/verify-source-graph-error-cli/v1";
 const DEBUG_ERROR_CLI_SCHEMA_VERSION: &str = "franken-node/debug-error-cli/v1";
 
 fn emit_verify_release_error_json(message: &str) -> Result<()> {
@@ -29676,6 +29678,59 @@ fn named_cli_fail(
         fail_closed_after_json();
     }
     anyhow::bail!("{message}")
+}
+
+fn handle_verify_source_graph(args: &VerifySourceGraphArgs) -> Result<i32> {
+    anyhow::ensure!(
+        !args.project_path.as_os_str().is_empty() && !args.entrypoint.is_empty(),
+        "`verify source-graph` requires a project path and project-relative entrypoint"
+    );
+    #[cfg(not(unix))]
+    {
+        anyhow::bail!("Source graph capture requires Unix");
+    }
+    #[cfg(unix)]
+    {
+        use frankenengine_node::supply_chain::module_resolution_graph::file_resolution::{
+            SymlinkPolicy,
+            source_graph::{GraphOptions, capture},
+        };
+
+        let captured = capture(
+            &args.project_path,
+            &args.entrypoint,
+            GraphOptions {
+                symlink_policy: if args.allow_contained_symlinks {
+                    SymlinkPolicy::Contained
+                } else {
+                    SymlinkPolicy::Reject
+                },
+                ..GraphOptions::default()
+            },
+        )?;
+        let report = captured.report();
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(report)?);
+        } else {
+            println!(
+                "Source graph: {} (bounded static requests; no guest execution)",
+                if report.fully_resolved {
+                    "CAPTURED"
+                } else {
+                    "INCOMPLETE"
+                }
+            );
+            println!("Graph pin: {}", report.input_hash);
+            println!(
+                "Modules: {}; edges: {}; diagnostics: {}",
+                report.modules.len(),
+                report.edges.len(),
+                report.diagnostics.len()
+            );
+            println!("Content identity grants no publisher or execution authority.");
+        }
+        Ok(i32::from(!report.fully_resolved))
+    }
 }
 
 fn handle_verify_release(args: &VerifyReleaseArgs) -> Result<()> {
@@ -34223,6 +34278,10 @@ fn clap_json_error_surface() -> (&'static str, &'static str) {
         },
         ("runtime", Some("epoch")) => (RUNTIME_ERROR_CLI_SCHEMA_VERSION, "runtime.epoch"),
         ("verify", Some("release")) => (VERIFY_RELEASE_ERROR_CLI_SCHEMA_VERSION, "verify.release"),
+        ("verify", Some("source-graph")) => (
+            VERIFY_SOURCE_GRAPH_ERROR_CLI_SCHEMA_VERSION,
+            "verify.source-graph",
+        ),
         ("verify", Some("lockstep")) => {
             (VERIFY_LOCKSTEP_ERROR_CLI_SCHEMA_VERSION, "verify.lockstep")
         }
@@ -35403,6 +35462,17 @@ fn main() -> Result<()> {
         }
 
         Command::Verify(sub) => match sub {
+            VerifyCommand::SourceGraph(args) => match handle_verify_source_graph(&args) {
+                Ok(code) => std::process::exit(code),
+                Err(err) => {
+                    return named_cli_fail(
+                        VERIFY_SOURCE_GRAPH_ERROR_CLI_SCHEMA_VERSION,
+                        "verify.source-graph",
+                        args.json,
+                        err,
+                    );
+                }
+            },
             VerifyCommand::Module(args) => {
                 let code = emit_verify_module(&args);
                 std::process::exit(code);

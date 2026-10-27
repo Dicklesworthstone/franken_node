@@ -6,6 +6,7 @@ Local verification family (Node is the lockstep spec when included; matching onl
 Usage: franken-node verify <COMMAND>
 
 Commands:
+  source-graph      Capture a bounded source-graph commitment without executing guest code. Content identity is not publisher authentication or execution approval
   module            Verify a crate-src module contract (not a guest JS module)
   migration         Check a local migration evidence record (not a live rewrite)
   compatibility     Probe node, bun, or franken-node; profile names fail closed. `franken-node` smoke executes fixture JS through the embedded engine (`run --console-only`); it does not auto-PASS on `--version`
