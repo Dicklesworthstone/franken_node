@@ -1902,6 +1902,285 @@ mod tests {
     }
 
     #[test]
+    fn captured_conditional_requests_authorize_only_captured_choices_and_styles() {
+        let root = tempfile::tempdir().unwrap();
+        put(
+            root.path(),
+            "app.cjs",
+            "module.exports = function(flag) { \
+             return require(flag ? './first.cjs' : './second.cjs'); };",
+        );
+        for name in ["first", "second", "uncaptured"] {
+            put(root.path(), &format!("{name}.cjs"), "module.exports = 42;");
+        }
+        let resolver = resolver_entry(root.path(), "app.cjs");
+        let policy = granted();
+        let entry = resolver
+            .resolve(&resolver.entry_request(), &context(), &policy)
+            .unwrap();
+        assert_eq!(entry.module.record.dependencies.len(), 2);
+        let request = |specifier: &str, style| {
+            ModuleRequest::new(specifier, style)
+                .with_referrer(entry.module.record.id.clone())
+                .with_compatibility_mode(CompatibilityMode::NodeCompat)
+        };
+        for specifier in ["./first.cjs", "./second.cjs"] {
+            resolver
+                .resolve(&request(specifier, ImportStyle::Require), &context(), &policy)
+                .unwrap();
+            assert_eq!(
+                resolver
+                    .resolve(&request(specifier, ImportStyle::Import), &context(), &policy)
+                    .unwrap_err()
+                    .code,
+                ResolutionErrorCode::UnsupportedSpecifier
+            );
+        }
+        assert_eq!(
+            resolver
+                .resolve(
+                    &request("./uncaptured.cjs", ImportStyle::Require),
+                    &context(),
+                    &policy,
+                )
+                .unwrap_err()
+                .code,
+            ResolutionErrorCode::UnsupportedSpecifier
+        );
+    }
+
+    #[test]
+    fn captured_conditional_branch_policy_is_checked_when_the_branch_loads() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            for denied in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                put(
+                    root.path(),
+                    "app.cjs",
+                    &format!(
+                        "function choose(flag) {{ \
+                         try {{ return require(flag ? './denied.cjs' : './allowed.cjs'); }} \
+                         catch (error) {{ return 'policy refusal became catchable'; }} \
+                         }} console.log(choose({denied}));"
+                    ),
+                );
+                put(root.path(), "allowed.cjs", "module.exports = 'allowed';");
+                put(root.path(), "denied.cjs", "module.exports = 'forbidden';");
+                let policy = granted().deny_specifier("./denied.cjs");
+                let result = execute_captured_graph_with_policy_for_test(
+                    root.path(),
+                    "app.cjs",
+                    lane,
+                    Arc::new(policy),
+                    || {},
+                );
+                if denied {
+                    let error = result.expect_err("captured choices do not grant module authority");
+                    let message = error.to_string();
+                    assert!(
+                        message.contains("closed-world module resolution refused"),
+                        "{lane:?}: {message}"
+                    );
+                    assert!(message.contains("./denied.cjs"), "{lane:?}: {message}");
+                    assert!(message.contains("policy"), "{lane:?}: {message}");
+                } else {
+                    let result = result
+                        .expect("an unselected denied alternative does not block execution");
+                    assert_eq!(
+                        result
+                            .console_output
+                            .iter()
+                            .map(|entry| entry.message.as_str())
+                            .collect::<Vec<_>>(),
+                        ["allowed"],
+                        "{lane:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn captured_conditional_npm_loads_match_node_without_reopening_sources() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let root = tempfile::tempdir().unwrap();
+            put(
+                root.path(),
+                "app.cjs",
+                "const choose = require('conditional-kit'); \
+                 console.log(choose(true)); console.log(choose(false));",
+            );
+            put(
+                root.path(),
+                "node_modules/conditional-kit/package.json",
+                r#"{"main":"index.cjs"}"#,
+            );
+            put(
+                root.path(),
+                "node_modules/conditional-kit/index.cjs",
+                r#"
+module.exports = function(enabled) {
+    const selected = require(enabled ? './production.cjs' : './development.cjs');
+    const repeated = require(`./${enabled ? 'production' : 'development'}.cjs`);
+    const asset = require.resolve('./assets/' + (enabled ? 'first' : 'second') + '.cjs');
+    return selected.name + ':' + (selected === repeated) + ':' +
+        asset.endsWith(enabled ? 'assets/first.cjs' : 'assets/second.cjs');
+};
+"#,
+            );
+            for name in ["production", "development"] {
+                put(
+                    root.path(),
+                    &format!("node_modules/conditional-kit/{name}.cjs"),
+                    &format!("module.exports = {{ name: '{name}' }};"),
+                );
+            }
+            for name in ["first", "second"] {
+                put(
+                    root.path(),
+                    &format!("node_modules/conditional-kit/assets/{name}.cjs"),
+                    "throw new Error('require.resolve must not evaluate either asset');",
+                );
+            }
+            let reference = node_reference_output(root.path(), "app.cjs");
+            assert_eq!(reference, "production:true:true\ndevelopment:true:true\n");
+            let result = execute_captured_graph_for_test(root.path(), "app.cjs", lane, || {
+                for path in [
+                    "app.cjs",
+                    "node_modules/conditional-kit/index.cjs",
+                    "node_modules/conditional-kit/production.cjs",
+                    "node_modules/conditional-kit/development.cjs",
+                ] {
+                    put(root.path(), path, "throw new Error('live source reopened');");
+                }
+                put(
+                    root.path(),
+                    "node_modules/conditional-kit/package.json",
+                    r#"{"main":"uncaptured.cjs"}"#,
+                );
+            });
+            let actual = result
+                .console_output
+                .iter()
+                .map(|entry| entry.message.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, reference.lines().collect::<Vec<_>>(), "{lane:?}");
+        }
+    }
+
+    #[test]
+    fn captured_conditional_created_require_and_import_match_node() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let root = tempfile::tempdir().unwrap();
+            put(
+                root.path(),
+                "nested/app.mjs",
+                r#"
+import { createRequire } from 'node:module';
+const local = createRequire(import.meta.url);
+function chooseCommonJs(enabled) {
+    return local(enabled ? './first.cjs' : './second.cjs');
+}
+function chooseEsm(enabled) {
+    return import(`./${enabled ? 'first' : 'second'}.mjs`);
+}
+console.log(chooseCommonJs(true), chooseCommonJs(false));
+chooseEsm(true).then(function(first) {
+    console.log(first.default);
+    return chooseEsm(false);
+}).then(function(second) {
+    console.log(second.default);
+});
+"#,
+            );
+            for (name, value) in [("first", 41), ("second", 42)] {
+                put(
+                    root.path(),
+                    &format!("nested/{name}.cjs"),
+                    &format!("module.exports = {value};"),
+                );
+                put(
+                    root.path(),
+                    &format!("nested/{name}.mjs"),
+                    &format!("export default '{name}';"),
+                );
+                // The createRequire origin must remain the captured nested
+                // module, not the root where other modules could exist.
+                put(
+                    root.path(),
+                    &format!("{name}.cjs"),
+                    "throw new Error('wrong createRequire origin');",
+                );
+            }
+            let reference = node_reference_output(root.path(), "nested/app.mjs");
+            assert_eq!(reference, "41 42\nfirst\nsecond\n");
+            let result = execute_captured_graph_for_test(root.path(), "nested/app.mjs", lane, || {
+                for path in [
+                    "nested/app.mjs",
+                    "nested/first.cjs",
+                    "nested/second.cjs",
+                    "nested/first.mjs",
+                    "nested/second.mjs",
+                ] {
+                    put(
+                        root.path(),
+                        path,
+                        "throw new Error('live conditional source reopened');",
+                    );
+                }
+            });
+            let actual = result
+                .console_output
+                .iter()
+                .map(|entry| entry.message.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, reference.lines().collect::<Vec<_>>(), "{lane:?}");
+        }
+    }
+
+    #[test]
+    fn captured_conditional_optional_dependency_stays_missing_after_installation() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let root = tempfile::tempdir().unwrap();
+            put(
+                root.path(),
+                "app.cjs",
+                r#"
+function choose(installed) {
+    try { return require(installed ? './present.cjs' : './optional.cjs'); }
+    catch (error) { return error.code; }
+}
+console.log(choose(true), choose(false));
+"#,
+            );
+            put(root.path(), "present.cjs", "module.exports = 42;");
+            let reference = node_reference_output(root.path(), "app.cjs");
+            assert_eq!(reference, "42 MODULE_NOT_FOUND\n");
+            let result = execute_captured_graph_for_test(root.path(), "app.cjs", lane, || {
+                put(
+                    root.path(),
+                    "optional.cjs",
+                    "module.exports = 'uncaptured installation';",
+                );
+            });
+            let actual = result
+                .console_output
+                .iter()
+                .map(|entry| entry.message.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, reference.lines().collect::<Vec<_>>(), "{lane:?}");
+        }
+    }
+
+    #[test]
     fn captured_crypto_zlib_packages_match_node_without_live_source_access() {
         use frankenengine_engine::baseline_interpreter::LaneChoice;
 

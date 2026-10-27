@@ -3,8 +3,9 @@
 //! One resolver owns every source, manifest, link and negative probe for the
 //! whole graph. This is a conservative source graph, not execution or proof of
 //! all runtime dependencies: literal deferred loads are included even in dead
-//! branches; exact string concatenations and templates add no runtime lookup
-//! authority. Dynamic/indirect loaders and unsupported syntax stay explicit.
+//! branches; exact string concatenations, templates and bounded conditional
+//! string choices add no runtime lookup authority. Dynamic/indirect loaders
+//! and unsupported syntax stay explicit.
 //! TypeScript follows explicit runtime syntax, not tsconfig-dependent emit.
 //! Whole-declaration type imports and import types are recorded but never read;
 //! inline type specifiers retain their declaration's side-effect dependency.
@@ -48,6 +49,7 @@ const MAX_EVIDENCE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_STRING_EXPRESSION_DEPTH: usize = 64;
 const MAX_STRING_EXPRESSION_NODES: usize = 4096;
 const MAX_STRING_EXPRESSION_BYTES: usize = 16 * super::MAX_PATH;
+const MAX_STRING_ALTERNATIVES: usize = 32;
 const HASH_DOMAIN: &[u8] = b"franken-node/module-source-graph/v2\0";
 type Result<T> = std::result::Result<T, ResolutionError>;
 
@@ -1227,13 +1229,26 @@ fn scan(
             ));
         }
         if let Some((kind, argument)) = request {
-            budget.site()?;
-            loads.push(Load {
-                site: SourceSite::of(node),
-                kind,
-                specifier: literal(argument, text),
-                type_only: erased,
-            });
+            let specifiers = request_literals(argument, text);
+            let unresolved = specifiers.is_none();
+            // A finite choice is a set of potential routes at the same source
+            // site, not a prediction of the branch that execution will take.
+            // Charge each route before publishing any scan output. An unknown
+            // branch remains one opaque load, never a partially admitted set.
+            for specifier in specifiers
+                .into_iter()
+                .flatten()
+                .map(Some)
+                .chain(unresolved.then_some(None))
+            {
+                budget.site()?;
+                loads.push(Load {
+                    site: SourceSite::of(node),
+                    kind,
+                    specifier,
+                    type_only: erased,
+                });
+            }
         }
         if let Some((code, message)) = issue {
             budget.site()?;
@@ -1613,6 +1628,176 @@ fn literal(node: Node<'_>, source: &str) -> Option<String> {
     (value.len() <= super::MAX_PATH).then_some(value)
 }
 
+/// Enumerate only a bounded set of literal request results. Conditions are
+/// never evaluated, and a value from a binding, call, coercion or unknown
+/// branch invalidates the entire set. The ordinary AST walk still examines
+/// every condition for nested loads, loader mutations and dynamic code.
+/// Keep `literal` narrower: loader/factory identity must remain an exact
+/// spelling, not a conditional expression with executable tests.
+fn request_literals(node: Node<'_>, source: &str) -> Option<Vec<String>> {
+    // Preserve the existing single-buffer path for ordinary package imports.
+    if let Some(value) = literal(node, source) {
+        return Some(vec![value]);
+    }
+    let mut budget = FiniteStringBudget {
+        expression: StringExpressionBudget::default(),
+        copied_units: MAX_STRING_EXPRESSION_BYTES,
+    };
+    finite_strings(node, source, &mut budget, 0)?
+        .into_iter()
+        .map(|units| {
+            let value = String::from_utf16(&units).ok()?;
+            (value.len() <= super::MAX_PATH).then_some(value)
+        })
+        .collect()
+}
+
+struct FiniteStringBudget {
+    expression: StringExpressionBudget,
+    // Bound intermediate Cartesian-product copying independently of source
+    // size and final unique values (many concatenations can deduplicate).
+    copied_units: usize,
+}
+
+type StringAlternatives = BTreeSet<Vec<u16>>;
+
+fn concatenate_strings(
+    left: StringAlternatives,
+    right: StringAlternatives,
+    budget: &mut FiniteStringBudget,
+) -> Option<StringAlternatives> {
+    let mut result = BTreeSet::new();
+    for prefix in &left {
+        for suffix in &right {
+            let size = prefix.len().checked_add(suffix.len())?;
+            if size > super::MAX_PATH {
+                return None;
+            }
+            budget.copied_units = budget.copied_units.checked_sub(size)?;
+            let mut value = Vec::with_capacity(size);
+            value.extend_from_slice(prefix);
+            value.extend_from_slice(suffix);
+            result.insert(value);
+            if result.len() > MAX_STRING_ALTERNATIVES {
+                return None;
+            }
+        }
+    }
+    Some(result)
+}
+
+fn finite_strings(
+    node: Node<'_>,
+    source: &str,
+    budget: &mut FiniteStringBudget,
+    depth: usize,
+) -> Option<StringAlternatives> {
+    if depth > MAX_STRING_EXPRESSION_DEPTH {
+        return None;
+    }
+    budget.expression.nodes = budget.expression.nodes.checked_sub(1)?;
+    match node.kind() {
+        "parenthesized_expression"
+        | "as_expression"
+        | "satisfies_expression"
+        | "non_null_expression" => {
+            finite_strings(wrapper_operand(node)?, source, budget, depth + 1)
+        }
+        "ternary_expression" => {
+            let mut values = finite_strings(
+                node.child_by_field_name("consequence")?,
+                source,
+                budget,
+                depth + 1,
+            )?;
+            let alternative = finite_strings(
+                node.child_by_field_name("alternative")?,
+                source,
+                budget,
+                depth + 1,
+            )?;
+            values.extend(alternative);
+            (values.len() <= MAX_STRING_ALTERNATIVES).then_some(values)
+        }
+        "binary_expression"
+            if node
+                .child_by_field_name("operator")
+                .is_some_and(|operator| operator.kind() == "+") =>
+        {
+            let left =
+                finite_strings(node.child_by_field_name("left")?, source, budget, depth + 1)?;
+            let right = finite_strings(
+                node.child_by_field_name("right")?,
+                source,
+                budget,
+                depth + 1,
+            )?;
+            concatenate_strings(left, right, budget)
+        }
+        "string" => {
+            let spelling = source.get(node.byte_range())?;
+            let quote = spelling.chars().next()?;
+            if !matches!(quote, '\'' | '"') || !spelling.ends_with(quote) || spelling.len() < 2 {
+                return None;
+            }
+            let mut units = Vec::new();
+            append_string_segment(
+                &spelling[1..spelling.len() - 1],
+                false,
+                &mut units,
+                &mut budget.expression,
+            )?;
+            Some(BTreeSet::from([units]))
+        }
+        "template_string" => {
+            let spelling = source.get(node.byte_range())?;
+            if !spelling.starts_with('`') || !spelling.ends_with('`') || spelling.len() < 2 {
+                return None;
+            }
+            let mut values = BTreeSet::from([Vec::new()]);
+            let mut start = node.start_byte() + 1;
+            let mut cursor = node.walk();
+            for part in node.named_children(&mut cursor) {
+                budget.expression.nodes = budget.expression.nodes.checked_sub(1)?;
+                match part.kind() {
+                    "string_fragment" | "escape_sequence" => {}
+                    "template_substitution" => {
+                        values = concatenate_segment(
+                            values,
+                            source.get(start..part.start_byte())?,
+                            budget,
+                        )?;
+                        let mut children = part.walk();
+                        let mut expression = None;
+                        for child in part.named_children(&mut children) {
+                            budget.expression.nodes = budget.expression.nodes.checked_sub(1)?;
+                            if child.kind() != "comment" && expression.replace(child).is_some() {
+                                return None;
+                            }
+                        }
+                        let choices = finite_strings(expression?, source, budget, depth + 1)?;
+                        values = concatenate_strings(values, choices, budget)?;
+                        start = part.end_byte();
+                    }
+                    _ => return None,
+                }
+            }
+            concatenate_segment(values, source.get(start..node.end_byte() - 1)?, budget)
+        }
+        _ => None,
+    }
+}
+
+fn concatenate_segment(
+    values: StringAlternatives,
+    text: &str,
+    budget: &mut FiniteStringBudget,
+) -> Option<StringAlternatives> {
+    let mut units = Vec::new();
+    append_string_segment(text, true, &mut units, &mut budget.expression)?;
+    concatenate_strings(values, BTreeSet::from([units]), budget)
+}
+
 struct StringExpressionBudget {
     nodes: usize,
     bytes: usize,
@@ -1916,8 +2101,14 @@ mod tests {
     }
 
     fn scan_string_request(expression: &str, language: SourceLanguage) -> Option<String> {
+        let mut values = scan_string_requests(expression, language);
+        assert_eq!(values.len(), 1, "{expression}: {values:?}");
+        values.pop().unwrap()
+    }
+
+    fn scan_string_requests(expression: &str, language: SourceLanguage) -> Vec<Option<String>> {
         let source = format!("require({expression});");
-        let (mut loads, notices, analyzed) = scan(
+        let (loads, notices, analyzed) = scan(
             &mut Parser::new(),
             source.as_bytes(),
             language,
@@ -1926,8 +2117,7 @@ mod tests {
         .unwrap();
         assert!(analyzed, "{expression}: {notices:?}");
         assert!(notices.is_empty(), "{expression}: {notices:?}");
-        assert_eq!(loads.len(), 1, "{expression}: {loads:?}");
-        loads.pop().unwrap().specifier
+        loads.into_iter().map(|load| load.specifier).collect()
     }
 
     #[test]
@@ -3038,13 +3228,13 @@ const fromPackage = require('string-' + 'fixture');
     }
 
     #[test]
-    fn exact_string_capture_rejects_coercion_bindings_branches_and_side_effects() {
+    fn exact_string_capture_rejects_coercion_bindings_and_result_side_effects() {
         for expression in [
             "'./' + name",
             "`./${name}.cjs`",
             "'./' + 1",
             "`./${1}.cjs`",
-            "true ? './one.cjs' : './two.cjs'",
+            "flag ? './one.cjs' : unknown",
             "'./one.cjs' || './two.cjs'",
             "(touch(), './value.cjs')",
             "(name = './value.cjs')",
@@ -3093,6 +3283,349 @@ const fromPackage = require('string-' + 'fixture');
                 .code,
             "ERR_MODULE_REGISTRY_INCOMPLETE"
         );
+    }
+
+    #[test]
+    fn conditional_strings_enumerate_nested_choices_products_and_templates() {
+        for (expression, expected) in [
+            (
+                "flag ? './one.cjs' : './two.cjs'",
+                vec!["./one.cjs", "./two.cjs"],
+            ),
+            (
+                "true ? './one.cjs' : (other ? './two.cjs' : './three.cjs')",
+                vec!["./one.cjs", "./three.cjs", "./two.cjs"],
+            ),
+            (
+                "'./' + (flag ? 'a' : 'b') + (other ? '.cjs' : '.mjs')",
+                vec!["./a.cjs", "./a.mjs", "./b.cjs", "./b.mjs"],
+            ),
+            (
+                "`./${flag ? 'a' : 'b'}${other ? '.cjs' : '.mjs'}`",
+                vec!["./a.cjs", "./a.mjs", "./b.cjs", "./b.mjs"],
+            ),
+            (
+                "(touch(), flag) ? './one.cjs' : './two.cjs'",
+                vec!["./one.cjs", "./two.cjs"],
+            ),
+            (
+                "'./' + (flag ? '\\uD83D' : '\\uD83D') + '\\uDE00.cjs'",
+                vec!["./😀.cjs"],
+            ),
+            (
+                "flag ? './same.cjs' : (other ? './same.cjs' : './same.cjs')",
+                vec!["./same.cjs"],
+            ),
+        ] {
+            assert_eq!(
+                scan_string_requests(expression, SourceLanguage::JavaScript),
+                expected
+                    .into_iter()
+                    .map(|value| Some(value.to_owned()))
+                    .collect::<Vec<_>>(),
+                "{expression}"
+            );
+        }
+        assert_eq!(
+            scan_string_requests(
+                "(flag ? './one.cjs' as const : ('./two.cjs' satisfies string))!",
+                SourceLanguage::TypeScript,
+            ),
+            vec![Some("./one.cjs".into()), Some("./two.cjs".into())]
+        );
+    }
+
+    #[test]
+    fn conditional_strings_never_publish_a_known_subset_of_an_unknown_choice() {
+        for expression in [
+            "flag ? './one.cjs' : name",
+            "flag ? name : './one.cjs'",
+            "flag ? './one.cjs' : 1",
+            "flag ? './one.cjs' : ('./' + name)",
+            "flag ? './one.cjs' : (touch(), './two.cjs')",
+            "flag ? './one.cjs' : (name = './two.cjs')",
+            "flag ? './one.cjs' : './two.cjs'.toString()",
+            "`./${flag ? 'one' : {toString() { return 'two'; }}}.cjs`",
+            "flag ? './one.cjs' : '\\uD800'",
+        ] {
+            assert_eq!(
+                scan_string_requests(expression, SourceLanguage::JavaScript),
+                vec![None],
+                "{expression}"
+            );
+        }
+        let root = tempfile::tempdir().unwrap();
+        put(
+            root.path(),
+            "app.cjs",
+            "require(flag ? './one.cjs' : name);",
+        );
+        put(root.path(), "one.cjs", "module.exports = 1;");
+        let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        assert_eq!(paths(&graph), ["app.cjs"]);
+        assert!(!graph.report().fully_resolved);
+        assert_eq!(graph.report().edges.len(), 1);
+        assert_eq!(graph.report().edges[0].state, EdgeState::NonLiteral);
+        let pin = graph.report().input_hash.clone();
+        assert_eq!(
+            registry::PinnedModuleRegistry::new(graph, &pin)
+                .err()
+                .unwrap()
+                .code,
+            "ERR_MODULE_REGISTRY_INCOMPLETE"
+        );
+    }
+
+    #[test]
+    fn conditional_strings_obey_unique_route_copy_work_and_existing_expression_limits() {
+        fn choices(values: &[String]) -> String {
+            if values.len() == 1 {
+                return format!("'{}'", values[0]);
+            }
+            let middle = values.len() / 2;
+            format!(
+                "(flag ? {} : {})",
+                choices(&values[..middle]),
+                choices(&values[middle..])
+            )
+        }
+        let paths = (0..MAX_STRING_ALTERNATIVES)
+            .map(|index| format!("./variant-{index:02}.cjs"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            scan_string_requests(&choices(&paths), SourceLanguage::JavaScript),
+            paths.iter().cloned().map(Some).collect::<Vec<_>>()
+        );
+        let mut too_many = paths.clone();
+        too_many.push("./overflow.cjs".into());
+        assert_eq!(
+            scan_string_requests(&choices(&too_many), SourceLanguage::JavaScript),
+            vec![None]
+        );
+        let duplicates = vec!["./same.cjs".to_owned(); 128];
+        assert_eq!(
+            scan_string_requests(&choices(&duplicates), SourceLanguage::JavaScript),
+            vec![Some("./same.cjs".into())]
+        );
+        let path_at_limit = "a".repeat(super::super::MAX_PATH);
+        let depth_overflow = format!(
+            "{}flag ? 'a' : 'b'{}",
+            "(".repeat(MAX_STRING_EXPRESSION_DEPTH + 1),
+            ")".repeat(MAX_STRING_EXPRESSION_DEPTH + 1)
+        );
+        let product_overflow = std::iter::repeat_n("(flag ? 'a' : 'b')", 6)
+            .collect::<Vec<_>>()
+            .join("+");
+        let copy_overflow = format!("'{path_at_limit}' + {}", choices(&vec![String::new(); 128]));
+        let mut work_overflow = "(flag ? '' : '')".to_owned();
+        for _ in 0..11 {
+            work_overflow = format!("({work_overflow}+{work_overflow})");
+        }
+        // Distinct empty-source choices cannot spend unbounded copy work on
+        // the same long prefix. Repeated concatenation also has an independent
+        // work budget even when every final alternative is identical.
+        let copy_overflow = format!("({copy_overflow}){}", "+''".repeat(17));
+        for expression in [
+            format!("flag ? '{path_at_limit}x' : 'b'"),
+            format!(
+                "flag ? '{}' : 'b'",
+                "é".repeat(super::super::MAX_PATH / 2 + 1)
+            ),
+            format!(
+                "flag ? 'a' : '{}'",
+                "\\\n".repeat(MAX_STRING_EXPRESSION_BYTES / 2 + 1)
+            ),
+            depth_overflow,
+            product_overflow,
+            copy_overflow,
+            work_overflow,
+        ] {
+            assert_eq!(
+                scan_string_requests(&expression, SourceLanguage::JavaScript),
+                vec![None],
+                "bounded expression with {} bytes",
+                expression.len()
+            );
+        }
+        let source = "require(flag ? './one.cjs' : './two.cjs');";
+        let mut budget = Budget {
+            sites: MAX_SITES - 1,
+            ..Budget::default()
+        };
+        assert_eq!(
+            scan(
+                &mut Parser::new(),
+                source.as_bytes(),
+                SourceLanguage::JavaScript,
+                &mut budget
+            )
+            .unwrap_err()
+            .code,
+            "ERR_MODULE_GRAPH_LIMIT"
+        );
+    }
+
+    #[test]
+    fn conditional_request_tests_keep_nested_loads_and_loader_mutation_visible() {
+        for (source, expected_kind) in [
+            (
+                "require(flag ? './one.cjs' : './two.cjs');",
+                LoadKind::Require,
+            ),
+            (
+                "require.resolve(flag ? './one.cjs' : './two.cjs');",
+                LoadKind::Require,
+            ),
+            (
+                "const load = require; load(flag ? './one.cjs' : './two.cjs');",
+                LoadKind::Require,
+            ),
+            (
+                "import(flag ? './one.cjs' : './two.cjs');",
+                LoadKind::DynamicImport,
+            ),
+            (
+                "import {createRequire} from 'node:module'; const load = createRequire(import.meta.url); load(flag ? './one.cjs' : './two.cjs');",
+                LoadKind::Require,
+            ),
+        ] {
+            let (loads, notices, analyzed) = scan(
+                &mut Parser::new(),
+                source.as_bytes(),
+                SourceLanguage::JavaScript,
+                &mut Budget::default(),
+            )
+            .unwrap();
+            assert!(analyzed && notices.is_empty(), "{source}: {notices:?}");
+            let choices = loads
+                .iter()
+                .filter(|load| load.kind == expected_kind)
+                .collect::<Vec<_>>();
+            assert_eq!(choices.len(), 2, "{source}: {loads:?}");
+            assert_eq!(choices[0].site, choices[1].site);
+            assert_eq!(choices[0].specifier.as_deref(), Some("./one.cjs"));
+            assert_eq!(choices[1].specifier.as_deref(), Some("./two.cjs"));
+        }
+        let (loads, notices, analyzed) = scan(
+            &mut Parser::new(),
+            b"require(require('./guard.cjs') ? './one.cjs' : './two.cjs');",
+            SourceLanguage::JavaScript,
+            &mut Budget::default(),
+        )
+        .unwrap();
+        assert!(analyzed && notices.is_empty());
+        assert_eq!(loads.len(), 3);
+        assert_eq!(loads[2].specifier.as_deref(), Some("./guard.cjs"));
+        for source in [
+            "require((require = replacement) ? './one.cjs' : './two.cjs');",
+            "require(eval('flag') ? './one.cjs' : './two.cjs');",
+        ] {
+            let (_, notices, _) = scan(
+                &mut Parser::new(),
+                source.as_bytes(),
+                SourceLanguage::JavaScript,
+                &mut Budget::default(),
+            )
+            .unwrap();
+            assert!(
+                !notices.is_empty(),
+                "condition concealed unsafe code: {source}"
+            );
+        }
+        let (loads, _, _) = scan(
+            &mut Parser::new(),
+            b"require(import(name) ? './one.cjs' : './two.cjs');",
+            SourceLanguage::JavaScript,
+            &mut Budget::default(),
+        )
+        .unwrap();
+        assert!(
+            loads
+                .iter()
+                .any(|load| load.kind == LoadKind::DynamicImport && load.specifier.is_none())
+        );
+    }
+
+    #[test]
+    fn conditional_package_routes_remain_pinned_during_capsule_replay() {
+        use super::registry::{PinnedModuleRegistry, RequestStyle};
+        let root = tempfile::tempdir().unwrap();
+        let source = "module.exports = require(flag ? './production.cjs' : './development.cjs');";
+        put(root.path(), "app.cjs", "require('conditional-package');");
+        put(
+            root.path(),
+            "node_modules/conditional-package/package.json",
+            r#"{"main":"index.cjs"}"#,
+        );
+        put(
+            root.path(),
+            "node_modules/conditional-package/index.cjs",
+            source,
+        );
+        put(
+            root.path(),
+            "node_modules/conditional-package/production.cjs",
+            "module.exports = 1;",
+        );
+        put(
+            root.path(),
+            "node_modules/conditional-package/development.cjs",
+            "module.exports = 2;",
+        );
+        let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        assert!(graph.report().fully_resolved);
+        assert!(!graph.report().runtime_completeness);
+        assert_eq!(graph.report().modules.len(), 4);
+        let pin = graph.report().input_hash.clone();
+        let capsule = super::capsule::encode(&graph).unwrap();
+        put(
+            root.path(),
+            "node_modules/conditional-package/production.cjs",
+            "throw new Error('live drift');",
+        );
+        put(
+            root.path(),
+            "node_modules/conditional-package/development.cjs",
+            "throw new Error('live drift');",
+        );
+        put(
+            root.path(),
+            "node_modules/conditional-package/uncaptured.cjs",
+            "module.exports = 3;",
+        );
+        let replayed = super::capsule::replay(capsule.bytes(), capsule.digest()).unwrap();
+        assert_eq!(replayed.report(), graph.report());
+        let registry = PinnedModuleRegistry::new(replayed, &pin).unwrap();
+        let package = registry
+            .lookup(
+                Some(registry.entrypoint()),
+                "conditional-package",
+                RequestStyle::Require,
+            )
+            .unwrap();
+        assert_eq!(package.source(), source);
+        for (specifier, expected) in [
+            ("./production.cjs", "module.exports = 1;"),
+            ("./development.cjs", "module.exports = 2;"),
+        ] {
+            let module = registry
+                .lookup(Some(package.id()), specifier, RequestStyle::Require)
+                .unwrap();
+            assert_eq!(module.source(), expected);
+        }
+        for (specifier, style) in [
+            ("./uncaptured.cjs", RequestStyle::Require),
+            ("./production.cjs", RequestStyle::Import),
+        ] {
+            assert_eq!(
+                registry
+                    .lookup(Some(package.id()), specifier, style)
+                    .err()
+                    .unwrap()
+                    .code,
+                "ERR_MODULE_REGISTRY_ROUTE"
+            );
+        }
     }
 
     #[test]
