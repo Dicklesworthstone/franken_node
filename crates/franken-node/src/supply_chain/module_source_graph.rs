@@ -1348,6 +1348,7 @@ fn scan(
     // One inherited bit per cursor depth, not an ancestor scan at every node.
     // All syntax still consumes the global budget, including erased subtrees.
     let mut type_context = vec![false];
+    let mut enum_context = vec![false];
     loop {
         budget.ast_nodes += 1;
         if budget.ast_nodes > MAX_AST_NODES {
@@ -1356,6 +1357,8 @@ fn scan(
         let node = cursor.node();
         let erased = language.is_typescript()
             && (*type_context.last().expect("root context") || erased_region(node));
+        let in_enum =
+            *enum_context.last().expect("root context") || node.kind() == "enum_declaration";
         let mut issue = None;
         let request = match node.kind() {
             "import_statement" => node
@@ -1587,6 +1590,24 @@ fn scan(
                 "non-erasable TypeScript or decorators require a configured transform; injected dependencies are not inferred",
             ));
         }
+        if language.is_typescript() && !erased && in_enum {
+            if enum_member_name(node)
+                && (node.kind() != "property_identifier"
+                    || !text[node.byte_range()]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')))
+            {
+                issue = Some((
+                    "TYPESCRIPT_TRANSFORM_REQUIRED",
+                    "quoted, escaped or non-ASCII enum member names require decoded engine member bindings",
+                ));
+            } else if enum_helper_capture(node, text) {
+                issue = Some((
+                    "TYPESCRIPT_TRANSFORM_REQUIRED",
+                    "enum binding may capture a normalization helper; hygienic engine normalization is required",
+                ));
+            }
+        }
         if let Some((kind, argument)) = request {
             let mut specifiers = request_literals(argument, text, &strings);
             if specifiers.is_none() && !erased && !strings_discovered {
@@ -1627,6 +1648,7 @@ fn scan(
         }
         if cursor.goto_first_child() {
             type_context.push(erased);
+            enum_context.push(in_enum);
             continue;
         }
         loop {
@@ -1637,8 +1659,56 @@ fn scan(
                 return Ok((loads, notices, true));
             }
             type_context.pop();
+            enum_context.pop();
         }
     }
+}
+
+/// The engine's current enum lowering has fixed helper bindings. Until it
+/// allocates fresh names, their capture must not change a source initializer's
+/// meaning. Property accesses and string values do not bind those helpers.
+fn enum_helper_capture(node: Node<'_>, source: &str) -> bool {
+    let binding = match node.kind() {
+        "identifier"
+        | "type_identifier"
+        | "shorthand_property_identifier"
+        | "shorthand_property_identifier_pattern" => true,
+        "property_identifier" => enum_member_name(node),
+        _ => false,
+    };
+    if !binding {
+        return false;
+    }
+    let spelling = &source[node.byte_range()];
+    let helper = |name: &str| matches!(name, "__enum" | "__enum_next" | "__value");
+    if !spelling.contains('\\') {
+        return helper(spelling);
+    }
+    // The syntax tree already validated the identifier. Reuse the bounded
+    // Unicode decoder so escaped spellings cannot evade the same refusal.
+    let mut units = Vec::new();
+    if append_string_segment(
+        spelling,
+        false,
+        &mut units,
+        &mut StringExpressionBudget::default(),
+    )
+    .is_none()
+    {
+        return true;
+    }
+    String::from_utf16(&units).map_or(true, |name| helper(&name))
+}
+
+fn enum_member_name(node: Node<'_>) -> bool {
+    node.is_named()
+        && node.parent().is_some_and(|parent| {
+            (parent.kind() == "enum_body" && !matches!(node.kind(), "enum_assignment" | "comment"))
+                || (parent.kind() == "enum_assignment"
+                    && parent
+                        .child_by_field_name("name")
+                        .is_some_and(|name| name.id() == node.id()))
+        })
 }
 
 /// Only a direct anonymous keyword is a modifier. A default binding named
@@ -6030,6 +6100,100 @@ interface Names { eval: Function; }
                     .code,
                 "ERR_MODULE_REGISTRY_FORMAT",
                 "capture must not enable a transform-free TypeScript registry"
+            );
+        }
+    }
+
+    #[test]
+    fn enum_normalization_helper_captures_keep_routes_but_block_admission() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "value.cjs", "module.exports=1;");
+        for source in [
+            "const __value=1;\nenum E { A=__value, Loaded=require('./value.cjs') }",
+            "const __enum=1;\nenum E { A=__enum, Loaded=require('./value.cjs') }",
+            "const __enum_next=1;\nenum E { A=__enum_next, Loaded=require('./value.cjs') }",
+            "enum E { __enum=1, Loaded=require('./value.cjs') }",
+            "enum E { __enum_next=1, Loaded=require('./value.cjs') }",
+            "enum E { __value=1, A=__value, Loaded=require('./value.cjs') }",
+            r"const __value=1;
+enum E { A=\u005f_value, Loaded=require('./value.cjs') }",
+            r"const __enum=1;
+enum E { A=__enu\u006d, Loaded=require('./value.cjs') }",
+            r"const __enum_next=1;
+enum E { A=\u{5f}_enum_next, Loaded=require('./value.cjs') }",
+        ] {
+            put(root.path(), "app.ts", source);
+            let g = typed_graph(root.path(), "app.ts");
+            assert!(!g.report.fully_resolved, "{source}");
+            assert_eq!(paths(&g), ["app.ts", "value.cjs"], "{source}");
+            assert_eq!(g.report.edges.len(), 1, "{source}");
+            assert_eq!(g.report.edges[0].state, EdgeState::Resolved);
+            assert!(
+                g.report.diagnostics.iter().any(|d| {
+                    d.code == "TYPESCRIPT_TRANSFORM_REQUIRED"
+                        && d.message.contains("normalization helper")
+                }),
+                "{source}: {:?}",
+                g.report.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn enum_member_names_need_the_engines_exact_binding_contract() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "value.cjs", "module.exports=1;");
+        for source in [
+            "enum E { 'A'=1, B=A+1, Loaded=require('./value.cjs') }",
+            "enum E { \"A\"=1, B=A+1, Loaded=require('./value.cjs') }",
+            r"enum E { \u0041=1, B=A+1, Loaded=require('./value.cjs') }",
+            r"enum E { \u{41}=1, B=A+1, Loaded=require('./value.cjs') }",
+            "enum E { Å=1, B=Å+1, Loaded=require('./value.cjs') }",
+        ] {
+            put(root.path(), "app.ts", source);
+            let g = typed_graph(root.path(), "app.ts");
+            assert!(!g.report.fully_resolved, "{source}");
+            assert_eq!(paths(&g), ["app.ts", "value.cjs"], "{source}");
+            assert_eq!(g.report.edges.len(), 1, "{source}");
+            assert_eq!(g.report.edges[0].state, EdgeState::Resolved);
+            assert!(
+                g.report.diagnostics.iter().any(|d| {
+                    d.code == "TYPESCRIPT_TRANSFORM_REQUIRED"
+                        && d.message.contains("decoded engine member bindings")
+                }),
+                "{source}: {:?}",
+                g.report.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn enum_hygiene_guard_ignores_properties_strings_outer_bindings_and_erased_types() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "value.cjs", "module.exports=1;");
+        for source in [
+            "const __enum=1, __enum_next=2, __value=3;\nenum E { A=require('./value.cjs') }",
+            "enum E { A=({__value:1}).__value, B='__enum', C='__enum_next', Loaded=require('./value.cjs') }",
+            "enum E { /* __enum __enum_next __value */ A=require('./value.cjs') }",
+            "declare enum __enum { __value=1 }\nenum E { A=require('./value.cjs') }",
+            "enum E { A=1 as import('type-only').__value, Loaded=require('./value.cjs') }",
+            "enum E { A=require('./value.cjs') }\nconst __value=1;",
+        ] {
+            put(root.path(), "app.ts", source);
+            let g = typed_graph(root.path(), "app.ts");
+            assert!(
+                g.report.fully_resolved,
+                "{source}: {:?}",
+                g.report.diagnostics
+            );
+            assert_eq!(paths(&g), ["app.ts", "value.cjs"], "{source}");
+            assert_eq!(
+                g.report
+                    .edges
+                    .iter()
+                    .filter(|e| e.state == EdgeState::Resolved)
+                    .count(),
+                1
             );
         }
     }

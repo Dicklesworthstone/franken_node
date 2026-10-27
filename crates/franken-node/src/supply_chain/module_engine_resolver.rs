@@ -1829,7 +1829,7 @@ mod tests {
 
         let root = tempfile::tempdir().unwrap();
         let source = r#"
-enum State { Ready = require('./seed.cjs'), Next }
+enum State { Ready = require('./seed.cjs'), Next = Ready + 1 }
 enum Label { Ready = 'ready', Done = 'done' }
 module.exports = { State, Label, offset: require('./offset.cjs') };
 "#;
@@ -1951,6 +1951,8 @@ module.exports = { State, Label, offset: require('./offset.cjs') };
             "namespace Values { export const value: number = 42; }\nmodule.exports=Values;\n",
             "namespace Values { export class Box {} }\nmodule.exports=Values;\n",
             "class Value { constructor(public value: number) {} }\nmodule.exports=Value;\n",
+            "const __value=42;\nenum Values { Value=__value }\nmodule.exports=Values;\n",
+            "enum Values { 'Value'=41, Next=Value+1 }\nmodule.exports=Values;\n",
         ] {
             let root = tempfile::tempdir().unwrap();
             put(root.path(), "app.cts", source);
@@ -2379,7 +2381,7 @@ console.log(Count.Next);
                     root.path(),
                     "node_modules/enum-kit/index.cts",
                     r#"
-enum Count { Start = require('./seed.cjs'), Next, Combined = Start | Next }
+enum Count { Start = require('./seed.cjs'), Next = Start + 1, Combined = Start | Next }
 enum Label { Ready = 'ready', Done = 'done' }
 module.exports = { Count, Label };
 "#,
@@ -2389,7 +2391,7 @@ module.exports = { Count, Label };
                     "node_modules/enum-kit/index.mts",
                     r#"
 import { seed } from './seed.mjs';
-export enum Count { Start = seed, Next, Combined = Start | Next }
+export enum Count { Start = seed, Next = Start + 1, Combined = Start | Next }
 export enum Label { Ready = 'ready', Done = 'done' }
 "#,
                 );
