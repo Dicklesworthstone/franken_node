@@ -1333,7 +1333,10 @@ def _require_file_output_evidence(report: dict, snapshots: dict,
             targets = dict(inventory[row["test"]].expectations.files)
             if not targets:
                 continue
-            observed = row[role].get("file_outputs")
+            capture = row.get(role)
+            if not isinstance(capture, dict):
+                raise ValueError("incomplete file output observations cannot certify reproduction: missing runtime observation")
+            observed = capture.get("file_outputs")
             if not isinstance(observed, dict) or observed.keys() != targets.keys():
                 raise ValueError("file-dependent replay requires measured file output evidence; recapture the case")
             if any(value.get("complete") is not True for value in observed.values()):
