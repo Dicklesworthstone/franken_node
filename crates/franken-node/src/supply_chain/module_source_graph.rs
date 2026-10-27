@@ -3,7 +3,7 @@
 //! One resolver owns every source, manifest, link and negative probe for the
 //! whole graph. This is a conservative source graph, not execution or proof of
 //! all runtime dependencies: literal deferred loads are included even in dead
-//! branches; exact string concatenations, templates, proven top-level constants
+//! branches; exact string concatenations, templates, proven lexical constants
 //! and bounded conditional string choices add no runtime lookup authority.
 //! Dynamic/indirect loaders and unsupported syntax stay explicit.
 //! TypeScript follows explicit runtime syntax, not tsconfig-dependent emit.
@@ -922,8 +922,11 @@ impl<'source> CreateRequireBindings<'source> {
 /// Immutable primitive values may flow into module requests, but a matching
 /// spelling alone is not a binding proof. Reject a name if any runtime use is
 /// a second declaration, a write, or a context we cannot classify. This is
-/// deliberately stricter than lexical scope resolution: even an unrelated
-/// inner shadow prevents inference for that name throughout the module.
+/// deliberately stricter than full lexical scope resolution: even an unrelated
+/// inner shadow prevents inference for that name throughout the module. A
+/// unique const may belong to a program or statement block, including function
+/// bodies. Its value is available only after its initializer and inside that
+/// exact lexical scope; it never supplies routes to a sibling or outer scope.
 #[derive(Default)]
 struct ConstStringBindings<'source> {
     values: BTreeMap<&'source str, ConstStringValue>,
@@ -932,6 +935,7 @@ struct ConstStringBindings<'source> {
 struct ConstStringValue {
     alternatives: StringAlternatives,
     available_after: usize,
+    scope_end: usize,
 }
 
 impl<'source> ConstStringBindings<'source> {
@@ -942,52 +946,12 @@ impl<'source> ConstStringBindings<'source> {
         budget: &mut Budget,
     ) -> Result<Self> {
         let mut candidates = Vec::new();
-        let mut declarations = BTreeMap::new();
-        let mut invalid = BTreeSet::new();
-        let mut statements = root.walk();
-        for statement in root.named_children(&mut statements) {
-            if statement.kind() != "lexical_declaration" || !keyword(statement, "const") {
-                continue;
-            }
-            let mut children = statement.walk();
-            for declaration in statement.named_children(&mut children) {
-                if declaration.kind() != "variable_declarator" {
-                    continue;
-                }
-                let (Some(name), Some(value)) = (
-                    declaration.child_by_field_name("name"),
-                    declaration.child_by_field_name("value"),
-                ) else {
-                    continue;
-                };
-                if name.kind() != "identifier"
-                    || !matches!(
-                        runtime_operand(value).kind(),
-                        "string"
-                            | "template_string"
-                            | "identifier"
-                            | "ternary_expression"
-                            | "binary_expression"
-                    )
-                {
-                    continue;
-                }
-                let spelling = name.utf8_text(source.as_bytes()).unwrap_or("");
-                if spelling.contains('\\') {
-                    continue;
-                }
-                if candidates.len() >= MAX_SITES {
-                    return Err(limit());
-                }
-                if declarations.insert(spelling, name.id()).is_some() {
-                    invalid.insert(spelling);
-                }
-                candidates.push((spelling, value, declaration.end_byte()));
-            }
-        }
-        if candidates.is_empty() {
-            return Ok(Self::default());
-        }
+        // Remember the sole non-read occurrence of each name. A second
+        // declaration, mutation or unknown use makes it unproved regardless of
+        // which one appears first. Borrowed names and entries are bounded by
+        // the shared AST budget. This combines nested-declaration discovery
+        // and binding proof in one walk instead of adding a separate pass.
+        let mut non_reads = BTreeMap::new();
 
         // This proof walk shares the capture's syntax budget. It cannot hide
         // work in a separate, unbounded traversal before the ordinary scanner.
@@ -1002,6 +966,34 @@ impl<'source> ConstStringBindings<'source> {
             let erased = language.is_typescript()
                 && (*type_context.last().expect("root context") || erased_region(node));
             if !erased
+                && node.kind() == "variable_declarator"
+                && let Some(scope) = const_string_scope(node)
+                && let (Some(name), Some(value)) = (
+                    node.child_by_field_name("name"),
+                    node.child_by_field_name("value"),
+                )
+                && name.kind() == "identifier"
+                && matches!(
+                    runtime_operand(value).kind(),
+                    "string"
+                        | "template_string"
+                        | "identifier"
+                        | "ternary_expression"
+                        | "binary_expression"
+                )
+            {
+                if candidates.len() >= MAX_SITES {
+                    return Err(limit());
+                }
+                candidates.push((
+                    name.utf8_text(source.as_bytes()).unwrap_or(""),
+                    value,
+                    node.end_byte(),
+                    scope.end_byte(),
+                    name.id(),
+                ));
+            }
+            if !erased
                 && matches!(
                     node.kind(),
                     "identifier"
@@ -1015,12 +1007,11 @@ impl<'source> ConstStringBindings<'source> {
                 if spelling.contains('\\') {
                     return Ok(Self::default());
                 }
-                if declarations
-                    .get(spelling)
-                    .is_some_and(|id| *id != node.id())
-                    && !const_string_read(node)
-                {
-                    invalid.insert(spelling);
+                if !const_string_read(node) {
+                    non_reads
+                        .entry(spelling)
+                        .and_modify(|id| *id = None)
+                        .or_insert(Some(node.id()));
                 }
             }
             if cursor.goto_first_child() {
@@ -1036,8 +1027,8 @@ impl<'source> ConstStringBindings<'source> {
                     // Bound the total retained values and alias-copy work for
                     // all constants, not merely each initializer in isolation.
                     let mut inference_budget = FiniteStringBudget::default();
-                    for (spelling, value, available_after) in candidates {
-                        if !invalid.contains(spelling)
+                    for (spelling, value, available_after, scope_end, declaration) in candidates {
+                        if non_reads.get(spelling) == Some(&Some(declaration))
                             && let Some(alternatives) =
                                 finite_strings(value, source, &bindings, &mut inference_budget, 0)
                         {
@@ -1046,6 +1037,7 @@ impl<'source> ConstStringBindings<'source> {
                                 ConstStringValue {
                                     alternatives,
                                     available_after,
+                                    scope_end,
                                 },
                             );
                         }
@@ -1056,6 +1048,22 @@ impl<'source> ConstStringBindings<'source> {
             }
         }
     }
+}
+
+/// Only a lexical declaration directly owned by a block or the program gives
+/// us a source-range scope. For-loop headers, switch clauses and destructuring
+/// need their own binding model and remain opaque. Exporting a const does not
+/// change the surrounding program scope or allow later mutation.
+fn const_string_scope(declaration: Node<'_>) -> Option<Node<'_>> {
+    let statement = declaration.parent()?;
+    if statement.kind() != "lexical_declaration" || !keyword(statement, "const") {
+        return None;
+    }
+    let mut scope = statement.parent()?;
+    if scope.kind() == "export_statement" {
+        scope = scope.parent()?;
+    }
+    matches!(scope.kind(), "program" | "statement_block").then_some(scope)
 }
 
 /// Classify expression reads, not declarations by exclusion. Unknown syntax
@@ -1997,7 +2005,7 @@ fn finite_strings(
             let value = bindings
                 .values
                 .get(node.utf8_text(source.as_bytes()).ok()?)?;
-            if node.start_byte() < value.available_after {
+            if node.start_byte() < value.available_after || node.end_byte() > value.scope_end {
                 return None;
             }
             let mut alternatives = BTreeSet::new();
@@ -2484,6 +2492,84 @@ mod tests {
     }
 
     #[test]
+    fn lexical_const_request_strings_capture_function_blocks_and_exports() {
+        for (source, language, expected) in [
+            (
+                "{const target='./dep.cjs'; require(target); require.resolve(target);}",
+                SourceLanguage::JavaScript,
+                vec!["./dep.cjs", "./dep.cjs"],
+            ),
+            (
+                "function nested(){const target='./dep.cjs'; return require(target);}",
+                SourceLanguage::JavaScript,
+                vec!["./dep.cjs"],
+            ),
+            (
+                "const prefix='./'; function nested(){const leaf=flag?'one':'two'; const target=`${prefix}${leaf}.cjs`; return ()=>require(target);}",
+                SourceLanguage::JavaScript,
+                vec!["./one.cjs", "./two.cjs"],
+            ),
+            (
+                "const loader={load(){const target='./dep.cjs'; return require(target);}};",
+                SourceLanguage::JavaScript,
+                vec!["./dep.cjs"],
+            ),
+            (
+                "async function load(){const target='./dep.mjs'; return import(target);}",
+                SourceLanguage::JavaScript,
+                vec!["./dep.mjs"],
+            ),
+            (
+                "import {createRequire} from 'node:module'; const load=createRequire(import.meta.url); function nested(){const target='./dep.cjs'; return load(target);}",
+                SourceLanguage::JavaScript,
+                vec!["node:module", "./dep.cjs"],
+            ),
+            (
+                "export const target='./dep.mjs'; import(target);",
+                SourceLanguage::JavaScript,
+                vec!["./dep.mjs"],
+            ),
+            (
+                "function load(){type target=string; const target=('./dep.cjs' as const); return require((target satisfies string)!);}",
+                SourceLanguage::TypeScript,
+                vec!["./dep.cjs"],
+            ),
+        ] {
+            assert_eq!(
+                scan_source_requests(source, language),
+                expected.into_iter().map(|value| Some(value.to_owned())).collect::<Vec<_>>(),
+                "{source}",
+            );
+        }
+    }
+
+    #[test]
+    fn lexical_const_request_strings_never_escape_scope_or_skip_binding_proof() {
+        for source in [
+            "{const target='./dep.cjs';} require(target);",
+            "{const target='./dep.cjs';} {require(target);}",
+            "function first(){const target='./dep.cjs';} function second(){return require(target);}",
+            "function nested(){const target='./dep.cjs';} require(target);",
+            "{const target='./dep.cjs';} const alias=target; require(alias);",
+            "{require(target); const target='./dep.cjs';}",
+            "function nested(){const first=second; const second='./dep.cjs'; return require(first);}",
+            "function nested(){const target='./dep.cjs'; target='./other.cjs'; return require(target);}",
+            "function nested(target){{const target='./dep.cjs'; return require(target);}}",
+            "function nested(){const target='./dep.cjs'; function shadow(target){} return require(target);}",
+            "function nested(){const target=flag?'./dep.cjs':unknown; return require(target);}",
+            "function first(){const target='./dep.cjs'; return require(target);} function second(){const target='./other.cjs';}",
+            "for(const target of ['./dep.cjs']){require(target);}",
+            "switch(flag){case 1: const target='./dep.cjs'; require(target);}",
+        ] {
+            assert_eq!(
+                scan_source_requests(source, SourceLanguage::JavaScript),
+                vec![None],
+                "unproved lexical binding: {source}",
+            );
+        }
+    }
+
+    #[test]
     fn const_request_strings_reject_shadowing_mutation_and_unknown_bindings() {
         for interference in [
             "target='./other.cjs';",
@@ -2525,8 +2611,6 @@ mod tests {
             "const target=getName(); require(target);",
             "const target=names.path; require(target);",
             "const {target}=names; require(target);",
-            "{const target='./dep.cjs'; require(target);}",
-            "function nested(){const target='./dep.cjs'; return require(target);}",
             "const targ\\u0065t='./dep.cjs'; require(target);",
         ] {
             assert_eq!(
@@ -2782,6 +2866,65 @@ mod tests {
         let changed = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
         assert_ne!(changed.report().input_hash, pin);
         assert!(PinnedModuleRegistry::new(changed, &pin).is_err());
+    }
+
+    #[test]
+    fn lexical_const_npm_graph_replays_sources_absence_and_exact_routes() {
+        use super::registry::{PinnedModuleRegistry, RequestStyle};
+
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.cjs", "module.exports=require('scoped-fixture');");
+        put(root.path(), "node_modules/scoped-fixture/package.json", r#"{"main":"index.cjs"}"#);
+        let package_source = r#"
+const prefix='./';
+function load(flag) {
+    const leaf=flag?'one':'two';
+    { const target=prefix+leaf+'.cjs'; return require(target); }
+}
+function lookup() { const selected='./one.cjs'; return require.resolve(selected); }
+function optional() {
+    const absent='optional-addon';
+    try { return require(absent); } catch(error) { return error.code; }
+}
+module.exports={load,lookup,optional};
+"#;
+        put(root.path(), "node_modules/scoped-fixture/index.cjs", package_source);
+        put(root.path(), "node_modules/scoped-fixture/one.cjs", "module.exports=41;");
+        put(root.path(), "node_modules/scoped-fixture/two.cjs", "module.exports=42;");
+        let captured = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        assert!(captured.report().diagnostics.is_empty());
+        assert_eq!(captured.report().modules.len(), 4);
+        assert_eq!(captured.report().edges.len(), 5);
+        assert!(!captured.report().fully_resolved, "optional absence remains explicit");
+        let pin = captured.report().input_hash.clone();
+        let encoded = super::capsule::encode(&captured).unwrap();
+        std::fs::rename(root.path().join("node_modules"), root.path().join("original_packages")).unwrap();
+        put(root.path(), "node_modules/scoped-fixture/index.js", "throw new Error('live package');");
+        put(root.path(), "node_modules/optional-addon/index.js", "module.exports=999;");
+
+        let replayed = super::capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+        assert_eq!(replayed.report(), captured.report());
+        let registry = PinnedModuleRegistry::new(replayed, &pin).unwrap();
+        assert_eq!(registry.summary().routes, 4);
+        assert_eq!(registry.summary().missing_routes, 1);
+        let package = registry.lookup(Some(registry.entrypoint()), "scoped-fixture", RequestStyle::Require).unwrap();
+        assert_eq!(package.source(), package_source);
+        for (request, expected) in [("./one.cjs", "module.exports=41;"), ("./two.cjs", "module.exports=42;")] {
+            assert_eq!(registry.lookup(Some(package.id()), request, RequestStyle::Require).unwrap().source(), expected);
+        }
+        assert_eq!(registry.lookup(Some(package.id()), "optional-addon", RequestStyle::Require).err().unwrap().code,
+            "MODULE_NOT_FOUND");
+        for (importer, request, style) in [
+            (registry.entrypoint(), "./one.cjs", RequestStyle::Require),
+            (package.id(), "./one.cjs", RequestStyle::Import),
+            (package.id(), "./extra.cjs", RequestStyle::Require),
+        ] {
+            assert_eq!(registry.lookup(Some(importer), request, style).err().unwrap().code,
+                "ERR_MODULE_REGISTRY_ROUTE");
+        }
+        let changed = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        assert_eq!(PinnedModuleRegistry::new(changed, &pin).err().unwrap().code,
+            "ERR_MODULE_REGISTRY_PIN_MISMATCH");
     }
 
     #[test]

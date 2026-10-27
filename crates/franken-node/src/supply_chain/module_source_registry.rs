@@ -57,10 +57,15 @@ impl ModuleKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum RegisteredTarget {
-    Module { id: String },
-    /// A captured require or dynamic import that deterministically found no module.
-    /// This is a terminal failure, never an invitation to probe the live host.
-    Missing { error: ResolutionError },
+    Module {
+        id: String,
+    },
+    /// A captured require or dynamic import that deterministically yields no
+    /// module, including a package-map refusal. This is a terminal failure,
+    /// never an invitation to probe the live host.
+    Missing {
+        error: ResolutionError,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -313,13 +318,17 @@ impl PinnedModuleRegistry {
                             (edge.kind, edge.error.as_ref().map(|failure| failure.code)),
                             (LoadKind::Require, Some("MODULE_NOT_FOUND"))
                                 | (LoadKind::DynamicImport, Some("ERR_MODULE_NOT_FOUND"))
+                                | (
+                                    LoadKind::Require | LoadKind::DynamicImport,
+                                    Some("ERR_PACKAGE_PATH_NOT_EXPORTED" | "ERR_PACKAGE_IMPORT_NOT_DEFINED"),
+                                )
                         ) =>
                 {
                     // Optional require/import() dependencies are ordinary
                     // control flow. Capture has sealed the negative probes
-                    // too; preserve the exact missing result without claiming
-                    // resolution or predicting a catch. Static imports and
-                    // reexports still require a real target during admission.
+                    // and package-map inputs too; preserve the exact result
+                    // without claiming resolution or predicting a catch.
+                    // Static imports and reexports still require a real target.
                     has_missing_routes = true;
                 }
                 _ => return Err(incomplete()),
@@ -1015,6 +1024,110 @@ mod tests {
     }
 
     #[test]
+    fn captured_package_map_errors_keep_exact_routes_and_survive_replay() {
+        for (entrypoint, source, style) in [
+            (
+                "app.cjs",
+                "try { require('pkg/private'); } catch (e) {} try { require.resolve('#optional'); } catch (e) {} require('./fallback.cjs');",
+                RequestStyle::Require,
+            ),
+            (
+                "app.mjs",
+                "import('pkg/private').catch(e => e.code); import('#optional').catch(e => e.code); import './fallback.cjs';",
+                RequestStyle::Import,
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            put(root.path(), entrypoint, source);
+            put(
+                root.path(),
+                "package.json",
+                r##"{"imports":{"#present":"./fallback.cjs"}}"##,
+            );
+            put(root.path(), "fallback.cjs", "module.exports = 42;");
+            put(
+                root.path(),
+                "node_modules/pkg/package.json",
+                r#"{"exports":{".":"./index.cjs"}}"#,
+            );
+            put(
+                root.path(),
+                "node_modules/pkg/private.cjs",
+                "throw new Error('private source');",
+            );
+            let graph = capture(root.path(), entrypoint, GraphOptions::default()).unwrap();
+            assert!(!graph.report().fully_resolved);
+            assert!(graph.report().diagnostics.is_empty());
+            assert_eq!(graph.report().modules.len(), 2);
+            assert!(
+                !graph
+                    .report()
+                    .probes
+                    .iter()
+                    .any(|probe| probe.path.ends_with("private.cjs"))
+            );
+            let pin = graph.report().input_hash.clone();
+            let encoded = capsule::encode(&graph).unwrap();
+            let registry = PinnedModuleRegistry::new(graph, &pin).ok().unwrap();
+            assert_eq!(registry.summary().missing_routes, 2);
+
+            // The host now admits both requests, but the reviewed registry
+            // and replay capsule must retain their original package failures.
+            put(
+                root.path(),
+                "package.json",
+                r##"{"imports":{"#optional":"./fallback.cjs"}}"##,
+            );
+            put(
+                root.path(),
+                "node_modules/pkg/package.json",
+                r#"{"exports":{"./private":"./private.cjs"}}"#,
+            );
+            let changed = capture(root.path(), entrypoint, GraphOptions::default()).unwrap();
+            assert!(changed.report().fully_resolved);
+            assert_ne!(changed.report().input_hash, pin);
+            let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+            let restored = PinnedModuleRegistry::new(replayed, &pin).ok().unwrap();
+            for registry in [&registry, &restored] {
+                for (request, expected) in [
+                    ("pkg/private", "ERR_PACKAGE_PATH_NOT_EXPORTED"),
+                    ("#optional", "ERR_PACKAGE_IMPORT_NOT_DEFINED"),
+                ] {
+                    assert_eq!(
+                        registry
+                            .lookup(Some(registry.entrypoint()), request, style)
+                            .err()
+                            .unwrap()
+                            .code,
+                        expected
+                    );
+                    let other_style = if style == RequestStyle::Import {
+                        RequestStyle::Require
+                    } else {
+                        RequestStyle::Import
+                    };
+                    assert_eq!(
+                        registry
+                            .lookup(Some(registry.entrypoint()), request, other_style)
+                            .err()
+                            .unwrap()
+                            .code,
+                        "ERR_MODULE_REGISTRY_ROUTE"
+                    );
+                }
+                assert_eq!(
+                    registry
+                        .lookup(Some(registry.entrypoint()), "#uncaptured", style)
+                        .err()
+                        .unwrap()
+                        .code,
+                    "ERR_MODULE_REGISTRY_ROUTE"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn replayed_missing_require_stays_absent_after_an_install_or_source_change() {
         let root = tempfile::tempdir().unwrap();
         put(root.path(), "app.cjs", "require('./optional.cjs');");
@@ -1117,11 +1230,12 @@ mod tests {
             "import './absent.mjs';",
             "export * from './absent.mjs';",
             "import('./absent.mjs'); import './absent.mjs';",
-            "import('pkg/private');",
+            "import 'pkg/private';",
+            "export * from 'pkg/private';",
+            "import '#optional';",
             "import('broken');",
             "import('node:unknown');",
             "import(variable);",
-            "require('pkg/private');",
             "require('broken');",
             "require('node:unknown');",
             "require(variable);",

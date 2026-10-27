@@ -424,11 +424,13 @@ fn registry_error(
 ) -> Box<ResolutionError> {
     let code = match error.code {
         "ERR_MODULE_REGISTRY_REFERRER" => ResolutionErrorCode::InvalidReferrer,
-        // Only a captured negative require or import() lookup is a
-        // guest-catchable absence. The engine retains the distinction between
-        // a CommonJS throw and a rejected dynamic-import promise. Unknown
-        // routes and policy denials never become optional-dependency absence.
+        // Only admitted, captured lookup failures become guest control flow.
+        // Keep package-map failures distinct from absence. The engine retains
+        // CommonJS throws versus dynamic-import rejections; unknown routes and
+        // runtime policy denials never become optional-dependency fallback.
         "MODULE_NOT_FOUND" | "ERR_MODULE_NOT_FOUND" => ResolutionErrorCode::ModuleNotFound,
+        "ERR_PACKAGE_PATH_NOT_EXPORTED" => ResolutionErrorCode::PackagePathNotExported,
+        "ERR_PACKAGE_IMPORT_NOT_DEFINED" => ResolutionErrorCode::PackageImportNotDefined,
         "ERR_MODULE_REGISTRY_ROUTE" => ResolutionErrorCode::UnsupportedSpecifier,
         "ERR_MODULE_REGISTRY_REQUEST" if request.specifier.is_empty() => {
             ResolutionErrorCode::EmptySpecifier
@@ -780,6 +782,57 @@ mod tests {
     }
 
     #[test]
+    fn package_import_alias_delivers_fs_provider_without_granting_io() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "package.json", r##"{"imports":{"#fs":"fs"}}"##);
+        put(root.path(), "app.mjs", "import '#fs';");
+        let resolver = resolver(root.path());
+        let policy = CapabilityPolicyHook::new(BTreeSet::from([
+            RuntimeCapability::ModuleLoad,
+            RuntimeCapability::Builtin,
+        ]));
+        let entry = resolver
+            .resolve(&resolver.entry_request(), &context(), &policy)
+            .unwrap();
+        let request = |specifier: &str| {
+            ModuleRequest::new(specifier, ImportStyle::Import)
+                .with_referrer(entry.module.record.id.clone())
+                .with_compatibility_mode(CompatibilityMode::NodeCompat)
+        };
+        let resolved = resolver
+            .resolve(&request("#fs"), &context(), &policy)
+            .unwrap();
+        assert_eq!(
+            NativeBuiltinModule::from_record(&resolved.module.record),
+            Some(NativeBuiltinModule::Fs)
+        );
+        assert_eq!(
+            resolved.module.content_hash,
+            resolved.module.record.canonical_hash()
+        );
+        assert_eq!(
+            resolved.module.record.required_capabilities,
+            BTreeSet::from([RuntimeCapability::ModuleLoad, RuntimeCapability::Builtin])
+        );
+        assert!(resolved.module.record.source.is_empty());
+        assert!(resolved.module.record.dependencies.is_empty());
+        assert_eq!(
+            resolver
+                .resolve(&request("#fs"), &context(), &granted())
+                .unwrap_err()
+                .code,
+            ResolutionErrorCode::PolicyDenied
+        );
+        assert_eq!(
+            resolver
+                .resolve(&request("fs"), &context(), &policy)
+                .unwrap_err()
+                .code,
+            ResolutionErrorCode::UnsupportedSpecifier
+        );
+    }
+
+    #[test]
     fn unsupported_builtin_providers_and_indirect_loaders_remain_refused() {
         for (file, source) in [
             ("app.cjs", "require('worker_threads');"),
@@ -792,10 +845,10 @@ mod tests {
             ("app.mjs", "let name='buffer'; import(name);"),
             ("app.mjs", "let name = 'node:path'; import(name);"),
             ("app.mjs", "import '#path';"),
-            ("app.mjs", "import '#fs';"),
+            ("app.mjs", "import '#http';"),
         ] {
             let root = tempfile::tempdir().unwrap();
-            put(root.path(), "package.json", r##"{"imports":{"#builtin":"buffer","#path":"node:path","#fs":"fs"}}"##);
+            put(root.path(), "package.json", r##"{"imports":{"#builtin":"buffer","#path":"node:path","#http":"http"}}"##);
             put(root.path(), file, source);
             let graph = capture(root.path(), file, GraphOptions::default()).unwrap();
             let pin = graph.report().input_hash.clone();
@@ -1058,6 +1111,71 @@ mod tests {
             resolver.resolve_chain(&resolver.entry_request(), &context(), &granted())
                 .unwrap_err().code,
             ResolutionErrorCode::ModuleNotFound
+        );
+    }
+
+    #[test]
+    fn captured_package_errors_keep_typed_engine_codes_and_route_boundaries() {
+        let root = tempfile::tempdir().unwrap();
+        put(
+            root.path(),
+            "app.cjs",
+            "require('pkg/private'); require('#optional'); import('pkg/private'); import('#optional'); require('./present.cjs');",
+        );
+        put(
+            root.path(),
+            "package.json",
+            r##"{"imports":{"#present":"./present.cjs"}}"##,
+        );
+        put(
+            root.path(),
+            "node_modules/pkg/package.json",
+            r#"{"exports":{".":"./index.cjs"}}"#,
+        );
+        put(root.path(), "present.cjs", "module.exports = 42;");
+        let resolver = resolver_entry(root.path(), "app.cjs");
+        let request = |specifier: &str, style| {
+            ModuleRequest::new(specifier, style)
+                .with_referrer(resolver.entry_request().specifier)
+                .with_compatibility_mode(CompatibilityMode::NodeCompat)
+        };
+        for style in [ImportStyle::Require, ImportStyle::Import] {
+            for (specifier, expected, node_code) in [
+                (
+                    "pkg/private",
+                    ResolutionErrorCode::PackagePathNotExported,
+                    "ERR_PACKAGE_PATH_NOT_EXPORTED",
+                ),
+                (
+                    "#optional",
+                    ResolutionErrorCode::PackageImportNotDefined,
+                    "ERR_PACKAGE_IMPORT_NOT_DEFINED",
+                ),
+            ] {
+                let error = resolver
+                    .resolve(&request(specifier, style), &context(), &granted())
+                    .unwrap_err();
+                assert_eq!(error.code, expected);
+                assert!(error.message.starts_with(node_code));
+            }
+            assert_eq!(
+                resolver
+                    .resolve(&request("#uncaptured", style), &context(), &granted())
+                    .unwrap_err()
+                    .code,
+                ResolutionErrorCode::UnsupportedSpecifier
+            );
+        }
+        assert_eq!(
+            resolver
+                .resolve(
+                    &request("./present.cjs", ImportStyle::Require),
+                    &context(),
+                    &granted().deny_specifier("./present.cjs")
+                )
+                .unwrap_err()
+                .code,
+            ResolutionErrorCode::PolicyDenied
         );
     }
 
@@ -2258,6 +2376,78 @@ console.log(choose(true), choose(false));
                 .map(|entry| entry.message.as_str())
                 .collect::<Vec<_>>();
             assert_eq!(actual, reference.lines().collect::<Vec<_>>(), "{lane:?}");
+        }
+    }
+
+    #[test]
+    fn captured_package_errors_match_node_after_package_maps_change() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let root = tempfile::tempdir().unwrap();
+            put(
+                root.path(),
+                "app.cjs",
+                r#"
+try { require('pkg/private'); } catch (error) { console.log('require-export', error.name, error.code, error instanceof TypeError); }
+try { require.resolve('pkg/private'); } catch (error) { console.log('resolve-export', error.name, error.code, error instanceof TypeError); }
+try { require('#optional'); } catch (error) { console.log('require-import', error.name, error.code, error instanceof TypeError); }
+try { require.resolve('#optional'); } catch (error) { console.log('resolve-import', error.name, error.code, error instanceof TypeError); }
+import('pkg/private').catch(error => console.log('dynamic-export', error.name, error.code, error instanceof TypeError));
+import('#optional').catch(error => console.log('dynamic-import', error.name, error.code, error instanceof TypeError));
+console.log(require('./fallback.cjs'));
+"#,
+            );
+            put(
+                root.path(),
+                "package.json",
+                r##"{"imports":{"#present":"./fallback.cjs"}}"##,
+            );
+            put(root.path(), "fallback.cjs", "module.exports = 42;");
+            put(
+                root.path(),
+                "node_modules/pkg/package.json",
+                r#"{"exports":{".":"./index.cjs"}}"#,
+            );
+            put(
+                root.path(),
+                "node_modules/pkg/private.cjs",
+                "throw new Error('must not execute newly exported source');",
+            );
+            let reference = node_reference_output(root.path(), "app.cjs");
+            assert_eq!(
+                reference,
+                concat!(
+                    "require-export Error ERR_PACKAGE_PATH_NOT_EXPORTED false\n",
+                    "resolve-export Error ERR_PACKAGE_PATH_NOT_EXPORTED false\n",
+                    "require-import TypeError ERR_PACKAGE_IMPORT_NOT_DEFINED true\n",
+                    "resolve-import TypeError ERR_PACKAGE_IMPORT_NOT_DEFINED true\n",
+                    "42\n",
+                    "dynamic-export Error ERR_PACKAGE_PATH_NOT_EXPORTED false\n",
+                    "dynamic-import TypeError ERR_PACKAGE_IMPORT_NOT_DEFINED true\n",
+                )
+            );
+            let result = execute_captured_graph_for_test(root.path(), "app.cjs", lane, || {
+                put(
+                    root.path(),
+                    "package.json",
+                    r##"{"imports":{"#optional":"./fallback.cjs"}}"##,
+                );
+                put(
+                    root.path(),
+                    "node_modules/pkg/package.json",
+                    r#"{"exports":{"./private":"./private.cjs"}}"#,
+                );
+            });
+            assert_eq!(
+                result
+                    .console_output
+                    .iter()
+                    .map(|entry| entry.message.as_str())
+                    .collect::<Vec<_>>(),
+                reference.lines().collect::<Vec<_>>(),
+                "{lane:?}"
+            );
         }
     }
 

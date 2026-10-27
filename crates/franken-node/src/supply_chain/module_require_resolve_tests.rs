@@ -346,6 +346,69 @@ module.exports = { value: value, lookup: lookup, resolved: resolved };
     }
 
     #[test]
+    fn native_lexical_const_npm_requests_match_node_after_source_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        put(root, "app.cjs", r#"
+const fixture = require('scoped-fixture');
+console.log('values', fixture.load(true), fixture.load(false));
+console.log('resolved', fixture.lookup());
+console.log('optional', fixture.optional());
+"#);
+        put(root, "node_modules/scoped-fixture/package.json", r#"{"main":"index.cjs"}"#);
+        put(root, "node_modules/scoped-fixture/index.cjs", r#"
+const prefix = './';
+function load(flag) {
+    const leaf = flag ? 'one' : 'two';
+    const target = prefix + leaf + '.cjs';
+    return require(target);
+}
+function lookup() {
+    const selected = './one.cjs';
+    return require.resolve(selected);
+}
+function optional() {
+    const absent = 'optional-addon';
+    try { return require(absent); }
+    catch (error) { return error.code; }
+}
+module.exports = { load: load, lookup: lookup, optional: optional };
+"#);
+        put(root, "node_modules/scoped-fixture/one.cjs", "module.exports = 41;");
+        put(root, "node_modules/scoped-fixture/two.cjs", "module.exports = 42;");
+        let reference = std::process::Command::new("node").arg("app.cjs").current_dir(root)
+            .output().expect("Node supplies the scoped-package reference result");
+        assert!(reference.status.success(), "{}", String::from_utf8_lossy(&reference.stderr));
+        let expected = format!(
+            "values 41 42\nresolved {}\noptional MODULE_NOT_FOUND\n",
+            root.join("node_modules/scoped-fixture/one.cjs").display(),
+        );
+        assert_eq!(reference.stdout, expected.as_bytes());
+        let captured = capture(root, "app.cjs", GraphOptions::default()).unwrap();
+        assert!(captured.report().diagnostics.is_empty());
+        assert_eq!(captured.report().modules.len(), 4);
+        let pin = captured.report().input_hash.clone();
+        let encoded = capsule::encode(&captured).unwrap();
+        std::fs::rename(root.join("node_modules"), root.join("original_packages")).unwrap();
+        put(root, "node_modules/scoped-fixture/index.cjs", "throw new Error('live package reopened');");
+        put(root, "node_modules/optional-addon/index.js", "module.exports = 999;");
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+            assert_eq!(replayed.report(), captured.report());
+            let resolver = Arc::new(CapturedEngineResolver::new(replayed, &pin).ok().unwrap());
+            assert_eq!(resolver.summary().missing_routes, 1);
+            let policy = Arc::new(policy());
+            let entry = resolver.resolve(&resolver.entry_request(), &context(), policy.as_ref()).unwrap();
+            let installed = resolver.execution_resolver(root, policy).unwrap();
+            let result = engine(lane).execute_resolved_entry_with_resolver(&package(), &entry, installed)
+                .expect("lexical immutable requests retain the captured npm package origin");
+            let output = result.console_output.iter().map(|line| line.message.as_str())
+                .collect::<Vec<_>>().join("\n") + "\n";
+            assert_eq!(output.as_bytes(), reference.stdout, "{lane:?}");
+        }
+    }
+
+    #[test]
     fn native_uncaught_missing_require_and_resolve_still_fail_execution() {
         for source in ["require('missing-package');", "require.resolve('missing-package');"] {
             let root = tempfile::tempdir().unwrap();

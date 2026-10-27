@@ -438,6 +438,65 @@ fn replay_capsule(path: &Path, pin: &str, cwd: &Path) -> (i32, Value) {
 }
 
 #[test]
+fn lexical_const_npm_graph_matches_node_and_replays_without_escaping_scopes() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let unrelated = temp.path().join("unrelated");
+    std::fs::create_dir_all(&unrelated).unwrap();
+    put(&project, "app.cjs", "require('scoped-fixture'); throw Error('never execute');");
+    put(&project, "node_modules/scoped-fixture/package.json", r#"{"main":"index.cjs"}"#);
+    put(&project, "node_modules/scoped-fixture/index.cjs", r#"
+const prefix='./';
+function load(flag) {
+    const leaf=flag?'one':'two';
+    { const target=prefix+leaf+'.cjs'; return require(target); }
+}
+function lookup() { const selected='./one.cjs'; return require.resolve(selected); }
+module.exports={load,lookup};
+"#);
+    put(&project, "node_modules/scoped-fixture/one.cjs", "throw Error('never execute one');");
+    put(&project, "node_modules/scoped-fixture/two.cjs", "throw Error('never execute two');");
+    let capsule = temp.path().join("scoped.fnsc");
+    let (code, captured) = export_capsule(&project, "app.cjs", &capsule, &[]);
+    assert_eq!(code, 0, "{captured}");
+    assert_eq!(paths(&captured).len(), 4);
+    assert_eq!(captured["source_graph"]["edges"].as_array().unwrap().len(), 4);
+    assert_eq!(captured["source_graph"]["fully_resolved"], true);
+    assert_eq!(captured["execution_performed"], false);
+    assert_node_edges(&project, &captured);
+
+    for source in [
+        "{const target='./dep.cjs';} require(target);",
+        "function first(){const target='./dep.cjs';} function second(){require(target);}",
+        "function load(){require(target); const target='./dep.cjs';}",
+        "function load(){const target='./dep.cjs'; target='./other.cjs'; require(target);}",
+        "function load(){const target='./dep.cjs'; function shadow(target){} require(target);}",
+        "function load(){const target=flag?'./dep.cjs':unknown; require(target);}",
+    ] {
+        put(&project, "unproved.cjs", source);
+        let (code, report) = run(&project, "unproved.cjs", &[]);
+        assert_eq!(code, 1, "{source}: {report}");
+        assert_eq!(paths(&report), ["unproved.cjs"]);
+        assert_eq!(report["source_graph"]["edges"][0]["state"], "non_literal");
+        assert_eq!(report["source_graph"]["fully_resolved"], false);
+    }
+    std::fs::rename(&project, temp.path().join("original_project")).unwrap();
+    put(&project, "app.cjs", "require('scoped-fixture');");
+    put(&project, "node_modules/scoped-fixture/index.js", "throw Error('replacement source');");
+    let (code, replayed) = replay_capsule(&capsule, captured["capsule_hash"].as_str().unwrap(), &unrelated);
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["source_graph"], captured["source_graph"]);
+    assert_eq!(replayed["input_hash"], captured["input_hash"]);
+    assert_eq!(replayed["replay_verified"], true);
+    assert_eq!(replayed["execution_performed"], false);
+    assert_eq!(std::fs::read_dir(&unrelated).unwrap().count(), 0);
+    let (code, changed) = run(&project, "app.cjs", &["--expected-hash", captured["input_hash"].as_str().unwrap()]);
+    assert_eq!(code, 1, "{changed}");
+    assert_eq!(changed["verdict"], "HASH_MISMATCH");
+    assert!(changed["source_graph"].is_null());
+}
+
+#[test]
 fn immutable_commonjs_aliases_match_node_routes_and_replay_without_source_files() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
