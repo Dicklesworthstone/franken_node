@@ -3904,6 +3904,11 @@ one pass.
   branch; it does not execute conditions or predict the branch that will run.
   Mutable, shadowed, forward-referenced and otherwise unproved bindings remain
   refused, and these expressions grant no access to uncaptured modules.
+  CommonJS packages can also use `require.main === module` and the equivalent
+  strict equality/inequality checks through proven loader aliases to distinguish
+  CLI execution from a dependency load. Capture retains dependencies from both
+  branches; this support does not expose arbitrary loader properties or allow
+  the loader object to escape.
   The `crypto` provider exposes the engine's existing hash/HMAC, key-derivation,
   cipher, key-pair/signature and random functions as ordinary callable exports;
   fresh entropy still requires `random_read` at invocation. The `zlib` provider

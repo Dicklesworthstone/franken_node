@@ -1313,7 +1313,11 @@ fn scan(
                         "createRequire factory must initialize a top-level const from this module's unchanged origin",
                     ));
                 } else if bindings.loaders.contains(spelling) {
-                    if !bindings.direct_loader_use(node, text) && !loader_typeof_probe(node) {
+                    if !bindings.direct_loader_use(node, text)
+                        && !loader_typeof_probe(node)
+                        && !(bindings.commonjs_aliases.contains(spelling)
+                            && commonjs_main_guard(node, text))
+                    {
                         issue = Some(if bindings.commonjs_aliases.contains(spelling) {
                             (
                                 "INDIRECT_REQUIRE_ALIAS",
@@ -1329,6 +1333,7 @@ fn scan(
                 } else if spelling == "require"
                     && !direct_callee(node, text)
                     && !loader_typeof_probe(node)
+                    && !commonjs_main_guard(node, text)
                 {
                     issue = Some((
                         "INDIRECT_REQUIRE",
@@ -1594,6 +1599,60 @@ fn loader_typeof_probe(mut node: Node<'_>) -> bool {
         } else {
             return false;
         }
+    }
+    false
+}
+
+/// CommonJS CLI modules commonly compare their require's entry-module object
+/// with their own module. Permit only that immediate strict identity observation:
+/// unlike loose equality it cannot invoke an object coercion hook that exposes
+/// the entry module. Aliases must already have a proved CommonJS origin;
+/// createRequire results keep their separate contract. All source branches and
+/// loader mutations remain scanned normally.
+fn commonjs_main_guard(mut node: Node<'_>, source: &str) -> bool {
+    let mut main_found = false;
+    for _ in 0..MAX_STRING_EXPRESSION_DEPTH {
+        let Some(parent) = node.parent() else {
+            return false;
+        };
+        if wrapper_operand(parent).is_some_and(|operand| operand.id() == node.id()) {
+            node = parent;
+            continue;
+        }
+        if !main_found {
+            if !named_member(parent, "main", source)
+                || !parent
+                    .child_by_field_name("object")
+                    .is_some_and(|object| object.id() == node.id())
+            {
+                return false;
+            }
+            main_found = true;
+            node = parent;
+            continue;
+        }
+        if parent.kind() != "binary_expression"
+            || !parent
+                .child_by_field_name("operator")
+                .is_some_and(|operator| matches!(operator.kind(), "===" | "!=="))
+        {
+            return false;
+        }
+        let (Some(left), Some(right)) = (
+            parent.child_by_field_name("left"),
+            parent.child_by_field_name("right"),
+        ) else {
+            return false;
+        };
+        let other = if left.id() == node.id() {
+            right
+        } else if right.id() == node.id() {
+            left
+        } else {
+            return false;
+        };
+        let other = runtime_operand(other);
+        return other.kind() == "identifier" && other.utf8_text(source.as_bytes()) == Ok("module");
     }
     false
 }
@@ -4311,6 +4370,273 @@ const fromPackage = require('string-' + 'fixture');
             assert!(analyzed, "{source}");
             assert!(loads.is_empty(), "{source}: {loads:?}");
             assert!(notices.is_empty(), "{source}: {notices:?}");
+        }
+    }
+
+    #[test]
+    fn commonjs_main_guards_accept_only_entry_identity_comparisons() {
+        for (source, language) in [
+            ("if(require.main===module){}", SourceLanguage::JavaScript),
+            ("if(module!==require.main){}", SourceLanguage::JavaScript),
+            ("require['main']===module;", SourceLanguage::JavaScript),
+            ("module!==require['ma'+'in'];", SourceLanguage::JavaScript),
+            ("((require).main)===((module));", SourceLanguage::JavaScript),
+            (
+                "Object.prototype[Symbol.toPrimitive]=function(){leaked=this; return 1;}; module=1; require.main===module;",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "const load=require; const next=load; if(next.main===module){} if(module!==load.main){}",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "((require as Loader).main) === (module satisfies Module);",
+                SourceLanguage::TypeScript,
+            ),
+        ] {
+            assert!(
+                scan_source_requests(source, language).is_empty(),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn commonjs_main_guards_refuse_object_escape_writes_shadowing_and_created_loaders() {
+        for source in [
+            "const main=require.main;",
+            "save(require.main);",
+            "require.main.require('./hidden.cjs');",
+            "require.main.filename;",
+            "require.main();",
+            "require.main=module;",
+            "require.main++;",
+            "delete require.main;",
+            "[require.main]=values;",
+            "for(require.main of values){}",
+            "require.main===other;",
+            "require.main==module;",
+            "module!=require.main;",
+            "const load=require; load.main==module;",
+            "Object.prototype[Symbol.toPrimitive]=function(){leaked=this; return 1;}; module=1; require.main==module;",
+            "Object.prototype[Symbol.toPrimitive]=function(){leaked=this; return 1;}; module=1; module!=require.main;",
+            "require.main===(module, other);",
+            "require.main===(module=other);",
+            "require[name]===module;",
+            "module.require.main===module;",
+            "const load=require; load.main=module;",
+            "const load=require; const main=load.main;",
+            "const load=require; function nested(load){return load.main===module;}",
+            "function nested(require){return require.main===module;}",
+            "import {createRequire as make} from 'node:module'; const load=make(import.meta.url); load.main===module;",
+            "const {createRequire:make}=require('node:module'); const load=make(__filename); load.main===module;",
+            "import {createRequire as require} from 'node:module'; require.main===module;",
+        ] {
+            let (_, notices, analyzed) = scan(
+                &mut Parser::new(),
+                source.as_bytes(),
+                SourceLanguage::JavaScript,
+                &mut Budget::default(),
+            )
+            .unwrap();
+            assert!(analyzed, "{source}");
+            assert!(
+                notices.iter().any(|notice| matches!(
+                    notice.code,
+                    "INDIRECT_REQUIRE"
+                        | "INDIRECT_REQUIRE_ALIAS"
+                        | "INDIRECT_CREATED_REQUIRE"
+                        | "INDIRECT_CREATE_REQUIRE"
+                )),
+                "unproved main observation: {source}: {notices:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn commonjs_main_guards_refuse_loose_coercion_before_module_authorization() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.cjs", "require('./child.cjs');");
+        for (operator, expected, admitted) in [
+            ("==", "true object .\n", false),
+            ("!=", "false object .\n", false),
+            ("===", "false undefined undefined\n", true),
+            ("!==", "true undefined undefined\n", true),
+        ] {
+            let source = format!(
+                "let leaked; Object.prototype[Symbol.toPrimitive]=function(){{leaked=this; return 1;}}; \
+                 module=1; const compared=require.main{operator}module; \
+                 console.log(compared, typeof leaked, leaked && leaked.id);"
+            );
+            put(root.path(), "child.cjs", &source);
+            let reference = std::process::Command::new("node")
+                .arg(root.path().join("app.cjs"))
+                .current_dir(root.path())
+                .env_remove("NODE_OPTIONS")
+                .env_remove("NODE_PATH")
+                .output()
+                .expect("Node is required for the independent entry-module coercion oracle");
+            assert!(reference.status.success(), "{operator}: {reference:?}");
+            assert!(reference.stderr.is_empty(), "{operator}: {reference:?}");
+            assert_eq!(reference.stdout, expected.as_bytes(), "{operator}");
+            let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+            assert_eq!(graph.report().fully_resolved, admitted, "{operator}");
+            let pin = graph.report().input_hash.clone();
+            let registry = registry::PinnedModuleRegistry::new(graph, &pin);
+            if admitted {
+                assert!(registry.is_ok(), "{operator}");
+            } else {
+                assert_eq!(
+                    registry.err().unwrap().code,
+                    "ERR_MODULE_REGISTRY_INCOMPLETE",
+                    "{operator}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn commonjs_main_guards_preserve_unresolved_loads_and_bounded_proof_work() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "dep.cjs", "module.exports=42;");
+        put(
+            root.path(),
+            "app.cjs",
+            "if(require.main===module){require('./dep.cjs');} else {require(runtimeName);}",
+        );
+        let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        assert!(graph.report().diagnostics.is_empty());
+        assert_eq!(graph.report().edges.len(), 2);
+        assert_eq!(graph.report().edges[0].state, EdgeState::Resolved);
+        assert_eq!(graph.report().edges[1].state, EdgeState::NonLiteral);
+        assert!(!graph.report().fully_resolved);
+        let pin = graph.report().input_hash.clone();
+        assert_eq!(
+            registry::PinnedModuleRegistry::new(graph, &pin)
+                .err()
+                .unwrap()
+                .code,
+            "ERR_MODULE_REGISTRY_INCOMPLETE"
+        );
+
+        let source = format!(
+            "{}require{}.main===module;",
+            "(".repeat(MAX_STRING_EXPRESSION_DEPTH + 1),
+            ")".repeat(MAX_STRING_EXPRESSION_DEPTH + 1)
+        );
+        let (loads, notices, analyzed) = scan(
+            &mut Parser::new(),
+            source.as_bytes(),
+            SourceLanguage::JavaScript,
+            &mut Budget::default(),
+        )
+        .unwrap();
+        assert!(analyzed);
+        assert!(loads.is_empty());
+        assert!(
+            notices
+                .iter()
+                .any(|notice| notice.code == "INDIRECT_REQUIRE")
+        );
+    }
+
+    #[test]
+    fn commonjs_main_guards_match_node_and_preserve_both_frozen_branches() {
+        use super::registry::{PinnedModuleRegistry, RequestStyle};
+        let root = tempfile::tempdir().unwrap();
+        let entry_source = r#"
+const load=require;
+if(require.main===module){console.log('entry', require('./cli.cjs'));}
+console.log('package', load('guarded'));
+if(module!==load.main){throw new Error('entry identity differs');}
+"#;
+        let package_source = r#"
+const load=require;
+if(load.main===module){module.exports=load('./cli.cjs');}
+else{module.exports=load('./library.cjs');}
+"#;
+        put(root.path(), "app.cjs", entry_source);
+        put(root.path(), "cli.cjs", "module.exports='cli';");
+        put(
+            root.path(),
+            "node_modules/guarded/package.json",
+            r#"{"main":"index.cjs"}"#,
+        );
+        put(
+            root.path(),
+            "node_modules/guarded/index.cjs",
+            package_source,
+        );
+        put(
+            root.path(),
+            "node_modules/guarded/cli.cjs",
+            "throw new Error('package is not the entry');",
+        );
+        put(
+            root.path(),
+            "node_modules/guarded/library.cjs",
+            "module.exports='library';",
+        );
+        let reference = std::process::Command::new("node")
+            .arg(root.path().join("app.cjs"))
+            .current_dir(root.path())
+            .env_remove("NODE_OPTIONS")
+            .env_remove("NODE_PATH")
+            .output()
+            .expect("Node is required for the independent CommonJS entry oracle");
+        assert!(reference.status.success(), "{reference:?}");
+        assert!(reference.stderr.is_empty(), "{reference:?}");
+        assert_eq!(reference.stdout, b"entry cli\npackage library\n");
+        let captured = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        assert!(captured.report().fully_resolved, "{:?}", captured.report());
+        assert!(!captured.report().execution_performed);
+        assert_eq!(captured.report().modules.len(), 5);
+        assert_eq!(captured.report().edges.len(), 4);
+        let pin = captured.report().input_hash.clone();
+        let capsule = super::capsule::encode(&captured).unwrap();
+        for path in [
+            "app.cjs",
+            "node_modules/guarded/index.cjs",
+            "node_modules/guarded/library.cjs",
+        ] {
+            put(root.path(), path, "throw new Error('live source changed');");
+        }
+        let replayed = super::capsule::replay(capsule.bytes(), capsule.digest()).unwrap();
+        assert_eq!(replayed.report(), captured.report());
+        let registry = PinnedModuleRegistry::new(replayed, &pin).unwrap();
+        let entry = registry
+            .lookup(None, registry.entrypoint(), RequestStyle::Require)
+            .unwrap();
+        assert_eq!(entry.source(), entry_source);
+        let package = registry
+            .lookup(Some(entry.id()), "guarded", RequestStyle::Require)
+            .unwrap();
+        assert_eq!(package.source(), package_source);
+        for (request, expected) in [
+            ("./library.cjs", "module.exports='library';"),
+            ("./cli.cjs", "throw new Error('package is not the entry');"),
+        ] {
+            assert_eq!(
+                registry
+                    .lookup(Some(package.id()), request, RequestStyle::Require)
+                    .unwrap()
+                    .source(),
+                expected
+            );
+        }
+        for (from, request, style) in [
+            (entry.id(), "./library.cjs", RequestStyle::Require),
+            (package.id(), "./library.cjs", RequestStyle::Import),
+            (package.id(), "./uncaptured.cjs", RequestStyle::Require),
+        ] {
+            assert_eq!(
+                registry
+                    .lookup(Some(from), request, style)
+                    .err()
+                    .unwrap()
+                    .code,
+                "ERR_MODULE_REGISTRY_ROUTE"
+            );
         }
     }
 

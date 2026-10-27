@@ -431,6 +431,15 @@ Mutation, shadowing, escaped loader references, mutable bindings, alternate
 resolve search paths and unbounded requests keep the graph incomplete. This
 does not grant a loader permission to open another route at execution time.
 
+CommonJS entrypoint guards such as `require.main === module` are supported,
+including strict equality/inequality comparisons in either operand order and
+proven CommonJS loader aliases. Dependencies in both guarded branches are captured.
+The allowance is limited to direct comparisons with `module`: storing or
+returning `require.main`, writing to it, inspecting other loader properties,
+shadowed loaders, loose comparisons and `createRequire` loader guards remain
+incomplete. Guard analysis uses the existing bounded syntax and wrapper-depth
+budgets.
+
 Request values can use proven top-level `const` strings and earlier constant
 aliases: `const directory = './'; const target = directory + 'adapter.cjs';
 require(target)`. The same analysis applies to `require.resolve`, `import()`

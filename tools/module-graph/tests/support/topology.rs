@@ -23,13 +23,12 @@ fn cli_bun_manifest_capture_bounds_include_root_before_parsing_more_workspaces()
 }
 
 fn chain() -> TempDir {
-    let root = fixture(json!({
+    fixture(json!({
         "node_modules/dep":{"version":"1", "dependencies":{"leaf":"*"}},
         "node_modules/leaf":{"version":"1"},
         "packages/a/node_modules/dep":{"version":"2", "dependencies":{"leaf":"*"}},
         "packages/a/node_modules/dep/node_modules/leaf":{"version":"2"}
-    }));
-    root
+    }))
 }
 
 #[test]

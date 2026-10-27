@@ -2181,6 +2181,137 @@ console.log(choose(true), choose(false));
     }
 
     #[test]
+    fn captured_constant_request_bindings_match_node_after_live_source_changes() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let root = tempfile::tempdir().unwrap();
+            put(
+                root.path(),
+                "app.cjs",
+                r#"
+const name = 'mode-kit';
+const load = require;
+const choose = load(name);
+const path = name + '/production.cjs';
+console.log(choose(true), choose(false));
+console.log(require.resolve(path).endsWith('/node_modules/mode-kit/production.cjs'));
+"#,
+            );
+            put(
+                root.path(),
+                "node_modules/mode-kit/package.json",
+                r#"{"name":"mode-kit","main":"index.cjs"}"#,
+            );
+            put(
+                root.path(),
+                "node_modules/mode-kit/index.cjs",
+                r#"
+const prefix = './';
+const production = prefix + 'production.cjs';
+const development = prefix + 'development.cjs';
+module.exports = function(flag) {
+    return require(flag ? production : development);
+};
+"#,
+            );
+            put(
+                root.path(),
+                "node_modules/mode-kit/production.cjs",
+                "module.exports = 42;",
+            );
+            put(
+                root.path(),
+                "node_modules/mode-kit/development.cjs",
+                "module.exports = 7;",
+            );
+            let reference = node_reference_output(root.path(), "app.cjs");
+            assert_eq!(reference, "42 7\ntrue\n");
+            let result = execute_captured_graph_for_test(root.path(), "app.cjs", lane, || {
+                for path in [
+                    "app.cjs",
+                    "node_modules/mode-kit/index.cjs",
+                    "node_modules/mode-kit/production.cjs",
+                    "node_modules/mode-kit/development.cjs",
+                ] {
+                    put(
+                        root.path(),
+                        path,
+                        "throw new Error('live source must not execute');",
+                    );
+                }
+                put(
+                    root.path(),
+                    "node_modules/mode-kit/package.json",
+                    r#"{"main":"missing.cjs"}"#,
+                );
+            });
+            let actual = result
+                .console_output
+                .iter()
+                .map(|entry| entry.message.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, reference.lines().collect::<Vec<_>>(), "{lane:?}");
+        }
+    }
+
+    #[test]
+    fn captured_commonjs_main_guards_keep_entry_identity_across_packages() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let root = tempfile::tempdir().unwrap();
+            put(
+                root.path(),
+                "app.cjs",
+                r#"
+const load = require;
+console.log(require.main === module, load.main === module);
+const kit = require('main-kit');
+console.log(kit.main, kit.alias, kit.nonmain);
+"#,
+            );
+            put(
+                root.path(),
+                "node_modules/main-kit/package.json",
+                r#"{"name":"main-kit","main":"index.cjs"}"#,
+            );
+            put(
+                root.path(),
+                "node_modules/main-kit/index.cjs",
+                r#"
+const load = require;
+if (require.main === module) { console.log('entry only'); }
+else { console.log('loaded as dependency'); }
+exports.main = require.main === module;
+exports.alias = load.main === module;
+exports.nonmain = module !== require.main;
+"#,
+            );
+            let reference = node_reference_output(root.path(), "app.cjs");
+            assert_eq!(
+                reference,
+                "true true\nloaded as dependency\nfalse false true\n"
+            );
+            let result = execute_captured_graph_for_test(root.path(), "app.cjs", lane, || {
+                for path in ["app.cjs", "node_modules/main-kit/index.cjs"] {
+                    put(
+                        root.path(),
+                        path,
+                        "throw new Error('uncaptured code must not execute');",
+                    );
+                }
+            });
+            let actual = result
+                .console_output
+                .iter()
+                .map(|entry| entry.message.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, reference.lines().collect::<Vec<_>>(), "{lane:?}");
+        }
+    }
+
+    #[test]
     fn captured_crypto_zlib_packages_match_node_without_live_source_access() {
         use frankenengine_engine::baseline_interpreter::LaneChoice;
 
