@@ -3,7 +3,7 @@
 
 use super::{
     Entry, EntryData, Invocation, MAX_PATH_BYTES, MAX_TESTS, Snapshot, excluded_from_discovery,
-    is_test,
+    is_declaration, is_test, is_test_source,
 };
 use anyhow::{Context, Result, bail, ensure};
 use rustix::fs::{Mode, OFlags, open, openat};
@@ -383,11 +383,11 @@ fn inventory(entries: &BTreeMap<PathBuf, Entry>) -> Result<Inventory> {
             "migration test manifest cannot select dependencies, backups or reserved state: {name}"
         );
         ensure!(
-            path.extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(
-                    |extension| ["js", "mjs", "cjs", "ts", "mts", "cts"].contains(&extension)
-                ),
+            !is_declaration(path),
+            "migration test manifest cannot execute a TypeScript declaration: {name}"
+        );
+        ensure!(
+            is_test_source(path),
             "migration test manifest requires a standalone JS/TS entrypoint: {name}"
         );
         ensure!(
