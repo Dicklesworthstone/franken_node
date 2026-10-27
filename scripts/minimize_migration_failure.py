@@ -65,7 +65,7 @@ def selected_sources(snapshots: dict, observation: dict, source_files) -> list[t
     paths = []
     for path in source_files:
         replay.safe_path(path)
-        if Path(path).suffix not in {".js", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"}:
+        if Path(path).suffix.removeprefix(".") not in runner.TEST_EXTENSIONS:
             raise ValueError("only explicit JS/TS source files may be reduced, not configuration")
         if path in paths:
             raise ValueError("duplicate reduction source file")

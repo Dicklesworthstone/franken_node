@@ -131,6 +131,65 @@ class TestExecutedMinimization(unittest.TestCase):
             self.assertEqual(new["app.test.js"], old["app.test.js"])
             self.assertNotEqual(new["helper.js"].data, old["helper.js"].data)
 
+    def test_source_selection_retains_every_executable_extension(self):
+        extensions = {"js", "mjs", "cjs", "ts", "mts", "cts", "jsx", "tsx"}
+        self.assertEqual(extensions, replay.runner.TEST_EXTENSIONS)
+        for extension in sorted(extensions):
+            with self.subTest(extension=extension):
+                name = f"app.test.{extension}"
+                entry = replay.runner.SnapshotEntry(name, b"// source\n", 0o600)
+                snapshots = {leg: [entry] for leg in replay.LEGS}
+                observation = {"cases": [{"test": name, "status": "FAIL"}]}
+                for selected in (None, [name]):
+                    self.assertEqual(minimizer.selected_sources(snapshots, observation, selected),
+                                     [("baseline", 0), ("migration", 0)])
+
+    @unittest.skipUnless(shutil.which("bun"), "Bun JSX execution required")
+    def test_real_jsx_failure_reduces_and_replays_without_original_projects(self):
+        self.command = [str(Path(shutil.which("bun")).resolve()), "{test}"]
+        setup = ("/** @jsx h */\n"
+                 "// irrelevant JSX migration scaffolding\n"
+                 "const unused = 42;\n"
+                 "const h = (tag, props, ...children) => children.join('');\n")
+        self.sources(setup + "console.log(<p>original</p>);\n",
+                     setup + "console.log(<p>rewritten</p>);\n", "app.test.jsx")
+        for project in (self.before, self.after):
+            (project / "tsconfig.json").write_text(json.dumps({
+                "compilerOptions": {"jsx": "react", "jsxFactory": "h"}}), encoding="utf-8")
+        artifact = self.capture()
+        original = copy.deepcopy(artifact)
+        self.assertEqual(artifact["expected"]["validation_verdict"], "FAIL")
+        case = artifact["expected"]["cases"][0]
+        self.assertEqual(case["baseline"]["streams"]["stdout"]["sha256"],
+                         hashlib.sha256(b"original\n").hexdigest())
+        self.assertEqual(case["migration"]["streams"]["stdout"]["sha256"],
+                         hashlib.sha256(b"rewritten\n").hexdigest())
+        result = self.minimize(artifact)
+        self.assertEqual(artifact, original)
+        self.assertTrue(result["minimized"])
+        metadata = result["minimization"]
+        self.assertEqual(metadata["source_files"], ["app.test.jsx"])
+        self.assertLess(metadata["final_bytes"], metadata["initial_bytes"])
+        self.assertEqual(metadata["final_confirmations"], 2)
+        self.assertFalse(metadata["global_minimum_claimed"])
+        self.assertEqual(minimizer.behavior(result["expected"]), minimizer.behavior(artifact["expected"]))
+        self.before.rename(self.root / "retained-before")
+        self.after.rename(self.root / "retained-after")
+        rerun = replay.replay_migration(result, execute=True, baseline_command=self.command,
+                                        migration_command=self.command)
+        self.assertEqual(rerun["verdict"], "REPRODUCED", rerun)
+        self.assertEqual(rerun["observed_validation_verdict"], "FAIL")
+        destination = self.root / "exported"
+        exported = minimizer.export_capsule(result, destination)
+        self.assertFalse(exported["executed"])
+        for leg, expected in (("baseline", b"original\n"), ("migration", b"rewritten\n")):
+            source = (destination / leg / "app.test.jsx").read_bytes()
+            self.assertIn(b"<p>", source)
+            self.assertNotIn(b"irrelevant", source)
+            executed = subprocess.run([self.command[0], "app.test.jsx"], cwd=destination / leg,
+                                      capture_output=True, timeout=5)
+            self.assertEqual((executed.returncode, executed.stdout, executed.stderr), (0, expected, b""))
+
     def test_never_modifies_original_projects_or_dependency_configuration(self):
         self.sources()
         for root in (self.before, self.after):

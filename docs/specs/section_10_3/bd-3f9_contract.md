@@ -10,7 +10,7 @@ The original program targets remain: capture every migration failure, preserve a
 
 The delivered standalone `scripts/failure_replay.py` now performs **exact-input re-execution** through `scripts/migration_validation_runner.py`. It captures complete bounded workspace inputs, executes both runtimes, restores those same inputs for replay, and compares newly measured observations. It also supports runtime-bound fix verification and offline capsule inspection.
 
-This is not a claim of fully deterministic runtime replay. Ambient environment, clocks, network services, dynamic libraries, and external script dependencies are not captured. Automatic capture from every Rust CLI failure and automated minimization remain outstanding. The native `incident replay` and `franken-node migrate validate` commands are not changed by this work. Do not close the full bead on this narrower delivery.
+This is not a claim of fully deterministic runtime replay. Ambient environment, clocks, network services, dynamic libraries, and external script dependencies are not captured. Automatic capture from every Rust CLI failure remains outstanding. The standalone minimizer below performs bounded execution-backed source/input reduction. The native `incident replay` and `franken-node migrate validate` commands are not changed by this work. Do not close the full bead on this narrower delivery.
 
 ## Operator Workflow
 
@@ -116,6 +116,25 @@ the validator hash for capsules made using older code.
 ```bash
 python3 -m unittest discover -s tests -p test_migration_source_fix.py -v
 ```
+
+## Bounded Failure Reduction
+
+`python3 scripts/minimize_migration_failure.py ./failure-capsule.json --execute
+--expected-sha256 "$CAPSULE_SHA256" --out ./reduced-capsule.json` reduces trusted
+captured failures using fresh paired executions. Supply the same explicit command
+arrays used for capture. Repeat `--source-file` to select ordinary captured source paths;
+omission selects failing test entrypoints. Source selection shares the validator's
+eight executable extensions: `.js`, `.mjs`, `.cjs`, `.ts`, `.mts`, `.cts`, `.jsx`,
+and `.tsx`. Each selected file retains the existing 1 MiB/4,096-line bound.
+
+The reducer requires successful reference observations, preserves every recorded
+case's behavior, and performs fresh initial and final confirmations. Syntax
+errors, changed successful cases and runtime/validator drift do not count as
+reductions. Search budget exhaustion may return a verified partial reduction;
+it never claims a global minimum. The result is an ordinary replay capsule.
+`--export-dir ./reproduction` restores both verified input trees into a new private
+directory without executing them. Original project directories need not exist
+for replay or export. Capsules and exported source remain sensitive.
 
 ## Capsule and Observation Contract
 

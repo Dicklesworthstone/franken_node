@@ -87,7 +87,9 @@ and `FRANKEN_NODE_MIGRATION_FAILURE_DIR` from both guest environments.
 
 Without a manifest, conventional `.test`/`.spec` files and files under `test` or
 `__tests__` are discovered, including `.js`, `.mjs`, `.cjs`, `.ts`, `.mts`, and
-`.cts`. Dependencies, VCS metadata, migration backups, and runtime state are not
+`.cts`, plus `.jsx` and `.tsx`. Supporting `.d.ts`, `.d.mts`, and `.d.cts`
+declarations are excluded from implicit discovery and refused as explicit test
+entrypoints. Dependencies, VCS metadata, migration backups, and runtime state are not
 test inventories. An empty implicit suite remains `NO_TESTS`; an invalid or empty
 explicit manifest is an error, not permission to fall back to heuristic tests.
 
