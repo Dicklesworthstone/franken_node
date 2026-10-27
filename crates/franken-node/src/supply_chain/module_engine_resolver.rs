@@ -24,14 +24,17 @@ use frankenengine_engine::module_resolver::{
     ExecutionModuleResolver, ImportStyle, ModuleDependency, ModulePolicyHook, ModuleProvenance,
     ModuleRecord, ModuleRequest, ModuleResolver, ModuleSourceKind, ModuleSourceLocation, ModuleSyntax,
     NativeBuiltinModule, ResolutionContext, ResolutionError, ResolutionErrorCode, ResolutionEvent,
-    ResolutionOutcome, ResolutionResult, ResolvedModule,
+    ResolutionOutcome, ResolutionResult, ResolvedModule, SharedModuleRecord,
+    SharedResolutionOutcome, SharedResolvedModule,
 };
 use frankenengine_engine::parser::ParserOptions;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 const MAX_CHAIN_SOURCE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_SHARED_RECORD_SOURCE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_CONTEXT_BYTES: usize = 1024;
 
 /// An embedding resolver, not an evaluator or a policy grant. It can be passed
@@ -44,6 +47,14 @@ pub struct CapturedEngineResolver {
     // Cache content identity only. Authorization and request/event context are
     // always fresh. No duplicate source strings are retained by this cache.
     content_hashes: BTreeMap<String, OnceLock<ContentHash>>,
+    // Native execution can borrow a sealed engine record instead of copying
+    // its source before every evaluation-cache lookup. URL instances may share
+    // a physical capture but have different identities, so bound their total
+    // retained source allocation as well as the registry-bounded slot count.
+    // A full cache falls back to an ephemeral record without refusing a load.
+    shared_records: BTreeMap<String, OnceLock<Option<Arc<SharedModuleRecord>>>>,
+    shared_record_source_budget: usize,
+    retained_shared_source_bytes: AtomicUsize,
     prepared_sources: PreparedSources,
     #[cfg(test)]
     hash_computations: std::sync::atomic::AtomicUsize,
@@ -82,10 +93,17 @@ impl CapturedEngineResolver {
             .modules()
             .map(|module| (module.id().to_owned(), OnceLock::new()))
             .collect();
+        let shared_records = registry
+            .modules()
+            .map(|module| (module.id().to_owned(), OnceLock::new()))
+            .collect();
         Self {
             registry,
             chain_source_budget: MAX_CHAIN_SOURCE_BYTES,
             content_hashes,
+            shared_records,
+            shared_record_source_budget: MAX_SHARED_RECORD_SOURCE_BYTES,
+            retained_shared_source_bytes: AtomicUsize::new(0),
             prepared_sources: PreparedSources::default(),
             #[cfg(test)]
             hash_computations: std::sync::atomic::AtomicUsize::new(0),
@@ -285,9 +303,77 @@ impl CapturedEngineResolver {
             event: event(context, "allow", ""),
         }
     }
+
+    fn shared_outcome(
+        &self,
+        request: &ModuleRequest,
+        record: Arc<SharedModuleRecord>,
+        context: &ResolutionContext,
+    ) -> SharedResolutionOutcome {
+        let compute = || {
+            #[cfg(test)]
+            self.hash_computations.fetch_add(1, Ordering::Relaxed);
+            record.canonical_hash()
+        };
+        let content_hash = match self.content_hashes.get(&record.id) {
+            Some(slot) => *slot.get_or_init(compute),
+            None => compute(),
+        };
+        SharedResolutionOutcome {
+            module: SharedResolvedModule {
+                request_specifier: request.specifier.clone(),
+                canonical_specifier: record.id.clone(),
+                record,
+                content_hash,
+                probe_sequence: Vec::new(),
+            },
+            event: event(context, "allow", ""),
+        }
+    }
 }
 
 impl ModuleResolver for CapturedEngineResolver {
+    fn resolve_shared(
+        &self,
+        request: &ModuleRequest,
+        context: &ResolutionContext,
+        policy: &dyn ModulePolicyHook,
+    ) -> ResolutionResult<SharedResolutionOutcome> {
+        self.validate_request(request, context)?;
+        let module = self.lookup(request, context)?;
+        let slot = self.shared_records.get(module.id());
+        if let Some(Some(record)) = slot.and_then(OnceLock::get) {
+            // Cache identity only. Even an alias of an already loaded module
+            // needs an exact captured route and a fresh policy decision.
+            self.authorize(request, record.record(), context, policy)?;
+            return Ok(self.shared_outcome(request, Arc::clone(record), context));
+        }
+
+        let candidate = Arc::new(SharedModuleRecord::new(self.record(module)));
+        self.authorize(request, candidate.record(), context, policy)?;
+        // Policy runs outside initialization: a denied request retains nothing,
+        // and a reentrant policy may safely resolve the same candidate. Competing
+        // successful first loads use the winning record and its one hash cell.
+        let record = slot
+            .and_then(|slot| {
+                slot.get_or_init(|| {
+                    let bytes = candidate.source.capacity();
+                    self.retained_shared_source_bytes
+                        .try_update(Ordering::Relaxed, Ordering::Relaxed, |retained| {
+                            retained
+                                .checked_add(bytes)
+                                .filter(|total| *total <= self.shared_record_source_budget)
+                        })
+                        .ok()
+                        .map(|_| Arc::clone(&candidate))
+                })
+                .as_ref()
+            })
+            .map(Arc::clone)
+            .unwrap_or(candidate);
+        Ok(self.shared_outcome(request, record, context))
+    }
+
     fn resolve(
         &self,
         request: &ModuleRequest,
@@ -1659,6 +1745,203 @@ mod tests {
         let hashes: Vec<_> = workers.into_iter().map(|w| w.join().unwrap()).collect();
         assert!(hashes.iter().all(|hash| hash == &hashes[0]));
         assert_eq!(r.hash_computations.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn shared_records_reuse_source_but_refresh_policy_and_event_context() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mjs", "export const answer=42;");
+        let r = resolver(root.path());
+        let request = r.entry_request();
+        let policy = ChangingPolicy {
+            allowed: Cell::new(false),
+            calls: Cell::new(0),
+        };
+        assert!(r.resolve_shared(&request, &context(), &policy).is_err());
+        assert!(r.shared_records.values().all(|cell| cell.get().is_none()));
+        assert_eq!(r.retained_shared_source_bytes.load(Ordering::Relaxed), 0);
+        assert_eq!(r.hash_computations.load(Ordering::Relaxed), 0);
+
+        policy.allowed.set(true);
+        let first = r.resolve_shared(&request, &context(), &policy).unwrap();
+        let mut owned = r.resolve(&request, &context(), &policy).unwrap();
+        owned.module.record.source = "mutated tooling snapshot".into();
+        owned.module.record.dependencies.clear();
+        for index in 0..8 {
+            let current = ResolutionContext::new(
+                format!("trace-{index}"), format!("decision-{index}"), "current-policy",
+            );
+            let next = r.resolve_shared(&request, &current, &policy).unwrap();
+            assert!(Arc::ptr_eq(&first.module.record, &next.module.record));
+            assert_eq!(next.module.record.source, "export const answer=42;");
+            assert_eq!(next.module.content_hash, first.module.content_hash);
+            assert_eq!(next.module.content_hash, next.module.record.canonical_hash());
+            assert_eq!(next.event.trace_id, current.trace_id);
+            assert_eq!(next.event.decision_id, current.decision_id);
+            assert_eq!(next.event.policy_id, current.policy_id);
+        }
+        policy.allowed.set(false);
+        assert_eq!(
+            r.resolve_shared(&request, &context(), &policy).unwrap_err().code,
+            ResolutionErrorCode::PolicyDenied,
+        );
+        assert_eq!(policy.calls.get(), 12);
+        assert_eq!(r.hash_computations.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            r.retained_shared_source_bytes.load(Ordering::Relaxed),
+            first.module.record.source.capacity(),
+        );
+    }
+
+    #[test]
+    fn shared_record_hits_cannot_authorize_an_uncaptured_route_or_importer() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mjs", "import './a.mjs'; import './b.mjs';");
+        put(root.path(), "a.mjs", "import './shared.mjs';");
+        put(root.path(), "b.mjs", "import './shared.mjs';");
+        put(root.path(), "shared.mjs", "export const shared=42;");
+        let r = resolver(root.path());
+        let entry_id = r.entry_request().specifier;
+        let route = |name: &str, referrer: &str| {
+            ModuleRequest::new(name, ImportStyle::Import)
+                .with_referrer(referrer)
+                .with_compatibility_mode(CompatibilityMode::NodeCompat)
+        };
+        let a = r.resolve_shared(&route("./a.mjs", &entry_id), &context(), &granted()).unwrap();
+        let b = r.resolve_shared(&route("./b.mjs", &entry_id), &context(), &granted()).unwrap();
+        let from_a = route("./shared.mjs", &a.module.record.id);
+        let from_b = route("./shared.mjs", &b.module.record.id);
+        let policy = EdgePolicy {
+            deny_referrer: Some(b.module.record.id.clone()),
+            calls: RefCell::new(Vec::new()),
+        };
+        let shared = r.resolve_shared(&from_a, &context(), &policy).unwrap();
+        assert_eq!(
+            r.resolve_shared(&from_b, &context(), &policy).unwrap_err().code,
+            ResolutionErrorCode::PolicyDenied,
+        );
+        assert_eq!(policy.calls.borrow().len(), 2);
+        let other_edge = r.resolve_shared(&from_b, &context(), &granted()).unwrap();
+        assert!(Arc::ptr_eq(&shared.module.record, &other_edge.module.record));
+        for rejected in [
+            route("./shared.mjs", &entry_id),
+            ModuleRequest { style: ImportStyle::Require, ..from_a.clone() },
+            ModuleRequest { compatibility_mode: CompatibilityMode::BunCompat, ..from_a.clone() },
+            route("./shared.mjs", "unknown-importer"),
+        ] {
+            assert!(r.resolve_shared(&rejected, &context(), &AllowAllPolicy).is_err());
+        }
+    }
+
+    #[test]
+    fn shared_native_aliases_reuse_descriptors_without_retaining_capability_grants() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.cjs", "require('buffer'); require('node:buffer');");
+        let r = resolver_entry(root.path(), "app.cjs");
+        let policy = CapabilityPolicyHook::new(BTreeSet::from([
+            RuntimeCapability::ModuleLoad, RuntimeCapability::Builtin,
+        ]));
+        let request = |name: &str| {
+            ModuleRequest::new(name, ImportStyle::Require)
+                .with_referrer(r.entry_request().specifier)
+                .with_compatibility_mode(CompatibilityMode::NodeCompat)
+        };
+        let bare = r.resolve_shared(&request("buffer"), &context(), &policy).unwrap();
+        let prefixed = r.resolve_shared(&request("node:buffer"), &context(), &policy).unwrap();
+        assert!(Arc::ptr_eq(&bare.module.record, &prefixed.module.record));
+        assert_eq!(NativeBuiltinModule::from_record(prefixed.module.record.record()), Some(NativeBuiltinModule::Buffer));
+        assert_eq!(bare.module.request_specifier, "buffer");
+        assert_eq!(prefixed.module.request_specifier, "node:buffer");
+        assert_eq!(r.retained_shared_source_bytes.load(Ordering::Relaxed), 0);
+        for name in ["buffer", "node:buffer"] {
+            assert_eq!(
+                r.resolve_shared(&request(name), &context(), &granted()).unwrap_err().code,
+                ResolutionErrorCode::PolicyDenied,
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_shared_resolves_retain_one_source_and_hash_once() {
+        use std::sync::Barrier;
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mjs", "export const answer=42;");
+        let r = Arc::new(resolver(root.path()));
+        let barrier = Arc::new(Barrier::new(8));
+        let workers: Vec<_> = (0..8).map(|_| {
+            let r = Arc::clone(&r);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                r.resolve_shared(&r.entry_request(), &context(), &granted()).unwrap()
+            })
+        }).collect();
+        let outcomes: Vec<_> = workers.into_iter().map(|worker| worker.join().unwrap()).collect();
+        let first = &outcomes[0].module;
+        for outcome in &outcomes {
+            assert!(Arc::ptr_eq(&first.record, &outcome.module.record));
+            assert_eq!(first.content_hash, outcome.module.content_hash);
+        }
+        assert_eq!(r.hash_computations.load(Ordering::Relaxed), 1);
+        assert_eq!(r.retained_shared_source_bytes.load(Ordering::Relaxed), first.record.source.capacity());
+    }
+
+    #[test]
+    fn shared_record_source_budget_bounds_duplicate_url_instances_without_refusing_them() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mjs", "import './value.mjs?one'; import './value.mjs?two'; import './value.mjs?three';");
+        let source = "export const value=42;";
+        put(root.path(), "value.mjs", source);
+        let mut r = resolver(root.path());
+        r.shared_record_source_budget = source.len();
+        let request = |suffix: &str| {
+            ModuleRequest::new(format!("./value.mjs?{suffix}"), ImportStyle::Import)
+                .with_referrer(r.entry_request().specifier)
+                .with_compatibility_mode(CompatibilityMode::NodeCompat)
+        };
+        let one = r.resolve_shared(&request("one"), &context(), &granted()).unwrap();
+        let two = r.resolve_shared(&request("two"), &context(), &granted()).unwrap();
+        let three = r.resolve_shared(&request("three"), &context(), &granted()).unwrap();
+        assert_ne!(one.module.record.id, two.module.record.id);
+        assert_ne!(two.module.record.id, three.module.record.id);
+        for (suffix, first, retained) in [("one", one, true), ("two", two, false), ("three", three, false)] {
+            let again = r.resolve_shared(&request(suffix), &context(), &granted()).unwrap();
+            assert_eq!(Arc::ptr_eq(&first.module.record, &again.module.record), retained);
+            assert_eq!(first.module.record.source, source);
+            assert_eq!(first.module.content_hash, again.module.content_hash);
+            assert_eq!(again.module.content_hash, again.module.record.canonical_hash());
+        }
+        assert_eq!(r.retained_shared_source_bytes.load(Ordering::Relaxed), source.len());
+        assert_eq!(r.shared_records.values().filter(|slot| matches!(slot.get(), Some(Some(_)))).count(), 1);
+        assert_eq!(r.shared_records.values().filter(|slot| matches!(slot.get(), Some(None))).count(), 2);
+    }
+
+    #[test]
+    fn reentrant_policy_initializes_shared_records_without_caching_authorization() {
+        struct Reentrant<'a> {
+            resolver: &'a CapturedEngineResolver,
+            nested: RefCell<Option<Arc<SharedModuleRecord>>>,
+            calls: Cell<usize>,
+        }
+        impl ModulePolicyHook for Reentrant<'_> {
+            fn authorize(&self, request: &ModuleRequest, _: &ModuleRecord, context: &ResolutionContext) -> ResolutionResult<()> {
+                self.calls.set(self.calls.get() + 1);
+                let nested = self.resolver.resolve_shared(request, context, &AllowAllPolicy)?;
+                *self.nested.borrow_mut() = Some(nested.module.record);
+                Ok(())
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mjs", "export const answer=42;");
+        let r = resolver(root.path());
+        let policy = Reentrant { resolver: &r, nested: RefCell::new(None), calls: Cell::new(0) };
+        for _ in 0..2 {
+            let outcome = r.resolve_shared(&r.entry_request(), &context(), &policy).unwrap();
+            assert!(Arc::ptr_eq(&outcome.module.record, policy.nested.borrow().as_ref().unwrap()));
+        }
+        assert_eq!(policy.calls.get(), 2);
+        assert_eq!(r.hash_computations.load(Ordering::Relaxed), 1);
+        assert_eq!(r.retained_shared_source_bytes.load(Ordering::Relaxed), "export const answer=42;".len());
     }
 
     #[test]
