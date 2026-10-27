@@ -515,7 +515,8 @@ enum CreateRequireFactory {
 
 /// A deliberately narrow binding proof, not general JavaScript scope analysis.
 /// Only immutable top-level imports and const declarations participate. Native
-/// CommonJS require may also flow through an ordered chain of const aliases.
+/// CommonJS require and proved createRequire results may also flow through an
+/// ordered chain of const aliases, retaining their original importer authority.
 /// Every other occurrence of their names is checked by the ordinary bounded
 /// walk; shadowing, mutation and escape make the graph incomplete instead of
 /// lending an unrelated function the captured importer's require authority.
@@ -524,6 +525,7 @@ struct CreateRequireBindings<'source> {
     factories: BTreeMap<&'source str, CreateRequireFactory>,
     commonjs_factories: BTreeSet<&'source str>,
     loaders: BTreeSet<&'source str>,
+    created_loaders: BTreeMap<&'source str, usize>,
     commonjs_aliases: BTreeSet<&'source str>,
     allowed_identifiers: BTreeSet<usize>,
     factory_members: BTreeSet<usize>,
@@ -672,6 +674,9 @@ impl<'source> CreateRequireBindings<'source> {
                 }
                 bindings.reserve_binding()?;
                 bindings.loaders.insert(spelling);
+                bindings
+                    .created_loaders
+                    .insert(spelling, declaration.end_byte());
                 bindings.filename_origin |= commonjs;
                 bindings.allowed_identifiers.insert(name.id());
                 bindings.allowed_identifiers.insert(factory.id());
@@ -685,17 +690,12 @@ impl<'source> CreateRequireBindings<'source> {
     }
 
     /// An alias retains exactly this module's require origin. Only earlier
-    /// aliases in top-level const initializers may supply a later alias; no
+    /// loaders in top-level const initializers may supply a later alias; no
     /// fixed-point inference, nested binding, property read or executable
-    /// expression can manufacture another loader. The full scan still rejects
-    /// every unproved occurrence of require or any alias, including shadowing.
+    /// expression can manufacture another loader. Created loaders retain their
+    /// own classification rather than gaining CommonJS wrapper authority. The
+    /// full scan still rejects every unproved occurrence, including shadowing.
     fn discover_commonjs_aliases(&mut self, root: Node<'_>, source: &'source str) -> Result<()> {
-        // An explicitly imported factory or createRequire result named
-        // require is not the CommonJS wrapper binding. Its existing narrower
-        // contract remains authoritative, including refusal of aliases.
-        if self.factories.contains_key("require") || self.loaders.contains("require") {
-            return Ok(());
-        }
         let mut statements = root.walk();
         for statement in root.named_children(&mut statements) {
             if statement.kind() != "lexical_declaration" || !keyword(statement, "const") {
@@ -717,7 +717,18 @@ impl<'source> CreateRequireBindings<'source> {
                     continue;
                 }
                 let origin = value.utf8_text(source.as_bytes()).unwrap_or("");
-                if origin != "require" && !self.commonjs_aliases.contains(origin) {
+                // Factory discovery precedes this ordered alias pass. Do not
+                // let a later createRequire declaration prove an earlier read
+                // from its temporal dead zone, even if the name is require.
+                let created = self
+                    .created_loaders
+                    .get(origin)
+                    .is_some_and(|end| *end <= value.start_byte());
+                let commonjs = self.commonjs_aliases.contains(origin)
+                    || (origin == "require"
+                        && !self.factories.contains_key("require")
+                        && !self.loaders.contains("require"));
+                if !created && !commonjs {
                     continue;
                 }
                 let spelling = name.utf8_text(source.as_bytes()).unwrap_or("");
@@ -729,7 +740,12 @@ impl<'source> CreateRequireBindings<'source> {
                     continue;
                 }
                 self.reserve_binding()?;
-                self.commonjs_aliases.insert(spelling);
+                if created {
+                    self.created_loaders
+                        .insert(spelling, declaration.end_byte());
+                } else {
+                    self.commonjs_aliases.insert(spelling);
+                }
                 self.loaders.insert(spelling);
                 self.allowed_identifiers.insert(name.id());
                 self.allowed_identifiers.insert(value.id());
@@ -2870,7 +2886,7 @@ mod tests {
             "const {load}=require; load('./dep.cjs');",
             "function nested(){const load=require; load('./dep.cjs');}",
             "import {createRequire as require} from 'node:module'; const load=require; load('./dep.cjs');",
-            "import {createRequire} from 'node:module'; const require=createRequire(import.meta.url); const load=require; load('./dep.cjs');",
+            "import {createRequire} from 'node:module'; const load=require; const require=createRequire(import.meta.url); load('./dep.cjs');",
             "({[arguments[1]=replacement](){}}); const load=require; load('./dep.cjs');",
             "class Example {[arguments[1]=replacement](){}} const load=require; load('./dep.cjs');",
         ] {
@@ -3466,7 +3482,7 @@ mod tests {
             "local=other;",
             "local.resolve=other;",
             "Object.defineProperty(local, 'resolve', {value:other});",
-            "const alias=local;",
+            "let alias=local;",
             "const escaped={local};",
             "export {local};",
             "consume(local);",
@@ -5624,5 +5640,238 @@ require!('./dep.cjs');
                 .iter()
                 .any(|d| d.code == "TYPESCRIPT_TRANSFORM_REQUIRED")
         );
+    }
+
+    #[test]
+    fn created_require_const_aliases_preserve_factory_and_loader_origins() {
+        for (source, language) in [
+            (
+                "import {createRequire} from 'node:module'; const require=createRequire(import.meta.url); const load=require; load('./dep.cjs'); load.resolve('./dep.cjs');",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "import {createRequire as require} from 'node:module'; const first=require(import.meta.url), second=first, third=(second); third('./dep.cjs'); third['res'+'olve']('./dep.cjs');",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "import * as mod from 'node:module'; const first=mod.createRequire(import.meta.url); const second=first; function nested(){return second('./dep.cjs');} const later=()=>second.resolve('./dep.cjs'); console.log(typeof arguments);",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "import mod from 'module'; const first: Loader=mod.createRequire(import.meta.url as string); const second: Loader=first!; const third=(second as Loader); third?.('./dep.cjs'); (third.resolve satisfies Resolver)('./dep.cjs');",
+                SourceLanguage::TypeScript,
+            ),
+            (
+                "const {createRequire}=require('node:module'); const first=createRequire(__filename), second=first; const third=second; third('./dep.cjs'); third.resolve('./dep.cjs');",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "const mod=require('module'); const first=mod.createRequire(__filename); const second=(first); if(typeof second==='function') second('./dep.cjs'); second.resolve('./dep.cjs');",
+                SourceLanguage::JavaScript,
+            ),
+        ] {
+            let (loads, notices, analyzed) = scan(
+                &mut Parser::new(),
+                source.as_bytes(),
+                language,
+                &mut Budget::default(),
+            )
+            .unwrap();
+            assert!(analyzed, "{source}: {notices:?}");
+            assert!(notices.is_empty(), "{source}: {notices:?}");
+            let dependencies: Vec<_> = loads
+                .iter()
+                .filter(|load| load.specifier.as_deref() == Some("./dep.cjs"))
+                .collect();
+            assert_eq!(dependencies.len(), 2, "{source}: {loads:?}");
+            assert!(
+                dependencies
+                    .iter()
+                    .all(|load| load.kind == LoadKind::Require && !load.type_only)
+            );
+        }
+    }
+
+    #[test]
+    fn created_require_aliases_refuse_forward_mutable_and_escaping_bindings() {
+        let factory = "import {createRequire as make} from 'node:module';";
+        for body in [
+            "const load=local; const local=make(import.meta.url); load('./dep.cjs');",
+            "const first=second, second=make(import.meta.url); first('./dep.cjs');",
+            "const local=make(import.meta.url); const first=second, second=local; first('./dep.cjs');",
+            "const local=make(import.meta.url); let load=local; load('./dep.cjs');",
+            "const local=make(import.meta.url); const load=(0,local); load('./dep.cjs');",
+            "const local=make(import.meta.url); const load=flag?local:other; load('./dep.cjs');",
+            "const local=make(import.meta.url); const load=local; load=other; load('./dep.cjs');",
+            "const local=make(import.meta.url); const load=local; local=other; load('./dep.cjs');",
+            "const local=make(import.meta.url); const load=local; load.resolve=other; load('./dep.cjs');",
+            "const local=make(import.meta.url); const load=local; Object.assign(load,{resolve:other}); load('./dep.cjs');",
+            "const local=make(import.meta.url); function nested(){const load=local; load('./dep.cjs');}",
+            "const local=make(import.meta.url); const load=local; function shadow(load){load('./dep.cjs');}",
+            "const local=make(import.meta.url); const load=local; function shadow(local){load('./dep.cjs');}",
+            "const local=make(import.meta.url); const load=local; try{}catch(load){load('./dep.cjs');}",
+            "const local=make(import.meta.url); const load=local; const {load}=other; load('./dep.cjs');",
+            "const local=make(import.meta.url); const load=local; ({load}=other); load('./dep.cjs');",
+            "const local=make(import.meta.url); const load=local; const escaped={load}; load('./dep.cjs');",
+            "const local=make(import.meta.url); const load=local; consume(load); load('./dep.cjs');",
+            "const local=make(import.meta.url); const load=local; export {load}; load('./dep.cjs');",
+            "const local=make(import.meta.url); const load=local; load.call(null,'./dep.cjs');",
+            "const local=make(import.meta.url); const load=local; const resolve=load.resolve; resolve('./dep.cjs');",
+            "const local=make(import.meta.url); const load=local; load.resolve('./dep.cjs',{paths:['other']});",
+            "const local=make(import.meta.url); const load=local; function shadow(lo\\u0061d){} load('./dep.cjs');",
+            "const local=make(import.meta.url); const lo\\u0061d=local; lo\\u0061d('./dep.cjs');",
+            "const local=make(import.meta.url); const load=local; eval('load=other'); load('./dep.cjs');",
+            "const local=make(import.meta.url); const load=local; import.meta.url='file:///other.mjs'; load('./dep.cjs');",
+        ] {
+            let source = format!("{factory}{body}");
+            let (_, notices, analyzed) = scan(
+                &mut Parser::new(),
+                source.as_bytes(),
+                SourceLanguage::JavaScript,
+                &mut Budget::default(),
+            )
+            .unwrap();
+            assert!(analyzed, "{source}: {notices:?}");
+            assert!(
+                !notices.is_empty(),
+                "unproved created-loader alias became complete: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn created_require_aliases_keep_nonliteral_requests_and_binding_limits() {
+        let source = "import {createRequire} from 'node:module'; const local=createRequire(import.meta.url); const next=local; next(request); next.resolve(`./${name}.cjs`);";
+        let (loads, notices, analyzed) = scan(
+            &mut Parser::new(),
+            source.as_bytes(),
+            SourceLanguage::JavaScript,
+            &mut Budget::default(),
+        )
+        .unwrap();
+        assert!(analyzed);
+        assert!(notices.is_empty(), "{notices:?}");
+        let requests: Vec<_> = loads
+            .iter()
+            .filter(|load| load.kind == LoadKind::Require)
+            .collect();
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|load| load.specifier.is_none()));
+
+        let mut source = String::from(
+            "import {createRequire} from 'node:module'; const local=createRequire(import.meta.url);",
+        );
+        for index in 0..MAX_SITES {
+            source.push_str(&format!("const load{index}=local;"));
+        }
+        let failure = scan(
+            &mut Parser::new(),
+            source.as_bytes(),
+            SourceLanguage::JavaScript,
+            &mut Budget::default(),
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, "ERR_MODULE_GRAPH_LIMIT");
+    }
+
+    #[test]
+    fn created_require_alias_capsules_keep_importer_routes_and_negative_probes() {
+        use super::registry::{ModuleKind, PinnedModuleRegistry, RequestStyle};
+        let root = tempfile::tempdir().unwrap();
+        let source = "import {createRequire} from 'node:module'; const require=createRequire(import.meta.url); const load=require; load('pkg'); load('./value.cjs'); try{load('optional')}catch(error){}";
+        put(root.path(), "app.mjs", source);
+        put(root.path(), "value.cjs", "module.exports=42;");
+        put(
+            root.path(),
+            "node_modules/pkg/package.json",
+            r#"{"main":"index.cjs"}"#,
+        );
+        put(
+            root.path(),
+            "node_modules/pkg/index.cjs",
+            "const {createRequire}=require('node:module'); const local=createRequire(__filename); const read=local; module.exports=read('./value.cjs');",
+        );
+        put(
+            root.path(),
+            "node_modules/pkg/value.cjs",
+            "module.exports=17;",
+        );
+        let captured = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
+        assert!(captured.report().diagnostics.is_empty());
+        assert_eq!(captured.report().edges.len(), 6);
+        let pin = captured.report().input_hash.clone();
+        let capsule = super::capsule::encode(&captured).unwrap();
+        put(
+            root.path(),
+            "value.cjs",
+            "throw new Error('live source changed');",
+        );
+        put(
+            root.path(),
+            "node_modules/pkg/value.cjs",
+            "throw new Error('live package changed');",
+        );
+        put(
+            root.path(),
+            "node_modules/optional/index.js",
+            "module.exports='new live dependency';",
+        );
+        put(root.path(), "uncaptured.cjs", "module.exports=99;");
+        let replayed = super::capsule::replay(capsule.bytes(), capsule.digest()).unwrap();
+        assert_eq!(replayed.report(), captured.report());
+        let registry = PinnedModuleRegistry::new_with_kind_resolver(
+            replayed,
+            &pin,
+            |module, _, _| {
+                Ok(if module.format_hint == "commonjs" {
+                    ModuleKind::CommonJs
+                } else {
+                    ModuleKind::EsModule
+                })
+            },
+            |specifier, _| match specifier {
+                "module" | "node:module" => Some("node:module"),
+                _ => None,
+            },
+        )
+        .unwrap();
+        let entry = registry
+            .lookup(None, registry.entrypoint(), RequestStyle::Import)
+            .unwrap();
+        let local = registry
+            .lookup(Some(entry.id()), "./value.cjs", RequestStyle::Require)
+            .unwrap();
+        assert_eq!(local.source(), "module.exports=42;");
+        let package = registry
+            .lookup(Some(entry.id()), "pkg", RequestStyle::Require)
+            .unwrap();
+        let nested = registry
+            .lookup(Some(package.id()), "./value.cjs", RequestStyle::Require)
+            .unwrap();
+        assert_eq!(nested.source(), "module.exports=17;");
+        assert_ne!(nested.id(), local.id());
+        assert_eq!(registry.summary().missing_routes, 1);
+        assert_eq!(
+            registry
+                .lookup(Some(entry.id()), "optional", RequestStyle::Require)
+                .err()
+                .unwrap()
+                .code,
+            "MODULE_NOT_FOUND"
+        );
+        for (importer, specifier, style) in [
+            (entry.id(), "./uncaptured.cjs", RequestStyle::Require),
+            (entry.id(), "./value.cjs", RequestStyle::Import),
+            (package.id(), "optional", RequestStyle::Require),
+        ] {
+            assert_eq!(
+                registry
+                    .lookup(Some(importer), specifier, style)
+                    .err()
+                    .unwrap()
+                    .code,
+                "ERR_MODULE_REGISTRY_ROUTE"
+            );
+        }
     }
 }

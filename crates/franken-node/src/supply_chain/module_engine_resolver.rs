@@ -2154,8 +2154,13 @@ chooseEsm(true).then(function(first) {
                 root.path(),
                 "app.cjs",
                 r#"
+const { createRequire } = require('node:module');
+const local = createRequire(__filename);
+const load = local;
+const present = './present.cjs';
+const optional = './optional.cjs';
 function choose(installed) {
-    try { return require(installed ? './present.cjs' : './optional.cjs'); }
+    try { return load(installed ? present : optional); }
     catch (error) { return error.code; }
 }
 console.log(choose(true), choose(false));
@@ -2477,9 +2482,12 @@ import('node:zlib').then(function(again) {{
             ] {
                 let root = tempfile::tempdir().unwrap();
                 let source = format!(
-                    "{factory} const local={origin}; \
-                     console.log(local('./dep.cjs'), local('dual')); \
-                     console.log(local.resolve('./asset.cjs'));"
+                    "{factory} const local={origin}; const alias=local, again=alias; \
+                     const suffix='.cjs', dependency='./dep'+suffix; \
+                     const packageName='du'+'al', asset='./asset'+suffix; \
+                     console.log(alias(dependency), again(packageName).answer, \
+                         alias(packageName)===again(packageName), again(packageName).resolved); \
+                     console.log(again.resolve(asset));"
                 );
                 put(root.path(), entrypoint, &source);
                 put(root.path(), "nested/dep.cjs", "module.exports=42;");
@@ -2497,7 +2505,26 @@ import('node:zlib').then(function(again) {{
                 put(
                     root.path(),
                     "node_modules/dual/required.cjs",
+                    "const {createRequire}=require('node:module'); \
+                     const local=createRequire(__filename); const alias=local; \
+                     const suffix='.cjs', value='./value'+suffix, asset='./asset'+suffix; \
+                     module.exports={answer:alias(value), \
+                         resolved:alias.resolve(asset).endsWith('/dual/asset.cjs')};",
+                );
+                put(
+                    root.path(),
+                    "node_modules/dual/value.cjs",
                     "module.exports=7;",
+                );
+                put(
+                    root.path(),
+                    "node_modules/dual/asset.cjs",
+                    "throw new Error('nested resolve must not evaluate');",
+                );
+                put(
+                    root.path(),
+                    "nested/value.cjs",
+                    "throw new Error('nested alias used entrypoint origin');",
                 );
                 put(
                     root.path(),
@@ -2507,7 +2534,10 @@ import('node:zlib').then(function(again) {{
                 let reference = node_reference_output(root.path(), entrypoint);
                 assert_eq!(
                     reference,
-                    format!("42 7\n{}\n", root.path().join("nested/asset.cjs").display())
+                    format!(
+                        "42 7 true true\n{}\n",
+                        root.path().join("nested/asset.cjs").display()
+                    )
                 );
                 let result = execute_captured_graph_for_test(root.path(), entrypoint, lane, || {
                     put(
@@ -2529,6 +2559,11 @@ import('node:zlib').then(function(again) {{
                         root.path(),
                         "node_modules/dual/required.cjs",
                         "module.exports=0;",
+                    );
+                    put(
+                        root.path(),
+                        "node_modules/dual/value.cjs",
+                        "module.exports=-1;",
                     );
                 });
                 let actual = result
