@@ -5,11 +5,25 @@ on:
     paths:
       - 'crates/franken-node/src/conformance/**'
       - 'crates/franken-node/src/connector/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'packaging/source-siblings.tsv'
+      - 'scripts/bootstrap_source.sh'
+      - '.github/actions/franken-siblings/action.yml'
+      - '.github/workflows/connector-conformance.yml'
   push:
     branches: [main]
     paths:
       - 'crates/franken-node/src/conformance/**'
       - 'crates/franken-node/src/connector/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'packaging/source-siblings.tsv'
+      - 'scripts/bootstrap_source.sh'
+      - '.github/actions/franken-siblings/action.yml'
+      - '.github/workflows/connector-conformance.yml'
 
 jobs:
   conformance:

@@ -9,7 +9,7 @@ name: README CLI Drift Gate
 
 on:
   push:
-    # `master` mirrors `main`; one run per commit is enough.
+    # The legacy mirror has identical commits; one run per commit is enough.
     branches: [main]
   pull_request:
     paths:
@@ -17,6 +17,12 @@ on:
       - crates/franken-node/src/cli.rs
       - crates/franken-node/src/main.rs
       - scripts/check_readme_cli_drift.py
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - packaging/source-siblings.tsv
+      - scripts/bootstrap_source.sh
+      - .github/actions/franken-siblings/action.yml
       - .github/workflows/readme-cli-drift-gate.yml
   workflow_dispatch: {}
 
