@@ -155,6 +155,36 @@ class CapsuleFileEvidenceTests(unittest.TestCase):
         self.assertIn("incomplete file output", result["error"])
         self.assertIn("execution", result)
 
+    def test_missing_runtime_leg_returns_error_and_retains_completed_file_evidence(self):
+        artifact = self.capture()  # Genuine Node execution, before fault injection.
+        real_run = runner.run_command
+        for missing_leg in replay.LEGS:
+            with self.subTest(missing_leg=missing_leg):
+                calls = 0
+
+                def fail_selected_launch(*args, **kwargs):
+                    nonlocal calls
+                    leg = replay.LEGS[calls]
+                    calls += 1
+                    if leg == missing_leg:
+                        raise OSError("injected runtime launch failure")
+                    return real_run(*args, **kwargs)
+
+                with mock.patch.object(runner, "run_command", side_effect=fail_selected_launch):
+                    result = self.run_capsule(artifact)
+                self.assertEqual(result["verdict"], "ERROR", result)
+                self.assertIn("incomplete file output", result["error"])
+                execution = result["execution"]
+                self.assertEqual(execution["summary"]["verdict"], "ERROR")
+                row = execution["validation_results"][0]
+                self.assertEqual(row["status"], "ERROR")
+                self.assertNotIn(missing_leg, row)
+                self.assertIn("injected runtime launch failure", execution["errors"][0]["message"])
+                if missing_leg == "migration":
+                    self.assertEqual(row["baseline"]["exit_code"], 0)
+                    self.assertEqual(row["baseline"]["file_outputs"],
+                                     artifact["expected"]["cases"][0]["baseline"]["file_outputs"])
+
     def test_incomplete_candidate_can_be_repaired_without_relaxing_reference(self):
         self.reference_correct()
         self.ambient.write_bytes(b"x" * (runner.MAX_EXPECTATION_BYTES + 1))

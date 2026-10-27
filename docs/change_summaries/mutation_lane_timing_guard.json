@@ -5,7 +5,26 @@
     "intent": "Restore qualification wiring, align the development engine API with the landed module adapter, register dormant migration suites, align Python executable-test discovery with native JSX/TSX and declaration rules, and make legacy source-check workflows read-only. Node production constant-time comparison functions remain unchanged.",
     "scope": {
       "subsystems": ["franken_node.security", "franken_node.control_plane", "franken_node.test_strategies", "franken_node.migration"],
-      "modules": ["crates/franken-node/src/security/constant_time.rs", "crates/franken-node/src/control_plane/fleet_transport.rs", "crates/franken-node/src/test_strategies/mod.rs", "crates/franken-node/src/migration/validation_suite.rs", "crates/franken-node/src/migration/test_inventory.rs", "scripts/migration_validation_runner.py", "tests/test_migration_captured_execution.py", "tests/test_migration_runtime_identity.py", "crates/franken-node/Cargo.toml", "crates/franken-node/tests/native_engine_compat.rs", "crates/franken-node/tests/native_rewrite_transactions.rs", "crates/franken-node/tests/typed_module_rewrites.rs", ".github/actions/franken-siblings/action.yml", ".github/workflows/mutants-gate.yml", ".github/workflows/inline-lib-tests-gate.yml", ".github/workflows/esm-module-rewrite.yml", ".github/workflows/corpus-success-admission.yml"]
+      "modules": [
+        "crates/franken-node/src/security/constant_time.rs",
+        "crates/franken-node/src/control_plane/fleet_transport.rs",
+        "crates/franken-node/src/test_strategies/mod.rs",
+        "crates/franken-node/src/migration/validation_suite.rs",
+        "crates/franken-node/src/migration/test_inventory.rs",
+        "scripts/migration_validation_runner.py",
+        "tests/test_migration_captured_execution.py",
+        "tests/test_migration_runtime_identity.py",
+        "tests/test_migration_capsule_file_evidence.py",
+        "crates/franken-node/Cargo.toml",
+        "crates/franken-node/tests/native_engine_compat.rs",
+        "crates/franken-node/tests/native_rewrite_transactions.rs",
+        "crates/franken-node/tests/typed_module_rewrites.rs",
+        ".github/actions/franken-siblings/action.yml",
+        ".github/workflows/mutants-gate.yml",
+        ".github/workflows/inline-lib-tests-gate.yml",
+        ".github/workflows/esm-module-rewrite.yml",
+        ".github/workflows/corpus-success-admission.yml"
+      ]
     },
     "surface_area_delta": {
       "new_apis": [],
