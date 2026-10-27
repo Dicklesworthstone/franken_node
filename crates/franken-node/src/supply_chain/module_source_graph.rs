@@ -9,6 +9,9 @@
 //! TypeScript follows explicit runtime syntax, not tsconfig-dependent emit.
 //! Whole-declaration type imports and import types are recorded but never read;
 //! inline type specifiers retain their declaration's side-effect dependency.
+//! Enum initializers are scanned as runtime syntax. Their execution still
+//! requires engine normalization with an unchanged captured
+//! dependency surface; dependency capture alone does not authorize a transform.
 //! Spec: https://www.typescriptlang.org/tsconfig/verbatimModuleSyntax.html
 
 use super::{
@@ -1674,8 +1677,13 @@ fn erased_region(node: Node<'_>) -> bool {
 
 fn requires_typescript_transform(node: Node<'_>) -> bool {
     match node.kind() {
-        "enum_declaration" | "internal_module" | "module" | "import_alias" | "decorator"
-        | "type_assertion" => true,
+        // Enum initializers have explicit runtime loads, all visited by the
+        // ordinary walk. The engine owns their bounded
+        // normalization and rescans its output before registry admission; it
+        // must preserve every captured route. Other transforms still lack that
+        // contract, including namespaces, legacy `module` declarations and
+        // import aliases.
+        "internal_module" | "module" | "import_alias" | "decorator" | "type_assertion" => true,
         "export_statement" => keyword(node, "="),
         "required_parameter" | "optional_parameter" => {
             let mut cursor = node.walk();
@@ -5990,12 +5998,117 @@ interface Names { eval: Function; }
     }
 
     #[test]
-    fn nonerasable_typescript_keeps_real_loads_but_requires_transform_analysis() {
+    fn enum_initializers_capture_runtime_dependencies() {
         let root = tempfile::tempdir().unwrap();
         for source in [
             "enum E { A = require('./value.cjs') }",
+            "export enum E { A = require('./value.cjs') }",
+            "const enum E { A = require('./value.cjs') }",
+            "function value() { enum E { A = require('./value.cjs') } return E.A; }",
+        ] {
+            put(root.path(), "app.ts", source);
+            put(root.path(), "value.cjs", "module.exports=1;");
+            let g = typed_graph(root.path(), "app.ts");
+            assert!(
+                g.report.fully_resolved,
+                "{source}: {:?}",
+                g.report.diagnostics
+            );
+            assert_eq!(paths(&g), ["app.ts", "value.cjs"], "{source}");
+            assert_eq!(g.report.edges.len(), 1, "{source}");
+            assert_eq!(g.report.edges[0].kind, LoadKind::Require);
+            assert_eq!(g.report.edges[0].state, EdgeState::Resolved);
+            assert_eq!(g.report.edges[0].specifier.as_deref(), Some("./value.cjs"));
+            assert!(g.report.edges[0].deferred_or_conditional);
+            assert!(!g.report.runtime_completeness);
+            assert!(!g.report.execution_performed);
+            let pin = g.report.input_hash.clone();
+            assert_eq!(
+                registry::PinnedModuleRegistry::new(g, &pin)
+                    .err()
+                    .unwrap()
+                    .code,
+                "ERR_MODULE_REGISTRY_FORMAT",
+                "capture must not enable a transform-free TypeScript registry"
+            );
+        }
+    }
+
+    #[test]
+    fn enum_type_references_are_erased_but_runtime_choices_are_captured() {
+        let root = tempfile::tempdir().unwrap();
+        put(
+            root.path(),
+            "app.ts",
+            r#"
+enum Values {
+    Selected = require(flag ? './left.cjs' : './right.cjs'),
+    Typed = 1 as import('../outside').Count,
+}
+declare namespace Ambient { const value: typeof import('ambient-only'); }
+"#,
+        );
+        put(root.path(), "left.cjs", "module.exports=1;");
+        put(root.path(), "right.cjs", "module.exports=2;");
+        let g = typed_graph(root.path(), "app.ts");
+        assert!(g.report.fully_resolved, "{:?}", g.report.diagnostics);
+        assert_eq!(paths(&g), ["app.ts", "left.cjs", "right.cjs"]);
+        assert_eq!(
+            g.report
+                .edges
+                .iter()
+                .filter(|e| e.state == EdgeState::TypeOnly)
+                .count(),
+            2
+        );
+        assert_eq!(
+            g.report
+                .edges
+                .iter()
+                .filter(|e| e.state == EdgeState::Resolved)
+                .count(),
+            2
+        );
+        assert!(
+            g.report
+                .probes
+                .iter()
+                .all(|p| { !p.path.contains("outside") && !p.path.contains("ambient-only") })
+        );
+    }
+
+    #[test]
+    fn enums_do_not_hide_unbounded_loads_or_dynamic_code() {
+        let root = tempfile::tempdir().unwrap();
+        for source in [
+            "enum E { A = require(request) }",
+            "enum E { A = import(request) }",
+            "enum E { A = eval('require(request)') }",
+            "enum E { A = ((load) => load('./hidden.cjs'))(require) }",
+            "enum E { A = require('./missing.cjs') }",
+        ] {
+            put(root.path(), "app.ts", source);
+            let g = typed_graph(root.path(), "app.ts");
+            assert!(!g.report.fully_resolved, "{source}");
+            assert!(
+                !g.report.diagnostics.is_empty()
+                    || g.report
+                        .edges
+                        .iter()
+                        .any(|e| matches!(e.state, EdgeState::NonLiteral | EdgeState::Unresolved)),
+                "unsupported runtime surface lost its evidence: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn unconfigured_typescript_transforms_keep_real_loads_and_block_admission() {
+        let root = tempfile::tempdir().unwrap();
+        for source in [
             "namespace N { export const x = require('./value.cjs'); }",
             "class C { constructor(public value = require('./value.cjs')) {} }",
+            "namespace N { export class C { constructor(public value = require('./value.cjs')) {} } }",
+            "module N { export const x = require('./value.cjs'); }",
         ] {
             put(root.path(), "app.ts", source);
             put(root.path(), "value.cjs", "module.exports=1;");

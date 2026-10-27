@@ -1824,6 +1824,148 @@ mod tests {
     }
 
     #[test]
+    fn typescript_enums_keep_normalization_witnesses_and_module_routes() {
+        use frankenengine_engine::ts_normalization::prepare_source_entry_for_public_entrypoints;
+
+        let root = tempfile::tempdir().unwrap();
+        let source = r#"
+enum State { Ready = require('./seed.cjs'), Next }
+enum Label { Ready = 'ready', Done = 'done' }
+module.exports = { State, Label, offset: require('./offset.cjs') };
+"#;
+        put(root.path(), "app.cts", source);
+        put(root.path(), "seed.cjs", "module.exports = 40;");
+        put(root.path(), "offset.cjs", "module.exports = 1;");
+        let graph = capture(root.path(), "app.cts", GraphOptions::default()).unwrap();
+        assert!(
+            graph.report().fully_resolved,
+            "{:?}",
+            graph.report().diagnostics
+        );
+        let pin = graph.report().input_hash.clone();
+        let encoded = capsule::encode(&graph).unwrap();
+        let resolver = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
+        let entry = resolver
+            .resolve(&resolver.entry_request(), &context(), &granted())
+            .unwrap();
+        let expected = prepare_source_entry_for_public_entrypoints(
+            source,
+            "app.cts",
+            "captured-module-preparation",
+            &pin,
+            "franken-node.engine-source-preparation.v1",
+        )
+        .unwrap();
+        assert_eq!(entry.module.record.source, expected.prepared_source);
+        assert_eq!(entry.module.record.syntax, ModuleSyntax::CommonJs);
+        assert_eq!(resolver.summary().graph_input_hash, pin);
+        assert_eq!(
+            entry.module.record.dependencies,
+            vec![
+                ModuleDependency::new("./seed.cjs", ImportStyle::Require),
+                ModuleDependency::new("./offset.cjs", ImportStyle::Require),
+            ]
+        );
+        let prepared = resolver.preparation_reports().next().unwrap();
+        assert_eq!(prepared.source_ingestion, expected.source_ingestion);
+        assert_eq!(
+            prepared.normalization_witness,
+            expected.normalization_output.map(|o| o.witness)
+        );
+        assert!(prepared.normalization_witness.is_some());
+
+        put(
+            root.path(),
+            "app.cts",
+            "throw new Error('live TypeScript was reopened');",
+        );
+        put(root.path(), "seed.cjs", "module.exports = 0;");
+        let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+        let restored = CapturedEngineResolver::new(replayed, &pin).ok().unwrap();
+        assert_eq!(
+            entry,
+            restored
+                .resolve(&restored.entry_request(), &context(), &granted())
+                .unwrap()
+        );
+        assert_eq!(
+            resolver.preparation_reports().collect::<Vec<_>>(),
+            restored.preparation_reports().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn typescript_enums_cannot_add_or_erase_captured_loads() {
+        let root = tempfile::tempdir().unwrap();
+        put(
+            root.path(),
+            "app.cts",
+            "enum State { Ready = require('./seed.cjs') }\nmodule.exports=State;\n",
+        );
+        put(root.path(), "seed.cjs", "module.exports = 42;");
+        let graph = capture(root.path(), "app.cts", GraphOptions::default()).unwrap();
+        assert!(graph.report().fully_resolved);
+        let module = graph
+            .report()
+            .modules
+            .iter()
+            .find(|module| module.id.path == "app.cts")
+            .unwrap();
+        for altered in [
+            "enum State { Ready = 42 }\nmodule.exports=State;\n",
+            "enum State { Ready = require('./seed.cjs'), Other = require('./uncaptured.cjs') }\nmodule.exports=State;\n",
+        ] {
+            assert_eq!(
+                SourcePreparer::default()
+                    .prepare(module, altered, graph.report())
+                    .err()
+                    .unwrap()
+                    .code,
+                "ERR_MODULE_ENGINE_DEPENDENCY_DRIFT"
+            );
+        }
+    }
+
+    #[test]
+    fn typescript_enum_expansion_obeys_the_callers_parser_budget() {
+        let root = tempfile::tempdir().unwrap();
+        let source = "export enum State { Ready, Done = 7, Later }\n";
+        put(root.path(), "app.mts", source);
+        let graph = capture(root.path(), "app.mts", GraphOptions::default()).unwrap();
+        assert!(graph.report().fully_resolved);
+        let pin = graph.report().input_hash.clone();
+        let mut options = ParserOptions::default();
+        options.budget.max_source_bytes = u64::try_from(source.len()).unwrap();
+        assert_eq!(
+            CapturedEngineResolver::new_with_parser_options(graph, &pin, options)
+                .err()
+                .unwrap()
+                .code,
+            "ERR_MODULE_ENGINE_PARSE_LIMIT"
+        );
+    }
+
+    #[test]
+    fn unsupported_typescript_transforms_remain_outside_engine_admission() {
+        for source in [
+            "namespace Values { export const value: number = 42; }\nmodule.exports=Values;\n",
+            "namespace Values { export class Box {} }\nmodule.exports=Values;\n",
+            "class Value { constructor(public value: number) {} }\nmodule.exports=Value;\n",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            put(root.path(), "app.cts", source);
+            let graph = capture(root.path(), "app.cts", GraphOptions::default()).unwrap();
+            assert!(!graph.report().fully_resolved, "{source}");
+            let pin = graph.report().input_hash.clone();
+            assert_eq!(
+                CapturedEngineResolver::new(graph, &pin).err().unwrap().code,
+                "ERR_MODULE_REGISTRY_INCOMPLETE",
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
     fn normalized_typescript_type_only_imports_do_not_gain_load_authority() {
         let root = tempfile::tempdir().unwrap();
         put(
@@ -2201,6 +2343,130 @@ mod tests {
         assert!(reference.status.success(), "{reference:?}");
         assert!(reference.stderr.is_empty(), "{reference:?}");
         String::from_utf8(reference.stdout).unwrap()
+    }
+
+    #[test]
+    fn native_frozen_typescript_enums_keep_package_exports_and_captured_source() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            for (entrypoint, load) in [
+                ("app.cjs", "const { Count, Label } = require('enum-kit');"),
+                ("app.mjs", "import { Count, Label } from 'enum-kit';"),
+            ] {
+                let root = tempfile::tempdir().unwrap();
+                put(
+                    root.path(),
+                    entrypoint,
+                    &format!(
+                        r#"
+{load}
+console.log(Count.Start, Count.Next, Count.Combined, Count[40], Count[41]);
+console.log(Label.Ready, Label.Done, Label[Label.Ready]);
+Count.Next = 99;
+console.log(Count.Next);
+"#
+                    ),
+                );
+                put(
+                    root.path(),
+                    "node_modules/enum-kit/package.json",
+                    r#"{
+    "exports": { "import": "./index.mts", "require": "./index.cts" }
+}"#,
+                );
+                put(
+                    root.path(),
+                    "node_modules/enum-kit/index.cts",
+                    r#"
+enum Count { Start = require('./seed.cjs'), Next, Combined = Start | Next }
+enum Label { Ready = 'ready', Done = 'done' }
+module.exports = { Count, Label };
+"#,
+                );
+                put(
+                    root.path(),
+                    "node_modules/enum-kit/index.mts",
+                    r#"
+import { seed } from './seed.mjs';
+export enum Count { Start = seed, Next, Combined = Start | Next }
+export enum Label { Ready = 'ready', Done = 'done' }
+"#,
+                );
+                put(
+                    root.path(),
+                    "node_modules/enum-kit/seed.cjs",
+                    "module.exports = 40;",
+                );
+                put(
+                    root.path(),
+                    "node_modules/enum-kit/seed.mjs",
+                    "export const seed = 40;",
+                );
+
+                let result = execute_captured_graph_for_test(root.path(), entrypoint, lane, || {
+                    for path in [
+                        entrypoint,
+                        "node_modules/enum-kit/index.cts",
+                        "node_modules/enum-kit/index.mts",
+                        "node_modules/enum-kit/seed.cjs",
+                        "node_modules/enum-kit/seed.mjs",
+                    ] {
+                        put(
+                            root.path(),
+                            path,
+                            "throw new Error('uncaptured source was reopened');",
+                        );
+                    }
+                    put(
+                        root.path(),
+                        "node_modules/enum-kit/package.json",
+                        r#"{
+                        "exports": "./uncaptured.cjs"
+                    }"#,
+                    );
+                });
+                assert_eq!(
+                    result
+                        .console_output
+                        .iter()
+                        .map(|entry| entry.message.as_str())
+                        .collect::<Vec<_>>(),
+                    ["40 41 41 Start Combined", "ready done undefined", "99"],
+                    "{lane:?}: {entrypoint}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_typescript_enum_initializers_do_not_bypass_module_policy() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let root = tempfile::tempdir().unwrap();
+            put(
+                root.path(),
+                "app.cts",
+                "enum Count { Start = require('./seed.cjs') }\nconsole.log(Count.Start);\n",
+            );
+            put(root.path(), "seed.cjs", "module.exports = 40;");
+            let error = execute_captured_graph_with_policy_for_test(
+                root.path(),
+                "app.cts",
+                lane,
+                Arc::new(granted().deny_specifier("./seed.cjs")),
+                || {},
+            )
+            .expect_err("normalizing an enum cannot authorize its initializer's module load");
+            let message = error.to_string();
+            assert!(
+                message.contains("closed-world module resolution refused"),
+                "{lane:?}: {message}"
+            );
+            assert!(message.contains("./seed.cjs"), "{lane:?}: {message}");
+            assert!(message.contains("policy"), "{lane:?}: {message}");
+        }
     }
 
     #[test]
