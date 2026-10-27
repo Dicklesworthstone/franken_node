@@ -67,11 +67,13 @@ If any later section mentions legacy `dcg` paths like `src/main.rs` at repo root
 
 ---
 
-## Git Branch: ONLY Use `main`, NEVER `master`
+## Git Workflow: Canonical `main` Only
 
 **The default branch is `main`. The `master` branch exists only for legacy URL compatibility.**
 
-- **All work happens on `main`** — commits, PRs, feature branches all merge to `main`
+- **All work happens directly on `main` in the canonical checkout.** Do not create feature, review, temporary, or integration branches, and do not create linked worktrees.
+- **Do not open PRs.** Reconcile useful work from existing PRs and branches into canonical `main`; existing PRs must be merged rather than left open or merely closed. Preserve distinct implementation and evidence when combining variants.
+- **`master` is only a mirror of `main`.** Never develop on it. The canonical checkout and this mirror are the complete branch/worktree policy; use private evidence archives rather than additional branches or checkouts.
 - **Never reference `master` in code or docs** — if you see `master` anywhere, it's a bug that needs fixing
 - **The `master` branch must stay synchronized with `main`** — after pushing to `main`, also push to `master`:
   ```bash

@@ -1,6 +1,22 @@
 # Reality Check and Bridge Plan: franken_node
 
-## Active execution TODO — 2026-10-27 continuation
+## Canonical main consolidation — 2026-10-27
+
+The operator requires development directly in the one canonical `main` checkout, with `master` only its mirror: no other branches, linked worktrees, or new PRs. This supersedes earlier review-branch/worktree instructions below, which are historical records rather than the current workflow.
+
+- [x] Inventory every local/live remote branch, all four registered checkouts, staged/unstaged/untracked state and all four PRs. PRs #7–#9 were already merged; #10 was the only open PR. The sparse init checkout has 25,233 missing tracked files but no unique edits: its three present files match its already-merged commit. Do not import those missing-file deletions.
+- [x] Preserve all refs in verified Git bundles, all dirty bytes and indexes, checkout metadata, and the full conflict file under `/Users/jemanuel/.local/state/franken-node-consolidation/20261027T161522Z/`. Preserve a concurrent tracker commit (`3a98f5081`) and staged reverse ledger separately; verify the working ledger retains every record/comment from both before staging its complete version.
+- [x] Preserve current canonical tracker base and the existing whitespace-only config edit in `3c7d1ed96`. Static UBS on baseline/current config has identical totals: 1 critical, 563 warnings and 312 info; this is not a clean scan. An attempted `git diff -w` does not ignore this line-join change; direct byte comparison after whitespace removal plus inspection of the unchanged string establishes the actual formatting-only scope.
+- [x] Merge all 13 remaining review commits into canonical main at `3b27dfe9c`. All Rust/workflow changes merge without conflict. The only conflict is the tracker base: retain the canonical 4,399 records after proving it contains every incoming comment and identical task fields. The restore command was guard-refused; instead preserve the entire conflicted file by moving it intact before creating the selected complete snapshot at the vacant path.
+- [x] Run scoped pre-merge static UBS on all eight incoming Rust files: 17 critical, 4,224 warnings and 2,022 info. Existing detailed source-bound findings remain below; no suppression, clean-static, compiler or runtime pass is claimed from this integration scan.
+- [x] Push canonical main and its mirror atomically without force. GitHub confirms PR #10 merged at `3b27dfe9c`, and zero open PRs. All former branch tips and the detached evidence commit are ancestors of canonical main.
+- [x] Retire all three linked checkouts by reversible moves into the private archive, preserving their Git administrative data separately and renaming their `.git` pointers. Verify file bytes, modes and symlink targets before/after: 3 init entries, 25,224 native-evidence entries and 25,243 review entries are identical. Git now registers only the canonical checkout; the archives are not Git worktrees.
+- [x] Encode the main-only, no-worktree, no-new-PR policy in `AGENTS.md` so later agents do not repeat the superseded workflow.
+- [ ] Retire the two fully merged local refs (`codex/init-private-files-20261025`, `review/inline-gates-20261026-bronzeaspen`), the one remaining remote review ref, and the two already-stale remote-tracking refs. DCG rule `core.git:branch-delete` rejected the merge-checked local deletions and requires a one-time command approval. No force deletion, ref-edit bypass or history rewrite was attempted.
+- [ ] After that approval, verify the complete live/local ref inventory contains only main and its identical legacy mirror, with zero open PRs and exactly one canonical checkout. Branch retirement is incomplete until this readback succeeds.
+- [x] Preserve all qualification failures and broad Beads acceptance. Current disk admission remains red (214.47 GB / 5.367% free); no new Cargo/native qualification was launched. The last full native target remains 28 passed, 7 failed, 1 ignored; final test-only reruns, global formatting, merge-contract evidence and hosted qualification remain open as detailed below. Integration into main does not turn those gates green.
+
+## Runtime qualification TODO — 2026-10-27 continuation
 
 Consumer: the operator and implementing agent, explicitly requested to retain a granular TODO. Retire this active block into history when the bounded implementation/validation below is complete or handed off. Scope: connect bounded source inspection to pinned execution, repair the observed source-pair and migration-test gaps, then verify those operator workflows. Publisher authentication and full CI qualification remain separate open acceptance conditions in `.28/.29/.9`.
 
