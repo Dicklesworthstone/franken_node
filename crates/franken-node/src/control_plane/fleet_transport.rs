@@ -30,8 +30,6 @@ use crate::{
 
 #[cfg(feature = "control-plane")]
 use crate::api::fleet_quarantine::RevocationScope;
-#[cfg(test)]
-use crate::api::fleet_quarantine::RevocationSeverity;
 use chrono::{DateTime, Utc};
 use ed25519_dalek::Signer;
 use rand::Rng;
@@ -2940,14 +2938,15 @@ mod tests {
         FleetAction, FleetActionRecord, FleetSharedState, FleetTargetKind, FleetTransport,
         FleetTransportError, FleetTransportLayout, LOCK_RETRY_BACKOFF_MILLIS,
         MAX_ACTION_LOG_ENTRIES, MAX_ACTION_RECORD_BYTES, MAX_ACTION_RECORD_LINE_BYTES,
-        MAX_NODE_ID_LEN, MAX_NODES_CAP, NodeHealth, NodeStatus, RevocationScope,
-        RevocationSeverity, TempFileGuard, canonical_fleet_convergence_receipt_payload, clock,
-        fleet_action_compaction_root_key, fleet_convergence_receipt_verdict,
-        lock_file_with_backoff, lock_fleet_action_compaction_process, lock_retry_backoffs,
-        lock_retry_base_backoffs, parse_jsonl_records, push_bounded,
-        sign_fleet_convergence_receipt_payload, validate_node_id, validate_zone_id,
-        wait_until_fleet_converged_or_timeout,
+        MAX_NODE_ID_LEN, MAX_NODES_CAP, NodeHealth, NodeStatus, TempFileGuard,
+        canonical_fleet_convergence_receipt_payload, clock, fleet_action_compaction_root_key,
+        fleet_convergence_receipt_verdict, lock_file_with_backoff,
+        lock_fleet_action_compaction_process, lock_retry_backoffs, lock_retry_base_backoffs,
+        parse_jsonl_records, push_bounded, sign_fleet_convergence_receipt_payload,
+        validate_node_id, validate_zone_id, wait_until_fleet_converged_or_timeout,
     };
+    #[cfg(feature = "control-plane")]
+    use crate::api::fleet_quarantine::{RevocationScope, RevocationSeverity};
     use chrono::{DateTime, Utc};
     use ed25519_dalek::{Signer, SigningKey};
     use sha2::{Digest, Sha256};

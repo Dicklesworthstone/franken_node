@@ -1,0 +1,37 @@
+{
+  "summary_id": "chg-20261026-mutation-lane-timing-guard",
+  "contract_version": "1.0",
+  "change_summary": {
+    "intent": "Restore mutation-lane inputs, repair an observed flaky timing measurement and correct default-inline helper feature gates without changing runtime comparison behavior.",
+    "scope": {
+      "subsystems": ["franken_node.security", "franken_node.control_plane", "franken_node.test_strategies"],
+      "modules": ["crates/franken-node/src/security/constant_time.rs", "crates/franken-node/src/control_plane/fleet_transport.rs", "crates/franken-node/src/test_strategies/mod.rs"]
+    },
+    "surface_area_delta": {
+      "new_apis": [],
+      "removed_apis": [],
+      "changed_signatures": []
+    },
+    "affected_contracts": {
+      "beads": ["bd-reality-20260923-26n9r.9"],
+      "documents": ["README.md", "docs/progress/REALITY_CHECK_AND_BRIDGE_PLAN.md"]
+    },
+    "operational_impact": {
+      "operator_notes": "Production ct_eq and ct_eq_bytes are unchanged. The test retains its input strategy and 10x limit, measuring warmed alternating batches by medians. Outliers affecting a minority of batches can now pass, including scheduling disturbances or sporadic leakage; persistent content-dependent early exits remain a required negative control. This coarse regression guard does not certify rare/tail leakage or side-channel soundness. The mutation floor retains all three configured source files and 2500 bp, requires the pinned tool schema, and refuses absent/empty/unknown outcomes and rounded-up sub-floor ratios.",
+      "required_actions": ["Keep full inline, feature, fuzz, workspace mutation and hosted qualification open until their named populations actually execute.", "Validate default-inline and control-plane/test-support configurations after the observed E0432/E0433 fleet helper gate repair. No test attribute or assertion was removed; 68 fleet tests remain. Default all-target check hit its configured deadline with exit 137, so it is incomplete. The no-default-features inline/test compiler probe is diagnostic and cannot replace default-feature qualification."],
+      "rollout_notes": "Retained original-source evidence includes both a 72-test/two-caught-mutant pass and an unchanged-baseline timing failure at 266.98x. The first measurement candidate is 70eb13cb9bf6f4dd0dbe1a6d8b786a28af4d0c1a9bf11d25a2ebad0af71d74bd. The final module after test-only lint repairs has SHA256 4c92c1bdfd6fdab53329b0fd14297ea71ac410817e725ac95f180ae4415da5ec and passes isolated formatting, all-target Clippy with -D warnings, all 73 tests and both predeclared boolean-return mutant controls. Production function bytes are unchanged. A redundant unsigned-size assertion now exercises truncated-input refusal and empty equality. A deliberately insufficient one-test selection misses the always-true mutant: cargo-mutants exits 2 and the actual workflow floor consumer exits 1; genuine caught outcomes pass that consumer. Three predeclared repeats (seeds 1001, 2002, 3003), including the saved regression seed, each pass 73/73 on both candidates. Fifteen gate controls, 27 source-bootstrap tests, 20 inline-gate tests and actionlint pass. Focused UBS has zero critical findings but remains non-clean: baseline/first/final warnings 190/200/202 and info 19/22/20. The final delta is four test assertions, seven bounded indices, a checked fixture conversion, two needed buffers and guarded division, with one unused wildcard import and one cast finding removed. Workspace formatting fails with 1856 groups outside the edited module. Required workspace compiler/Clippy and full inline discovery remain separately pending; one Clippy slot refusal is retained. The complete no-contract gate lacks seven evidence groups. No hosted CI, full workspace mutation score, production rollout, performance win or quantified risk reduction is claimed. Raw evidence is retained at /Users/jemanuel/.local/state/franken-node-qualification/implementation-20261026-bronzeaspen/.",
+      "rollback_notes": "Any proposed measurement rollback must preserve the original failure evidence and the planted-fault control; do not silently disable the property or widen its limit. No automatic deployment or runtime policy change accompanies this test-only patch."
+    },
+    "risk_delta": {
+      "previous_tier": "high",
+      "new_tier": "high",
+      "rationale": "The runtime security boundary is unchanged. Better qualification plumbing and a less noisy regression measurement do not establish reduced production compromise risk."
+    },
+    "compatibility": {
+      "backward_compatibility": "compatible",
+      "forward_compatibility": "enables",
+      "details": "No public Rust, CLI or serialized runtime contract changes. Test count increases by one; property inputs and the 10x timing limit are preserved. Mutation result acceptance becomes stricter."
+    },
+    "dependency_changes": {"added": [], "removed": [], "updated": []}
+  }
+}
