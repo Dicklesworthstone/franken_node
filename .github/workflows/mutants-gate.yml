@@ -32,7 +32,9 @@ on:
 jobs:
   cargo-mutants:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # The retained cold inline compile needed 109.7 minutes before reporting
+    # source errors. Budget the campaign separately from each mutant's 60s.
+    timeout-minutes: 240
     defaults:
       run:
         shell: bash
@@ -92,6 +94,8 @@ jobs:
           RCH_VISIBILITY: summary
           RCH_REQUIRE_REMOTE: "1"
           RCH_BUILD_SLOTS: "1"
+          RCH_BUILD_TIMEOUT_SEC: "10800"
+          RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS: "300"
         run: |
           set +e
           # One admitted job installs and uses the tool on the SAME worker.
