@@ -833,6 +833,114 @@ mod tests {
     }
 
     #[test]
+    fn captured_stream_submodules_preserve_descriptors_routes_and_offline_replay() {
+        for (entrypoint, style, source) in [
+            (
+                "app.cjs",
+                ImportStyle::Require,
+                "require('stream/consumers'); require('node:stream/consumers'); \
+                 require('stream/web'); require('node:stream/web');",
+            ),
+            (
+                "app.mjs",
+                ImportStyle::Import,
+                "import 'stream/consumers'; import 'node:stream/consumers'; \
+                 import 'stream/web'; import 'node:stream/web';",
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            put(root.path(), entrypoint, source);
+            let graph = capture(root.path(), entrypoint, GraphOptions::default()).unwrap();
+            let pin = graph.report().input_hash.clone();
+            let encoded = capsule::encode(&graph).unwrap();
+            let live = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
+            put(
+                root.path(),
+                entrypoint,
+                "throw new Error('live source was reopened');",
+            );
+            let replay = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+            let restored = CapturedEngineResolver::new(replay, &pin).ok().unwrap();
+            let policy = CapabilityPolicyHook::new(BTreeSet::from([
+                RuntimeCapability::ModuleLoad,
+                RuntimeCapability::Builtin,
+            ]));
+            let before = live
+                .resolve_chain(&live.entry_request(), &context(), &policy)
+                .unwrap();
+            assert_eq!(
+                before,
+                restored
+                    .resolve_chain(&restored.entry_request(), &context(), &policy)
+                    .unwrap()
+            );
+            assert_eq!(live.summary().modules, 3);
+            let entry = live
+                .resolve(&live.entry_request(), &context(), &policy)
+                .unwrap();
+            let request = |specifier: &str, request_style| {
+                ModuleRequest::new(specifier, request_style)
+                    .with_referrer(entry.module.record.id.clone())
+                    .with_compatibility_mode(CompatibilityMode::NodeCompat)
+            };
+            for (bare, native) in [
+                ("stream/consumers", NativeBuiltinModule::StreamConsumers),
+                ("stream/web", NativeBuiltinModule::StreamWeb),
+            ] {
+                let delivered = live
+                    .resolve(&request(bare, style), &context(), &policy)
+                    .unwrap();
+                let alias = live
+                    .resolve(
+                        &request(&format!("node:{bare}"), style),
+                        &context(),
+                        &policy,
+                    )
+                    .unwrap();
+                assert_eq!(delivered.module.record, alias.module.record);
+                assert_eq!(
+                    NativeBuiltinModule::from_record(&delivered.module.record),
+                    Some(native)
+                );
+                assert_eq!(
+                    delivered.module.content_hash,
+                    delivered.module.record.canonical_hash()
+                );
+                assert!(delivered.module.record.source.is_empty());
+                assert!(delivered.module.record.dependencies.is_empty());
+                assert_eq!(
+                    delivered.module.record.required_capabilities,
+                    BTreeSet::from([RuntimeCapability::ModuleLoad, RuntimeCapability::Builtin])
+                );
+                assert_eq!(
+                    live.resolve(&request(bare, style), &context(), &granted())
+                        .unwrap_err()
+                        .code,
+                    ResolutionErrorCode::PolicyDenied
+                );
+                let other_style = match style {
+                    ImportStyle::Import => ImportStyle::Require,
+                    ImportStyle::Require => ImportStyle::Import,
+                };
+                assert_eq!(
+                    live.resolve(&request(bare, other_style), &context(), &policy)
+                        .unwrap_err()
+                        .code,
+                    ResolutionErrorCode::UnsupportedSpecifier
+                );
+            }
+            for uncaptured in ["stream", "node:stream/promises", "fs", "node:fs"] {
+                assert_eq!(
+                    live.resolve(&request(uncaptured, style), &context(), &policy)
+                        .unwrap_err()
+                        .code,
+                    ResolutionErrorCode::UnsupportedSpecifier
+                );
+            }
+        }
+    }
+
+    #[test]
     fn unsupported_builtin_providers_and_indirect_loaders_remain_refused() {
         for (file, source) in [
             ("app.cjs", "require('worker_threads');"),
@@ -3211,6 +3319,144 @@ module.exports = {
                 .map(|entry| entry.message.as_str())
                 .collect::<Vec<_>>();
             assert_eq!(actual, reference.lines().collect::<Vec<_>>(), "{lane:?}");
+        }
+    }
+
+    #[test]
+    fn captured_web_stream_consumers_match_node_across_npm_and_frozen_sources() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let root = tempfile::tempdir().unwrap();
+            put(
+                root.path(),
+                "app.mjs",
+                r#"
+import consumers, { text, json, buffer, arrayBuffer, blob } from 'node:stream/consumers';
+import web, { ReadableStream, WritableStream, TransformStream } from 'stream/web';
+import * as namespace from 'node:stream/web';
+import common from 'stream-body-user';
+console.log(consumers === common.consumers, web === common.web,
+    ReadableStream === common.web.ReadableStream, namespace.default === web);
+function chunks(values) {
+    return new ReadableStream({start(controller) {
+        for (const value of values) controller.enqueue(value);
+        controller.close();
+    }});
+}
+async function run() {
+    console.log(await text(chunks([
+        new Uint8Array([0x73, 0x6e, 0x6f, 0x77, 0x20, 0xe2]),
+        new Uint8Array([0x98, 0x83])
+    ])));
+    console.log((await json(chunks(['{"answer":', '42}']))).answer);
+    const collected = await buffer(chunks([new Uint8Array([104]), new Uint8Array([105])]));
+    const binary = await arrayBuffer(chunks([new Uint8Array([7, 8])]));
+    const collectedBlob = await blob(chunks(['body']));
+    console.log(common.Buffer.isBuffer(collected), collected.toString(),
+        new Uint8Array(binary).join(','), await collectedBlob.text());
+    const fromBlob = new common.Blob(['shared']).stream();
+    const fromNode = common.Readable.toWeb(common.Readable.from(['node']));
+    console.log(fromBlob instanceof ReadableStream, fromNode instanceof ReadableStream,
+        await text(fromBlob), await text(fromNode));
+    const received = [];
+    await chunks(['a', 'b']).pipeThrough(new TransformStream({
+        transform(value, controller) { controller.enqueue(value.toUpperCase()); }
+    })).pipeTo(new WritableStream({write(value) { received.push(value); }}));
+    console.log(received.join(''));
+    const dynamic = await import('stream/web');
+    console.log(dynamic === namespace, dynamic.ReadableStream === ReadableStream);
+}
+run();
+"#,
+            );
+            put(
+                root.path(),
+                "node_modules/stream-body-user/package.json",
+                r#"{"name":"stream-body-user","main":"index.cjs"}"#,
+            );
+            put(
+                root.path(),
+                "node_modules/stream-body-user/index.cjs",
+                r#"
+const bytes = require('node:buffer');
+module.exports = {
+    consumers: require('stream/consumers'),
+    web: require('node:stream/web'),
+    Buffer: bytes.Buffer,
+    Blob: bytes.Blob,
+    Readable: require('node:stream').Readable
+};
+"#,
+            );
+            let reference = node_reference_output(root.path(), "app.mjs");
+            assert_eq!(
+                reference,
+                "true true true true\nsnow ☃\n42\ntrue hi 7,8 body\ntrue true shared node\nAB\ntrue true\n"
+            );
+            let result = execute_captured_graph_for_test(root.path(), "app.mjs", lane, || {
+                put(
+                    root.path(),
+                    "app.mjs",
+                    "throw new Error('live entry was reopened');",
+                );
+                put(
+                    root.path(),
+                    "node_modules/stream-body-user/index.cjs",
+                    "throw new Error('live npm consumer was reopened');",
+                );
+                put(
+                    root.path(),
+                    "node_modules/stream-body-user/package.json",
+                    r#"{"exports":{}}"#,
+                );
+            });
+            let actual = result
+                .console_output
+                .iter()
+                .map(|entry| entry.message.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, reference.lines().collect::<Vec<_>>(), "{lane:?}");
+        }
+    }
+
+    #[test]
+    fn cached_stream_factories_reauthorize_denied_alias_imports() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            for name in ["stream/consumers", "stream/web"] {
+                let root = tempfile::tempdir().unwrap();
+                let alias = format!("node:{name}");
+                let source = format!(
+                    "const core = require('{name}'); \
+                     import('{alias}').then(\
+                         function() {{ console.log('cached module bypassed policy'); }}, \
+                         function() {{ console.log('policy denial became catchable'); }}\
+                     );"
+                );
+                put(root.path(), "app.cjs", &source);
+                let mut policy = CapabilityPolicyHook::new(BTreeSet::from([
+                    RuntimeCapability::ModuleLoad,
+                    RuntimeCapability::Builtin,
+                ]));
+                policy.denied_specifiers.insert(alias.clone());
+                let error = execute_captured_graph_with_policy_for_test(
+                    root.path(),
+                    "app.cjs",
+                    lane,
+                    Arc::new(policy),
+                    || {},
+                )
+                .expect_err("a retained native factory must still authorize every public route");
+                let message = error.to_string();
+                assert!(
+                    message.contains("closed-world module resolution refused"),
+                    "{lane:?}: {message}"
+                );
+                assert!(message.contains(&alias), "{lane:?}: {message}");
+                assert!(message.contains("policy"), "{lane:?}: {message}");
+            }
         }
     }
 
