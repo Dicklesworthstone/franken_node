@@ -42,6 +42,28 @@ fn source_graph_capture_arguments_preserve_the_explicit_symlink_choice() {
 }
 
 #[test]
+fn source_graph_is_listed_in_the_reviewed_verification_help_contract() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_franken-node"))
+        .args(["verify", "--help"])
+        .env("NO_COLOR", "1")
+        .env("CLICOLOR", "0")
+        .env("CLICOLOR_FORCE", "0")
+        .env_remove("FORCE_COLOR")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let (_, expected) = include_str!("goldens/verify_cli/verify_help.snap")
+        .split_once("\n---\n")
+        .expect("reviewed help golden has a metadata header");
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+}
+
+#[test]
 #[cfg(unix)]
 fn source_graph_cli_captures_without_evaluation_and_preserves_incomplete_evidence() {
     let project = tempfile::TempDir::new().unwrap();
