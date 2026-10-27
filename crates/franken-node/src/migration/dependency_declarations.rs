@@ -10,6 +10,7 @@ use super::{
     time_remaining,
 };
 use anyhow::{Context, Result, ensure};
+use serde::Serialize;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -92,7 +93,7 @@ pub(super) fn select<'a>(
 /// replacement sources require review rather than partial application.
 /// Contracts: docs.npmjs.com/cli/v11/configuring-npm/package-json/#overrides
 ///            bun.com/docs/pm/overrides
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Serialize)]
 pub(super) struct Overrides {
     rules: BTreeMap<String, String>,
     bun: bool,
@@ -299,14 +300,18 @@ impl Overrides {
         Ok(Self { rules, bun: true })
     }
 
-    pub(super) fn apply<'a>(&'a self, installed_as: &str, request: &'a str) -> &'a str {
+    pub(super) fn replacement(&self, installed_as: &str, request: &str) -> Option<&str> {
         // Bun's plain-name rules do not replace versioned npm aliases. Alias
         // selectors and dist-tag alias rules remain outside this bounded set;
         // their original requests still undergo the ordinary range checks.
         if self.bun && request.starts_with("npm:") {
-            return request;
+            return None;
         }
-        self.rules.get(installed_as).map_or(request, String::as_str)
+        self.rules.get(installed_as).map(String::as_str)
+    }
+
+    pub(super) fn apply<'a>(&'a self, installed_as: &str, request: &'a str) -> &'a str {
+        self.replacement(installed_as, request).unwrap_or(request)
     }
 
     pub(super) fn is_empty(&self) -> bool {

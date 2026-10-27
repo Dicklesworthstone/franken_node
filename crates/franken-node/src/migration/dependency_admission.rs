@@ -510,6 +510,198 @@ pub fn inspect_for_execution(project: &Path, deadline: Instant) -> Result<Depend
     inspect_with_installation(project, deadline, true)
 }
 
+/// The topology and native migration gate share one override interpretation.
+/// Original rules, including inactive and unused entries, remain separate from
+/// resolved replacements so canonical topology evidence binds both decisions.
+/// Construction accepts only already-captured metadata and never reopens paths.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct CapturedRootOverrides {
+    source: &'static str,
+    raw_rules: BTreeMap<String, String>,
+    effective: declaration_selection::Overrides,
+}
+
+impl CapturedRootOverrides {
+    pub(crate) fn replacement(&self, installed_as: &str, request: &str) -> Option<&str> {
+        self.effective.replacement(installed_as, request)
+    }
+
+    pub(crate) fn validate_selected_pin(
+        &self,
+        installed_as: &str,
+        request: &str,
+        selected_name: Option<&str>,
+        selected_version: Option<&str>,
+        linked: bool,
+    ) -> Result<()> {
+        let Some(replacement) = self.replacement(installed_as, request) else {
+            return Ok(());
+        };
+        ensure!(
+            !linked || replacement == request,
+            "root registry override cannot replace a captured workspace link"
+        );
+        let expected = alias(installed_as, Some(replacement))?;
+        let actual = alias(
+            selected_name.context("overridden pin has no package identity")?,
+            selected_version,
+        )?;
+        ensure!(
+            expected.0 == actual.0,
+            "root override selects {:?}, but the captured pin names {:?}",
+            expected.0,
+            actual.0
+        );
+        if let Some((code, detail)) = graph::version_review(expected.1, actual.1) {
+            bail!("overridden captured pin: {code}: {detail}");
+        }
+        Ok(())
+    }
+}
+
+/// Reuse root precedence, $references, EOVERRIDE and exclusion-context review
+/// for metadata-only trust queries. This does not inspect installed contents.
+pub(crate) fn capture_topology_overrides(
+    manifests: &BTreeMap<String, Value>,
+    lock: Option<&Value>,
+    bun: bool,
+    deadline: Instant,
+) -> Result<Option<CapturedRootOverrides>> {
+    time_remaining(deadline)?;
+    let root = manifests
+        .get("")
+        .context("override authority requires a captured root manifest")?;
+    let mut report = DependencyAdmission {
+        schema_version: "franken-node/native-dependency-admission/v1".into(),
+        scope: SCOPE.into(),
+        packages_scanned: 0,
+        manifests_scanned: manifests.len(),
+        inputs: Vec::new(),
+        findings: Vec::new(),
+        installation_checked: false,
+        installed_packages_scanned: 0,
+    };
+    let effective = if bun {
+        declaration_selection::Overrides::capture_bun(
+            root.as_object()
+                .context("Bun root manifest must be an object")?,
+            lock.and_then(Value::as_object)
+                .context("Bun override authority requires its captured lock")?,
+            deadline,
+        )?
+    } else {
+        declaration_selection::Overrides::capture(root, &mut report, deadline)?
+    };
+    if let Some(finding) = report.findings.first() {
+        bail!(
+            "captured root overrides require review: {}: {}",
+            finding.code,
+            finding.detail
+        );
+    }
+    // No active replacements means no context exclusions to prove. Retain raw
+    // no-op rules in the hash below without repeating a complete lock walk.
+    if !effective.is_empty() {
+        for (directory, manifest) in manifests {
+            time_remaining(deadline)?;
+            if !directory.is_empty() {
+                effective.review_workspace(manifest, directory, &mut report)?;
+            }
+        }
+        if let Some(lock) = lock {
+            let mut count = 0_usize;
+            if let Some(packages) = lock.get("packages") {
+                let packages = packages
+                    .as_object()
+                    .context("override lock packages must be an object")?;
+                ensure!(
+                    packages.len() <= MAX_PACKAGES + 1,
+                    "override context package count exceeds limit"
+                );
+                for (path, record) in packages {
+                    time_remaining(deadline)?;
+                    if !path.is_empty() {
+                        effective.review_context(
+                            record
+                                .as_object()
+                                .context("invalid override package context")?,
+                            "captured-lockfile",
+                            Some(path),
+                            &mut report,
+                        )?;
+                    }
+                }
+            } else {
+                let mut pending = vec![(lock, 0_usize)];
+                while let Some((parent, depth)) = pending.pop() {
+                    time_remaining(deadline)?;
+                    ensure!(
+                        depth <= MAX_DEPTH,
+                        "legacy override context nesting exceeds limit"
+                    );
+                    if let Some(children) = parent.get("dependencies") {
+                        for record in children
+                            .as_object()
+                            .context("legacy override dependencies must be an object")?
+                            .values()
+                        {
+                            time_remaining(deadline)?;
+                            count += 1;
+                            ensure!(
+                                count <= MAX_PACKAGES,
+                                "override context package count exceeds limit"
+                            );
+                            effective.review_context(
+                                record
+                                    .as_object()
+                                    .context("invalid legacy override context")?,
+                                "captured-lockfile",
+                                None,
+                                &mut report,
+                            )?;
+                            pending.push((record, depth + 1));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(finding) = report.findings.first() {
+        bail!(
+            "captured root overrides require review: {}: {}",
+            finding.code,
+            finding.detail
+        );
+    }
+    let (source, raw) = if bun && root.get("overrides").is_none() {
+        ("package.json#resolutions", root.get("resolutions"))
+    } else {
+        ("package.json#overrides", root.get("overrides"))
+    };
+    let mut raw_rules = BTreeMap::new();
+    if let Some(raw) = raw {
+        for (key, value) in raw
+            .as_object()
+            .context("root override rules must be an object")?
+        {
+            time_remaining(deadline)?;
+            raw_rules.insert(
+                key.clone(),
+                value
+                    .as_str()
+                    .context("root override rule must be a string")?
+                    .to_owned(),
+            );
+        }
+    }
+    time_remaining(deadline)?;
+    Ok((!raw_rules.is_empty()).then_some(CapturedRootOverrides {
+        source,
+        raw_rules,
+        effective,
+    }))
+}
+
 /// Project a captured Bun lock into the shared installation graph used by
 /// runtime trust admission. The caller owns the bounded, descriptor-relative
 /// capture of these manifests; this function never reopens the project.
