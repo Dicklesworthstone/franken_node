@@ -1302,6 +1302,81 @@ mod comprehensive_boundary_negative_tests {
         );
     }
 
+    fn comparison_batch_time(
+        compare: fn(&[u8], &[u8]) -> bool,
+        left: &[u8],
+        right: &[u8],
+    ) -> std::time::Duration {
+        let started = std::time::Instant::now();
+        for _ in 0..128 {
+            std::hint::black_box(compare(
+                std::hint::black_box(left),
+                std::hint::black_box(right),
+            ));
+        }
+        started.elapsed()
+    }
+
+    fn comparison_median_times(
+        compare: fn(&[u8], &[u8]) -> bool,
+        left: &[u8],
+        same: &[u8],
+        different: &[u8],
+    ) -> (std::time::Duration, std::time::Duration) {
+        // Warm both paths, then alternate ordering so a cold first call or one
+        // descheduled batch cannot stand in for content-dependent work. This
+        // remains a coarse regression guard, not a proof of constant time.
+        for _ in 0..16 {
+            std::hint::black_box(compare(left, same));
+            std::hint::black_box(compare(left, different));
+        }
+        let mut same_times = [std::time::Duration::ZERO; 7];
+        let mut different_times = [std::time::Duration::ZERO; 7];
+        for index in 0..same_times.len() {
+            if index % 2 == 0 {
+                same_times[index] = comparison_batch_time(compare, left, same);
+                different_times[index] = comparison_batch_time(compare, left, different);
+            } else {
+                different_times[index] = comparison_batch_time(compare, left, different);
+                same_times[index] = comparison_batch_time(compare, left, same);
+            }
+        }
+        same_times.sort_unstable();
+        different_times.sort_unstable();
+        (
+            same_times[same_times.len() / 2],
+            different_times[different_times.len() / 2],
+        )
+    }
+
+    #[test]
+    fn timing_measurement_detects_content_dependent_early_exit() {
+        fn early_exit_fault(left: &[u8], right: &[u8]) -> bool {
+            if left.len() != right.len() {
+                return false;
+            }
+            for (&left_byte, &right_byte) in left.iter().zip(right) {
+                if std::hint::black_box(left_byte) != std::hint::black_box(right_byte) {
+                    return false;
+                }
+            }
+            true
+        }
+
+        let left = vec![0x5A; 4096];
+        let same = left.clone();
+        let mut different = left.clone();
+        different[0] ^= 1;
+        assert!(early_exit_fault(&left, &same));
+        assert!(!early_exit_fault(&left, &different));
+        let (same_time, different_time) =
+            comparison_median_times(early_exit_fault, &left, &same, &different);
+        assert!(
+            same_time.as_nanos() / different_time.as_nanos().max(1) >= 10,
+            "timing measurement must expose the planted early-exit fault: same={same_time:?}, different={different_time:?}"
+        );
+    }
+
     proptest! {
         #[test]
         fn proptest_ct_eq_matches_regular_equality(
@@ -1339,22 +1414,14 @@ mod comprehensive_boundary_negative_tests {
             content_b in any::<u8>(),
         ) {
             // Property: timing variance should be bounded for equal-length inputs
-            // Best-effort microbenchmark to detect gross timing side-channels
-            use std::time::Instant;
+            // Best-effort batch measurement to detect gross timing side-channels.
 
             let a = vec![content_a; len];
             let b_same = a.clone();
             let b_diff = vec![content_b; len];
 
-            // Measure timing for equal inputs
-            let start_same = Instant::now();
             let result_same = ct_eq_bytes(&a, &b_same);
-            let duration_same = start_same.elapsed();
-
-            // Measure timing for different inputs (same length)
-            let start_diff = Instant::now();
             let result_diff = ct_eq_bytes(&a, &b_diff);
-            let duration_diff = start_diff.elapsed();
 
             // Verify correctness first
             assert!(result_same, "Equal arrays should compare as equal");
@@ -1364,8 +1431,10 @@ mod comprehensive_boundary_negative_tests {
                 assert!(!result_diff, "Different content should compare as different");
             }
 
-            // Timing variance check (best effort - may be noisy in CI)
-            // Allow 10x variance as a gross side-channel check
+            let (duration_same, duration_diff) =
+                comparison_median_times(ct_eq_bytes, &a, &b_same, &b_diff);
+
+            // Preserve the 10x gross side-channel limit over paired medians.
             let max_duration = duration_same.max(duration_diff);
             let min_duration = duration_same.min(duration_diff);
 
