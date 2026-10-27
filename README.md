@@ -3896,6 +3896,14 @@ one pass.
   the CommonJS objects, and named exports come from the same native providers.
   Each route retains its policy and information-flow checks, including cached
   loads. This does not provide the complete Node/Bun builtin API inventory.
+  Frozen capture also supports immutable top-level request strings such as
+  `const target = './adapter.cjs'; require(target)`, earlier constant aliases,
+  string concatenation, templates, and bounded conditional string choices.
+  The same captured targets work with `require.resolve`, `import()` and
+  supported `createRequire` bindings. Capture includes every possible string
+  branch; it does not execute conditions or predict the branch that will run.
+  Mutable, shadowed, forward-referenced and otherwise unproved bindings remain
+  refused, and these expressions grant no access to uncaptured modules.
   The `crypto` provider exposes the engine's existing hash/HMAC, key-derivation,
   cipher, key-pair/signature and random functions as ordinary callable exports;
   fresh entropy still requires `random_read` at invocation. The `zlib` provider

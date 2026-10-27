@@ -708,13 +708,13 @@ mod tests {
         for (file, source) in [
             ("app.cjs", "require('fs');"),
             ("app.cjs", "require('node:unknown');"),
-            ("app.cjs", "const name='buffer'; require(name);"),
+            ("app.cjs", "let name='buffer'; require(name);"),
             ("app.cjs", "require.resolve('buffer', {paths: ['/tmp']});"),
             ("app.cjs", "require('#builtin');"),
             ("app.mjs", "import 'node:fs';"),
             ("app.mjs", "import('node:unknown');"),
-            ("app.mjs", "const name='buffer'; import(name);"),
-            ("app.mjs", "const name = 'node:path'; import(name);"),
+            ("app.mjs", "let name='buffer'; import(name);"),
+            ("app.mjs", "let name = 'node:path'; import(name);"),
             ("app.mjs", "import '#path';"),
             ("app.mjs", "import '#fs';"),
         ] {

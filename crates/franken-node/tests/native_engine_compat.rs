@@ -2629,7 +2629,7 @@ fn frozen_module_config_refuses_computed_loads_before_guest_execution() {
     let app = create_test_app(
         workspace.path(),
         "app.cjs",
-        "console.log('FROZEN_GUEST_MUST_NOT_RUN'); const name='./side.cjs'; require(name);",
+        "console.log('FROZEN_GUEST_MUST_NOT_RUN'); let name='./side.cjs'; require(name);",
     );
     create_test_app(workspace.path(), "side.cjs", "module.exports=42;");
     let mut config = balanced_config();
@@ -2655,6 +2655,45 @@ fn frozen_module_config_refuses_computed_loads_before_guest_execution() {
         assert!(
             !diagnostics.contains("FROZEN_GUEST_MUST_NOT_RUN"),
             "{diagnostics}",
+        );
+    }
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn frozen_module_cli_executes_immutable_request_bindings() {
+    // Keep the formerly refused const request as a positive control. A mutable
+    // binding remains an unproved request in the refusal test above.
+    for source in [
+        "const name='./side.cjs'; console.log(require(name));",
+        "const directory='./'; const name=directory+'side.cjs'; console.log(require(name));",
+        "const pick=true; const name=pick?'./side.cjs':'./alternate.cjs'; console.log(require(name));",
+    ] {
+        let workspace = TempDir::new().unwrap();
+        let app = create_test_app(workspace.path(), "app.cjs", source);
+        create_test_app(workspace.path(), "side.cjs", "module.exports=42;");
+        create_test_app(workspace.path(), "alternate.cjs", "module.exports=17;");
+        let mut config = balanced_config();
+        config.runtime.frozen_modules = Some(true);
+        let output = invoke_product_supervisor(
+            &app,
+            &config,
+            "balanced",
+            Path::new(franken_node_bin()),
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{source}: stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
+        let dispatch = parse_product_dispatch(&output).unwrap();
+        assert_eq!(dispatch.captured_output.stdout, "42\n", "{source}");
+        let graph = dispatch.engine_decision.unwrap().frozen_modules.unwrap();
+        assert_eq!(
+            graph.routes,
+            if source.contains("alternate.cjs") { 2 } else { 1 }
         );
     }
 }
