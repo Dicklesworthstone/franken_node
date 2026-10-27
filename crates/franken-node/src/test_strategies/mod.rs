@@ -20,7 +20,7 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use serde_json::json;
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(all(feature = "control-plane", any(test, feature = "test-support")))]
 use crate::api::fleet_quarantine::{
     DecisionReceipt, DecisionReceiptPayload, DecisionReceiptSignature, QuarantineScope,
     RevocationScope, RevocationSeverity, canonical_decision_receipt_payload_hash,
@@ -159,7 +159,7 @@ fn event_types() -> BoxedStrategy<EventType> {
     .boxed()
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(all(feature = "control-plane", any(test, feature = "test-support")))]
 fn revocation_severities() -> BoxedStrategy<RevocationSeverity> {
     prop_oneof![
         Just(RevocationSeverity::Advisory),
@@ -302,7 +302,7 @@ fn derivation_metadata() -> BoxedStrategy<DerivationMetadata> {
         .boxed()
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(all(feature = "control-plane", any(test, feature = "test-support")))]
 fn quarantine_scopes() -> BoxedStrategy<QuarantineScope> {
     (
         ascii_identifier(32),
@@ -321,7 +321,7 @@ fn quarantine_scopes() -> BoxedStrategy<QuarantineScope> {
         .boxed()
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(all(feature = "control-plane", any(test, feature = "test-support")))]
 fn revocation_scopes() -> BoxedStrategy<RevocationScope> {
     (
         ascii_identifier(32),
@@ -338,7 +338,7 @@ fn revocation_scopes() -> BoxedStrategy<RevocationScope> {
         .boxed()
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(all(feature = "control-plane", any(test, feature = "test-support")))]
 fn decision_receipt_signatures() -> BoxedStrategy<DecisionReceiptSignature> {
     (
         ascii_identifier(16),
@@ -409,7 +409,7 @@ pub fn capability_tokens() -> BoxedStrategy<CapabilityToken> {
         .boxed()
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(all(feature = "control-plane", any(test, feature = "test-support")))]
 pub fn decision_receipt_payloads() -> BoxedStrategy<DecisionReceiptPayload> {
     prop_oneof![
         (ascii_identifier(32), quarantine_scopes()).prop_map(|(extension_id, scope)| {
@@ -439,7 +439,7 @@ pub fn decision_receipt_payloads() -> BoxedStrategy<DecisionReceiptPayload> {
     .boxed()
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(all(feature = "control-plane", any(test, feature = "test-support")))]
 pub fn decision_receipts() -> BoxedStrategy<DecisionReceipt> {
     (
         ascii_identifier(48),
