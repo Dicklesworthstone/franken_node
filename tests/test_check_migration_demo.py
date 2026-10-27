@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "check_migration_demo.py"
@@ -71,6 +72,30 @@ class TestLiveE2EPipeline(unittest.TestCase):
         self.assertEqual(count, 8)
         failing = [r for r in checker.RESULTS if not r["pass"]]
         self.assertEqual(failing, [])
+
+    def test_rewrite_guard_rejects_obsolete_wrong_and_unasserted_commands(self):
+        body = checker._rust_function_body(checker.E2E_TEST_PATH.read_text(encoding="utf-8"),
+                                           checker.E2E_TEST_NAME)
+        expected = '"franken-node run --console-only index.js"'
+        assertion = ('assert_eq!(\n        rewritten_manifest["scripts"]["start"],\n'
+                     '        serde_json::json!(' + expected + ')\n    );')
+        self.assertIn(assertion, body)
+        variants = {
+            "obsolete": body.replace(expected, '"franken-node index.js"'),
+            "wrong": body.replace(expected, '"node index.js"'),
+            "unasserted": body.replace(assertion, ""),
+        }
+        with tempfile.TemporaryDirectory(prefix="migration-demo-guard-") as temporary:
+            fixture = Path(temporary) / "migrate_cli_e2e.rs"
+            for name, source in variants.items():
+                with self.subTest(name=name):
+                    fixture.write_text(source, encoding="utf-8")
+                    checker.RESULTS.clear()
+                    with patch.dict(checker.check_live_e2e_pipeline.__globals__, {"E2E_TEST_PATH": fixture}):
+                        count = checker.check_live_e2e_pipeline()
+                    self.assertEqual(count, 7)
+                    failed = [r["name"] for r in checker.RESULTS if not r["pass"]]
+                    self.assertEqual(failed, ["e2e:rewrite_mutation_checked"])
 
 
 class TestFlagshipConfigs(unittest.TestCase):

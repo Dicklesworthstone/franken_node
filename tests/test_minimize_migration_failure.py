@@ -51,7 +51,7 @@ class TestExecutedMinimization(unittest.TestCase):
         self.before, self.after = self.root / "before", self.root / "after"
         self.before.mkdir()
         self.after.mkdir()
-        self.command = [shutil.which("node"), "{test}"]
+        self.command = [str(Path(shutil.which("node")).resolve()), "{test}"]
 
     def sources(self, before=None, after=None, filename="app.test.js"):
         noise = "// irrelevant comment\nconst unused = 42;\n\n"

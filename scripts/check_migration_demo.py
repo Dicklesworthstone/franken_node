@@ -10,6 +10,7 @@ Usage:
 """
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -140,7 +141,11 @@ def check_live_e2e_pipeline() -> int:
         ),
         (
             "e2e:rewrite_mutation_checked",
-            "rewritten_manifest" in body and '"franken-node index.js"' in body,
+            bool(re.search(
+                r'assert_eq!\(\s*rewritten_manifest\["scripts"\]\["start"\],\s*'
+                r'serde_json::json!\("franken-node run --console-only index\.js"\)\s*,?\s*\);',
+                body,
+            )),
             "test asserts the live rewrite mutated the package manifest",
         ),
         (

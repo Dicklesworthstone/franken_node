@@ -197,7 +197,7 @@ class SourceFixTests(unittest.TestCase):
     def test_fabricated_recorded_case_inventory_is_not_accepted(self):
         artifact = self.capture()
         artifact["expected"]["cases"] = [case for case in artifact["expected"]["cases"] if case["test"] == "probe.cjs"]
-        with mock.patch.object(replay, "runtime_bindings") as lookup, self.assertRaisesRegex(ValueError, "recorded test inventory"):
+        with mock.patch.object(replay, "runtime_bindings") as lookup, self.assertRaisesRegex(ValueError, "capsule observation inventory differs from captured tests"):
             self.verify(replay.seal(artifact))
         lookup.assert_not_called()
 
@@ -249,9 +249,9 @@ class SourceFixTests(unittest.TestCase):
         artifact = self.capture()
         binding = replay.runtime_bindings
         expected_digest = runner.capture_project(self.fixed, time.monotonic() + 5)[1]
-        def mutate_after_capture(*args):
+        def mutate_after_capture(*args, **kwargs):
             (self.fixed / "lib.cjs").write_text(self.bad)
-            return binding(*args)
+            return binding(*args, **kwargs)
         with mock.patch.object(replay, "runtime_bindings", side_effect=mutate_after_capture):
             result = self.verify(artifact)
         self.assertEqual(result["verdict"], "FIX_VERIFIED", result)
