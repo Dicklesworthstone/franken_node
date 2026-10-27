@@ -44,6 +44,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        rustup toolchain install nightly --profile minimal --component rustfmt --component clippy
-        rustup default nightly
+        channel=$(python3 -c 'import os, pathlib, tomllib; print(tomllib.loads((pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "rust-toolchain.toml").read_text())["toolchain"]["channel"])')
+        rustup toolchain install "$channel" --profile minimal --component rustfmt --component clippy
+        rustup default "$channel"
         rustc --version

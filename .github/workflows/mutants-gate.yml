@@ -47,7 +47,7 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/bootstrap_source.sh --workspace "$PWD" \
-            --engine-ref dd1b3337f98ce381c3ff04307aca00153c20c453 \
+            --engine-ref c8f5618a01141b424d1b79659615d10563e7d3c6 \
             --receipt "$RUNNER_TEMP/mutation-source-inputs.tsv"
 
       - name: Install pinned Rust nightly
@@ -58,16 +58,19 @@ jobs:
       - name: Package the complete immutable mutation source set
         run: |
           set -euo pipefail
-          mkdir mutation-inputs
+          set -o noclobber
+          input_dir="$RUNNER_TEMP/mutation-inputs"
+          mkdir "$input_dir"
           while IFS=$'\t' read -r repo revision; do
             case "$repo" in \#*) continue ;; esac
-            git -C "../$repo" archive --format=tar "$revision" > "mutation-inputs/$repo.tar"
+            git -C "../$repo" archive --format=tar "$revision" > "$input_dir/$repo.tar"
           done < "$RUNNER_TEMP/mutation-source-inputs.tsv"
-          (cd mutation-inputs; sha256sum *.tar > SHA256SUMS)
+          (cd "$input_dir"; sha256sum *.tar > SHA256SUMS)
           bash scripts/bootstrap_source.sh --workspace "$PWD" \
-            --engine-ref dd1b3337f98ce381c3ff04307aca00153c20c453 --verify-only \
+            --engine-ref c8f5618a01141b424d1b79659615d10563e7d3c6 --verify-only \
             --receipt "$RUNNER_TEMP/mutation-source-inputs-after-packaging.tsv"
           cmp "$RUNNER_TEMP/mutation-source-inputs.tsv" "$RUNNER_TEMP/mutation-source-inputs-after-packaging.tsv"
+          cp -R "$input_dir" mutation-inputs
 
       - name: Cache cargo home and target
         uses: Swatinem/rust-cache@v2
@@ -88,15 +91,19 @@ jobs:
         env:
           RCH_VISIBILITY: summary
           RCH_REQUIRE_REMOTE: "1"
+          RCH_BUILD_SLOTS: "1"
         run: |
           set +e
           # One admitted job installs and uses the tool on the SAME worker.
           # Job transport carries only the primary root. Explicit archives
           # carry every sibling, then mutations affect only a fresh extraction.
           "$HOME/.local/bin/rch" exec --job --result-dir mutants-output -- \
-            env CARGO_INCREMENTAL=0 RUSTFLAGS="--cfg franken_node_inline_tests" \
+            env CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUSTFLAGS="--cfg franken_node_inline_tests" \
             bash -c '
               set -euo pipefail
+              # Cargo gives the encoded variable precedence over RUSTFLAGS.
+              # Ensure discovery and cargo-mutants both retain the inline cfg.
+              unset CARGO_ENCODED_RUSTFLAGS
               mkdir -p mutants-output
               output="$PWD/mutants-output"
               (cd mutation-inputs; sha256sum -c SHA256SUMS) > "$output/source-input-checks.txt"
@@ -106,6 +113,7 @@ jobs:
                 tar -xf "mutation-inputs/$repo.tar" -C "$campaign_root/$repo"
               done
               cd "$campaign_root/franken_node"
+              rustup toolchain install nightly-2026-09-21 --profile minimal
               cargo +nightly-2026-09-21 install cargo-mutants --version 27.0.0 --locked
               cargo +nightly-2026-09-21 test --locked -p frankenengine-node --lib -- --list \
                 > "$output/inline-tests.list"
@@ -122,7 +130,7 @@ jobs:
                 --config .cargo-mutants.toml \
                 --package frankenengine-node \
                 --test-package frankenengine-node \
-                --cargo-test-arg=--locked \
+                --cargo-arg=--locked \
                 --cargo-test-arg=--lib \
                 --cargo-test-arg=--tests \
                 --in-place \
@@ -203,21 +211,26 @@ jobs:
               print(f"::error::mutation-adequacy: could not read outcomes.json ({exc})")
               sys.exit(1)
 
-          outcomes = data if isinstance(data, list) else data.get("outcomes", [])
+          if not isinstance(data, dict) or not isinstance(data.get("outcomes"), list):
+              print("::error::mutation-adequacy: expected cargo-mutants outcomes object")
+              sys.exit(1)
+          outcomes = data["outcomes"]
           caught = missed = timeout = unviable = other = 0
           for outcome in outcomes:
               summary = outcome.get("summary") if isinstance(outcome, dict) else None
-              token = (summary if isinstance(summary, str) else json.dumps(summary)).lower()
-              if "caught" in token:
+              if summary == "CaughtMutant":
                   caught += 1
-              elif "missed" in token:
+              elif summary == "MissedMutant":
                   missed += 1
-              elif "timeout" in token:
+              elif summary == "Timeout":
                   timeout += 1
-              elif "unviable" in token:
+              elif summary == "Unviable":
                   unviable += 1
-              else:
+              elif summary == "Success":
                   other += 1
+              else:
+                  print(f"::error::mutation-adequacy: invalid or failed outcome {summary!r}")
+                  sys.exit(1)
 
           viable = caught + missed + timeout
           if viable == 0:
@@ -230,7 +243,7 @@ jobs:
           score_bp = round((caught + timeout) * 10000 / viable)
           print(f"mutation-adequacy: caught={caught} missed={missed} timeout={timeout} "
                 f"unviable={unviable} viable={viable} score={score_bp}bp floor={floor_bp}bp")
-          if score_bp < floor_bp:
+          if (caught + timeout) * 10000 < floor_bp * viable:
               print(f"::error::mutation score {score_bp}bp is below the registered floor "
                     f"{floor_bp}bp (bd-5r99w.14)")
               sys.exit(1)
