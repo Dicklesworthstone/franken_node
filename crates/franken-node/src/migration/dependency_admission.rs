@@ -676,7 +676,7 @@ fn inspect_with_installation(
         report.scope.push_str(if source == "bun.lock" {
             "; captured root scalar Bun overrides/resolutions applied; contextual and source-replacement override rules require explicit review"
         } else {
-            "; captured root scalar npm overrides applied; contextual and source-replacement override rules require explicit review"
+            "; captured root scalar npm overrides applied (including explicit registry aliases); contextual and nonregistry source-replacement override rules require explicit review"
         });
     }
     time_remaining(deadline)?;

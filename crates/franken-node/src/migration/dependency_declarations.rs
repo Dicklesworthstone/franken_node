@@ -87,8 +87,9 @@ pub(super) fn select<'a>(
 
 /// Captured root authority for globally selected scalar registry overrides.
 /// npm and Bun retain their distinct selection contracts; both reuse the same
-/// immutable authority for metadata AND actual installed edges. Scoped rules
-/// and replacement sources require review rather than partial application.
+/// immutable authority for metadata AND actual installed edges. npm registry
+/// aliases retain their replacement identity; contextual rules and nonregistry
+/// replacement sources require review rather than partial application.
 /// Contracts: docs.npmjs.com/cli/v11/configuring-npm/package-json/#overrides
 ///            bun.com/docs/pm/overrides
 #[derive(Debug, Default)]
@@ -106,6 +107,21 @@ fn plain_override_name(key: &str) -> bool {
                 && part
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        })
+}
+
+fn npm_registry_replacement(installed_as: &str, request: &str) -> bool {
+    if !request.starts_with("npm:") {
+        return graph::supports_range(request);
+    }
+    // An explicit npm alias is a registry fork, not an untyped source URL.
+    // Keep the full request as authority so all three admission passes check
+    // both the fork's identity and its range at the original lookup position.
+    // An omitted range is a dist-tag lookup, never a captured version proof.
+    alias(installed_as, Some(request))
+        .ok()
+        .is_some_and(|(package, range)| {
+            plain_override_name(package) && range.is_some_and(graph::supports_range)
         })
 }
 
@@ -169,12 +185,12 @@ impl Overrides {
                         Some(request)
                     };
                     if let Some(request) = request {
-                        if graph::supports_range(request) {
+                        if npm_registry_replacement(key, request) {
                             effective = Some(request);
                         } else {
                             issue = Some((
                                 "unsupported_npm_override",
-                                "Override replacement must be a supported registry version range; aliases, tags, URLs, Git and workspace requests require explicit review",
+                                "Override replacement must be a supported registry range or npm alias with an explicit supported range; tags, URLs, Git and workspace requests require explicit review",
                             ));
                         }
                     }

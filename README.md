@@ -912,11 +912,14 @@ every leaf command available in the current build.
 and installed package identities before differential execution. Its npm 11
 compatibility path gives `npm-shrinkwrap.json` precedence over `package-lock.json`,
 including when the ignored lockfile is stale or malformed. Root scalar
-`overrides` can select supported registry ranges, including scoped package names
-and `$dependency` references. The selected ranges apply consistently to the
-lockfile and actual installed dependency edges; direct dependency conflicts
-retain npm's `EOVERRIDE` behavior. Nested or version-qualified override rules,
-replacement sources, and bundled or nested-shrinkwrap contexts require review.
+`overrides` can select supported registry ranges and replacement forks such as
+`"vulnerable": "npm:@maintained/fork@^2"`, including `$dependency` references to
+aliased direct dependencies. The replacement's name and range are checked at the
+original dependency's installation location in both the lockfile and actual
+installed tree; raw declarations remain unchanged. Direct dependency conflicts
+retain npm's exact-spec `EOVERRIDE` behavior. Nested or version-qualified rules,
+nonregistry sources, omitted alias ranges, dist-tags, and bundled or
+nested-shrinkwrap contexts require review.
 Workspace and installed-package manifests cannot redefine the root's overrides.
 
 Bun text-lock projects also support root scalar registry `overrides` and

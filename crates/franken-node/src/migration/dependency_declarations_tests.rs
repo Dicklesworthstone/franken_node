@@ -286,6 +286,344 @@ fn scalar_root_overrides_reach_actual_installation_for_every_supported_npm_lock_
     }
 }
 
+fn fork_override_tree(
+    overrides: Value,
+    request: &str,
+    fork: &str,
+    version: &str,
+) -> tempfile::TempDir {
+    let parent = json!({"name":"parent","version":"1.0.0","dependencies":{"child":request}});
+    let child = json!({"name":fork,"version":version});
+    let root = fixture(
+        json!({"dependencies":{"parent":"1"},"overrides":overrides}),
+        json!({"node_modules/parent":parent,"node_modules/child":child}),
+    );
+    put(root.path(), "node_modules/parent/package.json", &parent);
+    put(root.path(), "node_modules/child/package.json", &child);
+    root
+}
+
+#[test]
+fn registry_fork_overrides_bind_actual_identities_for_every_npm_lock_version() {
+    // npm 11.9.0 / Arborist 9.2.0 loadActual independently selects the
+    // literal fork spec for ordinary AND aliased incoming requests. npm v1
+    // stores a fork identity inside version; v2/v3 use a separate name.
+    for lock_version in [1, 2, 3] {
+        for fork in ["maintained-child", "@patched/child"] {
+            for request in ["^1", "npm:original-child@^1"] {
+                let replacement = format!("npm:{fork}@^2");
+                let root = fork_override_tree(json!({"child":replacement}), request, fork, "2.1.0");
+                let lock = if lock_version == 1 {
+                    json!({"lockfileVersion":1,"dependencies":{
+                        "parent":{"version":"1.0.0","requires":{"child":request}},
+                        "child":{"version":format!("npm:{fork}@2.1.0")}
+                    }})
+                } else {
+                    json!({"lockfileVersion":lock_version,"packages":{
+                        "node_modules/parent":{"version":"1.0.0","dependencies":{"child":request}},
+                        "node_modules/child":{"name":fork,"version":"2.1.0"}
+                    }})
+                };
+                put(root.path(), "package-lock.json", &lock);
+                let before_root = fs::read(root.path().join("package.json")).unwrap();
+                let before_parent =
+                    fs::read(root.path().join("node_modules/parent/package.json")).unwrap();
+                let report = inspect_for_execution(root.path(), deadline()).unwrap();
+                assert!(
+                    report.installation_checked && !report.requires_review(),
+                    "v{lock_version} {replacement} {request}: {report:#?}"
+                );
+                assert_eq!(report.installed_packages_scanned, 2);
+                assert!(report.scope.contains("including explicit registry aliases"));
+                assert_eq!(
+                    fs::read(root.path().join("package.json")).unwrap(),
+                    before_root
+                );
+                assert_eq!(
+                    fs::read(root.path().join("node_modules/parent/package.json")).unwrap(),
+                    before_parent
+                );
+                assert_eq!(
+                    report,
+                    inspect_for_execution(root.path(), deadline()).unwrap()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn registry_fork_references_and_direct_conflicts_follow_npm_exact_specs() {
+    // Literal expected outcomes observed with npm 11.9.0 / Arborist 9.2.0,
+    // including EOVERRIDE for an equivalent but differently spelled range.
+    for section in FIELDS {
+        for (rule, conflict) in [
+            ("npm:@patched/child@^2", false),
+            ("$child", false),
+            ("$patch", false),
+            ("npm:@patched/child@>=2 <3", true),
+            ("npm:another-fork@^2", true),
+            ("^2", true),
+        ] {
+            let mut manifest = json!({"dependencies":{"patch":"npm:@patched/child@^2"},
+                "overrides":{"child":rule}});
+            manifest[section] = json!({"child":"npm:@patched/child@^2"});
+            manifest["dependencies"]["patch"] = json!("npm:@patched/child@^2");
+            let child = json!({"name":"@patched/child","version":"2.1.0"});
+            let root = fixture(
+                manifest,
+                json!({
+                    "node_modules/child":child,"node_modules/patch":child
+                }),
+            );
+            put(root.path(), "node_modules/child/package.json", &child);
+            put(root.path(), "node_modules/patch/package.json", &child);
+            let report = inspect_for_execution(root.path(), deadline()).unwrap();
+            assert_eq!(
+                has(&report, "conflicting_npm_override"),
+                conflict,
+                "{section} {rule}: {report:#?}"
+            );
+            assert_eq!(
+                report.requires_review(),
+                conflict,
+                "{section} {rule}: {report:#?}"
+            );
+            assert_eq!(report.installation_checked, !conflict);
+        }
+    }
+    let root = fork_override_tree(json!({"child":"$patch"}), "^1", "@patched/child", "2.1.0");
+    put(
+        root.path(),
+        "package.json",
+        &json!({"dependencies":{"parent":"1"},
+        "optionalDependencies":{"patch":"npm:@patched/child@^2"},"overrides":{"child":"$patch"}}),
+    );
+    let report = inspect_for_execution(root.path(), deadline()).unwrap();
+    assert!(
+        report.installation_checked && !report.requires_review(),
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn registry_fork_overrides_reach_workspace_optional_peer_and_private_edges() {
+    let member = json!({"name":"member","version":"1.0.0","dependencies":{"child":"^1"},
+        "overrides":{"child":"npm:untrusted-fork@99"}});
+    let a = json!({"name":"a","version":"1.0.0","dependencies":{"child":"npm:original-child@^1"}});
+    let b =
+        json!({"name":"b","version":"1.0.0","optionalDependencies":{"child":"^1","absent":"^1"}});
+    let c = json!({"name":"c","version":"1.0.0","peerDependencies":{"child":"^1"}});
+    let child = json!({"name":"@patched/child","version":"2.1.0"});
+    let root_manifest = json!({"workspaces":["packages/member"],"dependencies":{"a":"1","b":"1","c":"1"},
+        "overrides":{"child":"npm:@patched/child@^2","absent":"npm:optional-fork@^2"}});
+    let root = fixture(
+        root_manifest.clone(),
+        json!({
+            "packages/member":member,"node_modules/member":{"link":true,"resolved":"packages/member"},
+            "node_modules/a":a,"node_modules/b":b,"node_modules/c":c,
+            "node_modules/a/node_modules/child":child,"node_modules/child":child
+        }),
+    );
+    for (path, manifest) in [
+        ("packages/member", &member),
+        ("node_modules/a", &a),
+        ("node_modules/b", &b),
+        ("node_modules/c", &c),
+        ("node_modules/a/node_modules/child", &child),
+        ("node_modules/child", &child),
+    ] {
+        put(root.path(), &format!("{path}/package.json"), manifest);
+    }
+    symlink(
+        "../packages/member",
+        root.path().join("node_modules/member"),
+    )
+    .unwrap();
+    let report = inspect_for_execution(root.path(), deadline()).unwrap();
+    assert!(
+        report.installation_checked && !report.requires_review(),
+        "{report:#?}"
+    );
+    assert_eq!(report.installed_packages_scanned, 6);
+    let mut no_authority = root_manifest;
+    no_authority.as_object_mut().unwrap().remove("overrides");
+    put(root.path(), "package.json", &no_authority);
+    let report = inspect_for_execution(root.path(), deadline()).unwrap();
+    assert!(
+        has(&report, "unresolved_transitive_dependency") && !report.installation_checked,
+        "workspace/package overrides became authority: {report:#?}"
+    );
+}
+
+#[test]
+fn registry_fork_identity_version_and_installed_metadata_cannot_be_substituted() {
+    for (field, value, expected) in [
+        ("name", "child", "unresolved_transitive_dependency"),
+        ("name", "other-fork", "unresolved_transitive_dependency"),
+        ("version", "1.9.9", "dependency_version_mismatch"),
+    ] {
+        let root = fork_override_tree(
+            json!({"child":"npm:@patched/child@^2"}),
+            "^1",
+            "@patched/child",
+            "2.1.0",
+        );
+        let mut lock: Value =
+            serde_json::from_slice(&fs::read(root.path().join("package-lock.json")).unwrap())
+                .unwrap();
+        lock["packages"]["node_modules/child"][field] = json!(value);
+        put(root.path(), "package-lock.json", &lock);
+        let report = inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(
+            has(&report, expected) && !report.installation_checked,
+            "{field}={value}: {report:#?}"
+        );
+    }
+    for (name, version) in [("child", "2.1.0"), ("@patched/child", "2.2.0")] {
+        let root = fork_override_tree(
+            json!({"child":"npm:@patched/child@^2"}),
+            "^1",
+            "@patched/child",
+            "2.1.0",
+        );
+        put(
+            root.path(),
+            "node_modules/child/package.json",
+            &json!({"name":name,"version":version}),
+        );
+        let report = inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(
+            has(&report, "installed_identity_mismatch") && report.installation_checked,
+            "{name}@{version}: {report:#?}"
+        );
+    }
+    let root = fork_override_tree(
+        json!({"child":"npm:@patched/child@^2"}),
+        "^1",
+        "@patched/child",
+        "2.1.0",
+    );
+    put(
+        root.path(),
+        "node_modules/parent/package.json",
+        &json!({"name":"parent","version":"1.0.0",
+        "dependencies":{"child":"npm:@patched/child@^2"}}),
+    );
+    let report = inspect_for_execution(root.path(), deadline()).unwrap();
+    assert!(
+        has(&report, "installed_dependency_metadata_mismatch") && report.installation_checked,
+        "raw declaration rewrite was hidden by the effective override: {report:#?}"
+    );
+}
+
+#[test]
+fn registry_fork_overrides_cannot_rescue_missing_private_installations() {
+    let parent = json!({"name":"parent","version":"1.0.0","dependencies":{"child":"^1"}});
+    let child = json!({"name":"@patched/child","version":"2.1.0"});
+    let root = fixture(
+        json!({"dependencies":{"parent":"1"},"overrides":{"child":"npm:@patched/child@^2"}}),
+        json!({"node_modules/parent":parent,"node_modules/child":child,
+            "node_modules/parent/node_modules/child":child}),
+    );
+    put(root.path(), "node_modules/parent/package.json", &parent);
+    put(root.path(), "node_modules/child/package.json", &child);
+    let report = inspect_for_execution(root.path(), deadline()).unwrap();
+    assert!(
+        report.installation_checked && has(&report, "installed_dependency_route_mismatch"),
+        "{report:#?}"
+    );
+    let mismatch = report
+        .findings
+        .iter()
+        .find(|finding| finding.code == "installed_dependency_route_mismatch")
+        .unwrap();
+    assert_eq!(
+        mismatch.package_path.as_deref(),
+        Some("node_modules/parent/node_modules/child")
+    );
+}
+
+#[test]
+fn registry_alias_wildcards_replace_identity_and_scoped_lookup_names_stay_intact() {
+    let parent = json!({"name":"parent","version":"1.0.0","dependencies":{"@original/child":"^1"}});
+    let child = json!({"name":"@patched/child","version":"4.0.0"});
+    let root = fixture(
+        json!({"dependencies":{"parent":"1"},
+        "overrides":{"@original/child":"npm:@patched/child@*"}}),
+        json!({"node_modules/parent":parent,"node_modules/@original/child":child}),
+    );
+    put(root.path(), "node_modules/parent/package.json", &parent);
+    put(
+        root.path(),
+        "node_modules/@original/child/package.json",
+        &child,
+    );
+    let report = inspect_for_execution(root.path(), deadline()).unwrap();
+    assert!(
+        report.installation_checked && !report.requires_review(),
+        "{report:#?}"
+    );
+    assert!(
+        report
+            .inputs
+            .iter()
+            .any(|input| input.path == "node_modules/@original/child/package.json")
+    );
+}
+
+#[test]
+fn registry_fork_overrides_preserve_native_lifecycle_and_shrinkwrap_review() {
+    for (request, fork) in [("npm:sharp@^1", "@patched/child"), ("^1", "sharp")] {
+        let root = fork_override_tree(
+            json!({"child":format!("npm:{fork}@^2")}),
+            request,
+            fork,
+            "2.1.0",
+        );
+        let report = inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(
+            has(&report, "native_addon") && !report.installation_checked,
+            "{request} {fork}: {report:#?}"
+        );
+    }
+    for (case, code) in [
+        ("script", "install_script"),
+        ("native", "native_payload"),
+        ("shrinkwrap", "unsupported_npm_override_context"),
+        ("bundle", "unsupported_npm_override_context"),
+    ] {
+        let root = fork_override_tree(
+            json!({"child":"npm:@patched/child@^2"}),
+            "^1",
+            "@patched/child",
+            "2.1.0",
+        );
+        let mut child = json!({"name":"@patched/child","version":"2.1.0"});
+        match case {
+            "script" => child["scripts"] = json!({"install":"must never execute"}),
+            "native" => put(
+                root.path(),
+                "node_modules/child/native.node",
+                &json!("inert fixture"),
+            ),
+            "shrinkwrap" => put(
+                root.path(),
+                "node_modules/parent/npm-shrinkwrap.json",
+                &json!({"lockfileVersion":3,"packages":{}}),
+            ),
+            "bundle" => child["bundleDependencies"] = json!(["nested"]),
+            _ => unreachable!(),
+        }
+        put(root.path(), "node_modules/child/package.json", &child);
+        let report = inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(
+            report.installation_checked && has(&report, code),
+            "{case}: {report:#?}"
+        );
+    }
+}
+
 #[test]
 fn global_overrides_check_production_optional_peer_and_private_edges() {
     let a = json!({"name":"a","version":"1.0.0","dependencies":{"child":"^1"}});
@@ -546,7 +884,11 @@ fn unsupported_override_rules_cannot_be_hidden_by_a_supported_prefix_or_unused_n
         ("unused", json!(true)),
         ("unused", json!(null)),
         ("unused", json!("latest")),
-        ("unused", json!("npm:fork@2")),
+        ("unused", json!("npm:fork@latest")),
+        ("unused", json!("npm:fork")),
+        ("unused", json!("npm:@scope/fork")),
+        ("unused", json!("npm:fork@^2 || unsupported")),
+        ("unused", json!("npm:fork@npm:another@2")),
         ("unused", json!("file:../fork")),
         ("unused", json!("git+https://example.invalid/fork")),
         ("unused", json!("workspace:*")),
