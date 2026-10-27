@@ -5793,7 +5793,13 @@ fn native_execution_failure_message(
             ParseErrorCode::BudgetExceeded | ParseErrorCode::SourceTooLarge
         ),
         OrchestratorError::Interpreter(InterpreterError::ModuleParseFailed { error, .. }) => {
-            error.starts_with("BudgetExceeded:") || error.starts_with("SourceTooLarge:")
+            error.starts_with("BudgetExceeded:")
+                || error.starts_with("SourceTooLarge:")
+                || matches!(
+                    error.as_str(),
+                    "module exceeds the configured parser source-byte budget"
+                        | "resolved module exceeds the configured parser source-byte budget"
+                )
         }
         _ => false,
     };
@@ -11868,19 +11874,33 @@ mod tests {
         let budget = Config::default()
             .runtime
             .effective_parse_budget(Profile::Balanced);
-        let module_error = OrchestratorError::Interpreter(InterpreterError::ModuleParseFailed {
-            specifier: "node_modules/large/index.js".to_string(),
-            error: "BudgetExceeded: token budget exceeded: token_count=70000 max_token_count=65536"
-                .to_string(),
-        });
-        let message = native_execution_failure_message(&module_error, budget);
-        assert!(
-            message.contains("runtime.max_parse_tokens=65536"),
-            "{message}"
-        );
+        for detail in [
+            "BudgetExceeded: token budget exceeded: token_count=70000 max_token_count=65536",
+            "SourceTooLarge: source exceeds configured byte limit",
+            "module exceeds the configured parser source-byte budget",
+            "resolved module exceeds the configured parser source-byte budget",
+        ] {
+            let module_error =
+                OrchestratorError::Interpreter(InterpreterError::ModuleParseFailed {
+                    specifier: "node_modules/large/index.js".to_string(),
+                    error: detail.to_string(),
+                });
+            let message = native_execution_failure_message(&module_error, budget);
+            assert!(
+                message.contains("runtime.max_parse_tokens=65536"),
+                "{message}"
+            );
+            assert!(
+                message.contains("runtime.max_parse_source_bytes=1048576"),
+                "{message}"
+            );
+        }
         for error in [
             InterpreterError::UncaughtException {
                 value: "BudgetExceeded: forged guest text".to_string(),
+            },
+            InterpreterError::UncaughtException {
+                value: "module exceeds the configured parser source-byte budget".to_string(),
             },
             InterpreterError::ModuleReadFailed {
                 specifier: "BudgetExceeded.js".to_string(),

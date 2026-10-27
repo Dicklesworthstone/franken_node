@@ -389,6 +389,8 @@ else:
         self.assertEqual(result["verdict"], "ERROR")
         self.assertEqual(result["setup"]["exit_code"], 7)
         self.assertNotIn("candidate", result)
+        self.assertEqual(result["reference"]["differences"], [])
+        self.assertTrue(Path(result["reference"]["receipt_path"]).is_file())
 
     def test_setup_cannot_replace_fixture_source(self):
         self.native.write_text(f"#!{sys.executable}\n" +
@@ -399,6 +401,38 @@ else:
         result = self.run_cases(case())["results"][0]
         self.assertEqual(result["verdict"], "ERROR")
         self.assertIn("changed fixture input", result["detail"])
+        self.assertEqual(result["reference"]["differences"], [])
+
+    def test_failed_setup_retains_both_references_and_continues_next_case(self):
+        self.native.write_text(f"#!{sys.executable}\n" + '''
+import pathlib, sys
+if sys.argv[1:] == ['--version']:
+    print('selective-setup-failure-test-double')
+elif sys.argv[1] == 'init':
+    if pathlib.Path('fail-init.txt').exists():
+        sys.stderr.write('intentional initialization failure\\n')
+        raise SystemExit(7)
+else:
+    print(42)
+''')
+        failed = case("setup-bad")
+        failed["files"]["fail-init.txt"] = "fail only this candidate setup\n"
+        report = self.run_triad(failed, case("later-good"))
+        self.assertEqual(report["verdict"], "FAIL")
+        self.assertEqual(report["corpus_case_count"], 2)
+        self.assertEqual(report["selected_case_count"], 2)
+        self.assertEqual(report["failing_cases"], 1)
+        self.assertEqual(report["passing_cases"], 1)
+        self.assertEqual([row["verdict"] for row in report["results"]], ["ERROR", "PASS"])
+        result = report["results"][0]
+        self.assertEqual(result["setup"]["exit_code"], 7)
+        self.assertNotIn("candidate", result)
+        for role in ("reference", "bun"):
+            self.assertEqual(result[role]["differences"], [])
+            receipt = Path(result[role]["receipt_path"])
+            self.assertTrue(receipt.is_file())
+            observed = json.loads(receipt.read_text())
+            self.assertEqual(Path(observed["stdout_path"]).read_bytes(), b"42\n")
 
     def test_digest_pin_rejects_changed_inputs_before_execution(self):
         for pin in ("sha256:" + "0" * 64, "sha256:invalid-\u2603"):

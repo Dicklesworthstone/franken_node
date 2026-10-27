@@ -395,20 +395,6 @@ def run_case(case: dict[str, Any], binary: Path, node: Path, bun: Path | None,
     # None of the processes executes from the source checkout.
     for runtime in runtimes:
         stage(case, directory / runtime / "project")
-    native_cwd = directory / "candidate" / "project"
-    setup = supervise([str(binary), "init", "--profile", policy, "--out-dir", "."],
-                      directory / "setup", cwd=native_cwd, **limits)
-    result["setup"] = observation(setup)
-    if setup["outcome"] != "completed":
-        result["detail"] = "candidate initialization failed"
-        return result
-    # init must not silently replace captured inputs (for example a fixture
-    # that conflicts with the generated project configuration).
-    for name, text in case["files"].items():
-        target = native_cwd / name
-        if target.is_symlink() or not target.is_file() or target.read_bytes() != text.encode("utf-8"):
-            result["detail"] = f"candidate initialization changed fixture input: {name}"
-            return result
     entry = "./" + case["entry"]
     args = case.get("args", [])
     commands = {
@@ -421,6 +407,25 @@ def run_case(case: dict[str, Any], binary: Path, node: Path, bun: Path | None,
         commands["bun"] = [str(bun), entry, *args]
     stdin = case.get("stdin")
     for runtime in runtimes:
+        if runtime == "candidate":
+            # Retain independent reference observations even when candidate
+            # initialization fails. Setup failure remains an ERROR, never a
+            # successful comparison or a substitute native execution.
+            native_cwd = directory / "candidate" / "project"
+            setup = supervise([str(binary), "init", "--profile", policy, "--out-dir", "."],
+                              directory / "setup", cwd=native_cwd, **limits)
+            result["setup"] = observation(setup)
+            if setup["outcome"] != "completed":
+                result["detail"] = "candidate initialization failed"
+                return result
+            # init must not silently replace captured inputs (for example a
+            # fixture that conflicts with generated project configuration).
+            for name, text in case["files"].items():
+                target = native_cwd / name
+                if (target.is_symlink() or not target.is_file()
+                        or target.read_bytes() != text.encode("utf-8")):
+                    result["detail"] = f"candidate initialization changed fixture input: {name}"
+                    return result
         command = commands[runtime]
         receipt = supervise(command, directory / runtime / "execution",
                             cwd=directory / runtime / "project",
