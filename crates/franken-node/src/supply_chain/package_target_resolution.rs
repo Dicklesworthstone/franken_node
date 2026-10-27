@@ -185,6 +185,7 @@ pub(super) struct PackageMetadata {
     pub(super) main: Option<String>,
     pub(super) package_type: Option<String>,
     pub(super) exports: bool,
+    pub(super) imports: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -322,6 +323,9 @@ impl PackageMap {
             exports: members
                 .iter()
                 .any(|(key, value)| key == "exports" && !matches!(value, OrderedValue::Null)),
+            imports: members
+                .iter()
+                .any(|(key, value)| key == "imports" && !matches!(value, OrderedValue::Null)),
         };
         Ok((Self::from_document(source, members), metadata))
     }

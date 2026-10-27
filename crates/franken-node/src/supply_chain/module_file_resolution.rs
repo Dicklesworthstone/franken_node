@@ -188,6 +188,7 @@ struct Manifest {
     main: Option<String>,
     package_type: Option<String>,
     exports: bool,
+    imports: bool,
 }
 
 struct Resolver {
@@ -588,6 +589,7 @@ impl Resolver {
                     main: metadata.main,
                     package_type: metadata.package_type,
                     exports: metadata.exports,
+                    imports: metadata.imports,
                 }))
             }
         };
@@ -650,7 +652,17 @@ impl Resolver {
                 .ok_or_else(|| mode.missing(request));
         }
         if request.starts_with('#') {
-            let (scope, manifest) = self.scope(directory)?.ok_or_else(|| {
+            let scope = self.scope(directory)?;
+            if mode == ResolutionMode::Require
+                && scope.as_ref().is_none_or(|(_, manifest)| !manifest.imports)
+            {
+                // LOAD_PACKAGE_IMPORTS has no effect without a non-null
+                // imports field. CommonJS then performs its ordinary package
+                // search, even for a name beginning with '#'. Capture those
+                // probes; an unprobed MODULE_NOT_FOUND would invent absence.
+                return self.package(directory, request, mode, PackageLookup::CommonJs, depth);
+            }
+            let (scope, manifest) = scope.ok_or_else(|| {
                 error(
                     "ERR_PACKAGE_IMPORT_NOT_DEFINED",
                     "no package scope for internal import",
@@ -673,7 +685,10 @@ impl Resolver {
         lookup: PackageLookup,
         depth: usize,
     ) -> Result<(String, String)> {
-        let (name, subpath) = package_parts(request)?;
+        let (name, subpath) = package_parts(
+            request,
+            mode == ResolutionMode::Require && lookup == PackageLookup::CommonJs,
+        )?;
         if let Some((scope, manifest)) = self.scope(directory)?
             && manifest.name.as_deref() == Some(name)
             && manifest.exports
@@ -1107,7 +1122,7 @@ fn serialized_url_suffix(suffix: &str) -> Result<String> {
     Ok(serialized)
 }
 
-fn package_parts(request: &str) -> Result<(&str, String)> {
+fn package_parts(request: &str, commonjs: bool) -> Result<(&str, String)> {
     validate_request(request)?;
     let end = if request.starts_with('@') {
         let first = request.find('/').ok_or_else(|| {
@@ -1123,7 +1138,12 @@ fn package_parts(request: &str) -> Result<(&str, String)> {
         request.find('/').unwrap_or(request.len())
     };
     let name = &request[..end];
-    super::validate_package_name(name)
+    let validated_name = if commonjs {
+        name.strip_prefix('#').unwrap_or(name)
+    } else {
+        name
+    };
+    super::validate_package_name(validated_name)
         .map_err(|e| error("ERR_INVALID_MODULE_SPECIFIER", e.to_string()))?;
     let subpath = format!(".{}", &request[end..]);
     // Legacy packages can expose directory entrypoints (`pkg/`, `pkg/lib/`).
@@ -2461,7 +2481,107 @@ mod tests {
             rejected(root.path(), "app.js", "./large.js", ResolutionMode::Import),
             "ERR_MODULE_RESOLUTION_LIMIT"
         );
-        assert!(package_parts("pkg/../other").is_err());
+        assert!(package_parts("pkg/../other", false).is_err());
+    }
+
+    #[test]
+    fn commonjs_hash_requests_without_import_maps_capture_actual_package_search() {
+        for manifest in [None, Some("{}"), Some(r#"{"imports":null}"#)] {
+            let root = tempfile::tempdir().unwrap();
+            put(
+                root.path(),
+                "app.cjs",
+                b"require('#installed'); require('#absent');",
+            );
+            if let Some(manifest) = manifest {
+                put(root.path(), "package.json", manifest.as_bytes());
+            }
+            put(
+                root.path(),
+                "node_modules/#installed/package.json",
+                br#"{"main":"index.cjs"}"#,
+            );
+            put(
+                root.path(),
+                "node_modules/#installed/index.cjs",
+                b"module.exports = 42;",
+            );
+            let resolved = resolve(
+                root.path(),
+                "app.cjs",
+                "#installed",
+                ResolutionMode::Require,
+                &ResolutionMode::Require.default_conditions(),
+            )
+            .unwrap();
+            assert_eq!(resolved.report.path, "node_modules/#installed/index.cjs");
+            assert_eq!(resolved.source_bytes(), b"module.exports = 42;");
+            assert!(resolved.report.mappings.is_empty());
+            assert_eq!(
+                rejected(root.path(), "app.cjs", "#installed", ResolutionMode::Import),
+                "ERR_PACKAGE_IMPORT_NOT_DEFINED"
+            );
+            let graph = source_graph::capture(
+                root.path(),
+                "app.cjs",
+                source_graph::GraphOptions::default(),
+            )
+            .unwrap();
+            let absent = graph
+                .report()
+                .edges
+                .iter()
+                .find(|edge| edge.specifier.as_deref() == Some("#absent"))
+                .unwrap();
+            assert_eq!(absent.error.as_ref().unwrap().code, "MODULE_NOT_FOUND");
+            assert!(
+                graph
+                    .report()
+                    .probes
+                    .iter()
+                    .any(|probe| probe.path == "node_modules/#absent"
+                        && probe.kind == ProbeKind::Missing)
+            );
+            let pin = graph.report().input_hash.clone();
+            let encoded = source_graph::capsule::encode(&graph).unwrap();
+            put(
+                root.path(),
+                "node_modules/#absent/index.js",
+                b"module.exports = 99;",
+            );
+            let replayed =
+                source_graph::capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+            let registry = source_graph::registry::PinnedModuleRegistry::new(replayed, &pin)
+                .ok()
+                .unwrap();
+            assert_eq!(
+                registry
+                    .lookup(
+                        Some(registry.entrypoint()),
+                        "#absent",
+                        source_graph::registry::RequestStyle::Require,
+                    )
+                    .err()
+                    .unwrap()
+                    .code,
+                "MODULE_NOT_FOUND"
+            );
+
+            // An explicit map, even an empty one, encapsulates private imports
+            // and prevents falling through to an installed '#'-named package.
+            put(root.path(), "package.json", br#"{"imports":{}}"#);
+            assert_eq!(
+                rejected(
+                    root.path(),
+                    "app.cjs",
+                    "#installed",
+                    ResolutionMode::Require
+                ),
+                "ERR_PACKAGE_IMPORT_NOT_DEFINED"
+            );
+        }
+        assert!(package_parts("#installed", false).is_err());
+        assert!(package_parts("#installed/../escape", true).is_err());
     }
 
     #[test]
