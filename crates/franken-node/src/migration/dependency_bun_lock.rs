@@ -12,8 +12,10 @@
 //! test/cli/install/lockfile-version-2.test.ts at
 //! 281698ac9380110414b293017531b39466014ad3. No Bun implementation is copied.
 
-use super::{MAX_DEPTH, MAX_LOCK_BYTES, MAX_METADATA_BYTES, MAX_PACKAGES, SECTIONS,
-    bounded_text, graph, name, parse_unique, relative, time_remaining};
+use super::{
+    MAX_DEPTH, MAX_LOCK_BYTES, MAX_METADATA_BYTES, MAX_PACKAGES, SECTIONS, bounded_text,
+    declaration_selection::Overrides, graph, name, parse_unique, relative, time_remaining,
+};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -137,11 +139,11 @@ fn string_end(text: &[u8], start: usize, next: &mut usize, deadline: Instant) ->
 }
 
 fn no_resolution_controls(object: &Map<String, Value>) -> Result<()> {
-    for field in ["overrides", "resolutions", "patchedDependencies"] {
-        if let Some(value) = object.get(field) {
-            ensure!(value.as_object().is_some_and(Map::is_empty),
-                "Bun {field} needs explicit resolution/patch review before checked execution");
-        }
+    if let Some(value) = object.get("patchedDependencies") {
+        ensure!(
+            value.as_object().is_some_and(Map::is_empty),
+            "Bun patchedDependencies needs explicit resolution/patch review before checked execution"
+        );
     }
     if let Some(value) = object.get("trustedDependencies") {
         ensure!(value.as_array().is_some_and(Vec::is_empty),
@@ -268,7 +270,11 @@ fn tuple_record(tuple: Value, deadline: Instant) -> Result<Value> {
 /// Their identities and declarations are subsequently bound to real captured
 /// manifests by workspaces::bind_links. Isolated stores are NOT inferred from
 /// configVersion: execution admission still checks the actual hoisted layout.
-pub(super) fn project_lock(lock: Value, manifest: &Value, deadline: Instant) -> Result<(Value, Catalogs)> {
+pub(super) fn project_lock(
+    lock: Value,
+    manifest: &Value,
+    deadline: Instant,
+) -> Result<(Value, Catalogs)> {
     time_remaining(deadline)?;
     let Value::Object(mut document) = lock else { bail!("Bun lockfile must be an object"); };
     for key in document.keys() {
@@ -284,6 +290,10 @@ pub(super) fn project_lock(lock: Value, manifest: &Value, deadline: Instant) -> 
     no_resolution_controls(&document)?;
     let manifest = manifest.as_object().context("Bun project manifest must be an object")?;
     no_resolution_controls(manifest)?;
+    Overrides::capture_bun(manifest, &document, deadline)?;
+    // Keep the separately validated root rules beside the unchanged package
+    // records. This internal projection never rewrites declaration evidence.
+    let overrides = document.remove("overrides").unwrap_or_else(|| json!({}));
     let catalogs = Catalogs::bind(manifest, &document, deadline)?;
     let selectors = catalogs::workspace_selectors(manifest)?;
     let workspaces = document.remove("workspaces").context("Bun workspaces missing")?;
@@ -311,7 +321,14 @@ pub(super) fn project_lock(lock: Value, manifest: &Value, deadline: Instant) -> 
     }
     let mut packages = Map::new();
     packages.insert(String::new(), Value::Object(root));
-    let mut retained = serde_json::to_vec(&packages)?.len();
+    let mut retained = serde_json::to_vec(&packages)?
+        .len()
+        .checked_add(serde_json::to_vec(&overrides)?.len())
+        .context("Bun graph byte count overflow")?;
+    ensure!(
+        retained <= MAX_METADATA_BYTES,
+        "Bun projected graph exceeds byte limit"
+    );
     let mut workspace_names = BTreeMap::new();
     for (directory, record) in workspaces {
         time_remaining(deadline)?;
@@ -380,7 +397,10 @@ pub(super) fn project_lock(lock: Value, manifest: &Value, deadline: Instant) -> 
         ensure!(packages.insert(physical, record).is_none(), "Bun projected installation paths collide");
     }
     time_remaining(deadline)?;
-    Ok((json!({"lockfileVersion":3,"packages":packages}), catalogs))
+    Ok((
+        json!({"lockfileVersion":3,"packages":packages,"overrides":overrides}),
+        catalogs,
+    ))
 }
 
 fn workspace_directory(directory: &str) -> Result<()> {
@@ -421,6 +441,462 @@ mod tests {
         fs::create_dir_all(root.join(path)).unwrap();
         fs::write(root.join(path).join("package.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
         fs::write(root.join(path).join("index.js"), "throw Error('inspection must never evaluate me');").unwrap();
+    }
+
+    // Behavioral reference: Bun 9b8347a24e2de025d1bcca1f2e2a6b1518af64cb,
+    // test/cli/install/overrides.test.ts (root/transitive rules, canonical lock
+    // shape, field precedence, alias exclusions and implicit workspace links).
+    // These fixtures exercise our admission paths; no Bun installer is invoked.
+    #[test]
+    fn scalar_bun_overrides_reach_actual_hoisted_and_isolated_installations() {
+        for version in [1, 2] {
+            for isolated in [false, true] {
+                let declarations = json!({"dependencies":{"parent":"1","child":"^1"}});
+                let mut manifest = declarations.clone();
+                manifest["overrides"] = json!({"child":"2"});
+                let mut document = lock(
+                    declarations,
+                    json!({
+                        "parent":tuple("parent@1.0.0",json!({"dependencies":{"child":"^1"}})),
+                        "child":tuple("child@2.0.0",json!({}))
+                    }),
+                );
+                document["lockfileVersion"] = version.into();
+                document["overrides"] = manifest["overrides"].clone();
+                let root = fixture(&manifest, &document);
+                let metadata = super::super::inspect(root.path(), deadline()).unwrap();
+                assert!(!metadata.requires_review(), "{metadata:?}");
+                assert!(!metadata.installation_checked);
+                assert!(
+                    super::super::inspect_for_execution(root.path(), deadline())
+                        .unwrap()
+                        .requires_review()
+                );
+
+                let (parent, child) = if isolated {
+                    (
+                        "node_modules/.bun/parent@1.0.0/node_modules/parent",
+                        "node_modules/.bun/child@2.0.0/node_modules/child",
+                    )
+                } else {
+                    ("node_modules/parent", "node_modules/child")
+                };
+                installed(
+                    root.path(),
+                    parent,
+                    json!({"name":"parent","version":"1.0.0","dependencies":{"child":"^1"}}),
+                );
+                installed(
+                    root.path(),
+                    child,
+                    json!({"name":"child","version":"2.0.0"}),
+                );
+                if isolated {
+                    use std::os::unix::fs::symlink;
+                    symlink(
+                        ".bun/parent@1.0.0/node_modules/parent",
+                        root.path().join("node_modules/parent"),
+                    )
+                    .unwrap();
+                    symlink(
+                        ".bun/child@2.0.0/node_modules/child",
+                        root.path().join("node_modules/child"),
+                    )
+                    .unwrap();
+                    symlink(
+                        "../../child@2.0.0/node_modules/child",
+                        root.path()
+                            .join("node_modules/.bun/parent@1.0.0/node_modules/child"),
+                    )
+                    .unwrap();
+                }
+                let report = super::super::inspect_for_execution(root.path(), deadline()).unwrap();
+                assert!(!report.requires_review(), "{report:?}");
+                assert!(report.installation_checked);
+                // Count installation locations: an isolated layout also
+                // inspects both root aliases and the parent's child alias.
+                assert_eq!(
+                    report.installed_packages_scanned,
+                    if isolated { 5 } else { 2 }
+                );
+                for package in [parent, child] {
+                    assert!(
+                        report
+                            .inputs
+                            .iter()
+                            .any(|input| { input.path == format!("{package}/package.json") })
+                    );
+                }
+                assert!(report.scope.contains("scalar Bun overrides/resolutions"));
+                let input = report
+                    .inputs
+                    .iter()
+                    .find(|input| input.path == "bun.lock")
+                    .unwrap();
+                let bytes = serde_json::to_vec(&document).unwrap();
+                assert_eq!(input.sha256, hex::encode(Sha256::digest(&bytes)));
+                assert_eq!(input.bytes, bytes.len());
+                assert_eq!(
+                    fs::read(root.path().join("package.json")).unwrap(),
+                    serde_json::to_vec(&manifest).unwrap()
+                );
+
+                installed(
+                    root.path(),
+                    child,
+                    json!({"name":"child","version":"3.0.0"}),
+                );
+                let stale = super::super::inspect_for_execution(root.path(), deadline()).unwrap();
+                assert!(
+                    stale
+                        .findings
+                        .iter()
+                        .any(|finding| finding.code == "installed_identity_mismatch"),
+                    "{stale:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bun_root_rules_reach_optional_and_peer_edges_without_inheriting_package_overrides() {
+        for field in ["dependencies", "optionalDependencies", "peerDependencies"] {
+            let declarations = json!({"dependencies":{"parent":"1","child":"^1"}});
+            let mut manifest = declarations.clone();
+            manifest["overrides"] = json!({"child":"2"});
+            let mut parent = json!({});
+            parent[field] = json!({"child":"^1"});
+            let mut document = lock(
+                declarations,
+                json!({
+                    "parent":tuple("parent@1.0.0",parent.clone()),
+                    "child":tuple("child@2.0.0",json!({}))
+                }),
+            );
+            document["overrides"] = manifest["overrides"].clone();
+            let root = fixture(&manifest, &document);
+            parent["name"] = "parent".into();
+            parent["version"] = "1.0.0".into();
+            parent["overrides"] = json!({"child":"9"});
+            installed(root.path(), "node_modules/parent", parent);
+            installed(
+                root.path(),
+                "node_modules/child",
+                json!({"name":"child","version":"2.0.0"}),
+            );
+            let report = super::super::inspect_for_execution(root.path(), deadline()).unwrap();
+            assert!(!report.requires_review(), "{field}: {report:?}");
+            assert!(report.installation_checked);
+
+            document["packages"]["child"][0] = "child@1.0.0".into();
+            fs::write(
+                root.path().join("bun.lock"),
+                serde_json::to_vec(&document).unwrap(),
+            )
+            .unwrap();
+            let rejected = super::super::inspect(root.path(), deadline()).unwrap();
+            assert!(
+                rejected
+                    .findings
+                    .iter()
+                    .any(|finding| finding.code == "dependency_version_mismatch"),
+                "{field}: {rejected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bun_resolutions_use_canonical_lock_rules_and_overrides_presence_wins() {
+        let declarations = json!({"dependencies":{"child":"^1"}});
+        let mut document = lock(
+            declarations.clone(),
+            json!({"child":tuple("child@2.0.0",json!({}))}),
+        );
+        document["overrides"] = json!({"child":"2"});
+        for ignored in [
+            json!({"child":"9"}),
+            json!({"ancestor":{"child":"9"}}),
+            json!("not an override object"),
+            json!(["not an override object"]),
+            Value::Null,
+        ] {
+            let mut manifest = declarations.clone();
+            manifest["overrides"] = json!({"child":"2"});
+            manifest["resolutions"] = ignored;
+            let root = fixture(&manifest, &document);
+            assert!(
+                !super::super::inspect(root.path(), deadline())
+                    .unwrap()
+                    .requires_review()
+            );
+        }
+        let mut manifest = declarations.clone();
+        manifest["resolutions"] = json!({"child":"2"});
+        let root = fixture(&manifest, &document);
+        assert!(
+            !super::super::inspect(root.path(), deadline())
+                .unwrap()
+                .requires_review()
+        );
+
+        // Empty overrides suppress resolutions as well; the lock must record
+        // no active rules, and the original declaration remains authoritative.
+        manifest["overrides"] = json!({});
+        let plain = lock(
+            declarations,
+            json!({"child":tuple("child@1.0.0",json!({}))}),
+        );
+        let root = fixture(&manifest, &plain);
+        assert!(
+            !super::super::inspect(root.path(), deadline())
+                .unwrap()
+                .requires_review()
+        );
+        assert!(project_lock(document, &manifest, deadline()).is_err());
+    }
+
+    #[test]
+    fn literal_bun_override_wildcard_is_an_active_replacement() {
+        let declarations = json!({"dependencies":{"child":"^1"}});
+        let mut manifest = declarations.clone();
+        manifest["overrides"] = json!({"child":"*"});
+        let mut document = lock(
+            declarations,
+            json!({"child":tuple("child@9.0.0",json!({}))}),
+        );
+        document["overrides"] = manifest["overrides"].clone();
+        let root = fixture(&manifest, &document);
+        installed(
+            root.path(),
+            "node_modules/child",
+            json!({"name":"child","version":"9.0.0"}),
+        );
+        let report = super::super::inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(!report.requires_review(), "{report:?}");
+        assert!(report.installation_checked);
+    }
+
+    #[test]
+    fn plain_bun_override_rules_do_not_replace_versioned_npm_aliases() {
+        let declarations = json!({"dependencies":{"alias":"npm:@scope/real@^1","parent":"1"}});
+        let mut manifest = declarations.clone();
+        manifest["overrides"] = json!({"alias":"2","@scope/real":"3","child":"2"});
+        let mut document = lock(
+            declarations,
+            json!({
+                "alias":tuple("@scope/real@1.0.0",json!({})),
+                "parent":tuple("parent@1.0.0",json!({"dependencies":{"child":"^1"}})),
+                "child":tuple("child@2.0.0",json!({}))
+            }),
+        );
+        document["overrides"] = manifest["overrides"].clone();
+        let root = fixture(&manifest, &document);
+        installed(
+            root.path(),
+            "node_modules/alias",
+            json!({"name":"@scope/real","version":"1.0.0"}),
+        );
+        installed(
+            root.path(),
+            "node_modules/parent",
+            json!({"name":"parent","version":"1.0.0","dependencies":{"child":"^1"}}),
+        );
+        installed(
+            root.path(),
+            "node_modules/child",
+            json!({"name":"child","version":"2.0.0"}),
+        );
+        let report = super::super::inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(!report.requires_review(), "{report:?}");
+        document["packages"]["alias"][0] = "@scope/real@2.0.0".into();
+        fs::write(
+            root.path().join("bun.lock"),
+            serde_json::to_vec(&document).unwrap(),
+        )
+        .unwrap();
+        let rejected = super::super::inspect(root.path(), deadline()).unwrap();
+        assert!(
+            rejected
+                .findings
+                .iter()
+                .any(|finding| finding.code == "dependency_version_mismatch"
+                    && finding.installed_as == "alias")
+        );
+    }
+
+    #[test]
+    fn bun_override_binding_includes_unused_rules_and_preserves_raw_declarations() {
+        let declarations = json!({"dependencies":{"child":"^1"}});
+        let mut manifest = declarations.clone();
+        manifest["overrides"] = json!({"child":"2","unused":"7"});
+        let mut document = lock(
+            declarations,
+            json!({"child":tuple("child@2.0.0",json!({}))}),
+        );
+        document["overrides"] = manifest["overrides"].clone();
+        let (projected, _) = project_lock(document.clone(), &manifest, deadline()).unwrap();
+        assert_eq!(projected["overrides"], manifest["overrides"]);
+        assert_eq!(projected["packages"][""]["dependencies"]["child"], "^1");
+
+        let mut manifests = BTreeMap::from([(String::new(), manifest.clone())]);
+        let topology = super::super::project_bun_lock_for_topology(
+            &serde_json::to_vec(&document).unwrap(),
+            &mut manifests,
+            deadline(),
+        )
+        .unwrap();
+        assert_eq!(topology["overrides"], manifest["overrides"]);
+        assert_eq!(manifests[""]["dependencies"]["child"], "^1");
+        for stale in [
+            json!({}),
+            json!({"child":"2"}),
+            json!({"child":"2","unused":"8"}),
+            json!({"child":"2","unused":"7","extra":"1"}),
+        ] {
+            let mut changed = document.clone();
+            changed["overrides"] = stale;
+            assert!(project_lock(changed, &manifest, deadline()).is_err());
+        }
+        let mut stale = document.clone();
+        stale["workspaces"][""]["dependencies"]["child"] = "2".into();
+        assert!(project_lock(stale, &manifest, deadline()).is_err());
+        assert!(project_lock(document, &manifest, Instant::now()).is_err());
+    }
+
+    #[test]
+    fn unsupported_bun_override_rules_never_apply_a_supported_prefix() {
+        for unsupported in [
+            json!({"unused":{"child":"2"}}),
+            json!({"unused@^1":"2"}),
+            json!({"parent>unused":"2"}),
+            json!({"parent/unused":"2"}),
+            json!({"unused":"$child"}),
+            json!({"unused":"catalog:"}),
+            json!({"unused":"npm:other@2"}),
+            json!({"unused":"file:./local"}),
+            json!({"unused":"latest"}),
+            json!({"unused":""}),
+            json!({"unused":null}),
+        ] {
+            let declarations = json!({"dependencies":{"child":"^1"}});
+            let mut rules = json!({"child":"2"});
+            rules
+                .as_object_mut()
+                .unwrap()
+                .extend(unsupported.as_object().unwrap().clone());
+            let mut manifest = declarations.clone();
+            manifest["overrides"] = rules.clone();
+            let mut document = lock(
+                declarations,
+                json!({"child":tuple("child@2.0.0",json!({}))}),
+            );
+            document["overrides"] = rules;
+            assert!(
+                project_lock(document, &manifest, deadline()).is_err(),
+                "{unsupported}"
+            );
+        }
+    }
+
+    #[test]
+    fn bun_override_authority_preserves_implicit_workspaces_and_reviews_registry_replacement() {
+        for direct in [false, true] {
+            let mut manifest = json!({"workspaces":["packages/*"],"overrides":{"local":"2"}});
+            let mut root_record = json!({});
+            if direct {
+                manifest["dependencies"] = json!({"local":"1"});
+                root_record["dependencies"] = manifest["dependencies"].clone();
+            }
+            let member = json!({"name":"local","version":"1.0.0"});
+            let mut document = lock(
+                root_record,
+                json!({"local":["local@workspace:packages/local"]}),
+            );
+            document["workspaces"]["packages/local"] = member.clone();
+            document["overrides"] = manifest["overrides"].clone();
+            let root = fixture(&manifest, &document);
+            installed(root.path(), "packages/local", member);
+            fs::create_dir_all(root.path().join("node_modules")).unwrap();
+            std::os::unix::fs::symlink("../packages/local", root.path().join("node_modules/local"))
+                .unwrap();
+            let report = super::super::inspect_for_execution(root.path(), deadline()).unwrap();
+            if direct {
+                assert!(report.requires_review(), "{report:?}");
+                assert!(
+                    report
+                        .findings
+                        .iter()
+                        .any(|finding| finding.code.ends_with("override_context")),
+                    "{report:?}"
+                );
+            } else {
+                assert!(!report.requires_review(), "{report:?}");
+                assert!(report.installation_checked);
+            }
+            assert!(
+                !report
+                    .findings
+                    .iter()
+                    .any(|finding| finding.code == "conflicting_npm_override")
+            );
+        }
+    }
+
+    #[test]
+    fn bun_override_admission_keeps_install_script_native_and_patch_review() {
+        let declarations = json!({"dependencies":{"child":"^1"}});
+        let mut manifest = declarations.clone();
+        manifest["overrides"] = json!({"child":"2"});
+        let mut document = lock(
+            declarations,
+            json!({"child":tuple("child@2.0.0",json!({}))}),
+        );
+        document["overrides"] = manifest["overrides"].clone();
+        let root = fixture(&manifest, &document);
+        installed(
+            root.path(),
+            "node_modules/child",
+            json!({"name":"child","version":"2.0.0",
+            "scripts":{"postinstall":"touch forbidden-bun-override-effect"}}),
+        );
+        let report = super::super::inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.code == "install_script")
+        );
+        assert!(!root.path().join("forbidden-bun-override-effect").exists());
+        for field in ["patchedDependencies", "trustedDependencies"] {
+            let value = if field == "patchedDependencies" {
+                json!({"child":"patches/child.patch"})
+            } else {
+                json!(["child"])
+            };
+            let mut changed = manifest.clone();
+            changed[field] = value.clone();
+            assert!(project_lock(document.clone(), &changed, deadline()).is_err());
+            let mut changed = document.clone();
+            changed[field] = value;
+            assert!(project_lock(changed, &manifest, deadline()).is_err());
+        }
+
+        let declarations = json!({"dependencies":{"alias":"npm:node-gyp@^1"}});
+        let mut manifest = declarations.clone();
+        manifest["overrides"] = json!({"alias":"2"});
+        let mut document = lock(
+            declarations,
+            json!({"alias":tuple("node-gyp@1.0.0",json!({}))}),
+        );
+        document["overrides"] = manifest["overrides"].clone();
+        let root = fixture(&manifest, &document);
+        let report = super::super::inspect(root.path(), deadline()).unwrap();
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.code == "native_addon")
+        );
     }
 
     #[test]

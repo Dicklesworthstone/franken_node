@@ -601,10 +601,19 @@ fn inspect_with_installation(
         // published registry manifests never inherit these root definitions.
         catalogs.expand(&mut manifests, deadline)?;
     }
-    // npm root authority is immutable and independent of installed/workspace
-    // overrides. Bun retains its separately validated projection contract.
+    // Root authority is immutable and independent of installed/workspace
+    // overrides. Each package manager retains its own selection contract.
     let overrides = if source == "bun.lock" {
-        declaration_selection::Overrides::default()
+        declaration_selection::Overrides::capture_bun(
+            manifests
+                .get("")
+                .and_then(Value::as_object)
+                .context("captured root manifest missing")?,
+            lock.as_ref()
+                .and_then(Value::as_object)
+                .context("captured Bun lock projection missing")?,
+            deadline,
+        )?
     } else {
         declaration_selection::Overrides::capture(
             manifests
@@ -664,7 +673,11 @@ fn inspect_with_installation(
         report.scope.push_str("; project catalog references resolved from matching captured root/lock definitions");
     }
     if !overrides.is_empty() {
-        report.scope.push_str("; captured root scalar npm overrides applied; contextual and source-replacement override rules require explicit review");
+        report.scope.push_str(if source == "bun.lock" {
+            "; captured root scalar Bun overrides/resolutions applied; contextual and source-replacement override rules require explicit review"
+        } else {
+            "; captured root scalar npm overrides applied; contextual and source-replacement override rules require explicit review"
+        });
     }
     time_remaining(deadline)?;
     report.inputs = capture.inputs.into_values().collect();

@@ -85,14 +85,28 @@ pub(super) fn select<'a>(
     Ok(selected.into_values().collect())
 }
 
-/// Captured npm v11 root authority for globally selected scalar registry
-/// overrides. Parse once and reuse for metadata AND actual installed edges.
-/// Scoped rules, replacement sources and context-specific references require
-/// review; a supported prefix can never authorize an unsupported rule set.
-/// Contract: https://docs.npmjs.com/cli/v11/configuring-npm/package-json/#overrides
+/// Captured root authority for globally selected scalar registry overrides.
+/// npm and Bun retain their distinct selection contracts; both reuse the same
+/// immutable authority for metadata AND actual installed edges. Scoped rules
+/// and replacement sources require review rather than partial application.
+/// Contracts: docs.npmjs.com/cli/v11/configuring-npm/package-json/#overrides
+///            bun.com/docs/pm/overrides
 #[derive(Debug, Default)]
 pub(super) struct Overrides {
     rules: BTreeMap<String, String>,
+    bun: bool,
+}
+
+fn plain_override_name(key: &str) -> bool {
+    name(key).is_ok()
+        && key.trim_start_matches('@').split('/').all(|part| {
+            part.as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphanumeric)
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        })
 }
 
 impl Overrides {
@@ -127,16 +141,7 @@ impl Overrides {
             let mut issue = None;
             // A bounded conventional name accepts scoped packages, but not
             // version selectors such as child@^1 or ancestor-scoped objects.
-            let plain_name = name(key).is_ok()
-                && key.trim_start_matches('@').split('/').all(|part| {
-                    part.as_bytes()
-                        .first()
-                        .is_some_and(u8::is_ascii_alphanumeric)
-                        && part.bytes().all(|byte| {
-                            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
-                        })
-                });
-            if !plain_name {
+            if !plain_override_name(key) {
                 issue = Some((
                     "unsupported_npm_override",
                     "Only unversioned root package-name override keys are supported; version-qualified or scoped rules require explicit review",
@@ -208,13 +213,83 @@ impl Overrides {
         }
         time_remaining(deadline)?;
         Ok(if supported {
-            Self { rules: selected }
+            Self {
+                rules: selected,
+                ..Self::default()
+            }
         } else {
             Self::default()
         })
     }
 
+    /// Bun records either root field as canonical lockfile "overrides", while
+    /// retaining the original dependency declarations. Validate every rule,
+    /// including unused names, before admitting any replacement. The ordinary
+    /// registry subset deliberately excludes references and contextual rules.
+    pub(super) fn capture_bun(
+        root: &Map<String, Value>,
+        lock: &Map<String, Value>,
+        deadline: Instant,
+    ) -> Result<Self> {
+        time_remaining(deadline)?;
+        let empty = Map::new();
+        // Presence wins, including an empty overrides object. The ignored
+        // resolutions value is not an additional dependency authority.
+        let selected = match root.get("overrides").or_else(|| root.get("resolutions")) {
+            None => &empty,
+            Some(value) => value
+                .as_object()
+                .context("Bun root overrides/resolutions must be an object")?,
+        };
+        let recorded = match lock.get("overrides") {
+            None => &empty,
+            Some(value) => value
+                .as_object()
+                .context("Bun lockfile overrides must be an object")?,
+        };
+        ensure!(
+            lock.get("resolutions")
+                .is_none_or(|value| value.as_object().is_some_and(Map::is_empty)),
+            "Bun lockfile resolutions are not canonical override authority; explicit review is required"
+        );
+        let mut count = 0;
+        for (source, rules) in [("package.json", selected), ("bun.lock", recorded)] {
+            for (key, value) in rules {
+                account(&mut count, MAX_PACKAGES, deadline)?;
+                ensure!(
+                    key.len() <= 4096 && plain_override_name(key),
+                    "{source} Bun override keys must be unversioned package names; contextual and alias selectors require explicit review"
+                );
+                let request = bounded_text(value, "Bun override request")?;
+                ensure!(
+                    graph::supports_range(request),
+                    "{source} Bun override replacements must be supported registry ranges; references, catalogs and replacement sources require explicit review"
+                );
+            }
+        }
+        ensure!(
+            selected == recorded,
+            "Bun overrides differ between captured package.json and bun.lock; stale lock requires review"
+        );
+        let mut rules = BTreeMap::new();
+        for (key, value) in selected {
+            time_remaining(deadline)?;
+            rules.insert(
+                key.clone(),
+                bounded_text(value, "Bun override request")?.to_owned(),
+            );
+        }
+        time_remaining(deadline)?;
+        Ok(Self { rules, bun: true })
+    }
+
     pub(super) fn apply<'a>(&'a self, installed_as: &str, request: &'a str) -> &'a str {
+        // Bun's plain-name rules do not replace versioned npm aliases. Alias
+        // selectors and dist-tag alias rules remain outside this bounded set;
+        // their original requests still undergo the ordinary range checks.
+        if self.bun && request.starts_with("npm:") {
+            return request;
+        }
         self.rules.get(installed_as).map_or(request, String::as_str)
     }
 
@@ -237,7 +312,8 @@ impl Overrides {
             Some(directory),
             report,
         )?;
-        if let Some(package) = record.get("name").and_then(Value::as_str)
+        if !self.bun
+            && let Some(package) = record.get("name").and_then(Value::as_str)
             && let Some(request) = self.rules.get(package)
         {
             // npm adds a direct file: edge for every selected workspace,

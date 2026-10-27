@@ -919,6 +919,17 @@ retain npm's `EOVERRIDE` behavior. Nested or version-qualified override rules,
 replacement sources, and bundled or nested-shrinkwrap contexts require review.
 Workspace and installed-package manifests cannot redefine the root's overrides.
 
+Bun text-lock projects also support root scalar registry `overrides` and
+`resolutions`, checked against both the lock graph and actual hoisted or isolated
+installations. The presence of `overrides`, including an empty object, takes
+precedence over `resolutions`. Every selected rule must match `bun.lock.overrides`,
+including unused rules; original dependency declarations and input hashes remain
+unchanged. Bun permits direct dependency replacement and treats literal `*` as an
+active replacement. Versioned `npm:` aliases keep their original requirements.
+Nested or version-qualified rules, reference/catalog replacements, replacement
+sources and contextual workspace replacements still require review. Lifecycle,
+native-addon, patch and trusted-dependency checks remain in force.
+
 ### Verification
 
 | Command | Purpose |
