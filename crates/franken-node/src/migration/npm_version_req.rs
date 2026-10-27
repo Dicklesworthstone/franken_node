@@ -274,6 +274,12 @@ pub(super) fn matches(request: &str, locked_version: &str) -> Option<bool> {
     Some(range.iter().any(|arm| arm.accepts(&candidate.base)))
 }
 
+/// Validate a complete registry range before admitting it as root override
+/// authority, including rules that currently have no installed matching edge.
+pub(super) fn supports_range(request: &str) -> bool {
+    parse_range(request).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -908,6 +908,17 @@ every leaf command available in the current build.
 | `franken-node migrate rollout <path>` | Drive the progressive rollout state machine (shadow → canary → ramp → default) with fail-closed gates. `--action` is `promote` (default), `rollback`, or `status`; `--stage` overrides the target stage; `--ramp-pct` applies in ramp stage. The state machine records stages and evidence; it does not start or route traffic to instances. Leaving Shadow requires `--lockstep-report <path>`, the JSON printed by `franken-node verify lockstep <project> --json`. The report must have verdict Pass, include a franken leg and a reference leg, and match the project's current input. Without it the promotion fails closed. `--force` bypasses the confidence and evidence checks but never records `lockstep_verified`. `--no-auto-rollback` disables automatic rollback on verification failure. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--migration-id`, `--action`, `--stage`, `--ramp-pct`, `--lockstep-report`, `--force`, `--no-auto-rollback`, `--json`. |
 | `franken-node migrate-report <path>` | Export one-command migration assessment. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--format` (json\|html), `--json` (alias for `--format json`), `--output`. |
 
+`migrate rewrite <path> --apply --verify` checks captured dependency metadata
+and installed package identities before differential execution. Its npm 11
+compatibility path gives `npm-shrinkwrap.json` precedence over `package-lock.json`,
+including when the ignored lockfile is stale or malformed. Root scalar
+`overrides` can select supported registry ranges, including scoped package names
+and `$dependency` references. The selected ranges apply consistently to the
+lockfile and actual installed dependency edges; direct dependency conflicts
+retain npm's `EOVERRIDE` behavior. Nested or version-qualified override rules,
+replacement sources, and bundled or nested-shrinkwrap contexts require review.
+Workspace and installed-package manifests cannot redefine the root's overrides.
+
 ### Verification
 
 | Command | Purpose |

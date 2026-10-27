@@ -214,3 +214,462 @@ fn stable_selection_retains_alias_requirements_without_mutating_captured_maps() 
     assert_eq!(selected, selection(&manifest, true));
     assert_eq!(serde_json::to_vec(&manifest).unwrap(), original);
 }
+
+fn overridden_tree(overrides: Value, request: &str, version: &str) -> tempfile::TempDir {
+    let parent = json!({"name":"parent","version":"1.0.0","dependencies":{"child":request}});
+    let child = json!({"name":"child","version":version});
+    let root = fixture(
+        json!({"dependencies":{"parent":"1"},"overrides":overrides}),
+        json!({
+            "node_modules/parent":parent,"node_modules/child":child
+        }),
+    );
+    put(root.path(), "node_modules/parent/package.json", &parent);
+    put(root.path(), "node_modules/child/package.json", &child);
+    root
+}
+
+#[test]
+fn scalar_root_overrides_reach_actual_installation_for_every_supported_npm_lock_version() {
+    use sha2::{Digest, Sha256};
+    // npm 11.9.0 / Arborist 9.2.0 loadActual: parent requires ^1, root
+    // overrides child to 2.0.0, and the installed child 2.0.0 edge is valid.
+    for version in [1, 2, 3] {
+        let root = overridden_tree(json!({"child":"2.0.0"}), "^1", "2.0.0");
+        let lock = if version == 1 {
+            json!({"lockfileVersion":1,"dependencies":{
+                "parent":{"version":"1.0.0","requires":{"child":"^1"}},
+                "child":{"version":"2.0.0"}
+            }})
+        } else {
+            json!({"lockfileVersion":version,"packages":{
+                "node_modules/parent":{"version":"1.0.0","dependencies":{"child":"^1"}},
+                "node_modules/child":{"version":"2.0.0"}
+            }})
+        };
+        put(root.path(), "package-lock.json", &lock);
+        let report = inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(
+            !report.requires_review() && report.installation_checked,
+            "v{version}: {report:#?}"
+        );
+        assert_eq!(report.installed_packages_scanned, 2);
+        assert!(report.scope.contains("captured root scalar npm overrides"));
+        let root_bytes = fs::read(root.path().join("package.json")).unwrap();
+        let input = report
+            .inputs
+            .iter()
+            .find(|input| input.path == "package.json")
+            .unwrap();
+        assert_eq!(input.sha256, hex::encode(Sha256::digest(&root_bytes)));
+        assert_eq!(
+            report,
+            inspect_for_execution(root.path(), deadline()).unwrap()
+        );
+
+        put(
+            root.path(),
+            "node_modules/child/package.json",
+            &json!({"name":"child","version":"2.1.0"}),
+        );
+        let changed = inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(changed.installation_checked && has(&changed, "installed_identity_mismatch"));
+        put(
+            root.path(),
+            "package.json",
+            &json!({"dependencies":{"parent":"1"}}),
+        );
+        let no_authority = inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(
+            has(&no_authority, "dependency_version_mismatch") && !no_authority.installation_checked
+        );
+    }
+}
+
+#[test]
+fn global_overrides_check_production_optional_peer_and_private_edges() {
+    let a = json!({"name":"a","version":"1.0.0","dependencies":{"child":"^1"}});
+    let b =
+        json!({"name":"b","version":"1.0.0","optionalDependencies":{"child":"^1","absent":"^1"}});
+    let c = json!({"name":"c","version":"1.0.0","peerDependencies":{"child":"^1"}});
+    let root = fixture(
+        json!({"dependencies":{"a":"1","b":"1","c":"1"},
+        "overrides":{"child":"^2","absent":"^2"}}),
+        json!({
+            "node_modules/a":a,"node_modules/b":b,"node_modules/c":c,
+            "node_modules/a/node_modules/child":{"version":"2.0.0"},
+            "node_modules/child":{"version":"2.1.0"}
+        }),
+    );
+    for (path, manifest) in [("a", &a), ("b", &b), ("c", &c)] {
+        put(
+            root.path(),
+            &format!("node_modules/{path}/package.json"),
+            manifest,
+        );
+    }
+    put(
+        root.path(),
+        "node_modules/a/node_modules/child/package.json",
+        &json!({"name":"child","version":"2.0.0"}),
+    );
+    put(
+        root.path(),
+        "node_modules/child/package.json",
+        &json!({"name":"child","version":"2.1.0"}),
+    );
+    let report = inspect_for_execution(root.path(), deadline()).unwrap();
+    assert!(
+        !report.requires_review() && report.installation_checked,
+        "{report:#?}"
+    );
+    assert_eq!(report.installed_packages_scanned, 5);
+    let mut lock: Value =
+        serde_json::from_slice(&fs::read(root.path().join("package-lock.json")).unwrap()).unwrap();
+    lock["packages"]["node_modules/a/node_modules/child"]["version"] = json!("1.0.0");
+    put(root.path(), "package-lock.json", &lock);
+    let report = inspect(root.path(), deadline()).unwrap();
+    let mismatch = report
+        .findings
+        .iter()
+        .find(|finding| finding.code == "dependency_version_mismatch")
+        .unwrap();
+    assert_eq!(
+        mismatch.package_path.as_deref(),
+        Some("node_modules/a/node_modules/child")
+    );
+    assert_eq!(mismatch.version.as_deref(), Some("^2"));
+}
+
+#[test]
+fn only_root_override_authority_applies_to_workspace_and_installed_manifests() {
+    let member = json!({"name":"member","version":"1.0.0","dependencies":{"child":"^1"},
+        "overrides":{"child":"99"}});
+    let parent = json!({"name":"parent","version":"1.0.0","dependencies":{"child":"^1"},
+        "overrides":{"child":{"nested":"99"}}});
+    let root_manifest = json!({"workspaces":["packages/member"],"dependencies":{"parent":"1"},
+        "overrides":{"child":"2"}});
+    let root = fixture(
+        root_manifest.clone(),
+        json!({
+            "packages/member":member,"node_modules/member":{"link":true,"resolved":"packages/member"},
+            "node_modules/parent":parent,"node_modules/child":{"version":"2.0.0"}
+        }),
+    );
+    put(root.path(), "packages/member/package.json", &member);
+    put(root.path(), "node_modules/parent/package.json", &parent);
+    put(
+        root.path(),
+        "node_modules/child/package.json",
+        &json!({"name":"child","version":"2.0.0"}),
+    );
+    symlink(
+        "../packages/member",
+        root.path().join("node_modules/member"),
+    )
+    .unwrap();
+    let report = inspect_for_execution(root.path(), deadline()).unwrap();
+    assert!(
+        !report.requires_review() && report.installation_checked,
+        "{report:#?}"
+    );
+    let mut no_authority = root_manifest;
+    no_authority.as_object_mut().unwrap().remove("overrides");
+    put(root.path(), "package.json", &no_authority);
+    let report = inspect_for_execution(root.path(), deadline()).unwrap();
+    assert!(has(&report, "dependency_version_mismatch") && !report.installation_checked);
+}
+
+#[test]
+fn implicit_workspace_root_edges_enforce_the_npm_override_conflict_contract() {
+    // npm 11.9.0 / Arborist 9.2.0 makes this a file: edge even when an
+    // explicit direct dependency says "2". Its assertRootOverrides rejects
+    // scalar and $self replacements; a literal wildcard remains a no-op.
+    for (direct, rule, conflict) in [
+        (false, "2", true),
+        (true, "2", true),
+        (true, "$member", true),
+        (false, "*", false),
+    ] {
+        let member = json!({"name":"member","version":"2.0.0"});
+        let mut manifest = json!({"workspaces":["packages/member"],"overrides":{"member":rule}});
+        if direct {
+            manifest["dependencies"] = json!({"member":"2"});
+        }
+        let root = fixture(
+            manifest,
+            json!({"packages/member":member,
+            "node_modules/member":{"link":true,"resolved":"packages/member"}}),
+        );
+        put(root.path(), "packages/member/package.json", &member);
+        fs::create_dir(root.path().join("node_modules")).unwrap();
+        symlink(
+            "../packages/member",
+            root.path().join("node_modules/member"),
+        )
+        .unwrap();
+        let report = inspect_for_execution(root.path(), deadline()).unwrap();
+        assert_eq!(
+            has(&report, "conflicting_npm_override"),
+            conflict,
+            "direct={direct} {rule}: {report:#?}"
+        );
+        assert_eq!(report.requires_review(), conflict, "{report:#?}");
+        assert_eq!(report.installation_checked, !conflict);
+    }
+}
+
+#[test]
+fn unversioned_scoped_package_override_keys_select_the_captured_scoped_identity() {
+    let parent = json!({"name":"parent","version":"1.0.0","dependencies":{"@scope/child":"^1"}});
+    let root = fixture(
+        json!({"dependencies":{"parent":"1"},"overrides":{"@scope/child":"^2"}}),
+        json!({"node_modules/parent":parent,"node_modules/@scope/child":{"version":"2.0.0"}}),
+    );
+    put(root.path(), "node_modules/parent/package.json", &parent);
+    put(
+        root.path(),
+        "node_modules/@scope/child/package.json",
+        &json!({"name":"@scope/child","version":"2.0.0"}),
+    );
+    let report = inspect_for_execution(root.path(), deadline()).unwrap();
+    assert!(
+        !report.requires_review() && report.installation_checked,
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn root_override_reference_precedence_matches_independent_npm_v11_table() {
+    // npm 11.9.0 / Arborist 9.2.0, all 15 nonempty combinations of
+    // dependencies/devDependencies/peerDependencies/optionalDependencies.
+    let expected = [
+        "1.0.0", "2.0.0", "2.0.0", "3.0.0", "1.0.0", "2.0.0", "2.0.0", "4.0.0", "4.0.0", "2.0.0",
+        "2.0.0", "4.0.0", "4.0.0", "2.0.0", "2.0.0",
+    ];
+    for mask in 1..16 {
+        let mut manifest = collision(mask);
+        for (index, field) in FIELDS.iter().enumerate() {
+            if mask & (1 << index) != 0 {
+                manifest[*field] = json!({"x":format!("{}.0.0", index + 1)});
+            }
+        }
+        manifest["overrides"] = json!({"child":"$x"});
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        let root = fixture(json!({}), json!({}));
+        let mut report = inspect(root.path(), deadline()).unwrap();
+        let overrides = Overrides::capture(&manifest, &mut report, deadline()).unwrap();
+        assert!(!report.requires_review(), "mask {mask}: {report:#?}");
+        assert_eq!(overrides.apply("child", "^9"), expected[mask - 1]);
+        assert_eq!(serde_json::to_vec(&manifest).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn root_direct_override_conflicts_match_npm_eoverride_exact_text_contract() {
+    // npm 11.9.0 `npm ls --json --offline --ignore-scripts`: exact/self
+    // references pass, semantically equivalent differently written ranges fail.
+    for section in FIELDS {
+        for (rule, conflict) in [
+            ("^1", false),
+            (">=1 <2", true),
+            ("2", true),
+            ("$child", false),
+            ("$ref", true),
+            ("*", false),
+            ("", false),
+        ] {
+            let mut manifest = json!({"dependencies":{"ref":"^2"},"overrides":{"child":rule}});
+            manifest[section] = json!({"child":"^1"});
+            manifest["dependencies"]["ref"] = json!("^2");
+            let root = fixture(
+                manifest,
+                json!({
+                    "node_modules/child":{"version":"1.2.0"},"node_modules/ref":{"version":"2.0.0"}
+                }),
+            );
+            put(
+                root.path(),
+                "node_modules/child/package.json",
+                &json!({"name":"child","version":"1.2.0"}),
+            );
+            put(
+                root.path(),
+                "node_modules/ref/package.json",
+                &json!({"name":"ref","version":"2.0.0"}),
+            );
+            let report = inspect_for_execution(root.path(), deadline()).unwrap();
+            assert_eq!(
+                has(&report, "conflicting_npm_override"),
+                conflict,
+                "{section} {rule}: {report:#?}"
+            );
+            assert_eq!(
+                report.requires_review(),
+                conflict,
+                "{section} {rule}: {report:#?}"
+            );
+            assert_eq!(report.installation_checked, !conflict);
+        }
+    }
+}
+
+#[test]
+fn literal_override_wildcard_is_noop_but_referenced_wildcard_is_a_replacement() {
+    for rule in ["*", ""] {
+        let root = overridden_tree(json!({"child":rule}), "^1", "2.0.0");
+        let report = inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(has(&report, "dependency_version_mismatch") && !report.installation_checked);
+    }
+    let root = overridden_tree(json!({"child":"$ref"}), "^1", "2.0.0");
+    put(
+        root.path(),
+        "package.json",
+        &json!({"dependencies":{"parent":"1"},
+        "optionalDependencies":{"ref":"*"},"overrides":{"child":"$ref"}}),
+    );
+    let report = inspect_for_execution(root.path(), deadline()).unwrap();
+    assert!(
+        !report.requires_review() && report.installation_checked,
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn unsupported_override_rules_cannot_be_hidden_by_a_supported_prefix_or_unused_name() {
+    for (key, value) in [
+        ("unused@^1", json!("2")),
+        ("@scope/unused@^1", json!("2")),
+        ("unused", json!({"child":"2"})),
+        ("unused", json!({".":"2"})),
+        ("unused", json!(["2"])),
+        ("unused", json!(true)),
+        ("unused", json!(null)),
+        ("unused", json!("latest")),
+        ("unused", json!("npm:fork@2")),
+        ("unused", json!("file:../fork")),
+        ("unused", json!("git+https://example.invalid/fork")),
+        ("unused", json!("workspace:*")),
+        ("unused", json!("$missing")),
+        ("unused", json!("^2 || unsupported")),
+    ] {
+        let mut rules = json!({"child":"2"});
+        rules[key] = value;
+        let root = overridden_tree(rules, "^1", "2.0.0");
+        let report = inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(
+            has(&report, "unsupported_npm_override"),
+            "{key}: {report:#?}"
+        );
+        assert!(
+            has(&report, "dependency_version_mismatch"),
+            "partial rules applied: {report:#?}"
+        );
+        assert!(!report.installation_checked);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.source == "package.json#overrides")
+        );
+    }
+}
+
+#[test]
+fn effective_override_identity_and_original_native_risk_are_both_retained() {
+    let root = overridden_tree(json!({"child":"2"}), "npm:ordinary@^1", "2.0.0");
+    assert!(
+        !inspect_for_execution(root.path(), deadline())
+            .unwrap()
+            .requires_review()
+    );
+    let mut lock: Value =
+        serde_json::from_slice(&fs::read(root.path().join("package-lock.json")).unwrap()).unwrap();
+    lock["packages"]["node_modules/child"]["name"] = json!("ordinary");
+    put(root.path(), "package-lock.json", &lock);
+    assert!(has(
+        &inspect(root.path(), deadline()).unwrap(),
+        "unresolved_transitive_dependency"
+    ));
+    let native = overridden_tree(json!({"child":"2"}), "npm:sharp@^1", "2.0.0");
+    assert!(has(
+        &inspect_for_execution(native.path(), deadline()).unwrap(),
+        "native_addon"
+    ));
+    let script = overridden_tree(json!({"child":"2"}), "^1", "2.0.0");
+    put(
+        script.path(),
+        "node_modules/child/package.json",
+        &json!({"name":"child","version":"2.0.0",
+        "scripts":{"install":"must never execute"}}),
+    );
+    let report = inspect_for_execution(script.path(), deadline()).unwrap();
+    assert!(
+        report.installation_checked && report.requires_review(),
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn root_overrides_never_approximate_bundled_or_nested_shrinkwrap_exclusions() {
+    for field in ["inBundle", "bundled", "hasShrinkwrap"] {
+        let root = overridden_tree(json!({"child":"2"}), "^1", "2.0.0");
+        let mut lock: Value =
+            serde_json::from_slice(&fs::read(root.path().join("package-lock.json")).unwrap())
+                .unwrap();
+        lock["packages"]["node_modules/child"][field] = json!(true);
+        put(root.path(), "package-lock.json", &lock);
+        let report = inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(
+            has(&report, "unsupported_npm_override_context") && !report.installation_checked,
+            "{field}: {report:#?}"
+        );
+    }
+    for context in ["bundle", "file", "directory"] {
+        let root = overridden_tree(json!({"child":"2"}), "^1", "2.0.0");
+        if context == "directory" {
+            fs::create_dir(root.path().join("node_modules/parent/npm-shrinkwrap.json")).unwrap();
+        } else if context == "file" {
+            put(
+                root.path(),
+                "node_modules/parent/npm-shrinkwrap.json",
+                &json!({"lockfileVersion":3,"packages":{}}),
+            );
+        } else {
+            put(
+                root.path(),
+                "node_modules/parent/package.json",
+                &json!({"name":"parent","version":"1.0.0",
+                "dependencies":{"child":"^1"},"bundleDependencies":["child"]}),
+            );
+        }
+        assert!(!inspect(root.path(), deadline()).unwrap().requires_review());
+        let report = inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(
+            report.installation_checked && has(&report, "unsupported_npm_override_context"),
+            "{context}: {report:#?}"
+        );
+    }
+}
+
+#[test]
+fn malformed_and_expired_override_inputs_never_return_partial_authority() {
+    for rules in [
+        json!([]),
+        json!({"child":"2".repeat(4097)}),
+        json!({"bad\nname":"2"}),
+    ] {
+        let root = overridden_tree(rules, "^1", "2.0.0");
+        assert!(inspect_for_execution(root.path(), deadline()).is_err());
+    }
+    let root = fixture(json!({}), json!({}));
+    let mut report = inspect(root.path(), deadline()).unwrap();
+    assert!(
+        Overrides::capture(
+            &json!({"overrides":{"child":"2"}}),
+            &mut report,
+            Instant::now()
+        )
+        .is_err()
+    );
+}

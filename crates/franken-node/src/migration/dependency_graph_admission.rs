@@ -13,11 +13,14 @@
 //! Legacy `requires` lacks per-edge optionality: unresolved edges stay review
 //! findings rather than being guessed optional. Supported registry version
 //! ranges are checked; opaque requests require review. Installed-content
-//! authentication, npm overrides and JS resolution remain separate claims.
+//! authentication, contextual npm overrides and JS resolution remain separate
+//! claims. Supported root scalar overrides share one captured authority with
+//! project declarations and actual installed-manifest checks.
 
 use super::{
-    DependencyAdmission, DependencyFinding, LockedPackage, MAX_DEPTH, MAX_PACKAGES,
-    alias, bounded_text, flag, name, native_addon, nearest_package, time_remaining,
+    DependencyAdmission, DependencyFinding, LockedPackage, MAX_DEPTH, MAX_PACKAGES, alias,
+    bounded_text, declaration_selection::Overrides, flag, name, native_addon, nearest_package,
+    time_remaining,
 };
 use anyhow::{Context, Result, ensure};
 use serde_json::{Map, Value};
@@ -29,6 +32,10 @@ mod versions;
 
 const MAX_DEPENDENCY_EDGES: usize = 200_000;
 
+pub(super) fn supports_range(request: &str) -> bool {
+    versions::supports_range(request)
+}
+
 pub(super) fn version_review(
     request: Option<&str>,
     locked_version: Option<&str>,
@@ -37,7 +44,7 @@ pub(super) fn version_review(
         Some(true) => None,
         Some(false) => Some((
             "dependency_version_mismatch",
-            "Nearest locked version does not satisfy the declared npm registry range; review stale pins or explicit overrides before execution",
+            "Nearest locked version does not satisfy the effective declared or root-overridden npm registry range; review stale pins before execution",
         )),
         None => Some((
             "unverifiable_dependency_version",
@@ -59,6 +66,7 @@ struct Edge<'a> {
 struct Admission<'a> {
     packages: &'a BTreeMap<String, LockedPackage>,
     source: &'a str,
+    overrides: &'a Overrides,
     report: &'a mut DependencyAdmission,
     deadline: Instant,
     edges: usize,
@@ -72,25 +80,35 @@ impl Admission<'_> {
             self.edges <= MAX_DEPENDENCY_EDGES,
             "transitive dependency edge limit exceeded"
         );
-        let (actual, requirement) = alias(edge.installed_as, Some(edge.request))?;
+        let declared = alias(edge.installed_as, Some(edge.request))?;
+        let request = self.overrides.apply(edge.installed_as, edge.request);
+        let (actual, requirement) = if request == edge.request {
+            declared
+        } else {
+            alias(edge.installed_as, Some(request))?
+        };
         let source = format!("{}/package.json", edge.consumer);
         let selected = nearest_package(self.packages, &source, edge.installed_as);
         let private_peer = edge.peer
             && selected.is_some_and(|package| {
                 package.path.starts_with(&format!("{}/node_modules/", edge.consumer))
             });
+        let overridden_link =
+            request != edge.request && selected.is_some_and(|package| package.linked);
         let represented = selected.is_some_and(|package| {
             package.name == actual
                 && !package.unresolved
                 && (!package.linked || !edge.request.contains([':', '/', '\\']))
                 && !private_peer
+                && !overridden_link
         });
         // Missing optional code cannot run. Do not extend that exemption to a
         // present-but-wrong installation, malformed alias or a required peer.
         if selected.is_none() && edge.optional {
             return Ok(());
         }
-        let native = native_addon(actual) || native_addon(edge.installed_as);
+        let native =
+            native_addon(declared.0) || native_addon(actual) || native_addon(edge.installed_as);
         let version_issue = if represented {
             version_review(requirement, selected.and_then(|package| package.version.as_deref()))
         } else { None };
@@ -99,6 +117,11 @@ impl Admission<'_> {
                 (
                     "native_addon",
                     "Transitive declaration names a native-addon/build dependency; explicit migration review is required",
+                )
+            } else if overridden_link {
+                (
+                    "unsupported_npm_override_context",
+                    "A root registry override cannot certify replacement of a captured local workspace link; explicit review is required",
                 )
             } else if private_peer {
                 (
@@ -117,7 +140,7 @@ impl Admission<'_> {
                 package: actual.into(),
                 installed_as: edge.installed_as.into(),
                 package_path: selected.map(|package| package.path.clone()),
-                version: Some(edge.request.into()),
+                version: Some(request.into()),
                 detail: detail.into(),
             })?;
         }
@@ -195,12 +218,20 @@ pub(super) fn inspect(
     lock: Option<&Value>,
     packages: &BTreeMap<String, LockedPackage>,
     source: &str,
+    overrides: &Overrides,
     report: &mut DependencyAdmission,
     deadline: Instant,
 ) -> Result<()> {
     time_remaining(deadline)?;
     let Some(lock) = lock else { return Ok(()); };
-    let mut admission = Admission { packages, source, report, deadline, edges: 0 };
+    let mut admission = Admission {
+        packages,
+        source,
+        overrides,
+        report,
+        deadline,
+        edges: 0,
+    };
     match lock.get("lockfileVersion").and_then(Value::as_u64) {
         Some(2 | 3) => {
             let records = lock.get("packages").and_then(Value::as_object)
@@ -229,6 +260,7 @@ pub(super) fn inspect(
                 if !visited.insert(package.path.as_str()) { continue; }
                 let record = records.get(&package.path).and_then(Value::as_object)
                     .context("recorded package missing from dependency graph")?;
+                overrides.review_context(record, source, Some(&package.path), admission.report)?;
                 admission.modern_record(&package.path, record)?;
             }
         }
@@ -250,6 +282,7 @@ pub(super) fn inspect(
                         else { format!("{parent}/node_modules/{installed_as}") };
                     ensure!(packages.contains_key(&path), "legacy dependency graph inventory mismatch");
                     let record = value.as_object().context("invalid legacy dependency graph record")?;
+                    overrides.review_context(record, source, Some(&path), admission.report)?;
                     for (dependency, request) in section(record, "requires", &empty)? {
                         name(dependency)?;
                         admission.edge(Edge {
@@ -528,15 +561,26 @@ mod tests {
             installation_checked: false, installed_packages_scanned: 0,
         };
         let packages = BTreeMap::new();
+        let overrides = Overrides::default();
         let mut admission = Admission {
-            packages: &packages, source: "package-lock.json", report: &mut report,
+            packages: &packages, source: "package-lock.json", overrides: &overrides, report: &mut report,
             deadline: deadline(), edges: MAX_DEPENDENCY_EDGES,
         };
         assert!(admission.edge(Edge {
             consumer: "node_modules/a", section: "optionalDependencies", installed_as: "b",
             request: "1", optional: true, peer: false,
         }).unwrap_err().to_string().contains("edge limit"));
-        assert!(inspect(None, &packages, "package-lock.json", &mut report, Instant::now()).is_err());
+        assert!(
+            inspect(
+                None,
+                &packages,
+                "package-lock.json",
+                &overrides,
+                &mut report,
+                Instant::now()
+            )
+            .is_err()
+        );
     }
 
     fn physical_pin(package: &str, version: &str, path: &str) -> LockedPackage {
@@ -565,7 +609,15 @@ mod tests {
             (path):{"name":"a","version":"1.0.0","dependencies":{"missing":"1"}}
         }});
         let mut report = empty_report();
-        inspect(Some(&lock), &packages, "captured-installed-manifests", &mut report, deadline()).unwrap();
+        inspect(
+            Some(&lock),
+            &packages,
+            "captured-installed-manifests",
+            &Overrides::default(),
+            &mut report,
+            deadline(),
+        )
+        .unwrap();
         assert_eq!(report.findings.len(), 1);
         assert_eq!(report.findings[0].package, "missing");
         assert!(report.findings[0].source.contains(path));
@@ -588,7 +640,15 @@ mod tests {
         // The old path charged 1,025 * 256 edges for 256 real declarations.
         // The bound is unchanged; aliases are still all available to lookups.
         assert!(packages.len() * 256 > MAX_DEPENDENCY_EDGES);
-        inspect(Some(&lock), &packages, "captured-installed-manifests", &mut report, deadline()).unwrap();
+        inspect(
+            Some(&lock),
+            &packages,
+            "captured-installed-manifests",
+            &Overrides::default(),
+            &mut report,
+            deadline(),
+        )
+        .unwrap();
         assert!(report.findings.is_empty());
     }
 
@@ -609,7 +669,7 @@ mod tests {
                 _ => {}
             }
             packages.insert("node_modules/a".into(), alias);
-            let error = inspect(Some(&lock), &packages, "test", &mut empty_report(), deadline()).unwrap_err();
+            let error = inspect(Some(&lock), &packages, "test", &Overrides::default(), &mut empty_report(), deadline()).unwrap_err();
             assert!(error.to_string().contains("canonical physical identity"), "{error}");
         }
     }
@@ -634,7 +694,15 @@ mod tests {
             (b1):{}, (b2):{}
         }});
         let mut report = empty_report();
-        inspect(Some(&lock), &packages, "captured-installed-manifests", &mut report, deadline()).unwrap();
+        inspect(
+            Some(&lock),
+            &packages,
+            "captured-installed-manifests",
+            &Overrides::default(),
+            &mut report,
+            deadline(),
+        )
+        .unwrap();
         assert_eq!(report.findings.len(), 1);
         assert_eq!(report.findings[0].code, "dependency_version_mismatch");
         assert!(report.findings[0].source.contains(a2));

@@ -49,7 +49,7 @@ const MAX_DEPTH: usize = 64;
 const SECTIONS: &[&str] = &[
     "dependencies", "devDependencies", "peerDependencies", "optionalDependencies",
 ];
-const SCOPE: &str = "captured npm metadata and supported registry version ranges only; not installed-content authentication, npm override resolution or runtime compatibility proof";
+const SCOPE: &str = "captured npm metadata and supported registry version ranges only; not installed-content authentication, complete npm override resolution or runtime compatibility proof";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataInput {
@@ -425,8 +425,24 @@ fn nearest_package<'a>(packages: &'a BTreeMap<String, LockedPackage>, source: &s
     }
 }
 
-fn declarations(report: &mut DependencyAdmission, manifest: &Value, packages: &BTreeMap<String, LockedPackage>, source: &str, count: &mut usize, deadline: Instant, bun_workspace_links: Option<&BTreeSet<String>>) -> Result<()> {
+struct DeclarationAuthority<'a> {
+    overrides: &'a declaration_selection::Overrides,
+    bun_workspace_links: Option<&'a BTreeSet<String>>,
+}
+
+fn declarations(
+    report: &mut DependencyAdmission,
+    manifest: &Value,
+    packages: &BTreeMap<String, LockedPackage>,
+    source: &str,
+    count: &mut usize,
+    deadline: Instant,
+    authority: &DeclarationAuthority<'_>,
+) -> Result<()> {
     for edge in declaration_selection::select(manifest, true, deadline, count, MAX_PACKAGES)? {
+        let request = authority.overrides.apply(edge.installed_as, edge.request);
+        let (actual, requirement) = if request == edge.request { (edge.package, edge.requirement) }
+            else { alias(edge.installed_as, Some(request))? };
         let selected = nearest_package(packages, source, edge.installed_as);
         // Optionality belongs to the selected edge, not to the package name.
         // Present installations still need exact identity and range checks.
@@ -434,22 +450,23 @@ fn declarations(report: &mut DependencyAdmission, manifest: &Value, packages: &B
         // The prefix is authority, not just a range abbreviation. It cannot
         // select a registry namesake, arbitrary link, or unselected workspace.
         // npm paths keep their existing opaque-protocol refusal semantics.
-        let workspace_range = bun_workspace_links.and_then(|_| edge.request.strip_prefix("workspace:"));
-        let represented = selected.is_some_and(|package| package.name == edge.package && !package.unresolved
+        let workspace_range = authority.bun_workspace_links.and_then(|_| request.strip_prefix("workspace:"));
+        let overridden_link = request != edge.request && selected.is_some_and(|package| package.linked);
+        let represented = selected.is_some_and(|package| package.name == actual && !package.unresolved && !overridden_link
             && if workspace_range.is_some() {
-                package.linked && bun_workspace_links.is_some_and(|links| links.contains(&package.path))
+                package.linked && authority.bun_workspace_links.is_some_and(|links| links.contains(&package.path))
             } else {
                 // Opaque requests cannot substitute a same-named local workspace.
                 !package.linked || !edge.request.contains([':', '/', '\\'])
             });
-        let native = native_addon(edge.package) || native_addon(edge.installed_as);
+        let native = native_addon(edge.package) || native_addon(actual) || native_addon(edge.installed_as);
         let locked_version = selected.and_then(|package| package.version.as_deref());
         let requirement = match workspace_range {
             // These shorthands select the bound local version, including
             // prereleases. They are NOT registry wildcards that omit prereleases.
             Some("*" | "^" | "~") => locked_version,
             Some(range) => Some(range),
-            None => edge.requirement,
+            None => requirement,
         };
         let version_issue = if represented {
             if workspace_range == Some("") {
@@ -458,7 +475,9 @@ fn declarations(report: &mut DependencyAdmission, manifest: &Value, packages: &B
                 graph::version_review(requirement, locked_version)
             }
         } else { None };
-        let unresolved = if workspace_range.is_some() {
+        let unresolved = if overridden_link {
+            ("unsupported_npm_override_context", "A root registry override cannot certify replacement of a captured local workspace link; explicit review is required")
+        } else if workspace_range.is_some() {
             ("unresolved_workspace_dependency", "workspace: request requires the nearest installation to be an independently selected and manifest-bound workspace link")
         } else {
             ("unresolved_declaration", "Declaration has no matching complete nearest lockfile identity; version satisfaction is not established")
@@ -467,8 +486,8 @@ fn declarations(report: &mut DependencyAdmission, manifest: &Value, packages: &B
             report.finding(DependencyFinding {
                 code: if native { "native_addon" }
                     else { version_issue.unwrap_or(unresolved).0 }.into(),
-                source: format!("{source}#{}", edge.section), package: edge.package.into(),
-                installed_as: edge.installed_as.into(), package_path: None, version: Some(edge.request.into()),
+                source: format!("{source}#{}", edge.section), package: actual.into(),
+                installed_as: edge.installed_as.into(), package_path: None, version: Some(request.into()),
                 detail: if native { "Declared native-addon/build dependency requires explicit migration review" }
                     else { version_issue.unwrap_or(unresolved).1 }.into(),
             })?;
@@ -582,13 +601,39 @@ fn inspect_with_installation(
         // published registry manifests never inherit these root definitions.
         catalogs.expand(&mut manifests, deadline)?;
     }
+    // npm root authority is immutable and independent of installed/workspace
+    // overrides. Bun retains its separately validated projection contract.
+    let overrides = if source == "bun.lock" {
+        declaration_selection::Overrides::default()
+    } else {
+        declaration_selection::Overrides::capture(
+            manifests
+                .get("")
+                .context("captured root manifest missing")?,
+            &mut report,
+            deadline,
+        )?
+    };
     package_findings(&mut report, &packages, source, &workspace_links)?;
-    graph::inspect(lock.as_ref(), &packages, source, &mut report, deadline)?;
+    graph::inspect(
+        lock.as_ref(),
+        &packages,
+        source,
+        &overrides,
+        &mut report,
+        deadline,
+    )?;
     let mut declared = 0;
-    let bun_workspace_links = (source == "bun.lock").then_some(&workspace_links);
+    let authority = DeclarationAuthority {
+        overrides: &overrides,
+        bun_workspace_links: (source == "bun.lock").then_some(&workspace_links),
+    };
     for (directory, manifest) in &manifests {
         let source = workspaces::manifest_path(directory);
-        declarations(&mut report, manifest, &packages, &source, &mut declared, deadline, bun_workspace_links)?;
+        if !directory.is_empty() {
+            overrides.review_workspace(manifest, directory, &mut report)?;
+        }
+        declarations(&mut report, manifest, &packages, &source, &mut declared, deadline, &authority)?;
         workspaces::manifest_findings(&mut report, manifest, &source)?;
         if !directory.is_empty() {
             capture.refuse_binary_bun_lock(&format!("{directory}/bun.lockb"))?;
@@ -608,7 +653,7 @@ fn inspect_with_installation(
         if report.requires_review() {
             report.scope.push_str("; installed tree not inspected because metadata already requires review");
         } else {
-            installed::inspect(&mut capture, &packages, &manifests, lock.as_ref(), &mut report)?;
+            installed::inspect(&mut capture, &packages, &manifests, lock.as_ref(), &overrides, &mut report)?;
         }
     }
     if source == "bun.lock" {
@@ -617,6 +662,9 @@ fn inspect_with_installation(
     }
     if catalogs.as_ref().is_some_and(bun::Catalogs::has_entries) {
         report.scope.push_str("; project catalog references resolved from matching captured root/lock definitions");
+    }
+    if !overrides.is_empty() {
+        report.scope.push_str("; captured root scalar npm overrides applied; contextual and source-replacement override rules require explicit review");
     }
     time_remaining(deadline)?;
     report.inputs = capture.inputs.into_values().collect();

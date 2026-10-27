@@ -28,7 +28,7 @@ const MAX_TREE_ENTRIES: usize = 100_000;
 const MAX_TREE_DIRECTORIES: usize = 20_000;
 const MAX_TREE_PATH_BYTES: usize = 8 * 1024 * 1024;
 const MAX_EDGES: usize = 200_000;
-const INSTALLED_SCOPE: &str = "captured npm metadata, installed manifest identity, required dependency routes and native/lifecycle markers; not registry-content authentication, archive SRI verification, npm override resolution, a sandbox or runtime compatibility proof";
+const INSTALLED_SCOPE: &str = "captured npm metadata, installed manifest identity, required dependency routes and native/lifecycle markers; not registry-content authentication, archive SRI verification, complete npm override resolution, a sandbox or runtime compatibility proof";
 
 #[derive(Default)]
 struct TreeBudget {
@@ -155,6 +155,7 @@ struct Inspector<'a> {
     locked: &'a BTreeMap<String, LockedPackage>,
     projects: &'a BTreeMap<String, Value>,
     lock: Option<&'a Value>,
+    overrides: &'a declaration_selection::Overrides,
     report: &'a mut DependencyAdmission,
     actual: BTreeMap<String, LockedPackage>,
     manifests: BTreeMap<String, Value>,
@@ -297,6 +298,10 @@ impl Inspector<'_> {
                 // installations. Neither is executed or treated as authority.
                 if module_container(&path) && ((leaf == ".bin" && kind == FileType::Directory)
                     || (leaf == ".package-lock.json" && kind == FileType::RegularFile)) { continue; }
+                if !self.overrides.is_empty() && leaf == "npm-shrinkwrap.json"
+                    && owner.as_deref() == Some(path.as_str()) {
+                    self.finding(&path, "unsupported_npm_override_context", "Installed package contains a nested shrinkwrap path; its exclusion from root overrides requires explicit review")?;
+                }
                 if kind == FileType::Directory {
                     budget.directory(depth + 1)?;
                     pending.push((child, owner.clone(), depth + 1));
@@ -378,12 +383,13 @@ pub(super) fn inspect(
     locked: &BTreeMap<String, LockedPackage>,
     projects: &BTreeMap<String, Value>,
     lock: Option<&Value>,
+    overrides: &declaration_selection::Overrides,
     report: &mut DependencyAdmission,
 ) -> Result<()> {
     let layout = isolated::Layout::capture(capture, locked, projects, lock, report)?;
     let locked = layout.as_ref().map_or(locked, |layout| &layout.packages);
     let lock = layout.as_ref().map(|layout| &layout.lock).or(lock);
-    let mut inspector = Inspector { capture, locked, projects, lock, report,
+    let mut inspector = Inspector { capture, locked, projects, lock, overrides, report,
         actual: BTreeMap::new(), manifests: BTreeMap::new(), layout: layout.as_ref() };
     inspector.walk()?;
     if let Some(layout) = &layout {
@@ -395,7 +401,14 @@ pub(super) fn inspect(
     // Reuse the actual native alias/version/peer checker, with manifest bytes
     // read from the installation rather than trusting the lock's projection.
     let actual_lock = serde_json::json!({"lockfileVersion":3,"packages":inspector.manifests});
-    graph::inspect(Some(&actual_lock), &inspector.actual, "captured-installed-manifests", inspector.report, inspector.capture.deadline)?;
+    graph::inspect(
+        Some(&actual_lock),
+        &inspector.actual,
+        "captured-installed-manifests",
+        overrides,
+        inspector.report,
+        inspector.capture.deadline,
+    )?;
     // Recheck every metadata input against its recorded hash after enumeration.
     // This does not recapture or replace the already-verified observations.
     let mut recheck = Capture { root: inspector.capture.root.try_clone()?, deadline: inspector.capture.deadline,
