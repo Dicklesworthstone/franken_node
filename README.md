@@ -3922,11 +3922,14 @@ one pass.
   the CommonJS objects, and named exports come from the same native providers.
   Each route retains its policy and information-flow checks, including cached
   loads. This does not provide the complete Node/Bun builtin API inventory.
-  TypeScript enums in frozen `.ts`, `.mts` and `.cts` modules use the engine's
-  existing normalizer. Initializer dependencies remain in the pinned graph,
-  and prepared JavaScript must preserve those routes and obey the configured
-  parser budget. Namespace, parameter-property and import-equals transforms
-  remain outside frozen-module admission.
+  TypeScript enums and prefix assertions such as `<number>value` in frozen
+  `.ts`, `.mts` and `.cts` modules use the engine's existing normalizer.
+  Assertions erase types without converting runtime values; their type-only
+  imports never grant filesystem access. Initializer and asserted-expression
+  dependencies remain in the pinned graph, and prepared JavaScript must preserve
+  those routes and obey the configured parser budget. JSX/TSX syntax, namespace,
+  parameter-property and import-equals transforms remain outside frozen-module
+  admission.
   Frozen capture also supports immutable top-level request strings such as
   `const target = './adapter.cjs'; require(target)`, earlier constant aliases,
   string concatenation, templates, and bounded conditional string choices.

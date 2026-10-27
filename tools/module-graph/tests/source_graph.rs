@@ -371,6 +371,51 @@ fn typescript_runtime_edges_agree_with_independent_node_type_erasure() {
 }
 
 #[test]
+fn angle_assertion_routes_match_independent_node_transform() {
+    let root = tempfile::tempdir().unwrap();
+    let source = "const value=<import('types').Value>(<unknown>require('./dep.cjs')); (<Loader>require)(<string>'./dep.cjs');";
+    let script = "const {stripTypeScriptTypes}=require('node:module'); process.stdout.write(stripTypeScriptTypes(process.argv[1], {mode:'transform'}));";
+    let transformed = Command::new("node")
+        .env_remove("NODE_OPTIONS")
+        .env_remove("NODE_PATH")
+        .args(["--no-warnings", "-e", script, source])
+        .output()
+        .unwrap();
+    assert!(
+        transformed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&transformed.stderr)
+    );
+    put(root.path(), "app.cts", source);
+    put(
+        root.path(),
+        "reference.cjs",
+        std::str::from_utf8(&transformed.stdout).unwrap(),
+    );
+    put(
+        root.path(),
+        "dep.cjs",
+        "throw Error('selected code must not run');",
+    );
+    let (code, captured) = run(root.path(), "app.cts", &[]);
+    let (reference_code, reference) = run(root.path(), "reference.cjs", &[]);
+    assert_eq!(code, 0, "{captured}");
+    assert_eq!(reference_code, 0, "{reference}");
+    assert_eq!(
+        runtime_edges(&captured, "app.cts"),
+        runtime_edges(&reference, "reference.cjs")
+    );
+    assert!(
+        captured["source_graph"]["probes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|probe| !probe["path"].as_str().unwrap().contains("types"))
+    );
+    assert_node_edges(root.path(), &captured);
+}
+
+#[test]
 fn type_only_files_are_not_opened_even_when_fifo_or_escaping_symlink() {
     let root = tempfile::tempdir().unwrap();
     rustix::fs::mkfifoat(rustix::fs::CWD, root.path().join("types.d.ts"),
@@ -408,16 +453,58 @@ fn typed_import_equals_selects_require_target_without_claiming_strip_only_execut
 fn typescript_transforms_and_tsx_keep_explicit_edges_and_expose_missing_analysis() {
     let root = tempfile::tempdir().unwrap();
     put(root.path(), "dependency.ts", "export default 1;");
+    put(
+        root.path(),
+        "value.cjs",
+        "throw Error('captured default must not execute');",
+    );
+    for source in [
+        "enum E { A = require('./value.cjs') }; import './dependency.ts';",
+        "const value = <number>require('./value.cjs'); import './dependency.ts';",
+    ] {
+        put(root.path(), "app.ts", source);
+        let (code, report) = run(root.path(), "app.ts", &[]);
+        assert_eq!(code, 0, "{report}");
+        assert_eq!(report["verdict"], "CAPTURED");
+        assert_eq!(paths(&report), ["app.ts", "dependency.ts", "value.cjs"]);
+        assert_eq!(report["source_graph"]["edges"].as_array().unwrap().len(), 2);
+        assert_eq!(report["runtime_completeness"], false);
+        assert_eq!(report["execution_performed"], false);
+        assert_node_edges(root.path(), &report);
+    }
     for (entry, source, diagnostic) in [
-        ("app.ts", "enum E { A = 1 }; import './dependency.ts';", "TYPESCRIPT_TRANSFORM_REQUIRED"),
-        ("app.ts", "class C { constructor(public value: number) {} } import './dependency.ts';", "TYPESCRIPT_TRANSFORM_REQUIRED"),
-        ("app.tsx", "import X from './dependency.ts'; const view = <X/>;", "UNSUPPORTED_JAVASCRIPT_SURFACE"),
+        (
+            "app.ts",
+            "enum E { 'A' = 1 }; import './dependency.ts';",
+            "TYPESCRIPT_TRANSFORM_REQUIRED",
+        ),
+        (
+            "app.ts",
+            "class C { constructor(public value: number) {} } import './dependency.ts';",
+            "TYPESCRIPT_TRANSFORM_REQUIRED",
+        ),
+        (
+            "app.ts",
+            "namespace N { export const value = 1; } import './dependency.ts';",
+            "TYPESCRIPT_TRANSFORM_REQUIRED",
+        ),
+        (
+            "app.tsx",
+            "import X from './dependency.ts'; const view = <X/>;",
+            "UNSUPPORTED_JAVASCRIPT_SURFACE",
+        ),
     ] {
         put(root.path(), entry, source);
         let (code, report) = run(root.path(), entry, &[]);
         assert_eq!(code, 1, "{report}");
         assert!(paths(&report).contains(&"dependency.ts"));
-        assert!(report["source_graph"]["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == diagnostic));
+        assert!(
+            report["source_graph"]["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d["code"] == diagnostic)
+        );
         assert_eq!(report["runtime_completeness"], false);
         assert_eq!(report["execution_performed"], false);
     }
