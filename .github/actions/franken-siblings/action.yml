@@ -30,13 +30,15 @@ runs:
           --engine-ref 4349127b272604d71606d624172d966d18e61ea5 \
           --receipt "$RUNNER_TEMP/sibling-revisions.txt"
         cat "$RUNNER_TEMP/sibling-revisions.txt"
-    - name: Retain pinned source inputs
+    - name: Retain pinned source inputs in native workflow logs
       if: ${{ always() }}
-      uses: actions/upload-artifact@v4
-      with:
-        name: sibling-source-inputs-${{ github.job }}-${{ github.run_attempt }}
-        path: ${{ runner.temp }}/sibling-revisions.txt
-        if-no-files-found: error
+      shell: bash
+      run: |
+        set -euo pipefail
+        test "$GITHUB_RETENTION_DAYS" -ge 7
+        test -s "$RUNNER_TEMP/sibling-revisions.txt"
+        sha256sum "$RUNNER_TEMP/sibling-revisions.txt"
+        cat "$RUNNER_TEMP/sibling-revisions.txt"
     - name: Install the nightly toolchain the workspace requires
       shell: bash
       run: |

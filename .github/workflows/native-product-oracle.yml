@@ -27,6 +27,11 @@ on:
         type: choice
         options: [all, buffer]
         default: all
+      runner:
+        description: Hosted runner for the focused native product job
+        type: choice
+        options: [ubuntu-24.04, ubuntu-24.04-arm]
+        default: ubuntu-24.04
 
 permissions:
   contents: read
@@ -365,7 +370,7 @@ jobs:
         run: cargo +stable clippy --manifest-path tools/migration-validator/Cargo.toml --all-targets -- -D warnings
   native-buffer:
     name: Native Buffer product and filesystem authority
-    runs-on: ubuntu-24.04
+    runs-on: ${{ inputs.runner || 'ubuntu-24.04' }}
     timeout-minutes: 40
     env:
       CARGO_BUILD_JOBS: '1'
@@ -374,9 +379,15 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: '0'
       CARGO_TERM_COLOR: never
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
+      - name: Check out the exact source using the runner's Git
+        run: |
+          set -euo pipefail
+          test -z "$(find . -mindepth 1 -maxdepth 1 -print -quit)"
+          git init --initial-branch=main .
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          GIT_TERMINAL_PROMPT=0 git fetch --no-tags --depth=1 origin "$GITHUB_SHA"
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - uses: ./.github/actions/franken-siblings
       - name: Record product and compiler source inputs
         run: |
@@ -415,11 +426,21 @@ jobs:
               -- --exact --nocapture --test-threads=1 2>&1 | tee -a native-buffer-product-tests.log || status=1
           done
           exit "$status"
-      - name: Retain native product authority results
+      - name: Require complete product output in native workflow logs
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: native-buffer-product-validation
-          path: native-buffer-product-*.log
-          if-no-files-found: error
-          retention-days: 7
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RETENTION_DAYS" -ge 7
+          printf 'Native workflow log retention: %s days\n' "$GITHUB_RETENTION_DAYS"
+          status=0
+          for log in native-buffer-product-inputs.log native-buffer-product-test-list.log \
+            native-buffer-product-tests.log "$RUNNER_TEMP/sibling-revisions.txt"; do
+            if test -s "$log"; then
+              sha256sum "$log"
+            else
+              printf '::error::Missing or empty evidence log: %s\n' "$log"
+              status=1
+            fi
+          done
+          git diff --exit-code || status=1
+          exit "$status"
