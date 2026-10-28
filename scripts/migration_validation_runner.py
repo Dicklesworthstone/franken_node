@@ -1627,7 +1627,12 @@ def run_command(command: list[str], cwd: Path, *, timeout: float,
                                 selector.unregister(key.fileobj)
                                 key.fileobj.close()
                             continue
-                        chunk = os.read(key.fileobj.fileno(), 65536)
+                        try:
+                            chunk = os.read(key.fileobj.fileno(), 65536)
+                        except BlockingIOError:
+                            # A readiness notice does not consume the stream. Keep
+                            # waiting within the same deadline and cancellation loop.
+                            continue
                         if not chunk:
                             selector.unregister(key.fileobj)
                             continue

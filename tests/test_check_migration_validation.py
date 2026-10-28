@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Unit and real-process tests for migration_validation_runner.py."""
 
+import errno
+import hashlib
 import json
 import os
 import shutil
@@ -10,6 +12,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import migration_validation_runner as runner
@@ -155,6 +158,86 @@ class TestSelfTest(unittest.TestCase):
                          "scripts/migration_validation_runner.py")
         self.assertEqual(evidence["evidence_paths"]["lockstep_harness"],
                          "crates/franken-node/src/runtime/lockstep_harness.rs")
+
+
+@unittest.skipUnless(os.name == "posix", "POSIX pipe supervision required")
+class TestNonblockingProcessReads(unittest.TestCase):
+    """Inject readiness notices; child output and read errors come from the OS."""
+
+    def test_readiness_retries_keep_bytes_deadlines_and_real_errors(self):
+        payloads = {"stdout": b"out:\x00\xff\n\n", "stderr": b"err:\x00\xfe\n"}
+        for stream in payloads:
+            for mode in ("retry", "timeout", "error"):
+                with self.subTest(stream=stream, mode=mode), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    gate, child = root / "release", root / "child.py"
+                    child.write_text(r"""import os, sys, time
+from pathlib import Path
+while not Path(sys.argv[1]).exists():
+    time.sleep(0.001)
+os.write(1, b'out:\x00\xff\n\n')
+os.write(2, b'err:\x00\xfe\n')
+""", encoding="utf-8")
+                    selector_type, real_read = runner.selectors.DefaultSelector, os.read
+                    observed = {"fd": None, "notifications": 0, "blocked": 0, "errors": 0}
+
+                    class EarlyReadiness(selector_type):
+                        def select(self, timeout=None):
+                            if mode == "timeout" or not observed["notifications"]:
+                                key = next(k for k in self.get_map().values() if k.data == stream)
+                                observed["fd"] = key.fd
+                                observed["notifications"] += 1
+                                time.sleep(0.005)
+                                return [(key, runner.selectors.EVENT_READ)]
+                            return super().select(timeout)
+
+                    with (root / "write-only").open("wb") as write_only:
+                        def read(fd, size):
+                            if fd == observed["fd"] and mode == "error":
+                                observed["errors"] += 1
+                                # Reading a real write-only descriptor produces EBADF.
+                                return real_read(write_only.fileno(), size)
+                            try:
+                                return real_read(fd, size)
+                            except BlockingIOError as error:
+                                if fd == observed["fd"]:
+                                    self.assertIn(error.errno, (errno.EAGAIN, errno.EWOULDBLOCK))
+                                    observed["blocked"] += 1
+                                    if mode == "retry":
+                                        gate.touch()
+                                raise
+
+                        def execute():
+                            return runner.run_command(
+                                [sys.executable, str(child), str(gate)], root,
+                                timeout=0.1 if mode == "timeout" else 5,
+                                max_output_bytes=128, environment={})
+
+                        with patch.object(runner.selectors, "DefaultSelector", EarlyReadiness), \
+                             patch.object(runner.os, "read", side_effect=read):
+                            if mode == "error":
+                                with self.assertRaises(OSError) as failure:
+                                    execute()
+                                self.assertEqual(failure.exception.errno, errno.EBADF)
+                                self.assertEqual(observed["errors"], 1)
+                                continue
+                            result = execute()
+                    self.assertGreaterEqual(observed["blocked"], 1)
+                    if mode == "timeout":
+                        self.assertEqual(result["termination"], "timeout")
+                        self.assertLess(result["elapsed_ms"], 1000)
+                        self.assertNotEqual(result["exit_code"], 0)
+                    else:
+                        self.assertEqual(result["termination"], "exited")
+                        self.assertEqual(result["exit_code"], 0)
+                    for name, data in payloads.items():
+                        expected = b"" if mode == "timeout" else data
+                        self.assertEqual(result[name], expected)
+                        self.assertEqual(result["streams"][name], {
+                            "bytes_observed": len(expected),
+                            "sha256": hashlib.sha256(expected).hexdigest(),
+                            "complete": mode == "retry", "retained_bytes": len(expected),
+                        })
 
 
 @unittest.skipUnless(os.name == "posix" and shutil.which("node"), "real Node.js and POSIX required")
@@ -356,7 +439,8 @@ class TestLiveMigrationValidation(unittest.TestCase):
                               ("process.stdout.write(Buffer.from([255]));", "process.stdout.write(Buffer.from([254]));")]:
             with self.subTest(before=before):
                 self.write_case(before, after)
-                self.assertEqual(self.validate()["summary"]["verdict"], "FAIL")
+                report = self.validate()
+                self.assertEqual(report["summary"]["verdict"], "FAIL", report)
 
     def test_diagnostic_normalization_never_hides_live_differences(self):
         self.write_case("console.log('pid=1 at 2024-01-01T00:00:00');",
