@@ -208,6 +208,34 @@ fn self_and_internal_external_imports_resolve_without_losing_map_witnesses() {
 }
 
 #[test]
+fn bom_package_maps_resolve_substituted_url_paths_like_node_without_rewriting_inputs() {
+    let root = fixture();
+    let root_manifest = "\u{feff}{\"type\":\"commonjs\",\"imports\":{\"#data/*\":[\"./%*\",\"./fallback.cjs\"]}}";
+    let package_manifest = "\u{feff}{\"exports\":{\"./*\":[\"./%*\",\"./fallback.cjs\"]}}";
+    put(root.path(), "package.json", root_manifest.as_bytes());
+    put(root.path(), "node_modules/fixture/package.json", package_manifest.as_bytes());
+    for file in ["a.cjs", "fallback.cjs", "node_modules/fixture/a.cjs", "node_modules/fixture/fallback.cjs"] {
+        source(root.path(), file);
+    }
+    for mode in ["require", "import"] {
+        for (request, expected, manifest, original) in [
+            ("#data/61.cjs", "a.cjs", "package.json", root_manifest),
+            ("fixture/61.cjs", "node_modules/fixture/a.cjs", "node_modules/fixture/package.json", package_manifest),
+        ] {
+            let report = same_as_node(root.path(), "app.js", request, mode);
+            assert_eq!(report["resolution"]["path"], expected);
+            assert_eq!(report["resolution"]["mappings"][0]["selection"]["target"], "./%61.cjs");
+            let probe = report["resolution"]["probes"].as_array().unwrap().iter()
+                .find(|probe| probe["path"] == manifest).unwrap();
+            assert_eq!(probe["bytes"], original.len());
+            assert_eq!(probe["sha256"], hex::encode(Sha256::digest(original.as_bytes())));
+            assert!(!report["resolution"]["probes"].as_array().unwrap().iter()
+                .any(|probe| probe["path"].as_str().unwrap().ends_with("fallback.cjs")));
+        }
+    }
+}
+
+#[test]
 fn private_external_imports_use_exact_subpaths_and_keep_caller_conditions() {
     let root = fixture();
     put(root.path(), "package.json", br##"{"imports":{"#extension":"legacy/feature","#directory":"legacy/folder","#exact":"legacy/feature.js","#root":"legacy","#conditional":"dual"}}"##);

@@ -54,12 +54,12 @@ fn node(root: &Path, request: &str, esm: bool, extra: &[&str]) -> Value {
         command.args(["--input-type=module", "-e", r#"
 import {fileURLToPath} from 'node:url';
 try { console.log(JSON.stringify({target:fileURLToPath(import.meta.resolve(process.argv[1]))})); }
-catch (error) { console.log(JSON.stringify({code:error.code})); }
+catch (error) { console.log(JSON.stringify({code:error.code,name:error.name})); }
 "#]);
     } else {
         command.args(["-e", r#"
 try { console.log(JSON.stringify({target:require.resolve(process.argv[1])})); }
-catch (error) { console.log(JSON.stringify({code:error.code})); }
+catch (error) { console.log(JSON.stringify({code:error.code,name:error.name})); }
 "#]);
     }
     command.arg(request);
@@ -265,6 +265,103 @@ fn missing_target_is_selected_without_existence_fallback() {
     assert_eq!(node(root.path(), "map-package", true, &[])["target"], pkg.join("missing.cjs").to_str().unwrap());
     assert_eq!(node(root.path(), "map-package", false, &[])["code"], "MODULE_NOT_FOUND");
     assert!(!pkg.join("missing.cjs").exists());
+}
+
+#[test]
+fn leading_manifest_bom_matches_both_node_resolvers_and_remains_in_the_pin() {
+    let root = tempfile::tempdir().unwrap();
+    let plain = r##"{"name":"map-package","exports":{"import":"./import.mjs","require":"./require.cjs"},"imports":{"#local":{"import":"./import.mjs","require":"./require.cjs"}}}"##;
+    let pkg = package(root.path(), &format!("\u{feff}{plain}"));
+    for (esm, condition, target) in [(true, "import", "import.mjs"), (false, "require", "require.cjs")] {
+        for (flag, request, reference_request, reference_root) in [
+            ("--resolve-export", ".", "map-package", root.path()),
+            ("--resolve-import", "#local", "#local", pkg.as_path()),
+        ] {
+            let report = selected(&pkg, &[flag, request, "--condition", "node", "--condition", condition]);
+            assert_eq!(report["selection"]["target"], format!("./{target}"));
+            assert_eq!(node(reference_root, reference_request, esm, &[])["target"], pkg.join(target).to_str().unwrap());
+        }
+    }
+    let original = selected(&pkg, &["--resolve-export", "."]);
+    put(&pkg, "package.json", plain);
+    let changed = selected(&pkg, &["--resolve-export", "."]);
+    assert_eq!(original["selection"], changed["selection"]);
+    assert_ne!(original["input_hash"], changed["input_hash"]);
+    let (code, mismatch) = run(&pkg, &["--resolve-export", ".", "--expected-hash", original["input_hash"].as_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert_eq!(mismatch["verdict"], "HASH_MISMATCH");
+    assert!(mismatch["selection"].is_null());
+}
+
+#[test]
+fn wildcard_url_materialization_matches_node_for_exports_and_private_imports() {
+    for (target, capture, filename) in [
+        ("./%*", "61.cjs", "a.cjs"),
+        ("./%6*", "1.cjs", "a.cjs"),
+        ("./constant.cjs", "%", "constant.cjs"),
+        ("./constant.cjs", "%2f", "constant.cjs"),
+        ("./constant.cjs?raw=*", "%", "constant.cjs"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = json!({
+            "name": "map-package",
+            "exports": {"./*": [target, "./default.cjs"]},
+            "imports": {"#data/*": [target, "./default.cjs"]}
+        }).to_string();
+        let pkg = package(root.path(), &manifest);
+        put(&pkg, filename, "throw new Error('selected source must not execute');");
+        for esm in [false, true] {
+            let export = format!("./{capture}");
+            let import = format!("#data/{capture}");
+            let package_request = format!("map-package/{capture}");
+            for (flag, request, reference_request, reference_root) in [
+                ("--resolve-export", export.as_str(), package_request.as_str(), root.path()),
+                ("--resolve-import", import.as_str(), import.as_str(), pkg.as_path()),
+            ] {
+                let report = selected(&pkg, &[flag, request, "--condition", "node",
+                    "--condition", if esm { "import" } else { "require" }]);
+                assert_eq!(report["selection"]["target"], target.replace('*', capture));
+                assert_eq!(report["selection"]["branch"], json!([{"kind":"array_index","value":0}]));
+                assert_eq!(node(reference_root, reference_request, esm, &[])["target"], pkg.join(filename).to_str().unwrap());
+            }
+        }
+    }
+}
+
+#[test]
+fn invalid_materialized_url_never_falls_through_to_an_existing_alternative() {
+    for (target, capture, reference_code, reference_name) in [
+        ("./%*", "ZZ", None, "URIError"),
+        ("./%ZZ", "unused", None, "URIError"),
+        ("./%*", "2fsecret.cjs", Some("ERR_INVALID_MODULE_SPECIFIER"), "TypeError"),
+        ("./%*", "5csecret.cjs", Some("ERR_INVALID_MODULE_SPECIFIER"), "TypeError"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = json!({
+            "exports": {"./*": [target, "./default.cjs"]},
+            "imports": {"#data/*": [target, "./default.cjs"]}
+        }).to_string();
+        let pkg = package(root.path(), &manifest);
+        for esm in [false, true] {
+            let export = format!("./{capture}");
+            let import = format!("#data/{capture}");
+            let package_request = format!("map-package/{capture}");
+            for (flag, request, reference_request, reference_root) in [
+                ("--resolve-export", export.as_str(), package_request.as_str(), root.path()),
+                ("--resolve-import", import.as_str(), import.as_str(), pkg.as_path()),
+            ] {
+                let (code, report) = run(&pkg, &[flag, request, "--condition", "node",
+                    "--condition", if esm { "import" } else { "require" }]);
+                assert_eq!(code, 2, "{report}");
+                assert_eq!(report["error_code"], "ERR_INVALID_MODULE_SPECIFIER");
+                assert!(report["selection"].is_null());
+                let reference = node(reference_root, reference_request, esm, &[]);
+                assert_eq!(reference["name"], reference_name);
+                assert_eq!(reference["code"].as_str(), reference_code);
+                assert!(reference["target"].is_null());
+            }
+        }
+    }
 }
 
 #[test]

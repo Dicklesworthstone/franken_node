@@ -1485,6 +1485,81 @@ mod tests {
     }
 
     #[test]
+    fn bom_manifests_and_materialized_patterns_preserve_closed_graph_replay() {
+        use source_graph::{GraphOptions, capsule, capture};
+
+        let root = fixture();
+        let root_manifest = "\u{feff}{\"type\":\"module\",\"imports\":{\"#local\":\"./local.mjs\"}}";
+        let package_manifest = "\u{feff}{\"exports\":{\"./*\":[\"./%*\",\"./fallback.cjs\"]}}";
+        put(root.path(), "package.json", root_manifest.as_bytes());
+        put(root.path(), "node_modules/fixture/package.json", package_manifest.as_bytes());
+        put(root.path(), "app.js", b"import 'fixture/61.cjs'; import '#local';");
+        put(root.path(), "local.mjs", b"export const value = 1;");
+        put(root.path(), "node_modules/fixture/a.cjs", b"module.exports = 42;");
+        put(root.path(), "node_modules/fixture/fallback.cjs", b"throw Error('wrong target');");
+        let captured = capture(root.path(), "app.js", GraphOptions::default()).unwrap();
+        assert!(captured.report().fully_resolved);
+        assert_eq!(captured.report().modules.len(), 3);
+        assert!(captured.report().modules.iter().any(|module|
+            module.id.path == "node_modules/fixture/a.cjs"));
+        assert!(!captured.report().probes.iter().any(|probe|
+            probe.path == "node_modules/fixture/fallback.cjs"));
+        for (path, original) in [
+            ("package.json", root_manifest),
+            ("node_modules/fixture/package.json", package_manifest),
+        ] {
+            let probe = captured.report().probes.iter().find(|probe| probe.path == path).unwrap();
+            assert_eq!(probe.bytes, Some(original.len()));
+            assert_eq!(probe.sha256, Some(hex::encode(Sha256::digest(original.as_bytes()))));
+        }
+        let encoded = capsule::encode(&captured).unwrap();
+        put(root.path(), "package.json", br#"{"type":"commonjs"}"#);
+        put(root.path(), "node_modules/fixture/package.json", br#"{"exports":{"./*":"./fallback.cjs"}}"#);
+        put(root.path(), "node_modules/fixture/a.cjs", b"throw Error('live source reopened');");
+        let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+        assert_eq!(replayed.report(), captured.report());
+        for module in &captured.report().modules {
+            assert_eq!(replayed.source_bytes(&module.id), captured.source_bytes(&module.id));
+        }
+        assert_eq!(capsule::encode(&replayed).unwrap().bytes(), encoded.bytes());
+        let fresh = capture(root.path(), "app.js", GraphOptions::default()).unwrap();
+        assert_ne!(fresh.report().input_hash, captured.report().input_hash);
+    }
+
+    #[test]
+    fn materialized_pattern_errors_never_capture_a_fallback_or_escaping_source() {
+        use source_graph::{GraphOptions, capture, registry::PinnedModuleRegistry};
+
+        for (target, capture_name) in [
+            ("./%*", "ZZ"),
+            ("./%*", "2fprivate.cjs"),
+            ("./%2e%2*", "e/private.cjs"),
+            ("./node_*", "modules/private.cjs"),
+        ] {
+            let root = fixture();
+            let manifest = serde_json::json!({"exports":{"./*":[target,"./fallback.cjs"]}});
+            put(root.path(), "node_modules/fixture/package.json", manifest.to_string().as_bytes());
+            put(root.path(), "app.cjs", format!("require('fixture/{capture_name}');").as_bytes());
+            for file in [
+                "node_modules/private.cjs",
+                "node_modules/fixture/node_modules/private.cjs",
+                "node_modules/fixture/fallback.cjs",
+            ] {
+                put(root.path(), file, b"throw Error('refused target must not be captured');");
+            }
+            let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+            assert!(!graph.report().fully_resolved);
+            assert_eq!(graph.report().modules.len(), 1);
+            assert_eq!(graph.report().edges.len(), 1);
+            assert_eq!(graph.report().edges[0].error.as_ref().unwrap().code, "ERR_INVALID_MODULE_SPECIFIER");
+            assert!(!graph.report().probes.iter().any(|probe|
+                probe.path.ends_with("private.cjs") || probe.path.ends_with("fallback.cjs")));
+            let pin = graph.report().input_hash.clone();
+            assert_eq!(PinnedModuleRegistry::new(graph, &pin).err().unwrap().code, "ERR_MODULE_REGISTRY_INCOMPLETE");
+        }
+    }
+
+    #[test]
     fn private_external_targets_keep_require_conditions_but_use_exact_package_lookup() {
         let root = fixture();
         put(

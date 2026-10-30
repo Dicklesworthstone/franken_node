@@ -334,8 +334,12 @@ impl PackageMap {
         if source.len() > MAX_MANIFEST_BYTES {
             return Err(bound());
         }
+        // Node and the native engine accept one leading UTF-8 BOM. Strip it
+        // only for JSON parsing: its bytes still count toward the original
+        // limit and from_document pins the complete captured source.
+        let json = source.strip_prefix('\u{feff}').unwrap_or(source);
         let document: OrderedValue =
-            serde_json::from_str(source).map_err(|e| config(e.to_string()))?;
+            serde_json::from_str(json).map_err(|e| config(e.to_string()))?;
         let mut pending = vec![(&document, 0_usize)];
         let mut count = 0_usize;
         while let Some((value, depth)) = pending.pop() {
@@ -559,8 +563,15 @@ fn select_target(
             "target must be a string, condition object, array or null",
         )),
         OrderedValue::String(value) => {
+            if value.len() > MAX_TARGET_BYTES {
+                return Err(bound());
+            }
             let target_kind = if let Some(relative) = value.strip_prefix("./") {
-                validate_segments(relative, "ERR_INVALID_PACKAGE_TARGET")?;
+                validate_segments(
+                    relative,
+                    "ERR_INVALID_PACKAGE_TARGET",
+                    SegmentStage::PatternInput,
+                )?;
                 TargetKind::PackageRelative
             } else {
                 if kind != MapKind::Imports || !external_package_request(value) {
@@ -572,7 +583,11 @@ fn select_target(
                 TargetKind::ExternalPackage
             };
             let result = if let Some(matched) = pattern {
-                validate_segments(matched, "ERR_INVALID_MODULE_SPECIFIER")?;
+                validate_segments(
+                    matched,
+                    "ERR_INVALID_MODULE_SPECIFIER",
+                    SegmentStage::PatternInput,
+                )?;
                 let size = value
                     .len()
                     .checked_add(
@@ -593,6 +608,16 @@ fn select_target(
             if result.len() > MAX_TARGET_BYTES {
                 return Err(bound());
             }
+            // A pattern may split a percent escape across '*'. Materialize
+            // before checking URL syntax; a malformed selected URL cannot
+            // masquerade as an invalid original target and select an array
+            // fallback. Recheck reserved segments too, so substitution cannot
+            // assemble traversal or a nested node_modules target.
+            validate_segments(
+                result.strip_prefix("./").unwrap_or(&result),
+                "ERR_INVALID_MODULE_SPECIFIER",
+                SegmentStage::MaterializedTarget,
+            )?;
             Ok(Resolved::Target(result, target_kind, branch.clone()))
         }
         OrderedValue::Object(members) => {
@@ -661,39 +686,58 @@ fn external_package_request(value: &str) -> bool {
     })
 }
 
-/// Never normalize a traversal into a seemingly safe target. Query/fragment
-/// bytes are retained as URL suffixes; they are not filesystem path components.
-fn validate_segments(value: &str, code: &'static str) -> Result<()> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SegmentStage {
+    PatternInput,
+    MaterializedTarget,
+}
+
+/// Reserved segments are checked independently in the original target and
+/// wildcard capture, even when the target ignores the capture. Those inputs
+/// are not URLs yet: '%' may be completed by substitution or never used.
+/// Only the final target requires a valid UTF-8 URL path without encoded
+/// separators. Its query/fragment bytes remain module-identity suffixes.
+fn validate_segments(value: &str, code: &'static str, stage: SegmentStage) -> Result<()> {
     if value.contains('\\') || value.chars().any(char::is_control) {
         return Err(error(
             code,
             "backslashes and control characters are not supported in package targets",
         ));
     }
-    let path = value.split(['?', '#']).next().unwrap_or_default();
-    for part in path.split('/') {
-        let mut decoded = Vec::new();
-        let mut bytes = part.bytes();
-        while let Some(byte) = bytes.next() {
-            if byte == b'%' {
-                let high = bytes.next().and_then(|b| char::from(b).to_digit(16));
-                let low = bytes.next().and_then(|b| char::from(b).to_digit(16));
-                let (Some(high), Some(low)) = (high, low) else {
-                    return Err(error(code, "invalid percent encoding"));
-                };
-                let byte = (high * 16 + low) as u8;
-                if matches!(byte, b'/' | b'\\' | 0) {
-                    return Err(error(
-                        "ERR_INVALID_MODULE_SPECIFIER",
-                        "encoded separators or NUL are not permitted",
-                    ));
+    let path = if stage == SegmentStage::MaterializedTarget {
+        value.split(['?', '#']).next().unwrap_or_default()
+    } else {
+        value
+    };
+    let mut decoded = Vec::with_capacity(path.len());
+    let mut bytes = path.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte == b'%' {
+            let mut remaining = bytes.clone();
+            let high = remaining.next().and_then(|b| char::from(b).to_digit(16));
+            let low = remaining.next().and_then(|b| char::from(b).to_digit(16));
+            if let (Some(high), Some(low)) = (high, low) {
+                let decoded_byte = (high * 16 + low) as u8;
+                if stage == SegmentStage::MaterializedTarget
+                    && matches!(decoded_byte, b'/' | b'\\' | 0)
+                {
+                    return Err(error(code, "encoded separators or NUL are not permitted"));
                 }
-                decoded.push(byte);
-            } else {
-                decoded.push(byte);
+                decoded.push(decoded_byte);
+                bytes = remaining;
+                continue;
+            }
+            if stage == SegmentStage::MaterializedTarget {
+                return Err(error(code, "invalid percent encoding"));
             }
         }
-        if decoded == b"." || decoded == b".." || decoded.eq_ignore_ascii_case(b"node_modules") {
+        decoded.push(byte);
+    }
+    if stage == SegmentStage::MaterializedTarget && std::str::from_utf8(&decoded).is_err() {
+        return Err(error(code, "non-UTF-8 URL path"));
+    }
+    for part in decoded.split(|byte| matches!(byte, b'/' | b'\\')) {
+        if part == b"." || part == b".." || part.eq_ignore_ascii_case(b"node_modules") {
             return Err(error(
                 code,
                 "package target contains a forbidden path segment",
@@ -1171,6 +1215,123 @@ mod tests {
                 .code,
             "ERR_PACKAGE_MAP_LIMIT"
         );
+    }
+
+    #[test]
+    fn percent_escapes_materialize_after_pattern_substitution() {
+        for (pattern, request, expected) in [
+            ("./%*", "61.cjs", "./%61.cjs"),
+            ("./%6*", "1.cjs", "./%61.cjs"),
+            ("./%*/*", "61", "./%61/61"),
+        ] {
+            for (kind, key, specifier) in [
+                (MapKind::Exports, "exports", format!("./{request}")),
+                (MapKind::Imports, "imports", format!("#data/{request}")),
+            ] {
+                let source = serde_json::json!({(key): {
+                    (if kind == MapKind::Exports { "./*" } else { "#data/*" }):
+                        [pattern, "./fallback.cjs"]
+                }}).to_string();
+                let selected = select(&source, kind, &specifier, &[]).unwrap();
+                assert_eq!(selected.target, expected);
+                assert_eq!(selected.branch, [BranchStep::ArrayIndex(0)]);
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_materialized_urls_and_assembled_traversal_never_select_a_fallback() {
+        for (target, capture) in [
+            ("./%*", "ZZ"),
+            ("./%*", "2fsecret.cjs"),
+            ("./%*", "5csecret.cjs"),
+            ("./%*", "00secret.cjs"),
+            ("./%*", "ff"),
+            ("./%ZZ", "unused"),
+            ("./%2e%2*", "e/secret.cjs"),
+            ("./.%*", "2e/secret.cjs"),
+            ("./node_*", "modules/secret.cjs"),
+        ] {
+            let source = serde_json::json!({"exports": {"./*": [target, "./fallback.cjs"]}})
+                .to_string();
+            assert_eq!(
+                select(&source, MapKind::Exports, &format!("./{capture}"), &[])
+                    .unwrap_err().code,
+                "ERR_INVALID_MODULE_SPECIFIER",
+                "{target:?} with {capture:?}"
+            );
+        }
+        // A syntactically invalid target remains an ordinary alternatives
+        // fallback. Errors introduced by substitution must not be relabelled
+        // as errors in that original target.
+        let selected = select(
+            r#"{"exports":{"./*":["./../outside.cjs","./constant.cjs"]}}"#,
+            MapKind::Exports, "./value", &[],
+        ).unwrap();
+        assert_eq!(selected.target, "./constant.cjs");
+        assert_eq!(selected.branch, [BranchStep::ArrayIndex(1)]);
+    }
+
+    #[test]
+    fn unused_pattern_bytes_are_not_decoded_as_a_file_url() {
+        for capture in ["%", "%2f", "%5c", "%00", "%ff"] {
+            let selected = select(
+                r#"{"exports":{"./*":"./constant.cjs"}}"#,
+                MapKind::Exports, &format!("./{capture}"), &[],
+            ).unwrap();
+            assert_eq!(selected.target, "./constant.cjs");
+        }
+        for capture in ["..", "%2e%2e", "%6eode_modules", "a%2f..%2fb"] {
+            assert_eq!(
+                select(
+                    r#"{"exports":{"./*":"./constant.cjs"}}"#,
+                    MapKind::Exports, &format!("./{capture}"), &[],
+                ).unwrap_err().code,
+                "ERR_INVALID_MODULE_SPECIFIER"
+            );
+        }
+        let selected = select(
+            r#"{"exports":{"./*":"./constant.cjs?raw=*"}}"#,
+            MapKind::Exports, "./%", &[],
+        ).unwrap();
+        assert_eq!(selected.target, "./constant.cjs?raw=%");
+    }
+
+    #[test]
+    fn one_leading_manifest_bom_preserves_metadata_maps_and_exact_input_pin() {
+        let plain = r##"{"name":"fixture","main":"entry.cjs","type":"module","exports":{"import":"./import.mjs","default":"./require.cjs"},"imports":{"#local":"./local.mjs"}}"##;
+        let source = format!("\u{feff}{plain}");
+        let (map, metadata) = PackageMap::parse_manifest(&source).unwrap();
+        assert_eq!(metadata.name.as_deref(), Some("fixture"));
+        assert_eq!(metadata.main.as_deref(), Some("entry.cjs"));
+        assert_eq!(metadata.package_type.as_deref(), Some("module"));
+        assert!(metadata.exports && metadata.imports);
+        assert_eq!(
+            map.select(MapKind::Exports, ".", &["import".into()]).unwrap().target,
+            "./import.mjs"
+        );
+        assert_eq!(map.select(MapKind::Imports, "#local", &[]).unwrap().target, "./local.mjs");
+        assert_eq!(map.input_hash(), PackageMap::parse(&source).unwrap().input_hash());
+        assert_ne!(map.input_hash(), PackageMap::parse(plain).unwrap().input_hash());
+    }
+
+    #[test]
+    fn manifest_bom_does_not_relax_byte_limits_json_syntax_or_duplicate_refusal() {
+        let mut bounded = "\u{feff}{}".to_owned();
+        bounded.push_str(&" ".repeat(MAX_MANIFEST_BYTES - bounded.len()));
+        PackageMap::parse(&bounded).unwrap();
+        bounded.push(' ');
+        assert_eq!(PackageMap::parse(&bounded).unwrap_err().code, "ERR_PACKAGE_MAP_LIMIT");
+        for source in [
+            "\u{feff}\u{feff}{}", " \u{feff}{}", "\u{feff}{", "\u{feff}{}x",
+            "\u{feff}{\"exports\":\"./a\",\"exports\":\"./b\"}",
+            "\u{feff}{\"exports\":{\"node\":\"./a\",\"n\\u006fde\":\"./b\"}}",
+        ] {
+            assert_eq!(
+                PackageMap::parse(source).unwrap_err().code,
+                "ERR_INVALID_PACKAGE_CONFIG", "{source:?}"
+            );
+        }
     }
 
     #[test]
