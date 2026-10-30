@@ -197,6 +197,10 @@ struct Resolver {
     // a manifest here used to copy its entire conditional exports/imports tree
     // on every dependency edge and package-scope query.
     manifests: BTreeMap<String, Option<Rc<Manifest>>>,
+    // Nearest package directories for previously walked scopes, including
+    // absence at node_modules boundaries. Keep exact lookup spellings and
+    // bound this derived cache independently of captured filesystem inputs.
+    scopes: BTreeMap<String, Option<String>>,
     captured: usize,
     conditions: Vec<String>,
     mappings: Vec<Mapping>,
@@ -313,6 +317,7 @@ impl Resolver {
         Ok(Self {
             entries: BTreeMap::from([("".into(), Rc::new(Entry::Directory(Some(root))))]),
             manifests: BTreeMap::new(),
+            scopes: BTreeMap::new(),
             captured: 0,
             conditions,
             mappings: Vec::new(),
@@ -609,18 +614,43 @@ impl Resolver {
 
     fn scope(&mut self, start: &str) -> Result<Option<(String, Rc<Manifest>)>> {
         let mut directory = start;
-        loop {
+        let mut visited = Vec::new();
+        let found = loop {
             if directory.rsplit('/').next() == Some("node_modules") {
-                return Ok(None);
+                break None;
+            }
+            // Live observations are immutable within this capture. Replay
+            // must repeat the original walk to rebuild its observed inputs,
+            // including every negative manifest and physical parent probe.
+            if !self.sealed {
+                if let Some(cached) = self.scopes.get(directory).cloned() {
+                    break match cached {
+                        Some(scope) => self.manifest(&scope)?.map(|manifest| (scope, manifest)),
+                        None => None,
+                    };
+                }
+                visited.push(directory);
             }
             if let Some(manifest) = self.manifest(directory)? {
-                return Ok(Some((directory.into(), manifest)));
+                break Some((directory.into(), manifest));
             }
             if directory.is_empty() {
-                return Ok(None);
+                break None;
             }
             directory = parent(directory);
+        };
+        // Publish only completed walks. An invalid manifest or failed probe
+        // cannot leave a cached partial scope. Saturation merely stops reuse;
+        // it does not change the existing resolver's admission or evidence.
+        let nearest = found.as_ref().map(|(directory, _)| directory.as_str());
+        for directory in visited {
+            if self.scopes.len() >= MAX_PROBES {
+                break;
+            }
+            self.scopes
+                .insert(directory.into(), nearest.map(str::to_owned));
         }
+        Ok(found)
     }
 
     fn request(
@@ -1639,6 +1669,264 @@ mod tests {
         assert_ne!(first.maps.input_hash(), changed.maps.input_hash());
     }
 
+    fn uncached_scope(
+        resolver: &mut Resolver,
+        start: &str,
+    ) -> Result<Option<(String, Rc<Manifest>)>> {
+        let mut directory = start;
+        loop {
+            if directory.rsplit('/').next() == Some("node_modules") {
+                return Ok(None);
+            }
+            if let Some(manifest) = resolver.manifest(directory)? {
+                return Ok(Some((directory.into(), manifest)));
+            }
+            if directory.is_empty() {
+                return Ok(None);
+            }
+            directory = parent(directory);
+        }
+    }
+
+    fn scope_identity(scope: Option<(String, Rc<Manifest>)>) -> Option<(String, String)> {
+        scope.map(|(directory, manifest)| (directory, manifest.maps.input_hash().into()))
+    }
+
+    #[test]
+    fn scope_cache_preserves_nearest_manifests_negative_boundaries_and_mutations() {
+        let root = fixture();
+        put(root.path(), "src/a/deep/entry.js", b"");
+        put(root.path(), "src/a/private/deep/entry.js", b"");
+        put(
+            root.path(),
+            "src/a/private/package.json",
+            br#"{"type":"module"}"#,
+        );
+        put(root.path(), "node_modules/loose/lib/entry.js", b"");
+        put(root.path(), "node_modules/loose/lib/local/entry.js", b"");
+        put(
+            root.path(),
+            "node_modules/loose/lib/local/package.json",
+            b"{}",
+        );
+        put(
+            root.path(),
+            "node_modules/package.json",
+            b"{invalid boundary}",
+        );
+        let mut current = Resolver::new(root.path(), &[], SymlinkPolicy::Reject).unwrap();
+        let mut linear = Resolver::new(root.path(), &[], SymlinkPolicy::Reject).unwrap();
+        for (start, nearest) in [
+            ("", Some("")),
+            ("src/a/deep", Some("")),
+            ("src/a", Some("")),
+            ("src/a/private/deep", Some("src/a/private")),
+            ("src/a/deep", Some("")),
+            ("node_modules/loose/lib", None),
+            ("node_modules/loose/lib", None),
+            (
+                "node_modules/loose/lib/local",
+                Some("node_modules/loose/lib/local"),
+            ),
+        ] {
+            let found = scope_identity(current.scope(start).unwrap());
+            assert_eq!(
+                found.as_ref().map(|(directory, _)| directory.as_str()),
+                nearest
+            );
+            assert_eq!(
+                found,
+                scope_identity(uncached_scope(&mut linear, start).unwrap())
+            );
+            assert_eq!(current.probes(), linear.probes());
+        }
+        assert_eq!(current.scopes.get("src/a/deep"), Some(&Some(String::new())));
+        assert_eq!(current.scopes.get("src/a"), Some(&Some(String::new())));
+        assert_eq!(current.scopes.get("node_modules/loose/lib"), Some(&None));
+        assert!(!current.entries.contains_key("node_modules/package.json"));
+
+        // Captured absence stays absent; a new capture sees the new manifest.
+        put(root.path(), "src/a/package.json", br#"{"type":"module"}"#);
+        assert_eq!(current.scope("src/a/deep").unwrap().unwrap().0, "");
+        assert_eq!(
+            scope_identity(current.scope("src/a/deep").unwrap()),
+            scope_identity(uncached_scope(&mut linear, "src/a/deep").unwrap())
+        );
+        let mut fresh = Resolver::new(root.path(), &[], SymlinkPolicy::Reject).unwrap();
+        assert_eq!(fresh.scope("src/a/deep").unwrap().unwrap().0, "src/a");
+
+        // A newly reached child still checks its own manifest before using an
+        // inherited cached ancestor. Failed walks never publish partial scopes.
+        put(root.path(), "src/new/package.json", b"{}");
+        assert_eq!(current.scope("src/new").unwrap().unwrap().0, "src/new");
+        put(root.path(), "bad/deep/entry.js", b"");
+        put(root.path(), "bad/package.json", b"{invalid}");
+        let before = current.scopes.clone();
+        for _ in 0..2 {
+            assert_eq!(
+                current.scope("bad/deep").err().unwrap().code,
+                "ERR_INVALID_PACKAGE_CONFIG"
+            );
+            assert_eq!(current.scopes, before);
+        }
+    }
+
+    #[test]
+    fn scope_cache_keeps_alias_spellings_separate_from_physical_directories() {
+        let root = fixture();
+        put(root.path(), "shared/deep/entry.js", b"");
+        for directory in ["left", "right"] {
+            put(
+                root.path(),
+                &join(directory, "package.json"),
+                br#"{"type":"module"}"#,
+            );
+            link(root.path(), &join(directory, "alias"), "../shared");
+        }
+        let mut current = Resolver::new(root.path(), &[], SymlinkPolicy::Contained).unwrap();
+        let mut linear = Resolver::new(root.path(), &[], SymlinkPolicy::Contained).unwrap();
+        for (start, nearest) in [
+            ("shared/deep", ""),
+            ("left/alias/deep", "left"),
+            ("right/alias/deep", "right"),
+            ("shared/deep", ""),
+            ("right/alias/deep", "right"),
+            ("left/alias/deep", "left"),
+        ] {
+            let found = scope_identity(current.scope(start).unwrap());
+            assert_eq!(found.as_ref().unwrap().0, nearest);
+            assert_eq!(
+                found,
+                scope_identity(uncached_scope(&mut linear, start).unwrap())
+            );
+            assert_eq!(current.probes(), linear.probes());
+        }
+    }
+
+    #[test]
+    fn scope_cache_saturation_changes_neither_admission_nor_observed_inputs() {
+        let root = fixture();
+        let mut current = Resolver::new(root.path(), &[], SymlinkPolicy::Reject).unwrap();
+        let mut linear = Resolver::new(root.path(), &[], SymlinkPolicy::Reject).unwrap();
+        // A missing parent short-circuits physical probing. Distinct lookup
+        // spellings can therefore outnumber retained filesystem observations.
+        for index in 0..MAX_PROBES + 8 {
+            let start = format!("absent/child-{index}");
+            assert_eq!(
+                scope_identity(current.scope(&start).unwrap()),
+                scope_identity(uncached_scope(&mut linear, &start).unwrap())
+            );
+            assert!(current.scopes.len() <= MAX_PROBES);
+            assert_eq!(current.probes(), linear.probes());
+        }
+        assert_eq!(current.scopes.len(), MAX_PROBES);
+        assert!(current.entries.len() < 8);
+        put(root.path(), "fresh/package.json", br#"{"type":"module"}"#);
+        assert_eq!(current.scope("fresh").unwrap().unwrap().0, "fresh");
+        assert!(!current.scopes.contains_key("fresh"));
+        assert_eq!(
+            scope_identity(current.scope("fresh").unwrap()),
+            scope_identity(uncached_scope(&mut linear, "fresh").unwrap())
+        );
+        assert_eq!(current.probes(), linear.probes());
+    }
+
+    #[test]
+    fn sealed_scope_walks_ignore_warmed_cache_and_reconstruct_missing_observations() {
+        let root = fixture();
+        put(root.path(), "src/a/deep/entry.js", b"");
+        let mut current = Resolver::new(root.path(), &[], SymlinkPolicy::Reject).unwrap();
+        let mut linear = Resolver::new(root.path(), &[], SymlinkPolicy::Reject).unwrap();
+        assert_eq!(
+            scope_identity(current.scope("src/a/deep").unwrap()),
+            scope_identity(uncached_scope(&mut linear, "src/a/deep").unwrap())
+        );
+        let warmed = current.scopes.clone();
+        for resolver in [&mut current, &mut linear] {
+            resolver.sealed = true;
+            resolver.manifests.clear();
+            resolver.observed.clear();
+        }
+        assert_eq!(
+            scope_identity(current.scope("src/a/deep").unwrap()),
+            scope_identity(uncached_scope(&mut linear, "src/a/deep").unwrap())
+        );
+        assert_eq!(current.observed, linear.observed);
+        assert!(current.observed.contains("src/a/deep/package.json"));
+        assert!(current.observed.contains("src/a/package.json"));
+        assert_eq!(current.probes(), linear.probes());
+        assert_eq!(current.scopes, warmed);
+
+        current.entries.remove("src/a/deep/package.json");
+        current.manifests.clear();
+        current.observed.clear();
+        assert_eq!(
+            current.scope("src/a/deep").err().unwrap().code,
+            "ERR_MODULE_CAPSULE_INPUT_MISSING"
+        );
+        assert_eq!(current.scopes, warmed);
+    }
+
+    #[test]
+    #[ignore = "manual warm-scope comparison; timings depend on the machine and workload"]
+    fn package_scope_manual_comparison() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let root = fixture();
+        put(
+            root.path(),
+            "node_modules/fixture/package.json",
+            br#"{"name":"fixture","type":"commonjs"}"#,
+        );
+        let nested = format!("node_modules/fixture/{}", "nested/".repeat(32));
+        let starts: Vec<_> = (0..8)
+            .map(|index| {
+                let directory = format!("{nested}leaf-{index}");
+                put(
+                    root.path(),
+                    &join(&directory, "entry.js"),
+                    b"module.exports = 42;",
+                );
+                directory
+            })
+            .collect();
+        let mut current = Resolver::new(root.path(), &[], SymlinkPolicy::Reject).unwrap();
+        let mut linear = Resolver::new(root.path(), &[], SymlinkPolicy::Reject).unwrap();
+        for start in &starts {
+            let a = current.scope(start).unwrap().unwrap();
+            let b = uncached_scope(&mut linear, start).unwrap().unwrap();
+            assert_eq!(a.0, b.0);
+            assert_eq!(a.1.maps.input_hash(), b.1.maps.input_hash());
+        }
+        assert_eq!(current.probes(), linear.probes());
+        const QUERIES: usize = 10_000;
+        for round in 0..5 {
+            let measure = |resolver: &mut Resolver, optimized: bool| {
+                let before = Instant::now();
+                for index in 0..QUERIES {
+                    let start = &starts[index % starts.len()];
+                    black_box(if optimized {
+                        resolver.scope(start).unwrap()
+                    } else {
+                        uncached_scope(resolver, start).unwrap()
+                    });
+                }
+                before.elapsed().as_nanos()
+            };
+            let (current_ns, linear_ns) = if round % 2 == 0 {
+                (measure(&mut current, true), measure(&mut linear, false))
+            } else {
+                let linear_ns = measure(&mut linear, false);
+                (measure(&mut current, true), linear_ns)
+            };
+            eprintln!(
+                "scope_round={round} queries={QUERIES} current_ns={current_ns} uncached_ns={linear_ns}"
+            );
+        }
+        assert_eq!(current.probes(), linear.probes());
+    }
+
     #[test]
     fn single_parse_metadata_controls_package_routes_formats_and_frozen_replay() {
         use source_graph::registry::{PinnedModuleRegistry, RequestStyle};
@@ -2109,6 +2397,7 @@ mod tests {
         let mut resolver = Resolver {
             entries: BTreeMap::from([("".into(), Rc::new(Entry::Directory(Some(directory))))]),
             manifests: BTreeMap::new(),
+            scopes: BTreeMap::new(),
             captured: 0,
             conditions: Vec::new(),
             mappings: Vec::new(),
@@ -2149,6 +2438,7 @@ mod tests {
                 Rc::new(Entry::Directory(Some(File::open(root.path()).unwrap()))),
             )]),
             manifests: BTreeMap::new(),
+            scopes: BTreeMap::new(),
             captured: MAX_CAPTURE,
             conditions: Vec::new(),
             mappings: Vec::new(),

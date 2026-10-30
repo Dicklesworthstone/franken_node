@@ -280,6 +280,7 @@ fn recorded_resolver(header: &Header, payload: &[u8]) -> Result<Resolver> {
     Ok(Resolver {
         entries,
         manifests: BTreeMap::new(),
+        scopes: BTreeMap::new(),
         captured,
         conditions,
         mappings: Vec::new(),

@@ -98,6 +98,132 @@ fn mixed_package_graph_preserves_nested_instances_and_import_require_conditions(
 }
 
 #[test]
+fn repeated_deep_package_scopes_match_node_and_replay_exact_captured_evidence() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("project");
+    put(
+        &root,
+        "package.json",
+        r##"{"name":"application","type":"module","exports":{"./self":"./root.cjs"},"imports":{"#local":{"import":"./root.mjs","require":"./root.cjs"}}}"##,
+    );
+    let nested = "src/one/two/three/four/five";
+    put(
+        &root,
+        "app.mjs",
+        &format!(
+            "import './{nested}/first.js'; import './{nested}/second.js'; import './{nested}/bridge.cjs'; import './{nested}/local/entry.js'; import 'unmarked';"
+        ),
+    );
+    for name in ["first.js", "second.js"] {
+        put(
+            &root,
+            &format!("{nested}/{name}"),
+            "import '#local'; import 'application/self'; import 'dual'; throw Error('never execute');",
+        );
+    }
+    put(
+        &root,
+        &format!("{nested}/bridge.cjs"),
+        "require('#local'); require('application/self'); require('dual'); throw Error('never execute');",
+    );
+    put(
+        &root,
+        &format!("{nested}/local/package.json"),
+        r##"{"name":"nested","type":"commonjs","exports":{"./self":"./local.js"},"imports":{"#local":"./local.js"}}"##,
+    );
+    put(
+        &root,
+        &format!("{nested}/local/entry.js"),
+        "require('#local'); require('nested/self'); require('dual'); throw Error('never execute');",
+    );
+    put(
+        &root,
+        &format!("{nested}/local/local.js"),
+        "module.exports = 42;",
+    );
+    put(&root, "root.mjs", "export const value = 1;");
+    put(&root, "root.cjs", "module.exports = 2;");
+    put(
+        &root,
+        "node_modules/dual/package.json",
+        r##"{"type":"module","exports":{"import":"./lib/one/two/value.js","require":"./lib/one/two/value.cjs"},"imports":{"#local":{"import":"./leaf.js","require":"./leaf.cjs"}}}"##,
+    );
+    put(
+        &root,
+        "node_modules/dual/lib/one/two/value.js",
+        "import '#local';",
+    );
+    put(
+        &root,
+        "node_modules/dual/lib/one/two/value.cjs",
+        "require('#local');",
+    );
+    put(
+        &root,
+        "node_modules/dual/leaf.js",
+        "export const value = 3;",
+    );
+    put(&root, "node_modules/dual/leaf.cjs", "module.exports = 4;");
+    put(
+        &root,
+        "node_modules/unmarked/index.js",
+        "require('./lib/deep');",
+    );
+    put(
+        &root,
+        "node_modules/unmarked/lib/deep.js",
+        "module.exports = 5;",
+    );
+    // A dependency without its own package.json must stop at node_modules,
+    // even after repeated application-scope lookups have warmed the cache.
+    put(
+        &root,
+        "node_modules/package.json",
+        "{invalid package boundary}",
+    );
+
+    let (code, captured) = run(&root, "app.mjs", &[]);
+    assert_eq!(code, 0, "{captured}");
+    assert_node_edges(&root, &captured);
+    let graph = &captured["source_graph"];
+    assert_eq!(graph["fully_resolved"], true);
+    assert!(graph["modules"].as_array().unwrap().iter().any(|module| {
+        module["id"]["path"] == "node_modules/unmarked/lib/deep.js"
+            && module["format_hint"] == "javascript_unspecified"
+    }));
+    assert!(
+        !graph["probes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|probe| { probe["path"] == "node_modules/package.json" })
+    );
+    let capsule = temp.path().join("deep-scopes.fnsc");
+    let (code, exported) = export_capsule(&root, "app.mjs", &capsule, &[]);
+    assert_eq!(code, 0, "{exported}");
+    assert_eq!(exported["source_graph"], *graph);
+
+    put(
+        &root,
+        "package.json",
+        r#"{"name":"changed","type":"commonjs"}"#,
+    );
+    assert_ne!(
+        run(&root, "app.mjs", &[]).1["input_hash"],
+        captured["input_hash"]
+    );
+    std::fs::rename(&root, temp.path().join("moved-project")).unwrap();
+    let (code, replayed) = replay_capsule(
+        &capsule,
+        exported["capsule_hash"].as_str().unwrap(),
+        temp.path(),
+    );
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["source_graph"], *graph);
+    assert_eq!(replayed["input_hash"], captured["input_hash"]);
+}
+
+#[test]
 fn incomplete_graph_keeps_good_edges_missing_dependencies_runtime_modules_and_computed_sites() {
     let root = tempfile::tempdir().unwrap();
     put(root.path(), "app.mjs", "import './ok.mjs'; import 'node:fs'; import './absent.mjs'; import(name);");
