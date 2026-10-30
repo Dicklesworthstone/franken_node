@@ -23,6 +23,25 @@ fn config_with_profile(profile: Profile) -> Config {
 }
 
 #[test]
+fn custom_package_conditions_reach_the_engine_for_every_profile() {
+    for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+        let mut config = config_with_profile(profile);
+        assert!(
+            EngineDispatcher::map_config_to_orchestrator_config_for_tests(&config)
+                .module_conditions
+                .is_empty()
+        );
+        config.runtime.module_conditions = vec!["development".into(), "react-server".into()];
+        config.runtime.validate_module_conditions().unwrap();
+        let orchestrator = EngineDispatcher::map_config_to_orchestrator_config_for_tests(&config);
+        assert_eq!(
+            orchestrator.module_conditions,
+            config.runtime.module_conditions
+        );
+    }
+}
+
+#[test]
 fn run_project_authority_stops_marker_search_at_invocation_directory() {
     let dir = tempfile::tempdir().expect("tempdir");
     let invocation = dir.path().join("invocation");

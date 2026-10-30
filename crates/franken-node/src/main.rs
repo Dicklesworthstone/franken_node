@@ -29705,6 +29705,7 @@ fn handle_verify_source_graph(args: &VerifySourceGraphArgs) -> Result<i32> {
                 } else {
                     SymlinkPolicy::Reject
                 },
+                additional_conditions: args.module_conditions.clone(),
                 ..GraphOptions::default()
             },
         )?;
@@ -34565,6 +34566,7 @@ fn main() -> Result<()> {
                 frozen_modules,
                 frozen_module_symlinks,
                 frozen_module_graph_hash,
+                module_conditions,
                 app_args,
             } = args;
 
@@ -34599,6 +34601,12 @@ fn main() -> Result<()> {
             }
             if let Some(hash) = frozen_module_graph_hash {
                 resolved.config.runtime.frozen_module_graph_hash = Some(hash);
+            }
+            if !module_conditions.is_empty() {
+                resolved.config.runtime.module_conditions = module_conditions;
+            }
+            if let Err(error) = resolved.config.runtime.validate_module_conditions() {
+                return named_cli_fail("franken-node/run-error-cli/v1", "run", json, error.into());
             }
             if resolved.config.runtime.frozen_module_symlinks == Some(true)
                 && resolved.config.runtime.frozen_modules != Some(true)

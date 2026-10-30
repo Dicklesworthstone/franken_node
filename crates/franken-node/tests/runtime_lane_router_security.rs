@@ -42,6 +42,7 @@ fn runtime_config() -> RuntimeConfig {
         frozen_modules: None,
         frozen_module_symlinks: None,
         frozen_module_graph_hash: None,
+        module_conditions: Vec::new(),
         environment_allowlist: Default::default(),
         max_instructions: None,
         max_registers: None,

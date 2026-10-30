@@ -151,6 +151,7 @@ pub use engine::{CapturedModuleSources, CapturingProcessSpawnProvider};
 #[cfg(feature = "engine")]
 mod engine {
     use base64::Engine as _;
+    use std::collections::BTreeSet;
     use std::io::Write;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -244,6 +245,20 @@ mod engine {
             }
             let graph = capsule::replay(&bytes, &self.capsule_digest)
                 .map_err(|_| "invalid frozen replay module capsule".to_string())?;
+            let configured_conditions: BTreeSet<_> = settings.module_conditions.iter().collect();
+            let captured_conditions: BTreeSet<_> = graph
+                .report()
+                .options
+                .additional_conditions
+                .iter()
+                .collect();
+            if graph.report().options.conditions.is_some()
+                || configured_conditions != captured_conditions
+            {
+                return Err(
+                    "frozen replay package conditions differ from the captured settings".into(),
+                );
+            }
             let root = package
                 .module_root
                 .as_deref()
@@ -675,6 +690,8 @@ mod engine {
         parse_goal: ParseGoal,
         commonjs_entry: bool,
         parser_options: ParserOptions,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        module_conditions: Vec<String>,
         auto_size_register_window: bool,
         trace_id_prefix: String,
         policy_id: String,
@@ -688,6 +705,8 @@ mod engine {
                         .to_string(),
                 );
             }
+            crate::config::validate_module_condition_names(&config.module_conditions)
+                .map_err(|error| error.to_string())?;
             Ok(Self {
                 loss_matrix_preset: config.loss_matrix_preset,
                 force_lane: config.force_lane,
@@ -698,6 +717,13 @@ mod engine {
                 parse_goal: config.parse_goal,
                 commonjs_entry: config.commonjs_entry,
                 parser_options: config.parser_options.clone(),
+                module_conditions: config
+                    .module_conditions
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
                 auto_size_register_window: config.auto_size_register_window,
                 trace_id_prefix: config.trace_id_prefix.clone(),
                 policy_id: config.policy_id.clone(),
@@ -716,6 +742,7 @@ mod engine {
                 parse_goal: self.parse_goal,
                 commonjs_entry: self.commonjs_entry,
                 parser_options: self.parser_options.clone(),
+                module_conditions: self.module_conditions.clone(),
                 auto_size_register_window: self.auto_size_register_window,
                 trace_id_prefix: self.trace_id_prefix.clone(),
                 policy_id: self.policy_id.clone(),
@@ -915,6 +942,8 @@ mod engine {
 
     impl NativeReplayPayload {
         fn validate(&self) -> Result<(), String> {
+            crate::config::validate_module_condition_names(&self.orchestrator.module_conditions)
+                .map_err(|error| format!("invalid captured package conditions: {error}"))?;
             self.runtime
                 .validate()
                 .map_err(|error| format!("invalid captured runtime settings: {error}"))?;
@@ -1805,6 +1834,32 @@ mod engine {
                 .expect("start native test")
                 .join()
                 .expect("native test completed");
+        }
+
+        #[test]
+        fn captured_orchestrator_restores_custom_package_conditions_without_ambient_selection() {
+            let mut config = OrchestratorConfig::default();
+            let defaults = CapturedOrchestratorSettings::capture(&config).unwrap();
+            let historical = serde_json::to_value(&defaults).unwrap();
+            assert!(historical.get("module_conditions").is_none());
+            let decoded: CapturedOrchestratorSettings = serde_json::from_value(historical).unwrap();
+            assert!(decoded.restore().module_conditions.is_empty());
+
+            config.module_conditions = vec![
+                "react-server".into(),
+                "development".into(),
+                "development".into(),
+            ];
+            let captured = CapturedOrchestratorSettings::capture(&config).unwrap();
+            let decoded: CapturedOrchestratorSettings =
+                serde_json::from_slice(&serde_json::to_vec(&captured).unwrap()).unwrap();
+            assert_eq!(
+                decoded.restore().module_conditions,
+                vec!["development", "react-server"],
+            );
+
+            config.module_conditions = vec![String::new()];
+            assert!(CapturedOrchestratorSettings::capture(&config).is_err());
         }
 
         /// Use the real bounded environment provider with explicit fixture

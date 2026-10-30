@@ -219,6 +219,54 @@ fn frozen_module_symlink_flag_preserves_configuration_unless_explicit() {
 }
 
 #[test]
+fn run_conditions_are_repeatable_and_do_not_consume_guest_arguments() {
+    let Command::Run(defaults) = parse(&["franken-node", "run", "app.mjs"]).unwrap().command else {
+        panic!("expected run command");
+    };
+    assert!(defaults.module_conditions.is_empty());
+    let Command::Run(selected) = parse(&[
+        "franken-node",
+        "run",
+        "app.mjs",
+        "--conditions",
+        "development",
+        "-C",
+        "react-server",
+        "--",
+        "--conditions",
+        "guest-value",
+    ])
+    .unwrap()
+    .command
+    else {
+        panic!("expected run command");
+    };
+    assert_eq!(selected.module_conditions, ["development", "react-server"]);
+    assert_eq!(selected.app_args, ["--conditions", "guest-value"]);
+    let Command::Verify(VerifyCommand::SourceGraph(inspection)) = parse(&[
+        "franken-node",
+        "verify",
+        "source-graph",
+        ".",
+        "app.mjs",
+        "--conditions",
+        "development",
+        "-C",
+        "react-server",
+        "--json",
+    ])
+    .unwrap()
+    .command
+    else {
+        panic!("expected verify command");
+    };
+    assert_eq!(
+        inspection.module_conditions,
+        ["development", "react-server"]
+    );
+}
+
+#[test]
 fn frozen_module_graph_pin_preserves_omission_and_accepts_explicit_cli_selection() {
     let Command::Run(defaults) = parse(&["franken-node", "run", "app.cjs"]).unwrap().command else {
         panic!("expected run command");

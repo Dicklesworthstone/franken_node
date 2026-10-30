@@ -2367,6 +2367,7 @@ convention. The most common:
 | `FRANKEN_NODE_RUNTIME_MAX_CONSOLE_ENTRIES` | `runtime.max_console_entries` | Positive console-entry ceiling on both lanes; overflow fails and the fixed byte ceiling still applies |
 | `FRANKEN_NODE_RUNTIME_MAX_PARSE_SOURCE_BYTES` | `runtime.max_parse_source_bytes` | Source bytes per entry/required/imported JavaScript module (1–2,097,152); replaces the profile default |
 | `FRANKEN_NODE_RUNTIME_MAX_PARSE_TOKENS` | `runtime.max_parse_tokens` | Tokens per entry/required/imported JavaScript module (1–131,072); replaces the profile default |
+| `FRANKEN_NODE_RUNTIME_MODULE_CONDITIONS` | `runtime.module_conditions` | JSON string array, for example `["development","react-server"]`; additional package exports/imports conditions. `[]` clears configured conditions. |
 | `FRANKEN_NODE_ENGINE_BINARY_PATH` | `engine.binary_path` | Override the resolved `franken_engine` binary path |
 | `FRANKEN_NODE_COMPATIBILITY_MODE` | `compatibility.mode` | API compatibility mode |
 | `FRANKEN_NODE_COMPATIBILITY_EMIT_DIVERGENCE_RECEIPTS` | `compatibility.emit_divergence_receipts` | `true`/`false` |
@@ -3979,6 +3980,18 @@ one pass.
   in configuration. Capture rejects links that escape the project, absolute
   targets, and cycles; the default continues to reject module symlinks.
 
+  Select custom package `exports`/`imports` branches with repeatable conditions:
+  `franken-node run app.mjs --conditions development --conditions react-server`
+  (short form `-C`). This works for both ordinary and frozen native loading.
+  Each load retains `node` plus its own `import` or `require` condition; package
+  declaration order still decides which matching branch wins. The equivalent
+  TOML setting is `runtime.module_conditions = ["development", "react-server"]`.
+  Explicit CLI conditions replace the configured list; the environment override
+  accepts a JSON array. At most 62 nonempty names of 128 bytes each are admitted,
+  with control characters rejected. Conditions select code without granting
+  additional capabilities. Frozen captures and offline replay retain the
+  condition set, so changing it changes the source-graph commitment.
+
   Source builds also accept an independently retained source-graph pin:
   `run app.cjs --frozen-modules --frozen-module-graph-hash "$REVIEWED_SOURCE_GRAPH_HASH"`.
   The equivalent configuration is `runtime.frozen_module_graph_hash = "sha256:..."`
@@ -4009,6 +4022,10 @@ one pass.
   If inspection needs `--allow-contained-symlinks`, execution also needs
   `--frozen-module-symlinks`. The development `franken-module-graph` tool exposes
   the same capture through `--capture-source-graph`.
+  Pass the same repeatable `--conditions` values to `verify source-graph` and
+  `run` when reviewing a custom-condition graph. The development inspection
+  tool calls this additive option `--additional-condition`; its existing
+  `--condition` option continues to replace the complete condition set.
   Keep that approval outside
   guest-writable source; a configured pin needs an operator-controlled TOML file.
   The native worker checks the pin before preparing or

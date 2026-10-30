@@ -361,6 +361,13 @@ pub struct RunArgs {
     #[arg(long, value_name = "SHA256")]
     pub frozen_module_graph_hash: Option<String>,
 
+    /// Add a package exports/imports condition (repeatable). Normal node and
+    /// import/require conditions remain active. When supplied, these values
+    /// replace runtime.module_conditions from configuration or the environment.
+    /// Applies to ordinary and frozen native module loading.
+    #[arg(long = "conditions", short = 'C')]
+    pub module_conditions: Vec<String>,
+
     /// Arguments for the program itself, after `--`
     /// (`franken-node run app.js -- a b`). They become `process.argv[2..]`
     /// where the policy lets the program read `process.argv` (bd-my9hk).
@@ -1191,6 +1198,11 @@ pub struct VerifySourceGraphArgs {
     /// Absolute links, escaping paths and cycles remain rejected.
     #[arg(long)]
     pub allow_contained_symlinks: bool,
+
+    /// Additional package conditions, matching run --conditions. Repeat for
+    /// multiple conditions; each load retains its own import/require defaults.
+    #[arg(long = "conditions", short = 'C')]
+    pub module_conditions: Vec<String>,
 
     /// Emit the existing franken-node/module-source-graph/v2 report.
     /// Contains module metadata and commitments, not source bodies.

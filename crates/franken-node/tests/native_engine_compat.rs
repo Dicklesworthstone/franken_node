@@ -2311,6 +2311,75 @@ fn test_dispatcher_creation_and_fixture_configuration() {
 
 #[test]
 #[cfg(all(feature = "engine", unix))]
+fn native_and_frozen_commonjs_choose_the_same_node_resolution_targets() {
+    // Node's LOAD_AS_FILE/LOAD_INDEX infer .js, .json and .node; .cjs and
+    // .mjs are valid explicit paths, never higher-priority implicit choices.
+    // The ordinary engine and the captured resolver must execute the same
+    // source when both spellings exist in a real installed project.
+    let workspace = TempDir::new().unwrap();
+    let root = workspace.path();
+    std::fs::create_dir_all(root.join("directory")).unwrap();
+    std::fs::create_dir_all(root.join("node_modules/declared-main")).unwrap();
+    for (path, source) in [
+        ("value.js", "module.exports = 'js';"),
+        ("value.cjs", "module.exports = 'wrong implicit cjs';"),
+        ("directory/index.js", "module.exports = 'index-js';"),
+        ("directory/index.cjs", "module.exports = 'wrong index cjs';"),
+        ("data.json", "{\"answer\":42}"),
+        ("explicit.cjs", "module.exports = 'explicit-cjs';"),
+        ("cjs-only.cjs", "module.exports = 'wrong inferred cjs';"),
+        (
+            "node_modules/declared-main/package.json",
+            r#"{"name":"declared-main","main":"./entry.cjs"}"#,
+        ),
+        (
+            "node_modules/declared-main/entry.cjs",
+            "module.exports = 'declared-main';",
+        ),
+    ] {
+        std::fs::write(root.join(path), source).unwrap();
+    }
+    let app = create_test_app(
+        root,
+        "app.cjs",
+        r#"
+console.log(require('./value'));
+console.log(require('./directory'));
+console.log(require('./data').answer);
+console.log(require('./explicit.cjs'));
+console.log(require('declared-main'));
+try { console.log(require('./cjs-only')); }
+catch (error) { console.log(error.code); }
+"#,
+    );
+    let expected = "js\nindex-js\n42\nexplicit-cjs\ndeclared-main\nMODULE_NOT_FOUND\n";
+    for frozen in [false, true] {
+        let mut config = balanced_config();
+        config.runtime.frozen_modules = Some(frozen);
+        let output = invoke_product_supervisor(
+            &app,
+            &config,
+            "balanced",
+            Path::new(franken_node_bin()),
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "frozen={frozen}: stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
+        let dispatch = parse_product_dispatch(&output).unwrap();
+        assert_eq!(dispatch.captured_output.stdout, expected, "frozen={frozen}");
+        assert_eq!(
+            dispatch.engine_decision.unwrap().frozen_modules.is_some(),
+            frozen
+        );
+    }
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
 fn frozen_module_cli_runs_large_npm_source_with_configured_parser_limits() {
     let workspace = TempDir::new().expect("frozen module workspace");
     let package_dir = workspace.path().join("node_modules/frozen-fixture");
@@ -3596,4 +3665,143 @@ fn full_project_compatibility_corpus() {
     assert_eq!(report["passing_cases"], 170);
     assert_eq!(report["failing_cases"], 0);
     assert_eq!(report["inconclusive_cases"], 0);
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn native_custom_conditions_select_the_same_cjs_esm_branches_with_and_without_frozen_modules() {
+    for (entry, source, style) in [
+        ("app.cjs", "console.log(require('conditioned'));", "cjs"),
+        (
+            "app.mjs",
+            "import value from 'conditioned'; console.log(value);",
+            "esm",
+        ),
+    ] {
+        let workspace = TempDir::new().unwrap();
+        let package = workspace.path().join("node_modules/conditioned");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("package.json"),
+            r#"{"exports":{"fallback":{"import":"./fallback.mjs","require":"./fallback.cjs"},"development":{"import":"./dev.mjs","require":"./dev.cjs"},"import":"./default.mjs","require":"./default.cjs"}}"#,
+        ).unwrap();
+        for branch in ["fallback", "dev", "default"] {
+            std::fs::write(
+                package.join(format!("{branch}.cjs")),
+                format!("module.exports='{branch}-cjs';"),
+            )
+            .unwrap();
+            std::fs::write(
+                package.join(format!("{branch}.mjs")),
+                format!("export default '{branch}-esm';"),
+            )
+            .unwrap();
+        }
+        let app = create_test_app(workspace.path(), entry, source);
+        for frozen in [false, true] {
+            let mut config = balanced_config();
+            config.runtime.frozen_modules = frozen.then_some(true);
+            config.runtime.module_conditions = vec!["fallback".into()];
+            let configured =
+                invoke_product_supervisor(&app, &config, "balanced", Path::new(franken_node_bin()))
+                    .unwrap();
+            assert!(
+                configured.status.success(),
+                "{entry} frozen={frozen}: {} {}",
+                configured.stdout,
+                configured.stderr
+            );
+            assert_eq!(
+                parse_product_dispatch(&configured)
+                    .unwrap()
+                    .captured_output
+                    .stdout,
+                format!("fallback-{style}\n")
+            );
+
+            // fallback precedes development in package.json. If CLI values
+            // were appended instead of replacing configuration, this would
+            // select fallback even though development was explicitly requested.
+            let selected = invoke_product_supervisor_with_options(
+                &app,
+                &config,
+                "balanced",
+                Path::new(franken_node_bin()),
+                &["--conditions", "development", "-C", "unused"],
+            )
+            .unwrap();
+            assert!(
+                selected.status.success(),
+                "{entry} frozen={frozen}: {} {}",
+                selected.stdout,
+                selected.stderr
+            );
+            assert_eq!(
+                parse_product_dispatch(&selected)
+                    .unwrap()
+                    .captured_output
+                    .stdout,
+                format!("dev-{style}\n")
+            );
+        }
+    }
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn frozen_custom_conditions_replay_the_captured_branch_after_package_replacement() {
+    let workspace = TempDir::new().unwrap();
+    let package = workspace.path().join("node_modules/conditioned");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.json"),
+        r#"{"exports":{"development":"./dev.cjs","default":"./prod.cjs"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("dev.cjs"),
+        "module.exports='development-capture';",
+    )
+    .unwrap();
+    std::fs::write(package.join("prod.cjs"), "module.exports='wrong-branch';").unwrap();
+    let app = create_test_app(
+        workspace.path(),
+        "app.cjs",
+        "console.log(require('conditioned'));",
+    );
+    let mut config = balanced_config();
+    config.runtime.frozen_modules = Some(true);
+    config.runtime.module_conditions = vec!["development".into()];
+    let output = invoke_product_supervisor_with_options(
+        &app,
+        &config,
+        "balanced",
+        Path::new(franken_node_bin()),
+        &["--capture-replay"],
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{} {}",
+        output.stdout,
+        output.stderr
+    );
+    let report = parse_product_dispatch(&output).unwrap();
+    assert_eq!(report.captured_output.stdout, "development-capture\n");
+    let capture = report
+        .native_replay
+        .expect("native custom-condition source capture");
+    let payload: serde_json::Value = serde_json::from_str(&capture.payload_json).unwrap();
+    assert_eq!(
+        payload["orchestrator"]["module_conditions"],
+        serde_json::json!(["development"])
+    );
+    std::fs::rename(&package, workspace.path().join("original-package")).unwrap();
+    std::fs::write(&app, "throw Error('live entry must not execute');").unwrap();
+    let replay = frankenengine_node::ops::native_replay::reexecute(&capture).unwrap();
+    assert!(
+        replay.matched && replay.console_match && replay.host_effects_match,
+        "{replay:?}"
+    );
+    assert!(!replay.module_load_disabled);
 }

@@ -283,6 +283,32 @@ struct NativeSessionRequest {
     /// it must never silently ignore a requested frozen module graph.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     frozen_modules: Option<bool>,
+    /// Keep nondefault package selection visible to older workers, whose
+    /// nested runtime configuration may otherwise ignore an unknown field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    module_conditions: Vec<String>,
+}
+
+#[cfg(feature = "engine")]
+impl NativeSessionRequest {
+    fn validate_module_requirements(&self) -> Result<()> {
+        if self.frozen_modules
+            != self
+                .config
+                .runtime
+                .frozen_modules
+                .filter(|enabled| *enabled)
+        {
+            anyhow::bail!(
+                "native-session frozen module requirement does not match its configuration"
+            );
+        }
+        if self.module_conditions != self.config.runtime.module_conditions {
+            anyhow::bail!("native-session package conditions do not match their configuration");
+        }
+        validate_native_frozen_modules(&self.config)?;
+        Ok(())
+    }
 }
 
 #[cfg(all(feature = "engine", target_os = "linux"))]
@@ -5498,6 +5524,15 @@ fn run_exit_status(containment_exit_code: i32, program_exit_code: Option<i32>) -
 fn validate_native_frozen_modules(config: &Config) -> Result<(), ActionableError> {
     config
         .runtime
+        .validate_module_conditions()
+        .map_err(|error| {
+            ActionableError::new(
+                error.to_string(),
+                "Supply bounded, nonempty --conditions or runtime.module_conditions values",
+            )
+        })?;
+    config
+        .runtime
         .validate_frozen_module_graph_hash()
         .map_err(|error| {
             ActionableError::new(
@@ -5542,9 +5577,8 @@ struct FrozenNativeModules {
 #[cfg(feature = "engine")]
 fn prepare_native_frozen_modules(
     project_paths: &RunProjectPaths,
-    parser_options: &frankenengine_engine::parser::ParserOptions,
+    orchestrator_config: &OrchestratorConfig,
     capabilities: &[String],
-    policy_id: &str,
     contained_symlinks: bool,
     capture_replay: bool,
     expected_graph_hash: Option<&str>,
@@ -5553,9 +5587,8 @@ fn prepare_native_frozen_modules(
     {
         let _ = (
             project_paths,
-            parser_options,
+            orchestrator_config,
             capabilities,
-            policy_id,
             contained_symlinks,
             capture_replay,
             expected_graph_hash,
@@ -5586,6 +5619,7 @@ fn prepare_native_frozen_modules(
             } else {
                 SymlinkPolicy::Reject
             },
+            additional_conditions: orchestrator_config.module_conditions.clone(),
             ..GraphOptions::default()
         };
         let graph = capture(root, entrypoint, options)
@@ -5604,8 +5638,12 @@ fn prepare_native_frozen_modules(
             .unwrap_or(&graph.report().input_hash)
             .to_owned();
         let resolver = Arc::new(
-            CapturedEngineResolver::new_with_parser_options(graph, &pin, parser_options.clone())
-                .map_err(|error| format!("Frozen module source admission failed: {error}"))?,
+            CapturedEngineResolver::new_with_parser_options(
+                graph,
+                &pin,
+                orchestrator_config.parser_options.clone(),
+            )
+            .map_err(|error| format!("Frozen module source admission failed: {error}"))?,
         );
         let policy = Arc::new(CapabilityPolicyHook::new(
             capabilities
@@ -5619,7 +5657,7 @@ fn prepare_native_frozen_modules(
                 &ResolutionContext::new(
                     "native-module-admission",
                     "native-module-admission",
-                    policy_id,
+                    &orchestrator_config.policy_id,
                 ),
                 policy.as_ref(),
             )
@@ -7062,12 +7100,7 @@ impl EngineDispatcher {
         request.trust_requirements.validate()?;
         request.config.runtime.validate_execution_budget()?;
         request.config.runtime.validate_parse_budget()?;
-        if request.frozen_modules
-            != request.config.runtime.frozen_modules.filter(|enabled| *enabled)
-        {
-            anyhow::bail!("native-session frozen module requirement does not match its configuration");
-        }
-        validate_native_frozen_modules(&request.config)?;
+        request.validate_module_requirements()?;
         if !crate::security::constant_time::ct_eq(
             &request.runtime_evidence_grant.capture.session_nonce,
             &request.nonce,
@@ -7929,6 +7962,7 @@ impl EngineDispatcher {
             app_args: app_args.to_vec(),
             capture_replay,
             frozen_modules: config.runtime.frozen_modules.filter(|enabled| *enabled),
+            module_conditions: config.runtime.module_conditions.clone(),
         };
         let request_frame = Zeroizing::new(
             encode_native_session_frame(&request, NATIVE_SESSION_MAX_REQUEST_BYTES).map_err(
@@ -9417,6 +9451,7 @@ impl EngineDispatcher {
             parse_goal: ParseGoal::Script, // Default to script parsing (most common)
             commonjs_entry: false, // Set per entrypoint by map_config_to_orchestrator_config_for_entrypoint
             parser_options,
+            module_conditions: config.runtime.module_conditions.clone(),
             // Preserve the operator's configured register ceilings. The engine
             // also offers automatic widening, which is not a product override.
             auto_size_register_window: false,
@@ -9635,9 +9670,8 @@ impl EngineDispatcher {
             Some(
                 prepare_native_frozen_modules(
                     &project_paths,
-                    &orchestrator_config.parser_options,
+                    &orchestrator_config,
                     &capabilities,
-                    &orchestrator_config.policy_id,
                     config.runtime.frozen_module_symlinks == Some(true),
                     capture_replay,
                     config.runtime.frozen_module_graph_hash.as_deref(),
@@ -19226,6 +19260,7 @@ mod tests {
             app_args: vec!["alpha".to_string()],
             capture_replay: true,
             frozen_modules: None,
+            module_conditions: Vec::new(),
         };
         let frame = encode_native_session_frame(&request, NATIVE_SESSION_MAX_REQUEST_BYTES)
             .expect("encode request frame");
@@ -19241,10 +19276,18 @@ mod tests {
         assert_eq!(decoded.app_args, request.app_args);
         assert!(decoded.capture_replay);
         assert_eq!(decoded.frozen_modules, None);
+        assert!(decoded.module_conditions.is_empty());
+        decoded.validate_module_requirements().unwrap();
         assert!(
             serde_json::to_value(&request)
                 .unwrap()
                 .get("frozen_modules")
+                .is_none()
+        );
+        assert!(
+            serde_json::to_value(&request)
+                .unwrap()
+                .get("module_conditions")
                 .is_none()
         );
         assert_eq!(
@@ -19263,6 +19306,52 @@ mod tests {
             format!("{request:?}").contains("[REDACTED]"),
             "native-session request debug output must redact its signing seed"
         );
+
+        let mut changed = serde_json::to_value(&request).unwrap();
+        changed["config"]["runtime"]["module_conditions"] = serde_json::json!(["development"]);
+        for sentinel in [None, Some(serde_json::json!(["production"]))] {
+            if let Some(sentinel) = sentinel {
+                changed["module_conditions"] = sentinel;
+            } else {
+                changed.as_object_mut().unwrap().remove("module_conditions");
+            }
+            let mismatched_frame =
+                encode_native_session_frame(&changed, NATIVE_SESSION_MAX_REQUEST_BYTES).unwrap();
+            let mismatched: NativeSessionRequest = decode_native_session_frame(
+                &mismatched_frame,
+                NATIVE_SESSION_MAX_REQUEST_BYTES,
+                false,
+            )
+            .unwrap();
+            assert!(
+                mismatched
+                    .validate_module_requirements()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("package conditions do not match")
+            );
+        }
+        changed["module_conditions"] = serde_json::json!(["development"]);
+        let selected_frame =
+            encode_native_session_frame(&changed, NATIVE_SESSION_MAX_REQUEST_BYTES).unwrap();
+        let selected: NativeSessionRequest =
+            decode_native_session_frame(&selected_frame, NATIVE_SESSION_MAX_REQUEST_BYTES, false)
+                .unwrap();
+        selected.validate_module_requirements().unwrap();
+        assert_eq!(selected.module_conditions, ["development"]);
+
+        // Top-level protocol additions are refused before execution rather
+        // than ignored, including by workers predating module_conditions.
+        changed["unknown_module_requirement"] = serde_json::json!(true);
+        let unknown_frame =
+            encode_native_session_frame(&changed, NATIVE_SESSION_MAX_REQUEST_BYTES).unwrap();
+        let unknown_error = decode_native_session_frame::<NativeSessionRequest>(
+            &unknown_frame,
+            NATIVE_SESSION_MAX_REQUEST_BYTES,
+            false,
+        )
+        .unwrap_err();
+        assert!(unknown_error.contains("unknown field"));
 
         let mut corrupted = frame.clone();
         let last = corrupted.last_mut().expect("frame has payload");

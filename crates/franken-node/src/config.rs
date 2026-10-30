@@ -1453,6 +1453,18 @@ impl Config {
                     MAX_MERGE_DECISIONS,
                 );
             }
+            if let Some(value) = &section.module_conditions {
+                self.runtime.module_conditions.clone_from(value);
+                push_bounded(
+                    decisions,
+                    MergeDecision::new(
+                        stage.clone(),
+                        "runtime.module_conditions",
+                        serde_json::to_string(value).expect("condition strings serialize"),
+                    ),
+                    MAX_MERGE_DECISIONS,
+                );
+            }
             if let Some(value) = &section.environment_allowlist {
                 self.runtime.environment_allowlist.clone_from(value);
                 push_bounded(
@@ -2141,6 +2153,20 @@ impl Config {
                 MAX_MERGE_DECISIONS,
             );
         }
+        if let Some(raw) = env_lookup("FRANKEN_NODE_RUNTIME_MODULE_CONDITIONS") {
+            let parsed: Vec<String> =
+                serde_json::from_str(&raw).map_err(|_| ConfigError::EnvParseFailed {
+                    key: "FRANKEN_NODE_RUNTIME_MODULE_CONDITIONS".to_string(),
+                    value: raw.clone(),
+                    reason: "expected a JSON array of package condition strings".to_string(),
+                })?;
+            self.runtime.module_conditions = parsed;
+            push_bounded(
+                decisions,
+                MergeDecision::new(MergeStage::Env, "runtime.module_conditions", raw),
+                MAX_MERGE_DECISIONS,
+            );
+        }
         if let Some(raw) = env_lookup("FRANKEN_NODE_RUNTIME_MAX_INSTRUCTIONS") {
             let parsed = parse_env_u64("FRANKEN_NODE_RUNTIME_MAX_INSTRUCTIONS", &raw)?;
             self.runtime.max_instructions = Some(parsed);
@@ -2413,6 +2439,7 @@ impl Config {
         self.runtime.validate_parse_budget()?;
         self.runtime.validate_environment_allowlist()?;
         self.runtime.validate_frozen_module_graph_hash()?;
+        self.runtime.validate_module_conditions()?;
         validate_opt_score(
             "migration.verification_threshold",
             self.migration.verification_threshold,
@@ -3335,6 +3362,7 @@ struct RuntimeOverrides {
     pub frozen_modules: Option<bool>,
     pub frozen_module_symlinks: Option<bool>,
     pub frozen_module_graph_hash: Option<String>,
+    pub module_conditions: Option<Vec<String>>,
     pub environment_allowlist: Option<BTreeSet<String>>,
     pub max_instructions: Option<u64>,
     pub max_registers: Option<u32>,
@@ -4110,6 +4138,12 @@ pub struct RuntimeConfig {
     /// value; it grants no capabilities and is not publisher provenance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frozen_module_graph_hash: Option<String>,
+    /// Additional package exports/imports conditions for native module loading.
+    /// Each request keeps its normal node+import or node+require conditions.
+    /// Package document order still determines branch precedence. These names
+    /// select source only; they grant no filesystem or runtime capabilities.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub module_conditions: Vec<String>,
     /// Exact host environment variable names that native `run` may expose
     /// through named `process.env.NAME` / `process.env["NAME"]` reads.
     /// Values are snapshotted once inside the authenticated worker, never
@@ -4174,7 +4208,28 @@ pub struct RuntimeParseBudget {
     pub max_recursion_depth: u64,
 }
 
+pub(crate) fn validate_module_condition_names(conditions: &[String]) -> Result<(), ConfigError> {
+    if conditions.len() > 62
+        || conditions.iter().any(|condition| {
+            condition.is_empty() || condition.len() > 128 || condition.chars().any(char::is_control)
+        })
+    {
+        return Err(ConfigError::ValidationFailed(
+            "runtime.module_conditions (FRANKEN_NODE_RUNTIME_MODULE_CONDITIONS) requires at most 62 nonempty strings of at most 128 bytes without control characters"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 impl RuntimeConfig {
+    /// Validate the shared product/engine envelope for additive conditions.
+    /// Reserve two slots for the request's built-in node and import/require
+    /// conditions. Names are exact and never trimmed or silently discarded.
+    pub fn validate_module_conditions(&self) -> Result<(), ConfigError> {
+        validate_module_condition_names(&self.module_conditions)
+    }
+
     /// Validate before capture, including for directly constructed library configs.
     /// Enabling frozen execution is checked after CLI overrides are applied.
     pub fn validate_frozen_module_graph_hash(&self) -> Result<(), ConfigError> {
@@ -4397,6 +4452,7 @@ impl RuntimeConfig {
             frozen_modules: None,
             frozen_module_symlinks: None,
             frozen_module_graph_hash: None,
+            module_conditions: Vec::new(),
             environment_allowlist: BTreeSet::new(),
             max_instructions: None,
             max_registers: None,
@@ -4437,6 +4493,7 @@ impl RuntimeConfig {
             frozen_modules: None,
             frozen_module_symlinks: None,
             frozen_module_graph_hash: None,
+            module_conditions: Vec::new(),
             environment_allowlist: BTreeSet::new(),
             max_instructions: None,
             max_registers: None,
@@ -4477,6 +4534,7 @@ impl RuntimeConfig {
             frozen_modules: None,
             frozen_module_symlinks: None,
             frozen_module_graph_hash: None,
+            module_conditions: Vec::new(),
             environment_allowlist: BTreeSet::new(),
             max_instructions: None,
             max_registers: None,
@@ -6654,6 +6712,82 @@ registry_signing_key = "x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c="
                 assert_eq!(decoded.allow_process_shape, Some(allowed));
                 assert_eq!(decoded.allows_process_shape(profile), allowed);
             }
+        }
+    }
+
+    #[test]
+    fn module_conditions_preserve_defaults_and_config_profile_environment_precedence() {
+        for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+            let runtime = Config::for_profile(profile).runtime;
+            assert!(runtime.module_conditions.is_empty());
+            let encoded = serde_json::to_value(&runtime).unwrap();
+            assert!(encoded.get("module_conditions").is_none());
+            let decoded: RuntimeConfig = serde_json::from_value(encoded).unwrap();
+            assert!(decoded.module_conditions.is_empty());
+        }
+        let (_dir, path) = security_baseline_file();
+        let baseline = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "{baseline}\n[runtime]\nmodule_conditions = ['base']\n\
+                 [profiles.balanced.runtime]\nmodule_conditions = ['development']\n"
+            ),
+        )
+        .unwrap();
+        let profile =
+            Config::resolve_with_env(Some(&path), CliOverrides::default(), &|_| None).unwrap();
+        assert_eq!(profile.config.runtime.module_conditions, ["development"]);
+        for (raw, expected) in [
+            (
+                r#"["react-server","custom,condition"]"#,
+                vec!["react-server", "custom,condition"],
+            ),
+            ("[]", Vec::new()),
+        ] {
+            let resolved = Config::resolve_with_env(Some(&path), CliOverrides::default(), &|key| {
+                (key == "FRANKEN_NODE_RUNTIME_MODULE_CONDITIONS").then(|| raw.into())
+            })
+            .unwrap();
+            assert_eq!(resolved.config.runtime.module_conditions, expected);
+            assert!(resolved.decisions.iter().any(|decision| {
+                decision.field == "runtime.module_conditions" && decision.stage == MergeStage::Env
+            }));
+            let worker: Config =
+                serde_json::from_slice(&serde_json::to_vec(&resolved.config).unwrap()).unwrap();
+            assert_eq!(worker.runtime.module_conditions, expected);
+        }
+    }
+
+    #[test]
+    fn module_conditions_refuse_invalid_names_and_unbounded_input() {
+        let mut runtime = RuntimeConfig::balanced_defaults();
+        for names in [
+            vec![String::new()],
+            vec!["bad\ncondition".into()],
+            vec!["x".repeat(129)],
+            vec!["condition".into(); 63],
+        ] {
+            runtime.module_conditions = names;
+            let error = runtime
+                .validate_module_conditions()
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("runtime.module_conditions"));
+        }
+        runtime.module_conditions = vec!["x".repeat(128); 62];
+        runtime.validate_module_conditions().unwrap();
+        let (_dir, path) = security_baseline_file();
+        for raw in [
+            "development",
+            r#"{"condition":"development"}"#,
+            "[1]",
+            r#"[""]"#,
+        ] {
+            let resolved = Config::resolve_with_env(Some(&path), CliOverrides::default(), &|key| {
+                (key == "FRANKEN_NODE_RUNTIME_MODULE_CONDITIONS").then(|| raw.into())
+            });
+            assert!(resolved.is_err(), "{raw}");
         }
     }
 
