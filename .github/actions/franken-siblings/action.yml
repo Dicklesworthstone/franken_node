@@ -27,7 +27,7 @@ runs:
         set -euo pipefail
         bash "$GITHUB_WORKSPACE/scripts/bootstrap_source.sh" \
           --workspace "$GITHUB_WORKSPACE" \
-          --engine-ref cbd6203b1d40e99cd47d11849b64723edba53123 \
+          --engine-ref f658c30622bd21e19d2137676a724360f604851f \
           --receipt "$RUNNER_TEMP/sibling-revisions.txt"
         cat "$RUNNER_TEMP/sibling-revisions.txt"
     - name: Retain pinned source inputs in native workflow logs

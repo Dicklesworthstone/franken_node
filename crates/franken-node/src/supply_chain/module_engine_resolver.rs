@@ -1027,6 +1027,144 @@ mod tests {
     }
 
     #[test]
+    fn captured_http_providers_preserve_descriptors_routes_and_offline_replay() {
+        for (entrypoint, style, source) in [
+            (
+                "app.cjs",
+                ImportStyle::Require,
+                "require('http'); require('node:http'); \
+                 require('https'); require('node:https');",
+            ),
+            (
+                "app.mjs",
+                ImportStyle::Import,
+                "import 'http'; import 'node:http'; import '#transport'; \
+                 import 'https'; import 'node:https'; import '#secure';",
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            put(
+                root.path(),
+                "package.json",
+                r##"{"imports":{"#transport":"http","#secure":"https"}}"##,
+            );
+            put(root.path(), entrypoint, source);
+            for name in ["http", "https"] {
+                put(
+                    root.path(),
+                    &format!("node_modules/{name}/index.js"),
+                    "throw new Error('a package must not shadow the native provider');",
+                );
+            }
+            let graph = capture(root.path(), entrypoint, GraphOptions::default()).unwrap();
+            let pin = graph.report().input_hash.clone();
+            let encoded = capsule::encode(&graph).unwrap();
+            let live = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
+            put(
+                root.path(),
+                entrypoint,
+                "throw new Error('live entry was reopened');",
+            );
+            put(
+                root.path(),
+                "package.json",
+                r##"{"imports":{"#transport":"worker_threads","#secure":"worker_threads"}}"##,
+            );
+            let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+            let restored = CapturedEngineResolver::new(replayed, &pin).ok().unwrap();
+            let policy = CapabilityPolicyHook::new(BTreeSet::from([
+                RuntimeCapability::ModuleLoad,
+                RuntimeCapability::Builtin,
+            ]));
+            assert_eq!(live.summary().modules, 3);
+            assert_eq!(
+                live.resolve_chain(&live.entry_request(), &context(), &policy)
+                    .unwrap(),
+                restored
+                    .resolve_chain(&restored.entry_request(), &context(), &policy)
+                    .unwrap()
+            );
+            let entry = restored
+                .resolve(&restored.entry_request(), &context(), &policy)
+                .unwrap();
+            let request = |specifier: &str, request_style| {
+                ModuleRequest::new(specifier, request_style)
+                    .with_referrer(entry.module.record.id.clone())
+                    .with_compatibility_mode(CompatibilityMode::NodeCompat)
+            };
+            let mut provider_ids = BTreeSet::new();
+            for (bare, mapped, native) in [
+                ("http", "#transport", NativeBuiltinModule::Http),
+                ("https", "#secure", NativeBuiltinModule::Https),
+            ] {
+                let delivered = restored
+                    .resolve_shared(&request(bare, style), &context(), &policy)
+                    .unwrap();
+                provider_ids.insert(delivered.module.record.id.clone());
+                assert_eq!(
+                    NativeBuiltinModule::from_record(delivered.module.record.record()),
+                    Some(native)
+                );
+                assert_eq!(
+                    delivered.module.content_hash,
+                    delivered.module.record.canonical_hash()
+                );
+                assert_eq!(
+                    delivered.module.record.required_capabilities,
+                    BTreeSet::from([RuntimeCapability::ModuleLoad, RuntimeCapability::Builtin])
+                );
+                assert!(delivered.module.record.source.is_empty());
+                assert!(delivered.module.record.dependencies.is_empty());
+                let mut aliases = vec![format!("node:{bare}")];
+                if style == ImportStyle::Import {
+                    aliases.push(mapped.to_string());
+                }
+                for alias in aliases {
+                    let loaded = restored
+                        .resolve_shared(&request(&alias, style), &context(), &policy)
+                        .unwrap();
+                    assert!(Arc::ptr_eq(&delivered.module.record, &loaded.module.record));
+                    assert_eq!(loaded.module.request_specifier, alias);
+                    assert_eq!(loaded.module.content_hash, delivered.module.content_hash);
+                    // Reusing a native descriptor does not cache its authority.
+                    assert_eq!(
+                        restored
+                            .resolve_shared(&request(&alias, style), &context(), &granted())
+                            .unwrap_err()
+                            .code,
+                        ResolutionErrorCode::PolicyDenied
+                    );
+                }
+                let other_style = match style {
+                    ImportStyle::Import => ImportStyle::Require,
+                    ImportStyle::Require => ImportStyle::Import,
+                };
+                assert_eq!(
+                    restored
+                        .resolve_shared(&request(bare, other_style), &context(), &policy)
+                        .unwrap_err()
+                        .code,
+                    ResolutionErrorCode::UnsupportedSpecifier
+                );
+            }
+            assert_eq!(
+                provider_ids.len(),
+                2,
+                "HTTP and HTTPS keep distinct providers"
+            );
+            for uncaptured in ["fs", "node:fs", "net", "node:tls"] {
+                assert_eq!(
+                    restored
+                        .resolve_shared(&request(uncaptured, style), &context(), &policy)
+                        .unwrap_err()
+                        .code,
+                    ResolutionErrorCode::UnsupportedSpecifier
+                );
+            }
+        }
+    }
+
+    #[test]
     fn unsupported_builtin_providers_and_indirect_loaders_remain_refused() {
         for (file, source) in [
             ("app.cjs", "require('worker_threads');"),
@@ -1039,10 +1177,14 @@ mod tests {
             ("app.mjs", "let name='buffer'; import(name);"),
             ("app.mjs", "let name = 'node:path'; import(name);"),
             ("app.mjs", "import '#path';"),
-            ("app.mjs", "import '#http';"),
+            ("app.mjs", "import '#workers';"),
         ] {
             let root = tempfile::tempdir().unwrap();
-            put(root.path(), "package.json", r##"{"imports":{"#builtin":"buffer","#path":"node:path","#http":"http"}}"##);
+            put(
+                root.path(),
+                "package.json",
+                r##"{"imports":{"#builtin":"buffer","#path":"node:path","#workers":"worker_threads"}}"##,
+            );
             put(root.path(), file, source);
             let graph = capture(root.path(), file, GraphOptions::default()).unwrap();
             let pin = graph.report().input_hash.clone();
@@ -3581,6 +3723,159 @@ import('node:zlib').then(function(again) {{
                     reference.lines().collect::<Vec<_>>(),
                     "{entrypoint} through {lane:?}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn captured_http_packages_share_native_objects_after_live_source_changes() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            for (entrypoint, imports) in [
+                (
+                    "app.cjs",
+                    "const http = require('http'); const https = require('node:https'); \
+                     const request = http.request; const secureRequest = https.request; \
+                     const kit = require('http-kit');",
+                ),
+                (
+                    "app.mjs",
+                    "import http, { request } from '#transport'; \
+                     import https, { request as secureRequest } from 'node:https'; \
+                     import kit from 'http-kit';",
+                ),
+            ] {
+                let root = tempfile::tempdir().unwrap();
+                put(
+                    root.path(),
+                    "package.json",
+                    r##"{"imports":{"#transport":"http"}}"##,
+                );
+                put(
+                    root.path(),
+                    "node_modules/http-kit/package.json",
+                    r#"{"name":"http-kit","main":"index.cjs"}"#,
+                );
+                put(
+                    root.path(),
+                    "node_modules/http-kit/index.cjs",
+                    r#"
+const http = require('node:http');
+const https = require('https');
+module.exports = {
+    http: http,
+    https: https,
+    originalRequest: http.request,
+    callHttp: function() { return http.request(); },
+    callSecure: function() { return https.get(); }
+};
+"#,
+                );
+                put(
+                    root.path(),
+                    entrypoint,
+                    &format!(
+                        r#"{imports}
+console.log(http === kit.http, https === kit.https, http !== https, request === kit.originalRequest);
+const plain = new http.Agent();
+const secure = new https.Agent();
+console.log(plain instanceof http.Agent, secure instanceof https.Agent, secure instanceof http.Agent,
+    plain.protocol, plain.defaultPort, secure.protocol, secure.defaultPort);
+console.log(request.name, request.length, secureRequest.name, secureRequest.length,
+    http.STATUS_CODES[200], http.METHODS.includes('POST'));
+http.request = function() {{ return 'changed'; }};
+https.get = function() {{ return 'secure-changed'; }};
+console.log(kit.callHttp(), kit.callSecure(), request === kit.originalRequest);
+import('node:https').then(function(again) {{ console.log(again.default === https); }});
+"#
+                    ),
+                );
+                let reference = node_reference_output(root.path(), entrypoint);
+                assert_eq!(
+                    reference,
+                    "true true true true\ntrue true true http: 80 https: 443\nrequest 3 request 0 OK true\nchanged secure-changed true\ntrue\n"
+                );
+                let result = execute_captured_graph_for_test(root.path(), entrypoint, lane, || {
+                    put(
+                        root.path(),
+                        entrypoint,
+                        "throw new Error('live HTTP entry was reopened');",
+                    );
+                    put(
+                        root.path(),
+                        "node_modules/http-kit/index.cjs",
+                        "throw new Error('live HTTP package was reopened');",
+                    );
+                    put(
+                        root.path(),
+                        "node_modules/http-kit/package.json",
+                        r#"{"main":"missing.cjs"}"#,
+                    );
+                    put(
+                        root.path(),
+                        "package.json",
+                        r##"{"imports":{"#transport":"worker_threads"}}"##,
+                    );
+                });
+                let actual = result
+                    .console_output
+                    .iter()
+                    .map(|entry| entry.message.as_str())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    actual,
+                    reference.lines().collect::<Vec<_>>(),
+                    "{entrypoint} through {lane:?}"
+                );
+                assert!(result.host_effect_transcript.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn captured_http_modules_do_not_grant_network_authority() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            for (name, tag) in [
+                ("http", "builtin:HttpRequest"),
+                ("https", "builtin:HttpsRequest"),
+            ] {
+                for (entrypoint, source) in [
+                    (
+                        "app.cjs",
+                        format!(
+                            "const request = require('{name}').request; request('{name}://127.0.0.1:9/');"
+                        ),
+                    ),
+                    (
+                        "app.mjs",
+                        format!(
+                            "import {{ request }} from 'node:{name}'; request('{name}://127.0.0.1:9/');"
+                        ),
+                    ),
+                ] {
+                    let root = tempfile::tempdir().unwrap();
+                    put(root.path(), entrypoint, &source);
+                    let result = execute_captured_graph_with_policy_for_test(
+                        root.path(),
+                        entrypoint,
+                        lane,
+                        Arc::new(CapabilityPolicyHook::new(BTreeSet::from([
+                            RuntimeCapability::ModuleLoad,
+                            RuntimeCapability::Builtin,
+                        ]))),
+                        || {},
+                    );
+                    let error =
+                        result.expect_err("native module loading cannot grant network_egress");
+                    let detail = error.to_string();
+                    assert!(
+                        detail.contains("capability denied") && detail.contains(tag),
+                        "{entrypoint} through {lane:?} must retain the exact network operation denial: {detail}"
+                    );
+                }
             }
         }
     }
