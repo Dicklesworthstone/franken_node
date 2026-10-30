@@ -3307,6 +3307,122 @@ import('path/posix').then(function(again) {
 
 #[test]
 #[cfg(all(feature = "engine", unix))]
+fn native_readline_diagnostics_share_state_with_installed_commonjs_packages() {
+    for frozen in [false, true] {
+        let workspace = TempDir::new().unwrap();
+        let package_dir = workspace.path().join("node_modules/line-consumer");
+        std::fs::create_dir_all(&package_dir).unwrap();
+        std::fs::write(package_dir.join("package.json"),
+            r#"{"name":"line-consumer","version":"1.0.0","main":"index.cjs"}"#).unwrap();
+        std::fs::write(package_dir.join("index.cjs"), r#"
+module.exports = {
+    readline: require('node:readline'),
+    promises: require('node:readline/promises'),
+    diagnostics: require('node:diagnostics_channel')
+};
+"#).unwrap();
+        let app = create_test_app(workspace.path(), "app.cjs", r#"
+const readline = require('readline');
+const diagnostics = require('diagnostics_channel');
+const events = require('events');
+const child = require('line-consumer');
+const promises = require('readline/promises');
+console.log(readline === child.readline, diagnostics === child.diagnostics,
+    promises === readline.promises, promises === child.promises);
+const input = new events.EventEmitter();
+input.resume = function () {};
+input.pause = function () {};
+const reader = child.readline.createInterface({input: input, terminal: false});
+const seen = [];
+diagnostics.subscribe('captured-lines', function (line) { seen.push(line); });
+reader.on('line', function (line) { child.diagnostics.channel('captured-lines').publish(line); });
+input.emit('data', Buffer.from([226, 130]));
+input.emit('data', Buffer.from([172, 10]));
+input.emit('data', 'tail');
+input.emit('end');
+console.log(reader instanceof events.EventEmitter, seen.join('|'), reader.closed);
+readline.promises = {};
+console.log(require('node:readline/promises') === promises);
+"#);
+        let options = if frozen { &["--frozen-modules"][..] } else { &[] };
+        let output = invoke_product_supervisor_with_options(
+            &app, &balanced_config(), "balanced", Path::new(franken_node_bin()), options,
+        ).unwrap();
+        assert!(output.status.success(), "frozen={frozen}: stdout={} stderr={}",
+            output.stdout, output.stderr);
+        let dispatch = parse_product_dispatch(&output).unwrap();
+        assert_eq!(dispatch.captured_output.stdout,
+            "true true true true\ntrue €|tail true\ntrue\n");
+        let graph = dispatch.engine_decision.unwrap().frozen_modules;
+        assert_eq!(graph.is_some(), frozen);
+        if let Some(graph) = graph {
+            assert_eq!(graph.modules, 6);
+        }
+    }
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn native_readline_diagnostics_esm_exports_share_commonjs_identity() {
+    for frozen in [false, true] {
+        let workspace = TempDir::new().unwrap();
+        create_test_app(workspace.path(), "child.cjs",
+            "module.exports = {readline: require('readline'), promises: require('node:readline/promises'), diagnostics: require('diagnostics_channel')};");
+        let app = create_test_app(workspace.path(), "app.mjs", r#"
+import readline, {createInterface, cursorTo} from 'node:readline';
+import promises, {Readline} from 'readline/promises';
+import diagnostics, {channel, Channel} from 'node:diagnostics_channel';
+import child from './child.cjs';
+console.log(readline === child.readline, promises === child.promises,
+    diagnostics === child.diagnostics, createInterface === readline.createInterface);
+console.log(typeof cursorTo, typeof Readline, channel('esm') instanceof Channel);
+const seen = [];
+child.diagnostics.subscribe('esm', function (value) { seen.push(value); });
+channel('esm').publish(42);
+console.log(seen.join(','), channel('esm').hasSubscribers);
+import('diagnostics_channel').then(function (ns) {
+    console.log(ns.default === diagnostics, ns.channel === channel);
+});
+"#);
+        let options = if frozen { &["--frozen-modules"][..] } else { &[] };
+        let output = invoke_product_supervisor_with_options(
+            &app, &balanced_config(), "balanced", Path::new(franken_node_bin()), options,
+        ).unwrap();
+        assert!(output.status.success(), "frozen={frozen}: stdout={} stderr={}",
+            output.stdout, output.stderr);
+        let dispatch = parse_product_dispatch(&output).unwrap();
+        assert_eq!(dispatch.captured_output.stdout,
+            "true true true true\nfunction function true\n42 true\ntrue true\n");
+        assert_eq!(dispatch.engine_decision.unwrap().frozen_modules.is_some(), frozen);
+    }
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn native_diagnostics_subscribers_do_not_gain_filesystem_write_authority() {
+    for frozen in [false, true] {
+        let workspace = TempDir::new().unwrap();
+        let app = create_test_app(workspace.path(), "app.cjs", r#"
+const diagnostics = require('diagnostics_channel');
+const fs = require('fs');
+diagnostics.subscribe('attempt', function () { fs.writeFileSync('forbidden.txt', 'wrong'); });
+diagnostics.channel('attempt').publish(42);
+console.log('must not complete');
+"#);
+        let options = if frozen { &["--frozen-modules"][..] } else { &[] };
+        let output = invoke_product_supervisor_with_options(
+            &app, &balanced_config(), "balanced", Path::new(franken_node_bin()), options,
+        ).unwrap();
+        assert!(!output.status.success(), "frozen={frozen}: callback gained fs_write");
+        let diagnostics = format!("{}\n{}", output.stdout, output.stderr);
+        assert!(diagnostics.contains("capability denied: fs:write"), "{diagnostics}");
+        assert!(!workspace.path().join("forbidden.txt").exists());
+        assert!(!diagnostics.contains("must not complete"), "{diagnostics}");
+    }
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
 fn ordinary_buffer_import_keeps_module_process_authority_private() {
     for (module_source, expected_stdout) in [
         (

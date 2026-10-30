@@ -49,7 +49,7 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/bootstrap_source.sh --workspace "$PWD" \
-            --engine-ref 5258729d66b897daadad08df3dcc4d8e5189ee31 \
+            --engine-ref cbd6203b1d40e99cd47d11849b64723edba53123 \
             --receipt "$RUNNER_TEMP/mutation-source-inputs.tsv"
 
       - name: Install pinned Rust nightly
@@ -69,7 +69,7 @@ jobs:
           done < "$RUNNER_TEMP/mutation-source-inputs.tsv"
           (cd "$input_dir"; sha256sum ./*.tar > SHA256SUMS)
           bash scripts/bootstrap_source.sh --workspace "$PWD" \
-            --engine-ref 5258729d66b897daadad08df3dcc4d8e5189ee31 --verify-only \
+            --engine-ref cbd6203b1d40e99cd47d11849b64723edba53123 --verify-only \
             --receipt "$RUNNER_TEMP/mutation-source-inputs-after-packaging.tsv"
           cmp "$RUNNER_TEMP/mutation-source-inputs.tsv" "$RUNNER_TEMP/mutation-source-inputs-after-packaging.tsv"
           cp -R "$input_dir" mutation-inputs

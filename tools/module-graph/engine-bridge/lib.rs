@@ -61,20 +61,36 @@ mod native_builtin_execution {
         root: &std::path::Path,
         commonjs: bool,
     ) -> Vec<String> {
-        let policy = Arc::new(CapabilityPolicyHook::new(BTreeSet::from([
-            RuntimeCapability::ModuleLoad,
-            RuntimeCapability::Builtin,
-        ])));
+        execute_with_capabilities(
+            resolver,
+            root,
+            commonjs,
+            LaneChoice::QuickJs,
+            &[RuntimeCapability::ModuleLoad, RuntimeCapability::Builtin],
+        )
+        .expect("captured npm modules execute through the real engine")
+    }
+
+    fn execute_with_capabilities(
+        resolver: Arc<CapturedEngineResolver>,
+        root: &std::path::Path,
+        commonjs: bool,
+        lane: LaneChoice,
+        capabilities: &[RuntimeCapability],
+    ) -> Result<Vec<String>, String> {
+        let policy = Arc::new(CapabilityPolicyHook::new(
+            capabilities.iter().copied().collect::<BTreeSet<_>>(),
+        ));
         let entry = resolver
             .resolve(
                 &resolver.entry_request(),
                 &ResolutionContext::new("capture-test", "capture-decision", "capture-policy"),
                 policy.as_ref(),
             )
-            .expect("admitted captured entry");
+            .map_err(|error| error.to_string())?;
         let installed = resolver
             .execution_resolver(root, policy)
-            .expect("runtime resolver");
+            .map_err(|error| error.to_string())?;
         let mut engine = ExecutionOrchestrator::try_new_lab_with_runtime_config(
             OrchestratorConfig {
                 commonjs_entry: commonjs,
@@ -83,7 +99,7 @@ mod native_builtin_execution {
                 } else {
                     ParseGoal::Module
                 },
-                force_lane: Some(LaneChoice::QuickJs),
+                force_lane: Some(lane),
                 ..OrchestratorConfig::default()
             },
             RuntimeConfig::default(),
@@ -94,17 +110,18 @@ mod native_builtin_execution {
             source: entry.module.record.source.clone(),
             source_file: None,
             module_root: None,
-            capabilities: vec!["module_load".into(), "builtin".into()],
+            capabilities: capabilities.iter().map(ToString::to_string).collect(),
             version: "1.0.0".into(),
             metadata: BTreeMap::new(),
         };
-        engine
+        let result = engine
             .execute_resolved_entry_with_resolver(&package, &entry, installed)
-            .expect("captured npm modules execute through the real engine")
+            .map_err(|error| format!("{error}; console={:?}", engine.last_failed_console_output()))?;
+        Ok(result
             .console_output
             .into_iter()
             .map(|entry| entry.message)
-            .collect()
+            .collect())
     }
 
     #[test]
@@ -246,5 +263,250 @@ console.log(new MIMEType('Text/Plain').essence);
             execute(resolver, root.path(), false),
             ["esm:7 true function", "text/plain"]
         );
+    }
+
+    #[test]
+    fn frozen_readline_diagnostics_share_factories_after_live_sources_change() {
+        for commonjs in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let package = root.path().join("node_modules/line-consumer");
+            std::fs::create_dir_all(&package).unwrap();
+            std::fs::write(package.join("package.json"),
+                r#"{"name":"line-consumer","main":"index.cjs"}"#).unwrap();
+            std::fs::write(package.join("index.cjs"), r#"
+module.exports = {
+    readline: require('node:readline'),
+    promises: require('node:readline/promises'),
+    diagnostics: require('node:diagnostics_channel')
+};
+"#).unwrap();
+            let prefix = if commonjs { r#"
+const readline = require('readline');
+const promises = require('readline/promises');
+const diagnostics = require('diagnostics_channel');
+const events = require('events');
+const child = require('line-consumer');
+"# } else { r#"
+import readline from 'readline';
+import promises from 'readline/promises';
+import diagnostics from 'diagnostics_channel';
+import events from 'events';
+import child from 'line-consumer';
+"# };
+            let body = r#"
+console.log(readline === child.readline, diagnostics === child.diagnostics,
+    promises === readline.promises, promises === child.promises);
+const input = new events.EventEmitter();
+input.resume = function () {};
+input.pause = function () {};
+const reader = child.readline.createInterface({input: input, terminal: false});
+const seen = [];
+diagnostics.subscribe('lines', function (line) { seen.push(line); });
+reader.on('line', function (line) { child.diagnostics.channel('lines').publish(line); });
+input.emit('data', Buffer.from([226, 130]));
+input.emit('data', Buffer.from([172, 10]));
+input.emit('data', 'tail');
+input.emit('end');
+console.log(reader instanceof events.EventEmitter, seen.join('|'), reader.closed);
+console.log(diagnostics.channel('lines').hasSubscribers,
+    typeof readline.cursorTo, typeof promises.Readline);
+"#;
+            let entrypoint = if commonjs { "app.cjs" } else { "app.mjs" };
+            let app = root.path().join(entrypoint);
+            std::fs::write(&app, format!("{prefix}\n{body}")).unwrap();
+            let graph = capture(root.path(), entrypoint, GraphOptions::default()).unwrap();
+            let pin = graph.report().input_hash.clone();
+            let sealed = capsule::encode(&graph).unwrap();
+            for path in [&app, &package.join("index.cjs")] {
+                std::fs::write(path, "throw new Error('live source must not execute');").unwrap();
+            }
+            std::fs::write(package.join("package.json"), r#"{"main":"missing.cjs"}"#).unwrap();
+            let replayed = capsule::replay(sealed.bytes(), sealed.digest()).unwrap();
+            let resolver = Arc::new(CapturedEngineResolver::new(replayed, &pin).ok().unwrap());
+            for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+                assert_eq!(execute_with_capabilities(
+                    resolver.clone(), root.path(), commonjs, lane,
+                    &[RuntimeCapability::ModuleLoad, RuntimeCapability::Builtin, RuntimeCapability::Timer],
+                ).unwrap(), [
+                    "true true true true", "true €|tail true", "true function function",
+                ]);
+            }
+        }
+    }
+
+    #[test]
+    fn conditional_array_fallback_matches_node_in_live_and_frozen_execution() {
+        let root = tempfile::tempdir().unwrap();
+        for (name, contents) in [
+            ("package.json", r##"{"name":"self","exports":{"node":[{"browser":"./wrong.cjs"}],"default":"./self.cjs"},"imports":{"#local":{"node":[[{"browser":"./wrong.cjs"}],{}],"default":"./local.cjs"},"#external":"fallback"}}"##),
+            ("self.cjs", "module.exports = 'self';"),
+            ("local.cjs", "module.exports = 'local';"),
+            ("node_modules/fallback/package.json", r#"{"exports":{"node":[[{"browser":"./wrong.cjs"}],{}],"default":{"require":"./value.cjs","import":"./value.mjs"}}}"#),
+            ("node_modules/fallback/value.cjs", "module.exports = 'require';"),
+            ("node_modules/fallback/value.mjs", "export default 'import';"),
+            ("node_modules/empty/package.json", r#"{"exports":{"node":[],"default":"./wrong.cjs"}}"#),
+            ("node_modules/excluded/package.json", r#"{"exports":{"node":["../invalid.cjs",null,{}],"default":"./wrong.cjs"}}"#),
+            ("node_modules/empty/wrong.cjs", "throw new Error('empty array fell through');"),
+            ("node_modules/excluded/wrong.cjs", "throw new Error('null fell through');"),
+            ("app.cjs", r#"
+console.log(require('fallback'), require('self'), require('#local'), require('#external'));
+try { require('empty'); } catch (error) { console.log(error.code); }
+try { require('excluded'); } catch (error) { console.log(error.code); }
+import('fallback').then(value => console.log(value.default));
+"#),
+            ("app.mjs", r#"
+import value from 'fallback';
+import self from 'self';
+import local from '#local';
+import external from '#external';
+console.log(value, self, local, external);
+import('empty').then(() => console.log('wrong fallback'), error => console.log(error.code));
+"#),
+        ] {
+            let path = root.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        }
+        for commonjs in [true, false] {
+            let entrypoint = if commonjs { "app.cjs" } else { "app.mjs" };
+            let node = std::process::Command::new("node")
+                .arg(entrypoint)
+                .current_dir(root.path())
+                .env_remove("NODE_OPTIONS")
+                .output()
+                .expect("Node is required for the package-resolution oracle");
+            assert!(node.status.success(), "{}", String::from_utf8_lossy(&node.stderr));
+            let expected: Vec<_> = String::from_utf8(node.stdout).unwrap()
+                .lines().map(str::to_owned).collect();
+            let exact = if commonjs {
+                vec!["require self local require", "ERR_PACKAGE_PATH_NOT_EXPORTED",
+                    "ERR_PACKAGE_PATH_NOT_EXPORTED", "import"]
+            } else {
+                vec!["import self local import", "ERR_PACKAGE_PATH_NOT_EXPORTED"]
+            };
+            assert_eq!(expected, exact, "the oracle must perform the useful work and refusals");
+            let graph = capture(root.path(), entrypoint, GraphOptions::default()).unwrap();
+            let pin = graph.report().input_hash.clone();
+            let sealed = capsule::encode(&graph).unwrap();
+            let resolver = Arc::new(CapturedEngineResolver::new(graph, &pin).ok().unwrap());
+            for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+                let capabilities = [RuntimeCapability::ModuleLoad, RuntimeCapability::Builtin];
+                let mut engine = ExecutionOrchestrator::try_new_lab_with_runtime_config(
+                    OrchestratorConfig {
+                        commonjs_entry: commonjs,
+                        parse_goal: if commonjs { ParseGoal::Script } else { ParseGoal::Module },
+                        force_lane: Some(lane),
+                        ..OrchestratorConfig::default()
+                    },
+                    RuntimeConfig::default(),
+                ).unwrap();
+                let result = engine.execute(&ExtensionPackage {
+                    extension_id: "conditional-array-fallback".into(),
+                    source: std::fs::read_to_string(root.path().join(entrypoint)).unwrap(),
+                    source_file: Some(root.path().join(entrypoint).display().to_string()),
+                    module_root: Some(root.path().display().to_string()),
+                    capabilities: capabilities.iter().map(ToString::to_string).collect(),
+                    version: "1.0.0".into(),
+                    metadata: BTreeMap::new(),
+                }).unwrap_or_else(|error| panic!("live {entrypoint} {lane:?}: {error}"));
+                assert_eq!(result.console_output.iter().map(|line| line.message.clone())
+                    .collect::<Vec<_>>(), expected, "live {entrypoint} {lane:?}");
+                assert_eq!(execute_with_capabilities(resolver.clone(), root.path(), commonjs,
+                    lane, &capabilities).unwrap(), expected, "frozen {entrypoint} {lane:?}");
+            }
+            // Replay redoes selection from the capsule's original manifest
+            // bytes and negative routes, not from the live package directory.
+            let replayed = capsule::replay(sealed.bytes(), sealed.digest()).unwrap();
+            let replay_resolver = Arc::new(CapturedEngineResolver::new(replayed, &pin).ok().unwrap());
+            assert_eq!(execute(replay_resolver, root.path(), commonjs), expected);
+        }
+    }
+
+    #[test]
+    fn frozen_readline_diagnostics_retain_missing_capability_refusals() {
+        for name in ["readline", "readline/promises", "diagnostics_channel"] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::write(root.path().join("app.cjs"),
+                format!("require('{name}'); console.log('unreachable');")).unwrap();
+            let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+            let pin = graph.report().input_hash.clone();
+            let resolver = Arc::new(CapturedEngineResolver::new(graph, &pin).ok().unwrap());
+            for missing in [RuntimeCapability::ModuleLoad, RuntimeCapability::Builtin, RuntimeCapability::Timer] {
+                let grants: Vec<_> = [RuntimeCapability::ModuleLoad, RuntimeCapability::Builtin, RuntimeCapability::Timer]
+                    .into_iter().filter(|capability| *capability != missing).collect();
+                let error = execute_with_capabilities(
+                    resolver.clone(), root.path(), true, LaneChoice::QuickJs, &grants,
+                ).expect_err("native factories do not widen the captured execution's authority");
+                assert!(error.contains(&missing.to_string()), "{name} / {missing}: {error}");
+                assert!(!error.contains("unreachable"), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn frozen_diagnostics_callbacks_do_not_gain_host_write_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let forbidden = root.path().join("forbidden.txt");
+        let filename = serde_json::to_string(&forbidden.display().to_string()).unwrap();
+        std::fs::write(
+            root.path().join("app.cjs"),
+            format!(
+                r#"
+const diagnostics = require('diagnostics_channel');
+const fs = require('fs');
+diagnostics.subscribe('attempt', function () {{
+    console.log('callback entered');
+    fs.writeFileSync({filename}, 'wrong');
+}});
+diagnostics.channel('attempt').publish(42);
+console.log('unreachable');
+"#
+            ),
+        )
+        .unwrap();
+        let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        let resolver = Arc::new(CapturedEngineResolver::new(graph, &pin).ok().unwrap());
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let error = execute_with_capabilities(
+                resolver.clone(),
+                root.path(),
+                true,
+                lane,
+                &[
+                    RuntimeCapability::ModuleLoad,
+                    RuntimeCapability::Builtin,
+                    RuntimeCapability::Timer,
+                ],
+            )
+            .expect_err("a subscriber callback keeps the guest's original authority");
+            assert!(error.contains("capability denied: fs:write"), "{lane:?}: {error}");
+            assert!(error.contains("callback entered"), "{lane:?}: {error}");
+            assert!(!error.contains("unreachable"), "{lane:?}: {error}");
+            assert!(!forbidden.exists());
+        }
+    }
+
+    #[test]
+    fn frozen_diagnostics_esm_refuses_guest_or_snapshot_getters() {
+        for mutation in [
+            "Object.defineProperty(dc.Channel.prototype, 'hasSubscribers', {get: function hasSubscribers() { console.log('guest getter ran'); return true; }});",
+            "const get = Object.getOwnPropertyDescriptor(dc.Channel.prototype, 'hasSubscribers').get; Object.defineProperty(dc, 'channel', {get: get});",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::write(root.path().join("mutator.cjs"),
+                format!("const dc=require('diagnostics_channel'); {mutation}")).unwrap();
+            std::fs::write(root.path().join("app.mjs"),
+                "import './mutator.cjs'; import {channel} from 'node:diagnostics_channel'; console.log('unreachable');").unwrap();
+            let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
+            let pin = graph.report().input_hash.clone();
+            let resolver = Arc::new(CapturedEngineResolver::new(graph, &pin).ok().unwrap());
+            let error = execute_with_capabilities(
+                resolver, root.path(), false, LaneChoice::QuickJs,
+                &[RuntimeCapability::ModuleLoad, RuntimeCapability::Builtin, RuntimeCapability::Timer],
+            ).expect_err("namespace publication cannot execute an unaudited getter");
+            assert!(error.contains("bounded-import contract"), "{mutation}: {error}");
+            assert!(!error.contains("guest getter ran") && !error.contains("unreachable"), "{error}");
+        }
     }
 }

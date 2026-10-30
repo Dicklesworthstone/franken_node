@@ -54,13 +54,20 @@ imports, invalid metadata, denied exports and unknown routes remain refusals.
 Eager `resolve_chain` fails on any missing target.
 
 Literal `require`, static `import`, reexport and dynamic `import()` routes can
-deliver the engine's native `buffer`, `events`, `os`, `querystring`, `url`,
-`timers`, `perf_hooks`, `path`, `path/posix`, `path/win32`, `util`, `util/types`,
-`assert`, `assert/strict` and `string_decoder` providers, including
-their `node:` spellings. The registry admits only names in the engine's canonical
-provider inventory. These are source-free terminal descriptors, not captured
-files; the capture report continues to identify them as runtime requirements.
-Every load needs `ModuleLoad` and `Builtin`; `timers` additionally needs `Timer`.
+deliver the engine's native `buffer`, `crypto`, `zlib`, `fs`, `fs/promises`,
+`module`, `events`, `os`, `querystring`, `url`, `timers`, `timers/promises`,
+`perf_hooks`, `path`, `path/posix`, `path/win32`, `util`, `util/types`, `assert`,
+`assert/strict`, `string_decoder`, `stream`, `stream/promises`, `stream/consumers`,
+`stream/web`, `readline`, `readline/promises` and `diagnostics_channel` providers,
+including their `node:` spellings. The registry admits only names in the engine's
+canonical provider inventory. These are source-free terminal descriptors, not
+captured files; the capture report continues to identify them as runtime
+requirements. Every load needs `ModuleLoad` and `Builtin`. `timers`,
+`timers/promises`, `stream`, `stream/promises`, `readline`, `readline/promises`
+and `diagnostics_channel` additionally need `Timer` for their existing timer,
+next-tick or microtask behavior. Loading a provider does not grant filesystem,
+network or process rights; optional effects still need their existing host
+capabilities.
 
 The engine owns evaluation and caches the CommonJS object and ESM namespace in
 the execution realm. ESM exposes the provider's named exports and a `default`
@@ -75,8 +82,16 @@ The `util`, `assert` and `string_decoder` providers execute the engine's existin
 module factories as retained native modules. Extracted methods and functions
 exported by npm packages keep their defining module context. `util/types` shares
 the parent's `types` object, and `assert/strict` shares the parent's `strict`
-function. No builtin implementation is copied into the product or captured
-capsule; capsule replay uses the installed engine's authenticated provider.
+function. `readline` and `diagnostics_channel` also retain one factory per realm,
+so importing packages share constructors, channel subscriptions and channel
+identity. `readline/promises` retains the parent's original promises object even
+if guest code later replaces the public property. Readline uses the same native
+EventEmitter and string decoder as direct imports, including split UTF-8 input.
+The diagnostics namespace admits only authenticated, deferred native
+`hasSubscribers` getters; guest replacements and getters used to snapshot export
+values still fail the bounded-import contract. No builtin implementation is
+copied into the product or captured capsule; capsule replay uses the installed
+engine's authenticated provider.
 
 Only analyzed closed graphs are admitted. The engine-independent
 `PinnedModuleRegistry::new` remains transform-free and requires explicit
@@ -208,7 +223,11 @@ The engine-independent registry unit tests run in the regular native module-grap
 suite. This separate focused host compiles the same production modules against
 the real sibling engine, with no duplicated contract structs or mock resolver.
 Tests cover format preparation, dependency-route conservation, replay, concurrent
-hash reuse, per-edge authorization and normalized-source budgets. JSON tests also
+hash reuse, per-edge authorization and normalized-source budgets. Native readline
+and diagnostics tests execute captured CommonJS and ESM packages in both engine
+lanes after live sources change, verify shared identities and subscriptions, and
+exercise missing capabilities, subscriber filesystem-write denial and refused
+getter mutations. JSON tests also
 cover package/extension/index routes, cycles, contained aliases, capsule replay
 after source mutation, TypeScript consumers, independent source pins, and refusal
 of unsupported ESM and partial-budget cases. With sibling checkouts adjacent:
