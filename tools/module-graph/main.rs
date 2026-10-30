@@ -68,6 +68,9 @@ struct Args {
     /// Complete active condition set, repeatable. Default: node plus import/require mode.
     #[arg(long = "condition", requires = "condition_query")]
     conditions: Vec<String>,
+    /// Add to each source-graph load's node+import/require conditions (repeatable).
+    #[arg(long = "additional-condition", requires = "capture_source_graph")]
+    additional_conditions: Vec<String>,
     /// Resolve a module request to an existing captured file without executing it.
     #[arg(long, groups = ["condition_query", "file_query"], requires = "from", conflicts_with_all = ["importer_query", "impact", "importer", "require_resolved", "target_query", "package_manifest"])]
     resolve_module: Option<String>,
@@ -206,6 +209,7 @@ fn inspect_source_graph(args: &Args) -> Result<(Value, u8), Box<dyn std::error::
     let options = source_graph::GraphOptions {
         symlink_policy: if args.allow_contained_symlinks { SymlinkPolicy::Contained } else { SymlinkPolicy::Reject },
         conditions: if args.conditions.is_empty() { None } else { Some(args.conditions.clone()) },
+        additional_conditions: args.additional_conditions.clone(),
     };
     let mut report = json!({"schema_version":"franken-node/module-graph-inspection/v1",
         "scope":"static-and-literal-module-requests", "execution_performed":false,

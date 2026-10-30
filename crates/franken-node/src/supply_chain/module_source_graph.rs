@@ -21,6 +21,7 @@ use super::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::io::{self, Write};
 use std::path::Path;
 use std::rc::Rc;
 use tree_sitter::{Node, Parser};
@@ -190,6 +191,10 @@ pub struct GraphOptions {
     /// None uses node+import or node+require per load site. Some replaces the
     /// complete active condition set for every edge, including an empty set.
     pub conditions: Option<Vec<String>>,
+    /// Operator conditions added to each load's own node+import/require set.
+    /// Omission preserves historical graph/capsule bytes and default routing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_conditions: Vec<String>,
 }
 
 impl Default for GraphOptions {
@@ -197,7 +202,40 @@ impl Default for GraphOptions {
         Self {
             symlink_policy: SymlinkPolicy::Reject,
             conditions: None,
+            additional_conditions: Vec::new(),
         }
+    }
+}
+
+impl GraphOptions {
+    fn canonicalize_conditions(&mut self) -> Result<()> {
+        if let Some(conditions) = &self.conditions {
+            self.conditions = Some(Resolver::canonical_conditions(conditions)?);
+        }
+        if self.additional_conditions.len() > 62 {
+            return Err(error(
+                "ERR_INVALID_PACKAGE_CONDITIONS",
+                "at most 62 additional package conditions are supported",
+            ));
+        }
+        self.additional_conditions =
+            Resolver::canonical_conditions(&self.additional_conditions)?;
+        // Validate the combined envelope even for graphs without load sites.
+        self.active_conditions(ResolutionMode::Import)?;
+        self.active_conditions(ResolutionMode::Require)?;
+        Ok(())
+    }
+
+    fn active_conditions(&self, mode: ResolutionMode) -> Result<Vec<String>> {
+        let mut conditions = self
+            .conditions
+            .clone()
+            .unwrap_or_else(|| mode.default_conditions());
+        if self.additional_conditions.is_empty() {
+            return Ok(conditions);
+        }
+        conditions.extend(self.additional_conditions.iter().cloned());
+        Resolver::canonical_conditions(&conditions)
     }
 }
 
@@ -258,6 +296,55 @@ fn limit() -> ResolutionError {
     )
 }
 
+/// Bound the exact JSON stream before forwarding any bytes beyond the limit.
+/// Counting and hashing need no report-sized serialization buffer. The sink
+/// receives serde's original bytes, including escapes and UTF-8, unchanged.
+struct EvidenceWriter<F> {
+    bytes: usize,
+    max_bytes: usize,
+    exceeded: bool,
+    consume: F,
+}
+
+impl<F: FnMut(&[u8])> Write for EvidenceWriter<F> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        match self.bytes.checked_add(bytes.len()) {
+            Some(total) if !self.exceeded && total <= self.max_bytes => {
+                (self.consume)(bytes);
+                self.bytes = total;
+                Ok(bytes.len())
+            }
+            _ => {
+                self.exceeded = true;
+                Err(io::Error::other("source graph evidence limit exceeded"))
+            }
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialize_evidence(
+    value: &impl Serialize,
+    max_bytes: usize,
+    consume: impl FnMut(&[u8]),
+) -> Result<usize> {
+    let mut writer = EvidenceWriter {
+        bytes: 0,
+        max_bytes,
+        exceeded: false,
+        consume,
+    };
+    let serialized = serde_json::to_writer(&mut writer, value);
+    if writer.exceeded {
+        return Err(limit());
+    }
+    serialized.map_err(|e| io_error("<source graph>", e))?;
+    Ok(writer.bytes)
+}
+
 impl Budget {
     fn site(&mut self) -> Result<()> {
         self.sites += 1;
@@ -267,14 +354,13 @@ impl Budget {
         Ok(())
     }
     fn retain(&mut self, value: &impl Serialize) -> Result<()> {
-        let bytes = serde_json::to_vec(value).map_err(|e| io_error("<source graph>", e))?;
-        self.evidence_bytes = self
-            .evidence_bytes
-            .checked_add(bytes.len())
+        let remaining = MAX_EVIDENCE_BYTES
+            .checked_sub(self.evidence_bytes)
             .ok_or_else(limit)?;
-        if self.evidence_bytes > MAX_EVIDENCE_BYTES {
-            return Err(limit());
-        }
+        let bytes = serialize_evidence(value, remaining, |_| {})?;
+        // The writer has already checked the complete charge. Refused or
+        // unserializable values leave the caller's budget unchanged.
+        self.evidence_bytes += bytes;
         Ok(())
     }
 }
@@ -288,6 +374,7 @@ pub fn capture(
     mut options: GraphOptions,
 ) -> Result<CapturedModuleGraph> {
     validate_path(entrypoint)?;
+    options.canonicalize_conditions()?;
     let resolver = Resolver::new(
         project,
         options.conditions.as_deref().unwrap_or(&[]),
@@ -361,10 +448,7 @@ fn build(
             let conditions = if load.type_only {
                 Vec::new()
             } else {
-                options
-                    .conditions
-                    .clone()
-                    .unwrap_or_else(|| mode.default_conditions())
+                options.active_conditions(mode)?
             };
             resolver.conditions = conditions.clone();
             resolver.mappings.clear();
@@ -453,13 +537,9 @@ fn build(
         execution_performed: false,
         release_certification: false,
     };
-    let encoded = serde_json::to_vec(&report).map_err(|e| io_error("<source graph>", e))?;
-    if encoded.len() > MAX_EVIDENCE_BYTES {
-        return Err(limit());
-    }
     let mut hash = Sha256::new();
     hash.update(HASH_DOMAIN);
-    hash.update(encoded);
+    serialize_evidence(&report, MAX_EVIDENCE_BYTES, |bytes| hash.update(bytes))?;
     report.input_hash = format!("sha256:{}", hex::encode(hash.finalize()));
     let inputs = resolver
         .entries
@@ -2788,6 +2868,237 @@ mod tests {
     }
 
     #[test]
+    fn streamed_evidence_preserves_serialized_bytes_counts_and_hashes() {
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!([]),
+            serde_json::json!({
+                "escapes": "quote \" backslash \\ newline \n tab \t nul \u{0000}",
+                "unicode": "café 🦀 \u{2028}",
+                "numbers": [u64::MAX, i64::MIN, -0.0, 1.25e100],
+                "nested": [{"conditions": ["node", "import"]}, false],
+            }),
+        ] {
+            let expected = serde_json::to_vec(&value).unwrap();
+            let mut actual = Vec::new();
+            let mut hash = Sha256::new();
+            hash.update(HASH_DOMAIN);
+            let count = serialize_evidence(&value, expected.len(), |bytes| {
+                actual.extend_from_slice(bytes);
+                hash.update(bytes);
+            })
+            .unwrap();
+            let mut expected_hash = Sha256::new();
+            expected_hash.update(HASH_DOMAIN);
+            expected_hash.update(&expected);
+            assert_eq!(actual, expected);
+            assert_eq!(count, expected.len());
+            assert_eq!(hash.finalize(), expected_hash.finalize());
+        }
+    }
+
+    #[test]
+    fn streamed_evidence_enforces_exact_bound_before_forwarding() {
+        // Escaped JSON length, not input text length, consumes the bound.
+        let value = "\"\u{0000}café\n";
+        let encoded = serde_json::to_vec(value).unwrap();
+        for max_bytes in [0, 1, encoded.len() - 1] {
+            let mut forwarded = Vec::new();
+            let error = serialize_evidence(&value, max_bytes, |bytes| {
+                forwarded.extend_from_slice(bytes);
+            })
+            .unwrap_err();
+            assert_eq!(error.code, "ERR_MODULE_GRAPH_LIMIT");
+            assert!(forwarded.len() <= max_bytes);
+            assert_eq!(forwarded, encoded[..forwarded.len()]);
+        }
+        for max_bytes in [encoded.len(), encoded.len() + 1] {
+            assert_eq!(
+                serialize_evidence(&value, max_bytes, |_| {}).unwrap(),
+                encoded.len()
+            );
+        }
+    }
+
+    #[test]
+    fn retained_evidence_rejections_leave_all_budget_counters_unchanged() {
+        let value = serde_json::json!({"path": "quote\"-café.mjs", "sites": [1, 2, 3]});
+        let bytes = serde_json::to_vec(&value).unwrap().len();
+        let mut exact = Budget {
+            sites: 17,
+            ast_nodes: 31,
+            evidence_bytes: MAX_EVIDENCE_BYTES - bytes,
+        };
+        exact.retain(&value).unwrap();
+        assert_eq!(exact.evidence_bytes, MAX_EVIDENCE_BYTES);
+        assert_eq!((exact.sites, exact.ast_nodes), (17, 31));
+        for before in [MAX_EVIDENCE_BYTES - bytes + 1, MAX_EVIDENCE_BYTES, usize::MAX] {
+            let mut budget = Budget {
+                sites: 17,
+                ast_nodes: 31,
+                evidence_bytes: before,
+            };
+            assert_eq!(budget.retain(&value).unwrap_err().code, "ERR_MODULE_GRAPH_LIMIT");
+            assert_eq!(
+                (budget.sites, budget.ast_nodes, budget.evidence_bytes),
+                (17, 31, before)
+            );
+        }
+    }
+
+    #[test]
+    fn streamed_evidence_preserves_serialization_errors_without_budget_charge() {
+        struct FailingValue;
+        impl Serialize for FailingValue {
+            fn serialize<S: serde::Serializer>(
+                &self,
+                serializer: S,
+            ) -> std::result::Result<S::Ok, S::Error> {
+                use serde::ser::SerializeSeq;
+                let mut sequence = serializer.serialize_seq(Some(2))?;
+                sequence.serialize_element("serialized prefix")?;
+                Err(serde::ser::Error::custom("invalid evidence value"))
+            }
+        }
+        let mut budget = Budget {
+            sites: 17,
+            ast_nodes: 31,
+            evidence_bytes: 53,
+        };
+        let error = budget.retain(&FailingValue).unwrap_err();
+        assert_eq!(error.code, "ERR_MODULE_CAPTURE");
+        assert!(error.detail.contains("invalid evidence value"));
+        assert_eq!(
+            (budget.sites, budget.ast_nodes, budget.evidence_bytes),
+            (17, 31, 53)
+        );
+    }
+
+    #[test]
+    fn streamed_evidence_writer_rejects_overflow_without_forwarding() {
+        let forwarded = std::cell::Cell::new(0_usize);
+        let mut writer = EvidenceWriter {
+            bytes: usize::MAX - 1,
+            max_bytes: usize::MAX,
+            exceeded: false,
+            consume: |bytes: &[u8]| forwarded.set(forwarded.get() + bytes.len()),
+        };
+        assert!(writer.write_all(b"abc").is_err());
+        assert_eq!(writer.bytes, usize::MAX - 1);
+        assert_eq!(forwarded.get(), 0);
+        assert!(writer.exceeded);
+        // A rejected writer cannot resume emitting a partial JSON document.
+        assert!(writer.write_all(b"x").is_err());
+        assert_eq!(forwarded.get(), 0);
+    }
+
+    #[test]
+    fn streamed_graph_hash_matches_materialized_formula_and_replays_captured_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        put(
+            root.path(),
+            "app.mjs",
+            "import './café.mjs'; import 'node:path'; import './missing.mjs';",
+        );
+        put(root.path(), "café.mjs", "export const value = 'captured';");
+        let captured = graph(root.path());
+        assert!(!captured.report().fully_resolved);
+        let mut report = captured.report().clone();
+        let actual_pin = std::mem::take(&mut report.input_hash);
+        let encoded = serde_json::to_vec(&report).unwrap();
+        let mut hash = Sha256::new();
+        hash.update(HASH_DOMAIN);
+        hash.update(&encoded);
+        assert_eq!(actual_pin, format!("sha256:{}", hex::encode(hash.finalize())));
+        let mut streamed = Vec::new();
+        serialize_evidence(&report, MAX_EVIDENCE_BYTES, |bytes| {
+            streamed.extend_from_slice(bytes);
+        })
+        .unwrap();
+        assert_eq!(streamed, encoded);
+
+        let capsule = super::capsule::encode(&captured).unwrap();
+        put(root.path(), "café.mjs", "export const value = 'changed';");
+        put(root.path(), "missing.mjs", "export const newlyPresent = true;");
+        assert_ne!(graph(root.path()).report().input_hash, actual_pin);
+        let replayed = super::capsule::replay(capsule.bytes(), capsule.digest()).unwrap();
+        assert_eq!(replayed.report(), captured.report());
+    }
+
+    #[test]
+    #[ignore = "manual serialization-only comparison; not a Node/Bun runtime benchmark"]
+    fn evidence_serialization_manual_comparison() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let root = tempfile::tempdir().unwrap();
+        let entry = (0..MAX_MODULES - 1)
+            .map(|index| format!("import './mod-{index:03}.mjs';\n"))
+            .collect::<String>();
+        let shared = (0..15)
+            .map(|index| format!("import './mod-{index:03}.mjs';\n"))
+            .collect::<String>();
+        put(root.path(), "app.mjs", &entry);
+        for index in 0..MAX_MODULES - 1 {
+            put(root.path(), &format!("mod-{index:03}.mjs"), &shared);
+        }
+        let captured = graph(root.path());
+        let mut report = captured.report().clone();
+        report.input_hash.clear();
+        assert_eq!(report.modules.len(), MAX_MODULES);
+        assert_eq!(report.edges.len(), 4080);
+        let bytes = serde_json::to_vec(&report).unwrap().len();
+
+        let materialized = || {
+            let start = Instant::now();
+            let encoded = serde_json::to_vec(black_box(&report)).unwrap();
+            let mut hash = Sha256::new();
+            hash.update(HASH_DOMAIN);
+            hash.update(&encoded);
+            let digest = black_box(hash.finalize());
+            (start.elapsed(), encoded.capacity(), digest)
+        };
+        let streamed = || {
+            let start = Instant::now();
+            let mut hash = Sha256::new();
+            hash.update(HASH_DOMAIN);
+            let count = serialize_evidence(black_box(&report), MAX_EVIDENCE_BYTES, |part| {
+                hash.update(part);
+            })
+            .unwrap();
+            let digest = black_box(hash.finalize());
+            (start.elapsed(), count, digest)
+        };
+        let mut materialized_samples = Vec::new();
+        let mut streamed_samples = Vec::new();
+        let mut max_capacity = 0;
+        for sample in 0..24 {
+            // Alternate order to avoid assigning all early/cold samples to
+            // one implementation. Timings never determine test acceptance.
+            let (old, new) = if sample % 2 == 0 {
+                (materialized(), streamed())
+            } else {
+                let new = streamed();
+                (materialized(), new)
+            };
+            assert_eq!(old.2, new.2);
+            assert_eq!(new.1, bytes);
+            max_capacity = max_capacity.max(old.1);
+            materialized_samples.push(old.0.as_micros());
+            streamed_samples.push(new.0.as_micros());
+        }
+        materialized_samples.sort_unstable();
+        streamed_samples.sort_unstable();
+        eprintln!(
+            "serialization-only comparison: report_bytes={bytes}, samples=24, \
+             materialized_max_buffer_capacity={max_capacity}, \
+             materialized_median_us={}, streamed_median_us={}; \
+             this does not measure native execution or Node/Bun parity",
+            materialized_samples[12], streamed_samples[12]
+        );
+    }
+
+    #[test]
     fn static_import_reexport_cycles_and_diamonds_capture_each_identity_once() {
         let root = tempfile::tempdir().unwrap();
         put(
@@ -2844,6 +3155,74 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn additional_conditions_preserve_import_require_branches_and_offline_identity() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mjs", "import 'dual'; import './bridge.cjs';");
+        put(root.path(), "bridge.cjs", "module.exports=require('dual');");
+        put(
+            root.path(),
+            "node_modules/dual/package.json",
+            r#"{"exports":{"development":{"import":"./dev.mjs","require":"./dev.cjs"},"import":"./prod.mjs","require":"./prod.cjs"}}"#,
+        );
+        for name in ["dev.mjs", "dev.cjs", "prod.mjs", "prod.cjs"] {
+            put(root.path(), &format!("node_modules/dual/{name}"), "");
+        }
+        let default = graph(root.path());
+        let default_options = serde_json::to_string(&default.report.options).unwrap();
+        assert_eq!(default_options, r#"{"symlink_policy":"reject","conditions":null}"#);
+        assert!(paths(&default).contains(&"node_modules/dual/prod.mjs"));
+        assert!(paths(&default).contains(&"node_modules/dual/prod.cjs"));
+
+        let custom = capture(root.path(), "app.mjs", GraphOptions {
+            additional_conditions: vec!["unused".into(), "development".into(), "development".into()],
+            ..GraphOptions::default()
+        }).unwrap();
+        assert_eq!(custom.report.options.additional_conditions, ["development", "unused"]);
+        assert_ne!(custom.report.input_hash, default.report.input_hash);
+        assert!(paths(&custom).contains(&"node_modules/dual/dev.mjs"));
+        assert!(paths(&custom).contains(&"node_modules/dual/dev.cjs"));
+        assert!(!paths(&custom).contains(&"node_modules/dual/prod.mjs"));
+        for edge in &custom.report.edges {
+            assert!(edge.conditions.iter().any(|condition| condition == "node"));
+            assert!(edge.conditions.iter().any(|condition| condition == "development"));
+            let (present, absent) = if edge.kind == LoadKind::Require {
+                ("require", "import")
+            } else {
+                ("import", "require")
+            };
+            assert!(edge.conditions.iter().any(|condition| condition == present));
+            assert!(!edge.conditions.iter().any(|condition| condition == absent));
+        }
+        let canonical = capture(root.path(), "app.mjs", GraphOptions {
+            additional_conditions: vec!["development".into(), "unused".into()],
+            ..GraphOptions::default()
+        }).unwrap();
+        assert_eq!(custom.report(), canonical.report());
+        let encoded = capsule::encode(&custom).unwrap();
+        put(root.path(), "node_modules/dual/package.json", r#"{"exports":"./prod.mjs"}"#);
+        let restored = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+        assert_eq!(custom.report(), restored.report());
+    }
+
+    #[test]
+    fn additional_conditions_validate_even_without_dependency_edges() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mjs", "export const value = 1;");
+        for additional_conditions in [
+            vec![String::new()],
+            vec!["bad\nname".into()],
+            vec!["x".repeat(129)],
+            vec!["condition".into(); 63],
+        ] {
+            let error = capture(root.path(), "app.mjs", GraphOptions {
+                additional_conditions,
+                ..GraphOptions::default()
+            }).err().unwrap();
+            assert_eq!(error.code, "ERR_INVALID_PACKAGE_CONDITIONS");
+        }
     }
 
     #[test]
@@ -6250,6 +6629,7 @@ if (typeof module.require === 'function') { module.require('./other.cjs'); }
             GraphOptions {
                 symlink_policy: SymlinkPolicy::Contained,
                 conditions: None,
+                ..GraphOptions::default()
             },
         )
         .unwrap();

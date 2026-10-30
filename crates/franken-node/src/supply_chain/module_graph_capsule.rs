@@ -196,16 +196,12 @@ fn recorded_resolver(header: &Header, payload: &[u8]) -> Result<Resolver> {
         return Err(limit());
     }
     validate_path(&header.entrypoint)?;
-    let conditions =
-        Resolver::canonical_conditions(header.options.conditions.as_deref().unwrap_or(&[]))?;
-    if header
-        .options
-        .conditions
-        .as_ref()
-        .is_some_and(|c| c != &conditions)
-    {
+    let mut canonical_options = header.options.clone();
+    canonical_options.canonicalize_conditions()?;
+    if canonical_options != header.options {
         return Err(invalid("capsule conditions are not canonical"));
     }
+    let conditions = canonical_options.conditions.unwrap_or_default();
     let mut entries = BTreeMap::<String, Rc<Entry>>::new();
     let mut previous: Option<&str> = None;
     let mut offset = 0_usize;
@@ -428,6 +424,7 @@ mod tests {
             GraphOptions {
                 symlink_policy: super::super::SymlinkPolicy::Contained,
                 conditions: None,
+                ..GraphOptions::default()
             },
         )
         .unwrap();
@@ -617,6 +614,27 @@ mod tests {
         let mut header = MAGIC.to_vec();
         header.extend_from_slice(&u32::MAX.to_le_bytes());
         assert_eq!(failure(&header), "ERR_MODULE_CAPSULE_LIMIT");
+    }
+
+    #[test]
+    fn capsule_rejects_changed_or_noncanonical_additional_conditions() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mjs", "export const value = 1;");
+        let graph = capture(root.path(), "app.mjs", GraphOptions {
+            additional_conditions: vec!["development".into(), "react-server".into()],
+            ..GraphOptions::default()
+        }).unwrap();
+        let encoded = encode(&graph).unwrap();
+        for conditions in [
+            vec!["react-server".into(), "development".into()],
+            vec!["development".into(), "development".into()],
+            vec![String::new()],
+            vec!["other".into()],
+            Vec::new(),
+        ] {
+            let changed = modify(&encoded, |header| header.options.additional_conditions = conditions);
+            assert!(!failure(&changed).is_empty());
+        }
     }
 
     #[test]

@@ -28,6 +28,10 @@ fn paths(report: &Value) -> Vec<&str> {
 // Only invoke public resolution APIs. Selected fixture sources deliberately
 // throw, so neither this oracle nor the native scanner may load them.
 fn assert_node_edges(root: &Path, report: &Value) {
+    assert_node_edges_with_conditions(root, report, &[]);
+}
+
+fn assert_node_edges_with_conditions(root: &Path, report: &Value, conditions: &[&str]) {
     let script = r#"
 import {createRequire} from 'node:module';
 import {pathToFileURL,fileURLToPath} from 'node:url';
@@ -40,7 +44,13 @@ console.log(path.relative(root,selected));
 "#;
     for edge in report["source_graph"]["edges"].as_array().unwrap() {
         if edge["state"] != "resolved" { continue; }
-        let output = Command::new("node").env_remove("NODE_OPTIONS").env_remove("NODE_PATH")
+        let mut command = Command::new("node");
+        command.env_remove("NODE_OPTIONS").env_remove("NODE_PATH");
+        // Supplied by the test independently of the candidate's report.
+        for condition in conditions {
+            command.arg(format!("--conditions={condition}"));
+        }
+        let output = command
             .args(["--experimental-import-meta-resolve", "--input-type=module", "-e", script])
             .arg(root).args([edge["importer"]["path"].as_str().unwrap(),
                 edge["specifier"].as_str().unwrap(), edge["kind"].as_str().unwrap()])
@@ -137,6 +147,61 @@ fn graph_capture_is_relocation_stable_and_custom_conditions_are_explicit() {
     assert_eq!(code, 0, "{custom}");
     assert_ne!(first["input_hash"], custom["input_hash"]);
     assert!(paths(&custom).contains(&"node_modules/pkg/custom.mjs"));
+}
+
+#[test]
+fn additive_conditions_match_live_node_imports_exports_and_offline_replay() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    put(&project, "app.mjs", "import 'dual'; import './bridge.cjs'; import '#local'; import 'priority';");
+    put(&project, "bridge.cjs", "require('dual'); require('#local');");
+    put(&project, "package.json", r##"{"imports":{"#local":{"development":{"import":"./local-dev.mjs","require":"./local-dev.cjs"},"import":"./local-prod.mjs","require":"./local-prod.cjs"}}}"##);
+    put(&project, "node_modules/dual/package.json", r#"{"exports":{"development":{"import":"./dev.mjs","require":"./dev.cjs"},"import":"./prod.mjs","require":"./prod.cjs"}}"#);
+    put(&project, "node_modules/priority/package.json", r#"{"exports":{"default":"./first.cjs","development":"./wrong.cjs"}}"#);
+    for name in ["dev.mjs", "dev.cjs", "prod.mjs", "prod.cjs"] {
+        put(&project, &format!("node_modules/dual/{name}"), "throw Error('source capture must not evaluate modules');");
+        put(&project, &format!("local-{name}"), "throw Error('source capture must not evaluate modules');");
+    }
+    put(&project, "node_modules/priority/first.cjs", "throw Error('first matching condition');");
+    put(&project, "node_modules/priority/wrong.cjs", "throw Error('wrong condition precedence');");
+    let (default_code, defaults) = run(&project, "app.mjs", &[]);
+    assert_eq!(default_code, 0, "{defaults}");
+    assert_node_edges(&project, &defaults);
+    assert!(defaults["source_graph"]["options"].get("additional_conditions").is_none());
+
+    let flags = ["--additional-condition", "unused", "--additional-condition", "development", "--additional-condition", "development"];
+    let (code, captured) = run(&project, "app.mjs", &flags);
+    assert_eq!(code, 0, "{captured}");
+    assert_ne!(captured["input_hash"], defaults["input_hash"]);
+    assert_eq!(captured["source_graph"]["options"]["additional_conditions"], serde_json::json!(["development", "unused"]));
+    assert!(paths(&captured).contains(&"node_modules/dual/dev.mjs"));
+    assert!(paths(&captured).contains(&"node_modules/dual/dev.cjs"));
+    assert!(paths(&captured).contains(&"local-dev.mjs"));
+    assert!(paths(&captured).contains(&"local-dev.cjs"));
+    assert!(paths(&captured).contains(&"node_modules/priority/first.cjs"));
+    assert!(!paths(&captured).contains(&"node_modules/priority/wrong.cjs"));
+    assert_node_edges_with_conditions(&project, &captured, &["development", "unused"]);
+
+    let capsule = temp.path().join("conditioned.fnsc");
+    let (_, exported) = export_capsule(&project, "app.mjs", &capsule, &flags);
+    assert_eq!(exported["source_graph"], captured["source_graph"]);
+    std::fs::rename(&project, temp.path().join("original-project")).unwrap();
+    put(&project, "app.mjs", "throw Error('live replacement must not be observed');");
+    let (code, replayed) = replay_capsule(&capsule, exported["capsule_hash"].as_str().unwrap(), temp.path());
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["source_graph"], captured["source_graph"]);
+}
+
+#[test]
+fn additive_condition_cli_refuses_invalid_names_without_a_partial_graph() {
+    let root = tempfile::tempdir().unwrap();
+    put(root.path(), "app.mjs", "export const value=1;");
+    for condition in [String::new(), "bad\ncondition".into(), "x".repeat(129)] {
+        let (code, report) = run(root.path(), "app.mjs", &["--additional-condition", &condition]);
+        assert_eq!(code, 2, "{report}");
+        assert_eq!(report["error_code"], "ERR_INVALID_PACKAGE_CONDITIONS");
+        assert!(report["source_graph"].is_null());
+    }
 }
 
 #[test]
