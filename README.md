@@ -4057,8 +4057,52 @@ one pass.
   source integrity; it supplies neither publisher provenance nor additional
   capabilities. Files the graph never observes are outside this commitment:
   for example, a `.cjs` entry with explicit relative `.cjs` loads need not read
-  an unused root `package.json`. Signing-registry integration and current installed-release
-  qualification remain separate requirements.
+  an unused root `package.json`. Current installed-release qualification remains
+  a separate requirement.
+
+  **Publisher-approved frozen source.** The product can also bind this graph to
+  an existing signed local registry artifact. Export the exact captured inputs
+  as a new private capsule, then publish those bytes with the publisher's signing
+  key. Source export never executes the program or overwrites an existing file:
+
+  ```sh
+  franken-node verify source-graph /projects/example app.cjs \
+    --write-source-capsule /review/example.capsule --json
+  franken-node registry publish /review/example.capsule \
+    --version 1.2.3 --signing-key /operator/publisher.ed25519 --json
+  # Retain the absolute manifest_path from the publish result, then from the project:
+  franken-node run app.cjs --frozen-modules \
+    --registry-artifact /registry/path/artifact.manifest.json \
+    --publisher-public-key /operator/publisher.pub
+  ```
+
+  Supply a publisher public key independently retained **outside the guest
+  project**; an embedded key cannot approve itself. The registry artifact must
+  be a complete `FNSGCAP1` source capsule within the registry's 5 MiB artifact
+  limit. Both the dispatcher and its authenticated native worker reverify the
+  exact retained manifest and capsule using this external key. The worker then
+  checks the live graph against that signed content and executes its single
+  immutable capture. Changed entry/dependency bytes, observed manifests or
+  probes are refused before evaluation. The entrypoint, additional conditions
+  and contained-symlink policy must match the capsule, and an explicit
+  `--frozen-module-graph-hash` must agree with it. Manifest, artifact and key
+  reads are bounded and reject symlinks in every path component.
+
+  The frozen graph report and run receipt retain the authenticated publisher key
+  ID, package name/version and artifact hash. The `native_module_graph` receipt
+  field participates in both the receipt hash and its deterministic identity;
+  the original signed run record authenticates the same receipt snapshot.
+  Publisher-approved runs require that signed record to be persisted, even
+  without `--capture-replay`. Missing or misconfigured receipt signing authority,
+  or failed record persistence, fails the command. This check occurs after
+  execution and does not undo guest effects.
+
+  This establishes publisher approval of source identity and a durable statement
+  from the run receipt authority. It does not authenticate unsigned registry
+  lifecycle/provenance fields, attest registry-service approval, grant capabilities
+  or increase resource limits. Existing dependency trust-card revocation and
+  quarantine, fleet policy and runtime controls still govern execution. The broader
+  signed capability and resource contract remains separate work.
 
   The broader host-effect
   "runtime-of-record" — the full Node/Bun host-API surface with

@@ -88,7 +88,10 @@ fn valid_digest(value: &str) -> bool {
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
-fn digest(bytes: &[u8]) -> String {
+/// Content commitment only. Callers must authenticate bytes independently or
+/// compare against an independently retained digest before treating a capsule
+/// as approved source. Computing this value grants no publisher authority.
+pub fn digest(bytes: &[u8]) -> String {
     let mut hash = Sha256::new();
     hash.update(HASH_DOMAIN);
     hash.update((bytes.len() as u64).to_le_bytes());
@@ -621,10 +624,15 @@ mod tests {
     fn capsule_rejects_changed_or_noncanonical_additional_conditions() {
         let root = tempfile::tempdir().unwrap();
         put(root.path(), "app.mjs", "export const value = 1;");
-        let graph = capture(root.path(), "app.mjs", GraphOptions {
-            additional_conditions: vec!["development".into(), "react-server".into()],
-            ..GraphOptions::default()
-        }).unwrap();
+        let graph = capture(
+            root.path(),
+            "app.mjs",
+            GraphOptions {
+                additional_conditions: vec!["development".into(), "react-server".into()],
+                ..GraphOptions::default()
+            },
+        )
+        .unwrap();
         let encoded = encode(&graph).unwrap();
         for conditions in [
             vec!["react-server".into(), "development".into()],
@@ -633,7 +641,9 @@ mod tests {
             vec!["other".into()],
             Vec::new(),
         ] {
-            let changed = modify(&encoded, |header| header.options.additional_conditions = conditions);
+            let changed = modify(&encoded, |header| {
+                header.options.additional_conditions = conditions
+            });
             assert!(!failure(&changed).is_empty());
         }
     }

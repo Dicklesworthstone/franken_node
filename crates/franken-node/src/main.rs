@@ -183,6 +183,7 @@ use frankenengine_node::{
             SignedExtension, SignedExtensionRegistry, VersionEntry,
             canonical_registration_manifest_bytes,
         },
+        registry_artifact::{LocalRegistryArtifactManifest, PublisherSourceGraphApproval},
         trust_card::{
             BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
             DependencyTrustStatus, ExtensionIdentity, ProvenanceSummary, PublisherIdentity,
@@ -295,7 +296,7 @@ const VERIFY_CORPUS_REQUIRED_API_FAMILIES: &[&str] = &[
 ];
 const INCIDENT_EVIDENCE_RELATIVE_DIR: &str = ".franken-node/state/incidents";
 const REGISTRY_LOCAL_ARTIFACT_MANIFEST_SCHEMA_VERSION: &str =
-    "franken-node/local-registry-artifact-manifest/v1";
+    supply_chain::registry_artifact::LOCAL_ARTIFACT_SCHEMA;
 const REGISTRY_LOCAL_ARTIFACT_MANIFEST_FILE_NAME: &str = "artifact.manifest.json";
 const INCIDENT_EVIDENCE_FILE_NAME: &str = "evidence.v1.json";
 const RUN_EXECUTION_RECEIPT_SCHEMA_VERSION: &str = "franken-node/run-execution-receipt/v1";
@@ -903,6 +904,11 @@ struct RunExecutionReceiptCore {
     /// this receipt's identity; ordinary runs retain no replay payload.
     #[serde(skip_serializing_if = "Option::is_none")]
     native_replay_payload_sha256: Option<String>,
+    /// Exact immutable source identity reported by the native worker, including
+    /// publisher approval when requested. Bound before receipt identity/hashing
+    /// and retained in the signed run-record snapshot; no capability grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_module_graph: Option<ops::engine_dispatcher::NativeModuleGraphSummary>,
     preflight_verdict: PreFlightVerdict,
     telemetry_summary: Option<RunExecutionTelemetrySummary>,
     ssrf_violations: Vec<String>,
@@ -945,18 +951,6 @@ struct RunCommandOutput {
     /// (`native_containment_action`); absent for ordinary program exits.
     #[serde(skip_serializing_if = "Option::is_none")]
     containment_verdict: Option<&'static str>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-struct LocalRegistryArtifactManifest {
-    schema_version: String,
-    stored_at_utc: String,
-    artifact_file_name: String,
-    artifact_sha256: String,
-    artifact_size_bytes: u64,
-    manifest_bytes_b64: String,
-    publisher_public_key_hex: String,
-    extension: SignedExtension,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -6203,10 +6197,8 @@ fn handle_safe_mode_enter_command(args: SafeModeEnterArgs) -> Result<()> {
     }
 
     let timestamp = safe_mode_timestamp(args.timestamp.as_deref());
-    let controller = match runtime::safe_mode::update_persisted_safe_mode(
-        &state_path,
-        true,
-        |controller| {
+    let controller =
+        match runtime::safe_mode::update_persisted_safe_mode(&state_path, true, |controller| {
             controller.set_flags(runtime::safe_mode::OperationFlags::safe_mode_only());
             controller.enter_safe_mode(
                 reason,
@@ -6215,19 +6207,18 @@ fn handle_safe_mode_enter_command(args: SafeModeEnterArgs) -> Result<()> {
                 args.inconsistencies,
             );
             Ok(controller.clone())
-        },
-    ) {
-        Ok(controller) => controller,
-        Err(err) => {
-            return emit_safe_mode_error(
-                "safe-mode.enter",
-                &state_path,
-                args.json,
-                &format!("{err:#}"),
-                "Inspect the existing controller and state directory before retrying entry",
-            );
-        }
-    };
+        }) {
+            Ok(controller) => controller,
+            Err(err) => {
+                return emit_safe_mode_error(
+                    "safe-mode.enter",
+                    &state_path,
+                    args.json,
+                    &format!("{err:#}"),
+                    "Inspect the existing controller and state directory before retrying entry",
+                );
+            }
+        };
     let report = safe_mode_report(
         "safe-mode.enter",
         &state_path,
@@ -8750,6 +8741,10 @@ fn build_run_execution_receipt(
             .native_replay
             .as_ref()
             .map(|capture| capture.payload_sha256.clone()),
+        native_module_graph: dispatch
+            .engine_decision
+            .as_ref()
+            .and_then(|decision| decision.frozen_modules.clone()),
         preflight_verdict: preflight.verdict.clone(),
         telemetry_summary: summarize_run_telemetry(dispatch.telemetry.as_ref()),
         ssrf_violations,
@@ -16406,12 +16401,22 @@ mod trust_scan_tests {
                 level: RiskLevel::Low,
                 summary: "fresh metadata has no additional findings".to_owned(),
             },
-            evidence_refs: restored.derivation_evidence.as_ref().unwrap().evidence_refs.clone(),
+            evidence_refs: restored
+                .derivation_evidence
+                .as_ref()
+                .unwrap()
+                .evidence_refs
+                .clone(),
         };
         retain_trust_scan_risk_floor(&mut input, &restored);
-        let scanned = registry.refresh_from_scan(input, false, 1_004, "combined-scan").unwrap();
+        let scanned = registry
+            .refresh_from_scan(input, false, 1_004, "combined-scan")
+            .unwrap();
         assert_eq!(scanned.user_facing_risk_assessment.level, RiskLevel::High);
-        assert_eq!(scanned.user_facing_risk_assessment, restored.user_facing_risk_assessment);
+        assert_eq!(
+            scanned.user_facing_risk_assessment,
+            restored.user_facing_risk_assessment
+        );
         assert_eq!(scanned.reputation_score_basis_points, 400);
         assert_eq!(scanned.reputation_trend, ReputationTrend::Declining);
     }
@@ -17218,7 +17223,8 @@ mod trust_command_tests {
         std::fs::write(tmp.path().join("package.json"), "{not-json")
             .expect("write malformed package manifest");
 
-        let err = run_trust_scan(tmp.path(), false, false, false).expect_err("scan should reject JSON");
+        let err =
+            run_trust_scan(tmp.path(), false, false, false).expect_err("scan should reject JSON");
 
         assert!(err.to_string().contains("invalid dependency manifest JSON"));
     }
@@ -17232,7 +17238,8 @@ mod trust_command_tests {
         )
         .expect("write package manifest");
 
-        let first = run_trust_scan(tmp.path(), false, false, false).expect("first scan should succeed");
+        let first =
+            run_trust_scan(tmp.path(), false, false, false).expect("first scan should succeed");
         let second =
             run_trust_scan(tmp.path(), false, false, false).expect("second scan should succeed");
 
@@ -19865,11 +19872,11 @@ fn read_package_manifest_object(
     let manifest =
         serde_json::from_str::<serde_json::Value>(raw.strip_prefix('\u{feff}').unwrap_or(&raw))
             .with_context(|| {
-        format!(
-            "invalid dependency manifest JSON while evaluating {context}: {}",
-            package_json_path.display()
-        )
-    })?;
+                format!(
+                    "invalid dependency manifest JSON while evaluating {context}: {}",
+                    package_json_path.display()
+                )
+            })?;
     let object = manifest.as_object().cloned().ok_or_else(|| {
         anyhow::anyhow!(
             "dependency manifest must be a JSON object: {}",
@@ -19900,7 +19907,8 @@ fn collect_package_dependencies(
             return Err(error).with_context(|| format!("capturing dependencies for {context}"));
         }
     };
-    let runtime_capture = supply_chain::trust_card::CapturedDependencyTrust::from_topology(&topology)?;
+    let runtime_capture =
+        supply_chain::trust_card::CapturedDependencyTrust::from_topology(&topology)?;
     let include_development = sections.contains(&"devDependencies");
     let mut roots = vec!["."];
     if include_development {
@@ -19965,7 +19973,10 @@ fn collect_package_dependencies(
         }
     }
 
-    Ok(Some((dependencies.into_values().collect(), runtime_capture)))
+    Ok(Some((
+        dependencies.into_values().collect(),
+        runtime_capture,
+    )))
 }
 
 fn collect_run_package_dependencies(
@@ -19983,7 +19994,9 @@ fn collect_run_package_dependencies(
     )
 }
 
-fn collect_trust_scan_dependencies(project_root: &Path) -> Result<(
+fn collect_trust_scan_dependencies(
+    project_root: &Path,
+) -> Result<(
     Vec<RunPackageDependency>,
     supply_chain::trust_card::CapturedDependencyTrust,
 )> {
@@ -21189,10 +21202,12 @@ fn run_trust_scan(
                 &empty_audit,
                 now_secs,
             );
-            let retained_risk = existing.osv_risk_baseline.as_ref().map_or(
-                existing.user_facing_risk_assessment.level,
-                |baseline| baseline.risk_assessment.level,
-            );
+            let retained_risk = existing
+                .osv_risk_baseline
+                .as_ref()
+                .map_or(existing.user_facing_risk_assessment.level, |baseline| {
+                    baseline.risk_assessment.level
+                });
             let same_artifact = !ambiguous_versions
                 && dependency.lockfile_metadata.resolved_version()
                     == Some(existing.extension.version.as_str())
@@ -21254,10 +21269,7 @@ fn run_trust_scan(
                 // Equal aggregate severity does not authorize removing an
                 // OSV contribution or its reputation penalty. Explicit
                 // artifact repair instead retains those as aggregate floors.
-                if active_osv_overlay
-                    && !refresh
-                    && !authenticated_osv_clearance
-                {
+                if active_osv_overlay && !refresh && !authenticated_osv_clearance {
                     warnings.push(format!(
                         "{}: existing card not refreshed: active OSV evidence needs a complete authenticated clean answer for the same captured artifact before combined reassessment; use --refresh for explicit artifact repair",
                         dependency.extension_id
@@ -21381,7 +21393,10 @@ fn run_trust_scan(
         created_cards,
         refreshed_cards,
         skipped_existing,
-        lockfile_entries: dependencies.iter().filter(|dependency| dependency.lockfile_metadata.has_lockfile_pin).count(),
+        lockfile_entries: dependencies
+            .iter()
+            .filter(|dependency| dependency.lockfile_metadata.has_lockfile_pin)
+            .count(),
         deep,
         audit,
         refresh,
@@ -21626,7 +21641,9 @@ fn evaluate_run_trust_preflight(
                                             .get(&extension_id)
                                             .map_or(&[], Vec::as_slice),
                                     );
-                                    if let DependencyArtifactMatch::Mismatch(reason) = &artifact_match {
+                                    if let DependencyArtifactMatch::Mismatch(reason) =
+                                        &artifact_match
+                                    {
                                         let detail = format!(
                                             "dependency `{extension_id}` has contradictory artifact evidence: {reason}; run `franken-node trust scan --refresh` against the current project"
                                         );
@@ -21729,7 +21746,9 @@ fn evaluate_run_trust_preflight(
                                             (RunDependencyTrustStatus::Unverified, detail)
                                         }
                                         DependencyArtifactMatch::Mismatch(_) => {
-                                            unreachable!("artifact contradictions are refused before risk evaluation")
+                                            unreachable!(
+                                                "artifact contradictions are refused before risk evaluation"
+                                            )
                                         }
                                     };
                                     results.push(RunDependencyTrustResult {
@@ -21755,24 +21774,20 @@ fn evaluate_run_trust_preflight(
                         // (Dangerous) refuses a stale frontier; balanced (Risky)
                         // admits with a warning so the default profile keeps
                         // working offline.
-                        if results
-                            .iter()
-                            .any(|result| {
-                                matches!(
-                                    result.status,
-                                    RunDependencyTrustStatus::Trusted
-                                        | RunDependencyTrustStatus::Unverified
-                                )
-                            })
-                            && let Some(detail) = registry_revocation_freshness_denial(
-                                &authoritative_registry,
-                                &config.trust,
-                                policy_tier,
-                                now_secs,
-                                "run-preflight",
-                                "trace-run-trust-preflight",
+                        if results.iter().any(|result| {
+                            matches!(
+                                result.status,
+                                RunDependencyTrustStatus::Trusted
+                                    | RunDependencyTrustStatus::Unverified
                             )
-                        {
+                        }) && let Some(detail) = registry_revocation_freshness_denial(
+                            &authoritative_registry,
+                            &config.trust,
+                            policy_tier,
+                            now_secs,
+                            "run-preflight",
+                            "trace-run-trust-preflight",
+                        ) {
                             if policy_tier == SafetyTier::Dangerous {
                                 violations.push(TrustViolation {
                                     dependency_name: None,
@@ -24088,7 +24103,7 @@ fn ensure_registry_storage_root(project_root: &Path) -> Result<PathBuf> {
 }
 
 fn compute_registry_artifact_sha256(bytes: &[u8]) -> String {
-    format!("sha256:{}", hex::encode(sha2::Sha256::digest(bytes)))
+    supply_chain::registry_artifact::artifact_sha256(bytes)
 }
 
 fn registry_entry_directory_name(stored_at_utc: &str, extension_id: &str) -> String {
@@ -24132,18 +24147,7 @@ fn registry_should_skip_dir(path: &Path) -> bool {
 }
 
 fn registry_artifact_file_name_is_safe(file_name: &str) -> bool {
-    if file_name.is_empty() || file_name.contains('\0') {
-        return false;
-    }
-    let path = Path::new(file_name);
-    if path.is_absolute() {
-        return false;
-    }
-    let mut components = path.components();
-    match components.next() {
-        Some(Component::Normal(_)) => components.next().is_none(),
-        _ => false,
-    }
+    supply_chain::registry_artifact::artifact_file_name_is_safe(file_name)
 }
 
 fn count_active_registry_artifacts_in_lineage(lineage_root: &Path) -> Result<usize> {
@@ -24435,38 +24439,6 @@ fn inspect_local_registry_artifact(
         };
     }
     let artifact_path = artifact.entry_dir().join(artifact_file_name);
-    let Some(version_hash) = artifact
-        .manifest
-        .extension
-        .versions
-        .last()
-        .map(|version| version.content_hash.as_str())
-    else {
-        return RegistryArtifactVerification {
-            status: RegistryArtifactIntegrityStatus::InvalidMetadata,
-            detail: "extension has no registered version lineage".to_string(),
-            artifact_path,
-        };
-    };
-
-    // `version_hash` is the bare 64-hex content hash from the version lineage;
-    // `artifact_sha256` is the `sha256:`-prefixed digest URI. Compare modulo prefix.
-    let manifest_content_hash = artifact
-        .manifest
-        .artifact_sha256
-        .strip_prefix("sha256:")
-        .unwrap_or(artifact.manifest.artifact_sha256.as_str());
-    if !security::constant_time::ct_eq(version_hash, manifest_content_hash) {
-        return RegistryArtifactVerification {
-            status: RegistryArtifactIntegrityStatus::InvalidMetadata,
-            detail: format!(
-                "manifest hash {} does not match version lineage hash {}",
-                artifact.manifest.artifact_sha256, version_hash
-            ),
-            artifact_path,
-        };
-    }
-
     let package_bytes = match crate::bounded_read(&artifact_path, MAX_MANIFEST_FILE_BYTES) {
         Ok(bytes) => bytes,
         Err(error) => {
@@ -24477,133 +24449,25 @@ fn inspect_local_registry_artifact(
             };
         }
     };
-    let actual_hash = compute_registry_artifact_sha256(&package_bytes);
-    if !security::constant_time::ct_eq(&actual_hash, &artifact.manifest.artifact_sha256) {
-        return RegistryArtifactVerification {
-            status: RegistryArtifactIntegrityStatus::HashMismatch,
-            detail: format!(
-                "artifact hash mismatch: expected {} got {}",
-                artifact.manifest.artifact_sha256, actual_hash
-            ),
-            artifact_path,
-        };
-    }
-    if artifact.manifest.extension.signature.algorithm != "ed25519" {
-        return RegistryArtifactVerification {
-            status: RegistryArtifactIntegrityStatus::InvalidSignature,
-            detail: "unsupported manifest signature algorithm".to_string(),
-            artifact_path,
-        };
-    }
-
-    let manifest_bytes = match BASE64_STANDARD.decode(&artifact.manifest.manifest_bytes_b64) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            return RegistryArtifactVerification {
-                status: RegistryArtifactIntegrityStatus::InvalidMetadata,
-                detail: format!("failed decoding manifest bytes: {error}"),
-                artifact_path,
-            };
-        }
-    };
-    let public_key_bytes = match hex::decode(&artifact.manifest.publisher_public_key_hex) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            return RegistryArtifactVerification {
-                status: RegistryArtifactIntegrityStatus::InvalidMetadata,
-                detail: format!("failed decoding publisher key hex: {error}"),
-                artifact_path,
-            };
-        }
-    };
-    let public_key_array = match <[u8; 32]>::try_from(public_key_bytes.as_slice()) {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            return RegistryArtifactVerification {
-                status: RegistryArtifactIntegrityStatus::InvalidMetadata,
-                detail: "publisher public key was not 32 bytes".to_string(),
-                artifact_path,
-            };
-        }
-    };
-    let verifying_key = match ed25519_dalek::VerifyingKey::from_bytes(&public_key_array) {
-        Ok(key) => key,
-        Err(error) => {
-            return RegistryArtifactVerification {
-                status: RegistryArtifactIntegrityStatus::InvalidMetadata,
-                detail: format!("failed constructing verifying key: {error}"),
-                artifact_path,
-            };
-        }
-    };
-    let derived_key_id = supply_chain::artifact_signing::KeyId::from_verifying_key(&verifying_key);
-    if derived_key_id.to_string() != artifact.manifest.extension.signature.key_id {
-        return RegistryArtifactVerification {
-            status: RegistryArtifactIntegrityStatus::InvalidMetadata,
-            detail: format!(
-                "publisher key id mismatch: manifest={} derived={}",
-                artifact.manifest.extension.signature.key_id, derived_key_id
-            ),
-            artifact_path,
-        };
-    }
-    if let Err(error) = supply_chain::artifact_signing::verify_signature(
-        &verifying_key,
-        &manifest_bytes,
-        &artifact.manifest.extension.signature.signature_bytes,
+    if let Err(error) = supply_chain::registry_artifact::verify_artifact_bytes(
+        &artifact.manifest,
+        &package_bytes,
+        None,
     ) {
+        use supply_chain::registry_artifact::ArtifactVerificationFailure;
         return RegistryArtifactVerification {
-            status: RegistryArtifactIntegrityStatus::InvalidSignature,
-            detail: format!("manifest signature verification failed: {error}"),
-            artifact_path,
-        };
-    }
-
-    // The storage envelope is editable. A valid signature over detached bytes
-    // cannot authenticate a replacement package merely because its recomputed
-    // hash matches that envelope. Bind the signed package name, publisher,
-    // version and tags back to this immutable local artifact.
-    let signed_manifest = match serde_json::from_slice::<
-        supply_chain::extension_registry::ExtensionRegistrationManifest,
-    >(&manifest_bytes)
-    {
-        Ok(manifest) => manifest,
-        Err(error) => {
-            return RegistryArtifactVerification {
-                status: RegistryArtifactIntegrityStatus::InvalidMetadata,
-                detail: format!("invalid signed extension registration manifest: {error}"),
-                artifact_path,
-            };
-        }
-    };
-    let extension = &artifact.manifest.extension;
-    let binding_error = if signed_manifest.schema_version
-        != supply_chain::extension_registry::EXTENSION_REGISTRATION_MANIFEST_SCHEMA
-    {
-        Some("unsupported signed extension registration manifest schema")
-    } else if signed_manifest.name != extension.name {
-        Some("signed manifest name does not match stored extension name")
-    } else if signed_manifest.publisher_id != extension.publisher_id {
-        Some("signed manifest publisher_id does not match stored extension publisher")
-    } else if extension.versions.as_slice()
-        != std::slice::from_ref(&signed_manifest.initial_version)
-    {
-        // Each stored artifact is created from one registration. Later lineage
-        // entries need their own signed artifact; an unsigned appended version
-        // must not inherit the initial version's signature.
-        Some("stored artifact version lineage does not match signed initial_version")
-    } else if signed_manifest.tags != extension.tags {
-        Some("signed manifest tags do not match stored extension tags")
-    } else if u64::try_from(package_bytes.len()).ok() != Some(artifact.manifest.artifact_size_bytes)
-    {
-        Some("stored artifact size does not match actual package bytes")
-    } else {
-        None
-    };
-    if let Some(detail) = binding_error {
-        return RegistryArtifactVerification {
-            status: RegistryArtifactIntegrityStatus::InvalidMetadata,
-            detail: detail.to_string(),
+            status: match error.kind {
+                ArtifactVerificationFailure::HashMismatch => {
+                    RegistryArtifactIntegrityStatus::HashMismatch
+                }
+                ArtifactVerificationFailure::InvalidSignature => {
+                    RegistryArtifactIntegrityStatus::InvalidSignature
+                }
+                ArtifactVerificationFailure::InvalidMetadata => {
+                    RegistryArtifactIntegrityStatus::InvalidMetadata
+                }
+            },
+            detail: error.detail,
             artifact_path,
         };
     }
@@ -24613,6 +24477,38 @@ fn inspect_local_registry_artifact(
         detail: "artifact hash, size and signed manifest bindings verified".to_string(),
         artifact_path,
     }
+}
+
+fn load_run_registry_artifact(
+    manifest_path: &Path,
+    publisher_key_path: &Path,
+    project_paths: &RunProjectPaths,
+    config: &config::Config,
+) -> Result<PublisherSourceGraphApproval> {
+    use supply_chain::registry_artifact::{absolute_artifact_path, read_artifact_file};
+    let key_path = absolute_artifact_path(publisher_key_path)?;
+    anyhow::ensure!(
+        !key_path.starts_with(project_paths.project_root()),
+        "publisher public key must be independently retained outside the guest project"
+    );
+    let key_bytes = read_artifact_file(&key_path, 64 * 1024)
+        .context("failed reading independent publisher public key")?;
+    let key = parse_verifying_key_from_blob(&key_bytes)
+        .context("publisher public key is not a supported Ed25519 verification key")?;
+    let approval = PublisherSourceGraphApproval::load(manifest_path, &key)?;
+    let entrypoint = project_paths
+        .entrypoint()
+        .strip_prefix(project_paths.project_root())?
+        .to_str()
+        .context("registry-approved entrypoint is not UTF-8")?;
+    approval.validate_run(
+        entrypoint,
+        config.runtime.frozen_modules == Some(true),
+        config.runtime.frozen_module_symlinks == Some(true),
+        &config.runtime.module_conditions,
+        config.runtime.frozen_module_graph_hash.as_deref(),
+    )?;
+    Ok(approval)
 }
 
 fn local_registry_search_rows(
@@ -26676,10 +26572,18 @@ fn derive_active_fleet_incidents(
     let mut active_by_incident = BTreeMap::<(String, String), PersistedFleetActionRecord>::new();
     for action in &state.actions {
         match &action.action {
-            PersistedFleetAction::Quarantine { zone_id, incident_id, .. } => {
+            PersistedFleetAction::Quarantine {
+                zone_id,
+                incident_id,
+                ..
+            } => {
                 active_by_incident.insert((zone_id.clone(), incident_id.clone()), action.clone());
             }
-            PersistedFleetAction::Release { zone_id, incident_id, .. } => {
+            PersistedFleetAction::Release {
+                zone_id,
+                incident_id,
+                ..
+            } => {
                 active_by_incident.remove(&(zone_id.clone(), incident_id.clone()));
             }
             #[cfg(feature = "control-plane")]
@@ -26721,12 +26625,17 @@ fn derive_active_fleet_incidents(
                     .nodes
                     .iter()
                     .filter(|node| node_matches_filter(node, &zone_id))
-                    .filter(|node| active_ids_by_zone.get(&node.zone_id)
-                        .is_some_and(|ids| ids.contains(record.action_id.as_str())))
+                    .filter(|node| {
+                        active_ids_by_zone
+                            .get(&node.zone_id)
+                            .is_some_and(|ids| ids.contains(record.action_id.as_str()))
+                    })
                     .collect();
                 let stale_node_count = relevant_nodes
                     .iter()
-                    .filter(|node| stale_ids.contains(&(node.zone_id.as_str(), node.node_id.as_str())))
+                    .filter(|node| {
+                        stale_ids.contains(&(node.zone_id.as_str(), node.node_id.as_str()))
+                    })
                     .count();
                 let total_nodes = u32::try_from(relevant_nodes.len()).unwrap_or(u32::MAX);
                 let converged_nodes = u32::try_from(
@@ -26734,7 +26643,8 @@ fn derive_active_fleet_incidents(
                         .iter()
                         .filter(|node| {
                             node.health == PersistedNodeHealth::Healthy
-                                && !stale_ids.contains(&(node.zone_id.as_str(), node.node_id.as_str()))
+                                && !stale_ids
+                                    .contains(&(node.zone_id.as_str(), node.node_id.as_str()))
                                 && node.applied_actions.as_ref().is_some_and(|checkpoint| {
                                     expected_checkpoints.get(&node.zone_id) == Some(checkpoint)
                                 })
@@ -27822,9 +27732,15 @@ fn apply_fleet_quarantine_action(
     for extension_id in target_extension_ids {
         let card = state
             .registry
-            .read(&extension_id, now_secs, "trace-cli-fleet-agent-quarantine-current")
+            .read(
+                &extension_id,
+                now_secs,
+                "trace-cli-fleet-agent-quarantine-current",
+            )
             .map_err(|err| anyhow::anyhow!(err.to_string()))?
-            .ok_or_else(|| anyhow::anyhow!("fleet quarantine target `{extension_id}` disappeared"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("fleet quarantine target `{extension_id}` disappeared")
+            })?;
         if card.effective_quarantine_sources().contains(&source) {
             updated_extensions.push(extension_id);
             continue;
@@ -28294,9 +28210,10 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
                 actions_processed = actions_processed.saturating_add(1);
             }
             let apply_result = match &action.action {
-                PersistedFleetAction::Quarantine { quarantine_version: qv, .. }
-                    if !active_quarantine_ids.contains(action.action_id.as_str()) =>
-                {
+                PersistedFleetAction::Quarantine {
+                    quarantine_version: qv,
+                    ..
+                } if !active_quarantine_ids.contains(action.action_id.as_str()) => {
                     // A later release already retired this incident. Applying
                     // its historical quarantine would create a transient
                     // restriction that is not part of the desired snapshot.
@@ -28313,7 +28230,11 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
                     reason,
                     ..
                 } => match apply_fleet_quarantine_action(
-                    Path::new("."), zone_id, incident_id, target_id, now_secs,
+                    Path::new("."),
+                    zone_id,
+                    incident_id,
+                    target_id,
+                    now_secs,
                 ) {
                     Ok(updated_extensions) => {
                         quarantine_version = quarantine_version.max(*qv);
@@ -28382,7 +28303,8 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
                             "policy update `{policy_version}` carries field names without executable policy contents; application is not acknowledged"
                         ))
                     } else {
-                        policy_activation.as_ref()
+                        policy_activation
+                            .as_ref()
                             .map_err(|error| anyhow::anyhow!(error.to_string()))
                             .and_then(|active| {
                                 if active.is_none() {
@@ -29937,8 +29859,27 @@ fn handle_verify_source_graph(args: &VerifySourceGraphArgs) -> Result<i32> {
             },
         )?;
         let report = captured.report();
+        let capsule = if let Some(path) = &args.write_source_capsule {
+            anyhow::ensure!(
+                report.fully_resolved,
+                "cannot export a source capsule with unresolved module routes"
+            );
+            let capsule = frankenengine_node::supply_chain::module_resolution_graph::file_resolution::source_graph::capsule::encode(&captured)?;
+            supply_chain::registry_artifact::write_new_source_capsule(path, capsule.bytes())
+                .with_context(|| {
+                    format!("failed creating new source capsule {}", path.display())
+                })?;
+            Some((path, capsule))
+        } else {
+            None
+        };
         if args.json {
-            println!("{}", serde_json::to_string_pretty(report)?);
+            let mut output = serde_json::to_value(report)?;
+            if let Some((path, capsule)) = &capsule {
+                output["capsule_path"] = serde_json::json!(path);
+                output["capsule_digest"] = serde_json::json!(capsule.digest());
+            }
+            println!("{}", serde_json::to_string_pretty(&output)?);
         } else {
             println!(
                 "Source graph: {} (bounded static requests; no guest execution)",
@@ -29956,6 +29897,9 @@ fn handle_verify_source_graph(args: &VerifySourceGraphArgs) -> Result<i32> {
                 report.diagnostics.len()
             );
             println!("Content identity grants no publisher or execution authority.");
+            if let Some((path, capsule)) = &capsule {
+                println!("Source capsule: {} ({})", path.display(), capsule.digest());
+            }
         }
         Ok(i32::from(!report.fully_resolved))
     }
@@ -34793,6 +34737,8 @@ fn main() -> Result<()> {
                 frozen_modules,
                 frozen_module_symlinks,
                 frozen_module_graph_hash,
+                registry_artifact,
+                publisher_public_key,
                 module_conditions,
                 app_args,
             } = args;
@@ -34859,16 +34805,37 @@ fn main() -> Result<()> {
                     return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
                 }
             };
-            if let Err(err) = runtime::safe_mode::enforce_run_safe_mode(project_paths.entrypoint()) {
+            if let Err(err) = runtime::safe_mode::enforce_run_safe_mode(project_paths.entrypoint())
+            {
                 return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
             }
-            let active_fleet_policy = match control_plane::fleet_transport::enforce_active_fleet_policy(
-                project_paths.project_root(), &mut resolved.config, resolved.selected_profile,
+            let active_fleet_policy =
+                match control_plane::fleet_transport::enforce_active_fleet_policy(
+                    project_paths.project_root(),
+                    &mut resolved.config,
+                    resolved.selected_profile,
+                ) {
+                    Ok(active) => active,
+                    Err(err) => {
+                        return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
+                    }
+                };
+            let registry_artifact_approval = match (
+                registry_artifact.as_deref(),
+                publisher_public_key.as_deref(),
             ) {
-                Ok(active) => active,
-                Err(err) => {
-                    return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
-                }
+                (Some(manifest), Some(key)) => match load_run_registry_artifact(
+                    manifest,
+                    key,
+                    &project_paths,
+                    &resolved.config,
+                ) {
+                    Ok(approval) => Some(approval),
+                    Err(err) => {
+                        return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
+                    }
+                },
+                _ => None,
             };
             let preflight = match evaluate_run_trust_preflight(
                 &app_path,
@@ -34964,6 +34931,7 @@ fn main() -> Result<()> {
                     .with_preflight_fleet_policy(active_fleet_policy)
                     .with_preflight_dependency_ids(preflight_dependency_ids)
                     .with_preflight_dependency_capture(Some(preflight.dependency_capture.clone()))
+                    .with_registry_artifact_approval(registry_artifact_approval)
                     .with_preflight_registry_requirement(preflight_registry_required)
                     .with_replay_capture(capture_replay)
                     .with_app_args(app_args);
@@ -35138,8 +35106,8 @@ fn main() -> Result<()> {
                     &receipt,
                     configured_run_receipt_limit(&resolved.config),
                 )?;
-                // An explicitly requested replay capture must be durably bound
-                // to the signed run record before the command can succeed.
+                // Explicit replay capture and publisher-approved source must
+                // be durably bound to a signed record before command success.
                 let persisted_ledger = persist_run_host_effect_ledger(
                     &project_root,
                     &policy,
@@ -35154,6 +35122,19 @@ fn main() -> Result<()> {
                         .ok_or_else(|| {
                             anyhow::anyhow!(
                                 "requested native replay capture has no signed run record"
+                            )
+                        })?;
+                } else if receipt
+                    .core
+                    .native_module_graph
+                    .as_ref()
+                    .is_some_and(|graph| graph.publisher_artifact.is_some())
+                {
+                    persisted_ledger
+                        .context("failed persisting publisher-approved native run record")?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "publisher-approved native run has no signed run record"
                             )
                         })?;
                 } else if let Err(err) = persisted_ledger
@@ -35594,7 +35575,8 @@ fn main() -> Result<()> {
                     let json = matches!(format, migration::ValidateOutputFormat::Json);
                     #[cfg(not(target_os = "linux"))]
                     return migrate_fail(
-                        "migrate.validate", json,
+                        "migrate.validate",
+                        json,
                         "attested project validation is supported on Linux only",
                     );
                     #[cfg(target_os = "linux")]
@@ -35606,7 +35588,8 @@ fn main() -> Result<()> {
                             args.out.as_deref(),
                         ) else {
                             return migrate_fail(
-                                "migrate.validate", json,
+                                "migrate.validate",
+                                json,
                                 "--attest requires --bun-bin, --signing-key and --out",
                             );
                         };
@@ -35618,11 +35601,18 @@ fn main() -> Result<()> {
                             project: args.project_path.clone(),
                             migrated_project: args.migrated_project.clone(),
                             expected_input_sha256: args.expected_input_sha256.clone(),
-                            expected_candidate_input_sha256: args.expected_candidate_input_sha256.clone(),
+                            expected_candidate_input_sha256: args
+                                .expected_candidate_input_sha256
+                                .clone(),
                             attest_regression: args.attest_regression,
                         };
                         let published = match execution::run(
-                            &selection, &native, bun, key, out, args.execute,
+                            &selection,
+                            &native,
+                            bun,
+                            key,
+                            out,
+                            args.execute,
                         ) {
                             Ok(published) => published,
                             Err(error) => return migrate_fail("migrate.validate", json, error),
@@ -35923,7 +35913,8 @@ fn main() -> Result<()> {
                     .project_path
                     .as_deref()
                     .unwrap_or_else(|| Path::new("."));
-                let report = match run_trust_scan(project_root, args.deep, args.audit, args.refresh) {
+                let report = match run_trust_scan(project_root, args.deep, args.audit, args.refresh)
+                {
                     Ok(report) => report,
                     Err(err) => return trust_fail("trust.scan", args.json, err),
                 };
@@ -36275,8 +36266,13 @@ fn main() -> Result<()> {
                 let matching_incidents = loaded
                     .active_incidents
                     .iter()
-                    .filter(|incident| incident.incident_id == args.incident
-                        && args.zone.as_ref().is_none_or(|zone| incident.zone_id == *zone))
+                    .filter(|incident| {
+                        incident.incident_id == args.incident
+                            && args
+                                .zone
+                                .as_ref()
+                                .is_none_or(|zone| incident.zone_id == *zone)
+                    })
                     .cloned()
                     .collect::<Vec<_>>();
                 let incident = match matching_incidents.as_slice() {
@@ -36286,15 +36282,24 @@ fn main() -> Result<()> {
                             "fleet.release",
                             args.json,
                             match args.zone.as_deref() {
-                                Some(zone) => format!("incident `{}` not found in zone `{zone}`", args.incident),
+                                Some(zone) => format!(
+                                    "incident `{}` not found in zone `{zone}`",
+                                    args.incident
+                                ),
                                 None => format!("incident `{}` not found", args.incident),
                             },
                         );
                     }
-                    _ => return fleet_fail(
-                        "fleet.release", args.json,
-                        format!("incident `{}` exists in multiple zones; select its exact scope with --zone", args.incident),
-                    ),
+                    _ => {
+                        return fleet_fail(
+                            "fleet.release",
+                            args.json,
+                            format!(
+                                "incident `{}` exists in multiple zones; select its exact scope with --zone",
+                                args.incident
+                            ),
+                        );
+                    }
                 };
                 let fleet_signing_material = match load_fleet_signing_material() {
                     Ok(material) => material,
@@ -37709,6 +37714,7 @@ mod run_trust_gate_tests {
             process_shape_read_allowed: None,
             execution_limits: None,
             native_replay_payload_sha256: None,
+            native_module_graph: None,
             preflight_verdict: PreFlightVerdict::Passed {
                 checked: 0,
                 warnings: Vec::new(),
@@ -37881,6 +37887,82 @@ mod run_trust_gate_tests {
                 .get("native_replay_payload_sha256")
                 .is_none(),
             "ordinary runs retain their existing receipt representation"
+        );
+    }
+
+    #[test]
+    fn native_module_graph_and_publisher_are_bound_to_receipt_hash_and_identity() {
+        use ops::engine_dispatcher::NativeModuleGraphSummary;
+        use supply_chain::registry_artifact::PublisherArtifactIdentity;
+
+        let mut core = sample_failed_run_receipt_core();
+        let graph = NativeModuleGraphSummary {
+            graph_input_hash: format!("sha256:{}", "ab".repeat(32)),
+            entrypoint: "app.cjs".to_string(),
+            modules: 2,
+            routes: 1,
+            contained_symlinks: false,
+            publisher_artifact: Some(PublisherArtifactIdentity {
+                publisher_key_id: "publisher-key-id".to_string(),
+                publisher_id: "publisher".to_string(),
+                name: "application".to_string(),
+                version: "1.2.3".to_string(),
+                artifact_sha256: format!("sha256:{}", "cd".repeat(32)),
+            }),
+        };
+        core.native_module_graph = Some(graph.clone());
+        let original_hash = compute_run_execution_receipt_hash(&core).unwrap();
+        let original_id = deterministic_run_execution_receipt_id(
+            &compute_run_execution_receipt_seed_hash(&core).unwrap(),
+        );
+        let mut replacements = vec![None];
+        for mutate in [
+            (|graph: &mut NativeModuleGraphSummary| {
+                graph.graph_input_hash = format!("sha256:{}", "ef".repeat(32))
+            }) as fn(&mut NativeModuleGraphSummary),
+            |graph| graph.entrypoint = "other.cjs".into(),
+            |graph| graph.contained_symlinks = true,
+            |graph| graph.publisher_artifact = None,
+            |graph| {
+                graph.publisher_artifact.as_mut().unwrap().publisher_key_id = "other-key".into()
+            },
+            |graph| {
+                graph.publisher_artifact.as_mut().unwrap().publisher_id = "other-publisher".into()
+            },
+            |graph| graph.publisher_artifact.as_mut().unwrap().name = "other-package".into(),
+            |graph| graph.publisher_artifact.as_mut().unwrap().version = "9.9.9".into(),
+            |graph| {
+                graph.publisher_artifact.as_mut().unwrap().artifact_sha256 =
+                    format!("sha256:{}", "01".repeat(32))
+            },
+        ] {
+            let mut replacement = graph.clone();
+            mutate(&mut replacement);
+            replacements.push(Some(replacement));
+        }
+        for replacement in replacements {
+            let mut changed = core.clone();
+            changed.native_module_graph = replacement;
+            assert_ne!(
+                compute_run_execution_receipt_hash(&changed).unwrap(),
+                original_hash,
+                "source or publisher substitution must change the authenticated receipt"
+            );
+            assert_ne!(
+                deterministic_run_execution_receipt_id(
+                    &compute_run_execution_receipt_seed_hash(&changed).unwrap()
+                ),
+                original_id,
+                "source or publisher substitution must change receipt identity"
+            );
+        }
+        core.native_module_graph = None;
+        assert!(
+            serde_json::to_value(core)
+                .unwrap()
+                .get("native_module_graph")
+                .is_none(),
+            "runs without a frozen graph retain their existing receipt representation"
         );
     }
 

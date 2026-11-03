@@ -42,6 +42,147 @@ fn source_graph_capture_arguments_preserve_the_explicit_symlink_choice() {
 }
 
 #[test]
+fn registry_source_admission_requires_an_explicit_independent_key() {
+    let Command::Run(defaults) = parse(&["franken-node", "run", "app.cjs"]).unwrap().command else {
+        panic!("expected run");
+    };
+    assert!(defaults.registry_artifact.is_none());
+    assert!(defaults.publisher_public_key.is_none());
+    for missing_pair in [
+        ["--registry-artifact", "artifact.manifest.json"],
+        ["--publisher-public-key", "publisher.pub"],
+    ] {
+        let mut arguments = vec!["franken-node", "run", "app.cjs"];
+        arguments.extend(missing_pair);
+        let Command::Run(args) = parse(&arguments).unwrap().command else {
+            panic!("expected run");
+        };
+        assert!(
+            args.validate_paths()
+                .unwrap_err()
+                .to_string()
+                .contains("must be supplied together")
+        );
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn registry_source_admission_accepts_absolute_external_paths_without_traversal() {
+    let Command::Run(args) = parse(&[
+        "franken-node",
+        "run",
+        "app.cjs",
+        "--frozen-modules",
+        "--registry-artifact",
+        "/operator/registry/artifact.manifest.json",
+        "--publisher-public-key",
+        "/operator/keys/publisher.pub",
+    ])
+    .unwrap()
+    .command
+    else {
+        panic!("expected run");
+    };
+    args.validate_paths().unwrap();
+    assert_eq!(
+        args.publisher_public_key,
+        Some(PathBuf::from("/operator/keys/publisher.pub"))
+    );
+    let Command::Verify(VerifyCommand::SourceGraph(args)) = parse(&[
+        "franken-node",
+        "verify",
+        "source-graph",
+        "project",
+        "app.cjs",
+        "--write-source-capsule",
+        "/operator/review/source.capsule",
+    ])
+    .unwrap()
+    .command
+    else {
+        panic!("expected source graph");
+    };
+    assert_eq!(
+        args.write_source_capsule,
+        Some(PathBuf::from("/operator/review/source.capsule"))
+    );
+    assert!(
+        parse(&[
+            "franken-node",
+            "run",
+            "app.cjs",
+            "--registry-artifact",
+            "/operator/../artifact.json",
+            "--publisher-public-key",
+            "/operator/key.pub",
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn source_graph_capsule_export_is_explicit_private_and_does_not_overwrite() {
+    use frankenengine_node::supply_chain::module_resolution_graph::file_resolution::source_graph::capsule;
+    use std::os::unix::fs::PermissionsExt;
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(
+        project.path().join("app.cjs"),
+        "console.log('PRIVATE_CAPSULE_SOURCE');\n",
+    )
+    .unwrap();
+    let output_dir = tempfile::tempdir().unwrap();
+    let destination = output_dir.path().join("source.capsule");
+    let invoke = || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_franken-node"))
+            .args(["verify", "source-graph"])
+            .arg(project.path())
+            .arg("app.cjs")
+            .arg("--write-source-capsule")
+            .arg(&destination)
+            .arg("--json")
+            .output()
+            .unwrap()
+    };
+    let exported = invoke();
+    assert!(
+        exported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&exported.stdout).unwrap();
+    assert!(!String::from_utf8_lossy(&exported.stdout).contains("PRIVATE_CAPSULE_SOURCE"));
+    assert_eq!(
+        std::fs::metadata(&destination)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o077,
+        0
+    );
+    let retained = std::fs::read(&destination).unwrap();
+    let graph = capsule::replay(&retained, report["capsule_digest"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        graph.report().input_hash,
+        report["input_hash"].as_str().unwrap()
+    );
+    std::fs::write(
+        project.path().join("app.cjs"),
+        "console.log('REPLACEMENT_SOURCE');\n",
+    )
+    .unwrap();
+    let refused = invoke();
+    assert!(!refused.status.success());
+    assert_eq!(std::fs::read(&destination).unwrap(), retained);
+    let error: serde_json::Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!(
+        error["schema_version"],
+        "franken-node/verify-source-graph-error-cli/v1"
+    );
+}
+
+#[test]
 fn source_graph_is_listed_in_the_reviewed_verification_help_contract() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_franken-node"))
         .args(["verify", "--help"])
@@ -213,9 +354,15 @@ fn frozen_module_symlink_flag_preserves_configuration_unless_explicit() {
         };
         assert_eq!(run.frozen_module_symlinks, expected);
     }
-    assert!(parse(&[
-        "franken-node", "run", "app.cjs", "--frozen-module-symlinks=outside",
-    ]).is_err());
+    assert!(
+        parse(&[
+            "franken-node",
+            "run",
+            "app.cjs",
+            "--frozen-module-symlinks=outside",
+        ])
+        .is_err()
+    );
 }
 
 #[test]

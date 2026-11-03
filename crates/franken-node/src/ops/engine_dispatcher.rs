@@ -6,6 +6,9 @@ use crate::ops::telemetry_bridge::{
 };
 use crate::runtime::lockstep_harness::LockstepHarness;
 use crate::storage::frankensqlite_adapter::FrankensqliteAdapter;
+use crate::supply_chain::registry_artifact::{
+    PublisherArtifactIdentity, PublisherSourceGraphApproval,
+};
 use crate::{
     ActionableError,
     config::{Config, PreferredRuntime, Profile, RuntimeParseBudget},
@@ -3137,6 +3140,10 @@ pub struct RunTrustRequirements {
     /// name-only library callers retain risk checks without artifact claims.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dependency_capture: Option<CapturedDependencyTrust>,
+    /// Caller-pinned publisher approval for the exact frozen source graph.
+    /// Does not replace current dependency trust or runtime capability policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    registry_artifact_approval: Option<PublisherSourceGraphApproval>,
 }
 
 impl RunTrustRequirements {
@@ -3158,6 +3165,7 @@ impl RunTrustRequirements {
                 .collect(),
             registry_required: registry_required || !required_card_ids.is_empty(),
             dependency_capture: None,
+            registry_artifact_approval: None,
             required_card_ids: required_card_ids
                 .iter()
                 .cloned()
@@ -3180,6 +3188,42 @@ impl RunTrustRequirements {
         self.dependency_capture = Some(capture);
         self.validate()?;
         Ok(self)
+    }
+
+    pub fn with_registry_artifact_approval(
+        mut self,
+        approval: PublisherSourceGraphApproval,
+    ) -> Result<Self> {
+        approval.validate()?;
+        self.registry_artifact_approval = Some(approval);
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Both the dispatcher and worker reauthenticate the retained artifact,
+    /// preserving the explicit operator pin and the current resolution policy.
+    pub fn verify_registry_artifact(&self, paths: &RunProjectPaths, config: &Config) -> Result<()> {
+        self.validate()?;
+        if let Some(approval) = &self.registry_artifact_approval {
+            anyhow::ensure!(
+                cfg!(feature = "engine"),
+                "publisher source admission requires the native engine build"
+            );
+            let entrypoint = paths
+                .entrypoint()
+                .strip_prefix(paths.project_root())?
+                .to_str()
+                .context("registry-approved entrypoint is not UTF-8")?;
+            approval.validate_run(
+                entrypoint,
+                config.runtime.frozen_modules == Some(true),
+                config.runtime.frozen_module_symlinks == Some(true),
+                &config.runtime.module_conditions,
+                config.runtime.frozen_module_graph_hash.as_deref(),
+            )?;
+            approval.revalidate()?;
+        }
+        Ok(())
     }
 
     /// Recheck metadata at dispatch and authenticated worker launch. The live
@@ -3223,6 +3267,9 @@ impl RunTrustRequirements {
     /// these invariants prevent representation drift inside that boundary.
     fn validate(&self) -> Result<()> {
         Self::validate_bounds(&self.dependency_ids, &self.required_card_ids)?;
+        if let Some(approval) = &self.registry_artifact_approval {
+            approval.validate()?;
+        }
         for ids in [&self.dependency_ids, &self.required_card_ids] {
             if ids.windows(2).any(|pair| pair[0] >= pair[1]) {
                 anyhow::bail!("execution trust requirements are not sorted and unique");
@@ -3676,6 +3723,7 @@ pub struct EngineDispatcher {
     /// Selected lockfile artifacts and the exact dependency topology assessed
     /// by public preflight. Optional only for explicit name-only library use.
     preflight_dependency_capture: Option<CapturedDependencyTrust>,
+    registry_artifact_approval: Option<PublisherSourceGraphApproval>,
     /// Whether preflight relied on an available authoritative registry. Only
     /// legacy-risky's explicitly skipped preflight may start without one.
     preflight_registry_required: bool,
@@ -3808,7 +3856,8 @@ pub struct EngineContainmentDecision {
 }
 
 /// Source-free identity of the immutable graph supplied to native execution.
-/// The graph hash binds captured inputs; it does not authenticate a publisher.
+/// The graph hash binds captured inputs. Publisher identity is present only
+/// when an independently pinned registry signature approved these same bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeModuleGraphSummary {
     pub graph_input_hash: String,
@@ -3819,6 +3868,8 @@ pub struct NativeModuleGraphSummary {
     /// Historical summaries used the rejecting policy.
     #[serde(default)]
     pub contained_symlinks: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher_artifact: Option<PublisherArtifactIdentity>,
 }
 
 /// Settings supplied to one native orchestrator invocation. The invocation can
@@ -5582,6 +5633,7 @@ fn prepare_native_frozen_modules(
     contained_symlinks: bool,
     capture_replay: bool,
     expected_graph_hash: Option<&str>,
+    publisher_approval: Option<&PublisherSourceGraphApproval>,
 ) -> std::result::Result<FrozenNativeModules, String> {
     #[cfg(not(unix))]
     {
@@ -5592,15 +5644,16 @@ fn prepare_native_frozen_modules(
             contained_symlinks,
             capture_replay,
             expected_graph_hash,
+            publisher_approval,
         );
         Err("Frozen module capture requires Unix".to_string())
     }
     #[cfg(unix)]
     {
+        use crate::supply_chain::module_resolution_graph::file_resolution::SymlinkPolicy;
         use crate::supply_chain::module_resolution_graph::file_resolution::source_graph::{
             GraphOptions, capture, engine_resolver::CapturedEngineResolver,
         };
-        use crate::supply_chain::module_resolution_graph::file_resolution::SymlinkPolicy;
         use frankenengine_engine::capability::RuntimeCapability;
         use frankenengine_engine::module_resolver::{
             CapabilityPolicyHook, ModuleResolver, ResolutionContext,
@@ -5634,7 +5687,9 @@ fn prepare_native_frozen_modules(
         // A configured pin is authority retained by the operator, not a hash
         // derived from the untrusted graph currently under examination. The
         // resolver validates it and consumes this same immutable capture.
-        let pin = expected_graph_hash
+        let pin = publisher_approval
+            .map(PublisherSourceGraphApproval::graph_input_hash)
+            .or(expected_graph_hash)
             .unwrap_or(&graph.report().input_hash)
             .to_owned();
         let resolver = Arc::new(
@@ -5668,6 +5723,7 @@ fn prepare_native_frozen_modules(
             modules: resolver.summary().modules,
             routes: resolver.summary().routes,
             contained_symlinks,
+            publisher_artifact: publisher_approval.map(|approval| approval.identity().clone()),
         };
         let resolver = resolver
             .execution_resolver(root, policy)
@@ -6136,6 +6192,7 @@ impl Default for EngineDispatcher {
             project_paths: None,
             preflight_dependency_ids: Vec::new(),
             preflight_dependency_capture: None,
+            registry_artifact_approval: None,
             preflight_registry_required: true,
             preflight_fleet_policy: None,
             app_args: Vec::new(),
@@ -6330,6 +6387,17 @@ impl EngineDispatcher {
         self
     }
 
+    /// Carry an explicit publisher-approved graph through the authenticated
+    /// native session. Existing trust, fleet and capability gates still apply.
+    #[must_use]
+    pub fn with_registry_artifact_approval(
+        mut self,
+        approval: Option<PublisherSourceGraphApproval>,
+    ) -> Self {
+        self.registry_artifact_approval = approval;
+        self
+    }
+
     /// Preserve whether preflight consulted an authoritative registry. A false
     /// value only retains legacy-risky's existing missing/corrupt-state policy;
     /// newly available valid cards are always examined before execution.
@@ -6489,6 +6557,13 @@ impl EngineDispatcher {
         if let Some(capture) = &self.preflight_dependency_capture {
             trust_requirements = trust_requirements.with_dependency_capture(capture.clone())?;
         }
+        if let Some(approval) = &self.registry_artifact_approval {
+            trust_requirements =
+                trust_requirements.with_registry_artifact_approval(approval.clone())?;
+        }
+        trust_requirements
+            .verify_registry_artifact(&project_paths, config)
+            .context("publisher source admission failed at dispatch")?;
         trust_requirements
             .verify_dependency_capture(project_paths.project_root())
             .context("dependency metadata changed after run preflight")?;
@@ -8963,7 +9038,9 @@ impl EngineDispatcher {
         }
         let mut capabilities = Self::map_profile_to_capabilities(config.profile);
         if !config.runtime.environment_allowlist.is_empty()
-            && !capabilities.iter().any(|capability| capability == "env_read")
+            && !capabilities
+                .iter()
+                .any(|capability| capability == "env_read")
         {
             capabilities.push("env_read".to_string());
         }
@@ -9616,6 +9693,14 @@ impl EngineDispatcher {
                     &mut telemetry_guard,
                 )
             })?;
+        trust_requirements
+            .verify_registry_artifact(&project_paths, config)
+            .map_err(|error| {
+                native_engine_spawn_error_with_telemetry_cleanup(
+                    format!("Native execution publisher source admission failed: {error:#}"),
+                    &mut telemetry_guard,
+                )
+            })?;
         // Operator entry may occur while the authenticated worker starts.
         crate::runtime::safe_mode::enforce_run_safe_mode(project_paths.entrypoint()).map_err(
             |error| {
@@ -9675,6 +9760,7 @@ impl EngineDispatcher {
                     config.runtime.frozen_module_symlinks == Some(true),
                     capture_replay,
                     config.runtime.frozen_module_graph_hash.as_deref(),
+                    trust_requirements.registry_artifact_approval.as_ref(),
                 )
                 .map_err(|error| {
                     native_engine_spawn_error_with_telemetry_cleanup(error, &mut telemetry_guard)
@@ -9683,8 +9769,11 @@ impl EngineDispatcher {
         } else {
             None
         };
-        let frozen_module_summary = frozen_modules.as_ref().map(|modules| modules.summary.clone());
-        let replay_module_sources = frozen_modules.as_ref()
+        let frozen_module_summary = frozen_modules
+            .as_ref()
+            .map(|modules| modules.summary.clone());
+        let replay_module_sources = frozen_modules
+            .as_ref()
             .and_then(|modules| modules.replay_sources.clone());
         let source_code = if let Some(modules) = &frozen_modules {
             orchestrator_config.commonjs_entry = modules.entry.module.record.syntax
@@ -11259,7 +11348,10 @@ mod tests {
                 .expect("explicit environment capability");
             assert!(allowed.iter().any(|capability| capability == "env_read"));
             for capability in baseline {
-                assert!(allowed.contains(&capability), "{profile}: lost {capability}");
+                assert!(
+                    allowed.contains(&capability),
+                    "{profile}: lost {capability}"
+                );
             }
         }
     }
@@ -12149,10 +12241,14 @@ mod tests {
         let root = TempDir::new().expect("artifact workspace");
         let now_secs = Utc::now().timestamp().max(0) as u64;
         let mut config = seed_execution_trust_artifact_registry(root.path(), now_secs);
-        let original_integrity =
-            format!("sha256-{}", base64::engine::general_purpose::STANDARD.encode([0xa5; 32]));
-        let replaced_integrity =
-            format!("sha256-{}", base64::engine::general_purpose::STANDARD.encode([0x5a; 32]));
+        let original_integrity = format!(
+            "sha256-{}",
+            base64::engine::general_purpose::STANDARD.encode([0xa5; 32])
+        );
+        let replaced_integrity = format!(
+            "sha256-{}",
+            base64::engine::general_purpose::STANDARD.encode([0x5a; 32])
+        );
 
         for (version, integrity, admitted) in [
             ("1.0.0", original_integrity.as_str(), true),
@@ -12160,21 +12256,22 @@ mod tests {
             ("1.0.0", replaced_integrity.as_str(), false),
         ] {
             write_execution_trust_lock_fixture(root.path(), version, integrity);
-            let capture =
-                CapturedDependencyTrust::capture(root.path()).expect("capture exact lock selection");
+            let capture = CapturedDependencyTrust::capture(root.path())
+                .expect("capture exact lock selection");
             assert_eq!(
-                capture.packages.keys().map(String::as_str).collect::<Vec<_>>(),
+                capture
+                    .packages
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
                 vec!["npm:fixture-actual"],
                 "the installed alias must consult its actual package identity"
             );
-            let requirements = RunTrustRequirements::new(
-                &[],
-                &["npm:fixture-actual".to_string()],
-                true,
-            )
-            .expect("required signed card")
-            .with_dependency_capture(capture)
-            .expect("bound preflight capture");
+            let requirements =
+                RunTrustRequirements::new(&[], &["npm:fixture-actual".to_string()], true)
+                    .expect("required signed card")
+                    .with_dependency_capture(capture)
+                    .expect("bound preflight capture");
             requirements
                 .verify_dependency_capture(root.path())
                 .expect("unchanged selected metadata");
@@ -12190,7 +12287,9 @@ mod tests {
                         "{warnings:?}"
                     );
                 } else {
-                    let error = result.expect_err("a stale artifact card must block").to_string();
+                    let error = result
+                        .expect_err("a stale artifact card must block")
+                        .to_string();
                     assert!(error.contains("artifact mismatch"), "{error}");
                     assert!(error.contains("npm:fixture-actual"), "{error}");
                 }
@@ -12227,8 +12326,10 @@ mod tests {
 
         use base64::Engine as _;
         let root = TempDir::new().expect("lock replacement workspace");
-        let integrity =
-            format!("sha256-{}", base64::engine::general_purpose::STANDARD.encode([0xa5; 32]));
+        let integrity = format!(
+            "sha256-{}",
+            base64::engine::general_purpose::STANDARD.encode([0xa5; 32])
+        );
         write_execution_trust_lock_fixture(root.path(), "1.0.0", &integrity);
         let requirements = RunTrustRequirements::new(&[], &[], true)
             .expect("untracked trust requirements")
@@ -12249,7 +12350,10 @@ mod tests {
         let error = validate_execution_trust(root.path(), &Config::default(), &truncated, 1)
             .expect_err("captured identities are validated before the empty-set return")
             .to_string();
-        assert!(error.contains("omitted a captured dependency identity"), "{error}");
+        assert!(
+            error.contains("omitted a captured dependency identity"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -12262,26 +12366,24 @@ mod tests {
         .expect("manifest without an artifact pin");
         let now_secs = Utc::now().timestamp().max(0) as u64;
         let mut config = seed_execution_trust_artifact_registry(root.path(), now_secs);
-        let requirements = RunTrustRequirements::new(
-            &[],
-            &["npm:fixture-actual".to_string()],
-            true,
-        )
-        .expect("retain consulted card")
-        .with_dependency_capture(
-            CapturedDependencyTrust::capture(root.path()).expect("unresolved capture"),
-        )
-        .expect("bind unresolved capture");
+        let requirements =
+            RunTrustRequirements::new(&[], &["npm:fixture-actual".to_string()], true)
+                .expect("retain consulted card")
+                .with_dependency_capture(
+                    CapturedDependencyTrust::capture(root.path()).expect("unresolved capture"),
+                )
+                .expect("bind unresolved capture");
         requirements
             .verify_dependency_capture(root.path())
             .expect("unchanged unresolved topology");
         for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
             config.profile = profile;
-            let warnings =
-                validate_execution_trust(root.path(), &config, &requirements, now_secs)
-                    .expect("missing pins retain existing warning policy");
+            let warnings = validate_execution_trust(root.path(), &config, &requirements, now_secs)
+                .expect("missing pins retain existing warning policy");
             assert!(
-                warnings.iter().any(|warning| warning.contains("unverified artifact binding")),
+                warnings
+                    .iter()
+                    .any(|warning| warning.contains("unverified artifact binding")),
                 "{warnings:?}"
             );
         }
@@ -12320,14 +12422,9 @@ mod tests {
             .expect("persist independent revocation");
         for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
             config.profile = profile;
-            let error = validate_execution_trust(
-                root.path(),
-                &config,
-                &requirements,
-                now_secs + 1,
-            )
-            .expect_err("missing artifact pins never waive a signed revocation")
-            .to_string();
+            let error = validate_execution_trust(root.path(), &config, &requirements, now_secs + 1)
+                .expect_err("missing artifact pins never waive a signed revocation")
+                .to_string();
             assert!(error.contains("revoked since preflight"), "{error}");
         }
     }

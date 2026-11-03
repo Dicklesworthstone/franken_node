@@ -16,6 +16,9 @@ fn resolve_binary_path() -> PathBuf {
     if let Some(exe) = std::env::var_os("CARGO_BIN_EXE_franken-node") {
         return PathBuf::from(exe);
     }
+    if let Some(exe) = option_env!("CARGO_BIN_EXE_franken-node") {
+        return PathBuf::from(exe);
+    }
     repo_root().join("target/debug/franken-node")
 }
 
@@ -159,6 +162,493 @@ fn publish_signed_artifact(workspace: &Path) -> (String, PathBuf, PathBuf) {
         workspace.join(report["artifact_path"].as_str().expect("artifact path")),
         workspace.join(report["manifest_path"].as_str().expect("manifest path")),
     )
+}
+
+#[cfg(all(feature = "engine", unix))]
+fn run_source_fixture_cli(workspace: &Path, state_home: &Path, args: &[&str]) -> Output {
+    Command::new(resolve_binary_path())
+        .current_dir(workspace)
+        .env("XDG_STATE_HOME", state_home)
+        .env("XDG_CONFIG_HOME", state_home.join("config"))
+        .env_remove("FRANKEN_NODE_PROFILE")
+        .env_remove("FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH")
+        .args(args)
+        .output()
+        .expect("launch native publisher-approved source fixture")
+}
+
+#[cfg(all(feature = "engine", unix))]
+struct PublishedSourceFixture {
+    registry: tempfile::TempDir,
+    project: tempfile::TempDir,
+    state_home: tempfile::TempDir,
+    entrypoint: String,
+    public_key: PathBuf,
+    manifest: PathBuf,
+    artifact: PathBuf,
+    graph_hash: String,
+}
+
+#[cfg(all(feature = "engine", unix))]
+impl PublishedSourceFixture {
+    fn new(esm: bool) -> Self {
+        let registry = registry_workspace();
+        let project = tempfile::tempdir().unwrap();
+        // Runtime evidence belongs outside the guest authority. Retain a
+        // separate private state home instead of touching operator state.
+        let state_home = tempfile::tempdir().unwrap();
+        let entrypoint = if esm { "app.mjs" } else { "app.cjs" }.to_owned();
+        let (source, dependency) = if esm {
+            (
+                "import value from './side.mjs'; console.log('PUBLISHER_APPROVED_WORKLOAD', value);\n",
+                "export default 42;\n",
+            )
+        } else {
+            (
+                "const value = require('./side.cjs'); console.log('PUBLISHER_APPROVED_WORKLOAD', value);\n",
+                "module.exports = 42;\n",
+            )
+        };
+        fs::write(project.path().join(&entrypoint), source).unwrap();
+        fs::write(
+            project
+                .path()
+                .join(if esm { "side.mjs" } else { "side.cjs" }),
+            dependency,
+        )
+        .unwrap();
+        fs::write(
+            project.path().join("package.json"),
+            "{\"name\":\"publisher-capsule-test\",\"version\":\"1.0.0\"}\n",
+        )
+        .unwrap();
+        let initialized = run_source_fixture_cli(
+            project.path(),
+            state_home.path(),
+            &["init", "--profile", "balanced", "--out-dir", ".", "--json"],
+        );
+        assert!(
+            initialized.status.success(),
+            "init: {}\n{}",
+            String::from_utf8_lossy(&initialized.stdout),
+            String::from_utf8_lossy(&initialized.stderr)
+        );
+        let capture = run_cli_in_workspace(
+            registry.path(),
+            &[
+                "verify",
+                "source-graph",
+                project.path().to_str().unwrap(),
+                &entrypoint,
+                "--write-source-capsule",
+                "application.capsule",
+                "--json",
+            ],
+        );
+        assert!(
+            capture.status.success(),
+            "capture: {}\n{}",
+            String::from_utf8_lossy(&capture.stdout),
+            String::from_utf8_lossy(&capture.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&capture.stdout).unwrap();
+        let graph_hash = report["input_hash"].as_str().unwrap().to_owned();
+        assert_eq!(report["execution_performed"], false);
+        assert_eq!(report["capsule_path"], "application.capsule");
+        let signing_key_path = registry.path().join("publisher.ed25519");
+        write_signing_key(&signing_key_path);
+        let key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+        let public_key = registry.path().join("publisher.pub");
+        fs::write(&public_key, hex::encode(key.verifying_key().as_bytes())).unwrap();
+        let publish = run_cli_in_workspace(
+            registry.path(),
+            &[
+                "registry",
+                "publish",
+                "application.capsule",
+                "--version",
+                "1.2.3",
+                "--signing-key",
+                signing_key_path.to_str().unwrap(),
+                "--json",
+            ],
+        );
+        assert!(
+            publish.status.success(),
+            "publish: {}\n{}",
+            String::from_utf8_lossy(&publish.stdout),
+            String::from_utf8_lossy(&publish.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&publish.stdout).unwrap();
+        assert_eq!(report["integrity"], "verified");
+        let manifest = registry
+            .path()
+            .join(report["manifest_path"].as_str().unwrap());
+        let artifact = registry
+            .path()
+            .join(report["artifact_path"].as_str().unwrap());
+        Self {
+            registry,
+            project,
+            state_home,
+            entrypoint,
+            public_key,
+            manifest,
+            artifact,
+            graph_hash,
+        }
+    }
+
+    fn run(&self, extra: &[&str]) -> Output {
+        let mut args = vec![
+            "run",
+            &self.entrypoint,
+            "--config",
+            "franken_node.toml",
+            "--policy",
+            "balanced",
+            "--runtime",
+            "franken-engine",
+            "--frozen-modules",
+            "--registry-artifact",
+            self.manifest.to_str().unwrap(),
+            "--publisher-public-key",
+            self.public_key.to_str().unwrap(),
+            "--json",
+        ];
+        args.extend_from_slice(extra);
+        run_source_fixture_cli(self.project.path(), self.state_home.path(), &args)
+    }
+
+    fn assert_denied(&self, extra: &[&str], expected: &str) {
+        let output = self.run(extra);
+        let diagnostics = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !output.status.success(),
+            "unexpected admission: {diagnostics}"
+        );
+        assert!(
+            diagnostics.contains(expected),
+            "expected {expected}: {diagnostics}"
+        );
+        assert!(
+            !diagnostics.contains("PUBLISHER_APPROVED_WORKLOAD"),
+            "guest executed before refusal: {diagnostics}"
+        );
+    }
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn registry_source_capsule_admits_native_cjs_and_esm() {
+    use frankenengine_node::ops::engine_dispatcher::RunDispatchReport;
+    use frankenengine_node::tools::replay_bundle::parse_verified_run_ledger_record;
+    for esm in [false, true] {
+        let fixture = PublishedSourceFixture::new(esm);
+        let output = fixture.run(&["--frozen-module-graph-hash", &fixture.graph_hash]);
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let dispatch: RunDispatchReport =
+            serde_json::from_value(report["dispatch"].clone()).unwrap();
+        assert_eq!(
+            dispatch.captured_output.stdout,
+            "PUBLISHER_APPROVED_WORKLOAD 42\n"
+        );
+        let graph = dispatch.engine_decision.unwrap().frozen_modules.unwrap();
+        let graph_value = serde_json::to_value(&graph).unwrap();
+        assert_eq!(graph.graph_input_hash, fixture.graph_hash);
+        assert_eq!(report["receipt"]["native_module_graph"], graph_value);
+        let publisher = graph
+            .publisher_artifact
+            .expect("worker retained authenticated publisher identity");
+        assert_eq!(publisher.version, "1.2.3");
+        assert_eq!(publisher.name, "application");
+        assert_eq!(
+            publisher.publisher_key_id,
+            KeyId::from_verifying_key(
+                &ed25519_dalek::SigningKey::from_bytes(&[42; 32]).verifying_key()
+            )
+            .to_string()
+        );
+        assert_eq!(
+            publisher.artifact_sha256,
+            frankenengine_node::supply_chain::registry_artifact::artifact_sha256(
+                &fs::read(&fixture.artifact).unwrap()
+            )
+        );
+
+        // Authenticate the persisted product record with the independent run
+        // public key created by init. A live dispatch JSON field alone cannot
+        // establish durable publisher/source continuity.
+        let receipt_path = fixture
+            .project
+            .path()
+            .join(report["receipt_path"].as_str().unwrap());
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(receipt_path).unwrap()).unwrap();
+        assert_eq!(receipt, report["receipt"]);
+        let day = chrono::DateTime::parse_from_rfc3339(receipt["end_time_utc"].as_str().unwrap())
+            .unwrap()
+            .format("%Y-%m-%d")
+            .to_string();
+        let record_path = fixture
+            .project
+            .path()
+            .join(".franken-node/state/run-ledgers")
+            .join(day)
+            .join(format!("{}.json", receipt["receipt_id"].as_str().unwrap()));
+        let record_bytes = fs::read(record_path).expect("actual signed native run record");
+        let public = fs::read_to_string(
+            fixture
+                .project
+                .path()
+                .join(".franken-node/keys/receipt-signing.pub"),
+        )
+        .unwrap();
+        let key: [u8; 32] = hex::decode(public.trim()).unwrap().try_into().unwrap();
+        let key = ed25519_dalek::VerifyingKey::from_bytes(&key).unwrap();
+        let record = parse_verified_run_ledger_record(&record_bytes, &receipt, &key)
+            .expect("actual receipt authority authenticates the retained graph and publisher");
+        assert_eq!(
+            record["receipt_snapshot"]["native_module_graph"],
+            graph_value
+        );
+        for (pointer, replacement) in [
+            (
+                "/receipt_snapshot/native_module_graph/graph_input_hash",
+                format!("sha256:{}", "0".repeat(64)),
+            ),
+            (
+                "/receipt_snapshot/native_module_graph/publisher_artifact/publisher_key_id",
+                "substituted-publisher-key".into(),
+            ),
+        ] {
+            let mut substituted = record.clone();
+            *substituted.pointer_mut(pointer).unwrap() = serde_json::json!(replacement);
+            assert!(
+                parse_verified_run_ledger_record(
+                    &serde_json::to_vec(&substituted).unwrap(),
+                    &substituted["receipt_snapshot"],
+                    &key
+                )
+                .is_err(),
+                "even a matching edited receipt cannot authorize a changed source/publisher in the signed record"
+            );
+        }
+    }
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn registry_source_capsule_requires_signed_run_record_persistence() {
+    let fixture = PublishedSourceFixture::new(false);
+    let signing_key = fixture
+        .project
+        .path()
+        .join(".franken-node/keys/receipt-signing.key");
+    fs::rename(&signing_key, signing_key.with_extension("retained-key")).unwrap();
+    for invalid_key in [None, Some("not an Ed25519 signing key")] {
+        if let Some(contents) = invalid_key {
+            fs::write(&signing_key, contents).unwrap();
+        }
+        let output = fixture.run(&[]);
+        let diagnostics = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !output.status.success(),
+            "publisher-approved run must not succeed without its signed record: {diagnostics}"
+        );
+        assert!(
+            diagnostics.contains("failed persisting publisher-approved native run record"),
+            "a missing or malformed receipt authority must be a persistence failure: {diagnostics}"
+        );
+        // This is a post-execution persistence requirement. Do not describe it
+        // as a pre-execution refusal or assert that guest effects were undone.
+    }
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn registry_source_capsule_rejects_live_source_key_and_policy_substitutions() {
+    let fixture = PublishedSourceFixture::new(false);
+    let dependency = fixture.project.path().join("side.cjs");
+    fs::write(&dependency, "module.exports = 9001;\n").unwrap();
+    fixture.assert_denied(&[], "ERR_MODULE_REGISTRY_PIN_MISMATCH");
+    fs::write(&dependency, "module.exports = 42;\n").unwrap();
+    let entry = fixture.project.path().join(&fixture.entrypoint);
+    let original_entry = fs::read(&entry).unwrap();
+    fs::write(&entry, "console.log('UNSIGNED_ENTRY_EXECUTED');\n").unwrap();
+    let refused = fixture.run(&[]);
+    assert!(!refused.status.success());
+    assert!(!String::from_utf8_lossy(&refused.stdout).contains("UNSIGNED_ENTRY_EXECUTED"));
+    fs::write(&entry, original_entry).unwrap();
+    fixture.assert_denied(
+        &[
+            "--frozen-module-graph-hash",
+            &format!("sha256:{}", "0".repeat(64)),
+        ],
+        "explicit frozen module graph pin conflicts",
+    );
+    fixture.assert_denied(
+        &["--conditions", "development"],
+        "run conditions do not match",
+    );
+    fixture.assert_denied(
+        &["--frozen-module-symlinks"],
+        "run symlink policy does not match",
+    );
+    fs::write(
+        &fixture.public_key,
+        hex::encode(
+            ed25519_dalek::SigningKey::from_bytes(&[13; 32])
+                .verifying_key()
+                .as_bytes(),
+        ),
+    )
+    .unwrap();
+    fixture.assert_denied(&[], "independently supplied public key");
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn registry_source_capsule_binds_signed_bytes_and_parent_admission() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use frankenengine_node::supply_chain::{
+        artifact_signing,
+        registry_artifact::{PublisherSourceGraphApproval, artifact_sha256},
+    };
+    let fixture = PublishedSourceFixture::new(false);
+    let publisher = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+    let approved =
+        PublisherSourceGraphApproval::load(&fixture.manifest, &publisher.verifying_key()).unwrap();
+    approved.revalidate().unwrap();
+    let original_manifest = fs::read(&fixture.manifest).unwrap();
+    let original_artifact = fs::read(&fixture.artifact).unwrap();
+    fs::write(&fixture.artifact, b"not the signed capsule").unwrap();
+    fixture.assert_denied(&[], "artifact hash mismatch");
+    fs::write(&fixture.artifact, &original_artifact).unwrap();
+
+    // Replace the package with a complete, valid capsule and recompute every
+    // editable storage hash. The original signed version still rejects it.
+    fs::write(
+        fixture.project.path().join("side.cjs"),
+        "module.exports = 9001;\n",
+    )
+    .unwrap();
+    let replacement = run_cli_in_workspace(
+        fixture.registry.path(),
+        &[
+            "verify",
+            "source-graph",
+            fixture.project.path().to_str().unwrap(),
+            &fixture.entrypoint,
+            "--write-source-capsule",
+            "replacement.capsule",
+            "--json",
+        ],
+    );
+    assert!(replacement.status.success());
+    let replacement = fs::read(fixture.registry.path().join("replacement.capsule")).unwrap();
+    let replacement_hash = artifact_sha256(&replacement);
+    let mut envelope: serde_json::Value = serde_json::from_slice(&original_manifest).unwrap();
+    envelope["artifact_sha256"] = serde_json::json!(replacement_hash);
+    envelope["artifact_size_bytes"] = serde_json::json!(replacement.len());
+    envelope["extension"]["versions"][0]["content_hash"] =
+        serde_json::json!(replacement_hash.strip_prefix("sha256:").unwrap());
+    fs::write(&fixture.artifact, &replacement).unwrap();
+    fs::write(&fixture.manifest, serde_json::to_vec(&envelope).unwrap()).unwrap();
+    fixture.assert_denied(
+        &[],
+        "stored artifact version lineage does not match signed initial_version",
+    );
+
+    // An attacker can supply a self-consistent embedded key and real signature;
+    // that signature still has no authority under the caller's separate anchor.
+    let signed_bytes = STANDARD
+        .decode(envelope["manifest_bytes_b64"].as_str().unwrap())
+        .unwrap();
+    let mut signed: serde_json::Value = serde_json::from_slice(&signed_bytes).unwrap();
+    signed["initial_version"] = envelope["extension"]["versions"][0].clone();
+    let signed_bytes = serde_json::to_vec(&signed).unwrap();
+    envelope["manifest_bytes_b64"] = serde_json::json!(STANDARD.encode(&signed_bytes));
+    let attacker = ed25519_dalek::SigningKey::from_bytes(&[13; 32]);
+    envelope["publisher_public_key_hex"] =
+        serde_json::json!(hex::encode(attacker.verifying_key().as_bytes()));
+    envelope["extension"]["signature"]["key_id"] =
+        serde_json::json!(KeyId::from_verifying_key(&attacker.verifying_key()).to_string());
+    envelope["extension"]["signature"]["signature_bytes"] =
+        serde_json::json!(artifact_signing::sign_bytes(&attacker, &signed_bytes));
+    fs::write(&fixture.manifest, serde_json::to_vec(&envelope).unwrap()).unwrap();
+    fixture.assert_denied(&[], "independently supplied public key");
+
+    // Even another valid approval by the original publisher must not replace
+    // the exact artifact retained between parent admission and worker launch.
+    envelope["publisher_public_key_hex"] =
+        serde_json::json!(hex::encode(publisher.verifying_key().as_bytes()));
+    envelope["extension"]["signature"]["key_id"] =
+        serde_json::json!(KeyId::from_verifying_key(&publisher.verifying_key()).to_string());
+    envelope["extension"]["signature"]["signature_bytes"] =
+        serde_json::json!(artifact_signing::sign_bytes(&publisher, &signed_bytes));
+    fs::write(&fixture.manifest, serde_json::to_vec(&envelope).unwrap()).unwrap();
+    PublisherSourceGraphApproval::load(&fixture.manifest, &publisher.verifying_key()).unwrap();
+    assert!(
+        approved
+            .revalidate()
+            .unwrap_err()
+            .to_string()
+            .contains("changed after publisher admission")
+    );
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn registry_source_capsule_refuses_symlinks_path_escape_and_oversized_files() {
+    use frankenengine_node::supply_chain::registry_artifact::{
+        MAX_ARTIFACT_BYTES, PublisherSourceGraphApproval,
+    };
+    use std::os::unix::fs::symlink;
+    let fixture = PublishedSourceFixture::new(false);
+    let publisher = ed25519_dalek::SigningKey::from_bytes(&[42; 32]).verifying_key();
+    let alias = fixture.registry.path().join("manifest-alias.json");
+    symlink(&fixture.manifest, &alias).unwrap();
+    assert!(PublisherSourceGraphApproval::load(&alias, &publisher).is_err());
+    let parent_alias = fixture.registry.path().join("directory-alias");
+    symlink(fixture.manifest.parent().unwrap(), &parent_alias).unwrap();
+    assert!(
+        PublisherSourceGraphApproval::load(
+            &parent_alias.join(fixture.manifest.file_name().unwrap()),
+            &publisher
+        )
+        .is_err()
+    );
+    let mut envelope: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fixture.manifest).unwrap()).unwrap();
+    envelope["artifact_file_name"] = serde_json::json!("../../application.capsule");
+    fs::write(&fixture.manifest, serde_json::to_vec(&envelope).unwrap()).unwrap();
+    fixture.assert_denied(&[], "artifact file name is unsafe");
+    let huge = fixture.registry.path().join("oversized-manifest.json");
+    std::fs::File::create(&huge)
+        .unwrap()
+        .set_len(MAX_ARTIFACT_BYTES + 1)
+        .unwrap();
+    assert!(
+        PublisherSourceGraphApproval::load(&huge, &publisher)
+            .unwrap_err()
+            .to_string()
+            .contains("byte bound")
+    );
 }
 
 fn assert_registry_verify_integrity(

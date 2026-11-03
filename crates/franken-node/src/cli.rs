@@ -361,6 +361,19 @@ pub struct RunArgs {
     #[arg(long, value_name = "SHA256")]
     pub frozen_module_graph_hash: Option<String>,
 
+    /// Authenticate a frozen source graph against a published local registry
+    /// artifact manifest. The artifact must contain a source capsule produced by
+    /// verify source-graph --write-source-capsule. Requires --publisher-public-key
+    /// and frozen modules. Grants no capabilities, resources or lifecycle status.
+    #[arg(long, value_name = "MANIFEST", value_parser = parse_safe_binary_pathbuf)]
+    pub registry_artifact: Option<PathBuf>,
+
+    /// Independently retained Ed25519 publisher public key outside the guest
+    /// project. Used only with --registry-artifact; the artifact's embedded key
+    /// is never a trust anchor. Accepts the standard verification key formats.
+    #[arg(long, value_name = "KEY", value_parser = parse_safe_binary_pathbuf)]
+    pub publisher_public_key: Option<PathBuf>,
+
     /// Add a package exports/imports condition (repeatable). Normal node and
     /// import/require conditions remain active. When supplied, these values
     /// replace runtime.module_conditions from configuration or the environment.
@@ -393,6 +406,17 @@ impl RunArgs {
         if let Some(ref engine_bin) = self.engine_bin {
             validate_system_binary_pathbuf(engine_bin)
                 .with_context(|| format!("Invalid --engine-bin path: {:?}", engine_bin))?;
+        }
+
+        anyhow::ensure!(
+            self.registry_artifact.is_some() == self.publisher_public_key.is_some(),
+            "--registry-artifact and --publisher-public-key must be supplied together"
+        );
+        for path in [&self.registry_artifact, &self.publisher_public_key]
+            .into_iter()
+            .flatten()
+        {
+            validate_system_binary_pathbuf(path)?;
         }
 
         Ok(())
@@ -1251,6 +1275,12 @@ pub struct VerifySourceGraphArgs {
     /// multiple conditions; each load retains its own import/require defaults.
     #[arg(long = "conditions", short = 'C')]
     pub module_conditions: Vec<String>,
+
+    /// Persist exact captured sources and resolution observations as a portable
+    /// capsule for registry publish. Creates a new owner-only file; never
+    /// overwrites. May contain private source code. Requires a resolved graph.
+    #[arg(long, value_name = "NEW_PATH", value_parser = parse_safe_binary_pathbuf)]
+    pub write_source_capsule: Option<PathBuf>,
 
     /// Emit the existing franken-node/module-source-graph/v2 report.
     /// Contains module metadata and commitments, not source bodies.
@@ -4728,8 +4758,14 @@ mod tests {
     #[test]
     fn migrate_validate_attestation_requires_complete_explicit_execution_mode() {
         let required = [
-            "--attest", "--bun-bin", "/bun", "--signing-key", "/key",
-            "--out", "/report", "--execute",
+            "--attest",
+            "--bun-bin",
+            "/bun",
+            "--signing-key",
+            "/key",
+            "--out",
+            "/report",
+            "--execute",
         ];
         let mut command = vec!["franken-node", "migrate", "validate", "/project"];
         command.extend(required);
@@ -4744,8 +4780,11 @@ mod tests {
         assert_eq!(args.out, Some(PathBuf::from("/report")));
 
         for missing in ["--attest", "--execute"] {
-            let incomplete: Vec<_> = command.iter().copied()
-                .filter(|argument| *argument != missing).collect();
+            let incomplete: Vec<_> = command
+                .iter()
+                .copied()
+                .filter(|argument| *argument != missing)
+                .collect();
             assert!(Cli::try_parse_from(incomplete).is_err(), "{missing}");
         }
         for incompatible in ["--static-only", "--native-bin"] {
@@ -4777,9 +4816,21 @@ mod tests {
     #[test]
     fn migrate_validate_attested_candidate_requires_both_reviewed_role_hashes() {
         let mut command = vec![
-            "franken-node", "migrate", "validate", "/original", "--attest",
-            "--bun-bin", "/bun", "--signing-key", "/key", "--out", "/report",
-            "--execute", "--migrated-project", "/candidate", "--attest-regression",
+            "franken-node",
+            "migrate",
+            "validate",
+            "/original",
+            "--attest",
+            "--bun-bin",
+            "/bun",
+            "--signing-key",
+            "/key",
+            "--out",
+            "/report",
+            "--execute",
+            "--migrated-project",
+            "/candidate",
+            "--attest-regression",
         ];
         assert!(Cli::try_parse_from(&command).is_err());
         let original = "a".repeat(64);
@@ -4793,8 +4844,14 @@ mod tests {
         };
         assert!(args.attest_regression);
         assert_eq!(args.migrated_project, Some(PathBuf::from("/candidate")));
-        assert_eq!(args.expected_input_sha256.as_deref(), Some(original.as_str()));
-        assert_eq!(args.expected_candidate_input_sha256.as_deref(), Some(candidate.as_str()));
+        assert_eq!(
+            args.expected_input_sha256.as_deref(),
+            Some(original.as_str())
+        );
+        assert_eq!(
+            args.expected_candidate_input_sha256.as_deref(),
+            Some(candidate.as_str())
+        );
     }
 
     #[test]
