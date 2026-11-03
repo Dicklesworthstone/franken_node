@@ -400,29 +400,51 @@ fn build(
         url_suffix: String::new(),
     };
     let mut sources = BTreeMap::from([(first.clone(), entry)]);
-    let mut pending = VecDeque::from([first.clone()]);
+    let mut pending = VecDeque::from([(first.clone(), None)]);
     let mut modules = Vec::new();
     let mut edges = Vec::new();
     let mut diagnostics = Vec::new();
+    let mut require_extension_fallbacks = BTreeSet::new();
     let mut budget = Budget::default();
     let mut parser = Parser::new();
     let mut scan_cache = scan_cache::ScanCache::default();
     scan_cache.observe_module(&first.path);
 
-    while let Some(id) = pending.pop_front() {
+    while let Some((id, first_request_mode)) = pending.pop_front() {
         let source = Rc::clone(sources.get(&id).expect("queued source is captured"));
         let Entry::File { bytes, sha256 } = source.as_ref() else {
             unreachable!("ordinary source")
         };
-        let format_hint = resolver.format(&id.path)?;
+        let mut format_hint = resolver.format(&id.path)?;
+        // The CommonJS loader treats an exact file with an unrecognized
+        // extension as JavaScript. Its contents still need the engine's
+        // CommonJS-first syntax detection; even a `type: module` package
+        // does not select the parse goal for these require targets. Keep
+        // the special JSON/TS/addon/Wasm contracts and entrypoint rules.
+        let require_extension_fallback = format_hint == "unknown"
+            && first_request_mode == Some(ResolutionMode::Require)
+            && SourceLanguage::for_module(&id.path, &format_hint) == SourceLanguage::Unsupported;
+        if require_extension_fallback {
+            format_hint = "javascript_unspecified".into();
+            require_extension_fallbacks.insert(id.clone());
+        }
         let source_language = SourceLanguage::for_module(&id.path, &format_hint);
-        let (loads, notices, analyzed) = scan_cache.scan(
-            &mut parser,
-            &id.path,
-            source.as_ref(),
-            source_language,
-            &mut budget,
-        )?;
+        let (loads, notices, analyzed) = if require_extension_fallback {
+            // The same physical file may also have unsupported import URL
+            // instances. Do not put the require-specific language choice in
+            // the physical-source cache or mistake those instances for source
+            // mutation. CommonJS targets have no URL suffix and are scanned
+            // once; ordinary source-cache identity checks remain unchanged.
+            scan(&mut parser, bytes, source_language, &mut budget)?
+        } else {
+            scan_cache.scan(
+                &mut parser,
+                &id.path,
+                source.as_ref(),
+                source_language,
+                &mut budget,
+            )?
+        };
         let module = SourceModule {
             id: id.clone(),
             content_sha256: sha256.clone(),
@@ -485,7 +507,7 @@ fn build(
                             }
                             scan_cache.observe_module(&target.path);
                             sources.insert(target.clone(), source);
-                            pending.push_back(target.clone());
+                            pending.push_back((target.clone(), Some(mode)));
                         }
                         edge.state = EdgeState::Resolved;
                         edge.target = Some(target);
@@ -504,6 +526,32 @@ fn build(
             edge.mappings = std::mem::take(&mut resolver.mappings);
             budget.retain(&edge)?;
             edges.push(edge);
+        }
+    }
+    // A successful require must not lend its file-format fallback to an ESM
+    // route, including an import discovered after the target was scanned.
+    // Node can sometimes reuse an already loaded ESM instance here, but that
+    // depends on evaluation order, which this conservative graph cannot prove.
+    // Refuse mixed access rather than authorizing a cold unknown-extension
+    // import or erasing it from the captured dependency surface.
+    if !require_extension_fallbacks.is_empty() {
+        for edge in &edges {
+            if edge.kind != LoadKind::Require
+                && edge
+                    .target
+                    .as_ref()
+                    .is_some_and(|target| require_extension_fallbacks.contains(target))
+            {
+                budget.site()?;
+                let diagnostic = SourceDiagnostic {
+                    module: edge.importer.clone(),
+                    site: Some(edge.site.clone()),
+                    code: "UNSUPPORTED_MODULE_FORMAT",
+                    message: "an unknown file extension is supported only through captured CommonJS requests; ESM access requires a separate loading contract".into(),
+                };
+                budget.retain(&diagnostic)?;
+                diagnostics.push(diagnostic);
+            }
         }
     }
     modules.sort_by(|a, b| a.id.cmp(&b.id));
@@ -2865,6 +2913,235 @@ mod tests {
             .iter()
             .map(|n| n.id.path.as_str())
             .collect()
+    }
+
+    #[test]
+    fn require_custom_extensions_capture_package_entrypoints_and_nested_sources() {
+        for package_type in ["commonjs", "module", ""] {
+            let root = tempfile::tempdir().unwrap();
+            put(
+                root.path(),
+                "package.json",
+                &serde_json::json!({"type": package_type}).to_string(),
+            );
+            put(
+                root.path(),
+                "app.cjs",
+                "require('./value.fixture'); require('legacy'); require('mapped');",
+            );
+            put(
+                root.path(),
+                "value.fixture",
+                "module.exports = require('./nested.cjs');",
+            );
+            put(root.path(), "nested.cjs", "module.exports = 42;");
+            put(
+                root.path(),
+                "node_modules/legacy/package.json",
+                r#"{"type":"module","main":"entry.bundle"}"#,
+            );
+            put(
+                root.path(),
+                "node_modules/legacy/entry.bundle",
+                "module.exports = 7;",
+            );
+            put(
+                root.path(),
+                "node_modules/mapped/package.json",
+                r#"{"exports":{"require":"./entry.fixture","import":"./wrong.mjs"}}"#,
+            );
+            // Capture does not predict a JavaScript parse goal. The engine
+            // must detect this require-ESM case from the same pinned bytes.
+            put(
+                root.path(),
+                "node_modules/mapped/entry.fixture",
+                "export const answer = 42;",
+            );
+            put(
+                root.path(),
+                "node_modules/mapped/wrong.mjs",
+                "throw Error('wrong condition');",
+            );
+            let captured = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+            assert!(captured.report().fully_resolved, "{:?}", captured.report());
+            assert_eq!(captured.report().modules.len(), 5);
+            assert_eq!(captured.report().edges.len(), 4);
+            for path in [
+                "value.fixture",
+                "node_modules/legacy/entry.bundle",
+                "node_modules/mapped/entry.fixture",
+            ] {
+                let module = captured
+                    .report()
+                    .modules
+                    .iter()
+                    .find(|m| m.id.path == path)
+                    .unwrap();
+                assert_eq!(module.format_hint, "javascript_unspecified");
+                assert_eq!(module.source_language, SourceLanguage::JavaScript);
+                assert!(module.analyzed);
+            }
+            assert!(
+                !captured
+                    .report()
+                    .probes
+                    .iter()
+                    .any(|p| p.path.ends_with("wrong.mjs"))
+            );
+            let pin = captured.report().input_hash.clone();
+            // An engine-independent registry cannot guess the parse goal.
+            assert_eq!(
+                registry::PinnedModuleRegistry::new(captured, &pin)
+                    .err()
+                    .unwrap()
+                    .code,
+                "ERR_MODULE_REGISTRY_FORMAT"
+            );
+        }
+    }
+
+    #[test]
+    fn require_custom_extension_capsules_replay_without_original_sources() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("project");
+        put(&root, "app.cjs", "require('./value.fixture');");
+        put(
+            &root,
+            "value.fixture",
+            "module.exports = require('./nested.cjs');",
+        );
+        put(&root, "nested.cjs", "module.exports = 42;");
+        let captured = capture(&root, "app.cjs", GraphOptions::default()).unwrap();
+        assert!(captured.report().fully_resolved);
+        let encoded = capsule::encode(&captured).unwrap();
+        let moved = temporary.path().join("relocated");
+        std::fs::rename(&root, &moved).unwrap();
+        put(&moved, "value.fixture", "require('./uncaptured.cjs');");
+        put(&moved, "uncaptured.cjs", "throw Error('not captured');");
+        let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+        assert_eq!(replayed.report(), captured.report());
+        for module in &captured.report().modules {
+            assert_eq!(
+                replayed.source_bytes(&module.id),
+                captured.source_bytes(&module.id)
+            );
+        }
+        assert_eq!(capsule::encode(&replayed).unwrap().bytes(), encoded.bytes());
+    }
+
+    #[test]
+    fn custom_extension_requires_never_authorize_esm_routes_or_entrypoints() {
+        for source in [
+            "import './value.fixture';",
+            "import('./value.fixture');",
+            "export * from './value.fixture';",
+            "require('./value.fixture'); import('./value.fixture');",
+            "import('./value.fixture'); require('./value.fixture');",
+            "require('./value.fixture'); import('./value.fixture?variant');",
+            "import('./value.fixture?variant'); require('./value.fixture');",
+            // The importer is discovered after value.fixture was scanned.
+            "require('./value.fixture'); require('./late.cjs');",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            put(root.path(), "app.cjs", source);
+            put(root.path(), "value.fixture", "module.exports = 42;");
+            put(root.path(), "late.cjs", "import('./value.fixture');");
+            let captured = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+            assert!(!captured.report().fully_resolved, "{source}");
+            assert!(
+                captured
+                    .report()
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.code == "UNSUPPORTED_MODULE_FORMAT"),
+                "{source}"
+            );
+            let pin = captured.report().input_hash.clone();
+            assert_eq!(
+                registry::PinnedModuleRegistry::new(captured, &pin)
+                    .err()
+                    .unwrap()
+                    .code,
+                "ERR_MODULE_REGISTRY_INCOMPLETE",
+                "{source}"
+            );
+        }
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.fixture", "module.exports = 42;");
+        let captured = capture(root.path(), "app.fixture", GraphOptions::default()).unwrap();
+        assert!(!captured.report().fully_resolved);
+        assert_eq!(
+            captured.report().modules[0].source_language,
+            SourceLanguage::Unsupported
+        );
+    }
+
+    #[test]
+    fn custom_extension_fallback_keeps_special_formats_and_invalid_source_refusals() {
+        for (name, contents, diagnostic) in [
+            (
+                "addon.node",
+                "module.exports = 42;",
+                "UNSUPPORTED_MODULE_FORMAT",
+            ),
+            (
+                "binary.wasm",
+                "module.exports = 42;",
+                "UNSUPPORTED_MODULE_FORMAT",
+            ),
+            (
+                "view.tsx",
+                "export const view = <div />;",
+                "UNSUPPORTED_JAVASCRIPT_SURFACE",
+            ),
+            (
+                "types.d.ts",
+                "export declare const value: number;",
+                "DECLARATION_FILE_NOT_RUNTIME",
+            ),
+            (
+                "bad.fixture",
+                "module.exports = ;",
+                "JAVASCRIPT_PARSE_ERROR",
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            put(root.path(), "app.cjs", &format!("require('./{name}');"));
+            put(root.path(), name, contents);
+            let captured = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+            assert!(!captured.report().fully_resolved, "{name}");
+            assert!(
+                captured
+                    .report()
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.code == diagnostic),
+                "{name}: {:?}",
+                captured.report()
+            );
+        }
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.cjs", "require('./binary.fixture');");
+        std::fs::write(root.path().join("binary.fixture"), [0xff, 0x00]).unwrap();
+        let captured = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        assert!(
+            captured
+                .report()
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "NON_UTF8_JAVASCRIPT")
+        );
+        put(root.path(), "app.cjs", "require('./not-inferred');");
+        put(root.path(), "not-inferred.fixture", "module.exports = 42;");
+        let captured = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        assert_eq!(captured.report().edges[0].state, EdgeState::Unresolved);
+        assert!(
+            !captured
+                .report()
+                .probes
+                .iter()
+                .any(|p| p.path == "not-inferred.fixture")
+        );
     }
 
     #[test]

@@ -102,6 +102,16 @@ prepares the following captured sources using the real sibling front end:
   function body first, then an ES module. This accounts for top-level return and
   lexical conflicts with CommonJS wrapper parameters without a second parser or
   a text-based import/export heuristic. The detection wrapper is never delivered.
+- Exact dependencies with unrecognized extensions, such as `require('./tool.generated')`,
+  use the same engine syntax detection when reached exclusively through `require`.
+  This includes package `main` and `exports` targets and keeps CommonJS versus
+  synchronous ESM selection independent of the enclosing package's `type`.
+  Their nested dependencies, original filenames and per-load policy checks stay
+  in the captured graph. No new extension probing is added. Unknown-extension
+  entrypoints and any static import, reexport or dynamic import of these files
+  remain outside admission, including mixed require/import graphs. Recognized
+  JSON, TypeScript, native-addon and Wasm formats keep their separate rules;
+  JSX syntax remains unsupported.
 - Explicit `.mts` and `.cts`: the engine's public source-preparation function
   normalizes supported TypeScript, with ESM/CommonJS format fixed by extension.
   Plain `.ts` uses the package scope captured by the file resolver; an explicit

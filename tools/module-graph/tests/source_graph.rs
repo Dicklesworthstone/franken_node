@@ -62,6 +62,110 @@ console.log(path.relative(root,selected));
 }
 
 #[test]
+fn required_custom_extension_package_graphs_match_live_node_without_esm_format_widening() {
+    for package_type in ["commonjs", "module", ""] {
+        let root = tempfile::tempdir().unwrap();
+        put(
+            root.path(),
+            "package.json",
+            &serde_json::json!({"type": package_type}).to_string(),
+        );
+        put(
+            root.path(),
+            "app.cjs",
+            "console.log(require('./local.fixture'), require('legacy').value, require('mapped').answer);",
+        );
+        put(
+            root.path(),
+            "local.fixture",
+            "module.exports = require('./nested.cjs');",
+        );
+        put(root.path(), "nested.cjs", "module.exports = 42;");
+        put(
+            root.path(),
+            "node_modules/legacy/package.json",
+            r#"{"type":"module","main":"entry.bundle"}"#,
+        );
+        put(
+            root.path(),
+            "node_modules/legacy/entry.bundle",
+            "module.exports = {value: 7};",
+        );
+        put(
+            root.path(),
+            "node_modules/mapped/package.json",
+            r#"{"exports":{"require":"./entry.fixture","import":"./wrong.mjs"}}"#,
+        );
+        put(
+            root.path(),
+            "node_modules/mapped/entry.fixture",
+            "export const answer = 11;",
+        );
+        put(
+            root.path(),
+            "node_modules/mapped/wrong.mjs",
+            "throw Error('wrong branch');",
+        );
+        let (code, report) = run(root.path(), "app.cjs", &[]);
+        assert_eq!(code, 0, "{report}");
+        assert_eq!(report["source_graph"]["fully_resolved"], true);
+        assert_eq!(paths(&report).len(), 5);
+        assert_eq!(report["execution_performed"], false);
+        assert_node_edges(root.path(), &report);
+        let output = Command::new("node")
+            .env_remove("NODE_OPTIONS")
+            .env_remove("NODE_PATH")
+            .current_dir(root.path())
+            .arg("app.cjs")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"42 7 11\n");
+
+        // Use a fresh process: requiring an ESM instance first can populate
+        // Node's evaluation cache. That is not a permit for a cold import.
+        let cold_import = Command::new("node")
+            .env_remove("NODE_OPTIONS")
+            .env_remove("NODE_PATH")
+            .current_dir(root.path())
+            .args([
+                "--input-type=module",
+                "-e",
+                "try { await import('./local.fixture'); process.exitCode = 1; } catch (error) { console.log(error.code); }",
+            ])
+            .output()
+            .unwrap();
+        assert!(cold_import.status.success());
+        assert_eq!(cold_import.stdout, b"ERR_UNKNOWN_FILE_EXTENSION\n");
+        for source in [
+            "require('./local.fixture'); import('./local.fixture');",
+            "require('./local.fixture'); import('./local.fixture?variant');",
+            "import('./local.fixture?variant'); require('./local.fixture');",
+        ] {
+            put(root.path(), "app.cjs", source);
+            let (code, report) = run(root.path(), "app.cjs", &[]);
+            assert_eq!(code, 1, "{source}: {report}");
+            assert_eq!(
+                report["source_graph"]["fully_resolved"], false,
+                "{source}: {report}"
+            );
+            assert!(
+                report["source_graph"]["diagnostics"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|diagnostic| diagnostic["code"] == "UNSUPPORTED_MODULE_FORMAT"),
+                "{source}: {report}"
+            );
+        }
+    }
+}
+
+#[test]
 fn complete_entrypoint_graph_follows_reexports_cycles_and_real_node_edges_without_execution() {
     let root = tempfile::tempdir().unwrap();
     put(root.path(), "app.mjs", "import './lib/a.mjs'; export * from './lib/b.mjs'; throw Error('never execute');");

@@ -2853,12 +2853,25 @@ module.exports = { State, Label, offset: require('./offset.cjs') };
         frankenengine_engine::execution_orchestrator::OrchestratorResult,
         frankenengine_engine::execution_orchestrator::OrchestratorError,
     > {
+        let graph = capture(root, entrypoint, GraphOptions::default()).unwrap();
+        execute_module_graph_with_policy_for_test(root, graph, lane, policy, after_capture)
+    }
+
+    fn execute_module_graph_with_policy_for_test(
+        root: &Path,
+        graph: CapturedModuleGraph,
+        lane: frankenengine_engine::baseline_interpreter::LaneChoice,
+        policy: Arc<dyn ModulePolicyHook + Send + Sync>,
+        after_capture: impl FnOnce(),
+    ) -> Result<
+        frankenengine_engine::execution_orchestrator::OrchestratorResult,
+        frankenengine_engine::execution_orchestrator::OrchestratorError,
+    > {
         use frankenengine_engine::ast::ParseGoal;
         use frankenengine_engine::execution_orchestrator::{
             ExecutionOrchestrator, ExtensionPackage, OrchestratorConfig,
         };
 
-        let graph = capture(root, entrypoint, GraphOptions::default()).unwrap();
         let pin = graph.report().input_hash.clone();
         let resolver = Arc::new(CapturedEngineResolver::new(graph, &pin).ok().unwrap());
         let entry = resolver
@@ -2870,7 +2883,11 @@ module.exports = { State, Label, offset: require('./offset.cjs') };
         let mut engine = ExecutionOrchestrator::try_new_lab_with_runtime_config(
             OrchestratorConfig {
                 force_lane: Some(lane),
-                parse_goal: if commonjs { ParseGoal::Script } else { ParseGoal::Module },
+                parse_goal: if commonjs {
+                    ParseGoal::Script
+                } else {
+                    ParseGoal::Module
+                },
                 commonjs_entry: commonjs,
                 ..OrchestratorConfig::default()
             },
@@ -2886,8 +2903,7 @@ module.exports = { State, Label, offset: require('./offset.cjs') };
             version: "1.0.0".into(),
             metadata: BTreeMap::new(),
         };
-        engine
-            .execute_resolved_entry_with_resolver(&package, &entry, installed)
+        engine.execute_resolved_entry_with_resolver(&package, &entry, installed)
     }
 
     fn node_reference_output(root: &Path, entrypoint: &str) -> String {
@@ -2901,6 +2917,256 @@ module.exports = { State, Label, offset: require('./offset.cjs') };
         assert!(reference.status.success(), "{reference:?}");
         assert!(reference.stderr.is_empty(), "{reference:?}");
         String::from_utf8(reference.stdout).unwrap()
+    }
+
+    #[test]
+    fn native_required_custom_extensions_match_node_after_source_changes() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            for package_type in [None, Some("commonjs"), Some("module")] {
+                let root = tempfile::tempdir().unwrap();
+                if let Some(package_type) = package_type {
+                    put(
+                        root.path(),
+                        "package.json",
+                        &format!(r#"{{"type":"{package_type}"}}"#),
+                    );
+                }
+                put(
+                    root.path(),
+                    "app.cjs",
+                    r#"
+const direct = require('./direct.fixture');
+const again = require('./direct.fixture');
+const main = require('main-kit');
+const exported = require('exports-kit');
+const esm = require('./esm.source');
+console.log(direct.answer, direct === again, main, exported, esm.answer,
+    esm === require('./esm.source'));
+console.log(require.resolve('./direct.fixture').endsWith('/direct.fixture'));
+"#,
+                );
+                put(
+                    root.path(),
+                    "direct.fixture",
+                    "console.log('direct-once'); module.exports = { answer: require('./seed.cjs') + 2 };",
+                );
+                put(root.path(), "seed.cjs", "module.exports = 40;");
+                put(
+                    root.path(),
+                    "esm.source",
+                    "export { answer } from './seed.mjs';",
+                );
+                put(root.path(), "seed.mjs", "export const answer = 45;");
+                put(
+                    root.path(),
+                    "node_modules/main-kit/package.json",
+                    r#"{"main":"entry.generated"}"#,
+                );
+                put(
+                    root.path(),
+                    "node_modules/main-kit/entry.generated",
+                    "module.exports = 43;",
+                );
+                put(
+                    root.path(),
+                    "node_modules/exports-kit/package.json",
+                    r#"{"exports":"./entry.bundle"}"#,
+                );
+                put(
+                    root.path(),
+                    "node_modules/exports-kit/entry.bundle",
+                    "module.exports = 44;",
+                );
+
+                // The reference chooses CommonJS or synchronous ESM from the
+                // required source even inside an explicitly typed package.
+                let reference = node_reference_output(root.path(), "app.cjs");
+                assert_eq!(reference, "direct-once\n42 true 43 44 45 true\ntrue\n");
+                let result = execute_captured_graph_for_test(root.path(), "app.cjs", lane, || {
+                    for path in [
+                        "app.cjs",
+                        "direct.fixture",
+                        "seed.cjs",
+                        "esm.source",
+                        "seed.mjs",
+                        "node_modules/main-kit/entry.generated",
+                        "node_modules/exports-kit/entry.bundle",
+                    ] {
+                        put(
+                            root.path(),
+                            path,
+                            "throw new Error('live custom-extension source reopened');",
+                        );
+                    }
+                    put(root.path(), "package.json", r#"{"type":"module"}"#);
+                    put(
+                        root.path(),
+                        "node_modules/main-kit/package.json",
+                        r#"{"main":"uncaptured.cjs"}"#,
+                    );
+                    put(
+                        root.path(),
+                        "node_modules/exports-kit/package.json",
+                        r#"{"exports":"./uncaptured.cjs"}"#,
+                    );
+                });
+                assert_eq!(
+                    result
+                        .console_output
+                        .iter()
+                        .map(|entry| entry.message.as_str())
+                        .collect::<Vec<_>>(),
+                    reference.lines().collect::<Vec<_>>(),
+                    "{lane:?}, package type {package_type:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_custom_extension_capsule_replay_uses_original_sources() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let root = tempfile::tempdir().unwrap();
+            put(
+                root.path(),
+                "app.cjs",
+                "console.log(require('capsule-kit').answer);",
+            );
+            put(
+                root.path(),
+                "node_modules/capsule-kit/package.json",
+                r#"{"exports":"./entry.fixture"}"#,
+            );
+            put(
+                root.path(),
+                "node_modules/capsule-kit/entry.fixture",
+                "module.exports = { answer: require('./answer.source') };",
+            );
+            put(
+                root.path(),
+                "node_modules/capsule-kit/answer.source",
+                "module.exports = 42;",
+            );
+            let reference = node_reference_output(root.path(), "app.cjs");
+            assert_eq!(reference, "42\n");
+            let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+            let pin = graph.report().input_hash.clone();
+            let encoded = capsule::encode(&graph).unwrap();
+            for path in [
+                "app.cjs",
+                "node_modules/capsule-kit/entry.fixture",
+                "node_modules/capsule-kit/answer.source",
+            ] {
+                put(
+                    root.path(),
+                    path,
+                    "throw new Error('capsule replay reopened live source');",
+                );
+            }
+            put(
+                root.path(),
+                "node_modules/capsule-kit/package.json",
+                r#"{"exports":"./uncaptured.cjs"}"#,
+            );
+            let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+            assert_eq!(replayed.report().input_hash, pin);
+            let result = execute_module_graph_with_policy_for_test(
+                root.path(),
+                replayed,
+                lane,
+                Arc::new(granted()),
+                || {},
+            )
+            .expect("replayed custom-extension sources execute through the actual engine");
+            assert_eq!(
+                result
+                    .console_output
+                    .iter()
+                    .map(|entry| entry.message.as_str())
+                    .collect::<Vec<_>>(),
+                reference.lines().collect::<Vec<_>>(),
+                "{lane:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_required_custom_extensions_preserve_module_policy_denials() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            for source in ["module.exports = 42;", "export const answer = 42;"] {
+                let root = tempfile::tempdir().unwrap();
+                put(
+                    root.path(),
+                    "app.cjs",
+                    "console.log(require('./value.fixture'));",
+                );
+                put(root.path(), "value.fixture", source);
+                let failure = execute_captured_graph_with_policy_for_test(
+                    root.path(),
+                    "app.cjs",
+                    lane,
+                    Arc::new(granted().deny_specifier("./value.fixture")),
+                    || {},
+                )
+                .expect_err("a captured custom-extension file cannot bypass its runtime policy");
+                let detail = failure.to_string();
+                assert!(
+                    detail.contains("closed-world module resolution refused"),
+                    "{lane:?}: {detail}"
+                );
+                assert!(detail.contains("./value.fixture"), "{lane:?}: {detail}");
+                assert!(detail.contains("policy"), "{lane:?}: {detail}");
+            }
+        }
+    }
+
+    #[test]
+    fn custom_extension_capture_does_not_authorize_imports_or_special_formats() {
+        for (entrypoint, source, target) in [
+            ("app.mjs", "import './value.fixture';", "value.fixture"),
+            (
+                "app.mjs",
+                "export * from './value.fixture';",
+                "value.fixture",
+            ),
+            ("app.cjs", "import('./value.fixture');", "value.fixture"),
+            (
+                "app.cjs",
+                "require('./value.fixture'); import('./value.fixture');",
+                "value.fixture",
+            ),
+            ("app.cjs", "require('./value.node');", "value.node"),
+            ("app.cjs", "require('./value.wasm');", "value.wasm"),
+            ("app.cjs", "require('./value.tsx');", "value.tsx"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            put(root.path(), entrypoint, source);
+            put(root.path(), target, "module.exports = 42;");
+            let graph = capture(root.path(), entrypoint, GraphOptions::default()).unwrap();
+            let pin = graph.report().input_hash.clone();
+            assert!(
+                CapturedEngineResolver::new(graph, &pin).is_err(),
+                "{source}"
+            );
+        }
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "entry.fixture", "module.exports = 42;");
+        let graph = capture(root.path(), "entry.fixture", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        assert!(CapturedEngineResolver::new(graph, &pin).is_err());
+
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.cjs", "require('./view.jsx');");
+        put(root.path(), "view.jsx", "module.exports = <div />;");
+        let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        assert!(CapturedEngineResolver::new(graph, &pin).is_err());
     }
 
     #[test]
