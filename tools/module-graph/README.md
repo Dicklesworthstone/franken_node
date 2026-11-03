@@ -431,6 +431,24 @@ Mutation, shadowing, escaped loader references, mutable bindings, alternate
 resolve search paths and unbounded requests keep the graph incomplete. This
 does not grant a loader permission to open another route at execution time.
 
+`require.resolve(...)` and supported loader-alias `.resolve(...)` calls have
+their own `require_resolve` edge kind. They use CommonJS conditions and retain
+the selected ordinary files in `resolution_targets`, with identity, byte count
+and content SHA-256. Target bytes remain immutable, bounded capture inputs, but
+are not parsed, normalized or traversed for dependencies. This permits filename
+lookup for assets, native addons, Wasm, invalid JSON and unsupported JavaScript
+without claiming those contents can execute. The `modules` inventory and
+`source_bytes` API contain executable source candidates only. A separate actual
+load still scans its target, regardless of whether the lookup or load appears
+first. Both inventories share the existing module-count limit.
+
+The sealed registry keeps resolution-only routes separate from load routes. A
+captured filename lookup cannot authorize `require` or `import`, including a
+computed `require(require.resolve(...))`. Alternate resolve search paths,
+unbounded arguments and escaped resolver functions remain incomplete. Builtin
+lookups stay explicit runtime requirements for the engine's name inventory and
+per-request metadata policy; capture never substitutes a project package.
+
 CommonJS entrypoint guards such as `require.main === module` are supported,
 including strict equality/inequality comparisons in either operand order and
 proven CommonJS loader aliases. Dependencies in both guarded branches are captured.
@@ -458,13 +476,13 @@ branches: this is not a control-flow trace. Cycles and diamonds visit each
 physical file plus ESM query/fragment identity once. Contained workspace links
 retain physical package context. JSON modules are parsed as data, not scanned as
 JavaScript. TypeScript and TSX use their own grammars and the explicit erasure
-contract below. Native addons, Wasm and unknown source formats require separate
-analysis and produce explicit diagnostics.
+contract below. Native addon and Wasm loads, and other unsupported loaded
+formats, produce explicit diagnostics; resolution-only targets need no grammar.
 
 One resolver owns the entire graph capture. Sources, manifests, link text and
 negative probes are cached once across all edges, not captured independently
 from mutable paths. The `CapturedModuleGraph` owner provides a read-only report
-and `source_bytes(&ModuleId)` so a future consumer need not reopen a pathname.
+and `source_bytes(&ModuleId)` so a future consumer need not reopen a source pathname.
 The command does not serialize source bytes or ordinary source literals. Module
 requests, filenames, mappings and diagnostics are still potentially sensitive.
 
@@ -485,7 +503,7 @@ The product's `run --frozen-modules` separately admits this graph through the
 engine adapter; successful analysis alone does not authorize execution.
 
 The domain-separated graph `input_hash` binds the entrypoint, conditions and
-symlink policy, all captured source identities, edges, diagnostics, consulted
+symlink policy, all captured source and resolution-target identities, edges, diagnostics, consulted
 manifests and lookup gaps. Identical captures are relocation-stable. Changing a
 transitive source or introducing a nearer resolution candidate changes the pin.
 An `--expected-hash` mismatch exits 1 and suppresses the `source_graph` payload;
@@ -618,7 +636,7 @@ The recomputed graph hash must equal the captured hash, and every retained
 observation must be consulted. Altered payload digests, invalid paths or parent
 relationships, duplicate/unused observations, unsupported schemas and truncated
 or trailing payload bytes fail closed. Source identity, missing imports,
-runtime-required builtins, TypeScript type-only edges, URL instances and all
+runtime-required builtins, opaque resolution-only targets, TypeScript type-only edges, URL instances and all
 analysis diagnostics are recomputed. Adding a formerly missing file on the
 replay host cannot upgrade an incomplete result.
 

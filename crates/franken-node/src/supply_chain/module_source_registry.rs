@@ -24,14 +24,16 @@ type ImporterRoutes = BTreeMap<RequestStyle, BTreeMap<String, RegisteredTarget>>
 pub enum RequestStyle {
     Import,
     Require,
+    /// CommonJS filename lookup; this grants no source-delivery authority.
+    RequireResolve,
 }
 
 impl RequestStyle {
     fn for_load(kind: LoadKind) -> Self {
-        if kind == LoadKind::Require {
-            Self::Require
-        } else {
-            Self::Import
+        match kind {
+            LoadKind::Require => Self::Require,
+            LoadKind::RequireResolve => Self::RequireResolve,
+            LoadKind::StaticImport | LoadKind::Reexport | LoadKind::DynamicImport => Self::Import,
         }
     }
 }
@@ -86,6 +88,34 @@ pub struct RegisteredModule {
     dependencies: Vec<RegisteredDependency>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolutionKind {
+    File,
+    /// A recognized Node name, independent of executable native providers.
+    Builtin,
+}
+
+/// Pinned filename identity only. This type cannot carry executable source,
+/// dependencies, syntax, or a prepared module record.
+pub struct RegisteredResolution {
+    id: String,
+    origin: ModuleId,
+    kind: ResolutionKind,
+}
+
+impl RegisteredResolution {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn origin(&self) -> &ModuleId {
+        &self.origin
+    }
+    pub fn kind(&self) -> ResolutionKind {
+        self.kind
+    }
+}
+
 impl RegisteredModule {
     pub fn id(&self) -> &str {
         &self.id
@@ -115,6 +145,9 @@ pub struct RegistrySummary {
     pub modules: usize,
     pub routes: usize,
     pub missing_routes: usize,
+    pub resolution_targets: usize,
+    pub resolution_routes: usize,
+    pub missing_resolution_routes: usize,
     pub execution_performed: bool,
     pub policy_admission_performed: bool,
 }
@@ -206,6 +239,11 @@ pub struct PinnedModuleRegistry {
     // Split the key so BTreeMap's borrowed lookup can use &str directly.
     // A tuple of owned strings allocated on every successful load.
     routes: BTreeMap<String, ImporterRoutes>,
+    // Purpose is structural: these names never enter executable route lookup
+    // or breadth-first dependency traversal, even when their target is loaded
+    // elsewhere in the graph.
+    resolutions: BTreeMap<String, RegisteredResolution>,
+    resolution_routes: BTreeMap<String, BTreeMap<String, RegisteredTarget>>,
 }
 
 impl PinnedModuleRegistry {
@@ -222,7 +260,7 @@ impl PinnedModuleRegistry {
                     ),
                 )),
             }
-        }, |_, _| None)
+        }, |_, _| Ok(None))
     }
 
     /// Engine-owned preparation may assign a runtime kind to captured source.
@@ -241,7 +279,7 @@ impl PinnedModuleRegistry {
     ) -> Result<Self>
     where
         F: FnMut(&super::SourceModule, &str, &super::SourceGraphReport) -> Result<ModuleKind>,
-        B: Fn(&str, RequestStyle) -> Option<&'static str>,
+        B: Fn(&str, RequestStyle) -> Result<Option<&'static str>>,
     {
         let digest = independent_graph_pin.strip_prefix("sha256:").unwrap_or("");
         if digest.len() != 64
@@ -266,6 +304,8 @@ impl PinnedModuleRegistry {
         // different native providers; never coalesce these route decisions.
         let mut builtin_targets =
             BTreeMap::<(ModuleId, RequestStyle, String), (String, &'static str)>::new();
+        let mut missing_builtin_resolutions =
+            BTreeMap::<(ModuleId, String), ResolutionError>::new();
         let mut has_missing_routes = false;
         let incomplete = || error(
             "ERR_MODULE_REGISTRY_INCOMPLETE",
@@ -305,7 +345,24 @@ impl PinnedModuleRegistry {
                     } else {
                         request
                     };
-                    let name = native_builtin(provider, style).ok_or_else(incomplete)?;
+                    let name = match native_builtin(provider, style) {
+                        Ok(Some(name)) => name,
+                        Ok(None) => return Err(incomplete()),
+                        Err(failure)
+                            if style == RequestStyle::RequireResolve
+                                && failure.code == "MODULE_NOT_FOUND" =>
+                        {
+                            // A reserved node: name is decided by the engine's
+                            // exact name inventory, never by filesystem fallback.
+                            // Preserve this catchable metadata outcome separately
+                            // from executable native-provider admission.
+                            missing_builtin_resolutions
+                                .insert((edge.importer.clone(), request.to_owned()), failure);
+                            has_missing_routes = true;
+                            continue;
+                        }
+                        Err(failure) => return Err(failure),
+                    };
                     builtin_targets.insert(
                         (edge.importer.clone(), style, request.to_owned()),
                         (native_builtin_id(&report.input_hash, name), name),
@@ -316,10 +373,10 @@ impl PinnedModuleRegistry {
                         && edge.specifier.is_some()
                         && matches!(
                             (edge.kind, edge.error.as_ref().map(|failure| failure.code)),
-                            (LoadKind::Require, Some("MODULE_NOT_FOUND"))
+                            (LoadKind::Require | LoadKind::RequireResolve, Some("MODULE_NOT_FOUND"))
                                 | (LoadKind::DynamicImport, Some("ERR_MODULE_NOT_FOUND"))
                                 | (
-                                    LoadKind::Require | LoadKind::DynamicImport,
+                                    LoadKind::Require | LoadKind::RequireResolve | LoadKind::DynamicImport,
                                     Some("ERR_PACKAGE_PATH_NOT_EXPORTED" | "ERR_PACKAGE_IMPORT_NOT_DEFINED"),
                                 )
                         ) =>
@@ -342,8 +399,32 @@ impl PinnedModuleRegistry {
         let identities: BTreeMap<_, _> = report
             .modules
             .iter()
-            .map(|m| (m.id.clone(), canonical_id(&report.input_hash, &m.id)))
+            .map(|module| &module.id)
+            .chain(report.resolution_targets.iter().map(|target| &target.id))
+            .map(|id| (id.clone(), canonical_id(&report.input_hash, id)))
             .collect();
+        let mut resolutions = BTreeMap::new();
+        for target in &report.resolution_targets {
+            let Some(super::Entry::File { bytes, sha256 }) =
+                graph.inputs.get(&target.id.path).map(|entry| entry.as_ref())
+            else {
+                return Err(invalid_graph());
+            };
+            if !target.id.url_suffix.is_empty()
+                || target.content_sha256 != *sha256
+                || target.content_bytes != bytes.len()
+            {
+                return Err(invalid_graph());
+            }
+            let id = identities.get(&target.id).ok_or_else(invalid_graph)?.clone();
+            if resolutions.insert(id.clone(), RegisteredResolution {
+                id,
+                origin: target.id.clone(),
+                kind: ResolutionKind::File,
+            }).is_some() {
+                return Err(invalid_graph());
+            }
+        }
         let mut modules = BTreeMap::new();
         let mut shared_sources = BTreeMap::<String, Arc<str>>::new();
         for module in &report.modules {
@@ -381,7 +462,15 @@ impl PinnedModuleRegistry {
                 return Err(invalid_graph());
             }
         }
-        for (id, name) in builtin_targets.values() {
+        for ((_, style, _), (id, name)) in &builtin_targets {
+            if *style == RequestStyle::RequireResolve {
+                resolutions.entry(id.clone()).or_insert_with(|| RegisteredResolution {
+                    id: id.clone(),
+                    origin: ModuleId { path: (*name).to_owned(), url_suffix: String::new() },
+                    kind: ResolutionKind::Builtin,
+                });
+                continue;
+            }
             modules.entry(id.clone()).or_insert_with(|| RegisteredModule {
                 id: id.clone(),
                 origin: ModuleId { path: (*name).to_owned(), url_suffix: String::new() },
@@ -392,8 +481,11 @@ impl PinnedModuleRegistry {
             });
         }
         let mut routes = BTreeMap::<String, ImporterRoutes>::new();
+        let mut resolution_routes = BTreeMap::<String, BTreeMap<String, RegisteredTarget>>::new();
         let mut route_count = 0;
         let mut missing_routes = 0;
+        let mut resolution_route_count = 0;
+        let mut missing_resolution_routes = 0;
         for edge in &report.edges {
             if edge.state == EdgeState::TypeOnly {
                 continue;
@@ -402,6 +494,16 @@ impl PinnedModuleRegistry {
             let specifier = edge.specifier.as_ref().ok_or_else(invalid_graph)?;
             let style = RequestStyle::for_load(edge.kind);
             let target = match edge.state {
+                EdgeState::RuntimeRequired if style == RequestStyle::RequireResolve
+                    && missing_builtin_resolutions.contains_key(&(edge.importer.clone(), specifier.clone())) =>
+                {
+                    RegisteredTarget::Missing {
+                        error: missing_builtin_resolutions
+                            .get(&(edge.importer.clone(), specifier.clone()))
+                            .ok_or_else(invalid_graph)?
+                            .clone(),
+                    }
+                }
                 EdgeState::RuntimeRequired => RegisteredTarget::Module {
                     id: builtin_targets
                         .get(&(edge.importer.clone(), style, specifier.clone()))
@@ -419,6 +521,33 @@ impl PinnedModuleRegistry {
                         .clone(),
                 },
             };
+            if style == RequestStyle::RequireResolve {
+                if let RegisteredTarget::Module { id } = &target
+                    && !resolutions.contains_key(id)
+                {
+                    return Err(invalid_graph());
+                }
+                if !modules.contains_key(importer) {
+                    return Err(invalid_graph());
+                }
+                let by_specifier = resolution_routes.entry(importer.clone()).or_default();
+                if let Some(previous) = by_specifier.get(specifier) {
+                    if previous != &target {
+                        return Err(invalid_graph());
+                    }
+                    continue;
+                }
+                missing_resolution_routes +=
+                    usize::from(matches!(target, RegisteredTarget::Missing { .. }));
+                resolution_route_count += 1;
+                by_specifier.insert(specifier.clone(), target);
+                continue;
+            }
+            if let RegisteredTarget::Module { id } = &target
+                && !modules.contains_key(id)
+            {
+                return Err(invalid_graph());
+            }
             let by_specifier = routes
                 .entry(importer.clone())
                 .or_default()
@@ -454,6 +583,9 @@ impl PinnedModuleRegistry {
             modules: modules.len(),
             routes: route_count,
             missing_routes,
+            resolution_targets: resolutions.len(),
+            resolution_routes: resolution_route_count,
+            missing_resolution_routes,
             execution_performed: false,
             policy_admission_performed: false,
         };
@@ -461,6 +593,8 @@ impl PinnedModuleRegistry {
             summary,
             modules,
             routes,
+            resolutions,
+            resolution_routes,
         })
     }
 
@@ -480,6 +614,47 @@ impl PinnedModuleRegistry {
         self.modules.values()
     }
 
+    /// Source-free identities selected by captured filename lookups.
+    pub fn resolutions(&self) -> impl ExactSizeIterator<Item = &RegisteredResolution> {
+        self.resolutions.values()
+    }
+
+    /// Resolve only an exact captured require.resolve route. A matching load
+    /// route, canonical target ID, other referrer, or alternate spelling cannot
+    /// substitute for that captured request. The result grants no load permit.
+    pub fn lookup_resolution(
+        &self,
+        referrer: Option<&str>,
+        specifier: &str,
+    ) -> Result<&RegisteredResolution> {
+        validate_specifier(specifier)?;
+        let importer = referrer.ok_or_else(|| {
+            error(
+                "ERR_MODULE_REGISTRY_ENTRY",
+                "filename lookup requires a captured source referrer",
+            )
+        })?;
+        if !self.modules.contains_key(importer) {
+            return Err(error(
+                "ERR_MODULE_REGISTRY_REFERRER",
+                "referrer does not belong to this sealed graph",
+            ));
+        }
+        let target = self.resolution_routes
+            .get(importer)
+            .and_then(|requests| requests.get(specifier))
+            .ok_or_else(|| {
+                error(
+                    "ERR_MODULE_REGISTRY_ROUTE",
+                    "filename lookup was not captured for this importer",
+                )
+            })?;
+        match target {
+            RegisteredTarget::Module { id } => self.resolutions.get(id).ok_or_else(invalid_graph),
+            RegisteredTarget::Missing { error } => Err(error.clone()),
+        }
+    }
+
     /// Data lookup only. This never confers an execution/capability permit.
     /// With no referrer, only the exact entrypoint ID and its admitted style
     /// are accepted. With a referrer, even a known target's canonical ID cannot
@@ -491,6 +666,12 @@ impl PinnedModuleRegistry {
         style: RequestStyle,
     ) -> Result<&RegisteredModule> {
         validate_specifier(specifier)?;
+        if style == RequestStyle::RequireResolve {
+            return Err(error(
+                "ERR_MODULE_REGISTRY_ROUTE",
+                "filename lookup cannot deliver executable source",
+            ));
+        }
         let id = match referrer {
             None if specifier == self.entrypoint() && style == self.entry_style() => {
                 self.entrypoint()
@@ -711,13 +892,13 @@ mod tests {
                     ModuleKind::EsModule
                 })
             },
-            |specifier, _| match specifier {
+            |specifier, _| Ok(match specifier {
                 "path" | "node:path" => Some("node:path"),
                 "path/posix" => Some("node:path/posix"),
                 "node:path/win32" => Some("node:path/win32"),
                 "node:querystring" => Some("node:querystring"),
                 _ => None,
-            },
+            }),
         )
         .ok()
         .unwrap();
@@ -855,14 +1036,14 @@ mod tests {
                 |_, _, _| Ok(ModuleKind::EsModule),
                 |specifier, style| {
                     if style != RequestStyle::Import {
-                        return None;
+                        return Ok(None);
                     }
-                    match specifier {
+                    Ok(match specifier {
                         "path/posix" => Some("node:path/posix"),
                         "path/win32" => Some("node:path/win32"),
                         "buffer" => Some("node:buffer"),
                         _ => None,
-                    }
+                    })
                 },
             )
         };
@@ -955,7 +1136,7 @@ mod tests {
                     prepared.set(true);
                     Ok(ModuleKind::EsModule)
                 },
-                |specifier, _| (specifier == "node:path").then_some("node:path"),
+                |specifier, _| Ok((specifier == "node:path").then_some("node:path")),
             );
             assert_eq!(
                 result.err().unwrap().code,
@@ -1069,7 +1250,8 @@ mod tests {
             let pin = graph.report().input_hash.clone();
             let encoded = capsule::encode(&graph).unwrap();
             let registry = PinnedModuleRegistry::new(graph, &pin).ok().unwrap();
-            assert_eq!(registry.summary().missing_routes, 2);
+            assert_eq!(registry.summary().missing_routes, if style == RequestStyle::Require { 1 } else { 2 });
+            assert_eq!(registry.summary().missing_resolution_routes, usize::from(style == RequestStyle::Require));
 
             // The host now admits both requests, but the reviewed registry
             // and replay capsule must retain their original package failures.
@@ -1093,14 +1275,19 @@ mod tests {
                     ("pkg/private", "ERR_PACKAGE_PATH_NOT_EXPORTED"),
                     ("#optional", "ERR_PACKAGE_IMPORT_NOT_DEFINED"),
                 ] {
-                    assert_eq!(
-                        registry
-                            .lookup(Some(registry.entrypoint()), request, style)
-                            .err()
-                            .unwrap()
-                            .code,
-                        expected
-                    );
+                    let resolution_only = style == RequestStyle::Require && request == "#optional";
+                    let failure = if resolution_only {
+                        registry.lookup_resolution(Some(registry.entrypoint()), request).err().unwrap()
+                    } else {
+                        registry.lookup(Some(registry.entrypoint()), request, style).err().unwrap()
+                    };
+                    assert_eq!(failure.code, expected);
+                    if resolution_only {
+                        assert_eq!(
+                            registry.lookup(Some(registry.entrypoint()), request, style).err().unwrap().code,
+                            "ERR_MODULE_REGISTRY_ROUTE"
+                        );
+                    }
                     let other_style = if style == RequestStyle::Import {
                         RequestStyle::Require
                     } else {
@@ -1706,8 +1893,8 @@ mod tests {
                     Ok(ModuleKind::CommonJs)
                 },
                 |specifier, style| {
-                    (specifier == "path" && (style == RequestStyle::Require || admit_import))
-                        .then_some("node:path")
+                    Ok((specifier == "path" && (style == RequestStyle::Require || admit_import))
+                        .then_some("node:path"))
                 },
             );
             if !admit_import {
@@ -1758,7 +1945,7 @@ mod tests {
             let result = PinnedModuleRegistry::new_with_kind_resolver(graph, &pin, |_, _, _| {
                 calls.set(calls.get() + 1);
                 Ok(ModuleKind::EsModule)
-            }, |_, _| None);
+            }, |_, _| Ok(None));
             assert_eq!(
                 result.err().unwrap().code,
                 if mismatch {
@@ -1769,5 +1956,155 @@ mod tests {
             );
         }
         assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn resolution_only_files_never_become_executable_routes_or_dependencies() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.cjs", r#"
+            require.resolve('./asset.node');
+            require.resolve('./invalid.json');
+            require.resolve('./invalid.cjs');
+            require.resolve('./nested.cjs');
+            require.resolve('./both.cjs');
+            require('./both.cjs');
+        "#);
+        std::fs::write(root.path().join("asset.node"), [0, 255, 128, 1]).unwrap();
+        put(root.path(), "invalid.json", "{not json");
+        put(root.path(), "invalid.cjs", "function { invalid syntax");
+        put(root.path(), "nested.cjs", "require('uncaptured-package'); throw Error('never run');");
+        put(root.path(), "both.cjs", "module.exports = 42;");
+        let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        assert!(graph.report().fully_resolved);
+        assert_eq!(graph.report().modules.len(), 2);
+        assert_eq!(graph.report().resolution_targets.len(), 5);
+        let pin = graph.report().input_hash.clone();
+        let registry = PinnedModuleRegistry::new(graph, &pin).ok().unwrap();
+        assert_eq!(registry.summary().modules, 2);
+        assert_eq!(registry.summary().routes, 1);
+        assert_eq!(registry.summary().resolution_targets, 5);
+        assert_eq!(registry.summary().resolution_routes, 5);
+        assert_eq!(registry.summary().missing_resolution_routes, 0);
+        let entry = registry.entrypoint();
+        for name in ["asset.node", "invalid.json", "invalid.cjs", "nested.cjs"] {
+            let request = format!("./{name}");
+            let metadata = registry.lookup_resolution(Some(entry), &request).unwrap();
+            assert_eq!(metadata.origin().path, name);
+            assert_eq!(metadata.kind(), ResolutionKind::File);
+            for style in [RequestStyle::Require, RequestStyle::Import, RequestStyle::RequireResolve] {
+                assert_eq!(
+                    registry.lookup(Some(entry), &request, style).err().unwrap().code,
+                    "ERR_MODULE_REGISTRY_ROUTE"
+                );
+            }
+            assert_eq!(
+                registry.lookup_resolution(Some(entry), metadata.id()).err().unwrap().code,
+                "ERR_MODULE_REGISTRY_ROUTE"
+            );
+            assert_eq!(
+                registry.lookup_resolution(None, &request).err().unwrap().code,
+                "ERR_MODULE_REGISTRY_ENTRY"
+            );
+        }
+        let both = registry.lookup(Some(entry), "./both.cjs", RequestStyle::Require).unwrap();
+        assert_eq!(both.source(), "module.exports = 42;");
+        assert_eq!(
+            registry.lookup_resolution(Some(entry), "./both.cjs").unwrap().id(),
+            both.id()
+        );
+        for (referrer, request) in [
+            (entry, "././asset.node"),
+            (entry, "uncaptured-package"),
+            (both.id(), "./asset.node"),
+        ] {
+            assert_eq!(
+                registry.lookup_resolution(Some(referrer), request).err().unwrap().code,
+                "ERR_MODULE_REGISTRY_ROUTE"
+            );
+        }
+        let walk = registry.reachable_requests(None, entry, RequestStyle::Require).unwrap();
+        assert_eq!(walk.len(), 2);
+        assert_eq!(walk[1].1, "./both.cjs");
+    }
+
+    #[test]
+    fn filename_builtin_names_are_separate_from_executable_native_providers() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.cjs", r#"
+            require.resolve('fs');
+            require.resolve('node:fs');
+            try { require.resolve('node:not-real'); } catch (error) {}
+        "#);
+        let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        assert_eq!(
+            PinnedModuleRegistry::new(graph, &pin).err().unwrap().code,
+            "ERR_MODULE_REGISTRY_INCOMPLETE"
+        );
+        let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        let registry = PinnedModuleRegistry::new_with_kind_resolver(
+            graph,
+            &pin,
+            |_, _, _| Ok(ModuleKind::CommonJs),
+            |specifier, style| {
+                assert_eq!(style, RequestStyle::RequireResolve);
+                match specifier {
+                    "fs" | "node:fs" => Ok(Some("node:fs")),
+                    "node:not-real" => Err(error("MODULE_NOT_FOUND", "unknown reserved name")),
+                    _ => Ok(None),
+                }
+            },
+        ).ok().unwrap();
+        assert_eq!(registry.summary().modules, 1);
+        assert_eq!(registry.summary().routes, 0);
+        assert_eq!(registry.summary().resolution_targets, 1);
+        assert_eq!(registry.summary().resolution_routes, 3);
+        assert_eq!(registry.summary().missing_resolution_routes, 1);
+        let entry = registry.entrypoint();
+        let bare = registry.lookup_resolution(Some(entry), "fs").unwrap();
+        let prefixed = registry.lookup_resolution(Some(entry), "node:fs").unwrap();
+        assert_eq!(bare.kind(), ResolutionKind::Builtin);
+        assert_eq!(bare.origin().path, "node:fs");
+        assert_eq!(bare.id(), prefixed.id());
+        assert_eq!(
+            registry.lookup_resolution(Some(entry), "node:not-real").err().unwrap().code,
+            "MODULE_NOT_FOUND"
+        );
+        for name in ["fs", "node:fs", "node:not-real"] {
+            assert_eq!(
+                registry.lookup(Some(entry), name, RequestStyle::Require).err().unwrap().code,
+                "ERR_MODULE_REGISTRY_ROUTE"
+            );
+        }
+        assert_eq!(registry.reachable_requests(None, entry, RequestStyle::Require).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn resolution_metadata_is_checked_before_any_source_preparation() {
+        use std::cell::Cell;
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.cjs", "require.resolve('./asset.node');");
+        std::fs::write(root.path().join("asset.node"), [0, 255, 128, 1]).unwrap();
+        for corrupt_hash in [false, true] {
+            let mut graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+            let pin = graph.report().input_hash.clone();
+            if corrupt_hash {
+                graph.report.resolution_targets[0].content_sha256 = "00".repeat(32);
+            } else {
+                graph.report.resolution_targets[0].content_bytes += 1;
+            }
+            let prepared = Cell::new(false);
+            let result = PinnedModuleRegistry::new_with_kind_resolver(
+                graph,
+                &pin,
+                |_, _, _| {
+                    prepared.set(true);
+                    Ok(ModuleKind::CommonJs)
+                },
+                |_, _| Ok(None),
+            );
+            assert_eq!(result.err().unwrap().code, "ERR_MODULE_REGISTRY_GRAPH");
+            assert!(!prepared.get());
+        }
     }
 }

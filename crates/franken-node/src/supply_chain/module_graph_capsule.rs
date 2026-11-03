@@ -469,6 +469,49 @@ mod tests {
     }
 
     #[test]
+    fn resolution_only_capsules_replay_opaque_files_and_require_search_observations() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "src/app.cjs", "require.resolve('addon');");
+        put(root.path(), "node_modules/addon/package.json", r#"{"exports":"./addon.node"}"#);
+        let opaque = b"\x7fELF\xff\0private_native_bytes";
+        put(root.path(), "node_modules/addon/addon.node", opaque);
+        let graph = capture(root.path(), "src/app.cjs", GraphOptions::default()).unwrap();
+        assert!(graph.report().fully_resolved);
+        assert_eq!(graph.report().modules.len(), 1);
+        assert_eq!(graph.report().resolution_targets.len(), 1);
+        let target = &graph.report().resolution_targets[0].id;
+        assert!(graph.source_bytes(target).is_none());
+        assert!(graph.report().probes.iter().any(|probe|
+            probe.path == "src/node_modules"
+                && probe.kind == super::super::super::ProbeKind::Missing));
+        let encoded = encode(&graph).unwrap();
+        put(root.path(), "node_modules/addon/addon.node", b"replaced binary");
+        put(root.path(), "src/node_modules/addon/index.js", "throw Error('new nearer package');");
+        let replayed = replay(encoded.bytes(), encoded.digest()).unwrap();
+        assert_eq!(replayed.report(), graph.report());
+        assert!(replayed.source_bytes(target).is_none());
+        assert!(matches!(replayed.inputs.get(&target.path).unwrap().as_ref(),
+            Entry::File { bytes, .. } if bytes == opaque));
+        assert_eq!(encode(&replayed).unwrap().bytes(), encoded.bytes());
+        assert!(!serde_json::to_string(replayed.report()).unwrap().contains("private_native_bytes"));
+
+        // A successful filename lookup still needs the captured negative
+        // search path. Omission cannot mean absence or trigger live fallback.
+        let omitted = modify(&encoded, |header| {
+            header.inputs.retain(|input| input.path != "src/node_modules");
+        });
+        assert_eq!(failure(&omitted), "ERR_MODULE_CAPSULE_INPUT_MISSING");
+        let changed_digest = modify(&encoded, |header| {
+            let input = header.inputs.iter_mut().find(|input| input.path == target.path).unwrap();
+            let Content::File { sha256, .. } = &mut input.content else {
+                panic!("ordinary resolution target");
+            };
+            *sha256 = "0".repeat(64);
+        });
+        assert_eq!(failure(&changed_digest), "ERR_MODULE_CAPSULE_INVALID");
+    }
+
+    #[test]
     fn typescript_erased_dependencies_and_url_instances_replay_without_extra_reads() {
         let root = tempfile::tempdir().unwrap();
         put(

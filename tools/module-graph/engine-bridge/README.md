@@ -29,6 +29,16 @@ artifact's self-reported hash. The capsule pin authenticates byte consistency;
 the graph pin identifies the exact analysis admitted to the source registry.
 Neither pin identifies a publisher or grants capabilities.
 
+## Required sibling revision
+
+This bridge requires `franken_engine` commit
+[`b7ac48264b9bff30b2135f7bafd4916848e9d8c9`](https://github.com/Dicklesworthstone/franken_engine/commit/b7ac48264b9bff30b2135f7bafd4916848e9d8c9)
+or a descendant that retains `ModuleMetadata`, `ModuleResolver::resolve_metadata`
+and `ModulePolicyHook::authorize_metadata`. The Cargo path dependency on the
+sibling checkout is intentional; it does not select or enforce a Git revision.
+An older sibling checkout does not provide the metadata-resolution contract
+required by this bridge.
+
 ## Closed-world behavior
 
 Admission consumes the capture and builds immutable, `Send + Sync` source
@@ -40,16 +50,16 @@ paths or JavaScript URLs to parse or reopen.
 
 Only the entrypoint's generated request is accepted without a referrer.
 Subsequent requests must use the returned engine record ID as referrer and the
-exact captured specifier and import/require style. Knowing a target's canonical
+exact captured specifier, import/require style and load/filename-lookup purpose. Knowing a target's canonical
 ID does not create a new edge to it. Nested package versions, condition choices,
 workspace links and missing lookup decisions are never reinterpreted using the
 ambient machine. Unknown requests fail rather than falling back to another
 resolver. Engine requests must use `NodeCompat`; the helper entry request does
 this explicitly. These captured choices cannot be relabelled Native or Bun.
 
-Captured `require` and dynamic `import()` absences remain terminal after later
+Captured require, require.resolve and dynamic import() absences remain terminal after later
 installation or capsule replay. The engine throws `MODULE_NOT_FOUND` for require
-and rejects the import promise with `ERR_MODULE_NOT_FOUND`. Missing static
+and require.resolve, and rejects the import promise with `ERR_MODULE_NOT_FOUND`. Missing static
 imports, invalid metadata, denied exports and unknown routes remain refusals.
 Eager `resolve_chain` fails on any missing target.
 
@@ -93,7 +103,8 @@ values still fail the bounded-import contract. No builtin implementation is
 copied into the product or captured capsule; capsule replay uses the installed
 engine's authenticated provider.
 
-Only analyzed closed graphs are admitted. The engine-independent
+Only closed graphs with analyzed executable sources are admitted. Resolution-only
+targets have no language or source-preparation requirement. The engine-independent
 `PinnedModuleRegistry::new` remains transform-free and requires explicit
 JavaScript ESM/CommonJS formats. The engine-backed constructor additionally
 prepares the following captured sources using the real sibling front end:
@@ -124,7 +135,7 @@ prepares the following captured sources using the real sibling front end:
 Preparation runs after independent pin and closed-graph checks, once per
 physical source. A changed source is rescanned by the production dependency
 scanner without filesystem or network authority. Its runtime importer-local
-specifier/style routes must exactly equal the captured routes; adding a load or
+specifier/style/purpose routes must exactly equal the captured routes; adding a load or
 removing a side-effect dependency is an admission error. Type-only edges remain
 non-authorizing. Original source pins and URL identities are not rewritten;
 engine canonical hashes cover the actual delivered prepared source.
@@ -138,7 +149,7 @@ goal that could misclassify a CommonJS source as ESM just because the unwrapped
 source fits a smaller budget. The temporary CommonJS wrapper is moved into the
 engine's owned-input API without another source-buffer copy.
 
-JSX, native addons, Wasm and other builtins need separate contracts/providers. Typed
+Executing JSX, native addons, Wasm and other builtins needs separate contracts/providers. Typed
 capability-intent annotations are rejected rather than erased without their
 engine obligation metadata. Implicit reclassification of JavaScript as
 TypeScript is likewise rejected. These are admission errors, not empty module
@@ -146,9 +157,10 @@ shims. The broader inspection/capsule functionality remains available unchanged.
 
 ## CommonJS JSON dependencies
 
-A captured `.json` dependency can be delivered when every non-type-only incoming
+A captured `.json` dependency can be delivered when every executable incoming
 edge is `require`, it has no outgoing runtime routes, and it has no URL-instance
-suffix. This covers explicit JSON files, existing CommonJS extension/index
+suffix. Filename-only lookup edges do not change this loading contract.
+This covers explicit JSON files, existing CommonJS extension/index
 search and JSON-valued package entrypoints. A bare JSON graph entrypoint, static
 or dynamic ESM JSON import, reexport, or mixed require/import access is refused
 with `ERR_MODULE_ENGINE_JSON_IMPORT`. The graph has no import-attribute evidence
@@ -165,7 +177,7 @@ JSON strings as dependency requests. The engine frontend must preserve the
 adapter exactly and accept its CommonJS parse goal. The generated JavaScript
 is rescanned and must still have no dependency routes.
 
-The existing graph JSON validator remains authoritative. This change does not
+The existing graph JSON validator remains authoritative for executable JSON dependencies. This change does not
 expand its accepted JSON syntax or resource envelope; invalid or unsupported
 capture inputs still prevent registry admission. It does not evaluate JSON while
 constructing the resolver, implement module evaluation caches, or certify an
@@ -185,6 +197,46 @@ once alongside the graph routes rather than rescanning every edge per file.
 The per-chain limit counts delivered adapter bytes, including escaping and the
 wrapper, not only original JSON byte lengths. These are logical byte bounds,
 not a process-RSS guarantee or a measured throughput claim.
+
+## Filename resolution without executable source
+
+Direct require.resolve requests, including recognized createRequire aliases,
+have their own captured purpose. Successful file targets appear in
+resolution_targets with physical identity, original byte length and SHA-256.
+They are not scanned, prepared, or traversed for dependencies unless a separate
+executable route reaches the same file. This supports native-addon and binary
+assets, invalid JSON, invalid JavaScript and other filename-only targets.
+Both purposes retain their own exact importer and request spelling even when
+they select the same graph-scoped identity.
+
+Capture still seals the original filesystem observations and target bytes under
+the existing per-file, total-payload and union-of-targets limits. Capsule replay
+repeats the real resolution from those sealed inputs, including negative probes;
+it never reopens a live target. The separate metadata inventory prevents lookup
+authority from becoming source-delivery or execution authority.
+
+PinnedModuleRegistry::lookup_resolution returns a RegisteredResolution with no
+source, syntax or dependencies. CapturedEngineResolver implements the sibling
+engine's resolve_metadata API and returns ModuleMetadata. Each successful
+request calls ModulePolicyHook::authorize_metadata with current context; the
+default policy method refuses until an implementation explicitly supports it.
+The stock capability policy requires ModuleLoad and honors request/identity
+denials. No executable ModuleRecord, canonical source hash, preparation work or
+evaluation-cache entry is constructed by this runtime lookup.
+
+The engine's exact Node builtin-name inventory is independent of its executable
+provider inventory. Lookup of a recognized name returns the Node spelling,
+including the distinction between fs and node:fs, without requiring Builtin
+execution authority or constructing a provider. Unknown reserved node: names
+produce a catchable MODULE_NOT_FOUND. A successful builtin filename lookup
+cannot authorize require or import of that name.
+
+Registry summaries count executable routes and resolution routes separately,
+including their respective missing outcomes. Eager resolve_chain visits only
+executable routes. Source transformation must preserve the purpose of every
+captured request; changing require.resolve into require, or the reverse, fails
+the dependency-conservation check. Captured lookup options, indirect loaders,
+and unknown computed names retain their existing explicit refusals.
 
 ## Authorization is per load, not per cached byte
 

@@ -348,6 +348,9 @@ fn expected_routes(report: &SourceGraphReport) -> Result<ExpectedRoutes> {
             .ok_or_else(invalid_preparation)?;
         let specifier = edge.specifier.as_ref().ok_or_else(invalid_preparation)?;
         importer.insert((specifier.clone(), request_style(edge.kind)));
+        if edge.kind == LoadKind::RequireResolve {
+            continue;
+        }
         if let Some(target) = &edge.target {
             if edge.kind == LoadKind::Require {
                 required.insert(target.clone());
@@ -391,10 +394,10 @@ fn json_commonjs_source(source: &str, limit: usize) -> Result<String> {
 }
 
 fn request_style(kind: LoadKind) -> RequestStyle {
-    if kind == LoadKind::Require {
-        RequestStyle::Require
-    } else {
-        RequestStyle::Import
+    match kind {
+        LoadKind::Require => RequestStyle::Require,
+        LoadKind::RequireResolve => RequestStyle::RequireResolve,
+        LoadKind::StaticImport | LoadKind::Reexport | LoadKind::DynamicImport => RequestStyle::Import,
     }
 }
 

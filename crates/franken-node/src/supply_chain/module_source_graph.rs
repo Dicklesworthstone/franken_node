@@ -87,15 +87,15 @@ impl SourceSite {
 pub enum LoadKind {
     StaticImport,
     Reexport,
-    /// CommonJS-resolution requests, including direct require.resolve calls.
-    /// Capturing this route never asserts that the target will be evaluated.
     Require,
+    /// CommonJS filename lookup without source preparation or load authority.
+    RequireResolve,
     DynamicImport,
 }
 
 impl LoadKind {
     fn mode(self) -> ResolutionMode {
-        if self == Self::Require {
+        if matches!(self, Self::Require | Self::RequireResolve) {
             ResolutionMode::Require
         } else {
             ResolutionMode::Import
@@ -176,6 +176,16 @@ pub struct SourceModule {
     pub analyzed: bool,
 }
 
+/// A captured ordinary file selected only for its location. Its bytes remain
+/// pinned capsule inputs; no source grammar, execution format or load authority
+/// follows from this observation. A separately loaded file may appear here too.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ResolutionTarget {
+    pub id: ModuleId,
+    pub content_sha256: String,
+    pub content_bytes: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SourceDiagnostic {
     pub module: ModuleId,
@@ -247,6 +257,8 @@ pub struct SourceGraphReport {
     pub resolved_entrypoint: ModuleId,
     pub options: GraphOptions,
     pub modules: Vec<SourceModule>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resolution_targets: Vec<ResolutionTarget>,
     pub edges: Vec<SourceEdge>,
     pub diagnostics: Vec<SourceDiagnostic>,
     pub probes: Vec<Probe>,
@@ -402,6 +414,10 @@ fn build(
     let mut sources = BTreeMap::from([(first.clone(), entry)]);
     let mut pending = VecDeque::from([(first.clone(), None)]);
     let mut modules = Vec::new();
+    let mut resolution_targets = BTreeMap::new();
+    // Bound the union: observing a filename and subsequently loading it does
+    // not count twice, and metadata routes do not create a second module quota.
+    let mut target_count = 1;
     let mut edges = Vec::new();
     let mut diagnostics = Vec::new();
     let mut require_extension_fallbacks = BTreeSet::new();
@@ -479,7 +495,10 @@ fn build(
                 site: load.site,
                 kind: load.kind,
                 deferred_or_conditional: !load.type_only
-                    && matches!(load.kind, LoadKind::Require | LoadKind::DynamicImport),
+                    && matches!(
+                        load.kind,
+                        LoadKind::Require | LoadKind::RequireResolve | LoadKind::DynamicImport
+                    ),
                 specifier: load.specifier,
                 conditions,
                 state: if load.type_only {
@@ -501,10 +520,28 @@ fn build(
                             return Err(mode.missing(&path));
                         }
                         let target = ModuleId { path, url_suffix };
-                        if !sources.contains_key(&target) {
-                            if sources.len() >= MAX_MODULES {
+                        if !sources.contains_key(&target)
+                            && !resolution_targets.contains_key(&target)
+                        {
+                            if target_count >= MAX_MODULES {
                                 return Err(limit());
                             }
+                            target_count += 1;
+                        }
+                        if edge.kind == LoadKind::RequireResolve {
+                            if !resolution_targets.contains_key(&target) {
+                                let Entry::File { bytes, sha256 } = source.as_ref() else {
+                                    unreachable!("ordinary resolution target")
+                                };
+                                let metadata = ResolutionTarget {
+                                    id: target.clone(),
+                                    content_sha256: sha256.clone(),
+                                    content_bytes: bytes.len(),
+                                };
+                                budget.retain(&metadata)?;
+                                resolution_targets.insert(target.clone(), metadata);
+                            }
+                        } else if !sources.contains_key(&target) {
                             scan_cache.observe_module(&target.path);
                             sources.insert(target.clone(), source);
                             pending.push_back((target.clone(), Some(mode)));
@@ -536,7 +573,7 @@ fn build(
     // import or erasing it from the captured dependency surface.
     if !require_extension_fallbacks.is_empty() {
         for edge in &edges {
-            if edge.kind != LoadKind::Require
+            if !matches!(edge.kind, LoadKind::Require | LoadKind::RequireResolve)
                 && edge
                     .target
                     .as_ref()
@@ -576,6 +613,7 @@ fn build(
                 .iter()
                 .all(|e| matches!(e.state, EdgeState::Resolved | EdgeState::TypeOnly)),
         modules,
+        resolution_targets: resolution_targets.into_values().collect(),
         edges,
         diagnostics,
         probes,
@@ -1726,7 +1764,9 @@ fn scan(
                         None
                     } else if f.kind() == "import" {
                         Some(LoadKind::DynamicImport)
-                    } else if is_require(f, bytes) || bindings.is_loader(f, text) || resolve {
+                    } else if resolve {
+                        Some(LoadKind::RequireResolve)
+                    } else if is_require(f, bytes) || bindings.is_loader(f, text) {
                         Some(LoadKind::Require)
                     } else {
                         None
@@ -2428,9 +2468,9 @@ fn immutable_import_meta_use(mut node: Node<'_>, source: &str) -> bool {
 
 /// Recognize the actual CommonJS resolve member, not aliases, call/apply,
 /// user-provided loaders, or arbitrary computed property expressions. Reuse
-/// the ordinary require route/condition set: the engine already implements
-/// resolve-only execution and policy checks over that same route. Capturing
-/// the full source closure remains conservative (this is not asset discovery).
+/// CommonJS conditions while preserving a separate resolution-only route.
+/// Target bytes and filesystem observations are retained without treating an
+/// asset's contents as executable source or granting a subsequent require.
 fn is_require_resolve(node: Node<'_>, source: &str) -> bool {
     let node = runtime_operand(node);
     if !matches!(node.kind(), "member_expression" | "subscript_expression") {
@@ -4062,8 +4102,8 @@ module.exports={load,lookup,optional};
             assert!(analyzed, "{source}: {notices:?}");
             assert!(notices.is_empty(), "{source}: {notices:?}");
             assert_eq!(loads.len(), 2, "{source}: {loads:?}");
-            for load in loads {
-                assert_eq!(load.kind, LoadKind::Require, "{source}");
+            for (load, kind) in loads.into_iter().zip([LoadKind::Require, LoadKind::RequireResolve]) {
+                assert_eq!(load.kind, kind, "{source}");
                 assert_eq!(load.specifier.as_deref(), Some("./dep.cjs"), "{source}");
                 assert!(!load.type_only);
             }
@@ -4116,11 +4156,9 @@ module.exports={load,lookup,optional};
                 .filter(|load| load.specifier.as_deref() == Some("./dep.cjs"))
                 .collect();
             assert_eq!(requests.len(), 2, "{source}: {loads:?}");
-            assert!(
-                requests
-                    .iter()
-                    .all(|load| load.kind == LoadKind::Require && !load.type_only)
-            );
+            assert!(requests.iter().all(|load| !load.type_only));
+            assert_eq!(requests.iter().filter(|load| load.kind == LoadKind::Require).count(), 1);
+            assert_eq!(requests.iter().filter(|load| load.kind == LoadKind::RequireResolve).count(), 1);
         }
     }
 
@@ -4319,8 +4357,8 @@ module.exports={load,lookup,optional};
                 _ => Err(error("ERR_TEST_MODULE_KIND", "unexpected fixture format")),
             },
             |specifier, style| {
-                (specifier == "node:module" && style == RequestStyle::Import)
-                    .then_some("node:module")
+                Ok((specifier == "node:module" && style == RequestStyle::Import)
+                    .then_some("node:module"))
             },
         )
         .unwrap();
@@ -4474,11 +4512,9 @@ module.exports={load,lookup,optional};
         assert!(analyzed);
         assert!(notices.is_empty(), "{notices:?}");
         assert_eq!(loads.len(), 2);
-        assert!(
-            loads
-                .iter()
-                .all(|load| load.kind == LoadKind::Require && load.specifier.is_none())
-        );
+        assert_eq!(loads.iter().map(|load| load.kind).collect::<Vec<_>>(),
+            [LoadKind::Require, LoadKind::RequireResolve]);
+        assert!(loads.iter().all(|load| load.specifier.is_none()));
 
         let root = tempfile::tempdir().unwrap();
         put(root.path(), "app.cjs", source);
@@ -4661,8 +4697,8 @@ module.exports={load,lookup,optional};
             assert!(notices.is_empty(), "{source}: {notices:?}");
             assert_eq!(loads.len(), 3, "{source}: {loads:?}");
             assert_eq!(loads[0].kind, LoadKind::StaticImport);
-            for load in &loads[1..] {
-                assert_eq!(load.kind, LoadKind::Require, "{source}");
+            for (load, kind) in loads[1..].iter().zip([LoadKind::Require, LoadKind::RequireResolve]) {
+                assert_eq!(load.kind, kind, "{source}");
                 assert_eq!(load.specifier.as_deref(), Some("./dep.cjs"), "{source}");
                 assert!(!load.type_only);
             }
@@ -4720,7 +4756,7 @@ module.exports={load,lookup,optional};
             assert_eq!(loads[1].kind, LoadKind::StaticImport);
             assert_eq!(loads[2].kind, LoadKind::Require);
             assert_eq!(loads[2].specifier.as_deref(), Some("./dep.cjs"));
-            assert_eq!(loads[3].kind, LoadKind::Require);
+            assert_eq!(loads[3].kind, LoadKind::RequireResolve);
             assert_eq!(loads[3].specifier.as_deref(), Some("./asset.cjs"));
         }
     }
@@ -4891,8 +4927,10 @@ module.exports={load,lookup,optional};
                 loads[0].specifier.as_deref(),
                 Some("module" | "node:module")
             ));
-            for load in &loads {
-                assert_eq!(load.kind, LoadKind::Require, "{source}");
+            for (load, kind) in loads.iter().zip([
+                LoadKind::Require, LoadKind::Require, LoadKind::RequireResolve,
+            ]) {
+                assert_eq!(load.kind, kind, "{source}");
                 assert!(!load.type_only);
             }
             for load in &loads[1..] {
@@ -5140,12 +5178,14 @@ module.exports={load,lookup,optional};
             );
             assert!(captured.report().edges.iter().any(|edge| {
                 edge.specifier.as_deref() == Some("./asset.cjs")
-                    && edge.kind == LoadKind::Require
+                    && edge.kind == LoadKind::RequireResolve
                     && edge
                         .target
                         .as_ref()
                         .is_some_and(|target| target.path == "nested/asset.cjs")
             }));
+            assert_eq!(captured.report().resolution_targets.len(), 1);
+            assert!(captured.source_bytes(&captured.report().resolution_targets[0].id).is_none());
             assert!(
                 !captured
                     .report()
@@ -5295,11 +5335,9 @@ module.exports={load,lookup,optional};
         .unwrap();
         assert!(notices.is_empty());
         assert_eq!(loads.len(), 3);
-        assert!(
-            loads[1..]
-                .iter()
-                .all(|load| load.kind == LoadKind::Require && load.specifier.is_none())
-        );
+        assert_eq!(loads[1..].iter().map(|load| load.kind).collect::<Vec<_>>(),
+            [LoadKind::Require, LoadKind::RequireResolve]);
+        assert!(loads[1..].iter().all(|load| load.specifier.is_none()));
 
         let factories = (0..MAX_SITES)
             .map(|index| format!("createRequire as make{index}"))
@@ -5369,8 +5407,11 @@ module.exports={load,lookup,optional};
                 .iter()
                 .filter(|edge| edge.kind == LoadKind::Require)
                 .count(),
-            4
+            2
         );
+        assert_eq!(captured.report().edges.iter()
+            .filter(|edge| edge.kind == LoadKind::RequireResolve).count(), 2);
+        assert_eq!(captured.report().resolution_targets.len(), 1);
         assert!(!captured.report().execution_performed);
         let pin = captured.report().input_hash.clone();
         let capsule = super::capsule::encode(&captured).unwrap();
@@ -5406,10 +5447,10 @@ module.exports={load,lookup,optional};
                     ModuleKind::EsModule
                 })
             },
-            |specifier, _| match specifier {
+            |specifier, _| Ok(match specifier {
                 "module" | "node:module" => Some("node:module"),
                 _ => None,
-            },
+            }),
         )
         .ok()
         .unwrap();
@@ -5439,12 +5480,11 @@ module.exports={load,lookup,optional};
                 .unwrap();
             assert_eq!(required.source(), "module.exports='require';");
             let asset = registry
-                .lookup(Some(loaded.id()), "./asset.cjs", RequestStyle::Require)
+                .lookup_resolution(Some(loaded.id()), "./asset.cjs")
                 .unwrap();
-            assert_eq!(
-                asset.source(),
-                "throw new Error('resolve does not execute');"
-            );
+            assert_eq!(asset.origin().path, "asset.cjs");
+            assert!(registry.lookup(Some(loaded.id()), "./asset.cjs", RequestStyle::Require)
+                .is_err());
             assert!(
                 registry
                     .lookup(Some(loaded.id()), "dual", RequestStyle::Import)
@@ -5511,7 +5551,6 @@ const fromPackage = require('string-' + 'fixture');
                 "dynamic.mjs",
                 "node_modules/string-fixture/index.cjs",
                 "node_modules/string-fixture/value.cjs",
-                "other.cjs",
                 "value.cjs",
             ]
         );
@@ -5567,7 +5606,7 @@ const fromPackage = require('string-' + 'fixture');
         assert_eq!(package_value.source(), "module.exports = 17;");
         assert!(
             registry
-                .lookup(Some(entry.id()), "./other.cjs", RequestStyle::Require)
+                .lookup_resolution(Some(entry.id()), "./other.cjs")
                 .is_ok()
         );
         assert!(
@@ -5578,6 +5617,7 @@ const fromPackage = require('string-' + 'fixture');
         for (specifier, style) in [
             ("./uncaptured.cjs", RequestStyle::Require),
             ("./value.cjs", RequestStyle::Import),
+            ("./other.cjs", RequestStyle::Require),
         ] {
             assert_eq!(
                 registry
@@ -5660,7 +5700,7 @@ const fromPackage = require('string-' + 'fixture');
                 .collect::<Vec<_>>(),
             vec![
                 (LoadKind::Require, Some("./dep.cjs"), EdgeState::Resolved),
-                (LoadKind::Require, Some("./dep.cjs"), EdgeState::Resolved),
+                (LoadKind::RequireResolve, Some("./dep.cjs"), EdgeState::Resolved),
                 (
                     LoadKind::DynamicImport,
                     Some("./dep.cjs"),
@@ -5940,7 +5980,7 @@ const fromPackage = require('string-' + 'fixture');
             ),
             (
                 "require.resolve(flag ? './one.cjs' : './two.cjs');",
-                LoadKind::Require,
+                LoadKind::RequireResolve,
             ),
             (
                 "const load = require; load(flag ? './one.cjs' : './two.cjs');",
@@ -7757,11 +7797,9 @@ require!('./dep.cjs');
                 .filter(|load| load.specifier.as_deref() == Some("./dep.cjs"))
                 .collect();
             assert_eq!(dependencies.len(), 2, "{source}: {loads:?}");
-            assert!(
-                dependencies
-                    .iter()
-                    .all(|load| load.kind == LoadKind::Require && !load.type_only)
-            );
+            assert_eq!(dependencies.iter().map(|load| load.kind).collect::<Vec<_>>(),
+                [LoadKind::Require, LoadKind::RequireResolve]);
+            assert!(dependencies.iter().all(|load| !load.type_only));
         }
     }
 
@@ -7826,9 +7864,11 @@ require!('./dep.cjs');
         assert!(notices.is_empty(), "{notices:?}");
         let requests: Vec<_> = loads
             .iter()
-            .filter(|load| load.kind == LoadKind::Require)
+            .filter(|load| matches!(load.kind, LoadKind::Require | LoadKind::RequireResolve))
             .collect();
         assert_eq!(requests.len(), 2);
+        assert_eq!(requests.iter().map(|load| load.kind).collect::<Vec<_>>(),
+            [LoadKind::Require, LoadKind::RequireResolve]);
         assert!(requests.iter().all(|load| load.specifier.is_none()));
 
         let mut source = String::from(
@@ -7902,10 +7942,10 @@ require!('./dep.cjs');
                     ModuleKind::EsModule
                 })
             },
-            |specifier, _| match specifier {
+            |specifier, _| Ok(match specifier {
                 "module" | "node:module" => Some("node:module"),
                 _ => None,
-            },
+            }),
         )
         .unwrap();
         let entry = registry

@@ -3232,13 +3232,15 @@ mod tests {
 
         let captured = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
         assert!(captured.report().fully_resolved);
-        assert_eq!(captured.report().modules.len(), 3);
+        assert_eq!(captured.report().modules.len(), 2);
+        assert_eq!(captured.report().resolution_targets.len(), 1);
+        assert_eq!(captured.report().edges.iter().map(|edge| edge.kind).collect::<Vec<_>>(),
+            [LoadKind::Require, LoadKind::RequireResolve]);
         let requests: Vec<_> = captured
             .report()
             .edges
             .iter()
             .map(|edge| {
-                assert_eq!(edge.kind, LoadKind::Require);
                 assert_eq!(
                     edge.conditions,
                     ResolutionMode::Require.default_conditions()
@@ -3272,29 +3274,25 @@ mod tests {
         let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
         assert_eq!(replayed.report(), captured.report());
         let registry = PinnedModuleRegistry::new(replayed, &pin).unwrap();
-        assert_eq!(registry.summary().routes, 2);
-        for (request, expected_path, expected_source) in [
-            (
-                "legacy/",
-                "node_modules/legacy/entry.cjs",
-                "module.exports=41;",
-            ),
-            (
-                "legacy/sub/",
-                "node_modules/legacy/sub/index.js",
-                "module.exports=42;",
-            ),
-        ] {
-            let module = registry
-                .lookup(Some(registry.entrypoint()), request, RequestStyle::Require)
-                .unwrap();
-            assert_eq!(module.origin().path, expected_path);
-            assert_eq!(module.source(), expected_source);
+        assert_eq!(registry.summary().routes, 1);
+        assert_eq!(registry.summary().resolution_routes, 1);
+        let module = registry
+            .lookup(Some(registry.entrypoint()), "legacy/", RequestStyle::Require)
+            .unwrap();
+        assert_eq!(module.origin().path, "node_modules/legacy/entry.cjs");
+        assert_eq!(module.source(), "module.exports=41;");
+        let metadata = registry
+            .lookup_resolution(Some(registry.entrypoint()), "legacy/sub/")
+            .unwrap();
+        assert_eq!(metadata.origin().path, "node_modules/legacy/sub/index.js");
+        assert!(registry.lookup(Some(registry.entrypoint()), "legacy/sub/", RequestStyle::Require)
+            .is_err());
+        for id in [module.id(), metadata.id()] {
             assert_eq!(
                 registry
                     .lookup(
                         Some(registry.entrypoint()),
-                        module.id(),
+                        id,
                         RequestStyle::Require
                     )
                     .err()

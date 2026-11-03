@@ -38,7 +38,7 @@ import {pathToFileURL,fileURLToPath} from 'node:url';
 import path from 'node:path';
 const [root,from,request,kind] = process.argv.slice(1);
 const importer=pathToFileURL(path.join(root,from));
-const selected=kind==='require' ? createRequire(importer).resolve(request)
+const selected=(kind==='require'||kind==='require_resolve') ? createRequire(importer).resolve(request)
     : fileURLToPath(import.meta.resolve(request,importer.href));
 console.log(path.relative(root,selected));
 "#;
@@ -58,6 +58,78 @@ console.log(path.relative(root,selected));
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         assert_eq!(String::from_utf8(output.stdout).unwrap().trim(),
             edge["target"]["path"].as_str().unwrap(), "{edge}");
+    }
+}
+
+#[test]
+fn resolution_only_assets_match_node_for_aliases_and_created_require_and_replay() {
+    for (entry, prelude, builtin) in [
+        ("app.cjs", "const load=require; const lookup=load;", false),
+        ("factory.cjs", "const mod=require('node:module'); const load=mod.createRequire(__filename); const lookup=load;", true),
+        ("app.mjs", "import {createRequire} from 'node:module'; const load=createRequire(import.meta.url); const lookup=load;", true),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project with spaces");
+        put(&project, "package.json", r##"{"imports":{"#style":"assets/style.css"}}"##);
+        put(&project, "node_modules/assets/package.json",
+            r#"{"exports":{"./*":{"import":"./wrong/*.mjs","require":"./files/*"}}}"#);
+        for name in ["native.node", "style.css"] {
+            let path = format!("node_modules/assets/files/{name}");
+            put(&project, &path, "");
+            std::fs::write(project.join(path), b"\xff\0opaque asset, not source").unwrap();
+        }
+        put(&project, "broken.cjs", "function { invalid; require('not-captured');");
+        put(&project, "never.json", "{invalid JSON");
+        put(&project, entry, &format!(r#"{prelude}
+console.log(lookup.resolve('assets/native.node'));
+console.log(lookup['resolve']('assets/style.css'));
+console.log(lookup.resolve('#style'));
+console.log(lookup.resolve('./broken.cjs'));
+if (false) {{ lookup.resolve('./never.json'); }}
+"#));
+        let reference = Command::new("node")
+            .env_remove("NODE_OPTIONS").env_remove("NODE_PATH")
+            .current_dir(&project).arg(entry).output().unwrap();
+        assert!(reference.status.success(), "{}", String::from_utf8_lossy(&reference.stderr));
+        let expected = [
+            "node_modules/assets/files/native.node", "node_modules/assets/files/style.css",
+            "node_modules/assets/files/style.css", "broken.cjs",
+        ].iter().map(|path| format!("{}\n", project.join(path).display())).collect::<String>();
+        assert_eq!(reference.stdout, expected.as_bytes());
+
+        let (code, captured) = run(&project, entry, &[]);
+        assert_eq!(code, i32::from(builtin), "{captured}");
+        assert_eq!(paths(&captured), [entry]);
+        assert!(captured["source_graph"]["diagnostics"].as_array().unwrap().is_empty());
+        let targets = captured["source_graph"]["resolution_targets"].as_array().unwrap();
+        assert_eq!(targets.len(), 4);
+        let edges = captured["source_graph"]["edges"].as_array().unwrap();
+        let lookups: Vec<_> = edges.iter().filter(|edge| edge["kind"] == "require_resolve").collect();
+        assert_eq!(lookups.len(), 5);
+        assert!(lookups.iter().all(|edge| edge["state"] == "resolved"
+            && edge["deferred_or_conditional"] == true
+            && edge["conditions"] == serde_json::json!(["node", "require"])));
+        let alias = lookups.iter().find(|edge| edge["specifier"] == "#style").unwrap();
+        assert_eq!(alias["mappings"][0]["kind"], "imports");
+        assert_eq!(alias["mappings"][1]["kind"], "exports");
+        assert!(!captured["source_graph"]["probes"].as_array().unwrap().iter().any(|probe|
+            probe["path"].as_str().unwrap().contains("not-captured")
+                || probe["path"].as_str().unwrap().contains("/wrong/")));
+        assert_node_edges(&project, &captured);
+
+        let capsule = temp.path().join("assets.fnsc");
+        let (export_code, exported) = export_capsule(&project, entry, &capsule, &[]);
+        assert_eq!(export_code, code);
+        assert_eq!(exported["source_graph"], captured["source_graph"]);
+        std::fs::rename(&project, temp.path().join("original-project")).unwrap();
+        put(&project, entry, "throw Error('live source must not reopen');");
+        let unrelated = temp.path().join("unrelated");
+        std::fs::create_dir(&unrelated).unwrap();
+        let (replay_code, replayed) = replay_capsule(&capsule,
+            exported["capsule_hash"].as_str().unwrap(), &unrelated);
+        assert_eq!(replay_code, code, "{replayed}");
+        assert_eq!(replayed["source_graph"], captured["source_graph"]);
+        assert_eq!(std::fs::read_dir(&unrelated).unwrap().count(), 0);
     }
 }
 
@@ -1036,11 +1108,9 @@ fn immutable_commonjs_aliases_match_node_routes_and_replay_without_source_files(
     );
     let edges = captured["source_graph"]["edges"].as_array().unwrap();
     assert_eq!(edges.len(), 5);
-    assert!(
-        edges
-            .iter()
-            .all(|edge| edge["kind"] == "require" && edge["state"] == "resolved")
-    );
+    assert!(edges.iter().all(|edge| edge["state"] == "resolved"));
+    assert_eq!(edges.iter().filter(|edge| edge["kind"] == "require").count(), 3);
+    assert_eq!(edges.iter().filter(|edge| edge["kind"] == "require_resolve").count(), 2);
     assert_node_edges(&project, &captured);
     std::fs::rename(&project, temp.path().join("original-not-at-recorded-path")).unwrap();
     let (code, replayed) = replay_capsule(

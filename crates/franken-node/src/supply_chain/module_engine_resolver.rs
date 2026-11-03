@@ -14,7 +14,7 @@ pub use preparation::detect_kind_with_options;
 use preparation::{PreparedSources, SourcePreparer};
 
 use super::registry::{
-    ModuleKind, PinnedModuleRegistry, RegisteredModule, RegistrySummary, RequestStyle,
+    ModuleKind, PinnedModuleRegistry, RegisteredModule, RegistrySummary, RequestStyle, ResolutionKind,
 };
 use super::{CapturedModuleGraph, ResolutionError as CaptureError};
 use frankenengine_engine::capability::RuntimeCapability;
@@ -23,8 +23,9 @@ use frankenengine_engine::module_compatibility_matrix::CompatibilityMode;
 use frankenengine_engine::module_resolver::{
     ExecutionModuleResolver, ImportStyle, ModuleDependency, ModulePolicyHook, ModuleProvenance,
     ModuleRecord, ModuleRequest, ModuleResolver, ModuleSourceKind, ModuleSourceLocation, ModuleSyntax,
-    NativeBuiltinModule, ResolutionContext, ResolutionError, ResolutionErrorCode, ResolutionEvent,
-    ResolutionOutcome, ResolutionResult, ResolvedModule, SharedModuleRecord,
+    MetadataResolutionOutcome, ModuleMetadata, NativeBuiltinModule, ResolutionContext,
+    ResolutionError, ResolutionErrorCode, ResolutionEvent, ResolutionOutcome, ResolutionResult,
+    ResolvedModule, ResolvedModuleMetadata, SharedModuleRecord, node_builtin_specifier,
     SharedResolutionOutcome, SharedResolvedModule,
 };
 use frankenengine_engine::parser::ParserOptions;
@@ -80,8 +81,22 @@ impl CapturedEngineResolver {
             graph,
             independent_graph_pin,
             |module, source, report| preparer.prepare(module, source, report),
-            |specifier, _| NativeBuiltinModule::from_specifier(specifier)
-                .map(NativeBuiltinModule::canonical_specifier),
+            |specifier, style| {
+                if style == RequestStyle::RequireResolve {
+                    if let Some(name) = node_builtin_specifier(specifier) {
+                        return Ok(Some(name));
+                    }
+                    if specifier.starts_with("node:") {
+                        return Err(super::error(
+                            "MODULE_NOT_FOUND",
+                            "reserved Node name is absent from the engine builtin inventory",
+                        ));
+                    }
+                    return Ok(None);
+                }
+                Ok(NativeBuiltinModule::from_specifier(specifier)
+                    .map(NativeBuiltinModule::canonical_specifier))
+            },
         )?;
         let mut resolver = Self::from_registry(registry);
         resolver.prepared_sources = preparer.finish();
@@ -143,11 +158,17 @@ impl CapturedEngineResolver {
             ));
         }
         let mut locations = BTreeMap::new();
-        for module in self.registry.modules() {
-            if module.kind() == ModuleKind::NativeBuiltin {
+        let origins = self.registry.modules()
+            .filter(|module| module.kind() != ModuleKind::NativeBuiltin)
+            .map(|module| (module.id(), module.origin()))
+            .chain(self.registry.resolutions()
+                .filter(|target| target.kind() == ResolutionKind::File)
+                .map(|target| (target.id(), target.origin())));
+        for (id, origin) in origins {
+            if locations.contains_key(id) {
                 continue;
             }
-            let filename = project_root.join(&module.origin().path);
+            let filename = project_root.join(&origin.path);
             let mut url = url::Url::from_file_path(&filename)
                 .map_err(|_| {
                     super::error(
@@ -156,8 +177,8 @@ impl CapturedEngineResolver {
                     )
                 })?
                 .to_string();
-            url.push_str(&module.origin().url_suffix);
-            locations.insert(module.id().to_owned(), ModuleSourceLocation { filename, url });
+            url.push_str(&origin.url_suffix);
+            locations.insert(id.to_owned(), ModuleSourceLocation { filename, url });
         }
         Ok(ExecutionModuleResolver::new(
             self.registry.entrypoint(),
@@ -333,6 +354,65 @@ impl CapturedEngineResolver {
 }
 
 impl ModuleResolver for CapturedEngineResolver {
+    fn resolve_metadata(
+        &self,
+        request: &ModuleRequest,
+        context: &ResolutionContext,
+        policy: &dyn ModulePolicyHook,
+    ) -> ResolutionResult<MetadataResolutionOutcome> {
+        self.validate_request(request, context)?;
+        if request.style != ImportStyle::Require {
+            return Err(denied(
+                ResolutionErrorCode::UnsupportedSpecifier,
+                "captured filename lookup requires CommonJS resolution",
+                request,
+                context,
+                None,
+            ));
+        }
+        let target = self.registry
+            .lookup_resolution(request.referrer.as_deref(), &request.specifier)
+            .map_err(|error| registry_error(error, request, context))?;
+        let metadata = ModuleMetadata {
+            id: target.id().to_owned(),
+            required_capabilities: BTreeSet::from([RuntimeCapability::ModuleLoad]),
+            provenance: ModuleProvenance {
+                kind: match target.kind() {
+                    ResolutionKind::File => ModuleSourceKind::Workspace,
+                    ResolutionKind::Builtin => ModuleSourceKind::BuiltIn,
+                },
+                origin: match target.kind() {
+                    ResolutionKind::File => format!(
+                        "franken-node-source-graph:{}",
+                        self.registry.summary().graph_input_hash
+                    ),
+                    ResolutionKind::Builtin => target.origin().path.clone(),
+                },
+            },
+        };
+        // Filename disclosure is a separate policy operation. No executable
+        // record, source copy, source hash, preparation or evaluation cache is
+        // consulted, and every repeated request receives a fresh decision.
+        policy.authorize_metadata(request, &metadata, context).map_err(|failure| {
+            denied(
+                ResolutionErrorCode::PolicyDenied,
+                &format!("{}: {}", failure.code.stable_code(), failure.message),
+                request,
+                context,
+                Some(&metadata.id),
+            )
+        })?;
+        Ok(MetadataResolutionOutcome {
+            module: ResolvedModuleMetadata {
+                request_specifier: request.specifier.clone(),
+                canonical_specifier: metadata.id.clone(),
+                metadata,
+                probe_sequence: Vec::new(),
+            },
+            event: event(context, "allow", ""),
+        })
+    }
+
     fn resolve_shared(
         &self,
         request: &ModuleRequest,
@@ -457,7 +537,7 @@ fn source_style(style: ImportStyle) -> RequestStyle {
 fn engine_style(style: RequestStyle) -> ImportStyle {
     match style {
         RequestStyle::Import => ImportStyle::Import,
-        RequestStyle::Require => ImportStyle::Require,
+        RequestStyle::Require | RequestStyle::RequireResolve => ImportStyle::Require,
     }
 }
 
@@ -1520,6 +1600,26 @@ mod tests {
         calls: Cell<usize>,
     }
     impl ModulePolicyHook for ChangingPolicy {
+        fn authorize_metadata(
+            &self,
+            request: &ModuleRequest,
+            metadata: &ModuleMetadata,
+            context: &ResolutionContext,
+        ) -> ResolutionResult<()> {
+            self.calls.set(self.calls.get() + 1);
+            if self.allowed.get() {
+                Ok(())
+            } else {
+                Err(denied(
+                    ResolutionErrorCode::PolicyDenied,
+                    "metadata policy revoked",
+                    request,
+                    context,
+                    Some(&metadata.id),
+                ))
+            }
+        }
+
         fn authorize(
             &self,
             request: &ModuleRequest,
@@ -1568,6 +1668,86 @@ mod tests {
             "export const x=1;"
         );
         assert_eq!(policy.calls.get(), 3);
+    }
+
+    #[test]
+    fn metadata_lookup_has_no_source_preparation_record_hash_or_cached_policy_authority() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.cjs", r#"
+            require.resolve('./asset.node');
+            require.resolve('./invalid.json');
+            require.resolve('./invalid.ts');
+            require.resolve('crypto');
+            require.resolve('node:crypto');
+            try { require.resolve('node:not-real'); } catch (error) {}
+        "#);
+        std::fs::write(root.path().join("asset.node"), [0, 255, 128, 1]).unwrap();
+        put(root.path(), "invalid.json", "{ invalid JSON");
+        put(root.path(), "invalid.ts", "namespace { invalid TypeScript");
+        let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        let resolver = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
+        assert_eq!(resolver.summary().modules, 1);
+        assert_eq!(resolver.summary().routes, 0);
+        assert_eq!(resolver.preparation_reports().count(), 0);
+        let request = |name: &str| ModuleRequest::new(name, ImportStyle::Require)
+            .with_referrer(resolver.entry_request().specifier)
+            .with_compatibility_mode(CompatibilityMode::NodeCompat);
+        let policy = ChangingPolicy { allowed: Cell::new(true), calls: Cell::new(0) };
+        let first = resolver.resolve_metadata(&request("./asset.node"), &context(), &policy).unwrap();
+        assert_eq!(first.module.metadata.required_capabilities, BTreeSet::from([RuntimeCapability::ModuleLoad]));
+        assert_eq!(first.module.metadata.provenance.kind, ModuleSourceKind::Workspace);
+        let mut returned = first.module.metadata;
+        returned.id = "caller replacement".into();
+        policy.allowed.set(false);
+        assert_eq!(
+            resolver.resolve_metadata(&request("./asset.node"), &context(), &policy).unwrap_err().code,
+            ResolutionErrorCode::PolicyDenied
+        );
+        policy.allowed.set(true);
+        let repeated = resolver.resolve_metadata(&request("./asset.node"), &context(), &policy).unwrap();
+        assert_ne!(repeated.module.metadata.id, returned.id);
+        assert_eq!(policy.calls.get(), 3);
+        for name in ["./invalid.json", "./invalid.ts", "crypto", "node:crypto"] {
+            // Builtin-name lookup needs no Builtin execution capability.
+            let metadata = resolver.resolve_metadata(&request(name), &context(), &granted()).unwrap();
+            assert_eq!(metadata.module.request_specifier, name);
+            assert_eq!(
+                resolver.resolve_shared(&request(name), &context(), &AllowAllPolicy).unwrap_err().code,
+                ResolutionErrorCode::UnsupportedSpecifier
+            );
+        }
+        let builtin = resolver.resolve_metadata(&request("crypto"), &context(), &granted()).unwrap();
+        assert_eq!(builtin.module.metadata.provenance.kind, ModuleSourceKind::BuiltIn);
+        assert_eq!(builtin.module.metadata.provenance.origin, "node:crypto");
+        assert_eq!(
+            resolver.resolve_metadata(&request("node:not-real"), &context(), &granted()).unwrap_err().code,
+            ResolutionErrorCode::ModuleNotFound
+        );
+        assert_eq!(
+            resolver.resolve_metadata(&request("./asset.node"), &context(), &granted().deny_specifier("./asset.node")).unwrap_err().code,
+            ResolutionErrorCode::PolicyDenied
+        );
+        let legacy = EdgePolicy { deny_referrer: None, calls: RefCell::new(Vec::new()) };
+        assert_eq!(
+            resolver.resolve_metadata(&request("./asset.node"), &context(), &legacy).unwrap_err().code,
+            ResolutionErrorCode::PolicyDenied
+        );
+        assert!(legacy.calls.borrow().is_empty());
+        for invalid in [
+            ModuleRequest { style: ImportStyle::Import, ..request("./asset.node") },
+            request("././asset.node"),
+            request("node:fs"),
+            request("./asset.node").with_compatibility_mode(CompatibilityMode::BunCompat),
+        ] {
+            assert_eq!(
+                resolver.resolve_metadata(&invalid, &context(), &AllowAllPolicy).unwrap_err().code,
+                ResolutionErrorCode::UnsupportedSpecifier
+            );
+        }
+        assert_eq!(resolver.hash_computations.load(Ordering::Relaxed), 0);
+        assert_eq!(resolver.retained_shared_source_bytes.load(Ordering::Relaxed), 0);
+        assert!(resolver.shared_records.values().all(|slot| slot.get().is_none()));
     }
 
     #[test]
@@ -2610,6 +2790,34 @@ module.exports = { State, Label, offset: require('./offset.cjs') };
     }
 
     #[test]
+    fn typescript_preparation_cannot_exchange_filename_lookup_and_executable_loading() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "asset.cjs", "module.exports = 42;");
+        let metadata = "const value: string = require.resolve('./asset.cjs'); module.exports = value;";
+        let executable = "const value: string = require('./asset.cjs'); module.exports = value;";
+        for (captured_source, altered) in [(metadata, executable), (executable, metadata)] {
+            put(root.path(), "app.cts", captured_source);
+            let graph = capture(root.path(), "app.cts", GraphOptions::default()).unwrap();
+            let entry = graph.report().modules.iter()
+                .find(|module| module.id.path == "app.cts").unwrap();
+            assert_eq!(
+                SourcePreparer::default().prepare(entry, altered, graph.report()).err().unwrap().code,
+                "ERR_MODULE_ENGINE_DEPENDENCY_DRIFT"
+            );
+            let pin = graph.report().input_hash.clone();
+            let resolver = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
+            let entry = resolver.resolve(&resolver.entry_request(), &context(), &granted()).unwrap();
+            if captured_source == metadata {
+                assert!(entry.module.record.dependencies.is_empty());
+                assert!(entry.module.record.source.contains("require.resolve"));
+            } else {
+                assert_eq!(entry.module.record.dependencies,
+                    [ModuleDependency::new("./asset.cjs", ImportStyle::Require)]);
+            }
+        }
+    }
+
+    #[test]
     fn prepared_source_replay_never_reopens_the_original_project() {
         let root = tempfile::tempdir().unwrap();
         put(root.path(), "app.mts", "export const answer: number=42;");
@@ -2917,6 +3125,77 @@ module.exports = { State, Label, offset: require('./offset.cjs') };
         assert!(reference.status.success(), "{reference:?}");
         assert!(reference.stderr.is_empty(), "{reference:?}");
         String::from_utf8(reference.stdout).unwrap()
+    }
+
+    #[test]
+    fn native_metadata_only_npm_assets_match_node_after_complete_project_replacement() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            for esm in [false, true] {
+                let parent = tempfile::tempdir().unwrap();
+                let root = parent.path().join("project with spaces");
+                let (entrypoint, prefix, loader) = if esm {
+                    (
+                        "app.mjs",
+                        "import {createRequire} from 'node:module'; const local = createRequire(import.meta.url);",
+                        "local",
+                    )
+                } else {
+                    ("app.cjs", "", "require")
+                };
+                put(&root, entrypoint, &format!(r#"
+{prefix}
+console.log({loader}.resolve('asset-kit').endsWith('/node_modules/asset-kit/native.node'));
+console.log({loader}.resolve('./broken.json').endsWith('/broken.json'));
+console.log({loader}.resolve('./unparsed.cjs').endsWith('/unparsed.cjs'));
+console.log({loader}.resolve('./typed.ts').endsWith('/typed.ts'));
+console.log('builtins', {loader}.resolve('crypto'), {loader}.resolve('node:crypto'), {loader}.resolve('node:test'));
+try {{ {loader}.resolve('node:not-real'); }}
+catch (error) {{ console.log('missing', error.code); }}
+try {{ {loader}.resolve('asset-kit/private'); }}
+catch (error) {{ console.log('private', error.code); }}
+console.log('value', {loader}('./value.cjs'));
+"#));
+                put(&root, "node_modules/asset-kit/package.json",
+                    r#"{"exports":{".":{"import":"./wrong.mjs","require":"./native.node"}}}"#);
+                std::fs::write(root.join("node_modules/asset-kit/native.node"), [0, 255, 128, 1]).unwrap();
+                put(&root, "node_modules/asset-kit/wrong.mjs", "throw Error('wrong lookup mode');");
+                put(&root, "broken.json", "{ invalid JSON");
+                put(&root, "unparsed.cjs", "require('must-not-be-traversed'); function { invalid");
+                put(&root, "typed.ts", "namespace { invalid TypeScript");
+                put(&root, "value.cjs", "module.exports = 42;");
+                let reference = node_reference_output(&root, entrypoint);
+                assert_eq!(reference,
+                    "true\ntrue\ntrue\ntrue\nbuiltins crypto node:crypto node:test\nmissing MODULE_NOT_FOUND\nprivate ERR_PACKAGE_PATH_NOT_EXPORTED\nvalue 42\n");
+                let graph = capture(&root, entrypoint, GraphOptions::default()).unwrap();
+                assert_eq!(graph.report().modules.len(), 2);
+                assert_eq!(graph.report().resolution_targets.len(), 4);
+                assert!(graph.report().diagnostics.is_empty());
+                let encoded = capsule::encode(&graph).unwrap();
+                std::fs::rename(&root, parent.path().join("original-project")).unwrap();
+                put(&root, entrypoint, "throw Error('live replacement was reopened');");
+                let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+                assert_eq!(replayed.report(), graph.report());
+                let capabilities = if esm {
+                    BTreeSet::from([RuntimeCapability::ModuleLoad, RuntimeCapability::Builtin])
+                } else {
+                    BTreeSet::from([RuntimeCapability::ModuleLoad])
+                };
+                let result = execute_module_graph_with_policy_for_test(
+                    &root,
+                    replayed,
+                    lane,
+                    Arc::new(CapabilityPolicyHook::new(capabilities)),
+                    || {},
+                ).expect("filename metadata uses the real engine without loading target bytes");
+                let actual = result.console_output.iter()
+                    .map(|line| line.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n") + "\n";
+                assert_eq!(actual, reference, "{lane:?}, esm={esm}");
+            }
+        }
     }
 
     #[test]
