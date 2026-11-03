@@ -1,0 +1,34 @@
+{
+  "engine_session_signature_verified": false,
+  "fixture_sha256": "8b2a30721a8bccc502fada06ac4f9b82517afa44bbbf8df749e2610685b544d1",
+  "native_execution_performed": false,
+  "number_regressions": [
+    51.248178375505404,
+    -93.31137037688033,
+    52.314008204106244
+  ],
+  "original_record_sha256": "d1ca60747f4565f0c80c5a0e488d86f82ccfedf713a583276815fe64fc101b1b",
+  "producer_source_sha256": {
+    "crates/franken-node/src/crypto/schemes.rs": "3f51c450b206c2f475e3d09af197571e31152c32c74a3541d398497e8235251d",
+    "crates/franken-node/src/runtime/effect_receipt.rs": "d4839312865c9a7d78bc4e150ac07d4522d0d75b4a5117cc7a3e09a42814f807",
+    "crates/franken-node/src/security/constant_time.rs": "4c92c1bdfd6fdab53329b0fd14297ea71ac410817e725ac95f180ae4415da5ec",
+    "crates/franken-node/src/security/crypto.rs": "161c8cf1ebd906ca7bc3424042af540a2c6111112bf3c3fceff2e23a3de8731d",
+    "crates/franken-node/src/storage/cas.rs": "e1dd9c88a033cadfa0e4daba433bdbfb996a9e7aeb580a27edd70334e7f63736",
+    "crates/franken-node/src/supply_chain/artifact_signing.rs": "074bf56d433d1f2778fc06fa3cffd832251e70796551c8c715158311fb50b50a",
+    "crates/franken-node/src/tools/replay_bundle.rs": "688b042e27461f20927bb355358bc89d297b047be3e37b047578ee492409105e"
+  },
+  "production_functions": [
+    "sign_run_ledger_record",
+    "parse_verified_run_ledger_record",
+    "EffectReceiptChain::append",
+    "generate_replay_bundle",
+    "sign_replay_bundle",
+    "verify_replay_bundle_signature",
+    "to_canonical_json"
+  ],
+  "schema_version": "franken-node/run-origin-protocol-fixture/v1",
+  "scope": "Production signer/bundle/receipt-chain protocol interoperability; synthetic execution metadata",
+  "test_exporter_seed": "RFC 8032 section 7.1 TEST 1; public test material only",
+  "test_run_seed": "41 repeated 32 bytes; public test material only",
+  "typed_run_receipt_identity_recomputed": false
+}

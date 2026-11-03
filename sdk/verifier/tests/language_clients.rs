@@ -1,5 +1,7 @@
 //! Real Python/JS consumers of the distributed executable, without product or
-//! engine sources. Protocol vectors are independently signed by Node crypto.
+//! engine sources. Adversarial protocol vectors are independently signed by
+//! Node crypto; the original-run interoperability fixture retains the actual
+//! production signers' signatures over explicitly synthetic execution metadata.
 
 use std::fs;
 use std::io::Write;
@@ -97,7 +99,10 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
         .arg(sdk.join("tests/fixtures/cli_incident_bundle/INC-SDK-FIXTURE-1.fnbundle"))
         .arg(sdk.join("tests/fixtures/public_api/bundle_canonical.json"))
         .arg(sdk.join("tests/fixtures/cli_incident_bundle/rfc8032_test1_seed.hex"))
-        .arg(root.join("vectors.json"));
+        .arg(root.join("vectors.json"))
+        .arg(sdk.join("tests/fixtures/run_origin_protocol/producer-run.fnbundle"))
+        .arg(sdk.join("tests/fixtures/run_origin_protocol/bundle-authority.pub"))
+        .arg(sdk.join("tests/fixtures/run_origin_protocol/run-authority.pub"));
     checked(&mut vectors);
     let cases: Vec<serde_json::Value> =
         serde_json::from_slice(&fs::read(root.join("vectors.json")).unwrap()).unwrap();
@@ -113,6 +118,9 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
         ]);
         if let Some(signature) = case["signature_hex"].as_str() {
             verifier.args(["--signature-hex", signature]);
+        }
+        if let Some(run_anchor) = case["run_anchor"].as_str() {
+            verifier.args(["--trusted-run-key-hex", run_anchor]);
         }
         let mut child = verifier
             .stdin(Stdio::piped())
@@ -137,6 +145,13 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
             );
             assert_eq!(response["artifact_sha256"], case["artifact_sha256"]);
             assert_eq!(response["verdict"], "verified");
+            if let Some(run_anchor) = case["run_anchor"].as_str() {
+                assert_eq!(response["scope"], "authenticated_run_incident");
+                assert_eq!(
+                    response["facts"]["run_origin"]["signer_public_key_hex"],
+                    run_anchor
+                );
+            }
         } else {
             assert!(!output.status.success(), "Rust accepted {}", case["name"]);
             assert_eq!(

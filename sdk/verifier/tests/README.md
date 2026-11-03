@@ -83,6 +83,36 @@ that all loads were captured, check engine IR, or verify replay consumption.
 Those properties still require production graph reconstruction and native
 `incident replay --execute` under the intended policy.
 
+### Original Run Authority
+
+`verify_incident_bundle_with_run_key` and the executable's optional
+`--trusted-run-key-hex` authenticate an original signed run record against a
+separate caller-supplied authority. Tests require exact receipt, policy,
+security-control, effect-entry, native-capture, terminal-time and failure
+bindings, reject interrupted records, and demonstrate that a valid exporter
+signature cannot authorize rewriting the original statement. Historical
+one-key verification retains its narrower scope; requesting original-run
+authentication without its proof fails.
+
+`run_origin.rs` verifies `fixtures/run_origin_protocol/producer-run.fnbundle`,
+emitted through the exact production `sign_run_ledger_record`, effect-receipt
+chain, bundle-generation and bundle-signing implementations. The receipt and
+execution metadata are explicitly synthetic. This fixture proves signer and
+wire-format interoperability, including difficult finite floating-point
+telemetry and unknown signed fields; it does not prove native execution,
+typed receipt-identity recomputation, or engine session certification. Its
+provenance records the producer source hashes, fixture digest and public test
+key origins. The language consumer matrix uses these original signatures and
+also re-signs adversarial exports under its separate test exporter key.
+
+```bash
+cargo test -p frankenengine-verifier-sdk --test run_origin
+cargo test -p frankenengine-verifier-sdk --test language_clients
+```
+
+See [original-run verification](../RUN_ORIGIN.md) for the public Rust,
+executable, JavaScript, TypeScript and Python interfaces and their proof scope.
+
 ## Conformance Testing
 
 ### What is Tested

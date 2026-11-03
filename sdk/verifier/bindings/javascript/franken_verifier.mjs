@@ -26,16 +26,27 @@ const object = (value) => value !== null && typeof value === "object" && !Array.
 const keys = (value, expected) => object(value) && Object.keys(value).length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 const count = (value) => Number.isSafeInteger(value) && value >= 0;
 
-function factsValid(facts, format, anchor) {
+function runOriginValid(origin, anchor) {
+  return keys(origin, ["receipt_id", "receipt_hash", "signer_public_key_hex", "record_sha256"])
+    && typeof origin.receipt_id === "string" && /^[A-Za-z0-9_-]{1,128}$/u.test(origin.receipt_id)
+    && typeof origin.receipt_hash === "string" && /^sha256:[0-9a-f]{64}$/u.test(origin.receipt_hash)
+    && origin.signer_public_key_hex === anchor
+    && typeof origin.record_sha256 === "string" && /^[0-9a-f]{64}$/u.test(origin.record_sha256);
+}
+
+function factsValid(facts, format, anchor, runAnchor) {
   const expected = {
     "incident-bundle": ["bundle_id", "incident_id", "created_at", "policy_version", "event_count", "integrity_hash", "decision_sequence_hash", "signer_public_key_hex", "signing_identity", "native_capture"],
     capsule: ["capsule_id", "expected_hash", "actual_hash", "signer_public_key_hex"],
     "signed-bundle": ["bundle_id", "incident_id", "event_count", "integrity_hash", "signer_public_key_hex"],
   }[format];
+  if (runAnchor !== undefined) expected.push("run_origin");
   if (!keys(facts, expected) || facts.signer_public_key_hex !== anchor) return false;
   for (const [key, value] of Object.entries(facts)) {
     if (key === "event_count") {
       if (!count(value)) return false;
+    } else if (key === "run_origin") {
+      if (!runOriginValid(value, runAnchor)) return false;
     } else if (key === "native_capture") {
       if (value !== null && (!keys(value, ["payload_sha256", "payload_bytes", "captured_terminal_state", "host_io_exchange_count"])
           || !hex(value.payload_sha256, 64) || !["completed", "uncaught_exception", "engine_failure"].includes(value.captured_terminal_state)
@@ -46,18 +57,29 @@ function factsValid(facts, format, anchor) {
   return true;
 }
 
-/** Authenticate original bytes; never executes a captured guest or discovers its own anchor. */
+/**
+ * Authenticate original bytes; never executes a captured guest or discovers its own anchor.
+ * An explicit trustedRunPublicKeyHex requires the original receipt-authority
+ * signature and matching run data. Missing proof or downgraded scope fails.
+ */
 export async function verifyArtifact(data, trustedPublicKeyHex, options) {
-  const { verifier, format = "incident-bundle", signatureHex, timeoutMs = 10_000 } = options ?? {};
+  const { verifier, format = "incident-bundle", trustedRunPublicKeyHex, signatureHex, timeoutMs = 10_000 } = options ?? {};
   if (!(data instanceof Uint8Array)) throw new VerifierError("INPUT_INVALID", "data must contain the original bytes");
   if (data.byteLength > MAX_INPUT_BYTES) throw new VerifierError("INPUT_TOO_LARGE", "evidence exceeds 64 MiB");
   if (typeof format !== "string" || !Object.hasOwn(SCOPES, format)) throw new VerifierError("UNSUPPORTED_FORMAT", "unsupported evidence format");
   if (!hex(trustedPublicKeyHex, 64)) throw new VerifierError("ANCHOR_INVALID", "expected a 32-byte hexadecimal public key");
+  if (trustedRunPublicKeyHex !== undefined) {
+    if (format !== "incident-bundle") throw new VerifierError("INPUT_INVALID", "original-run trust applies only to incident-bundle");
+    if (!hex(trustedRunPublicKeyHex, 64)) throw new VerifierError("RUN_ANCHOR_INVALID", "expected a 32-byte hexadecimal run public key");
+  }
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 120_000) throw new VerifierError("TIMEOUT_INVALID", "timeoutMs must be finite and in (0, 120000]");
   if (typeof verifier !== "string" || verifier.length === 0 || verifier.includes("\0")) throw new VerifierError("EXECUTABLE_INVALID", "verifier must be a trusted executable path");
   const bytes = Buffer.from(data);
   const anchor = trustedPublicKeyHex.toLowerCase();
+  const runAnchor = trustedRunPublicKeyHex?.toLowerCase();
+  const scope = runAnchor === undefined ? SCOPES[format] : "authenticated_run_incident";
   const args = ["verify", "--format", format, "--trusted-key-hex", anchor];
+  if (runAnchor !== undefined) args.push("--trusted-run-key-hex", runAnchor);
   if (format === "signed-bundle") {
     if (!hex(signatureHex, 128)) throw new VerifierError("SIGNATURE_MALFORMED", "a detached 64-byte signature is required");
     args.push("--signature-hex", signatureHex);
@@ -89,8 +111,8 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
         return reject(new VerifierError(result.error.code, result.error.message, { exitCode, stderr }));
       }
       if (exitCode !== 0 || !keys(result, ["schema_version", "verdict", "format", "scope", "artifact_sha256", "facts"])
-          || result.verdict !== "verified" || result.format !== format || result.scope !== SCOPES[format]
-          || result.artifact_sha256 !== createHash("sha256").update(bytes).digest("hex") || !factsValid(result.facts, format, anchor)) {
+          || result.verdict !== "verified" || result.format !== format || result.scope !== scope
+          || result.artifact_sha256 !== createHash("sha256").update(bytes).digest("hex") || !factsValid(result.facts, format, anchor, runAnchor)) {
         return reject(new VerifierError("PROTOCOL_INVALID", "verification response does not match the request"));
       }
       resolve(result);

@@ -17,7 +17,8 @@ for case in cases:
     data = bytes.fromhex(case["input_hex"])
     try:
         result = verify_artifact(data, case["anchor"], verifier=executable,
-                                 format=case["format"], signature_hex=case.get("signature_hex"))
+                                 format=case["format"], signature_hex=case.get("signature_hex"),
+                                 trusted_run_public_key_hex=case.get("run_anchor"))
     except VerifierError as error:
         assert error.code == case["expected"], (case["name"], error.code, case["expected"])
         print(json.dumps({"case": case["name"], "result": error.code}), flush=True)
@@ -25,18 +26,30 @@ for case in cases:
         assert case["expected"] == "verified", case["name"]
         assert result["artifact_sha256"] == hashlib.sha256(data).hexdigest()
         if case["format"] == "incident-bundle":
-            assert result["facts"]["event_count"] == 3
-            assert result["facts"]["signing_identity"] == "339eefa3a988f613"
+            if case.get("run_anchor") is not None:
+                assert result["scope"] == "authenticated_run_incident"
+                assert result["facts"]["run_origin"]["signer_public_key_hex"] == case["run_anchor"].lower()
+                assert result["facts"]["run_origin"]["receipt_hash"].startswith("sha256:")
+                if "event_count" in case:
+                    assert result["facts"]["event_count"] == case["event_count"]
+            else:
+                assert result["scope"] == "authenticated_recorded_incident"
+                assert result["facts"]["event_count"] == 3
+                assert result["facts"]["signing_identity"] == "339eefa3a988f613"
+                assert "run_origin" not in result["facts"]
         assert "PRIVATE-" not in json.dumps(result)
         print(json.dumps({"case": case["name"], "result": "verified", "scope": result["scope"]}), flush=True)
 
-for label, data, options, expected in [
+client_controls = [
     ("oversize_client_input", b" " * (MAX_INPUT_BYTES + 1), {}, "INPUT_TOO_LARGE"),
     ("bad_key_shape", b"{}", {"trusted_public_key_hex": "00"}, "ANCHOR_INVALID"),
+    ("bad_run_key_shape", b"{}", {"trusted_run_public_key_hex": "00"}, "RUN_ANCHOR_INVALID"),
+    ("run_key_wrong_format", b"{}", {"format": "capsule", "trusted_run_public_key_hex": cases[0]["anchor"]}, "INPUT_INVALID"),
     ("invalid_timeout", b"{}", {"timeout": 0}, "TIMEOUT_INVALID"),
     ("enormous_timeout_integer", b"{}", {"timeout": 10**1000}, "TIMEOUT_INVALID"),
     ("missing_executable", b"{}", {"verifier": str(root / "does-not-exist")}, "PROCESS_UNAVAILABLE"),
-]:
+]
+for label, data, options, expected in client_controls:
     kwargs = {"verifier": str(root / "verifier"), "trusted_public_key_hex": cases[0]["anchor"], **options}
     try:
         verify_artifact(data, **kwargs)
@@ -58,5 +71,27 @@ for mode in controls:
         print(json.dumps({"case": f"protocol_{mode}", "result": error.code}), flush=True)
     else:
         raise AssertionError(f"protocol_{mode}")
-print(json.dumps({"consumer": "python", "matrix_cases": len(cases), "client_cases": 5,
-                  "protocol_cases": len(controls), "passed": True}), flush=True)
+
+run_anchor = next(case["anchor"] for case in cases if case["name"] == "foreign_anchor")
+run_controls = ["run_scope_downgrade", "run_origin_missing", "run_wrong_anchor",
+                "run_invalid_receipt_id", "run_invalid_receipt_hash", "run_invalid_record_digest",
+                "run_extra_origin_field", "run_origin_non_object", "run_duplicate_origin"]
+for mode in run_controls:
+    try:
+        verify_artifact(json.dumps({"protocol_control": mode}).encode(), cases[0]["anchor"],
+                        verifier=str(root / "fake_verifier"), trusted_run_public_key_hex=run_anchor.upper())
+    except VerifierError as error:
+        assert error.code == "PROTOCOL_INVALID", (mode, error.code)
+        print(json.dumps({"case": f"protocol_{mode}", "result": error.code}), flush=True)
+    else:
+        raise AssertionError(f"protocol_{mode}")
+try:
+    verify_artifact(b'{"protocol_control":"run_unrequested_scope"}', cases[0]["anchor"],
+                    verifier=str(root / "fake_verifier"))
+except VerifierError as error:
+    assert error.code == "PROTOCOL_INVALID", error.code
+    print(json.dumps({"case": "protocol_run_unrequested_scope", "result": error.code}), flush=True)
+else:
+    raise AssertionError("unsolicited original-run authority was accepted")
+print(json.dumps({"consumer": "python", "matrix_cases": len(cases), "client_cases": len(client_controls),
+                  "protocol_cases": len(controls) + len(run_controls) + 1, "passed": True}), flush=True)

@@ -13,3 +13,13 @@ export async function audit(data: Uint8Array, anchor: string, executable: string
     throw error;
   }
 }
+
+export async function auditOriginalRun(
+  data: Uint8Array, exporterAnchor: string, runAnchor: string, executable: string,
+): Promise<string> {
+  const verified: Verification = await verifyArtifact(data, exporterAnchor, {
+    verifier: executable, format: "incident-bundle", trustedRunPublicKeyHex: runAnchor,
+  });
+  if (verified.scope !== "authenticated_run_incident") throw new Error("original-run proof required");
+  return `${verified.facts.run_origin.receipt_id}:${verified.facts.run_origin.record_sha256}`;
+}

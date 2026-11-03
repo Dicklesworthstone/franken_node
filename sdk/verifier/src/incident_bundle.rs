@@ -35,8 +35,11 @@
 //! Gzip byte counts remain signed producer assertions: compression is optional
 //! in the product. This verifier checks replay structure, not guest execution.
 //! Embedded effect receipt chains are independently rehashed and checked against
-//! declared run counts, chain heads and timeline bindings. This does not verify
-//! the original run's detached signature, which the bundle does not carry.
+//! declared run counts, chain heads and timeline bindings. The one-key API does
+//! not authenticate an original run's detached signature.
+//! When the exporter carries an original signed run record, the separate
+//! [`verify_incident_bundle_with_run_key`] API authenticates that statement
+//! against a second caller-supplied authority and binds it to this bundle.
 
 #[path = "incident_bundle_structure.rs"]
 mod structure;
@@ -44,6 +47,10 @@ mod structure;
 #[path = "incident_native_capture.rs"]
 mod native_capture;
 pub use native_capture::{CapturedNativeTerminalState, VerifiedNativeCaptureMetadata};
+
+#[path = "incident_run_origin.rs"]
+mod run_origin;
+pub use run_origin::VerifiedRunOrigin;
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
@@ -100,6 +107,15 @@ pub struct VerifiedIncidentBundle {
     pub native_capture: Option<VerifiedNativeCaptureMetadata>,
 }
 
+/// A verified bundle plus its independently authenticated original run record.
+/// The two signers are separate caller-supplied authorities. The run statement
+/// authenticates recorded data, not engine execution or session certification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedIncidentBundleWithRunOrigin {
+    pub bundle: VerifiedIncidentBundle,
+    pub run_origin: VerifiedRunOrigin,
+}
+
 /// Why a bundle failed independent verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IncidentBundleError {
@@ -121,6 +137,10 @@ pub enum IncidentBundleError {
     SignaturePayloadHashMismatch,
     SignatureMalformed,
     SignatureInvalid,
+    RunOriginMissing,
+    RunOriginInvalid { reason: &'static str },
+    RunOriginSignatureMalformed,
+    RunOriginSignatureInvalid,
 }
 
 impl std::fmt::Display for IncidentBundleError {
@@ -184,6 +204,15 @@ impl std::fmt::Display for IncidentBundleError {
             }
             Self::SignatureMalformed => write!(f, "bundle signature is malformed"),
             Self::SignatureInvalid => write!(f, "bundle signature does not verify"),
+            Self::RunOriginMissing => write!(f, "bundle has no original signed run record"),
+            Self::RunOriginInvalid { reason } => {
+                write!(f, "original run record is invalid: {reason}")
+            }
+            Self::RunOriginSignatureMalformed => write!(f, "original run signature is malformed"),
+            Self::RunOriginSignatureInvalid => write!(
+                f,
+                "original run signature does not verify under the supplied run authority"
+            ),
         }
     }
 }
@@ -257,7 +286,10 @@ impl<'de> Deserialize<'de> for UnambiguousJson {
                 Ok(UnambiguousJson(Value::String(value)))
             }
 
-            fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
+            fn visit_seq<A: SeqAccess<'de>>(
+                self,
+                mut sequence: A,
+            ) -> Result<Self::Value, A::Error> {
                 let mut values = Vec::new();
                 while let Some(UnambiguousJson(value)) = sequence.next_element()? {
                     values.push(value);
@@ -420,6 +452,39 @@ pub fn verify_incident_bundle(
     trusted_signer: &VerifyingKey,
 ) -> Result<VerifiedIncidentBundle, IncidentBundleError> {
     let value = decode_evidence_json(bytes)?;
+    verify_incident_value(&value, trusted_signer)
+}
+
+/// Authenticate a bundle and its original run statement under two explicit
+/// trust anchors, then require exact agreement between their recorded evidence.
+///
+/// Unlike [`verify_incident_bundle`], this refuses historical bundles without an
+/// original signed run record. Neither anchor is inferred from evidence, and
+/// a bundle-signing key does not automatically authorize the original run.
+/// It checks the receipt authority's existing record signature, not the engine
+/// session certificate or native execution equivalence. The receipt ID/hash
+/// remain authenticated declarations, not a recomputation of the product's
+/// typed receipt-identity preimage.
+///
+/// # Errors
+///
+/// Refuses any failed bundle check, absent/malformed original record, invalid
+/// original signature or disagreement between the original record and bundle.
+pub fn verify_incident_bundle_with_run_key(
+    bytes: &[u8],
+    trusted_bundle_signer: &VerifyingKey,
+    trusted_run_signer: &VerifyingKey,
+) -> Result<VerifiedIncidentBundleWithRunOrigin, IncidentBundleError> {
+    let value = decode_evidence_json(bytes)?;
+    let bundle = verify_incident_value(&value, trusted_bundle_signer)?;
+    let run_origin = run_origin::verify(&value, trusted_run_signer)?;
+    Ok(VerifiedIncidentBundleWithRunOrigin { bundle, run_origin })
+}
+
+fn verify_incident_value(
+    value: &Value,
+    trusted_signer: &VerifyingKey,
+) -> Result<VerifiedIncidentBundle, IncidentBundleError> {
     let Value::Object(object) = value else {
         return Err(IncidentBundleError::NotAnObject);
     };
@@ -437,7 +502,7 @@ pub fn verify_incident_bundle(
     }
 
     // 1. Integrity: canonical view = bundle minus integrity_hash and signature.
-    let recorded_integrity = string_field(&object, "integrity_hash")?.to_string();
+    let recorded_integrity = string_field(object, "integrity_hash")?.to_string();
     let mut view = object.clone();
     view.remove("integrity_hash");
     view.remove("signature");
@@ -455,7 +520,7 @@ pub fn verify_incident_bundle(
         .get("timeline")
         .and_then(Value::as_array)
         .ok_or(IncidentBundleError::WrongType { field: "timeline" })?;
-    let policy_version = string_field(&object, "policy_version")?;
+    let policy_version = string_field(object, "policy_version")?;
     let manifest = object
         .get("manifest")
         .and_then(Value::as_object)
@@ -548,16 +613,18 @@ pub fn verify_incident_bundle(
 
     // A valid signer can still produce inconsistent evidence. Do not promote
     // hashes and counts to a verified replay until their structure is checked.
-    structure::verify_structure(&object)?;
+    structure::verify_structure(object)?;
     let native_capture = native_capture::verify(&object["initial_state_snapshot"])?;
     native_capture::verify_terminal_events(
-        &object["initial_state_snapshot"], timeline, native_capture.as_ref(),
+        &object["initial_state_snapshot"],
+        timeline,
+        native_capture.as_ref(),
     )?;
 
     Ok(VerifiedIncidentBundle {
-        bundle_id: string_field(&object, "bundle_id")?.to_string(),
-        incident_id: string_field(&object, "incident_id")?.to_string(),
-        created_at: string_field(&object, "created_at")?.to_string(),
+        bundle_id: string_field(object, "bundle_id")?.to_string(),
+        incident_id: string_field(object, "incident_id")?.to_string(),
+        created_at: string_field(object, "created_at")?.to_string(),
         policy_version: policy_version.to_string(),
         event_count: timeline.len(),
         integrity_hash: recorded_integrity,
@@ -625,7 +692,10 @@ mod tests {
                 r#""key_source":"local","key_source":"cli""#,
             ),
         ] {
-            assert!(CLI_BUNDLE.contains(needle), "fixture must exercise {needle}");
+            assert!(
+                CLI_BUNDLE.contains(needle),
+                "fixture must exercise {needle}"
+            );
             let ambiguous = CLI_BUNDLE.replacen(needle, replacement, 1);
             // The old parser erases the injected member, leaving exactly the
             // original authenticated value and its still-valid signature.

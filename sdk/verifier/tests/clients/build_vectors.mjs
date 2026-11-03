@@ -5,7 +5,7 @@ import { createHash, createPrivateKey, createPublicKey, sign } from "node:crypto
 import { readFileSync, writeFileSync } from "node:fs";
 import assert from "node:assert/strict";
 
-const [incidentPath, sdkBundlePath, seedPath, output] = process.argv.slice(2);
+const [incidentPath, sdkBundlePath, seedPath, output, originalRunPath, exporterAnchorPath, runAnchorPath] = process.argv.slice(2);
 const anchor = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
 const foreign = "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c";
 const seed = Buffer.from(readFileSync(seedPath, "utf8").trim(), "hex");
@@ -62,6 +62,48 @@ const extra = clone(incident); extra.unsigned_operator_claim = "trusted";
 add("unknown_unsigned_member", "incident-bundle", canonical(extra), "EVIDENCE_INVALID");
 const missingCheckpoint = clone(incident); missingCheckpoint.initial_state_snapshot.run_receipt_id = "run-without-its-checkpoint";
 add("missing_run_checkpoint", "incident-bundle", resealIncident(missingCheckpoint), "EVIDENCE_INVALID");
+
+// This fixture is emitted by the exact production record/bundle signers and
+// effect-receipt implementation under two explicit test authorities. Execution
+// metadata is synthetic: it does not claim that a native guest ran. Its producer
+// signatures are retained, not recreated by this independent consumer.
+const originalRunBytes = readFileSync(originalRunPath);
+const originalRun = JSON.parse(originalRunBytes);
+const exporterAnchor = readFileSync(exporterAnchorPath, "utf8").trim();
+const runAnchor = readFileSync(runAnchorPath, "utf8").trim();
+assert.notEqual(exporterAnchor, runAnchor);
+assert.equal(originalRun.signature.public_key_hex, exporterAnchor);
+const originalRunOptions = { anchor: exporterAnchor, run_anchor: runAnchor, event_count: originalRun.timeline.length };
+add("producer_signed_run_origin", "incident-bundle", originalRunBytes, "verified", originalRunOptions);
+add("original_run_foreign_authority", "incident-bundle", originalRunBytes, "RUN_ORIGIN_SIGNATURE_INVALID", { ...originalRunOptions, run_anchor: foreign });
+add("original_run_bundle_key_is_not_run_authority", "incident-bundle", originalRunBytes, "RUN_ORIGIN_SIGNATURE_INVALID", { ...originalRunOptions, run_anchor: exporterAnchor });
+add("original_run_swapped_authorities", "incident-bundle", originalRunBytes, "SIGNER_UNTRUSTED", { anchor: runAnchor, run_anchor: exporterAnchor });
+add("original_run_proof_required", "incident-bundle", incidentBytes, "RUN_ORIGIN_MISSING", { run_anchor: runAnchor });
+
+// Re-export under the public RFC test key to model a trusted exporter who can
+// change its bundle but cannot produce a new original-run signature.
+function reexportOriginal(mutator) {
+  const value = clone(originalRun);
+  value.signature = clone(incident.signature);
+  mutator(value);
+  return resealIncident(value);
+}
+const testExporterOptions = { run_anchor: runAnchor, event_count: originalRun.timeline.length };
+add("original_run_reexport_retains_independent_authority", "incident-bundle", reexportOriginal(() => {}), "verified", testExporterOptions);
+add("original_run_exporter_cannot_change_policy", "incident-bundle", reexportOriginal((value) => { value.policy_version = "different-policy"; }), "RUN_ORIGIN_INVALID", testExporterOptions);
+add("original_run_exporter_cannot_change_identity", "incident-bundle", reexportOriginal((value) => { value.initial_state_snapshot.run_receipt_id = "different-run"; }), "RUN_ORIGIN_INVALID", testExporterOptions);
+add("original_run_exporter_cannot_strip_proof", "incident-bundle", reexportOriginal((value) => { delete value.initial_state_snapshot.run_origin; }), "RUN_ORIGIN_MISSING", testExporterOptions);
+add("original_run_nested_duplicate", "incident-bundle", reexportOriginal((value) => {
+  const origin = value.initial_state_snapshot.run_origin;
+  const raw = origin.record_json.trimEnd();
+  origin.record_json = `${raw.slice(0, -1)},"\\u0072eceipt_id":"duplicate"}`;
+}), "RUN_ORIGIN_INVALID", testExporterOptions);
+add("original_run_exporter_cannot_rewrite_signed_metadata", "incident-bundle", reexportOriginal((value) => {
+  const origin = value.initial_state_snapshot.run_origin;
+  // Keep the complete original string (including difficult float spellings)
+  // while changing a signed path that must never be executed by a verifier.
+  origin.record_json = origin.record_json.replace(/("receipt_path"\s*:\s*)"(?:[^"\\]|\\.)*"/u, '$1"PRIVATE-substituted-receipt.json"');
+}), "RUN_ORIGIN_SIGNATURE_INVALID", testExporterOptions);
 
 function captured(state) {
   const expected = { terminal_state: state, trace_id: "trace-vector-1", console_output: [] };

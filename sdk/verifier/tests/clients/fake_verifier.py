@@ -15,6 +15,8 @@ try:
 except (ValueError, AttributeError):
     mode = "accept_everything"
 anchor = sys.argv[sys.argv.index("--trusted-key-hex") + 1]
+run_anchor = (sys.argv[sys.argv.index("--trusted-run-key-hex") + 1]
+              if "--trusted-run-key-hex" in sys.argv else "11" * 32)
 response = {
     "schema_version": "franken-verifier-cli/v1", "verdict": "verified",
     "format": "incident-bundle", "scope": "authenticated_recorded_incident",
@@ -26,6 +28,12 @@ response = {
         "signing_identity": "339eefa3a988f613", "native_capture": None,
     },
 }
+if mode.startswith("run_"):
+    response["scope"] = "authenticated_run_incident"
+    response["facts"]["run_origin"] = {
+        "receipt_id": "run-protocol-control", "receipt_hash": "sha256:" + "a" * 64,
+        "signer_public_key_hex": run_anchor, "record_sha256": "b" * 64,
+    }
 exit_code = 0
 if mode == "timeout":
     time.sleep(5)
@@ -63,8 +71,28 @@ elif mode == "success_with_failure_exit":
 elif mode == "rejection_with_success_exit":
     response = {"schema_version": "franken-verifier-cli/v1", "verdict": "rejected",
                 "error": {"code": "SIGNATURE_INVALID", "message": "bad signature"}}
+elif mode == "run_scope_downgrade":
+    response["scope"] = "authenticated_recorded_incident"
+    del response["facts"]["run_origin"]
+elif mode == "run_origin_missing":
+    del response["facts"]["run_origin"]
+elif mode == "run_wrong_anchor":
+    response["facts"]["run_origin"]["signer_public_key_hex"] = anchor
+elif mode == "run_invalid_receipt_id":
+    response["facts"]["run_origin"]["receipt_id"] = "../run"
+elif mode == "run_invalid_receipt_hash":
+    response["facts"]["run_origin"]["receipt_hash"] = "sha256:claimed"
+elif mode == "run_invalid_record_digest":
+    response["facts"]["run_origin"]["record_sha256"] = "b" * 63
+elif mode == "run_extra_origin_field":
+    response["facts"]["run_origin"]["engine_execution_verified"] = True
+elif mode == "run_origin_non_object":
+    response["facts"]["run_origin"] = []
 encoded = json.dumps(response, separators=(",", ":"), sort_keys=True)
 if mode == "duplicate":
     encoded = encoded[:-1] + ',"verdict":"verified"}'
+elif mode == "run_duplicate_origin":
+    encoded = encoded.replace('"receipt_id":"run-protocol-control"',
+                              '"receipt_id":"run-protocol-control","receipt_id":"run-protocol-control"')
 sys.stdout.write(encoded)
 sys.exit(exit_code)

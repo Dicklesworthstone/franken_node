@@ -30,9 +30,19 @@ class Verification(TypedDict):
     schema_version: str
     verdict: Literal["verified"]
     format: EvidenceFormat
-    scope: str
+    scope: Literal["authenticated_recorded_incident", "authenticated_run_incident",
+                   "authenticated_capsule_content", "authenticated_sdk_replay_bundle"]
     artifact_sha256: str
     facts: dict[str, Any]
+
+
+class RunOriginMetadata(TypedDict):
+    """Original receipt-authority statement; not an engine execution verdict."""
+
+    receipt_id: str
+    receipt_hash: str
+    signer_public_key_hex: str
+    record_sha256: str
 
 
 class VerifierError(Exception):
@@ -59,7 +69,21 @@ def _hex(value: Any, length: int) -> bool:
     return isinstance(value, str) and re.fullmatch(f"[0-9a-fA-F]{{{length}}}", value) is not None
 
 
-def _facts_valid(facts: Any, format: str, anchor: str) -> bool:
+def _run_origin_valid(origin: Any, anchor: str) -> bool:
+    return (
+        isinstance(origin, dict)
+        and set(origin) == {"receipt_id", "receipt_hash", "signer_public_key_hex", "record_sha256"}
+        and isinstance(origin["receipt_id"], str)
+        and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", origin["receipt_id"]) is not None
+        and isinstance(origin["receipt_hash"], str)
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", origin["receipt_hash"]) is not None
+        and origin["signer_public_key_hex"] == anchor
+        and isinstance(origin["record_sha256"], str)
+        and re.fullmatch(r"[0-9a-f]{64}", origin["record_sha256"]) is not None
+    )
+
+
+def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None) -> bool:
     if not isinstance(facts, dict) or facts.get("signer_public_key_hex") != anchor:
         return False
     expected = {
@@ -69,11 +93,16 @@ def _facts_valid(facts: Any, format: str, anchor: str) -> bool:
         "capsule": {"capsule_id", "expected_hash", "actual_hash", "signer_public_key_hex"},
         "signed-bundle": {"bundle_id", "incident_id", "event_count", "integrity_hash", "signer_public_key_hex"},
     }[format]
+    if run_anchor is not None:
+        expected.add("run_origin")
     if set(facts) != expected:
         return False
     for key, value in facts.items():
         if key == "event_count":
             if type(value) is not int or not 0 <= value <= 2**53 - 1:
+                return False
+        elif key == "run_origin":
+            if run_anchor is None or not _run_origin_valid(value, run_anchor):
                 return False
         elif key == "native_capture":
             if value is not None:
@@ -101,6 +130,7 @@ def verify_artifact(
     *,
     verifier: str | os.PathLike[str],
     format: EvidenceFormat = "incident-bundle",
+    trusted_run_public_key_hex: str | None = None,
     signature_hex: str | None = None,
     timeout: float = 10.0,
 ) -> Verification:
@@ -109,6 +139,10 @@ def verify_artifact(
     Supported formats and proof scopes are in ``_SCOPES``. Capsule verification
     re-derives signed content hashes; incident verification checks recorded
     evidence. Neither constitutes guest execution or original-policy replay.
+    For incident bundles, supplying ``trusted_run_public_key_hex`` additionally
+    requires the original receipt authority's signature and matching run data.
+    Missing proof, a different run signer or a narrower response is refused;
+    the bundle exporter never supplies this separate authority implicitly.
     The supplied executable is part of the caller's trusted verifier
     distribution. It is never inferred from an artifact or run through a shell.
     """
@@ -120,6 +154,11 @@ def verify_artifact(
         raise VerifierError("UNSUPPORTED_FORMAT", "unsupported evidence format")
     if not _hex(trusted_public_key_hex, 64):
         raise VerifierError("ANCHOR_INVALID", "expected a 32-byte hexadecimal public key")
+    if trusted_run_public_key_hex is not None:
+        if format != "incident-bundle":
+            raise VerifierError("INPUT_INVALID", "original-run trust applies only to incident-bundle")
+        if not _hex(trusted_run_public_key_hex, 64):
+            raise VerifierError("RUN_ANCHOR_INVALID", "expected a 32-byte hexadecimal run public key")
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 120 or not math.isfinite(timeout):
         raise VerifierError("TIMEOUT_INVALID", "timeout must be finite and in (0, 120] seconds")
     try:
@@ -129,7 +168,11 @@ def verify_artifact(
     if not isinstance(executable, str) or not executable or "\0" in executable:
         raise VerifierError("EXECUTABLE_INVALID", "verifier must be a trusted executable path")
     anchor = trusted_public_key_hex.lower()
+    run_anchor = trusted_run_public_key_hex.lower() if trusted_run_public_key_hex is not None else None
+    scope = "authenticated_run_incident" if run_anchor is not None else _SCOPES[format]
     args = [executable, "verify", "--format", format, "--trusted-key-hex", anchor]
+    if run_anchor is not None:
+        args.extend(["--trusted-run-key-hex", run_anchor])
     if format == "signed-bundle":
         if not _hex(signature_hex, 128):
             raise VerifierError("SIGNATURE_MALFORMED", "a detached 64-byte signature is required")
@@ -162,8 +205,8 @@ def verify_artifact(
                             stderr=process.stderr)
     if (process.returncode != 0 or result.get("verdict") != "verified"
             or set(result) != {"schema_version", "verdict", "format", "scope", "artifact_sha256", "facts"}
-            or result.get("format") != format or result.get("scope") != _SCOPES[format]
+            or result.get("format") != format or result.get("scope") != scope
             or result.get("artifact_sha256") != hashlib.sha256(data).hexdigest()
-            or not _facts_valid(result.get("facts"), format, anchor)):
+            or not _facts_valid(result.get("facts"), format, anchor, run_anchor)):
         raise VerifierError("PROTOCOL_INVALID", "verification response does not match the request")
     return result

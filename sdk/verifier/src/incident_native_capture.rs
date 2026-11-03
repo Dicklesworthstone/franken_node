@@ -348,7 +348,7 @@ pub(super) fn verify(initial: &Value) -> Result<Option<VerifiedNativeCaptureMeta
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::incident_bundle) mod tests {
     use super::*;
     use serde_json::json;
 
@@ -532,7 +532,7 @@ mod tests {
         assert!(!format!("{error:?}: {error}").contains(secret));
     }
 
-    fn with_run_context(state: &str) -> Value {
+    pub(in crate::incident_bundle) fn with_run_context(state: &str) -> Value {
         let mut initial = captured(&payload(state));
         initial["run_receipt_id"] = json!("run-1");
         initial["run_receipt_hash"] = json!("a".repeat(64));
@@ -631,7 +631,7 @@ mod tests {
         ed25519_dalek::SigningKey::from_bytes(&seed)
     }
 
-    fn signed_bundle(initial: Value) -> Vec<u8> {
+    pub(in crate::incident_bundle) fn signed_bundle(initial: Value) -> Vec<u8> {
         use super::super::structure::tests::{refresh_timeline_metadata, resign, set_chunks};
         // Retain the CLI envelope, but construct a coherent zero-effect run:
         // the captured terminal is its sole timeline event. These metadata

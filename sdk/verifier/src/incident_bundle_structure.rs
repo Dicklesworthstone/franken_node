@@ -708,7 +708,7 @@ pub(super) mod tests {
         assert_structure_rejected(bundle, "$.chunks[0].chunk_index");
     }
 
-    fn run_bundle() -> Value {
+    pub(in crate::incident_bundle) fn run_bundle() -> Value {
         // Reuse the existing cross-format allowed/denied/failed run-ledger
         // vector. It is sealed by the receipt implementation, not by the new
         // incident-chain adapter being tested here.
