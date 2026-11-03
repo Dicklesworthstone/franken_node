@@ -24317,6 +24317,13 @@ fn inspect_local_registry_artifact(
             artifact_path,
         };
     }
+    if artifact.manifest.extension.signature.algorithm != "ed25519" {
+        return RegistryArtifactVerification {
+            status: RegistryArtifactIntegrityStatus::InvalidSignature,
+            detail: "unsupported manifest signature algorithm".to_string(),
+            artifact_path,
+        };
+    }
 
     let manifest_bytes = match BASE64_STANDARD.decode(&artifact.manifest.manifest_bytes_b64) {
         Ok(bytes) => bytes,
@@ -24381,9 +24388,58 @@ fn inspect_local_registry_artifact(
         };
     }
 
+    // The storage envelope is editable. A valid signature over detached bytes
+    // cannot authenticate a replacement package merely because its recomputed
+    // hash matches that envelope. Bind the signed package name, publisher,
+    // version and tags back to this immutable local artifact.
+    let signed_manifest = match serde_json::from_slice::<
+        supply_chain::extension_registry::ExtensionRegistrationManifest,
+    >(&manifest_bytes)
+    {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            return RegistryArtifactVerification {
+                status: RegistryArtifactIntegrityStatus::InvalidMetadata,
+                detail: format!("invalid signed extension registration manifest: {error}"),
+                artifact_path,
+            };
+        }
+    };
+    let extension = &artifact.manifest.extension;
+    let binding_error = if signed_manifest.schema_version
+        != supply_chain::extension_registry::EXTENSION_REGISTRATION_MANIFEST_SCHEMA
+    {
+        Some("unsupported signed extension registration manifest schema")
+    } else if signed_manifest.name != extension.name {
+        Some("signed manifest name does not match stored extension name")
+    } else if signed_manifest.publisher_id != extension.publisher_id {
+        Some("signed manifest publisher_id does not match stored extension publisher")
+    } else if extension.versions.as_slice()
+        != std::slice::from_ref(&signed_manifest.initial_version)
+    {
+        // Each stored artifact is created from one registration. Later lineage
+        // entries need their own signed artifact; an unsigned appended version
+        // must not inherit the initial version's signature.
+        Some("stored artifact version lineage does not match signed initial_version")
+    } else if signed_manifest.tags != extension.tags {
+        Some("signed manifest tags do not match stored extension tags")
+    } else if u64::try_from(package_bytes.len()).ok() != Some(artifact.manifest.artifact_size_bytes)
+    {
+        Some("stored artifact size does not match actual package bytes")
+    } else {
+        None
+    };
+    if let Some(detail) = binding_error {
+        return RegistryArtifactVerification {
+            status: RegistryArtifactIntegrityStatus::InvalidMetadata,
+            detail: detail.to_string(),
+            artifact_path,
+        };
+    }
+
     RegistryArtifactVerification {
         status: RegistryArtifactIntegrityStatus::Verified,
-        detail: "artifact hash and manifest signature verified".to_string(),
+        detail: "artifact hash, size and signed manifest bindings verified".to_string(),
         artifact_path,
     }
 }

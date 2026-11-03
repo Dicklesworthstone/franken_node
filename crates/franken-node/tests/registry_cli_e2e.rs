@@ -128,6 +128,59 @@ fn tamper_manifest_signature(manifest_path: &Path) {
     .expect("write tampered manifest");
 }
 
+fn publish_signed_artifact(workspace: &Path) -> (String, PathBuf, PathBuf) {
+    let signing_key_path = workspace.join("keys/publisher.ed25519");
+    write_signing_key(&signing_key_path);
+    let output = run_cli_in_workspace(
+        workspace,
+        &[
+            "registry",
+            "publish",
+            "plugin.fnext",
+            "--version",
+            "1.0.0",
+            "--signing-key",
+            signing_key_path.to_str().expect("signing key path"),
+            "--json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "registry publish failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("publish report");
+    assert_eq!(report["integrity"], "verified");
+    (
+        report["extension_id"]
+            .as_str()
+            .expect("extension id")
+            .to_string(),
+        workspace.join(report["artifact_path"].as_str().expect("artifact path")),
+        workspace.join(report["manifest_path"].as_str().expect("manifest path")),
+    )
+}
+
+fn assert_registry_verify_integrity(
+    workspace: &Path,
+    extension_id: &str,
+    expected: &str,
+    case: &str,
+) -> serde_json::Value {
+    let output = run_cli_in_workspace(workspace, &["registry", "verify", extension_id, "--json"]);
+    assert_eq!(
+        output.status.success(),
+        expected == "verified",
+        "{case}: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("{case}: invalid verification JSON: {error}"));
+    assert_eq!(report["integrity"], expected, "{case}: {report}");
+    report
+}
+
 #[test]
 fn registry_publish_requires_explicit_signing_key() {
     let workspace = registry_workspace();
@@ -674,6 +727,237 @@ fn registry_verify_detects_corrupted_local_artifact() {
     assert_eq!(verify_payload["command"], "registry.verify");
     assert_eq!(verify_payload["extension_id"], extension_id);
     assert_eq!(verify_payload["integrity"], "hash-mismatch");
+}
+
+#[test]
+fn registry_verify_rejects_replacement_artifact_with_recomputed_storage_hashes() {
+    use sha2::Digest;
+
+    let workspace = registry_workspace();
+    let (extension_id, artifact_path, manifest_path) = publish_signed_artifact(workspace.path());
+    assert_registry_verify_integrity(workspace.path(), &extension_id, "verified", "original");
+    let original: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read manifest"))
+            .expect("parse manifest");
+    let mut tampered = original.clone();
+    let replacement = b"attacker-controlled replacement package";
+    let digest = hex::encode(sha2::Sha256::digest(replacement));
+    fs::write(&artifact_path, replacement).expect("replace stored artifact");
+    tampered["artifact_sha256"] = serde_json::json!(format!("sha256:{digest}"));
+    tampered["artifact_size_bytes"] = serde_json::json!(replacement.len());
+    tampered["extension"]["versions"][0]["content_hash"] = serde_json::json!(digest);
+    // No signing key is used for the attack. The original signed statement is
+    // intact while every unsigned package hash agrees with the replacement.
+    assert_eq!(
+        tampered["manifest_bytes_b64"],
+        original["manifest_bytes_b64"]
+    );
+    assert_eq!(
+        tampered["extension"]["signature"],
+        original["extension"]["signature"]
+    );
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec(&tampered).expect("encode forged wrapper"),
+    )
+    .expect("write forged wrapper");
+
+    let report = assert_registry_verify_integrity(
+        workspace.path(),
+        &extension_id,
+        "invalid-metadata",
+        "recomputed storage hashes",
+    );
+    assert!(
+        report["detail"]
+            .as_str()
+            .expect("detail")
+            .contains("initial_version")
+    );
+    let human = run_cli_in_workspace(workspace.path(), &["registry", "verify", &extension_id]);
+    assert!(!human.status.success());
+    assert!(String::from_utf8_lossy(&human.stderr).contains("invalid-metadata"));
+
+    let search = run_cli_in_workspace(
+        workspace.path(),
+        &["registry", "search", "plugin", "--json"],
+    );
+    assert!(
+        search.status.success(),
+        "search must still report corrupt entries"
+    );
+    let search: serde_json::Value = serde_json::from_slice(&search.stdout).expect("search report");
+    let row = search["rows"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .find(|row| row["extension_id"] == extension_id)
+        .expect("published row");
+    assert_eq!(row["integrity_status"], "invalid-metadata");
+}
+
+#[test]
+fn registry_verify_binds_signed_identity_version_and_size() {
+    let workspace = registry_workspace();
+    let (extension_id, _, manifest_path) = publish_signed_artifact(workspace.path());
+    let original: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read manifest"))
+            .expect("parse manifest");
+    let mut appended_versions = original["extension"]["versions"].clone();
+    let mut unsigned_version = original["extension"]["versions"][0].clone();
+    unsigned_version["version"] = serde_json::json!("2.0.0");
+    unsigned_version["parent_version"] = serde_json::json!("1.0.0");
+    appended_versions
+        .as_array_mut()
+        .expect("versions")
+        .push(unsigned_version);
+    let cases = [
+        (
+            "/extension/name",
+            serde_json::json!("substituted-package"),
+            "invalid-metadata",
+        ),
+        (
+            "/extension/publisher_id",
+            serde_json::json!("another-publisher"),
+            "invalid-metadata",
+        ),
+        (
+            "/extension/tags",
+            serde_json::json!(["trusted"]),
+            "invalid-metadata",
+        ),
+        (
+            "/extension/versions/0/version",
+            serde_json::json!("2.0.0"),
+            "invalid-metadata",
+        ),
+        (
+            "/extension/versions/0/parent_version",
+            serde_json::json!("0.9.0"),
+            "invalid-metadata",
+        ),
+        (
+            "/extension/versions/0/registered_at",
+            serde_json::json!("2020-01-01T00:00:00Z"),
+            "invalid-metadata",
+        ),
+        (
+            "/extension/versions/0/compatible_with",
+            serde_json::json!(["anything"]),
+            "invalid-metadata",
+        ),
+        ("/extension/versions", appended_versions, "invalid-metadata"),
+        (
+            "/artifact_size_bytes",
+            serde_json::json!(0),
+            "invalid-metadata",
+        ),
+        (
+            "/extension/signature/algorithm",
+            serde_json::json!("sha256"),
+            "invalid-signature",
+        ),
+    ];
+    for (field, replacement, expected) in cases {
+        let mut tampered = original.clone();
+        *tampered.pointer_mut(field).expect("existing field") = replacement;
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec(&tampered).expect("encode manifest"),
+        )
+        .expect("write mutated manifest");
+        assert_registry_verify_integrity(workspace.path(), &extension_id, expected, field);
+    }
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec(&original).expect("encode original"),
+    )
+    .expect("restore fixture manifest");
+    assert_registry_verify_integrity(
+        workspace.path(),
+        &extension_id,
+        "verified",
+        "original restored",
+    );
+}
+
+#[test]
+fn registry_verify_checks_signed_statement_schema_without_requiring_json_layout() {
+    use base64::Engine as _;
+    use ed25519_dalek::Signer as _;
+
+    let workspace = registry_workspace();
+    let (extension_id, _, manifest_path) = publish_signed_artifact(workspace.path());
+    let original: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read manifest"))
+            .expect("parse manifest");
+    let signed_bytes = base64::engine::general_purpose::STANDARD
+        .decode(
+            original["manifest_bytes_b64"]
+                .as_str()
+                .expect("signed bytes"),
+        )
+        .expect("decode statement");
+    let statement: serde_json::Value = serde_json::from_slice(&signed_bytes).expect("statement");
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42_u8; 32]);
+    let mut wrong_schema = statement.clone();
+    wrong_schema["schema_version"] = serde_json::json!("unrelated-signed-statement/v1");
+    let mut unknown_field = statement.clone();
+    unknown_field["unsigned_authority"] = serde_json::json!("all");
+    let mut missing_field = statement.clone();
+    missing_field
+        .as_object_mut()
+        .expect("object")
+        .remove("name");
+    let valid = serde_json::to_string(&statement).expect("encode statement");
+    let duplicate_field = format!(
+        "{{\"name\":\"substituted\",{}",
+        valid.strip_prefix('{').expect("object")
+    );
+    let cases = [
+        (
+            "equivalent pretty JSON",
+            serde_json::to_vec_pretty(&statement).expect("pretty statement"),
+            "verified",
+        ),
+        (
+            "wrong schema",
+            serde_json::to_vec(&wrong_schema).expect("wrong schema"),
+            "invalid-metadata",
+        ),
+        (
+            "unknown field",
+            serde_json::to_vec(&unknown_field).expect("unknown field"),
+            "invalid-metadata",
+        ),
+        (
+            "missing field",
+            serde_json::to_vec(&missing_field).expect("missing field"),
+            "invalid-metadata",
+        ),
+        (
+            "duplicate field",
+            duplicate_field.into_bytes(),
+            "invalid-metadata",
+        ),
+    ];
+    for (case, bytes, expected) in cases {
+        // Sign with the same real test publisher so malformed statements reach
+        // semantic validation; rejection must not depend on a broken signature.
+        let signature = signing_key.sign(&bytes);
+        let mut manifest = original.clone();
+        manifest["manifest_bytes_b64"] =
+            serde_json::json!(base64::engine::general_purpose::STANDARD.encode(&bytes));
+        manifest["extension"]["signature"]["signature_bytes"] =
+            serde_json::json!(signature.to_bytes().to_vec());
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest).expect("encode wrapper"),
+        )
+        .expect("write wrapper");
+        assert_registry_verify_integrity(workspace.path(), &extension_id, expected, case);
+    }
 }
 
 #[test]
