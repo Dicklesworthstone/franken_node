@@ -36,6 +36,7 @@ const MAX_LINK_HOPS: usize = 40;
 const MAX_PACKAGE_CACHE_BYTES: usize = 1024 * 1024;
 const HASH_DOMAIN: &[u8] = b"franken-node/module-file-resolution/v2\0";
 type Result<T> = std::result::Result<T, ResolutionError>;
+type FileVersion = (u64, u64, u64, u32, i64, i64, i64, i64);
 
 fn error(code: &'static str, detail: impl Into<String>) -> ResolutionError {
     ResolutionError {
@@ -108,6 +109,8 @@ pub enum ProbeKind {
     Missing,
     Directory,
     File,
+    /// A regular-file observation without reading or admitting its contents.
+    FileMetadata,
     Symlink,
 }
 
@@ -174,11 +177,14 @@ enum Entry {
     // None is a recorded directory in an offline capsule, never a host path.
     Directory(Option<File>),
     File { bytes: Vec<u8>, sha256: String },
+    // Live promotion to source bytes must still describe this same file.
+    // Offline metadata deliberately carries no host identity or source bytes.
+    FileMetadata { version: Option<FileVersion> },
     Symlink { target: String, sha256: String },
 }
 impl Entry {
     fn is_file(&self) -> bool {
-        matches!(self, Self::File { .. })
+        matches!(self, Self::File { .. } | Self::FileMetadata { .. })
     }
     fn is_dir(&self) -> bool {
         matches!(self, Self::Directory(_))
@@ -199,6 +205,7 @@ struct PackageQuery {
     mode: ResolutionMode,
     lookup: PackageLookup,
     depth: usize,
+    url_lookup: bool,
 }
 
 struct CachedPackageResolution {
@@ -319,6 +326,9 @@ struct Resolver {
     symlink_policy: SymlinkPolicy,
     sealed: bool,
     observed: BTreeSet<String>,
+    // URL lookup changes finalization, never the import condition set. Keep
+    // this purpose in package-cache keys and restore it after every request.
+    url_lookup: bool,
 }
 
 /// Resolve with the complete caller-selected condition set. No environment
@@ -437,6 +447,7 @@ impl Resolver {
             symlink_policy,
             sealed: false,
             observed: BTreeSet::new(),
+            url_lookup: false,
         })
     }
 
@@ -451,6 +462,7 @@ impl Resolver {
                     Entry::File { bytes, sha256 } => {
                         (ProbeKind::File, Some(bytes.len()), Some(sha256.clone()))
                     }
+                    Entry::FileMetadata { .. } => (ProbeKind::FileMetadata, None, None),
                     Entry::Symlink { target, sha256 } => {
                         (ProbeKind::Symlink, Some(target.len()), Some(sha256.clone()))
                     }
@@ -474,13 +486,17 @@ impl Resolver {
             .collect()
     }
     fn probe(&mut self, path: &str) -> Result<Rc<Entry>> {
-        self.locate(path).map(|(_, entry)| entry)
+        self.locate_with_bytes(path, !self.url_lookup).map(|(_, entry)| entry)
     }
 
     /// Resolve link components in order. In particular, a '..' inside link text
     /// applies AFTER preceding links, not to the lexical spelling of their paths.
     /// Raw positive/negative probes and link text are cached once per capture.
     fn locate(&mut self, path: &str) -> Result<(String, Rc<Entry>)> {
+        self.locate_with_bytes(path, true)
+    }
+
+    fn locate_with_bytes(&mut self, path: &str, read_bytes: bool) -> Result<(String, Rc<Entry>)> {
         if !path.is_empty() {
             validate_path(path)?;
         }
@@ -491,13 +507,14 @@ impl Resolver {
         if !self.sealed
             && let Some(entry) = self.entries.get(path)
             && !matches!(entry.as_ref(), Entry::Symlink { .. })
+            && (!read_bytes || !matches!(entry.as_ref(), Entry::FileMetadata { .. }))
         {
             return Ok((path.to_owned(), Rc::clone(entry)));
         }
         let mut pending: VecDeque<String> = path.split('/').map(str::to_owned).collect();
         let mut resolved = Vec::<String>::new();
         let mut links = 0;
-        let mut entry = self.raw_probe("")?;
+        let mut entry = self.raw_probe_with_bytes("", read_bytes)?;
         while let Some(part) = pending.pop_front() {
             // A missing or non-directory component cannot be bypassed with '..'.
             if !entry.is_dir() {
@@ -512,13 +529,13 @@ impl Resolver {
                             "symlink escapes the captured project root",
                         ));
                     }
-                    entry = self.raw_probe(&resolved.join("/"))?;
+                    entry = self.raw_probe_with_bytes(&resolved.join("/"), read_bytes)?;
                     continue;
                 }
                 _ => {}
             }
             let candidate = join(&resolved.join("/"), &part);
-            let next = self.raw_probe(&candidate)?;
+            let next = self.raw_probe_with_bytes(&candidate, read_bytes)?;
             if let Entry::Symlink { target, .. } = next.as_ref() {
                 links += 1;
                 if links > MAX_LINK_HOPS {
@@ -552,11 +569,17 @@ impl Resolver {
     /// are opened against its retained descriptor, not a re-resolved pathname.
     /// This private method accepts ONLY physical paths produced by locate().
     fn raw_probe(&mut self, path: &str) -> Result<Rc<Entry>> {
+        self.raw_probe_with_bytes(path, true)
+    }
+
+    fn raw_probe_with_bytes(&mut self, path: &str, read_bytes: bool) -> Result<Rc<Entry>> {
         if self.sealed {
             self.observed.insert(path.to_owned());
         }
         if let Some(entry) = self.entries.get(path) {
-            return Ok(Rc::clone(entry));
+            if !read_bytes || !matches!(entry.as_ref(), Entry::FileMetadata { .. }) {
+                return Ok(Rc::clone(entry));
+            }
         }
         // An omitted observation is NOT evidence that the path was missing.
         // Sealed replay has no host descriptors and must never consult the host.
@@ -568,16 +591,39 @@ impl Resolver {
         }
         validate_path(path)?;
         let directory = self.raw_probe(parent(path))?;
-        if self.entries.len() >= MAX_PROBES {
+        if !self.entries.contains_key(path) && self.entries.len() >= MAX_PROBES {
             return Err(limit());
         }
+        let expected_version = self.entries.get(path).and_then(|entry| match entry.as_ref() {
+            Entry::FileMetadata { version } => *version,
+            _ => None,
+        });
         let entry = if let Entry::Directory(Some(directory)) = directory.as_ref() {
             let name = path.rsplit('/').next().unwrap_or(path);
             match statat(directory, name, AtFlags::SYMLINK_NOFOLLOW) {
+                Err(Errno::NOENT) if expected_version.is_some() => {
+                    return Err(error(
+                        "ERR_MODULE_INPUT_CHANGED",
+                        "URL resolution target disappeared before source capture",
+                    ));
+                }
                 Err(Errno::NOENT) => Entry::Missing,
                 Err(e) => return Err(io_error(path, e)),
                 Ok(info) => {
                     let kind = FileType::from_raw_mode(info.st_mode);
+                    if expected_version.is_some_and(|expected| expected != stat_version(&info)) {
+                        return Err(error(
+                            "ERR_MODULE_INPUT_CHANGED",
+                            "URL resolution target changed before source capture",
+                        ));
+                    }
+                    if kind == FileType::RegularFile && !read_bytes {
+                        let entry = Rc::new(Entry::FileMetadata {
+                            version: Some(stat_version(&info)),
+                        });
+                        self.entries.insert(path.into(), Rc::clone(&entry));
+                        return Ok(entry);
+                    }
                     if kind == FileType::Symlink && self.symlink_policy == SymlinkPolicy::Contained
                     {
                         let mut buffer = [0_u8; MAX_PATH + 1];
@@ -642,6 +688,7 @@ impl Resolver {
                         || before.ino() != info.st_ino
                         || before.is_dir() != (kind == FileType::Directory)
                         || (!before.is_file() && !before.is_dir())
+                        || expected_version.is_some_and(|expected| expected != version(&before))
                     {
                         return Err(error(
                             "ERR_MODULE_INPUT_CHANGED",
@@ -697,7 +744,8 @@ impl Resolver {
         if let Some(value) = self.manifests.get(&path) {
             return Ok(value.clone());
         }
-        let entry = self.probe(&path)?;
+        // Package selection needs the actual manifest even during URL lookup.
+        let (_, entry) = self.locate(&path)?;
         let manifest = match entry.as_ref() {
             Entry::Missing => None,
             Entry::Directory(_) => {
@@ -707,6 +755,7 @@ impl Resolver {
                 ));
             }
             Entry::Symlink { .. } => unreachable!("probe finalizes links before reading manifests"),
+            Entry::FileMetadata { .. } => unreachable!("manifest capture requires source bytes"),
             Entry::File { bytes, .. } => {
                 let text = std::str::from_utf8(bytes)
                     .map_err(|e| error("ERR_INVALID_PACKAGE_CONFIG", e.to_string()))?;
@@ -766,6 +815,62 @@ impl Resolver {
         Ok(found)
     }
 
+    /// Resolve a URL without acquiring source bytes or executable authority.
+    /// Package manifests and realpath observations remain captured evidence.
+    fn resolve_url(&mut self, directory: &str, request: &str) -> Result<source_graph::ResolutionUrl> {
+        use source_graph::{ModuleId, ResolutionUrl};
+        if request.is_empty() || request.len() > MAX_PATH || request.chars().any(char::is_control) {
+            return Err(error("ERR_INVALID_MODULE_SPECIFIER", "invalid URL resolution request"));
+        }
+        let absolute = match url::Url::parse(request) {
+            Ok(url) => Some(url),
+            Err(url::ParseError::RelativeUrlWithoutBase) => None,
+            Err(_) => return Err(error("ERR_INVALID_URL", "invalid absolute module URL")),
+        };
+        if let Some(url) = absolute {
+            if url.scheme() == "file" {
+                return Err(error(
+                    "ERR_UNSUPPORTED_MODULE_SPECIFIER",
+                    "absolute file URLs need a captured project-root mapping",
+                ));
+            }
+            if url.as_str().len() > MAX_PATH {
+                return Err(limit());
+            }
+            return Ok(ResolutionUrl::Absolute { url: url.into() });
+        }
+        if bare_builtin(request) {
+            return Ok(ResolutionUrl::Absolute { url: format!("node:{request}") });
+        }
+        let previous = self.url_lookup;
+        self.url_lookup = true;
+        let selected = self.request(directory, request, ResolutionMode::Import, 0);
+        self.url_lookup = previous;
+        let (path, url_suffix) = selected?;
+        if path.starts_with("node:") {
+            return Ok(ResolutionUrl::Absolute { url: path });
+        }
+        // WHATWG URL paths preserve empty segments and trailing '/'. Physical
+        // probes use their equivalent canonical spelling, while a missing file
+        // or directory result must retain the original lexical URL spelling.
+        let physical = normalize("", &path)?;
+        let (real, entry) = self.locate_with_bytes(&physical, false)?;
+        let path = if entry.is_file() && !path.ends_with('/') {
+            real
+        } else {
+            path
+        };
+        Ok(ResolutionUrl::File { id: ModuleId { path, url_suffix } })
+    }
+
+    fn selected_path(&self, directory: &str, request: &str) -> Result<(String, String)> {
+        if self.url_lookup {
+            metadata_url_path(directory, request)
+        } else {
+            url_path(directory, request)
+        }
+    }
+
     fn request(
         &mut self,
         directory: &str,
@@ -789,7 +894,7 @@ impl Resolver {
             || request.starts_with("../")
         {
             if mode == ResolutionMode::Import {
-                let (path, suffix) = url_path(directory, request)?;
+                let (path, suffix) = self.selected_path(directory, request)?;
                 return self.exact(&path, suffix, mode);
             }
             let path = normalize(directory, request)?;
@@ -842,6 +947,7 @@ impl Resolver {
             mode,
             lookup,
             depth,
+            url_lookup: self.url_lookup,
         };
         // A live cache hit repeats exactly the successful target and mapping
         // witnesses whose inputs are already captured. Sealed replay must walk
@@ -915,7 +1021,7 @@ impl Resolver {
                                 .map(|p| (p, String::new()))
                                 .ok_or_else(|| mode.missing(request));
                         }
-                        let (path, suffix) = url_path(&package, &subpath)?;
+                        let (path, suffix) = self.selected_path(&package, &subpath)?;
                         if path != package && !path.starts_with(&format!("{package}/")) {
                             return Err(error(
                                 "ERR_INVALID_MODULE_SPECIFIER",
@@ -972,7 +1078,7 @@ impl Resolver {
         });
         match selection.target_kind {
             TargetKind::PackageRelative => {
-                let (path, suffix) = url_path(directory, &selection.target)?;
+                let (path, suffix) = self.selected_path(directory, &selection.target)?;
                 self.exact(
                     &path,
                     if mode == ResolutionMode::Import {
@@ -991,6 +1097,9 @@ impl Resolver {
                 // target cannot select an inferred extension, directory index
                 // or a different installed version.
                 if bare_builtin(&selection.target) {
+                    if self.url_lookup {
+                        return Ok((format!("node:{}", selection.target), String::new()));
+                    }
                     if mode == ResolutionMode::Require {
                         // CommonJS finalizes package imports through a file
                         // URL. Node rejects a builtin URL here, unlike ESM's
@@ -1034,8 +1143,12 @@ impl Resolver {
         suffix: String,
         mode: ResolutionMode,
     ) -> Result<(String, String)> {
-        let entry = self.probe(path)?;
-        if entry.is_file() {
+        let physical = if self.url_lookup { normalize("", path)? } else { path.into() };
+        let entry = self.probe(&physical)?;
+        if entry.is_file() || self.url_lookup {
+            // URL resolution admits missing paths and directories. The final
+            // URL step realpaths regular files only, preserving directory and
+            // absent-target spellings, including their terminal slash.
             Ok((path.into(), suffix))
         } else if entry.is_dir() && mode == ResolutionMode::Import {
             Err(error(
@@ -1147,7 +1260,7 @@ fn validate_link_target(target: &str) -> Result<()> {
     Ok(())
 }
 
-fn version(m: &Metadata) -> (u64, u64, u64, u32, i64, i64, i64, i64) {
+fn version(m: &Metadata) -> FileVersion {
     (
         m.dev(),
         m.ino(),
@@ -1157,6 +1270,22 @@ fn version(m: &Metadata) -> (u64, u64, u64, u32, i64, i64, i64, i64) {
         m.mtime_nsec(),
         m.ctime(),
         m.ctime_nsec(),
+    )
+}
+
+// rustix stat fields have platform-specific integer types (notably Apple dev_t
+// and time fields). This ephemeral identity is never serialized into capsules.
+#[allow(clippy::unnecessary_cast, clippy::cast_sign_loss)]
+fn stat_version(info: &rustix::fs::Stat) -> FileVersion {
+    (
+        info.st_dev as u64,
+        info.st_ino as u64,
+        info.st_size as u64,
+        info.st_mode as u32,
+        info.st_mtime as i64,
+        info.st_mtime_nsec as i64,
+        info.st_ctime as i64,
+        info.st_ctime_nsec as i64,
     )
 }
 fn parent(path: &str) -> &str {
@@ -1252,6 +1381,11 @@ fn url_path(directory: &str, request: &str) -> Result<(String, String)> {
     let request = request.trim_end_matches(' ');
     let split = request.find(['?', '#']).unwrap_or(request.len());
     let (path, suffix) = request.split_at(split);
+    let path = decoded_url_path(path)?;
+    Ok((normalize(directory, &path)?, serialized_url_suffix(suffix)?))
+}
+
+fn decoded_url_path(path: &str) -> Result<String> {
     let mut decoded = Vec::new();
     let mut bytes = path.bytes();
     while let Some(byte) = bytes.next() {
@@ -1276,9 +1410,40 @@ fn url_path(directory: &str, request: &str) -> Result<(String, String)> {
         }
         decoded.push(byte);
     }
-    let path = String::from_utf8(decoded)
-        .map_err(|_| error("ERR_INVALID_MODULE_SPECIFIER", "non-UTF-8 URL path"))?;
-    Ok((normalize(directory, &path)?, serialized_url_suffix(suffix)?))
+    String::from_utf8(decoded)
+        .map_err(|_| error("ERR_INVALID_MODULE_SPECIFIER", "non-UTF-8 URL path"))
+}
+
+/// A synthetic URL origin makes relative resolution independent of the host
+/// root. Keep URL empty segments, unlike canonical physical probe paths.
+fn metadata_url_path(directory: &str, request: &str) -> Result<(String, String)> {
+    const ROOT: &str = "/__franken_node_captured_project__/";
+    let base = url::Url::from_directory_path(Path::new(ROOT).join(directory))
+        .map_err(|_| error("ERR_INVALID_MODULE_SPECIFIER", "invalid captured URL origin"))?;
+    let url = base.join(request)
+        .map_err(|_| error("ERR_INVALID_URL", "invalid relative module URL"))?;
+    let encoded = url.path().strip_prefix(ROOT).ok_or_else(|| error(
+        "ERR_MODULE_OUTSIDE_PROJECT", "module URL escapes the captured project root",
+    ))?;
+    let path = decoded_url_path(encoded)?;
+    if path.len() > MAX_PATH || path.split('/').count() > MAX_DEPTH {
+        return Err(limit());
+    }
+    // Check containment/reserved components without changing URL spelling.
+    normalize("", &path)?;
+    let mut suffix = String::new();
+    if let Some(query) = url.query() {
+        suffix.push('?');
+        suffix.push_str(query);
+    }
+    if let Some(fragment) = url.fragment() {
+        suffix.push('#');
+        suffix.push_str(fragment);
+    }
+    if suffix.len() > MAX_PATH {
+        return Err(limit());
+    }
+    Ok((path, suffix))
 }
 
 /// Serialize the query and fragment of a contained file URL. These are module
@@ -1460,6 +1625,44 @@ mod tests {
         );
         root
     }
+    #[test]
+    fn import_meta_resolve_promotes_only_the_same_observed_file() {
+        let root = fixture();
+        put(root.path(), "asset.css", b"initial");
+        let mut resolver = Resolver::new(root.path(), &ResolutionMode::Import.default_conditions(),
+            SymlinkPolicy::Reject).unwrap();
+        resolver.resolve_url("", "./asset.css").unwrap();
+        assert!(matches!(resolver.entries.get("asset.css").unwrap().as_ref(),
+            Entry::FileMetadata { version: Some(_) }));
+        put(root.path(), "asset.css", b"changed after metadata observation");
+        assert_eq!(resolver.locate("asset.css").err().unwrap().code, "ERR_MODULE_INPUT_CHANGED");
+    }
+
+    #[test]
+    fn import_meta_resolve_package_cache_cannot_authorize_an_import() {
+        let root = fixture();
+        put(root.path(), "node_modules/exports/package.json",
+            br#"{"exports":"./missing.js"}"#);
+        put(root.path(), "node_modules/legacy/package.json",
+            br#"{"main":"./missing.js"}"#);
+        let mut resolver = Resolver::new(root.path(), &ResolutionMode::Import.default_conditions(),
+            SymlinkPolicy::Reject).unwrap();
+        assert_eq!(resolver.resolve_url("", "exports").unwrap(),
+            source_graph::ResolutionUrl::File { id: source_graph::ModuleId {
+                path: "node_modules/exports/missing.js".into(), url_suffix: String::new(),
+            } });
+        assert_eq!(resolver.request("", "exports", ResolutionMode::Import, 0).unwrap_err().code,
+            "ERR_MODULE_NOT_FOUND");
+        assert_eq!(resolver.resolve_url("", "legacy").unwrap_err().code, "ERR_MODULE_NOT_FOUND");
+        assert_eq!(resolver.resolve_url("", "not-installed").unwrap_err().code, "ERR_MODULE_NOT_FOUND");
+        for prefix_only in ["sea", "sqlite", "test", "test/reporters"] {
+            assert_eq!(resolver.resolve_url("", prefix_only).unwrap_err().code,
+                "ERR_MODULE_NOT_FOUND", "{prefix_only}");
+            assert_eq!(resolver.resolve_url("", &format!("node:{prefix_only}")).unwrap(),
+                source_graph::ResolutionUrl::Absolute { url: format!("node:{prefix_only}") });
+        }
+    }
+
     fn run(root: &Path, from: &str, request: &str, mode: ResolutionMode) -> CapturedResolution {
         resolve(root, from, request, mode, &mode.default_conditions()).unwrap()
     }
@@ -2998,6 +3201,7 @@ mod tests {
             symlink_policy: SymlinkPolicy::Contained,
             sealed: false,
             observed: BTreeSet::new(),
+            url_lookup: false,
         };
         assert!(matches!(
             resolver.probe("alias/absent.mjs").unwrap().as_ref(),
@@ -3040,6 +3244,7 @@ mod tests {
             symlink_policy: SymlinkPolicy::Contained,
             sealed: false,
             observed: BTreeSet::new(),
+            url_lookup: false,
         };
         assert!(resolver.probe("expanding").is_err());
         assert!(!resolver.entries.contains_key("expanding"));

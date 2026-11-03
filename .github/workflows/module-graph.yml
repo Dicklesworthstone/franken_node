@@ -81,7 +81,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: Dicklesworthstone/franken_engine
-          ref: b7ac48264b9bff30b2135f7bafd4916848e9d8c9
+          ref: c3a65dd598a9e0f9f7fa78240fe943545be90140
           path: franken_engine
           persist-credentials: false
       - name: Test the product resolver against the actual engine contract

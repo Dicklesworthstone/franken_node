@@ -348,7 +348,7 @@ fn expected_routes(report: &SourceGraphReport) -> Result<ExpectedRoutes> {
             .ok_or_else(invalid_preparation)?;
         let specifier = edge.specifier.as_ref().ok_or_else(invalid_preparation)?;
         importer.insert((specifier.clone(), request_style(edge.kind)));
-        if edge.kind == LoadKind::RequireResolve {
+        if matches!(edge.kind, LoadKind::RequireResolve | LoadKind::ImportMetaResolve) {
             continue;
         }
         if let Some(target) = &edge.target {
@@ -397,6 +397,7 @@ fn request_style(kind: LoadKind) -> RequestStyle {
     match kind {
         LoadKind::Require => RequestStyle::Require,
         LoadKind::RequireResolve => RequestStyle::RequireResolve,
+        LoadKind::ImportMetaResolve => RequestStyle::ImportMetaResolve,
         LoadKind::StaticImport | LoadKind::Reexport | LoadKind::DynamicImport => RequestStyle::Import,
     }
 }

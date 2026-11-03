@@ -32,9 +32,10 @@ Neither pin identifies a publisher or grants capabilities.
 ## Required sibling revision
 
 This bridge requires `franken_engine` commit
-[`b7ac48264b9bff30b2135f7bafd4916848e9d8c9`](https://github.com/Dicklesworthstone/franken_engine/commit/b7ac48264b9bff30b2135f7bafd4916848e9d8c9)
-or a descendant that retains `ModuleMetadata`, `ModuleResolver::resolve_metadata`
-and `ModulePolicyHook::authorize_metadata`. The Cargo path dependency on the
+[`c3a65dd598a9e0f9f7fa78240fe943545be90140`](https://github.com/Dicklesworthstone/franken_engine/commit/c3a65dd598a9e0f9f7fa78240fe943545be90140)
+or a descendant that retains `ModuleMetadataTarget`,
+`ModuleResolver::resolve_metadata`, `ModulePolicyHook::authorize_metadata`
+and the native `import.meta.resolve` runtime. The Cargo path dependency on the
 sibling checkout is intentional; it does not select or enforce a Git revision.
 An older sibling checkout does not provide the metadata-resolution contract
 required by this bridge.
@@ -50,8 +51,8 @@ paths or JavaScript URLs to parse or reopen.
 
 Only the entrypoint's generated request is accepted without a referrer.
 Subsequent requests must use the returned engine record ID as referrer and the
-exact captured specifier, import/require style and load/filename-lookup purpose. Knowing a target's canonical
-ID does not create a new edge to it. Nested package versions, condition choices,
+exact captured specifier, import/require style and load/filename/URL-lookup
+purpose. Knowing a target's canonical ID does not create a new edge to it. Nested package versions, condition choices,
 workspace links and missing lookup decisions are never reinterpreted using the
 ambient machine. Unknown requests fail rather than falling back to another
 resolver. Engine requests must use `NodeCompat`; the helper entry request does
@@ -159,7 +160,7 @@ shims. The broader inspection/capsule functionality remains available unchanged.
 
 A captured `.json` dependency can be delivered when every executable incoming
 edge is `require`, it has no outgoing runtime routes, and it has no URL-instance
-suffix. Filename-only lookup edges do not change this loading contract.
+suffix. Filename-only and URL-only lookup edges do not change this loading contract.
 This covers explicit JSON files, existing CommonJS extension/index
 search and JSON-valued package entrypoints. A bare JSON graph entrypoint, static
 or dynamic ESM JSON import, reexport, or mixed require/import access is refused
@@ -237,6 +238,50 @@ executable routes. Source transformation must preserve the purpose of every
 captured request; changing require.resolve into require, or the reverse, fails
 the dependency-conservation check. Captured lookup options, indirect loaders,
 and unknown computed names retain their existing explicit refusals.
+
+## ESM URL resolution without loading assets
+
+Direct `import.meta.resolve()` calls have a separate captured URL-lookup purpose.
+The engine returns a synchronous absolute URL using the defining module's
+origin and ESM import conditions. The graph records project-relative file URL
+descriptors or normalized absolute non-file URLs. Relative missing paths,
+directories, query strings, fragments and repeated path separators retain their
+URL meaning. Existing regular files use the captured realpath; URL lookup does
+not parse, prepare, evaluate or cache their contents.
+
+File observations made only for URL lookup are stat-only capsule inputs.
+A large binary asset therefore does not consume the executable-source byte
+budget. Package manifests, symlink targets and negative probes remain sealed
+resolution evidence. If a later executable route needs a stat-only target,
+live capture verifies that the file is unchanged before reading its bytes;
+replay refuses a source request when the capsule contains only metadata.
+The combined target limit counts URL, filename and executable identities, and
+package lookup caches distinguish these purposes.
+
+`PinnedModuleRegistry::lookup_url_resolution` admits only the exact captured
+importer and request spelling. A URL result grants neither filename-lookup nor
+source-delivery authority. The adapter uses `ModuleMetadataTarget::SourceUrl`
+for trusted installed file locations and `AbsoluteUrl` for captured non-file
+URL strings; `Filename` remains exclusive to `require.resolve`. The engine
+checks the target purpose and normalized URL before exposing the result.
+Every successful lookup invokes the current `authorize_metadata` policy;
+a previous successful result cannot bypass revocation.
+
+Bare core names resolve to their `node:` URLs. Explicit `node:` URLs need
+no installed executable provider and are not checked against its inventory.
+Other absolute non-file schemes are normalized without fetching them.
+Missing packages and blocked package exports retain their captured errors.
+These outcomes remain unchanged after the live project is replaced.
+
+The native engine retains one `import.meta` object per module. Its resolver
+function keeps that module's base when extracted or called from another module,
+uses ordinary string coercion, and respects replacements, accessors and deletion
+of the `resolve` property. Captured graphs currently admit direct, statically
+bounded requests and literal `['resolve']` access; escaping, computed or mutable
+resolver origins are refused with an explicit diagnostic. Absolute file URLs
+and absolute filesystem paths need an additional captured-root mapping and
+remain outside this capture contract. This bounded capture support does not
+claim arbitrary computed-loader completeness or full Node URL conformance.
 
 ## Authorization is per load, not per cached byte
 

@@ -60,7 +60,7 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/bootstrap_source.sh --workspace "$PWD" \
-            --engine-ref b7ac48264b9bff30b2135f7bafd4916848e9d8c9 \
+            --engine-ref c3a65dd598a9e0f9f7fa78240fe943545be90140 \
             --receipt "$RUNNER_TEMP/inline-source-inputs.tsv"
 
       - name: Install pinned Rust nightly

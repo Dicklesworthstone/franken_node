@@ -90,6 +90,8 @@ pub enum LoadKind {
     Require,
     /// CommonJS filename lookup without source preparation or load authority.
     RequireResolve,
+    /// ESM URL lookup, including absent paths and non-file URL schemes.
+    ImportMetaResolve,
     DynamicImport,
 }
 
@@ -162,8 +164,21 @@ pub struct SourceEdge {
     pub conditions: Vec<String>,
     pub state: EdgeState,
     pub target: Option<ModuleId>,
+    /// URL metadata grants no source-delivery or execution authority.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_url: Option<ResolutionUrl>,
     pub error: Option<ResolutionError>,
     pub mappings: Vec<Mapping>,
+}
+
+/// A relocatable file URL or an absolute URL with no loader attached. File URL
+/// paths are decoded and project-relative; empty segments and a final slash are
+/// meaningful URL spelling. An empty path denotes the project directory itself.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ResolutionUrl {
+    File { id: ModuleId },
+    Absolute { url: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -415,6 +430,8 @@ fn build(
     let mut pending = VecDeque::from([(first.clone(), None)]);
     let mut modules = Vec::new();
     let mut resolution_targets = BTreeMap::new();
+    let mut url_files = BTreeSet::new();
+    let mut absolute_urls = BTreeSet::new();
     // Bound the union: observing a filename and subsequently loading it does
     // not count twice, and metadata routes do not create a second module quota.
     let mut target_count = 1;
@@ -497,7 +514,8 @@ fn build(
                 deferred_or_conditional: !load.type_only
                     && matches!(
                         load.kind,
-                        LoadKind::Require | LoadKind::RequireResolve | LoadKind::DynamicImport
+                        LoadKind::Require | LoadKind::RequireResolve | LoadKind::ImportMetaResolve
+                            | LoadKind::DynamicImport
                     ),
                 specifier: load.specifier,
                 conditions,
@@ -507,12 +525,45 @@ fn build(
                     EdgeState::NonLiteral
                 },
                 target: None,
+                resolved_url: None,
                 error: None,
                 mappings: Vec::new(),
             };
             // Type-only references grant no filesystem authority. In particular,
             // an erased outside-root path or runtime name must not be resolved.
             if let Some(request) = edge.specifier.as_ref().filter(|_| !load.type_only) {
+                if load.kind == LoadKind::ImportMetaResolve {
+                    match resolver.resolve_url(parent(&id.path), request) {
+                        Ok(url) => {
+                            let fresh = match &url {
+                                ResolutionUrl::File { id } => !sources.contains_key(id)
+                                    && !resolution_targets.contains_key(id) && !url_files.contains(id),
+                                ResolutionUrl::Absolute { url } => !absolute_urls.contains(url),
+                            };
+                            if fresh {
+                                if target_count >= MAX_MODULES {
+                                    return Err(limit());
+                                }
+                                target_count += 1;
+                            }
+                            match &url {
+                                ResolutionUrl::File { id } => { url_files.insert(id.clone()); }
+                                ResolutionUrl::Absolute { url } => { absolute_urls.insert(url.clone()); }
+                            }
+                            edge.state = EdgeState::Resolved;
+                            edge.resolved_url = Some(url);
+                        }
+                        Err(e) if fatal(&e) => return Err(e),
+                        Err(e) => {
+                            edge.state = EdgeState::Unresolved;
+                            edge.error = Some(e);
+                        }
+                    }
+                    edge.mappings = std::mem::take(&mut resolver.mappings);
+                    budget.retain(&edge)?;
+                    edges.push(edge);
+                    continue;
+                }
                 match resolver.request(parent(&id.path), request, mode, 0) {
                     Ok((path, url_suffix)) => {
                         let (path, source) = resolver.locate(&path)?;
@@ -522,6 +573,7 @@ fn build(
                         let target = ModuleId { path, url_suffix };
                         if !sources.contains_key(&target)
                             && !resolution_targets.contains_key(&target)
+                            && !url_files.contains(&target)
                         {
                             if target_count >= MAX_MODULES {
                                 return Err(limit());
@@ -573,7 +625,7 @@ fn build(
     // import or erasing it from the captured dependency surface.
     if !require_extension_fallbacks.is_empty() {
         for edge in &edges {
-            if !matches!(edge.kind, LoadKind::Require | LoadKind::RequireResolve)
+            if !matches!(edge.kind, LoadKind::Require | LoadKind::RequireResolve | LoadKind::ImportMetaResolve)
                 && edge
                     .target
                     .as_ref()
@@ -1764,6 +1816,8 @@ fn scan(
                         None
                     } else if f.kind() == "import" {
                         Some(LoadKind::DynamicImport)
+                    } else if is_import_meta_resolve(f, text) {
+                        Some(LoadKind::ImportMetaResolve)
                     } else if resolve {
                         Some(LoadKind::RequireResolve)
                     } else if is_require(f, bytes) || bindings.is_loader(f, text) {
@@ -1913,14 +1967,21 @@ fn scan(
             }
             "meta_property"
                 if !erased
-                    && !bindings.loaders.is_empty()
-                    && node.utf8_text(bytes) == Ok("import.meta")
-                    && !immutable_import_meta_use(node, text) =>
+                    && keyword(node, "import")
+                    && !immutable_import_meta_use(node, text)
+                    && !direct_import_meta_resolve_use(node, text) =>
             {
-                issue = Some((
-                    "MUTABLE_CREATE_REQUIRE_ORIGIN",
-                    "createRequire capture requires unescaped import.meta and read-only origin members",
-                ));
+                issue = Some(if bindings.loaders.is_empty() {
+                    (
+                        "UNPROVED_IMPORT_META_ACCESS",
+                        "import.meta requires read-only origin properties or direct resolve calls; mutable, computed and escaping resolver access needs separate analysis",
+                    )
+                } else {
+                    (
+                        "MUTABLE_CREATE_REQUIRE_ORIGIN",
+                        "createRequire capture requires unescaped import.meta and read-only origin members",
+                    )
+                });
                 None
             }
             "object_pattern"
@@ -2466,6 +2527,28 @@ fn immutable_import_meta_use(mut node: Node<'_>, source: &str) -> bool {
     false
 }
 
+fn is_import_meta_resolve(node: Node<'_>, source: &str) -> bool {
+    let node = runtime_operand(node);
+    named_member(node, "resolve", source)
+        && node.child_by_field_name("object").is_some_and(|object| {
+            let object = runtime_operand(object);
+            object.kind() == "meta_property" && keyword(object, "import")
+        })
+}
+
+fn direct_import_meta_resolve_use(mut node: Node<'_>, source: &str) -> bool {
+    for _ in 0..MAX_STRING_EXPRESSION_DEPTH {
+        let Some(parent) = node.parent() else { return false; };
+        if wrapper_operand(parent).is_some_and(|operand| operand.id() == node.id()) {
+            node = parent;
+            continue;
+        }
+        return is_import_meta_resolve(parent, source)
+            && (direct_callee(parent, source) || loader_typeof_probe(parent));
+    }
+    false
+}
+
 /// Recognize the actual CommonJS resolve member, not aliases, call/apply,
 /// user-provided loaders, or arbitrary computed property expressions. Reuse
 /// CommonJS conditions while preserving a separate resolution-only route.
@@ -2953,6 +3036,166 @@ mod tests {
             .iter()
             .map(|n| n.id.path.as_str())
             .collect()
+    }
+
+    #[test]
+    fn import_meta_resolve_captures_urls_without_asset_bytes_or_source_routes() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "package.json", r##"{"imports":{"#asset":"assets/style.css"}}"##);
+        put(root.path(), "node_modules/assets/package.json",
+            r#"{"exports":{"./*":{"import":"./files/*","require":"./wrong/*"}}}"#);
+        put(root.path(), "node_modules/assets/files/style.css", "not JavaScript: }");
+        put(root.path(), "broken.json", "{invalid JSON");
+        std::fs::create_dir(root.path().join("dir")).unwrap();
+        put(root.path(), "app.mjs", r#"
+import.meta.resolve('./missing.js?rev=1#view');
+import /* origin */ . meta['resolve']('./dir/');
+import.meta.resolve('assets/style.css');
+import.meta.resolve('#asset');
+import.meta.resolve('fs');
+import.meta.resolve('node:fake');
+import.meta.resolve('https://EXAMPLE.com/a b?query=1#view');
+import.meta.resolve('data:text/plain,hello');
+import.meta.resolve('./broken.json');
+if (false) { import.meta.resolve('./unused.node'); }
+"#);
+        let captured = graph(root.path());
+        assert!(captured.report.fully_resolved, "{:?}", captured.report.diagnostics);
+        assert_eq!(paths(&captured), ["app.mjs"]);
+        assert!(captured.report.resolution_targets.is_empty());
+        assert_eq!(captured.report.edges.len(), 10);
+        assert!(captured.report.edges.iter().all(|edge|
+            edge.kind == LoadKind::ImportMetaResolve && edge.target.is_none()
+                && edge.resolved_url.is_some() && edge.deferred_or_conditional
+                && edge.conditions == ["node", "import"]));
+        let edge = |name: &str| captured.report.edges.iter()
+            .find(|edge| edge.specifier.as_deref() == Some(name)).unwrap();
+        assert_eq!(edge("./missing.js?rev=1#view").resolved_url,
+            Some(ResolutionUrl::File { id: ModuleId {
+                path: "missing.js".into(), url_suffix: "?rev=1#view".into(),
+            } }));
+        assert_eq!(edge("#asset").resolved_url, edge("assets/style.css").resolved_url);
+        assert_eq!(edge("#asset").mappings.len(), 2);
+        assert_eq!(edge("fs").resolved_url,
+            Some(ResolutionUrl::Absolute { url: "node:fs".into() }));
+        assert_eq!(edge("node:fake").resolved_url,
+            Some(ResolutionUrl::Absolute { url: "node:fake".into() }));
+        assert_eq!(edge("https://EXAMPLE.com/a b?query=1#view").resolved_url,
+            Some(ResolutionUrl::Absolute { url: "https://example.com/a%20b?query=1#view".into() }));
+        for name in ["broken.json", "node_modules/assets/files/style.css"] {
+            let probe = captured.report.probes.iter().find(|probe| probe.path == name).unwrap();
+            assert_eq!(probe.kind, super::super::ProbeKind::FileMetadata);
+            assert_eq!(probe.bytes, None);
+            assert_eq!(probe.sha256, None);
+            assert!(captured.source_bytes(&ModuleId { path: name.into(), url_suffix: String::new() }).is_none());
+        }
+        assert!(!captured.report.probes.iter().any(|probe| probe.path.contains("/wrong/")));
+    }
+
+    #[test]
+    fn import_meta_resolve_preserves_lexical_directory_and_missing_urls() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "real/file.css", "opaque");
+        std::fs::create_dir(root.path().join("a")).unwrap();
+        symlink("real", root.path().join("linkdir")).unwrap();
+        symlink("real/file.css", root.path().join("linkfile")).unwrap();
+        let cases = [
+            ("./linkdir", "linkdir"), ("./linkdir/", "linkdir/"),
+            ("./linkdir/missing", "linkdir/missing"),
+            ("./linkdir/file.css", "real/file.css"),
+            ("./linkfile/", "linkfile/"), ("./a//missing", "a//missing"),
+            ("./a//", "a//"), ("./", ""),
+            ("./missing%3Fname%23piece", "missing?name#piece"),
+        ];
+        let source = cases.iter().map(|(request, _)|
+            format!("import.meta.resolve({});\n", serde_json::to_string(request).unwrap())
+        ).collect::<String>();
+        put(root.path(), "app.mjs", &source);
+        let captured = capture(root.path(), "app.mjs", GraphOptions {
+            symlink_policy: SymlinkPolicy::Contained, ..GraphOptions::default()
+        }).unwrap();
+        assert!(captured.report.fully_resolved);
+        for (edge, (_, expected)) in captured.report.edges.iter().zip(cases) {
+            assert_eq!(edge.resolved_url, Some(ResolutionUrl::File { id: ModuleId {
+                path: expected.into(), url_suffix: String::new(),
+            } }), "{:?}", edge.specifier);
+        }
+        let capsule = capsule::encode(&captured).unwrap();
+        let replayed = capsule::replay(capsule.bytes(), capsule.digest()).unwrap();
+        assert_eq!(captured.report, replayed.report);
+    }
+
+    #[test]
+    fn import_meta_resolve_does_not_promote_dynamic_or_mutable_calls() {
+        let root = tempfile::tempdir().unwrap();
+        for source in [
+            "const lookup=import.meta.resolve; lookup('./asset');",
+            "import.meta[member]('./asset');",
+            "import.meta.resolve=()=>''; import.meta.resolve('./asset');",
+            "import /* origin */ . meta.resolve=()=>''; import.meta.resolve('./asset');",
+            "const origin=import.meta; origin.resolve('./asset');",
+        ] {
+            put(root.path(), "app.mjs", source);
+            let captured = graph(root.path());
+            assert!(!captured.report.fully_resolved, "{source}");
+            assert!(captured.report.diagnostics.iter().any(|notice|
+                notice.code == "UNPROVED_IMPORT_META_ACCESS"), "{source}");
+        }
+        put(root.path(), "app.mjs", "import.meta.resolve(runtimeName);");
+        let captured = graph(root.path());
+        assert_eq!(captured.report.edges[0].kind, LoadKind::ImportMetaResolve);
+        assert_eq!(captured.report.edges[0].state, EdgeState::NonLiteral);
+        for request in ["file:///outside.js", "/outside.js"] {
+            put(root.path(), "app.mjs", &format!("import.meta.resolve({request:?});"));
+            let captured = graph(root.path());
+            assert_eq!(captured.report.edges[0].error.as_ref().unwrap().code,
+                "ERR_UNSUPPORTED_MODULE_SPECIFIER");
+            assert!(captured.report.edges[0].resolved_url.is_none());
+        }
+    }
+
+    #[test]
+    fn import_meta_resolve_observation_cannot_bypass_source_byte_limits() {
+        let root = tempfile::tempdir().unwrap();
+        let large = std::fs::File::create(root.path().join("large.js")).unwrap();
+        large.set_len(super::super::MAX_FILE as u64 + 1).unwrap();
+        put(root.path(), "app.mjs", "import.meta.resolve('./large.js');");
+        let captured = graph(root.path());
+        assert!(captured.report.fully_resolved);
+        assert_eq!(paths(&captured), ["app.mjs"]);
+        assert!(capsule::encode(&captured).unwrap().bytes().len() < 8192);
+        put(root.path(), "app.mjs", "import.meta.resolve('./large.js'); import './large.js';");
+        assert_eq!(capture(root.path(), "app.mjs", GraphOptions::default()).err().unwrap().code,
+            "ERR_MODULE_RESOLUTION_LIMIT");
+        for source in [
+            "import.meta.resolve('./value.mjs'); import './value.mjs';",
+            "import './value.mjs'; import.meta.resolve('./value.mjs');",
+        ] {
+            put(root.path(), "value.mjs", "export const value=1;");
+            put(root.path(), "app.mjs", source);
+            let captured = graph(root.path());
+            assert!(captured.report.fully_resolved);
+            assert_eq!(paths(&captured), ["app.mjs", "value.mjs"]);
+            let probe = captured.report.probes.iter().find(|probe| probe.path == "value.mjs").unwrap();
+            assert_eq!(probe.kind, super::super::ProbeKind::File);
+            let capsule = capsule::encode(&captured).unwrap();
+            assert_eq!(captured.report, capsule::replay(capsule.bytes(), capsule.digest()).unwrap().report);
+        }
+    }
+
+    #[test]
+    fn import_meta_resolve_shares_the_existing_total_target_bound() {
+        let root = tempfile::tempdir().unwrap();
+        let urls = (0..MAX_MODULES-2).map(|index|
+            format!("import.meta.resolve('node:opaque{index}');\n")
+        ).collect::<String>();
+        put(root.path(), "dep.mjs", "export const value=1;");
+        put(root.path(), "app.mjs", &format!("{urls}import './dep.mjs'; import.meta.resolve('./dep.mjs');"));
+        assert!(graph(root.path()).report.fully_resolved);
+        put(root.path(), "app.mjs", &format!("{urls}import './dep.mjs'; import.meta.resolve('./missing');"));
+        assert_eq!(capture(root.path(), "app.mjs", GraphOptions::default()).err().unwrap().code,
+            "ERR_MODULE_GRAPH_LIMIT");
     }
 
     #[test]

@@ -115,11 +115,11 @@ test-support = ["control-plane", "admin-tools"]
 # invocations. This is intentionally not part of default or test-support builds.
 loom-models = ["dep:loom"]
 # Heavy compilation dependencies - optional for fuzz builds
-http-client = ["dep:ureq", "dep:url"]
+http-client = ["dep:ureq"]
 external-commands = ["dep:which", "dep:ctrlc"]
 compression = ["dep:flate2"]
 cbor-serialization = ["dep:ciborium"]
-engine = ["dep:frankenengine-engine", "dep:frankenengine-extension-host", "dep:url"]
+engine = ["dep:frankenengine-engine", "dep:frankenengine-extension-host"]
 blake3 = ["dep:blake3"]
 # bd-98xo5.12.1: opt-in profiling feature pulling in the hdrhistogram
 # dependency for per-hot-path latency histograms. Production builds
@@ -181,7 +181,7 @@ arbitrary = { version = "1.3", features = ["derive"] }
 proptest = "1.6"
 # Heavy compilation dependencies made optional for faster fuzz builds
 ureq = { version = "3", optional = true }
-url = { version = "2.5", optional = true }
+url = "2.5"
 which = { version = "8.0.2", optional = true }
 ctrlc = { version = "3", optional = true, features = ["termination"] }
 tree-sitter = "0.26.8"

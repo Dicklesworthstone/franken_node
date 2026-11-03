@@ -46,6 +46,7 @@ struct Input {
 enum Content {
     Missing,
     Directory,
+    FileMetadata,
     File { bytes: usize, sha256: String },
     Symlink { target: String, sha256: String },
 }
@@ -124,6 +125,7 @@ pub fn encode(graph: &CapturedModuleGraph) -> Result<EncodedCapsule> {
         let content = match entry.as_ref() {
             Entry::Missing => Content::Missing,
             Entry::Directory(_) => Content::Directory,
+            Entry::FileMetadata { .. } => Content::FileMetadata,
             Entry::File { bytes, sha256 } => {
                 if payload.len().saturating_add(bytes.len()) > MAX_CAPTURE {
                     return Err(limit());
@@ -229,6 +231,7 @@ fn recorded_resolver(header: &Header, payload: &[u8]) -> Result<Resolver> {
         let entry = match &input.content {
             Content::Missing => Entry::Missing,
             Content::Directory => Entry::Directory(None),
+            Content::FileMetadata => Entry::FileMetadata { version: None },
             Content::File { bytes, sha256 } => {
                 let cap = if input.path.rsplit('/').next() == Some("package.json") {
                     super::super::super::package_targets::MAX_MANIFEST_BYTES
@@ -291,6 +294,7 @@ fn recorded_resolver(header: &Header, payload: &[u8]) -> Result<Resolver> {
         symlink_policy: header.options.symlink_policy,
         sealed: true,
         observed: BTreeSet::new(),
+        url_lookup: false,
     })
 }
 
@@ -359,6 +363,58 @@ mod tests {
             .expect("must reject capsule")
             .code
             .into()
+    }
+
+    #[test]
+    fn import_meta_resolve_capsule_retains_stat_and_negative_observations() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "asset.node", b"\xff\0opaque bytes");
+        std::fs::create_dir(root.path().join("nested")).unwrap();
+        put(root.path(), "app.mjs",
+            "import.meta.resolve('./asset.node'); import.meta.resolve('./nested/missing.css');");
+        let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
+        let capsule = encode(&graph).unwrap();
+        let (header, _) = parse_frame(capsule.bytes()).unwrap();
+        assert!(header.inputs.iter().any(|input| input.path == "asset.node"
+            && matches!(input.content, Content::FileMetadata)));
+        put(root.path(), "asset.node", b"different unparsed data");
+        put(root.path(), "nested/missing.css", "now exists");
+        assert_eq!(replay(capsule.bytes(), capsule.digest()).unwrap().report(), graph.report());
+        let omitted = modify(&capsule, |header|
+            header.inputs.retain(|input| input.path != "nested/missing.css"));
+        assert_eq!(failure(&omitted), "ERR_MODULE_CAPSULE_INPUT_MISSING");
+        let relabelled = modify(&capsule, |header| {
+            header.inputs.iter_mut().find(|input| input.path == "asset.node").unwrap().content =
+                Content::Missing;
+        });
+        assert_eq!(failure(&relabelled), "ERR_MODULE_CAPSULE_REPLAY_MISMATCH");
+    }
+
+    #[test]
+    fn import_meta_resolve_capsule_metadata_cannot_satisfy_source_delivery() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mjs", "import.meta.resolve('./dep.mjs'); import './dep.mjs';");
+        put(root.path(), "dep.mjs", "export const value=1;");
+        let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
+        let capsule = encode(&graph).unwrap();
+        let (mut header, payload) = parse_frame(capsule.bytes()).unwrap();
+        let mut offset = 0;
+        let mut removed = None;
+        for input in &mut header.inputs {
+            if let Content::File { bytes, .. } = &input.content {
+                let count = *bytes;
+                if input.path == "dep.mjs" {
+                    removed = Some((offset, count));
+                    input.content = Content::FileMetadata;
+                    break;
+                }
+                offset += count;
+            }
+        }
+        let (offset, count) = removed.unwrap();
+        let shortened = [&payload[..offset], &payload[offset+count..]].concat();
+        let bytes = frame(&header, &shortened).unwrap();
+        assert_eq!(failure(&bytes), "ERR_MODULE_CAPSULE_INPUT_MISSING");
     }
 
     #[test]

@@ -449,6 +449,32 @@ unbounded arguments and escaped resolver functions remain incomplete. Builtin
 lookups stay explicit runtime requirements for the engine's name inventory and
 per-request metadata policy; capture never substitutes a project package.
 
+`import.meta.resolve(...)` has a separate `import_meta_resolve` edge kind and
+`resolved_url` descriptor. It selects packages with import conditions, preserves
+package exports/imports witnesses, and returns file URLs for existing files,
+directories and missing paths. Existing regular files use captured realpaths;
+directory and missing results preserve lexical spelling, repeated separators,
+trailing slashes, queries and fragments. Direct absolute non-file URLs are
+normalized without fetching or loading them. This includes `node:` URLs even
+when the name has no native provider; bare builtin names use the Node inventory.
+
+URL targets are outside the `modules` and `resolution_targets` byte inventories.
+A `file_metadata` probe records a regular-file observation without reading its
+contents. Manifests and symlink text still supply captured resolution evidence.
+If another edge actually loads that file, live capture verifies the observed
+file identity before reading it and applies the existing byte limits. Replay
+can deliver source only from captured file bytes, never from a metadata probe.
+All loaded modules, filename targets and distinct URL targets share the same
+256-target limit. URL lookup cannot authorize an import, require or filename
+lookup, including a later request for the identical target.
+
+Direct calls and their supported finite string requests are captured. Additional
+arguments are evaluated normally but do not change the default module origin.
+Escaping or mutating `import.meta`, indirect resolver calls and unproved computed
+members remain explicit analysis refusals. Absolute filesystem paths and
+`file:` URLs remain outside this project-contained capture contract; they need
+an explicit root mapping before they can be replayed correctly.
+
 CommonJS entrypoint guards such as `require.main === module` are supported,
 including strict equality/inequality comparisons in either operand order and
 proven CommonJS loader aliases. Dependencies in both guarded branches are captured.
@@ -510,7 +536,7 @@ An `--expected-hash` mismatch exits 1 and suppresses the `source_graph` payload;
 metadata-only, single-file and manifest-only pins cannot approve this scope.
 Pins are consistency checks, not signatures, provenance or permission to execute.
 
-Capture is bounded to 256 module identities, 4,096 dependency/diagnostic sites,
+Capture is bounded to 256 total module/filename/URL identities, 4,096 dependency/diagnostic sites,
 262,144 traversed syntax nodes and 32 MiB of report evidence, in addition to the
 shared resolver's file/probe/link limits. There is no truncation-as-success and
 no claim of a real-time I/O or parsing deadline. Neither this graph nor the
@@ -654,7 +680,9 @@ The graph report itself retains its original scope and input hash.
 Capsules use the eight-byte magic `FNSGCAP1`, a four-byte little-endian header
 length, canonical JSON metadata, and exact binary file payloads in sorted
 physical-path order. Files are stored once even when multiple URL module
-identities share them. The capsule identity is SHA-256 over the domain
+identities share them. Metadata-only file observations have a `file_metadata`
+header record and no payload; negative probes and directory observations remain
+part of the authenticated inputs. The capsule identity is SHA-256 over the domain
 `franken-node/module-source-capsule/v1` followed by a NUL byte, the eight-byte
 little-endian encoded capsule length, and the complete capsule bytes. The
 output spelling is `sha256:` followed by lowercase hexadecimal digits.

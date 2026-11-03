@@ -7,7 +7,8 @@
 //! engine consumers must authorize every lookup through ModulePolicyHook.
 
 use super::{
-    CapturedModuleGraph, EdgeState, LoadKind, ModuleId, ResolutionError, SourceLanguage, error,
+    CapturedModuleGraph, EdgeState, LoadKind, ModuleId, ResolutionError, ResolutionUrl, SourceLanguage,
+    error,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -17,6 +18,7 @@ use std::sync::Arc;
 type Result<T> = std::result::Result<T, ResolutionError>;
 const ID_DOMAIN: &[u8] = b"franken-node/sealed-module-id/v1\0";
 const BUILTIN_ID_DOMAIN: &[u8] = b"franken-node/sealed-native-builtin/v1\0";
+const URL_ID_DOMAIN: &[u8] = b"franken-node/sealed-resolution-url/v1\0";
 type ImporterRoutes = BTreeMap<RequestStyle, BTreeMap<String, RegisteredTarget>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -26,6 +28,8 @@ pub enum RequestStyle {
     Require,
     /// CommonJS filename lookup; this grants no source-delivery authority.
     RequireResolve,
+    /// ESM URL lookup; the target need not be an existing executable file.
+    ImportMetaResolve,
 }
 
 impl RequestStyle {
@@ -33,6 +37,7 @@ impl RequestStyle {
         match kind {
             LoadKind::Require => Self::Require,
             LoadKind::RequireResolve => Self::RequireResolve,
+            LoadKind::ImportMetaResolve => Self::ImportMetaResolve,
             LoadKind::StaticImport | LoadKind::Reexport | LoadKind::DynamicImport => Self::Import,
         }
     }
@@ -116,6 +121,24 @@ impl RegisteredResolution {
     }
 }
 
+/// A captured URL result, independent of both filename lookup and loading.
+/// File locations are relative to the sealed project so execution can relocate
+/// them without reading the host. Absolute URLs never imply fetch authority.
+pub struct RegisteredUrlResolution {
+    id: String,
+    target: ResolutionUrl,
+}
+
+impl RegisteredUrlResolution {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn target(&self) -> &ResolutionUrl {
+        &self.target
+    }
+}
+
 impl RegisteredModule {
     pub fn id(&self) -> &str {
         &self.id
@@ -148,6 +171,9 @@ pub struct RegistrySummary {
     pub resolution_targets: usize,
     pub resolution_routes: usize,
     pub missing_resolution_routes: usize,
+    pub url_resolution_targets: usize,
+    pub url_resolution_routes: usize,
+    pub missing_url_resolution_routes: usize,
     pub execution_performed: bool,
     pub policy_admission_performed: bool,
 }
@@ -244,6 +270,8 @@ pub struct PinnedModuleRegistry {
     // elsewhere in the graph.
     resolutions: BTreeMap<String, RegisteredResolution>,
     resolution_routes: BTreeMap<String, BTreeMap<String, RegisteredTarget>>,
+    url_resolutions: BTreeMap<String, RegisteredUrlResolution>,
+    url_resolution_routes: BTreeMap<String, BTreeMap<String, RegisteredTarget>>,
 }
 
 impl PinnedModuleRegistry {
@@ -315,6 +343,16 @@ impl PinnedModuleRegistry {
             return Err(incomplete());
         }
         for edge in &report.edges {
+            if edge.kind == LoadKind::ImportMetaResolve {
+                if edge.target.is_some()
+                    || (edge.state == EdgeState::Resolved) != edge.resolved_url.is_some()
+                    || !matches!(edge.state, EdgeState::Resolved | EdgeState::Unresolved)
+                {
+                    return Err(invalid_graph());
+                }
+            } else if edge.resolved_url.is_some() {
+                return Err(invalid_graph());
+            }
             match edge.state {
                 EdgeState::Resolved | EdgeState::TypeOnly => {}
                 EdgeState::RuntimeRequired
@@ -374,9 +412,15 @@ impl PinnedModuleRegistry {
                         && matches!(
                             (edge.kind, edge.error.as_ref().map(|failure| failure.code)),
                             (LoadKind::Require | LoadKind::RequireResolve, Some("MODULE_NOT_FOUND"))
-                                | (LoadKind::DynamicImport, Some("ERR_MODULE_NOT_FOUND"))
                                 | (
-                                    LoadKind::Require | LoadKind::RequireResolve | LoadKind::DynamicImport,
+                                    LoadKind::DynamicImport | LoadKind::ImportMetaResolve,
+                                    Some("ERR_MODULE_NOT_FOUND"),
+                                )
+                                | (
+                                    LoadKind::Require
+                                        | LoadKind::RequireResolve
+                                        | LoadKind::DynamicImport
+                                        | LoadKind::ImportMetaResolve,
                                     Some("ERR_PACKAGE_PATH_NOT_EXPORTED" | "ERR_PACKAGE_IMPORT_NOT_DEFINED"),
                                 )
                         ) =>
@@ -423,6 +467,24 @@ impl PinnedModuleRegistry {
                 kind: ResolutionKind::File,
             }).is_some() {
                 return Err(invalid_graph());
+            }
+        }
+        let mut url_resolutions = BTreeMap::<String, RegisteredUrlResolution>::new();
+        for target in report.edges.iter().filter_map(|edge| edge.resolved_url.as_ref()) {
+            validate_url_target(target)?;
+            let id = url_target_id(&report.input_hash, target);
+            if let Some(previous) = url_resolutions.get(&id) {
+                if previous.target() != target {
+                    return Err(invalid_graph());
+                }
+            } else {
+                url_resolutions.insert(
+                    id.clone(),
+                    RegisteredUrlResolution {
+                        id,
+                        target: target.clone(),
+                    },
+                );
             }
         }
         let mut modules = BTreeMap::new();
@@ -482,10 +544,14 @@ impl PinnedModuleRegistry {
         }
         let mut routes = BTreeMap::<String, ImporterRoutes>::new();
         let mut resolution_routes = BTreeMap::<String, BTreeMap<String, RegisteredTarget>>::new();
+        let mut url_resolution_routes =
+            BTreeMap::<String, BTreeMap<String, RegisteredTarget>>::new();
         let mut route_count = 0;
         let mut missing_routes = 0;
         let mut resolution_route_count = 0;
         let mut missing_resolution_routes = 0;
+        let mut url_resolution_route_count = 0;
+        let mut missing_url_resolution_routes = 0;
         for edge in &report.edges {
             if edge.state == EdgeState::TypeOnly {
                 continue;
@@ -493,6 +559,34 @@ impl PinnedModuleRegistry {
             let importer = identities.get(&edge.importer).ok_or_else(invalid_graph)?;
             let specifier = edge.specifier.as_ref().ok_or_else(invalid_graph)?;
             let style = RequestStyle::for_load(edge.kind);
+            if style == RequestStyle::ImportMetaResolve {
+                if !modules.contains_key(importer) {
+                    return Err(invalid_graph());
+                }
+                let target = if let Some(url) = &edge.resolved_url {
+                    let id = url_target_id(&report.input_hash, url);
+                    if !url_resolutions.contains_key(&id) {
+                        return Err(invalid_graph());
+                    }
+                    RegisteredTarget::Module { id }
+                } else {
+                    RegisteredTarget::Missing {
+                        error: edge.error.clone().ok_or_else(invalid_graph)?,
+                    }
+                };
+                let requests = url_resolution_routes.entry(importer.clone()).or_default();
+                if let Some(previous) = requests.get(specifier) {
+                    if previous != &target {
+                        return Err(invalid_graph());
+                    }
+                    continue;
+                }
+                missing_url_resolution_routes +=
+                    usize::from(matches!(target, RegisteredTarget::Missing { .. }));
+                url_resolution_route_count += 1;
+                requests.insert(specifier.clone(), target);
+                continue;
+            }
             let target = match edge.state {
                 EdgeState::RuntimeRequired if style == RequestStyle::RequireResolve
                     && missing_builtin_resolutions.contains_key(&(edge.importer.clone(), specifier.clone())) =>
@@ -586,6 +680,9 @@ impl PinnedModuleRegistry {
             resolution_targets: resolutions.len(),
             resolution_routes: resolution_route_count,
             missing_resolution_routes,
+            url_resolution_targets: url_resolutions.len(),
+            url_resolution_routes: url_resolution_route_count,
+            missing_url_resolution_routes,
             execution_performed: false,
             policy_admission_performed: false,
         };
@@ -595,6 +692,8 @@ impl PinnedModuleRegistry {
             routes,
             resolutions,
             resolution_routes,
+            url_resolutions,
+            url_resolution_routes,
         })
     }
 
@@ -617,6 +716,48 @@ impl PinnedModuleRegistry {
     /// Source-free identities selected by captured filename lookups.
     pub fn resolutions(&self) -> impl ExactSizeIterator<Item = &RegisteredResolution> {
         self.resolutions.values()
+    }
+
+    /// Source-free URL results. A file URL can describe an absent path or a
+    /// directory; this inventory must never become an executable-source cache.
+    pub fn url_resolutions(&self) -> impl ExactSizeIterator<Item = &RegisteredUrlResolution> {
+        self.url_resolutions.values()
+    }
+
+    /// Resolve only an exact captured import.meta.resolve route. Filename
+    /// lookup and executable import routes cannot lend their authority here.
+    pub fn lookup_url_resolution(
+        &self,
+        referrer: Option<&str>,
+        specifier: &str,
+    ) -> Result<&RegisteredUrlResolution> {
+        validate_specifier(specifier)?;
+        let importer = referrer.ok_or_else(|| {
+            error(
+                "ERR_MODULE_REGISTRY_ENTRY",
+                "URL lookup requires a captured source referrer",
+            )
+        })?;
+        if !self.modules.contains_key(importer) {
+            return Err(error(
+                "ERR_MODULE_REGISTRY_REFERRER",
+                "referrer does not belong to this sealed graph",
+            ));
+        }
+        let target = self
+            .url_resolution_routes
+            .get(importer)
+            .and_then(|requests| requests.get(specifier))
+            .ok_or_else(|| {
+                error(
+                    "ERR_MODULE_REGISTRY_ROUTE",
+                    "URL lookup was not captured for this importer",
+                )
+            })?;
+        match target {
+            RegisteredTarget::Module { id } => self.url_resolutions.get(id).ok_or_else(invalid_graph),
+            RegisteredTarget::Missing { error } => Err(error.clone()),
+        }
     }
 
     /// Resolve only an exact captured require.resolve route. A matching load
@@ -666,10 +807,10 @@ impl PinnedModuleRegistry {
         style: RequestStyle,
     ) -> Result<&RegisteredModule> {
         validate_specifier(specifier)?;
-        if style == RequestStyle::RequireResolve {
+        if matches!(style, RequestStyle::RequireResolve | RequestStyle::ImportMetaResolve) {
             return Err(error(
                 "ERR_MODULE_REGISTRY_ROUTE",
-                "filename lookup cannot deliver executable source",
+                "metadata lookup cannot deliver executable source",
             ));
         }
         let id = match referrer {
@@ -774,6 +915,48 @@ fn invalid_graph() -> ResolutionError {
         "ERR_MODULE_REGISTRY_GRAPH",
         "captured source graph has inconsistent module identities or routes",
     )
+}
+
+fn validate_url_target(target: &ResolutionUrl) -> Result<()> {
+    match target {
+        ResolutionUrl::File { id } => {
+            if id.path.starts_with('/')
+                || id.path.contains('\\')
+                || id.path.chars().any(char::is_control)
+                || id.path.split('/').any(|part| matches!(part, "." | ".."))
+                || (!id.url_suffix.is_empty()
+                    && !id.url_suffix.starts_with('?')
+                    && !id.url_suffix.starts_with('#'))
+                || id.url_suffix.chars().any(char::is_control)
+            {
+                return Err(invalid_graph());
+            }
+        }
+        ResolutionUrl::Absolute { url } => {
+            let parsed = url::Url::parse(url).map_err(|_| invalid_graph())?;
+            // File URLs need a sealed project-relative location. A literal
+            // absolute file URL cannot bypass the capture's root boundary.
+            if parsed.scheme() == "file" || parsed.as_str() != url {
+                return Err(invalid_graph());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn url_target_id(graph_hash: &str, target: &ResolutionUrl) -> String {
+    match target {
+        ResolutionUrl::File { id } => canonical_id(graph_hash, id),
+        ResolutionUrl::Absolute { url } => {
+            let mut digest = Sha256::new();
+            digest.update(URL_ID_DOMAIN);
+            for part in [graph_hash, url] {
+                digest.update((part.len() as u64).to_le_bytes());
+                digest.update(part.as_bytes());
+            }
+            format!("franken-captured-url:{}", hex::encode(digest.finalize()))
+        }
+    }
 }
 
 fn native_builtin_id(graph_hash: &str, name: &str) -> String {
@@ -2077,6 +2260,128 @@ mod tests {
             );
         }
         assert_eq!(registry.reachable_requests(None, entry, RequestStyle::Require).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn url_resolution_routes_replay_without_source_or_filename_authority() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mjs", r#"
+            import './shared.mjs';
+            import.meta.resolve('./shared.mjs');
+            import.meta.resolve('./missing//asset.json?one#frag');
+            import.meta.resolve('./assets/');
+            import.meta.resolve('fs');
+            import.meta.resolve('node:fs');
+            import.meta.resolve('node:not-real');
+            import.meta.resolve('https://EXAMPLE.com:443/a/../asset');
+            try { import.meta.resolve('missing-package'); } catch (error) {}
+        "#);
+        put(root.path(), "shared.mjs", "export const value = 42;");
+        std::fs::create_dir(root.path().join("assets")).unwrap();
+        let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        let encoded = capsule::encode(&graph).unwrap();
+        put(root.path(), "app.mjs", "throw Error('live source changed');");
+        put(root.path(), "missing/asset.json", "{}");
+        let replay = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+        assert_eq!(replay.report(), graph.report());
+        let registry = PinnedModuleRegistry::new(replay, &pin).ok().unwrap();
+        let entry = registry.entrypoint();
+        assert_eq!(registry.summary().modules, 2);
+        assert_eq!(registry.summary().routes, 1);
+        assert_eq!(registry.summary().resolution_routes, 0);
+        assert_eq!(registry.summary().url_resolution_targets, 6);
+        assert_eq!(registry.summary().url_resolution_routes, 8);
+        assert_eq!(registry.summary().missing_url_resolution_routes, 1);
+        let shared = registry.lookup(Some(entry), "./shared.mjs", RequestStyle::Import).unwrap();
+        assert_eq!(
+            registry.lookup_url_resolution(Some(entry), "./shared.mjs").unwrap().id(),
+            shared.id(),
+        );
+        assert_eq!(
+            registry.lookup_url_resolution(Some(entry), "./missing//asset.json?one#frag")
+                .unwrap().target(),
+            &ResolutionUrl::File {
+                id: ModuleId {
+                    path: "missing//asset.json".into(),
+                    url_suffix: "?one#frag".into(),
+                },
+            },
+        );
+        assert_eq!(
+            registry.lookup_url_resolution(Some(entry), "./assets/").unwrap().target(),
+            &ResolutionUrl::File {
+                id: ModuleId { path: "assets/".into(), url_suffix: String::new() },
+            },
+        );
+        for (request, expected) in [
+            ("fs", "node:fs"),
+            ("node:fs", "node:fs"),
+            ("node:not-real", "node:not-real"),
+            ("https://EXAMPLE.com:443/a/../asset", "https://example.com/asset"),
+        ] {
+            let metadata = registry.lookup_url_resolution(Some(entry), request).unwrap();
+            assert_eq!(metadata.target(), &ResolutionUrl::Absolute { url: expected.into() });
+            assert!(registry.lookup_url_resolution(Some(entry), metadata.id()).is_err());
+            assert!(registry.lookup_url_resolution(Some(shared.id()), request).is_err());
+            assert!(registry.lookup_url_resolution(None, request).is_err());
+            assert!(registry.lookup_resolution(Some(entry), request).is_err());
+            for style in [RequestStyle::Import, RequestStyle::Require, RequestStyle::ImportMetaResolve] {
+                assert!(registry.lookup(Some(entry), request, style).is_err());
+            }
+        }
+        assert_eq!(
+            registry.lookup_url_resolution(Some(entry), "missing-package").err().unwrap().code,
+            "ERR_MODULE_NOT_FOUND",
+        );
+        assert_eq!(registry.reachable_requests(None, entry, RequestStyle::Import).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn malformed_url_metadata_and_changed_purpose_fail_before_source_preparation() {
+        use std::cell::Cell;
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mjs", "import.meta.resolve('./missing.json');");
+        let bad = [
+            ResolutionUrl::File {
+                id: ModuleId { path: "../escape".into(), url_suffix: String::new() },
+            },
+            ResolutionUrl::File {
+                id: ModuleId { path: "/absolute".into(), url_suffix: String::new() },
+            },
+            ResolutionUrl::File {
+                id: ModuleId { path: "a\\b".into(), url_suffix: String::new() },
+            },
+            ResolutionUrl::File {
+                id: ModuleId { path: "missing.json".into(), url_suffix: "/extra".into() },
+            },
+            ResolutionUrl::Absolute { url: "file:///outside".into() },
+            ResolutionUrl::Absolute { url: "HTTPS://EXAMPLE.COM/".into() },
+        ];
+        for target in bad {
+            let mut graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
+            let pin = graph.report().input_hash.clone();
+            graph.report.edges[0].resolved_url = Some(target);
+            let prepared = Cell::new(false);
+            let result = PinnedModuleRegistry::new_with_kind_resolver(
+                graph,
+                &pin,
+                |_, _, _| {
+                    prepared.set(true);
+                    Ok(ModuleKind::EsModule)
+                },
+                |_, _| Ok(None),
+            );
+            assert_eq!(result.err().unwrap().code, "ERR_MODULE_REGISTRY_GRAPH");
+            assert!(!prepared.get());
+        }
+        let mut graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        graph.report.edges[0].kind = LoadKind::StaticImport;
+        assert_eq!(
+            PinnedModuleRegistry::new(graph, &pin).err().unwrap().code,
+            "ERR_MODULE_REGISTRY_GRAPH",
+        );
     }
 
     #[test]

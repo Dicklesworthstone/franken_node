@@ -16,14 +16,15 @@ use preparation::{PreparedSources, SourcePreparer};
 use super::registry::{
     ModuleKind, PinnedModuleRegistry, RegisteredModule, RegistrySummary, RequestStyle, ResolutionKind,
 };
-use super::{CapturedModuleGraph, ResolutionError as CaptureError};
+use super::{CapturedModuleGraph, ResolutionError as CaptureError, ResolutionUrl};
 use frankenengine_engine::capability::RuntimeCapability;
 use frankenengine_engine::hash_tiers::ContentHash;
 use frankenengine_engine::module_compatibility_matrix::CompatibilityMode;
 use frankenengine_engine::module_resolver::{
     ExecutionModuleResolver, ImportStyle, ModuleDependency, ModulePolicyHook, ModuleProvenance,
     ModuleRecord, ModuleRequest, ModuleResolver, ModuleSourceKind, ModuleSourceLocation, ModuleSyntax,
-    MetadataResolutionOutcome, ModuleMetadata, NativeBuiltinModule, ResolutionContext,
+    MetadataResolutionOutcome, ModuleMetadata, ModuleMetadataTarget, NativeBuiltinModule,
+    ResolutionContext,
     ResolutionError, ResolutionErrorCode, ResolutionEvent, ResolutionOutcome, ResolutionResult,
     ResolvedModule, ResolvedModuleMetadata, SharedModuleRecord, node_builtin_specifier,
     SharedResolutionOutcome, SharedResolvedModule,
@@ -179,6 +180,43 @@ impl CapturedEngineResolver {
                 .to_string();
             url.push_str(&origin.url_suffix);
             locations.insert(id.to_owned(), ModuleSourceLocation { filename, url });
+        }
+        for target in self.registry.url_resolutions() {
+            let ResolutionUrl::File { id: origin } = target.target() else {
+                continue;
+            };
+            if locations.contains_key(target.id()) {
+                continue;
+            }
+            let mut url = url::Url::from_directory_path(project_root).map_err(|_| {
+                super::error(
+                    "ERR_MODULE_ENGINE_SOURCE_LOCATION",
+                    "captured URL origin requires an absolute project directory",
+                )
+            })?;
+            if !origin.path.is_empty() {
+                // PathBuf normalizes empty components. URL lookup preserves
+                // them for absent paths and directories, so encode each decoded
+                // segment directly and retain inner and terminal separators.
+                url.path_segments_mut()
+                    .map_err(|_| {
+                        super::error(
+                            "ERR_MODULE_ENGINE_SOURCE_LOCATION",
+                            "captured URL origin has no hierarchical path",
+                        )
+                    })?
+                    .pop_if_empty()
+                    .extend(origin.path.split('/'));
+            }
+            let mut url = url.to_string();
+            url.push_str(&origin.url_suffix);
+            locations.insert(
+                target.id().to_owned(),
+                ModuleSourceLocation {
+                    filename: project_root.join(&origin.path),
+                    url,
+                },
+            );
         }
         Ok(ExecutionModuleResolver::new(
             self.registry.entrypoint(),
@@ -361,36 +399,56 @@ impl ModuleResolver for CapturedEngineResolver {
         policy: &dyn ModulePolicyHook,
     ) -> ResolutionResult<MetadataResolutionOutcome> {
         self.validate_request(request, context)?;
-        if request.style != ImportStyle::Require {
-            return Err(denied(
-                ResolutionErrorCode::UnsupportedSpecifier,
-                "captured filename lookup requires CommonJS resolution",
-                request,
-                context,
-                None,
-            ));
-        }
-        let target = self.registry
-            .lookup_resolution(request.referrer.as_deref(), &request.specifier)
-            .map_err(|error| registry_error(error, request, context))?;
-        let metadata = ModuleMetadata {
-            id: target.id().to_owned(),
-            required_capabilities: BTreeSet::from([RuntimeCapability::ModuleLoad]),
-            provenance: ModuleProvenance {
-                kind: match target.kind() {
-                    ResolutionKind::File => ModuleSourceKind::Workspace,
-                    ResolutionKind::Builtin => ModuleSourceKind::BuiltIn,
-                },
-                origin: match target.kind() {
-                    ResolutionKind::File => format!(
-                        "franken-node-source-graph:{}",
-                        self.registry.summary().graph_input_hash
-                    ),
-                    ResolutionKind::Builtin => target.origin().path.clone(),
-                },
-            },
+        let metadata = match request.style {
+            ImportStyle::Require => {
+                let target = self.registry
+                    .lookup_resolution(request.referrer.as_deref(), &request.specifier)
+                    .map_err(|error| registry_error(error, request, context))?;
+                ModuleMetadata {
+                    id: target.id().to_owned(),
+                    target: ModuleMetadataTarget::Filename,
+                    required_capabilities: BTreeSet::from([RuntimeCapability::ModuleLoad]),
+                    provenance: ModuleProvenance {
+                        kind: match target.kind() {
+                            ResolutionKind::File => ModuleSourceKind::Workspace,
+                            ResolutionKind::Builtin => ModuleSourceKind::BuiltIn,
+                        },
+                        origin: match target.kind() {
+                            ResolutionKind::File => format!(
+                                "franken-node-source-graph:{}",
+                                self.registry.summary().graph_input_hash
+                            ),
+                            ResolutionKind::Builtin => target.origin().path.clone(),
+                        },
+                    },
+                }
+            }
+            ImportStyle::Import => {
+                let target = self.registry
+                    .lookup_url_resolution(request.referrer.as_deref(), &request.specifier)
+                    .map_err(|error| registry_error(error, request, context))?;
+                ModuleMetadata {
+                    id: target.id().to_owned(),
+                    target: match target.target() {
+                        ResolutionUrl::File { .. } => ModuleMetadataTarget::SourceUrl,
+                        ResolutionUrl::Absolute { url } => {
+                            ModuleMetadataTarget::AbsoluteUrl(url.clone())
+                        }
+                    },
+                    required_capabilities: BTreeSet::from([RuntimeCapability::ModuleLoad]),
+                    provenance: ModuleProvenance {
+                        // This provenance describes the sealed workspace
+                        // observation, not an authenticated external provider.
+                        kind: ModuleSourceKind::Workspace,
+                        origin: format!(
+                            "franken-node-source-graph:{}",
+                            self.registry.summary().graph_input_hash
+                        ),
+                    },
+                }
+            }
         };
-        // Filename disclosure is a separate policy operation. No executable
+        // Metadata disclosure is a separate policy operation. No executable
         // record, source copy, source hash, preparation or evaluation cache is
         // consulted, and every repeated request receives a fresh decision.
         policy.authorize_metadata(request, &metadata, context).map_err(|failure| {
@@ -536,7 +594,7 @@ fn source_style(style: ImportStyle) -> RequestStyle {
 }
 fn engine_style(style: RequestStyle) -> ImportStyle {
     match style {
-        RequestStyle::Import => ImportStyle::Import,
+        RequestStyle::Import | RequestStyle::ImportMetaResolve => ImportStyle::Import,
         RequestStyle::Require | RequestStyle::RequireResolve => ImportStyle::Require,
     }
 }
@@ -1751,6 +1809,75 @@ mod tests {
     }
 
     #[test]
+    fn url_metadata_preserves_locations_and_rechecks_policy_without_materializing_sources() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mjs", r#"
+            import.meta.resolve('./missing//file.json?query#fragment');
+            import.meta.resolve('./assets/');
+            import.meta.resolve('./');
+            import.meta.resolve('./literal%25%23%3F.bin');
+            import.meta.resolve('node:not-real');
+            import.meta.resolve('https://EXAMPLE.com:443/a/../asset');
+        "#);
+        std::fs::create_dir(root.path().join("assets")).unwrap();
+        std::fs::write(root.path().join("literal%#?.bin"), [0, 255, 128]).unwrap();
+        let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        let resolver = Arc::new(CapturedEngineResolver::new(graph, &pin).ok().unwrap());
+        let installed = resolver.execution_resolver(root.path(), Arc::new(granted())).unwrap();
+        let request = |name: &str| ModuleRequest::new(name, ImportStyle::Import)
+            .with_referrer(resolver.entry_request().specifier)
+            .with_compatibility_mode(CompatibilityMode::NodeCompat);
+        let base = url::Url::from_directory_path(root.path()).unwrap().to_string();
+        for (name, suffix) in [
+            ("./missing//file.json?query#fragment", "missing//file.json?query#fragment"),
+            ("./assets/", "assets/"),
+            ("./", ""),
+            ("./literal%25%23%3F.bin", "literal%25%23%3F.bin"),
+        ] {
+            let result = resolver.resolve_metadata(&request(name), &context(), &granted()).unwrap();
+            assert_eq!(result.module.metadata.target, ModuleMetadataTarget::SourceUrl);
+            assert_eq!(
+                installed.source_location(&result.module.metadata.id).unwrap().url,
+                format!("{base}{suffix}"),
+            );
+            assert_eq!(
+                resolver.resolve_shared(&request(name), &context(), &AllowAllPolicy).unwrap_err().code,
+                ResolutionErrorCode::UnsupportedSpecifier,
+            );
+            let filename_request = ModuleRequest { style: ImportStyle::Require, ..request(name) };
+            assert_eq!(
+                resolver.resolve_metadata(&filename_request, &context(), &AllowAllPolicy).unwrap_err().code,
+                ResolutionErrorCode::UnsupportedSpecifier,
+            );
+        }
+        for (name, url) in [
+            ("node:not-real", "node:not-real"),
+            ("https://EXAMPLE.com:443/a/../asset", "https://example.com/asset"),
+        ] {
+            let result = resolver.resolve_metadata(&request(name), &context(), &granted()).unwrap();
+            assert_eq!(result.module.metadata.target, ModuleMetadataTarget::AbsoluteUrl(url.into()));
+            assert_eq!(result.module.metadata.provenance.kind, ModuleSourceKind::Workspace);
+            assert!(installed.source_location(&result.module.metadata.id).is_none());
+        }
+        let policy = ChangingPolicy { allowed: Cell::new(true), calls: Cell::new(0) };
+        let request = request("./missing//file.json?query#fragment");
+        resolver.resolve_metadata(&request, &context(), &policy).unwrap();
+        policy.allowed.set(false);
+        assert_eq!(
+            resolver.resolve_metadata(&request, &context(), &policy).unwrap_err().code,
+            ResolutionErrorCode::PolicyDenied,
+        );
+        assert_eq!(policy.calls.get(), 2);
+        assert_eq!(resolver.summary().modules, 1);
+        assert_eq!(resolver.summary().routes, 0);
+        assert_eq!(resolver.preparation_reports().count(), 0);
+        assert_eq!(resolver.hash_computations.load(Ordering::Relaxed), 0);
+        assert_eq!(resolver.retained_shared_source_bytes.load(Ordering::Relaxed), 0);
+        assert!(resolver.shared_records.values().all(|slot| slot.get().is_none()));
+    }
+
+    #[test]
     fn native_and_bun_mode_requests_cannot_relabel_captured_node_choices() {
         let root = tempfile::tempdir().unwrap();
         put(root.path(), "app.mjs", "export const x=1;");
@@ -2818,6 +2945,24 @@ module.exports = { State, Label, offset: require('./offset.cjs') };
     }
 
     #[test]
+    fn typescript_preparation_cannot_exchange_url_lookup_and_executable_import() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "asset.mjs", "export default 42;");
+        let metadata = "const value: unknown = import.meta.resolve('./asset.mjs'); export default value;";
+        let executable = "const value: unknown = import('./asset.mjs'); export default value;";
+        for (captured_source, altered) in [(metadata, executable), (executable, metadata)] {
+            put(root.path(), "app.mts", captured_source);
+            let graph = capture(root.path(), "app.mts", GraphOptions::default()).unwrap();
+            let entry = graph.report().modules.iter()
+                .find(|module| module.id.path == "app.mts").unwrap();
+            assert_eq!(
+                SourcePreparer::default().prepare(entry, altered, graph.report()).err().unwrap().code,
+                "ERR_MODULE_ENGINE_DEPENDENCY_DRIFT",
+            );
+        }
+    }
+
+    #[test]
     fn prepared_source_replay_never_reopens_the_original_project() {
         let root = tempfile::tempdir().unwrap();
         put(root.path(), "app.mts", "export const answer: number=42;");
@@ -3195,6 +3340,61 @@ console.log('value', {loader}('./value.cjs'));
                     .join("\n") + "\n";
                 assert_eq!(actual, reference, "{lane:?}, esm={esm}");
             }
+        }
+    }
+
+    #[test]
+    fn native_import_meta_resolve_matches_node_after_project_replacement() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let parent = tempfile::tempdir().unwrap();
+            let root = parent.path().join("project with spaces");
+            put(&root, "app.mjs", r#"
+import { locate } from './lib/paths.mjs';
+console.log('child', locate().endsWith('/lib/absent.json'));
+console.log(import.meta.resolve('./missing//asset.json?x#y').endsWith('/missing//asset.json?x#y'));
+console.log(import.meta.resolve('./assets/').endsWith('/assets/'));
+console.log(import.meta.resolve('./payload%25%23%3F.bin').endsWith('/payload%25%23%3F.bin'));
+console.log(import.meta.resolve('choice').endsWith('/node_modules/choice/import.json?mode=import#pick'));
+console.log('names', import.meta.resolve('fs'), import.meta.resolve('node:fs'), import.meta.resolve('node:not-real'));
+console.log('url', import.meta.resolve('https://EXAMPLE.com:443/a/../asset?q#f'));
+try { import.meta.resolve('missing-package'); }
+catch (error) { console.log('missing', error.code); }
+try { import.meta.resolve('choice/private'); }
+catch (error) { console.log('private', error.code); }
+"#);
+            put(&root, "lib/paths.mjs", "export function locate() { return import.meta.resolve('./absent.json'); }");
+            put(&root, "node_modules/choice/package.json",
+                r#"{"exports":{".":{"import":"./import.json?mode=import#pick","require":"./wrong.cjs"}}}"#);
+            put(&root, "node_modules/choice/import.json", "{ invalid JSON");
+            put(&root, "node_modules/choice/wrong.cjs", "throw Error('wrong conditions');");
+            std::fs::create_dir(root.join("assets")).unwrap();
+            std::fs::write(root.join("payload%#?.bin"), [0, 255, 128, 1]).unwrap();
+            let reference = node_reference_output(&root, "app.mjs");
+            assert_eq!(reference,
+                "child true\ntrue\ntrue\ntrue\ntrue\nnames node:fs node:fs node:not-real\nurl https://example.com/asset?q#f\nmissing ERR_MODULE_NOT_FOUND\nprivate ERR_PACKAGE_PATH_NOT_EXPORTED\n");
+            let graph = capture(&root, "app.mjs", GraphOptions::default()).unwrap();
+            assert_eq!(graph.report().modules.len(), 2);
+            assert!(graph.report().resolution_targets.is_empty());
+            assert!(graph.report().diagnostics.is_empty());
+            let encoded = capsule::encode(&graph).unwrap();
+            std::fs::rename(&root, parent.path().join("original-project")).unwrap();
+            put(&root, "app.mjs", "throw Error('live replacement was reopened');");
+            let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+            assert_eq!(replayed.report(), graph.report());
+            let result = execute_module_graph_with_policy_for_test(
+                &root,
+                replayed,
+                lane,
+                Arc::new(CapabilityPolicyHook::new(BTreeSet::from([RuntimeCapability::ModuleLoad]))),
+                || {},
+            ).expect("URL metadata executes through the real engine without loading target bytes");
+            let actual = result.console_output.iter()
+                .map(|line| line.message.as_str())
+                .collect::<Vec<_>>()
+                .join("\n") + "\n";
+            assert_eq!(actual, reference, "{lane:?}");
         }
     }
 
