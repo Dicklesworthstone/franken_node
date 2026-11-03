@@ -690,3 +690,120 @@ fn link_policy_flag_is_rejected_outside_file_resolution() {
         assert!(output.stdout.is_empty());
     }
 }
+
+#[test]
+fn repeated_package_graph_routes_match_node_and_replay_original_mapping_witnesses() {
+    let root = fixture();
+    put(
+        root.path(),
+        "package.json",
+        br##"{"name":"application","type":"commonjs","imports":{"#alias":"dual"}}"##,
+    );
+    for directory in ["node_modules/dual", "nested/node_modules/dual"] {
+        put(
+            root.path(),
+            &format!("{directory}/package.json"),
+            br#"{"exports":{"import":"./entry.mjs","require":"./entry.cjs"}}"#,
+        );
+        source(root.path(), &format!("{directory}/entry.mjs"));
+        source(root.path(), &format!("{directory}/entry.cjs"));
+    }
+    let importers = [
+        ("src/deep/first.cjs", "require"),
+        ("src/deep/second.cjs", "require"),
+        ("src/deep/first.mjs", "import"),
+        ("src/deep/second.mjs", "import"),
+        ("nested/deep/first.cjs", "require"),
+        ("nested/deep/second.cjs", "require"),
+    ];
+    let mut entry = String::new();
+    for (importer, mode) in importers {
+        let imports = if mode == "require" {
+            "require('dual'); require('#alias');"
+        } else {
+            "import 'dual'; import '#alias';"
+        };
+        put(root.path(), importer, imports.as_bytes());
+        entry.push_str(&format!("import './{importer}';\n"));
+    }
+    put(root.path(), "entry.mjs", entry.as_bytes());
+    let artifacts = tempfile::tempdir().unwrap();
+    let capsule = artifacts.path().join("packages.capsule");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_franken-module-graph"));
+    command
+        .arg(root.path())
+        .args([
+            "--capture-source-graph",
+            "entry.mjs",
+            "--write-source-capsule",
+        ])
+        .arg(&capsule);
+    let output = bounded(command);
+    assert!(output.status.success(), "{output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["verdict"], "CAPTURED");
+    let graph = &report["source_graph"];
+    assert_eq!(graph["modules"].as_array().unwrap().len(), 10);
+    assert_eq!(graph["edges"].as_array().unwrap().len(), 18);
+    for (importer, mode) in importers {
+        for request in ["dual", "#alias"] {
+            let edge = graph["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|edge| edge["importer"]["path"] == importer && edge["specifier"] == request)
+                .unwrap();
+            let reference = node(root.path(), importer, request, mode);
+            assert_eq!(
+                root.path()
+                    .join(edge["target"]["path"].as_str().unwrap())
+                    .to_str()
+                    .unwrap(),
+                reference["path"]
+            );
+            let kinds: Vec<_> = edge["mappings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|mapping| mapping["kind"].as_str().unwrap())
+                .collect();
+            assert_eq!(
+                kinds,
+                if request == "#alias" {
+                    vec!["imports", "exports"]
+                } else {
+                    vec!["exports"]
+                }
+            );
+        }
+    }
+    // Neither a new nearer installation nor changed package maps can alter the
+    // replayed warm routes or remove the original negative ancestor evidence.
+    put(
+        root.path(),
+        "node_modules/dual/package.json",
+        br#"{"exports":null}"#,
+    );
+    put(
+        root.path(),
+        "src/deep/node_modules/dual/package.json",
+        br#"{"exports":"./different.cjs"}"#,
+    );
+    source(root.path(), "src/deep/node_modules/dual/different.cjs");
+    put(
+        root.path(),
+        "entry.mjs",
+        b"throw new Error('live entry changed');",
+    );
+    let mut command = Command::new(env!("CARGO_BIN_EXE_franken-module-graph"));
+    command
+        .arg("--replay-source-capsule")
+        .arg(&capsule)
+        .arg("--expected-hash")
+        .arg(report["capsule_hash"].as_str().unwrap());
+    let output = bounded(command);
+    assert!(output.status.success(), "{output:?}");
+    let replayed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(replayed["verdict"], "REPLAYED");
+    assert_eq!(&replayed["source_graph"], graph);
+}

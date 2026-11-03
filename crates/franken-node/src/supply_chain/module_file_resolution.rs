@@ -10,7 +10,9 @@
 //! reopen after checking evidence. Observations are bounded, not an atomic
 //! snapshot of a hostile filesystem. Builtin requests require the runtime.
 
-use super::package_targets::{MapKind, PackageMap, ResolutionError, Selection, TargetKind};
+use super::package_targets::{
+    BranchStep, MapKind, PackageMap, ResolutionError, Selection, TargetKind,
+};
 use rustix::fs::{AtFlags, FileType, Mode, OFlags, open, openat, readlinkat_raw, statat};
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
@@ -31,6 +33,7 @@ const MAX_PROBES: usize = 1024;
 const MAX_FILE: usize = 16 * 1024 * 1024;
 const MAX_CAPTURE: usize = 32 * 1024 * 1024;
 const MAX_LINK_HOPS: usize = 40;
+const MAX_PACKAGE_CACHE_BYTES: usize = 1024 * 1024;
 const HASH_DOMAIN: &[u8] = b"franken-node/module-file-resolution/v2\0";
 type Result<T> = std::result::Result<T, ResolutionError>;
 
@@ -191,6 +194,114 @@ struct Manifest {
     imports: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PackageQuery {
+    mode: ResolutionMode,
+    lookup: PackageLookup,
+    depth: usize,
+}
+
+struct CachedPackageResolution {
+    query: PackageQuery,
+    conditions: Vec<String>,
+    target: (String, String),
+    mappings: Vec<Mapping>,
+}
+
+/// Successful lookup decisions over this capture's immutable filesystem inputs.
+/// The directory and exact request use borrowed lookups; the small bucket keeps
+/// import/require, package-URL lookup, conditions and recursion budgets distinct.
+/// No failure, source bytes or runtime authorization is retained here.
+#[derive(Default)]
+struct PackageCache {
+    directories: BTreeMap<String, BTreeMap<String, Vec<CachedPackageResolution>>>,
+    entries: usize,
+    retained_bytes: usize,
+}
+
+impl PackageCache {
+    fn get(
+        &self,
+        directory: &str,
+        request: &str,
+        query: PackageQuery,
+        conditions: &[String],
+    ) -> Option<&CachedPackageResolution> {
+        self.directories
+            .get(directory)?
+            .get(request)?
+            .iter()
+            .find(|entry| entry.query == query && entry.conditions == conditions)
+    }
+
+    fn retain(
+        &mut self,
+        directory: &str,
+        request: &str,
+        query: PackageQuery,
+        conditions: &[String],
+        target: &(String, String),
+        mappings: &[Mapping],
+    ) {
+        if self.entries >= MAX_PROBES {
+            return;
+        }
+        // Cap retained payload before cloning it. Counting shared map keys for
+        // every entry is conservative; the separate entry bound also bounds
+        // container overhead. Saturation disables further reuse, not admission.
+        let mut retained_bytes = self.retained_bytes;
+        let mut charge = |bytes: usize| {
+            retained_bytes = retained_bytes.checked_add(bytes)?;
+            (retained_bytes <= MAX_PACKAGE_CACHE_BYTES).then_some(())
+        };
+        let charged = (|| {
+            charge(std::mem::size_of::<CachedPackageResolution>())?;
+            for value in [directory, request, &target.0, &target.1] {
+                charge(value.len())?;
+            }
+            for condition in conditions {
+                charge(std::mem::size_of::<String>())?;
+                charge(condition.len())?;
+            }
+            for mapping in mappings {
+                charge(std::mem::size_of::<Mapping>())?;
+                for value in [
+                    &mapping.manifest,
+                    &mapping.input_hash,
+                    &mapping.request,
+                    &mapping.selection.target,
+                    &mapping.selection.matched_key,
+                ] {
+                    charge(value.len())?;
+                }
+                for step in &mapping.selection.branch {
+                    charge(std::mem::size_of::<BranchStep>())?;
+                    if let BranchStep::Condition(condition) = step {
+                        charge(condition.len())?;
+                    }
+                }
+            }
+            Some(())
+        })();
+        if charged.is_none() {
+            return;
+        }
+        self.directories
+            .entry(directory.into())
+            .or_default()
+            .entry(request.into())
+            .or_default()
+            .push(CachedPackageResolution {
+                query,
+                conditions: conditions.to_vec(),
+                target: target.clone(),
+                mappings: mappings.to_vec(),
+            });
+        self.entries += 1;
+        self.retained_bytes = retained_bytes;
+    }
+}
+
 struct Resolver {
     entries: BTreeMap<String, Rc<Entry>>,
     // Share immutable parsed maps across all lookups in this capture. Cloning
@@ -201,6 +312,7 @@ struct Resolver {
     // absence at node_modules boundaries. Keep exact lookup spellings and
     // bound this derived cache independently of captured filesystem inputs.
     scopes: BTreeMap<String, Option<String>>,
+    packages: PackageCache,
     captured: usize,
     conditions: Vec<String>,
     mappings: Vec<Mapping>,
@@ -318,6 +430,7 @@ impl Resolver {
             entries: BTreeMap::from([("".into(), Rc::new(Entry::Directory(Some(root))))]),
             manifests: BTreeMap::new(),
             scopes: BTreeMap::new(),
+            packages: PackageCache::default(),
             captured: 0,
             conditions,
             mappings: Vec::new(),
@@ -718,6 +831,47 @@ impl Resolver {
     }
 
     fn package(
+        &mut self,
+        directory: &str,
+        request: &str,
+        mode: ResolutionMode,
+        lookup: PackageLookup,
+        depth: usize,
+    ) -> Result<(String, String)> {
+        let query = PackageQuery {
+            mode,
+            lookup,
+            depth,
+        };
+        // A live cache hit repeats exactly the successful target and mapping
+        // witnesses whose inputs are already captured. Sealed replay must walk
+        // again: a missing negative probe is not evidence that a path was absent.
+        if !self.sealed
+            && let Some(cached) = self
+                .packages
+                .get(directory, request, query, &self.conditions)
+        {
+            self.mappings.extend_from_slice(&cached.mappings);
+            return Ok(cached.target.clone());
+        }
+        let mapping_start = self.mappings.len();
+        let result = self.package_uncached(directory, request, mode, lookup, depth);
+        if !self.sealed
+            && let Ok(target) = &result
+        {
+            self.packages.retain(
+                directory,
+                request,
+                query,
+                &self.conditions,
+                target,
+                &self.mappings[mapping_start..],
+            );
+        }
+        result
+    }
+
+    fn package_uncached(
         &mut self,
         directory: &str,
         request: &str,
@@ -1644,6 +1798,445 @@ mod tests {
         );
     }
 
+    fn package_cache_fixture() -> tempfile::TempDir {
+        let root = fixture();
+        put(
+            root.path(),
+            "package.json",
+            br##"{"name":"application","type":"commonjs","imports":{"#alias":"dual"}}"##,
+        );
+        put(root.path(), "src/deep/entry.cjs", b"");
+        put(root.path(), "nested/deep/entry.cjs", b"");
+        put(
+            root.path(),
+            "node_modules/dual/package.json",
+            br#"{"exports":{".":{"development":{"require":"./dev.cjs","import":"./dev.mjs"},"require":"./main.cjs","import":"./main.mjs"},"./query":"./main.cjs?revision=one","./blocked":null}}"#,
+        );
+        for name in ["main.cjs", "main.mjs", "dev.cjs", "dev.mjs"] {
+            put(root.path(), &format!("node_modules/dual/{name}"), b"");
+        }
+        put(
+            root.path(),
+            "nested/node_modules/dual/package.json",
+            br#"{"exports":"./near.cjs"}"#,
+        );
+        put(root.path(), "nested/node_modules/dual/near.cjs", b"");
+        put(root.path(), "node_modules/plain/index.js", b"");
+        put(root.path(), "node_modules/plain/leaf.js", b"");
+        root
+    }
+
+    #[test]
+    fn package_cache_preserves_lookup_algorithms_conditions_depth_and_mapping_witnesses() {
+        let root = package_cache_fixture();
+        let mut cached = Resolver::new(root.path(), &[], SymlinkPolicy::Reject).unwrap();
+        let mut original = Resolver::new(root.path(), &[], SymlinkPolicy::Reject).unwrap();
+        for (directory, request, mode, lookup, conditions, depth) in [
+            (
+                "src/deep",
+                "dual",
+                ResolutionMode::Require,
+                PackageLookup::CommonJs,
+                vec!["node", "require"],
+                0,
+            ),
+            (
+                "src/deep",
+                "dual",
+                ResolutionMode::Require,
+                PackageLookup::CommonJs,
+                vec!["development", "node", "require"],
+                0,
+            ),
+            (
+                "src/deep",
+                "dual",
+                ResolutionMode::Import,
+                PackageLookup::PackageUrl,
+                vec!["import", "node"],
+                0,
+            ),
+            (
+                "src/deep",
+                "dual",
+                ResolutionMode::Import,
+                PackageLookup::PackageUrl,
+                vec!["development", "import", "node"],
+                0,
+            ),
+            (
+                "nested/deep",
+                "dual",
+                ResolutionMode::Require,
+                PackageLookup::CommonJs,
+                vec!["node", "require"],
+                0,
+            ),
+            (
+                "src/deep",
+                "dual/query",
+                ResolutionMode::Require,
+                PackageLookup::CommonJs,
+                vec!["node", "require"],
+                0,
+            ),
+            (
+                "src/deep",
+                "dual/query",
+                ResolutionMode::Import,
+                PackageLookup::PackageUrl,
+                vec!["node", "require"],
+                0,
+            ),
+            (
+                "src/deep",
+                "plain/leaf",
+                ResolutionMode::Require,
+                PackageLookup::CommonJs,
+                vec!["node", "require"],
+                0,
+            ),
+            (
+                "src/deep",
+                "plain/leaf",
+                ResolutionMode::Require,
+                PackageLookup::PackageUrl,
+                vec!["node", "require"],
+                0,
+            ),
+            (
+                "src/deep",
+                "plain",
+                ResolutionMode::Require,
+                PackageLookup::CommonJs,
+                vec!["node", "require"],
+                0,
+            ),
+            (
+                "src/deep",
+                "dual",
+                ResolutionMode::Require,
+                PackageLookup::PackageUrl,
+                vec!["node", "require"],
+                1,
+            ),
+            (
+                "src/deep",
+                "dual",
+                ResolutionMode::Require,
+                PackageLookup::PackageUrl,
+                vec!["node", "require"],
+                MAX_DEPTH - 1,
+            ),
+            (
+                "src/deep",
+                "dual/blocked",
+                ResolutionMode::Require,
+                PackageLookup::CommonJs,
+                vec!["node", "require"],
+                0,
+            ),
+            (
+                "src/deep",
+                "missing",
+                ResolutionMode::Require,
+                PackageLookup::CommonJs,
+                vec!["node", "require"],
+                0,
+            ),
+        ] {
+            cached.conditions = conditions.iter().map(|value| (*value).to_owned()).collect();
+            original.conditions = cached.conditions.clone();
+            for _ in 0..3 {
+                cached.mappings.clear();
+                original.mappings.clear();
+                assert_eq!(
+                    cached.package(directory, request, mode, lookup, depth),
+                    original.package_uncached(directory, request, mode, lookup, depth),
+                    "{directory}: {request}"
+                );
+                assert_eq!(cached.mappings, original.mappings, "{request}");
+                assert_eq!(cached.probes(), original.probes(), "{request}");
+            }
+        }
+        assert_eq!(cached.packages.entries, 11);
+        assert!(original.packages.directories.is_empty());
+        // A caller mutating its returned witness cannot alter a cached choice.
+        cached.conditions = vec!["node".into(), "require".into()];
+        cached.mappings.clear();
+        cached
+            .package(
+                "src/deep",
+                "dual",
+                ResolutionMode::Require,
+                PackageLookup::CommonJs,
+                0,
+            )
+            .unwrap();
+        let witnesses = cached.mappings.clone();
+        cached.mappings[0].selection.target = "./injected.cjs".into();
+        cached.mappings.clear();
+        cached
+            .package(
+                "src/deep",
+                "dual",
+                ResolutionMode::Require,
+                PackageLookup::CommonJs,
+                0,
+            )
+            .unwrap();
+        assert_eq!(cached.mappings, witnesses);
+
+        // Internal-import selection belongs to this request's package scope.
+        // A cached external package result contributes only its exports suffix,
+        // after the freshly selected imports witness, never a prior prefix.
+        original.conditions = cached.conditions.clone();
+        for _ in 0..3 {
+            cached.mappings.clear();
+            original.mappings.clear();
+            original.packages = PackageCache::default();
+            assert_eq!(
+                cached.request("src/deep", "#alias", ResolutionMode::Require, 0),
+                original.request("src/deep", "#alias", ResolutionMode::Require, 0)
+            );
+            assert_eq!(cached.mappings, original.mappings);
+            assert_eq!(
+                cached
+                    .mappings
+                    .iter()
+                    .map(|mapping| mapping.kind)
+                    .collect::<Vec<_>>(),
+                [MapKind::Imports, MapKind::Exports]
+            );
+            assert_eq!(cached.probes(), original.probes());
+        }
+    }
+
+    #[test]
+    fn package_cache_keeps_captured_absence_aliases_and_failure_inputs() {
+        let root = package_cache_fixture();
+        for directory in ["left", "right"] {
+            link(root.path(), &format!("{directory}/alias"), "../src");
+            put(
+                root.path(),
+                &format!("{directory}/node_modules/plain/index.js"),
+                b"",
+            );
+        }
+        let conditions = ResolutionMode::Require.default_conditions();
+        let mut cached = Resolver::new(root.path(), &conditions, SymlinkPolicy::Contained).unwrap();
+        let mut original =
+            Resolver::new(root.path(), &conditions, SymlinkPolicy::Contained).unwrap();
+        for directory in [
+            "src/deep",
+            "left/alias/deep",
+            "right/alias/deep",
+            "src/deep",
+            "right/alias/deep",
+        ] {
+            assert_eq!(
+                cached.package(
+                    directory,
+                    "plain",
+                    ResolutionMode::Require,
+                    PackageLookup::CommonJs,
+                    0
+                ),
+                original.package_uncached(
+                    directory,
+                    "plain",
+                    ResolutionMode::Require,
+                    PackageLookup::CommonJs,
+                    0
+                )
+            );
+            assert_eq!(cached.probes(), original.probes());
+        }
+        put(
+            root.path(),
+            "src/deep/node_modules/plain/index.js",
+            b"new closer package",
+        );
+        for resolver in [&mut cached, &mut original] {
+            let found = resolver
+                .package(
+                    "src/deep",
+                    "plain",
+                    ResolutionMode::Require,
+                    PackageLookup::CommonJs,
+                    0,
+                )
+                .unwrap();
+            assert_eq!(found.0, "node_modules/plain/index.js");
+        }
+        let mut fresh = Resolver::new(root.path(), &conditions, SymlinkPolicy::Contained).unwrap();
+        assert_eq!(
+            fresh
+                .package(
+                    "src/deep",
+                    "plain",
+                    ResolutionMode::Require,
+                    PackageLookup::CommonJs,
+                    0
+                )
+                .unwrap()
+                .0,
+            "src/deep/node_modules/plain/index.js"
+        );
+        let before = cached.packages.entries;
+        put(
+            root.path(),
+            "bad/node_modules/broken/package.json",
+            b"{invalid}",
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                cached
+                    .package(
+                        "bad",
+                        "broken",
+                        ResolutionMode::Require,
+                        PackageLookup::CommonJs,
+                        0
+                    )
+                    .unwrap_err()
+                    .code,
+                "ERR_INVALID_PACKAGE_CONFIG"
+            );
+            assert_eq!(cached.packages.entries, before);
+        }
+    }
+
+    #[test]
+    fn package_cache_saturation_preserves_original_lookup_and_probe_evidence() {
+        let root = package_cache_fixture();
+        let conditions = ResolutionMode::Require.default_conditions();
+        let mut cached = Resolver::new(root.path(), &conditions, SymlinkPolicy::Reject).unwrap();
+        let mut original = Resolver::new(root.path(), &conditions, SymlinkPolicy::Reject).unwrap();
+        for index in 0..MAX_PROBES + 8 {
+            let directory = format!("absent/child-{index}");
+            assert_eq!(
+                cached.package(
+                    &directory,
+                    "plain",
+                    ResolutionMode::Require,
+                    PackageLookup::CommonJs,
+                    0
+                ),
+                original.package_uncached(
+                    &directory,
+                    "plain",
+                    ResolutionMode::Require,
+                    PackageLookup::CommonJs,
+                    0
+                )
+            );
+            assert_eq!(cached.probes(), original.probes());
+        }
+        assert_eq!(cached.packages.entries, MAX_PROBES);
+        assert!(cached.packages.retained_bytes <= MAX_PACKAGE_CACHE_BYTES);
+        assert!(cached.entries.len() < 32);
+
+        // Different valid complete condition sets exhaust retained payload
+        // before the entry count. Both cases fall back to the original search.
+        let mut bounded = Resolver::new(root.path(), &[], SymlinkPolicy::Reject).unwrap();
+        for index in 0..160 {
+            bounded.conditions = (0..62)
+                .map(|condition| format!("condition-{index:03}-{condition:03}-{}", "x".repeat(108)))
+                .chain(["node".into(), "require".into()])
+                .collect();
+            original.conditions = bounded.conditions.clone();
+            assert_eq!(
+                bounded.package(
+                    "src/deep",
+                    "plain",
+                    ResolutionMode::Require,
+                    PackageLookup::CommonJs,
+                    0
+                ),
+                original.package_uncached(
+                    "src/deep",
+                    "plain",
+                    ResolutionMode::Require,
+                    PackageLookup::CommonJs,
+                    0
+                )
+            );
+            assert!(bounded.packages.retained_bytes <= MAX_PACKAGE_CACHE_BYTES);
+        }
+        assert!(bounded.packages.entries > 1 && bounded.packages.entries < 160);
+    }
+
+    #[test]
+    fn sealed_package_walks_ignore_cached_success_and_require_negative_probes() {
+        let root = package_cache_fixture();
+        let conditions = ResolutionMode::Require.default_conditions();
+        let mut cached = Resolver::new(root.path(), &conditions, SymlinkPolicy::Reject).unwrap();
+        let mut original = Resolver::new(root.path(), &conditions, SymlinkPolicy::Reject).unwrap();
+        assert_eq!(
+            cached.package(
+                "src/deep",
+                "dual",
+                ResolutionMode::Require,
+                PackageLookup::CommonJs,
+                0
+            ),
+            original.package_uncached(
+                "src/deep",
+                "dual",
+                ResolutionMode::Require,
+                PackageLookup::CommonJs,
+                0
+            )
+        );
+        let retained = cached.packages.entries;
+        for resolver in [&mut cached, &mut original] {
+            resolver.sealed = true;
+            resolver.manifests.clear();
+            resolver.observed.clear();
+            resolver.mappings.clear();
+        }
+        assert_eq!(
+            cached.package(
+                "src/deep",
+                "dual",
+                ResolutionMode::Require,
+                PackageLookup::CommonJs,
+                0
+            ),
+            original.package_uncached(
+                "src/deep",
+                "dual",
+                ResolutionMode::Require,
+                PackageLookup::CommonJs,
+                0
+            )
+        );
+        assert_eq!(cached.mappings, original.mappings);
+        assert_eq!(cached.observed, original.observed);
+        assert_eq!(cached.probes(), original.probes());
+        assert!(cached.observed.contains("src/deep/node_modules"));
+        assert_eq!(cached.packages.entries, retained);
+        cached.entries.remove("src/deep/node_modules");
+        cached.manifests.clear();
+        cached.observed.clear();
+        cached.mappings.clear();
+        assert_eq!(
+            cached
+                .package(
+                    "src/deep",
+                    "dual",
+                    ResolutionMode::Require,
+                    PackageLookup::CommonJs,
+                    0
+                )
+                .unwrap_err()
+                .code,
+            "ERR_MODULE_CAPSULE_INPUT_MISSING"
+        );
+        assert_eq!(cached.packages.entries, retained);
+    }
+
     #[test]
     fn package_scope_reuses_immutable_manifest_maps_within_one_capture() {
         let root = fixture();
@@ -2398,6 +2991,7 @@ mod tests {
             entries: BTreeMap::from([("".into(), Rc::new(Entry::Directory(Some(directory))))]),
             manifests: BTreeMap::new(),
             scopes: BTreeMap::new(),
+            packages: PackageCache::default(),
             captured: 0,
             conditions: Vec::new(),
             mappings: Vec::new(),
@@ -2439,6 +3033,7 @@ mod tests {
             )]),
             manifests: BTreeMap::new(),
             scopes: BTreeMap::new(),
+            packages: PackageCache::default(),
             captured: MAX_CAPTURE,
             conditions: Vec::new(),
             mappings: Vec::new(),

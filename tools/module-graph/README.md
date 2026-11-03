@@ -657,3 +657,56 @@ effects, a type-checking environment, or a hostile filesystem's atomic state.
 Parser/resolver changes that alter the reconstructed graph are reported as a
 replay mismatch rather than silently accepted. This build exposes the graph
 analysis and capsule API on Unix; the encoded artifact itself has no host paths.
+
+## Repeated npm package lookup and capture performance
+
+Live source capture reuses completed package resolutions within one immutable
+capture. Reuse is keyed by the exact importer directory, request, import/require
+mode, CommonJS/package-URL lookup algorithm, complete condition set and recursion
+depth. It retains the original package-map witnesses; it does not retain source
+copies, failures or runtime policy decisions. The derived cache has a 1,024-entry
+and 1 MiB retained-payload bound. Saturation falls back to the original lookup.
+Sealed replay always repeats the search so every required positive and negative
+filesystem observation remains checked.
+
+`bench_package_capture.py` compares two independently built module-graph binaries:
+
+```sh
+python3 tools/module-graph/bench_package_capture.py \
+  /absolute/path/to/module-graph-before /absolute/path/to/module-graph-after \
+  --samples 11 --build-profile debug --parent /tmp > package-capture-comparison.json
+```
+
+The script writes only newly created temporary fixtures and retains them for
+inspection. It bounds every subprocess, records executable SHA-256s and the Node
+reference version/checksum, alternates sample order and checks every complete
+serialized report byte-for-byte. Both binaries must encode identical capsules
+and reconstruct the same graph after the live entry file changes. The Node leg
+executes the fixture programs to check their results; its time is not compared
+with source inspection.
+
+The npm fan-in workload has eight deep source directories, eight importers per
+directory and sixteen shared conditional-export subpaths: 81 modules, 1,088
+edges and 402 captured probes. A separate control loads 64 distinct packages
+once each (65 modules, 64 edges, 196 probes), exposing cache insertion cost when
+no lookup can be reused.
+
+On 2026-11-03, unoptimized binaries built with `nightly-2026-09-21` produced these
+11-pair medians. The original input was commit `4d5c5e4c808b42d804069d23a5104e21f6e6c589`:
+
+| Source-capture workload | Original median | Cached median |
+| --- | ---: | ---: |
+| Repeated npm fan-in | 2,074.33 ms | 521.16 ms |
+| Distinct-package control | 36.84 ms | 34.69 ms |
+
+The fan-in result is a 3.98x local source-capture improvement. The small control
+is noisy and does not establish a separate gain. The binary SHA-256s were
+`3386769b50ed0682ea942fa093b788296abb07a7c6c18d14f6feb6db147c6768`
+(original) and
+`1a4711ed921f704d67c3ca34047ef9775dd67fd6d843f9d7f9f6fea1484e02a3`
+(candidate). Every timed report matched exactly. A separate untimed correctness
+round with those same binaries also confirmed identical 84,830-byte and
+31,272-byte capsules and exact replay after source mutation. This measures
+inspection of generated npm project graphs; it does not qualify native program
+execution, production cold start, release performance or speed relative to
+Node/Bun.

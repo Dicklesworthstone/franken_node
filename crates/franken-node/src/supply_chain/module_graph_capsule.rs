@@ -284,6 +284,7 @@ fn recorded_resolver(header: &Header, payload: &[u8]) -> Result<Resolver> {
         entries,
         manifests: BTreeMap::new(),
         scopes: BTreeMap::new(),
+        packages: super::super::PackageCache::default(),
         captured,
         conditions,
         mappings: Vec::new(),
