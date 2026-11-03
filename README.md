@@ -582,6 +582,28 @@ it does not repeat filesystem writes, network requests, or child processes.
 The original source and input files may be missing or changed. An unused transcript suffix,
 an unexpected request, or a different result fails verification.
 
+Run-derived exports also carry the exact original signed run record. An
+exporter can sign the incident with a different key without replacing that
+original authority. To require both signatures and bind the incident's receipt,
+effect ledger, native capture and outcome to the original statement:
+
+```bash
+franken-node incident replay --bundle INCIDENT_ID.fnbundle --execute \
+    --trusted-public-key keys/bundle-exporter.pub \
+    --trusted-run-public-key keys/original-run-authority.pub --json
+```
+
+The original run key is supplied independently; a key embedded in the bundle
+cannot establish trust. A missing proof, wrong original signer or inconsistent
+run binding fails before guest execution. Successful JSON reports
+`run_origin_verified: true` and the authenticated receipt identity. The same
+portable verification is available in the [verifier SDK and its Python,
+JavaScript and TypeScript bindings](sdk/verifier/RUN_ORIGIN.md), without the
+original project or private keys. This verifies the original receipt authority's
+statement; independent engine-session certification and guest re-execution
+remain separate checks. Historical managed captures require their original
+authenticated run record when first exported with this proof.
+
 | Replay mode | Verified result |
 |---|---|
 | Default, `replay_kind: recorded_trace` | Signature, bundle integrity, and the recorded decision sequence. |

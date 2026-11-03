@@ -2050,19 +2050,26 @@ pub fn read_bundle_from_path_with_trusted_keys(
     path: &Path,
     trusted_key_ids: &[String],
 ) -> Result<ReplayBundle, ReplayBundleError> {
-    // Check file size before reading to prevent memory exhaustion DoS attacks
-    let metadata = std::fs::metadata(path)?;
-    if metadata.len() > MAX_REPLAY_BUNDLE_BYTES {
+    let bytes = crate::bounded_read(path, MAX_REPLAY_BUNDLE_BYTES)?;
+    parse_replay_bundle_with_trusted_keys(&bytes, trusted_key_ids)
+}
+
+/// Authenticate a bounded, unambiguous snapshot of a replay bundle. Consumers
+/// that additionally verify its original run authority can pass these same
+/// bytes to both verifiers before executing any captured guest input.
+pub fn parse_replay_bundle_with_trusted_keys(
+    bytes: &[u8],
+    trusted_key_ids: &[String],
+) -> Result<ReplayBundle, ReplayBundleError> {
+    if bytes.len() as u64 > MAX_REPLAY_BUNDLE_BYTES {
         return Err(ReplayBundleError::FormatError(format!(
             "Replay bundle size {} bytes exceeds maximum {} bytes",
-            metadata.len(),
+            bytes.len(),
             MAX_REPLAY_BUNDLE_BYTES
         )));
     }
-
-    let file = std::fs::File::open(path)?;
-    let reader = std::io::BufReader::new(file);
-    let bundle: ReplayBundle = serde_json::from_reader(reader)?;
+    let value = serde_json::from_slice::<UniqueEvidenceJson>(bytes)?.0;
+    let bundle: ReplayBundle = serde_json::from_value(value)?;
     validate_adversarial_bundle_shape(&bundle)?;
     verify_replay_bundle_integrity_and_signature(
         &bundle,
@@ -4241,6 +4248,28 @@ mod tests {
         let trusted_key_id = fixture_trusted_key_id();
         read_bundle_from_path_with_trusted_key(&path, Some(&trusted_key_id))
             .expect("trusted read should still work");
+    }
+
+    #[test]
+    fn parse_replay_snapshot_rejects_duplicate_members_before_verification() {
+        let bundle = signed_fixture_bundle("INC-RPL-SNAPSHOT");
+        let json = to_canonical_json(&bundle).expect("canonical bundle");
+        let keys = vec![fixture_trusted_key_id()];
+        let verified = parse_replay_bundle_with_trusted_keys(json.as_bytes(), &keys)
+            .expect("authenticate original immutable byte snapshot");
+        assert_eq!(verified.integrity_hash, bundle.integrity_hash);
+        let duplicate = format!(
+            "{{\"incident_id\":\"misleading-first-value\",{}",
+            &json[1..],
+        );
+        let error = parse_replay_bundle_with_trusted_keys(duplicate.as_bytes(), &keys)
+            .expect_err("even a valid last-value signature must not permit duplicate keys");
+        assert!(error.to_string().contains("duplicate"), "{error}");
+        assert!(
+            parse_replay_bundle_with_trusted_keys(json.as_bytes(), &["untrusted".to_string()])
+                .is_err(),
+            "immutable snapshots still require independent trust",
+        );
     }
 
     #[test]

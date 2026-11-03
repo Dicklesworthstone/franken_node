@@ -18,15 +18,30 @@ fn resolve_binary_path() -> PathBuf {
 }
 
 fn run_cli_in_workspace(workspace: &Path, args: &[&str]) -> Output {
+    run_cli_in_workspace_with_state_home(workspace, args, None)
+}
+
+fn run_cli_in_workspace_with_state_home(
+    workspace: &Path,
+    args: &[&str],
+    state_home: Option<&Path>,
+) -> Output {
     let binary_path = resolve_binary_path();
     assert!(
         binary_path.is_file(),
         "franken-node binary not found at {}",
         binary_path.display()
     );
-    Command::new(&binary_path)
-        .current_dir(workspace)
-        .args(args)
+    let mut command = Command::new(&binary_path);
+    command.current_dir(workspace).args(args);
+    if let Some(state_home) = state_home {
+        command
+            .env("XDG_STATE_HOME", state_home)
+            .env("XDG_CONFIG_HOME", state_home.join("config"))
+            .env_remove("FRANKEN_NODE_PROFILE")
+            .env_remove("FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH");
+    }
+    command
         .output()
         .unwrap_or_else(|err| panic!("failed running `{}`: {err}", args.join(" ")))
 }
@@ -1994,26 +2009,55 @@ fn native_replay_workspace_with_arguments(
     allow_process_shape: bool,
     app_args: &[&str],
 ) -> (tempfile::TempDir, serde_json::Value) {
+    native_replay_workspace_with_arguments_in_state_home(
+        source,
+        profile,
+        expect_success,
+        allow_process_shape,
+        app_args,
+        None,
+    )
+}
+
+#[cfg(feature = "engine")]
+fn native_replay_workspace_with_arguments_in_state_home(
+    source: &str,
+    profile: &str,
+    expect_success: bool,
+    allow_process_shape: bool,
+    app_args: &[&str],
+    state_home: Option<&Path>,
+) -> (tempfile::TempDir, serde_json::Value) {
     let workspace = tempfile::tempdir().expect("native replay workspace");
     fs::write(workspace.path().join("app.js"), source).expect("write actual guest program");
     fs::write(workspace.path().join("input.txt"), "ORIGINAL").expect("write live guest input");
-    let initialized = run_cli_in_workspace(
+    let initialized = run_cli_in_workspace_with_state_home(
         workspace.path(),
         &["init", "--profile", profile, "--out-dir", ".", "--json"],
+        state_home,
     );
     assert!(
         initialized.status.success(),
         "init failed: {}",
         String::from_utf8_lossy(&initialized.stderr)
     );
-    let recorded = Command::new(resolve_binary_path())
+    let mut command = Command::new(resolve_binary_path());
+    command
         .current_dir(workspace.path())
         .args(["run", "app.js", "--capture-replay", "--json", "--"])
         .args(app_args)
         .env(
             "FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE",
             if allow_process_shape { "true" } else { "false" },
-        )
+        );
+    if let Some(state_home) = state_home {
+        command
+            .env("XDG_STATE_HOME", state_home)
+            .env("XDG_CONFIG_HOME", state_home.join("config"))
+            .env_remove("FRANKEN_NODE_PROFILE")
+            .env_remove("FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH");
+    }
+    let recorded = command
         .output()
         .expect("capture the native program's actual launch arguments");
     assert_eq!(
@@ -2105,6 +2149,127 @@ fn execute_native_replay_with(bundle_name: &str, invoke: impl FnOnce(&[&str]) ->
         ".franken-node/keys/receipt-signing.pub",
         "--json",
     ])
+}
+
+#[cfg(feature = "engine")]
+#[test]
+fn native_incident_run_origin_survives_exporter_change_and_rejects_wrong_authority() {
+    use ed25519_dalek::{SigningKey, VerifyingKey};
+    use frankenengine_verifier_sdk::incident_bundle::verify_incident_bundle_with_run_key;
+
+    let state_home = tempfile::tempdir().expect("external native evidence state");
+    let (workspace, run) = native_replay_workspace_with_arguments_in_state_home(
+        "const {readFileSync}=require('fs'); console.log(readFileSync('input.txt','utf8'));\n",
+        "balanced",
+        true,
+        false,
+        &[],
+        Some(state_home.path()),
+    );
+    let receipt_id = run["receipt"]["receipt_id"]
+        .as_str()
+        .expect("native receipt");
+    let (name, first) = capture_native_run_bundle_with(workspace.path(), receipt_id, |args| {
+        run_cli_in_workspace_with_state_home(workspace.path(), args, Some(state_home.path()))
+    });
+    let original_record = first["initial_state_snapshot"]["run_origin"]["record_json"]
+        .as_str()
+        .expect("capture retains the original signed record")
+        .to_string();
+    let exporter = SigningKey::from_bytes(&[0x52; 32]);
+    fs::write(
+        workspace.path().join("exporter.key"),
+        hex::encode(exporter.to_bytes()),
+    )
+    .unwrap();
+    let export = run_cli_in_workspace_with_state_home(
+        workspace.path(),
+        &[
+            "incident",
+            "bundle",
+            "--id",
+            first["incident_id"].as_str().unwrap(),
+            "--receipt-signing-key",
+            "exporter.key",
+            "--verify",
+            "--json",
+        ],
+        Some(state_home.path()),
+    );
+    assert!(export.status.success(), "{export:?}");
+    let exported: serde_json::Value = serde_json::from_slice(&export.stdout).unwrap();
+    assert_eq!(exported["source_authenticated"], true);
+    assert_eq!(exported["run_origin_authenticated"], true);
+    let bytes = fs::read(workspace.path().join(&name)).unwrap();
+    let bundle: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        bundle["initial_state_snapshot"]["run_origin"]["record_json"], original_record,
+        "export must preserve the exact original record, including telemetry and extensions",
+    );
+    let run_public = fs::read_to_string(
+        workspace
+            .path()
+            .join(".franken-node/keys/receipt-signing.pub"),
+    )
+    .unwrap();
+    let mut run_key_bytes = [0_u8; 32];
+    hex::decode_to_slice(run_public.trim(), &mut run_key_bytes).unwrap();
+    let run_key = VerifyingKey::from_bytes(&run_key_bytes).unwrap();
+    assert_ne!(run_key, exporter.verifying_key());
+    let verified = verify_incident_bundle_with_run_key(&bytes, &exporter.verifying_key(), &run_key)
+        .expect("independent SDK authenticates both actual producer signatures");
+    assert_eq!(verified.run_origin.receipt_id, receipt_id);
+    assert!(
+        verify_incident_bundle_with_run_key(
+            &bytes,
+            &exporter.verifying_key(),
+            &exporter.verifying_key()
+        )
+        .is_err(),
+        "export authority cannot substitute for the original run authority",
+    );
+
+    // Replay from a separate operator project with only the public anchors and
+    // bundle. None of the original receipt store, keys, source or inputs exist
+    // here, and no signing capability is needed to authenticate the run.
+    let operator = config_only_workspace();
+    let operator_state = tempfile::tempdir().expect("independent replay state");
+    fs::write(operator.path().join(&name), bytes).unwrap();
+    fs::write(operator.path().join("run.pub"), run_public).unwrap();
+    fs::write(
+        operator.path().join("exporter.pub"),
+        hex::encode(exporter.verifying_key().to_bytes()),
+    )
+    .unwrap();
+    for (run_anchor, expected_success) in [("exporter.pub", false), ("run.pub", true)] {
+        let replay = run_cli_in_workspace_with_state_home(
+            operator.path(),
+            &[
+                "incident",
+                "replay",
+                "--bundle",
+                &name,
+                "--trusted-public-key",
+                "exporter.pub",
+                "--trusted-run-public-key",
+                run_anchor,
+                "--execute",
+                "--json",
+            ],
+            Some(operator_state.path()),
+        );
+        assert_eq!(replay.status.success(), expected_success, "{replay:?}");
+        let report: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
+        if expected_success {
+            assert_eq!(report["run_origin_verified"], true);
+            assert_eq!(report["run_origin"]["receipt_id"], receipt_id);
+            assert_eq!(report["execution_result"]["matched"], true);
+        } else {
+            assert_eq!(report["ok"], false);
+            assert!(report["error"].as_str().unwrap().contains("before replay"));
+            assert!(report.get("execution_result").is_none());
+        }
+    }
 }
 
 #[cfg(all(feature = "engine", feature = "external-commands", target_os = "linux"))]

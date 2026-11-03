@@ -2483,6 +2483,12 @@ pub struct IncidentReplayArgs {
     #[arg(long = "key-dir", alias = "trusted-key-dir")]
     pub trusted_key_dir: Option<PathBuf>,
 
+    /// Independently trusted original run-receipt public key. Require the
+    /// bundled original run signature and its exact incident bindings before
+    /// reporting success or executing captured guest input.
+    #[arg(long)]
+    pub trusted_run_public_key: Option<PathBuf>,
+
     /// Re-execute captured JavaScript with recorded host-I/O results and
     /// verify guest completion or a certified uncaught-exception prefix.
     /// Runtime module loading is disabled; policy decisions are compared
@@ -3522,6 +3528,34 @@ mod parser_contract_extra_tests {
             }
             other => return Err(format!("expected incident replay, got {other:?}")),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn incident_replay_accepts_independent_bundle_and_run_authorities() -> Result<(), String> {
+        let cli = parse(&[
+            "franken-node",
+            "incident",
+            "replay",
+            "--bundle",
+            "incident.fnbundle",
+            "--trusted-public-key",
+            "exporter.pub",
+            "--trusted-run-public-key",
+            "runtime.pub",
+            "--execute",
+            "--json",
+        ])
+        .map_err(|error| error.to_string())?;
+        let Command::Incident(IncidentCommand::Replay(args)) = cli.command else {
+            return Err("expected incident replay".to_string());
+        };
+        assert_eq!(args.trusted_public_key, Some(PathBuf::from("exporter.pub")));
+        assert_eq!(
+            args.trusted_run_public_key,
+            Some(PathBuf::from("runtime.pub"))
+        );
+        assert!(args.execute && args.json);
         Ok(())
     }
 
