@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import sys
 import tempfile
 import time
@@ -247,6 +248,158 @@ class CapturedExecutionTests(unittest.TestCase):
         inventory = runner.captured_test_inventory(capture)
         self.assertEqual(list(inventory), ["scripts/check.js"])
         self.assertEqual(runner._test_input(inventory["scripts/check.js"], {e.path: e for e in capture}), b"captured")
+
+    def test_capture_refuses_ancestor_replacement_after_directory_enumeration(self):
+        # The scan opens the original directory. Replacing its pathname before
+        # the capture consumes those names must never import outside bytes.
+        # The race changes the real filesystem; no source reads are mocked.
+        for replace_root in (False, True):
+            with self.subTest(replace_root=replace_root), tempfile.TemporaryDirectory() as temporary:
+                area = Path(temporary)
+                project, external = area / "project", area / "external"
+                target = project if replace_root else project / "nested"
+                target.mkdir(parents=True)
+                external.mkdir()
+                (target / "probe.test.js").write_bytes(b"captured source")
+                (external / "probe.test.js").write_bytes(b"outside private source")
+                original = target.stat()
+                scandir = os.scandir
+                changed = False
+
+                def race(directory):
+                    nonlocal changed
+                    metadata = os.fstat(directory) if isinstance(directory, int) else os.stat(directory)
+                    iterator = scandir(directory)
+                    if not changed and (metadata.st_dev, metadata.st_ino) == (original.st_dev, original.st_ino):
+                        changed = True
+                        target.rename(area / "preserved-original")
+                        target.symlink_to(external, target_is_directory=True)
+                    return iterator
+
+                with patch.object(runner.os, "scandir", side_effect=race):
+                    with self.assertRaisesRegex(ValueError, "changed.*capture|capture.*changed"):
+                        runner.capture_project(project, time.monotonic() + 5)
+                self.assertTrue(changed)
+                self.assertEqual((external / "probe.test.js").read_bytes(), b"outside private source")
+
+    def test_capture_leaf_open_remains_bound_to_its_observed_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            area = Path(temporary)
+            project, external = area / "project", area / "external"
+            parent = project / "nested"
+            parent.mkdir(parents=True)
+            external.mkdir()
+            source = parent / "probe.test.js"
+            source.write_bytes(b"captured source")
+            outside = external / source.name
+            outside.write_bytes(b"outside private source")
+            outside_metadata = outside.stat()
+            original_open = os.open
+            changed = False
+            outside_opened = False
+
+            def race(path, flags, *args, **kwargs):
+                nonlocal changed, outside_opened
+                if not changed and Path(path).name == source.name:
+                    changed = True
+                    parent.rename(area / "preserved-original")
+                    parent.symlink_to(external, target_is_directory=True)
+                descriptor = original_open(path, flags, *args, **kwargs)
+                metadata = os.fstat(descriptor)
+                outside_opened |= ((metadata.st_dev, metadata.st_ino) ==
+                                   (outside_metadata.st_dev, outside_metadata.st_ino))
+                return descriptor
+
+            with patch.object(runner.os, "open", side_effect=race):
+                with self.assertRaisesRegex(ValueError, "changed.*capture|capture.*changed"):
+                    runner.capture_project(project, time.monotonic() + 5)
+            self.assertTrue(changed)
+            self.assertFalse(outside_opened, "capture opened an external leaf through a replaced ancestor")
+
+    def test_capture_refuses_a_subtree_skipped_after_directory_replacement(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            area = Path(temporary)
+            project, external = area / "project", area / "external"
+            parent = project / "nested"
+            parent.mkdir(parents=True)
+            external.mkdir()
+            (parent / "probe.test.js").write_bytes(b"captured source")
+            (external / "probe.test.js").write_bytes(b"outside private source")
+            original_open = os.open
+            changed = False
+
+            def race(path, flags, *args, **kwargs):
+                nonlocal changed
+                if not changed and str(path) == "nested" and kwargs.get("dir_fd") is not None:
+                    # fwalk has already observed the ordinary directory. It
+                    # safely skips the replacement rather than yielding it;
+                    # the producer must reject that missing captured subtree.
+                    changed = True
+                    parent.rename(area / "preserved-original")
+                    parent.symlink_to(external, target_is_directory=True)
+                return original_open(path, flags, *args, **kwargs)
+
+            with patch.object(runner.os, "open", side_effect=race):
+                with self.assertRaisesRegex(ValueError, "inventory changed during capture"):
+                    runner.capture_project(project, time.monotonic() + 5)
+            self.assertTrue(changed)
+
+    def test_capture_link_validation_preserves_deadline_and_cancellation(self):
+        self.put("target", "captured source")
+        (self.root / "alias").symlink_to("target")
+        validate_links = runner._validate_snapshot_links
+        for interrupted in (False, True):
+            with self.subTest(cancelled=interrupted):
+                cancellation = runner.CancellationState()
+                deadline = time.monotonic() + 10
+
+                def interrupt_validation(entries, **kwargs):
+                    self.assertIs(kwargs["cancellation"], cancellation)
+                    self.assertEqual(kwargs["deadline"], deadline)
+                    if interrupted:
+                        cancellation.signum = signal.SIGTERM
+                    with patch.object(runner.time, "monotonic", return_value=deadline):
+                        return validate_links(entries, **kwargs)
+
+                with patch.object(runner, "_validate_snapshot_links", side_effect=interrupt_validation):
+                    error = runner.ExecutionCancelled if interrupted else TimeoutError
+                    with self.assertRaises(error):
+                        runner.capture_project(self.root, deadline, cancellation=cancellation)
+
+    def test_absolute_root_alias_preserves_an_intermediate_link_back_to_root(self):
+        project, staged, alias = self.root / "project", self.root / "staged", self.root / "root-alias"
+        project.mkdir()
+        self.put("value", "root", project)
+        self.put("subdir/value", "subdir", project)
+        alias.symlink_to(project, target_is_directory=True)
+        (project / "middle").symlink_to(".", target_is_directory=True)
+        (project / "chain").symlink_to(alias / "middle", target_is_directory=True)
+        entries, _ = runner.capture_project(project, time.monotonic() + 5)
+        runner.stage_project(entries, staged, time.monotonic() + 5)
+        # Preserving the root alias must not flatten the separate "middle"
+        # hop merely because that hop currently resolves back to the root.
+        observed = []
+        for root in (project, staged):
+            (root / "middle").rename(root / "preserved-middle")
+            (root / "middle").symlink_to("subdir", target_is_directory=True)
+            observed.append((root / "chain/value").read_text())
+        self.assertEqual(observed, ["subdir", "subdir"])
+        self.assertEqual({entry.path: entry.link for entry in entries}["chain"], "middle")
+
+    @unittest.skipUnless(NODE, "real Node executable required")
+    def test_descriptor_capture_preserves_multifile_packages_and_internal_links(self):
+        self.put("node_modules/tiny/package.json", '{"name":"tiny","version":"1.0.0","main":"index.cjs"}')
+        self.put("node_modules/tiny/index.cjs", "module.exports = require('./lib/value.cjs');")
+        self.put("node_modules/tiny/lib/value.cjs", "module.exports = 42;")
+        self.put("fixtures/message", "captured")
+        (self.root / "message-link").symlink_to("fixtures/message")
+        self.put("probe.test.cjs", "const fs = require('fs');console.log(require('tiny'), fs.readFileSync('message-link', 'utf8'));")
+        report = self.validate(executable=NODE, compare_filesystem=True)
+        self.assertEqual(report["summary"]["verdict"], "PASS", report)
+        for leg in ("baseline", "migration"):
+            row = report["validation_results"][0][leg]
+            self.assertEqual(row["streams"]["stdout"]["sha256"], hashlib.sha256(b"42 captured\n").hexdigest())
+            self.assertEqual(row["workspace_delta"]["changed_paths"], 0)
 
     def test_candidate_cannot_substitute_settings_or_stdin_before_runtime_resolution(self):
         before, after = self.root / "before", self.root / "after"

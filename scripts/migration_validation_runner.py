@@ -34,7 +34,7 @@ import time
 import unicodedata
 import zipfile
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -705,15 +705,22 @@ def _relative_link_target(target) -> str:
     return target
 
 
-def _validate_snapshot_links(entries: dict[str, SnapshotEntry]) -> None:
+def _validate_snapshot_links(entries: dict[str, SnapshotEntry], *, deadline: float | None = None,
+                             cancellation: CancellationState | None = None) -> None:
     """Resolve captured links without consulting or touching the host filesystem."""
     for entry in entries.values():
+        check_cancellation(cancellation)
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("total validation budget exhausted during project capture")
         if entry.link is None:
             continue
         pending = entry.path.split("/")[:-1] + entry.link.split("/")
         resolved: list[str] = []
         expansions = 0
         while pending:
+            check_cancellation(cancellation)
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("total validation budget exhausted during project capture")
             component, pending = pending[0], pending[1:]
             if component in {"", "."}:
                 continue
@@ -1151,77 +1158,122 @@ def capture_project(project: Path, deadline: float, *,
     Dependencies and project configuration are included; .git is excluded.
     Internal links are preserved (absolute internal links become relative).
     External links and special files are refused rather than touching targets
-    outside the disposable workspace. This is not an atomic filesystem snapshot.
+    outside the disposable workspace. Every source open is relative to a held
+    directory descriptor: replacing a directory with a symlink cannot redirect
+    later reads. This is not an atomic filesystem snapshot.
     """
     check_cancellation(cancellation)
     project = Path(project).resolve(strict=True)
-    if not project.is_dir():
+    root_metadata = project.stat(follow_symlinks=False)
+    if not stat.S_ISDIR(root_metadata.st_mode):
         raise ValueError("project capture root must be a directory")
     entries = []
     total = 0
-    for directory, names, files in os.walk(project, followlinks=False, onerror=raise_walk_error):
-        names[:] = sorted(n for n in names if n != ".git")
-        for name in sorted(names + [name for name in files if name != ".git"]):
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    # Open the canonical root component by component. O_NOFOLLOW on only the
+    # final component would still follow a replaced ancestor of the root.
+    root_descriptor = os.open(project.anchor, directory_flags)
+    try:
+        for component in project.parts[1:]:
             check_cancellation(cancellation)
             if time.monotonic() >= deadline:
                 raise TimeoutError("total validation budget exhausted during project capture")
-            path = Path(directory) / name
-            relative = path.relative_to(project).as_posix()
-            metadata = path.lstat()
-            mode = stat.S_IMODE(metadata.st_mode) & 0o777
-            if stat.S_ISLNK(metadata.st_mode):
-                target = path.resolve(strict=True)
-                if not target.is_relative_to(project):
-                    raise ValueError(f"external workspace symlink refused: {relative}")
-                link = os.readlink(path)
-                lexical_target = Path(os.path.abspath(path.parent / link))
-                if os.path.isabs(link) and not lexical_target.is_relative_to(project):
-                    # An absolute link may spell the captured root through an
-                    # alias (for example macOS /var -> /private/var). Rebase
-                    # only that root prefix, preserving all links inside it.
-                    # Resolving the entire target would flatten a->b->c and
-                    # change behavior when a test retargets b.
-                    for prefix in (lexical_target, *lexical_target.parents):
-                        check_cancellation(cancellation)
-                        if prefix.resolve(strict=True) == project:
-                            lexical_target = project / lexical_target.relative_to(prefix)
-                            break
-                if (not lexical_target.is_relative_to(project)
-                        or ".git" in lexical_target.relative_to(project).parts
-                        or ".git" in target.relative_to(project).parts):
-                    raise ValueError(f"external or excluded workspace symlink refused: {relative}")
-                # Preserve intermediate links: flattening a->b->c would change
-                # program behavior when a test retargets b.
-                if os.path.isabs(link):
-                    link = os.path.relpath(lexical_target, path.parent)
-                entry = SnapshotEntry(relative, None, mode, link)
-            elif stat.S_ISDIR(metadata.st_mode):
-                entry = SnapshotEntry(relative, None, mode)
-            elif stat.S_ISREG(metadata.st_mode):
-                if metadata.st_nlink != 1:
-                    raise ValueError(f"hard-linked workspace files require explicit isolation: {relative}")
-                if metadata.st_size > MAX_PROJECT_BYTES - total:
-                    raise ValueError(f"project exceeds {MAX_PROJECT_BYTES}-byte capture budget")
-                flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
-                with os.fdopen(os.open(path, flags), "rb") as source:
-                    before = os.fstat(source.fileno())
-                    if not stat.S_ISREG(before.st_mode):
+            child_descriptor = os.open(component, directory_flags, dir_fd=root_descriptor)
+            os.close(root_descriptor)
+            root_descriptor = child_descriptor
+        if _file_version(root_metadata) != _file_version(os.fstat(root_descriptor)):
+            raise ValueError("project root changed before capture")
+        directories = {"": _file_version(root_metadata)}
+        visited = set()
+        with closing(os.fwalk(".", dir_fd=root_descriptor, follow_symlinks=False,
+                              onerror=raise_walk_error)) as walk:
+            for directory, names, files, directory_descriptor in walk:
+                check_cancellation(cancellation)
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("total validation budget exhausted during project capture")
+                directory_name = "" if directory == "." else Path(directory).as_posix()
+                expected_directory = directories.get(directory_name)
+                if expected_directory != _file_version(os.fstat(directory_descriptor)):
+                    raise ValueError("project directory changed before capture")
+                visited.add(directory_name)
+                names[:] = sorted(n for n in names if n != ".git")
+                for name in sorted(names + [name for name in files if name != ".git"]):
+                    check_cancellation(cancellation)
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("total validation budget exhausted during project capture")
+                    relative = (Path(directory_name) / name).as_posix()
+                    path = project / relative
+                    metadata = os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False)
+                    mode = stat.S_IMODE(metadata.st_mode) & 0o777
+                    if stat.S_ISLNK(metadata.st_mode):
+                        link = os.readlink(name, dir_fd=directory_descriptor)
+                        lexical_target = Path(os.path.abspath(path.parent / link))
+                        if os.path.isabs(link) and not lexical_target.is_relative_to(project):
+                            # Rebase only an absolute alias of the captured root
+                            # (such as macOS /var -> /private/var). Preserve all
+                            # intermediate links; captured topology is checked
+                            # below without opening live target contents.
+                            # Choose the outermost alias, not a later link
+                            # within the project that happens to point back to
+                            # its root. That later hop may be retargeted.
+                            for prefix in reversed((lexical_target, *lexical_target.parents)):
+                                check_cancellation(cancellation)
+                                if time.monotonic() >= deadline:
+                                    raise TimeoutError("total validation budget exhausted during project capture")
+                                if prefix.resolve(strict=True) == project:
+                                    lexical_target = project / lexical_target.relative_to(prefix)
+                                    break
+                            if not lexical_target.is_relative_to(project):
+                                raise ValueError(f"external workspace symlink refused: {relative}")
+                        if (not lexical_target.is_relative_to(project)
+                                or ".git" in lexical_target.relative_to(project).parts):
+                            raise ValueError(f"external or excluded workspace symlink refused: {relative}")
+                        if os.path.isabs(link):
+                            link = os.path.relpath(lexical_target, path.parent)
+                        if _file_version(metadata) != _file_version(os.stat(
+                                name, dir_fd=directory_descriptor, follow_symlinks=False)):
+                            raise ValueError(f"project symlink changed during capture: {relative}")
+                        entry = SnapshotEntry(relative, None, mode, link)
+                    elif stat.S_ISDIR(metadata.st_mode):
+                        directories[relative] = _file_version(metadata)
+                        entry = SnapshotEntry(relative, None, mode)
+                    elif stat.S_ISREG(metadata.st_mode):
+                        if metadata.st_nlink != 1:
+                            raise ValueError(f"hard-linked workspace files require explicit isolation: {relative}")
+                        if metadata.st_size > MAX_PROJECT_BYTES - total:
+                            raise ValueError(f"project exceeds {MAX_PROJECT_BYTES}-byte capture budget")
+                        flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
+                        with os.fdopen(os.open(name, flags, dir_fd=directory_descriptor), "rb") as source:
+                            before = os.fstat(source.fileno())
+                            if not stat.S_ISREG(before.st_mode):
+                                raise ValueError(f"nonregular project input refused: {relative}")
+                            if _file_version(metadata) != _file_version(before):
+                                raise ValueError(f"project input changed before capture: {relative}")
+                            data = source.read(MAX_PROJECT_BYTES - total + 1)
+                            after = os.fstat(source.fileno())
+                        if (_file_version(before) != _file_version(after)
+                                or _file_version(before) != _file_version(os.stat(
+                                    name, dir_fd=directory_descriptor, follow_symlinks=False))):
+                            raise ValueError(f"project input changed during capture: {relative}")
+                        total += len(data)
+                        if total > MAX_PROJECT_BYTES:
+                            raise ValueError(f"project exceeds {MAX_PROJECT_BYTES}-byte capture budget")
+                        entry = SnapshotEntry(relative, data, mode)
+                    else:
                         raise ValueError(f"nonregular project input refused: {relative}")
-                    if _file_version(metadata) != _file_version(before):
-                        raise ValueError(f"project input changed before capture: {relative}")
-                    data = source.read(MAX_PROJECT_BYTES - total + 1)
-                    after = os.fstat(source.fileno())
-                if _file_version(before) != _file_version(after):
-                    raise ValueError(f"project input changed during capture: {relative}")
-                total += len(data)
-                if total > MAX_PROJECT_BYTES:
-                    raise ValueError(f"project exceeds {MAX_PROJECT_BYTES}-byte capture budget")
-                entry = SnapshotEntry(relative, data, mode)
-            else:
-                raise ValueError(f"nonregular project input refused: {relative}")
-            entries.append(entry)
-            if len(entries) > MAX_PROJECT_FILES:
-                raise ValueError(f"project exceeds {MAX_PROJECT_FILES}-entry capture budget")
+                    entries.append(entry)
+                    if len(entries) > MAX_PROJECT_FILES:
+                        raise ValueError(f"project exceeds {MAX_PROJECT_FILES}-entry capture budget")
+                if expected_directory != _file_version(os.fstat(directory_descriptor)):
+                    raise ValueError("project directory changed during capture")
+        # fwalk safely skips directory replacements; an omitted subtree must
+        # still fail capture instead of silently shrinking the input inventory.
+        if visited != set(directories) or _file_version(root_metadata) != _file_version(os.fstat(root_descriptor)):
+            raise ValueError("project directory inventory changed during capture")
+        _validate_snapshot_links({entry.path: entry for entry in entries},
+                                 deadline=deadline, cancellation=cancellation)
+    finally:
+        os.close(root_descriptor)
     return entries, snapshot_digest(entries)
 
 

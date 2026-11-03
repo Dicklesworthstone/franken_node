@@ -153,7 +153,14 @@ class RuntimeIdentityTests(unittest.TestCase):
         changed = False
         def race(path, flags, *args, **kwargs):
             nonlocal changed
-            if Path(path) == self.source and not changed:
+            descriptor = kwargs.get("dir_fd")
+            source_parent = self.source.parent.stat()
+            observed_parent = os.fstat(descriptor) if descriptor is not None else None
+            selected_source = (Path(path) == self.source or
+                               (str(path) == self.source.name and observed_parent is not None
+                                and (observed_parent.st_dev, observed_parent.st_ino) ==
+                                    (source_parent.st_dev, source_parent.st_ino)))
+            if selected_source and not changed:
                 changed = True
                 self.source.chmod(0o777)
             return real_open(path, flags, *args, **kwargs)
