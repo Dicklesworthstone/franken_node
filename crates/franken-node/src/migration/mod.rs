@@ -51,6 +51,7 @@ pub use rewrite_transaction::rollback;
 pub mod verified_rewrite;
 
 pub mod rollout;
+pub use rollout::cohort::attestation as report_attestation;
 
 /// Maximum allowed file size for migration operations to prevent DoS via parser bombs.
 /// External package.json, source files, etc. could be maliciously crafted as large files.

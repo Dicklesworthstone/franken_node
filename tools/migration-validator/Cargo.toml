@@ -11,6 +11,17 @@ default-run = "franken-migration-suite"
 # library graph. The selected franken-node binary is a real child process.
 [workspace]
 
+# Include the production graph and its schema without enabling the optional
+# engine-only source adapter in these focused operator hosts.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("engine"))'] }
+
+[lib]
+name = "franken_migration_schema"
+path = "../../crates/franken-node/src/schema_versions.rs"
+test = false
+doctest = false
+
 [[bin]]
 name = "franken-migration-suite"
 path = "main.rs"

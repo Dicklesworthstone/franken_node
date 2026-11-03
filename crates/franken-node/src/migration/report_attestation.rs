@@ -125,6 +125,213 @@ pub fn project_key(project: &std::path::Path) -> Result<VerifyingKey> {
     public_key(text.strip_suffix("\r\n").or_else(|| text.strip_suffix('\n')).unwrap_or(text))
 }
 
+/// The primary CLI and standalone validator share this live producer. It never
+/// signs an imported report or substitutes a second runtime after a failure.
+#[cfg(target_os = "linux")]
+pub mod execution {
+    use super::{SCHEMA, project_key, seal, verify};
+    use super::super::validation_suite::{
+        ApprovedInputs, native_replay, rewrite_candidate::RewriteCandidate,
+    };
+    use anyhow::{Context, Result, ensure};
+    use ed25519_dalek::SigningKey;
+    use serde::Serialize;
+    use std::fs::{self, File};
+    use std::io::{Read, Write};
+    use std::os::unix::fs::MetadataExt;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
+    use zeroize::Zeroizing;
+
+    /// Both digests are mandatory for distinct original/candidate projects.
+    /// Same-tree callers may explicitly approve execution of the current tree.
+    pub struct Selection {
+        pub project: PathBuf,
+        pub migrated_project: Option<PathBuf>,
+        pub expected_input_sha256: Option<String>,
+        pub expected_candidate_input_sha256: Option<String>,
+        pub attest_regression: bool,
+    }
+
+    /// Publication and validation are distinct outcomes: a signed native FAIL
+    /// is useful recovery evidence, but the caller MUST retain a failing exit.
+    #[derive(Debug, Serialize)]
+    pub struct PublishedAttestation {
+        pub schema_version: &'static str,
+        pub report: PathBuf,
+        pub signer_public_key: String,
+        pub input_sha256: String,
+        pub candidate_input_sha256: String,
+        pub total_tests: usize,
+        pub verdict: String,
+        pub regression_attested: bool,
+        pub release_certification: bool,
+    }
+
+    pub(crate) fn destination(path: &Path) -> Result<PathBuf> {
+        ensure!(path.is_absolute(), "key and report destinations must be absolute");
+        let parent = path.parent().context("destination parent missing")?.canonicalize()?;
+        let name = path.file_name().context("destination filename missing")?;
+        let path = parent.join(name);
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path),
+            Err(error) => Err(error.into()),
+            Ok(_) => anyhow::bail!("destination already exists; refusing to overwrite it"),
+        }
+    }
+
+    pub(crate) fn load_secret(path: &Path, projects: &[&Path]) -> Result<SigningKey> {
+        use rustix::fs::{Mode, OFlags, open};
+        ensure!(path.is_absolute() && fs::symlink_metadata(path)?.is_file(),
+            "signing key must be an absolute regular file, not a symlink");
+        let path = path.canonicalize()?;
+        ensure!(!projects.iter().any(|project| path.starts_with(project)),
+            "signing key must remain outside both captured projects");
+        let mut file = File::from(open(&path,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC, Mode::empty())?);
+        let metadata = file.metadata()?;
+        ensure!(metadata.is_file() && metadata.len() == 32 && metadata.mode() & 0o077 == 0
+            && metadata.nlink() == 1,
+            "signing key must be an owner-only, single-link regular 32-byte raw seed");
+        let mut seed = Zeroizing::new([0_u8; 32]);
+        file.read_exact(seed.as_mut())?;
+        let mut extra = [0_u8; 1];
+        ensure!(file.read(&mut extra)? == 0, "signing key changed length");
+        let after = file.metadata()?;
+        ensure!(metadata.len() == after.len() && metadata.ctime() == after.ctime()
+            && metadata.ctime_nsec() == after.ctime_nsec(), "signing key changed while reading");
+        Ok(SigningKey::from_bytes(&seed))
+    }
+
+    /// Resolve aliases once. Validate complete approvals before opening a key
+    /// or resolving an executable, including for callers that bypass Clap.
+    pub(crate) fn resolve_inputs(inputs: &Selection) -> Result<(PathBuf, PathBuf)> {
+        let pins = (&inputs.expected_input_sha256, &inputs.expected_candidate_input_sha256);
+        ensure!(pins.0.is_some() == pins.1.is_some(), "both reviewed input hashes are required");
+        ensure!(inputs.migrated_project.is_none() || pins.0.is_some(),
+            "--migrated-project requires both reviewed input hashes");
+        for pin in [pins.0, pins.1].into_iter().flatten() {
+            ensure!(pin.len() == 64 && pin.bytes().all(|b|
+                b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                "reviewed input hashes must be 64 lowercase hexadecimal characters");
+        }
+        let original = inputs.project.canonicalize().context("resolve original project")?;
+        let candidate = inputs.migrated_project.as_deref().unwrap_or(&inputs.project)
+            .canonicalize().context("resolve candidate project")?;
+        ensure!(original.is_dir() && candidate.is_dir(), "input projects must be directories");
+        ensure!(original == candidate || (!original.starts_with(&candidate) && !candidate.starts_with(&original)),
+            "distinct input projects must not be nested");
+        Ok((original, candidate))
+    }
+
+    /// Recapture only to refuse stale evidence, never to redefine either input.
+    pub(crate) fn current_inventory(
+        original: &Path,
+        candidate: &Path,
+        original_pin: &str,
+        candidate_pin: &str,
+        deadline: Instant,
+    ) -> Result<Vec<PathBuf>> {
+        let original_now = RewriteCandidate::capture(original, deadline)?;
+        ensure!(original_now.input_sha256() == original_pin,
+            "original project changed during attested validation");
+        let candidate_now = if candidate == original {
+            None
+        } else {
+            Some(RewriteCandidate::capture(candidate, deadline)?)
+        };
+        let current = candidate_now.as_ref().unwrap_or(&original_now);
+        ensure!(current.input_sha256() == candidate_pin,
+            "candidate project changed during attested validation");
+        let tests = current.test_inventory()?;
+        original_now.ensure_source_unchanged()?;
+        if let Some(candidate_now) = candidate_now {
+            candidate_now.ensure_source_unchanged()?;
+        }
+        Ok(tests)
+    }
+
+    /// Measure every captured test under all three runtimes with filesystem
+    /// comparison and publish an exclusively created, independently anchored
+    /// signature. The private key and output must remain outside BOTH projects.
+    /// A published regression remains a failed validation, never a rollout grant.
+    pub fn run(
+        inputs: &Selection,
+        native: &Path,
+        bun: &Path,
+        key: &Path,
+        out: &Path,
+        approved: bool,
+    ) -> Result<PublishedAttestation> {
+        ensure!(approved, "--execute is required before running project code");
+        let (original, candidate) = resolve_inputs(inputs)?;
+        let destination = destination(out)?;
+        let destination = native_replay::output_destination(&destination, &[&original, &candidate])?;
+        let signing = load_secret(key, &[&original, &candidate])?;
+        let trusted = project_key(&candidate)?;
+        ensure!(signing.verifying_key() == trusted,
+            "signing key does not match the independently installed candidate validation key");
+
+        let deadline = Instant::now() + Duration::from_secs(300);
+        let (original_pin, candidate_pin) = match (
+            &inputs.expected_input_sha256, &inputs.expected_candidate_input_sha256,
+        ) {
+            (Some(original), Some(candidate)) => (original.clone(), candidate.clone()),
+            (None, None) => {
+                let captured = RewriteCandidate::capture(&original, deadline)?;
+                let pin = captured.input_sha256().to_owned();
+                (pin.clone(), pin)
+            }
+            _ => anyhow::bail!("both reviewed input hashes are required"),
+        };
+        // The one-use production API checks BOTH pins and identical test
+        // inventories before runtime discovery, then consumes those snapshots.
+        let admitted = ApprovedInputs::capture(
+            &original, Some(&candidate), &original_pin, &candidate_pin,
+        )?;
+        let report = admitted.run_product(native, bun, true)?;
+        let tests = current_inventory(&original, &candidate, &original_pin, &candidate_pin, deadline)?;
+        let regression = inputs.attest_regression && report.verdict == "FAIL";
+        if regression {
+            native_replay::failure_capture::product::check_native_regression(
+                &report, &original_pin, &candidate_pin, &tests,
+            ).context("refusing to attest incomplete or inconsistent native regression evidence")?;
+        } else {
+            report.check_admission(&original_pin, &candidate_pin, &tests)
+                .with_context(|| format!("refusing to attest a nonpassing or incomplete live suite ({})", report.verdict))?;
+        }
+        ensure!(report.native_runtime.sha256 != report.node_runtime.sha256
+            && report.native_runtime.sha256 != report.bun_runtime.sha256,
+            "attestation requires three distinct runtime executable hashes");
+        ensure!(project_key(&candidate)? == trusted,
+            "validation trust anchor changed during execution");
+        let raw = serde_json::to_vec(&report)?;
+        let sealed = seal(&raw, &signing)?;
+        ensure!(verify(&sealed, &trusted)? == raw,
+            "signed report failed local verification");
+        current_inventory(&original, &candidate, &original_pin, &candidate_pin, deadline)?;
+        ensure!(project_key(&candidate)? == trusted,
+            "validation trust anchor changed before publication");
+        let parent = destination.parent().context("report parent missing")?;
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        temporary.write_all(&sealed)?;
+        temporary.as_file().sync_all()?;
+        temporary.persist_noclobber(&destination).map_err(|error| error.error)?;
+        File::open(parent)?.sync_all()?;
+        Ok(PublishedAttestation {
+            schema_version: SCHEMA,
+            report: destination,
+            signer_public_key: hex::encode(trusted.to_bytes()),
+            input_sha256: report.input_sha256,
+            candidate_input_sha256: report.candidate_input_sha256,
+            total_tests: report.total_tests,
+            verdict: report.verdict,
+            regression_attested: regression,
+            release_certification: false,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

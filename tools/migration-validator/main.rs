@@ -7,6 +7,23 @@ use clap::Parser;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+// Dependency admission and workspace resolution share the product's canonical
+// graph implementation, including its schema identities and namespace paths.
+#[cfg(target_os = "linux")]
+use franken_migration_schema as schema_versions;
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+#[path = "../../crates/franken-node/src/supply_chain/module_resolution_graph.rs"]
+pub(crate) mod module_resolution_graph;
+#[cfg(target_os = "linux")]
+mod supply_chain {
+    pub(crate) use crate::module_resolution_graph;
+}
+#[cfg(target_os = "linux")]
+mod migration {
+    pub(crate) use crate::dependency_admission;
+}
+
 #[cfg(target_os = "linux")]
 #[path = "../../crates/franken-node/src/migration/dependency_admission.rs"]
 pub mod dependency_admission;

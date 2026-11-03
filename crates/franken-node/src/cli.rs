@@ -1069,6 +1069,54 @@ pub struct MigrateValidateArgs {
     /// which runtime is installed).
     #[arg(long)]
     pub static_only: bool,
+
+    /// Execute every captured test under Node, Bun and this native binary,
+    /// compare filesystem effects, and sign the live report for rollout.
+    /// Requires a separately installed candidate validation public key.
+    #[arg(
+        long,
+        requires_all = ["bun_bin", "signing_key", "out", "execute"],
+        conflicts_with = "static_only"
+    )]
+    pub attest: bool,
+
+    /// Absolute Bun executable for attested three-runtime validation.
+    #[arg(long, requires = "attest")]
+    pub bun_bin: Option<PathBuf>,
+
+    /// Dedicated owner-only 32-byte raw Ed25519 seed outside both projects.
+    #[arg(long, requires = "attest")]
+    pub signing_key: Option<PathBuf>,
+
+    /// New absolute signed-report path outside both projects; never overwritten.
+    #[arg(long, requires = "attest")]
+    pub out: Option<PathBuf>,
+
+    /// Approve attested execution of trusted project code with ambient
+    /// authority. Disposable workspaces are not an OS sandbox.
+    #[arg(long, requires = "attest")]
+    pub execute: bool,
+
+    /// Candidate project for native execution; Node and Bun use project_path.
+    /// Both independently reviewed input digests are required.
+    #[arg(
+        long,
+        requires_all = ["attest", "expected_input_sha256", "expected_candidate_input_sha256"]
+    )]
+    pub migrated_project: Option<PathBuf>,
+
+    /// Independently reviewed original capture digest, 64 lowercase hex digits.
+    #[arg(long, requires_all = ["attest", "expected_candidate_input_sha256"])]
+    pub expected_input_sha256: Option<String>,
+
+    /// Independently reviewed candidate digest; repeat the original for one tree.
+    #[arg(long, requires_all = ["attest", "expected_input_sha256"])]
+    pub expected_candidate_input_sha256: Option<String>,
+
+    /// Also sign a complete native regression with agreeing successful references.
+    /// Validation still exits nonzero; ERROR/INCONCLUSIVE are never signed.
+    #[arg(long, requires = "attest")]
+    pub attest_regression: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -4641,6 +4689,78 @@ mod tests {
             }
             other => panic!("expected migrate validate, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn migrate_validate_attestation_requires_complete_explicit_execution_mode() {
+        let required = [
+            "--attest", "--bun-bin", "/bun", "--signing-key", "/key",
+            "--out", "/report", "--execute",
+        ];
+        let mut command = vec!["franken-node", "migrate", "validate", "/project"];
+        command.extend(required);
+        command.push("--json");
+        let cli = Cli::try_parse_from(&command).expect("complete live attestation command");
+        let Command::Migrate(MigrateCommand::Validate(args)) = cli.command else {
+            panic!("expected migrate validate");
+        };
+        assert!(args.attest && args.execute && args.json);
+        assert!(!args.static_only);
+        assert_eq!(args.bun_bin, Some(PathBuf::from("/bun")));
+        assert_eq!(args.out, Some(PathBuf::from("/report")));
+
+        for missing in ["--attest", "--execute"] {
+            let incomplete: Vec<_> = command.iter().copied()
+                .filter(|argument| *argument != missing).collect();
+            assert!(Cli::try_parse_from(incomplete).is_err(), "{missing}");
+        }
+        for incompatible in ["--static-only", "--native-bin"] {
+            let mut invalid = command.clone();
+            invalid.push(incompatible);
+            assert!(Cli::try_parse_from(invalid).is_err(), "{incompatible}");
+        }
+    }
+
+    #[test]
+    fn migrate_validate_attestation_options_cannot_silently_use_ordinary_validation() {
+        for flags in [
+            vec!["--attest"],
+            vec!["--bun-bin", "/bun"],
+            vec!["--signing-key", "/key"],
+            vec!["--out", "/report"],
+            vec!["--execute"],
+            vec!["--attest-regression"],
+            vec!["--migrated-project", "/candidate"],
+            vec!["--expected-input-sha256", "hash"],
+            vec!["--expected-candidate-input-sha256", "hash"],
+        ] {
+            let mut command = vec!["franken-node", "migrate", "validate", "/project"];
+            command.extend(flags);
+            assert!(Cli::try_parse_from(&command).is_err(), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn migrate_validate_attested_candidate_requires_both_reviewed_role_hashes() {
+        let mut command = vec![
+            "franken-node", "migrate", "validate", "/original", "--attest",
+            "--bun-bin", "/bun", "--signing-key", "/key", "--out", "/report",
+            "--execute", "--migrated-project", "/candidate", "--attest-regression",
+        ];
+        assert!(Cli::try_parse_from(&command).is_err());
+        let original = "a".repeat(64);
+        let candidate = "b".repeat(64);
+        command.extend(["--expected-input-sha256", original.as_str()]);
+        assert!(Cli::try_parse_from(&command).is_err());
+        command.extend(["--expected-candidate-input-sha256", candidate.as_str()]);
+        let cli = Cli::try_parse_from(command).expect("both role approvals supplied");
+        let Command::Migrate(MigrateCommand::Validate(args)) = cli.command else {
+            panic!("expected migrate validate");
+        };
+        assert!(args.attest_regression);
+        assert_eq!(args.migrated_project, Some(PathBuf::from("/candidate")));
+        assert_eq!(args.expected_input_sha256.as_deref(), Some(original.as_str()));
+        assert_eq!(args.expected_candidate_input_sha256.as_deref(), Some(candidate.as_str()));
     }
 
     #[test]

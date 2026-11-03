@@ -14,6 +14,8 @@ use std::path::Path;
 
 #[path = "report_attestation.rs"]
 pub mod attestation;
+#[cfg(target_os = "linux")]
+use super::super::validation_suite;
 
 pub const REPORT_SCHEMA: &str = attestation::SCHEMA;
 const CONFIDENCE_SCHEMA: &str = "franken-node/rollout-cohort-confidence/v1";

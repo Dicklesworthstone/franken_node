@@ -284,6 +284,11 @@ jobs:
         run: |
           rustup toolchain install nightly --profile minimal --component rustfmt --component clippy
           rustc +nightly --version | tee evidence/rust-version.txt
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+      - name: Record actual attested validation references
+        run: |
+          node --version | tee evidence/node-version.txt
+          bun --version | tee evidence/bun-version.txt
       - name: Parse complete native application files
         working-directory: franken_node
         run: |

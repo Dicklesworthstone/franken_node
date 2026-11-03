@@ -35427,6 +35427,68 @@ fn main() -> Result<()> {
                     Ok(format) => format,
                     Err(err) => return migrate_fail("migrate.validate", args.json, err),
                 };
+                if args.attest {
+                    let json = matches!(format, migration::ValidateOutputFormat::Json);
+                    #[cfg(not(target_os = "linux"))]
+                    return migrate_fail(
+                        "migrate.validate", json,
+                        "attested project validation is supported on Linux only",
+                    );
+                    #[cfg(target_os = "linux")]
+                    {
+                        use migration::report_attestation::execution;
+                        let (Some(bun), Some(key), Some(out)) = (
+                            args.bun_bin.as_deref(),
+                            args.signing_key.as_deref(),
+                            args.out.as_deref(),
+                        ) else {
+                            return migrate_fail(
+                                "migrate.validate", json,
+                                "--attest requires --bun-bin, --signing-key and --out",
+                            );
+                        };
+                        let native = match std::env::current_exe() {
+                            Ok(native) => native,
+                            Err(error) => return migrate_fail("migrate.validate", json, error),
+                        };
+                        let selection = execution::Selection {
+                            project: args.project_path.clone(),
+                            migrated_project: args.migrated_project.clone(),
+                            expected_input_sha256: args.expected_input_sha256.clone(),
+                            expected_candidate_input_sha256: args.expected_candidate_input_sha256.clone(),
+                            attest_regression: args.attest_regression,
+                        };
+                        let published = match execution::run(
+                            &selection, &native, bun, key, out, args.execute,
+                        ) {
+                            Ok(published) => published,
+                            Err(error) => return migrate_fail("migrate.validate", json, error),
+                        };
+                        if json {
+                            let rendered = match serde_json::to_string_pretty(&published) {
+                                Ok(rendered) => rendered,
+                                Err(error) => return migrate_fail("migrate.validate", true, error),
+                            };
+                            println!("{rendered}");
+                        } else {
+                            println!("franken-node migrate validate --attest");
+                            println!("verdict: {}", published.verdict);
+                            println!("captured tests: {}", published.total_tests);
+                            println!("signed report: {}", published.report.display());
+                            println!("candidate input: {}", published.candidate_input_sha256);
+                            println!("release certification: false");
+                        }
+                        if published.regression_attested {
+                            if json {
+                                fail_closed_after_json();
+                            }
+                            anyhow::bail!(
+                                "native regression attested; validation remains FAIL; signed evidence was published"
+                            );
+                        }
+                        return Ok(());
+                    }
+                }
                 let report = match migration::run_validate(&args.project_path, args.static_only)
                     .with_context(|| {
                         format!(

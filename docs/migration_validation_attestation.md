@@ -1,9 +1,16 @@
 # Authenticated migration-cohort evidence
 
-`franken-migration-attest` signs the production validator's own freshly executed
-Node/Bun/Franken project report. There is no command that signs an imported
+`franken-node migrate validate --attest` signs the production validator's own
+freshly executed Node/Bun/native Franken project report. There is no command that signs an imported
 report or accepts a caller-declared passing result. A signature authenticates
 an authorized validator key, not the correctness or independence of runtimes.
+
+This Linux execution mode uses the invoked `franken-node` executable as its
+native runtime. It requires explicit `--execute`, `--bun-bin`, `--signing-key`
+and `--out` arguments. Attestation-only arguments require `--attest`, and
+`--static-only` conflicts with it; an incomplete command cannot silently fall
+back to ordinary validation. Without `--attest`, the existing static checks,
+Node/native test-suite comparison and entrypoint smoke behavior are unchanged.
 
 ## Provision a dedicated validator authority
 
@@ -12,7 +19,7 @@ project normally so `.franken-node/keys` exists. Create an external private
 key directory accessible only to its owner. Then generate a new dedicated pair:
 
 ```sh
-cargo +stable run --manifest-path tools/migration-validator/Cargo.toml \
+cargo run --manifest-path tools/migration-validator/Cargo.toml \
   --bin franken-migration-attest -- keygen \
   --secret-key /private/validator/migration.seed \
   --public-key /project/.franken-node/keys/migration-validation.pub
@@ -35,11 +42,10 @@ Initialize rollout status before measurement, as described in
 `migration_rollout_source_recovery.md`. Then run:
 
 ```sh
-cargo +stable run --manifest-path tools/migration-validator/Cargo.toml \
-  --bin franken-migration-attest -- run /project \
-  --native-bin /installed/franken-node --bun-bin /installed/bun \
+franken-node migrate validate /project --attest \
+  --bun-bin /installed/bun \
   --signing-key /private/validator/migration.seed \
-  --out /private/evidence/cohort-canary.signed.json --execute
+  --out /private/evidence/cohort-canary.signed.json --execute --json
 
 franken-node migrate rollout /project --migration-id txn-CHOSEN-ID \
   --action promote --lockstep-report /private/evidence/cohort-canary.signed.json --json
@@ -53,6 +59,14 @@ complete native FAIL as described below; it never converts that result to PASS.
 No unsigned-success fallback or automatic key provisioning occurs. An
 insufficient sample count may be attested truthfully, but still fails the
 rollout confidence gate unless explicitly overridden.
+
+The JSON summary identifies the new report, independent signer, both input
+digests, measured test count, verdict and whether a regression was retained.
+The report contains the complete signed observations, including filesystem
+receipts; the summary itself is not a rollout approval. The standalone
+`franken-migration-attest run` operator remains available when an explicit
+`--native-bin` is needed and calls the same producer with the same admission
+and publication checks.
 
 Private key admission, the independent public-key match, execution consent and
 output-path checks happen before executing a guest. The key may not reside
@@ -75,9 +89,9 @@ candidate's rollout status before reviewing the inputs. Keep the original and
 candidate in separate, non-nested directories. Inspect each without execution:
 
 ```sh
-cargo +stable run --manifest-path tools/migration-validator/Cargo.toml \
+cargo run --manifest-path tools/migration-validator/Cargo.toml \
   --bin franken-migration-suite -- /original --list-tests
-cargo +stable run --manifest-path tools/migration-validator/Cargo.toml \
+cargo run --manifest-path tools/migration-validator/Cargo.toml \
   --bin franken-migration-suite -- /candidate --list-tests
 ```
 
@@ -86,14 +100,13 @@ Review each captured inventory and its input SHA-256 independently. Set
 then execute:
 
 ```sh
-cargo +stable run --manifest-path tools/migration-validator/Cargo.toml \
-  --bin franken-migration-attest -- run /original \
+franken-node migrate validate /original --attest \
   --migrated-project /candidate \
   --expected-input-sha256 "$ORIGINAL_SHA256" \
   --expected-candidate-input-sha256 "$CANDIDATE_SHA256" \
-  --native-bin /installed/franken-node --bun-bin /installed/bun \
+  --bun-bin /installed/bun \
   --signing-key /private/validator/migration.seed \
-  --out /private/evidence/migration-canary.signed.json --execute
+  --out /private/evidence/migration-canary.signed.json --execute --json
 
 franken-node migrate rollout /candidate --migration-id txn-CHOSEN-ID \
   --action promote --lockstep-report /private/evidence/migration-canary.signed.json --json
@@ -124,7 +137,7 @@ passing attestation and never restores or installs either source tree.
 
 ## Retain authenticated regression evidence and recover
 
-Add `--attest-regression` to `run` to retain a **complete native FAIL** under the
+Add `--attest-regression` to `migrate validate --attest` to retain a **complete native FAIL** under the
 same signature protocol. This works with either same-tree or reviewed
 original/candidate execution; it does not waive `--execute`, paired hash
 approvals, original/candidate inventory matching, trust configuration or any
@@ -133,15 +146,14 @@ existing execution budget. Use a new output path outside both projects.
 For example, after initializing the bound rollout and reviewing both hashes:
 
 ```sh
-cargo +stable run --manifest-path tools/migration-validator/Cargo.toml \
-  --bin franken-migration-attest -- run /original \
+franken-node migrate validate /original --attest \
   --migrated-project /candidate \
   --expected-input-sha256 "$ORIGINAL_SHA256" \
   --expected-candidate-input-sha256 "$CANDIDATE_SHA256" \
-  --native-bin /installed/franken-node --bun-bin /installed/bun \
+  --bun-bin /installed/bun \
   --signing-key /private/validator/migration.seed \
   --out /private/evidence/cohort-regression.signed.json \
-  --attest-regression --execute
+  --attest-regression --execute --json
 ```
 
 A retained regression prints `verdict: "FAIL"` and `regression_attested: true`

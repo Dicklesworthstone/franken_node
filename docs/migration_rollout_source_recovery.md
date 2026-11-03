@@ -36,17 +36,17 @@ and external dedicated private key as described in
 Then generate evidence from the live validator after initializing rollout:
 
 ```sh
-cargo +stable run --manifest-path tools/migration-validator/Cargo.toml \
-  --bin franken-migration-attest -- run ./project \
-  --native-bin /absolute/path/to/franken-node --bun-bin /absolute/path/to/bun \
+franken-node migrate validate ./project --attest \
+  --bun-bin /absolute/path/to/bun \
   --signing-key /absolute/private/validator/migration.seed --execute \
-  --out /absolute/path/outside-project/cohort-canary.signed.json
+  --out /absolute/path/outside-project/cohort-canary.signed.json --json
 
 franken-node migrate rollout ./project --migration-id txn-CHOSEN-ID \
   --action promote --lockstep-report /absolute/path/outside-project/cohort-canary.signed.json --json
 ```
 
-Replace executable and report paths with real absolute paths. Node must also
+The invoked `franken-node` executable is the native measurement runtime.
+Replace Bun and report paths with real absolute paths. Node must also
 be available through an absolute PATH directory. Run trusted project code only:
 `--execute` approves the existing validator's execution authority, not an OS
 sandbox. This command measures the current project under all three runtimes;

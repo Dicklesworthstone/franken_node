@@ -38,12 +38,14 @@ jobs:
           harness="$RUNNER_TEMP/rollout-source-recovery"
           source="$GITHUB_WORKSPACE/crates/franken-node/src"
           mkdir -p "$harness" evidence
-          cat > "$harness/Cargo.toml" <<'TOML'
+          cat > "$harness/Cargo.toml" <<TOML
           [package]
           name = "rollout-source-recovery"
           version = "0.0.0"
           edition = "2024"
           [workspace]
+          [lints.rust]
+          unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("engine"))'] }
           [lib]
           path = "lib.rs"
           [dependencies]
@@ -61,7 +63,9 @@ jobs:
           zeroize = "1.8.2"
           tree-sitter = "0.26.8"
           tree-sitter-javascript = "0.25.0"
+          tree-sitter-typescript = "=0.23.2"
           rustix = { version = "1.1.4", default-features = false, features = ["std", "fs", "process"] }
+          franken_migration_schema = { package = "franken-migration-suite", path = "$GITHUB_WORKSPACE/tools/migration-validator" }
           TOML
           # Import exact production helper definitions. The oracle's inline
           # tests need the real poisoning/error behavior of lock_utils too.
@@ -81,6 +85,10 @@ jobs:
           #![forbid(unsafe_code)]
           extern crate self as frankenengine_node;
           include!("bounded.rs");
+          use franken_migration_schema as schema_versions;
+          #[path = "$source/supply_chain/module_resolution_graph.rs"]
+          pub mod production_module_resolution_graph;
+          pub mod supply_chain { pub use crate::production_module_resolution_graph as module_resolution_graph; }
           #[path = "$source/security/constant_time.rs"]
           pub mod production_constant_time;
           pub mod security { pub use crate::production_constant_time as constant_time; }
